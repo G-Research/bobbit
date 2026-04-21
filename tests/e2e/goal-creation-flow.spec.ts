@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, apiFetch } from "./e2e-setup.js";
 
 /**
  * End-to-end tests for the goal creation flow — verifying:
@@ -16,18 +16,16 @@ test.describe("Goal creation flow", () => {
 
 	test("goal-assistant session can be silently deleted after goal creation", async () => {
 		// Create a goal-assistant session
-		const createRes = await fetch(`${base()}/api/sessions`, {
+		const createRes = await apiFetch(`/api/sessions`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ assistantType: "goal" }),
 		});
 		expect(createRes.ok).toBe(true);
 		const { id: sessionId } = await createRes.json();
 
 		// Create a goal (simulates what the UI does)
-		const goalRes = await fetch(`${base()}/api/goals`, {
+		const goalRes = await apiFetch(`/api/goals`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ title: "Test goal for silent cleanup", cwd: ".", spec: "Test spec" }),
 		});
 		expect(goalRes.status).toBe(201);
@@ -53,9 +51,8 @@ test.describe("Goal creation flow", () => {
 	});
 
 	test("createGoal returns goal object with id for dashboard navigation", async () => {
-		const goalRes = await fetch(`${base()}/api/goals`, {
+		const goalRes = await apiFetch(`/api/goals`, {
 			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 			body: JSON.stringify({ title: "Navigation test goal", cwd: ".", spec: "Test" }),
 		});
 		expect(goalRes.status).toBe(201);

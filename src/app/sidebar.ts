@@ -25,6 +25,7 @@ import {
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
+import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
@@ -902,9 +903,14 @@ export function renderSidebar() {
 						<span>Skills</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-md transition-colors"
-						@click=${() => showGoalDialog()}
-						title="New goal (Alt+G)"
+						data-new-goal-trigger
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						?disabled=${state.projects.length === 0}
+						@click=${(e: Event) => {
+							if (state.projects.length === 0) { showProjectDialog(); return; }
+							startNewGoalFlow(e.currentTarget as HTMLElement);
+						}}
+						title=${state.projects.length === 0 ? "Add a project first" : "New goal (Alt+G)"}
 					>
 						${icon(GoalIcon, "xs", "!w-3.5 !h-3.5")}
 						<span>New Goal</span>
@@ -962,21 +968,22 @@ export function renderSidebar() {
 							}
 							const projectMap = new Map<string, ProjectBucket>();
 							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [] });
-							// Fallback bucket for items without a projectId
-							const defaultId = state.projects[0]?.id || "";
 							for (const g of filteredGoals) {
-								const pid = g.projectId || defaultId;
-								const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+								if (!g.projectId) { console.warn("[sidebar] orphaned goal with no projectId — skipping", g.id); continue; }
+								const bucket = projectMap.get(g.projectId);
+								if (!bucket) { console.warn("[sidebar] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 								bucket.goals.push(g);
 							}
 							for (const s of filteredUngrouped) {
-								const pid = s.projectId || defaultId;
-								const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+								if (!s.projectId) { console.warn("[sidebar] orphaned session with no projectId — skipping", s.id); continue; }
+								const bucket = projectMap.get(s.projectId);
+								if (!bucket) { console.warn("[sidebar] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 								bucket.sessions.push(s);
 							}
 							for (const s of filteredStaff) {
-								const pid = s.projectId || defaultId;
-								const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+								if (!s.projectId) { console.warn("[sidebar] orphaned staff with no projectId — skipping", s.id); continue; }
+								const bucket = projectMap.get(s.projectId);
+								if (!bucket) { console.warn("[sidebar] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
 								bucket.staff.push(s);
 							}
 
@@ -985,17 +992,15 @@ export function renderSidebar() {
 							const filteredArchivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
 							const filteredStandaloneArchived = filterArchivedSessionsByQuery(allStandaloneArchived, state.searchQuery);
 							for (const g of filteredArchivedGoals) {
-								const pid = g.projectId || defaultId;
-								if (!g.projectId) console.warn("[sidebar] archived goal missing projectId, using default", g.id);
-								const bucket = projectMap.get(pid) || (defaultId ? projectMap.get(defaultId) : undefined);
-								if (!bucket) { console.warn("[sidebar] archived goal has no matching project bucket", g.id, g.projectId); continue; }
+								if (!g.projectId) { console.warn("[sidebar] archived goal with no projectId — skipping", g.id); continue; }
+								const bucket = projectMap.get(g.projectId);
+								if (!bucket) { console.warn("[sidebar] archived goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 								bucket.archivedGoals.push(g);
 							}
 							for (const s of filteredStandaloneArchived) {
-								const pid = s.projectId || defaultId;
-								if (!s.projectId) console.warn("[sidebar] archived session missing projectId, using default", s.id);
-								const bucket = projectMap.get(pid) || (defaultId ? projectMap.get(defaultId) : undefined);
-								if (!bucket) { console.warn("[sidebar] archived session has no matching project bucket", s.id, s.projectId); continue; }
+								if (!s.projectId) { console.warn("[sidebar] archived session with no projectId — skipping", s.id); continue; }
+								const bucket = projectMap.get(s.projectId);
+								if (!bucket) { console.warn("[sidebar] archived session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 								bucket.standaloneArchivedSessions.push(s);
 							}
 

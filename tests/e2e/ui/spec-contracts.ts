@@ -284,10 +284,46 @@ export const CT_17 = defineContract({
 });
 
 // ────────────────────────────────────────────────────────────
+// CT-18: Multi-project goal/session routing
+// ────────────────────────────────────────────────────────────
+
+export const CT_18 = defineContract({
+	id: "CT-18",
+	guarantee: "Goal and session creation always routes to an explicit project — never a silent default",
+	survives: [
+		"per-project-button",
+		"popover-pick",
+		"back-to-back",
+		"assistant-flow",
+		"reload-mid-proposal",
+		"cwd-only-api",
+		"missing-project-400-goal",
+		"missing-project-400-session",
+	],
+	regions: ["sidebar", "toolbar", "goal_dashboard"],
+	depends_on: ["CT-16"],
+});
+
+// ────────────────────────────────────────────────────────────
+// CT-19: First-run and single-project UX
+// ────────────────────────────────────────────────────────────
+
+export const CT_19 = defineContract({
+	id: "CT-19",
+	guarantee: "Fresh installs force explicit project registration; single-project installs skip the picker",
+	survives: [
+		"zero-project-disabled",
+		"single-project-shortcircuit",
+	],
+	regions: ["toolbar", "sidebar", "dialog"],
+	depends_on: [],
+});
+
+// ────────────────────────────────────────────────────────────
 // ALL CONTRACTS
 // ────────────────────────────────────────────────────────────
 
 export const ALL_CONTRACTS = [
 	CT_01, CT_02, CT_03, CT_04, CT_05, CT_06, CT_07, CT_08, CT_09,
-	CT_10, CT_11, CT_12, CT_13, CT_14, CT_15, CT_16, CT_17,
+	CT_10, CT_11, CT_12, CT_13, CT_14, CT_15, CT_16, CT_17, CT_18, CT_19,
 ];

@@ -8,11 +8,17 @@
  * sandbox-recovery-docker.spec.ts and runs via test:manual.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, nonGitCwd } from "./e2e-setup.js";
+import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
 
-function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
+async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
+	const method = (opts.method || "GET").toUpperCase();
+	let body = opts.body;
+	if (method === "POST" && /^\/api\/(sessions|goals|staff)(\?|$|\/)/.test(path)) {
+		body = await injectDefaultProjectId(body) as BodyInit;
+	}
 	return fetch(`${baseURL}${path}`, {
 		...opts,
+		body,
 		headers: {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${readE2EToken()}`,

@@ -21,7 +21,8 @@ import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fe
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
-import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs.js";
+import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
+import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
@@ -145,9 +146,15 @@ function renderMobileLanding() {
 							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
 							${icon(Zap, "xs")} Skills
 						</button>
-						<button class="flex-1 text-sm text-muted-foreground px-1.5 py-1 rounded active:bg-secondary/50 transition-colors flex items-center justify-center gap-1"
-							@click=${() => showGoalDialog()}
-							title="New goal (Alt+G)">
+						<button
+							data-new-goal-trigger
+							class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground active:bg-secondary/50'}"
+							?disabled=${state.projects.length === 0}
+							@click=${(e: Event) => {
+								if (state.projects.length === 0) { showProjectDialog(); return; }
+								startNewGoalFlow(e.currentTarget as HTMLElement);
+							}}
+							title=${state.projects.length === 0 ? "Add a project first" : "New goal (Alt+G)"}>
 							${icon(GoalIcon, "xs")} New Goal
 						</button>
 					</div>
@@ -188,7 +195,7 @@ function renderMobileLanding() {
 									<div class="flex items-center justify-center gap-2">
 										${Button({
 											variant: "default",
-											onClick: () => showGoalDialog(),
+											onClick: (e?: Event) => startNewGoalFlow((e?.currentTarget as HTMLElement | null) ?? null),
 											children: html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create a Goal</span>`,
 										})}
 										${Button({
@@ -209,20 +216,22 @@ function renderMobileLanding() {
 									}
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
-										const defaultId = state.projects[0]?.id || "";
 										for (const g of liveGoals) {
-											const pid = g.projectId || defaultId;
-											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
+											const bucket = projectMap.get(g.projectId);
+											if (!bucket) { console.warn("[mobile] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 											bucket.goals.push(g);
 										}
 										for (const s of ungroupedSessions) {
-											const pid = s.projectId || defaultId;
-											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											if (!s.projectId) { console.warn("[mobile] orphaned session with no projectId — skipping", s.id); continue; }
+											const bucket = projectMap.get(s.projectId);
+											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
 										for (const s of staffList) {
-											const pid = s.projectId || defaultId;
-											const bucket = projectMap.get(pid) || projectMap.get(defaultId)!;
+											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
+											const bucket = projectMap.get(s.projectId);
+											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.staff.push(s);
 										}
 										// Bucket archived goals + standalone archived sessions per project.
@@ -604,6 +613,10 @@ function goalPreviewPanel() {
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
 		if (!trimmedTitle) return;
+		if (!state.previewProjectId) {
+			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
+			return;
+		}
 		const sessionId = activeSessionId();
 		if (state.remoteAgent) {
 			state.remoteAgent.disconnect();
@@ -1923,6 +1936,10 @@ function goalProposalPanel() {
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
 		if (!trimmedTitle || _proposalSaving) return;
+		if (!state.previewProjectId) {
+			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
+			return;
+		}
 		_proposalSaving = true;
 		renderApp();
 

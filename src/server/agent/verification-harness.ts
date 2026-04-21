@@ -1837,11 +1837,18 @@ export class VerificationHarness {
 
 			// Register as a viewable session so users can watch the review live
 			if (this.sessionManager) {
-				unregisterSession = this.sessionManager.registerExternalSession(subSessionId, rpc, {
-					title: `LLM Review: ${step.name}`,
-					cwd,
-					role: "reviewer",
-				});
+				// Best-effort: resolve the project from cwd so the review session
+				// persists under a real project. If none is registered, we simply
+				// don't register the session as viewable (no silent default).
+				const reviewProjectId = this.projectContextManager?.getRegistry().findByCwd(cwd)?.id;
+				if (reviewProjectId) {
+					unregisterSession = this.sessionManager.registerExternalSession(subSessionId, rpc, {
+						title: `LLM Review: ${step.name}`,
+						cwd,
+						role: "reviewer",
+						projectId: reviewProjectId,
+					});
+				}
 			}
 
 			// Override model if default.reviewModel preference is set

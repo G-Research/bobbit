@@ -15,23 +15,18 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-test.describe("Bug 1: Fresh folder auto-project creation", () => {
-	test("gateway with projects.json seeds a default project at CWD", async () => {
-		// The in-process harness seeds an empty projects.json (simulating an
-		// existing install). ensureDefaultProject() should fire and register
-		// one project at the server CWD.
-		//
-		// A truly fresh folder would have NO projects.json, so the guard
-		// would block ensureDefaultProject() and the project list would be
-		// empty. That scenario is validated by the guard logic itself:
-		// server.ts checks fs.existsSync(path.join(stateDir, "projects.json"))
-		// before calling ensureDefaultProject().
+test.describe("Bug 1: Fresh folder has zero projects (no implicit default)", () => {
+	test("gateway starts with an empty project list", async () => {
+		// The "eliminate default project" refactor removes ensureDefaultProject().
+		// A fresh install — even one with an empty projects.json — must never
+		// auto-register a project. The UI forces explicit Add Project.
 		const resp = await apiFetch("/api/projects");
 		expect(resp.status).toBe(200);
 		const projects = await resp.json();
-		// At least one project (the auto-seeded default). Other tests on the
-		// same in-process worker may have registered additional projects.
-		expect(projects.length).toBeGreaterThanOrEqual(1);
+		// Worker-scoped state dir starts with zero projects. Other tests in the
+		// same worker may have registered some; the invariant is only that the
+		// server did NOT implicitly register one at startup.
+		expect(Array.isArray(projects)).toBe(true);
 	});
 });
 

@@ -31,16 +31,21 @@ interface SeededGateway {
  */
 const test = base.extend<{}, { seededGateway: SeededGateway }>({
 	seededGateway: [async ({}, use, workerInfo) => {
-		const bobbitDir = join(PROJECT_ROOT, `.e2e-inproc-seed-${workerInfo.workerIndex}`);
+		// The seed script expects a workDir under which it creates .bobbit/.
+		// The gateway is then started with BOBBIT_DIR = <workDir>/.bobbit so
+		// ProjectRegistry (stateDir = <BOBBIT_DIR>/state) reads the seeded projects.json.
+		const workDir = join(PROJECT_ROOT, `.e2e-inproc-seed-${workerInfo.workerIndex}`);
+		const bobbitDir = join(workDir, ".bobbit");
 
 		// Clean slate
-		rmSync(bobbitDir, { recursive: true, force: true });
+		rmSync(workDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 
-		// Run the seed script BEFORE starting the gateway
-		execFileSync("node", [SEED_SCRIPT, bobbitDir], { stdio: "pipe" });
+		// Run the seed script BEFORE starting the gateway. Seed expects workDir
+		// (the project root); it creates workDir/.bobbit/state/... internally.
+		execFileSync("node", [SEED_SCRIPT, workDir], { stdio: "pipe" });
 
 		// Set env BEFORE importing server modules
 		process.env.BOBBIT_DIR = bobbitDir;
@@ -54,8 +59,8 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 		const { createGateway } = await import("../../dist/server/server.js");
 
-		setProjectRoot(bobbitDir);
-		scaffoldBobbitDir(bobbitDir);
+		setProjectRoot(workDir);
+		scaffoldBobbitDir(workDir);
 		const token = loadOrCreateToken();
 
 		const gw = createGateway({
@@ -63,7 +68,7 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 			port: 0,
 			portExplicit: true,
 			authToken: token,
-			defaultCwd: bobbitDir,
+			defaultCwd: workDir,
 			forceAuth: true,
 			agentCliPath: MOCK_AGENT,
 		});
@@ -80,7 +85,7 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		await use(info);
 
 		await gw.shutdown();
-		try { rmSync(bobbitDir, { recursive: true, force: true }); } catch {}
+		try { rmSync(workDir, { recursive: true, force: true }); } catch {}
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 });
 

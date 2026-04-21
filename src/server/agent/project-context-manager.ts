@@ -13,7 +13,6 @@ import type { SearchResults, SearchResult } from "../search/types.js";
 export class ProjectContextManager {
   private contexts = new Map<string, ProjectContext>();
   private registry: ProjectRegistry;
-  private defaultProjectId: string | null = null;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
@@ -21,13 +20,8 @@ export class ProjectContextManager {
 
   /** Initialize contexts for all registered projects. */
   initAll(): void {
-    const projects = this.registry.list();
-    for (const project of projects) {
+    for (const project of this.registry.list()) {
       this.getOrCreate(project.id);
-    }
-    // First project is the default (server CWD, registered via ensureDefaultProject)
-    if (projects.length > 0 && !this.defaultProjectId) {
-      this.defaultProjectId = projects[0].id;
     }
   }
 
@@ -42,51 +36,7 @@ export class ProjectContextManager {
     ctx = new ProjectContext(project);
     ctx.open();
     this.contexts.set(projectId, ctx);
-
-    // Set as default if this is the first context
-    if (!this.defaultProjectId) {
-      this.defaultProjectId = projectId;
-    }
-
     return ctx;
-  }
-
-  /** @deprecated Use explicit projectId resolution instead. The default project should not be used as a fallback. */
-  getDefault(): ProjectContext {
-    if (!this.defaultProjectId) {
-      throw new Error("Default project context not initialized — call initAll() first");
-    }
-    const ctx = this.contexts.get(this.defaultProjectId);
-    if (!ctx) {
-      throw new Error(`Default project context not found for id=${this.defaultProjectId}`);
-    }
-    return ctx;
-  }
-
-  /**
-   * Null-safe version of getDefault().
-   * Returns null when no projects are registered (e.g. fresh folder with no .bobbit/).
-   */
-  getDefaultOrNull(): ProjectContext | null {
-    if (!this.defaultProjectId) return null;
-    return this.contexts.get(this.defaultProjectId) ?? null;
-  }
-
-  /** @deprecated Use explicit projectId resolution instead. The default project should not be used as a fallback. */
-  getDefaultProjectId(): string {
-    if (!this.defaultProjectId) {
-      throw new Error("Default project not initialized — call initAll() first");
-    }
-    return this.defaultProjectId;
-  }
-
-  /**
-   * Null-safe version of getDefaultProjectId().
-   * Returns null when no projects are registered (e.g. fresh folder with no .bobbit/).
-   * Use this in API creation endpoints that should return a clear error instead of crashing.
-   */
-  getDefaultProjectIdOrNull(): string | null {
-    return this.defaultProjectId;
   }
 
   /** Get the underlying project registry. */

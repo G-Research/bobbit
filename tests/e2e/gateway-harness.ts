@@ -68,7 +68,8 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
-		// Seed projects.json so ensureDefaultProject() fires (mirrors a non-fresh install)
+		// Seed projects.json. The server no longer auto-registers a default project;
+		// we register one via REST after startup (see below) so existing tests keep working.
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		// Mark setup as complete so the setup wizard doesn't appear in tests
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
@@ -89,6 +90,8 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		// Enable test-only bypass knobs (e.g. DELETE /api/projects/:id?force=1).
+		process.env.BOBBIT_E2E = "1";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 		// Skip outbound network probes and per-prompt title-generation calls.
@@ -151,6 +154,19 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 		// (mock-agent, tool-grant-request flow) can discover the gateway.
 		// When running in-process we must do that ourselves.
 		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`);
+
+		// Register the server CWD as a default project via REST. The server no
+		// longer does this implicitly — see "eliminate default project" refactor.
+		try {
+			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Authorization": `Bearer ${token}`,
+				},
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+			});
+		} catch { /* best-effort */ }
 
 		const info: GatewayInfo = {
 			port,
