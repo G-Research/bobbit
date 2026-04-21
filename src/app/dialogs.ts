@@ -852,6 +852,19 @@ export function showGoalDialog(existingGoal?: Goal, projectId?: string): void {
 }
 
 async function createGoalAssistantSession(projectId?: string): Promise<void> {
+	// Invariant: goal creation must name an explicit registered project.
+	// Post-refactor (eliminate default project, §5.2), every caller goes
+	// through `startNewGoalFlow()` or passes an explicit projectId.
+	if (!projectId) {
+		const msg = "showGoalDialog() called without projectId for goal creation — callers must go through startNewGoalFlow() or pass an explicit projectId.";
+		if ((import.meta as any)?.env?.DEV) throw new Error(msg);
+		console.error(msg);
+		return;
+	}
+	if (!state.projects.find(p => p.id === projectId)) {
+		console.error(`showGoalDialog: projectId ${projectId} not in state.projects`);
+		return;
+	}
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
