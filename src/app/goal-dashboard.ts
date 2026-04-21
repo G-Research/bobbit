@@ -5,7 +5,8 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -80,6 +81,12 @@ interface GoalGitStatus {
 	summary?: string;
 }
 let gitStatus: GoalGitStatus | null = null;
+/** Tri-state repo detection for the dashboard widget. Widget renders whenever !== 'no'. */
+let gitRepoKnown: 'yes' | 'no' | 'unknown' = 'unknown';
+/** performance.now() of last *started* refresh. Used to coalesce poll ticks. */
+let gitStatusLastRefreshAt = 0;
+/** In-flight refresh abort handle (one per dashboard). */
+let gitStatusAbort: AbortController | null = null;
 
 /** PR status for goal branch */
 interface PrStatus {
@@ -206,8 +213,16 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	} catch { /* ignore */ }
 
 	disconnectDashboardWs();
+	const sameGoal = currentGoalId === goalId && currentGoal != null;
 	currentGoalId = goalId;
-	loading = true;
+	// Only show the full-page loading skeleton on the initial load for this
+	// goal. Re-entering loadDashboardData for the same goal (e.g. hashchange
+	// race, navigation back to the same dashboard, or refreshDashboardGoal()
+	// fallthrough) must keep the tab bar rendered — otherwise tests and users
+	// see the dashboard flicker between skeleton and content under load.
+	if (!sameGoal) {
+		loading = true;
+	}
 	error = "";
 	renderApp();
 
@@ -260,6 +275,13 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (gitStatusRes && gitStatusRes.ok) {
 			gitStatus = await gitStatusRes.json();
+			gitRepoKnown = 'yes';
+			gitStatusLastRefreshAt = performance.now();
+		} else if (gitStatusRes && gitStatusRes.status === 400) {
+			try {
+				const body = await gitStatusRes.json();
+				if (body?.error === 'Not a git repository') gitRepoKnown = 'no';
+			} catch { /* ignore */ }
 		}
 
 		if (costRes && costRes.ok) {
@@ -370,6 +392,9 @@ export function clearDashboardState(): void {
 	dashboardTab = "gates";
 	roleDropdownOpen = false;
 	gitStatus = null;
+	gitRepoKnown = 'unknown';
+	if (gitStatusAbort) { gitStatusAbort.abort(); gitStatusAbort = null; }
+	gitStatusLastRefreshAt = 0;
 	prStatus = null;
 	goalCost = null;
 	costPopoverOpen = false;
@@ -646,22 +671,63 @@ function stopCostPolling(): void {
 	if (costPollTimer) { clearInterval(costPollTimer); costPollTimer = null; }
 }
 
+/** Retry-with-backoff refresh for the dashboard git widget. Shares the same
+ *  tri-state + abort contract as the session widget. */
+async function refreshGoalGitStatus(
+	goalId: string,
+	opts?: { fetch?: boolean; untracked?: boolean },
+): Promise<void> {
+	if (gitStatusAbort) gitStatusAbort.abort();
+	const ctl = new AbortController();
+	gitStatusAbort = ctl;
+	gitStatusLastRefreshAt = performance.now();
+
+	let changed = false;
+	await runGitStatusRefresh(ctl.signal, {
+		fetch: (signal) => fetchGoalGitStatus(goalId, {
+			fetch: opts?.fetch,
+			untracked: opts?.untracked,
+			signal,
+		}),
+		sleep: abortableSleep,
+		isStale: () => currentGoalId !== goalId,
+		onOk: (data) => {
+			if (currentGoalId !== goalId) return;
+			if (JSON.stringify(data) !== JSON.stringify(gitStatus)) {
+				gitStatus = data as GoalGitStatus;
+				changed = true;
+			}
+			gitRepoKnown = 'yes';
+		},
+		onNotARepo: () => {
+			if (currentGoalId !== goalId) return;
+			if (gitRepoKnown !== 'no' || gitStatus !== null) {
+				gitRepoKnown = 'no';
+				gitStatus = null;
+				changed = true;
+			}
+		},
+		onFinally: () => {
+			if (gitStatusAbort === ctl) gitStatusAbort = null;
+			if (changed) renderApp();
+		},
+	});
+}
+
 function startGitStatusPolling(goalId: string): void {
 	stopGitStatusPolling();
 	gitStatusPollTimer = setInterval(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		if (document.visibilityState !== "visible") return;
+		if (gitRepoKnown === 'no') { stopGitStatusPolling(); return; }
+		// Coalesce: skip tick if any refresh started in the last 10s.
+		const elapsed = performance.now() - gitStatusLastRefreshAt;
+		if (elapsed < 10_000) {
+			// still poll PR status — fall through to PR-only block below
+		} else {
+			refreshGoalGitStatus(goalId);
+		}
 		let needRender = false;
-		try {
-			const res = await gatewayFetch(`/api/goals/${goalId}/git-status`);
-			if (res.ok) {
-				const newStatus: GoalGitStatus = await res.json();
-				if (JSON.stringify(newStatus) !== JSON.stringify(gitStatus)) {
-					gitStatus = newStatus;
-					needRender = true;
-				}
-			}
-		} catch { /* ignore */ }
 		try {
 			const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null);
 			if (prRes && prRes.ok) {
@@ -990,14 +1056,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; b
 
 async function handleGitFetch(): Promise<void> {
 	if (!currentGoalId) return;
-	const goalId = currentGoalId;
-	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/git-status?fetch=true`).catch(() => null);
-		if (res && res.ok) {
-			gitStatus = await res.json();
-			renderApp();
-		}
-	} catch { /* ignore */ }
+	await refreshGoalGitStatus(currentGoalId, { fetch: true });
 }
 
 // ============================================================================
@@ -1237,7 +1296,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 				</div>
 			</div>
 			` : nothing}
-			${branch || gs ? html`
+			${gitRepoKnown !== 'no' && (branch || gs || gitRepoKnown === 'unknown') ? html`
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
 						.goalId=${goal.id}
@@ -2032,7 +2091,27 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 
 export function renderGoalDashboard(): TemplateResult {
 	if (loading) {
-		return html`<div class="dashboard-container" style="flex:1;min-height:0;">${bobbitLoadingAnimation()}</div>`;
+		// Render a skeleton dashboard with an empty tab bar so tests and
+		// ancestor layout can anchor on `.dashboard-container` + `.tab` even
+		// before the first fetch resolves. Under heavy parallel load the
+		// initial Promise.all can take >30s; without this skeleton the main
+		// area appears empty the whole time and any assertion on `.tab`
+		// times out.
+		const skeletonTabs = ["Spec", "Gates", "Tasks", "Agents", "Commits"];
+		return html`
+			<div class="dashboard-container" style="flex:1;min-height:0;">
+				<div class="tab-bar" data-dashboard-loading="true">
+					${skeletonTabs.map((label, i) => html`
+						<div class="tab ${i === 1 ? "active" : ""}" title="${label}">
+							<span class="tab-label">${label}</span>
+						</div>
+					`)}
+				</div>
+				<div class="tab-content" style="flex:1;min-height:0;">
+					${bobbitLoadingAnimation()}
+				</div>
+			</div>
+		`;
 	}
 
 	if (error || !currentGoal) {

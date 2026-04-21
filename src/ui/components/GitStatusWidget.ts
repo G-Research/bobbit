@@ -18,6 +18,7 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Boolean }) unpushed = false;
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
     @property({ type: Boolean }) loading = false;
+    @property({ type: Boolean }) partial = false;
 
     @property() sessionId = '';
     @property() goalId = '';
@@ -121,11 +122,20 @@ export class GitStatusWidget extends LitElement {
 
     private _toggle(e: MouseEvent) {
         e.stopPropagation();
+        // Skeleton is non-interactive — no data to show in dropdown yet.
+        if (this.loading && !this.branch) return;
         if (this.expanded && !this._closing) {
             this._closeDropdown();
         } else if (!this.expanded) {
             this.expanded = true;
             this.dispatchEvent(new CustomEvent('git-fetch', {
+                bubbles: true,
+                composed: true,
+            }));
+            // Signal to parent (session-manager / goal-dashboard) that the
+            // dropdown was opened so it can refetch with ?untracked=1 for
+            // the full untracked-files list.
+            this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
                 bubbles: true,
                 composed: true,
             }));
@@ -754,7 +764,28 @@ export class GitStatusWidget extends LitElement {
     }
 
     render() {
-        if (!this.branch && !this.loading) return nothing;
+        this._ensureWidgetStyles();
+
+        // Skeleton state: loading with no data yet.
+        if (this.loading && !this.branch) {
+            return html`
+                <button
+                    class="git-status-pill skeleton inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground text-[11px] leading-tight"
+                    style="max-width:100%; height:var(--pill-h, auto); min-width:110px"
+                    aria-busy="true"
+                    disabled
+                    data-state="skeleton"
+                >
+                    <span class="git-skeleton-shimmer" aria-hidden="true"></span>
+                    <span class="shrink-0 relative z-10">⎇</span>
+                    <span class="truncate relative z-10">Checking git\u2026</span>
+                </button>
+            `;
+        }
+
+        // Safety fallback — no data and not loading: hide. The parent
+        // gitRepoKnown === 'no' gate normally prevents reaching here.
+        if (!this.branch) return nothing;
 
         const segments = this._pillSegments();
         // Show 'clean' only when no other indicators are present and no PR
@@ -762,21 +793,89 @@ export class GitStatusWidget extends LitElement {
             && (this.isOnPrimary || this.mergedIntoPrimary)
             && (this.isOnPrimary || this.aheadOfPrimary === 0);
 
+        const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : 'ready';
+        const refreshDot = this.loading
+            ? html`<span class="git-refresh-dot" aria-label="Refreshing" title="Refreshing git status\u2026"></span>`
+            : this.partial
+                ? html`<span class="git-partial-dot" aria-label="Partial" title="Status scan timed out \u2014 showing partial data."></span>`
+                : nothing;
+
         return html`
             <button
-                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight"
+                class="git-status-pill inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight ${this.loading ? 'loading' : ''} ${this.partial ? 'partial' : ''}"
                 style="max-width:100%; height:var(--pill-h, auto)"
+                data-state=${stateAttr}
                 @click=${this._toggle}
             >
-                ${this.loading
-                    ? html`<span class="animate-pulse shrink-0">⎇</span>`
-                    : html`<span class="shrink-0">⎇</span>`}
+                <span class="shrink-0 relative" style="display:inline-block">⎇${refreshDot}</span>
                 <span class="truncate">${this.branch}</span>
                 ${showClean ? html`<span class="text-green-600 dark:text-green-400 font-medium shrink-0">clean</span>` : nothing}
                 ${segments}
                 ${this._prPillIcon()}
             </button>
         `;
+    }
+
+    private _ensureWidgetStyles() {
+        if (typeof document === 'undefined') return;
+        if (document.getElementById('git-status-widget-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'git-status-widget-styles';
+        style.textContent = `
+            @keyframes git-status-shimmer {
+                0%   { background-position: -120% 0; }
+                100% { background-position: 220% 0; }
+            }
+            @keyframes git-status-pulse {
+                0%, 100% { opacity: 1; transform: scale(1); }
+                50%      { opacity: 0.4; transform: scale(0.8); }
+            }
+            .git-status-pill.skeleton {
+                position: relative;
+                overflow: hidden;
+                cursor: default;
+                opacity: 0.85;
+            }
+            .git-skeleton-shimmer {
+                position: absolute;
+                inset: 0;
+                background: linear-gradient(
+                    90deg,
+                    transparent 0%,
+                    rgba(255, 255, 255, 0.08) 40%,
+                    rgba(255, 255, 255, 0.18) 50%,
+                    rgba(255, 255, 255, 0.08) 60%,
+                    transparent 100%
+                );
+                background-size: 200% 100%;
+                animation: git-status-shimmer 1.2s linear infinite;
+                pointer-events: none;
+                z-index: 0;
+            }
+            .git-refresh-dot {
+                position: absolute;
+                top: -1px;
+                right: -3px;
+                width: 6px;
+                height: 6px;
+                border-radius: 9999px;
+                background: var(--primary, #60a5fa);
+                animation: git-status-pulse 1s ease-in-out infinite;
+                pointer-events: none;
+            }
+            .git-partial-dot {
+                position: absolute;
+                top: -1px;
+                right: -3px;
+                width: 6px;
+                height: 6px;
+                border-radius: 9999px;
+                background: #f59e0b;
+                box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35);
+                pointer-events: none;
+            }
+        `;
+        document.head.appendChild(style);
     }
 
     override updated(changed: Map<string, unknown>) {

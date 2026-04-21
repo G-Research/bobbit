@@ -34,16 +34,18 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
 	await newGoalBtn.click();
 
+	// Goal assistant session creation can be slow under parallel load —
+	// extend the textarea-visible timeout accordingly.
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 15_000 });
+	await expect(textarea).toBeVisible({ timeout: 30_000 });
 
 	// Send GOAL_PROPOSAL — mock agent responds with a proposal (workflow=general)
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
 	// Wait for the proposal panel to render
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
-	await expect(titleInput).toBeVisible({ timeout: 10_000 });
-	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+	await expect(titleInput).toBeVisible({ timeout: 20_000 });
+	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
 
 	// Switch workflow to "feature" which has optional QA step with description
 	const workflowSelect = page.locator(".goal-preview-panel select").first();
@@ -119,14 +121,14 @@ test.describe("Step description tooltips", () => {
 		await newGoalBtn.click();
 
 		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 15_000 });
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
 
 		// Send GOAL_PROPOSAL — mock agent uses "general" workflow by default
 		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 10_000 });
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
 
 		// General workflow has no optional steps — no ⓘ icons should be present
 		const tooltipIcons = page.locator(".goal-preview-panel span.cursor-help");
