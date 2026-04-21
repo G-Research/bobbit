@@ -218,7 +218,9 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, weakToken, projectId);
-		const goalHits = out.results.filter((r: any) => r.type === "goal" && r.id === `goal:${goal.id}`);
+		// SearchResult.id is emitted bare (the "goal:" source prefix on the
+		// underlying FlexDoc row id is stripped in toSearchResult).
+		const goalHits = out.results.filter((r: any) => r.type === "goal" && r.id === goal.id);
 		expect(goalHits.length).toBe(1);
 		expect(goalHits[0].matchedOn).toBe("metadata");
 		// Snippet should have no <b> tag — it's a head-of-text preview.
