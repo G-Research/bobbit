@@ -6,14 +6,20 @@
  * endpoints that work regardless of Docker availability.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, nonGitCwd } from "./e2e-setup.js";
+import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
 
 let _tok: string;
 function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
-function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method || "GET").toUpperCase();
+	let body = opts.body;
+	if (method === "POST" && /^\/api\/(sessions|goals|staff)(\?|$|\/)/.test(path)) {
+		body = await injectDefaultProjectId(body) as BodyInit;
+	}
 	return fetch(`${base()}${path}`, {
 		...opts,
+		body,
 		headers: {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${TOKEN()}`,

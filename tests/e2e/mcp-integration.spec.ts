@@ -15,14 +15,20 @@ test.use({ enableMcp: true });
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readE2EToken, base, bobbitDir } from "./e2e-setup.js";
+import { readE2EToken, base, bobbitDir, injectDefaultProjectId } from "./e2e-setup.js";
 
 let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
 /** Authenticated fetch helper */
-function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method || "GET").toUpperCase();
+	let body = opts.body;
+	if (method === "POST" && /^\/api\/(sessions|goals|staff)(\?|$|\/)/.test(path)) {
+		body = await injectDefaultProjectId(body) as BodyInit;
+	}
 	return fetch(`${base()}${path}`, {
 		...opts,
+		body,
 		headers: {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${TOKEN()}`,

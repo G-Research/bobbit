@@ -32,10 +32,13 @@ function makePersistedSession(
 	};
 }
 
-/** Get the default project ID from the session manager's PCM. */
+/** Get the (only) harness project ID from the project registry. */
 function getDefaultProjectId(sm: any): string | undefined {
 	const pcm = sm.getProjectContextManager?.() ?? sm.projectContextManager;
-	return pcm?.getDefaultProjectId?.();
+	if (pcm?.getDefaultProjectId) return pcm.getDefaultProjectId();
+	const reg = pcm?.registry ?? pcm?.projectRegistry ?? sm.projectRegistry;
+	const list: Array<{ id: string }> | undefined = reg?.list?.();
+	return list?.[0]?.id;
 }
 
 test.describe("sandbox session restore", () => {

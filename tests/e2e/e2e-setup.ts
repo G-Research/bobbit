@@ -113,17 +113,79 @@ function token(): string {
 	return _tokenCache[p];
 }
 
+/**
+ * Routes where POST must carry a registered projectId (or a cwd matching one).
+ * The E2E harness registers a "default" project at startup; tests that omit
+ * projectId get it injected automatically so they don't need to know about
+ * the underlying server requirement. Tests that deliberately exercise the
+ * 400-path bypass this helper by calling `fetch(...)` directly.
+ */
+const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$|\/)/;
+
+/**
+ * Parse a JSON body (string or already-object), inject projectId when missing,
+ * and return a string suitable for a fetch body. Returns the original body
+ * unchanged if it's not a JSON object we can read.
+ */
+export async function injectDefaultProjectId(body: unknown): Promise<unknown> {
+	if (body == null) {
+		const pid = await defaultProjectId();
+		return pid ? JSON.stringify({ projectId: pid }) : body;
+	}
+	let parsed: Record<string, unknown> | undefined;
+	if (typeof body === "string") {
+		try { parsed = JSON.parse(body); } catch { return body; }
+	} else if (typeof body === "object") {
+		parsed = body as Record<string, unknown>;
+	} else {
+		return body;
+	}
+	if (!parsed || typeof parsed !== "object") return body;
+	if (typeof parsed.projectId === "string" && parsed.projectId) {
+		return typeof body === "string" ? body : JSON.stringify(parsed);
+	}
+	const pid = await defaultProjectId();
+	if (!pid) return typeof body === "string" ? body : JSON.stringify(parsed);
+	return JSON.stringify({ ...parsed, projectId: pid });
+}
+
+async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<RequestInit> {
+	const method = (opts.method || "GET").toUpperCase();
+	if (method !== "POST") return opts;
+	if (!PROJECT_INJECT_ROUTES.test(path)) return opts;
+	const newBody = await injectDefaultProjectId(opts.body as unknown);
+	if (newBody === opts.body) return opts;
+	return { ...opts, body: newBody as BodyInit };
+}
+
+/**
+ * Raw authenticated fetch — identical auth to `apiFetch` but does NOT auto-inject
+ * the harness default projectId. Use this for tests that deliberately exercise
+ * the 400-projectId-required path.
+ */
+export async function rawApiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	return fetch(`${base()}${path}`, {
+		...opts,
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${token()}`,
+			...(opts.headers as Record<string, string> || {}),
+		},
+	});
+}
+
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const injected = await maybeInjectProjectId(path, opts);
 	const maxRetries = 4;
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
 			return await fetch(`${base()}${path}`, {
-				...opts,
+				...injected,
 				headers: {
 					"Content-Type": "application/json",
 					Authorization: `Bearer ${token()}`,
-					...(opts.headers as Record<string, string> || {}),
+					...(injected.headers as Record<string, string> || {}),
 				},
 			});
 		} catch (err: unknown) {
