@@ -4,7 +4,7 @@
  * No Playwright dependencies — safe to import from standalone tools.
  */
 import { defineStory } from "./spec-framework.js";
-import { CT_01, CT_02, CT_03, CT_04, CT_05, CT_06, CT_13, CT_15, CT_16, CT_17 } from "./spec-contracts.js";
+import { CT_01, CT_02, CT_03, CT_04, CT_05, CT_06, CT_13, CT_15, CT_16, CT_17, CT_18, CT_19 } from "./spec-contracts.js";
 
 // ── Draft Preservation stories (CT-02) ──
 
@@ -442,4 +442,76 @@ export const STORY_PR10 = defineStory({
 	title: "Session created and deleted within project",
 	contracts: [CT_16],
 	covers: ["page-reload"],
+});
+
+// ── Goal routing stories (CT-18, CT-19) ──
+
+export const STORY_GR01 = defineStory({
+	id: "GR-01",
+	title: "Per-project sidebar button creates goal in that project",
+	contracts: [CT_18, CT_16],
+	covers: ["per-project-button"],
+});
+
+export const STORY_GR02 = defineStory({
+	id: "GR-02",
+	title: "Toolbar + New Goal opens picker, creating in picked project",
+	contracts: [CT_18],
+	covers: ["popover-pick"],
+});
+
+export const STORY_GR03 = defineStory({
+	id: "GR-03",
+	title: "Back-to-back: pick A then pick B",
+	contracts: [CT_18],
+	covers: ["back-to-back"],
+});
+
+export const STORY_GR04 = defineStory({
+	id: "GR-04",
+	title: "Goal-assistant flow lands in picked project",
+	contracts: [CT_18],
+	covers: ["assistant-flow"],
+});
+
+export const STORY_GR05 = defineStory({
+	id: "GR-05",
+	title: "Reload mid-proposal preserves project",
+	contracts: [CT_18, CT_05],
+	covers: ["reload-mid-proposal", "page-reload"],
+});
+
+export const STORY_GR06 = defineStory({
+	id: "GR-06",
+	title: "API: cwd-only request resolves project",
+	contracts: [CT_18],
+	covers: ["cwd-only-api"],
+});
+
+export const STORY_GR07 = defineStory({
+	id: "GR-07",
+	title: "API: no projectId + no matching cwd returns 400",
+	contracts: [CT_18],
+	covers: ["missing-project-400-goal"],
+});
+
+export const STORY_GR08 = defineStory({
+	id: "GR-08",
+	title: "API: session creation enforces same contract",
+	contracts: [CT_18],
+	covers: ["missing-project-400-session"],
+});
+
+export const STORY_GR09 = defineStory({
+	id: "GR-09",
+	title: "First-run zero-project UX disables New Goal",
+	contracts: [CT_19],
+	covers: ["zero-project-disabled"],
+});
+
+export const STORY_GR10 = defineStory({
+	id: "GR-10",
+	title: "Single-project install skips the picker",
+	contracts: [CT_19],
+	covers: ["single-project-shortcircuit"],
 });
