@@ -148,6 +148,9 @@ test.describe("Project assistant UX (consolidated)", () => {
 		// Sidebar should no longer show "(setting up)"
 		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 15_000 });
 
+		// Project assistant session should be removed from the sidebar immediately
+		await expect(sidebar.getByText("Project Assistant")).toHaveCount(0, { timeout: 10_000 });
+
 		// Cleanup
 		await deleteSession(sessionId);
 		await cleanupProject(projectId);

@@ -1726,6 +1726,7 @@ export async function acceptProjectProposal(): Promise<void> {
 		deleteRoleDraft(propSessionId);
 		deletePersonalityDraft(propSessionId);
 		deleteProjectDraft(propSessionId);
+		await refreshSessions();
 		setHashRoute("landing");
 	} catch (err) {
 		console.error('[project-proposal] Failed to terminate assistant session:', err);
