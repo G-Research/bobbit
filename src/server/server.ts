@@ -1948,6 +1948,7 @@ async function handleApiRoute(
 					id: archived.id,
 					title: archived.title,
 					cwd: archived.cwd,
+					projectId: archived.projectId,
 					status: "archived",
 					createdAt: archived.createdAt,
 					lastActivity: archived.lastActivity,
@@ -4612,6 +4613,127 @@ async function handleApiRoute(
 		} finally {
 			clearInterval(heartbeat);
 		}
+		return;
+	}
+
+	// POST /api/sessions/:archivedId/continue — Continue-Archived
+	// Creates a new session cloned from an archived one's settings, with the
+	// archived transcript seeded into the new session's system prompt.
+	const continueMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/continue$/);
+	if (continueMatch && req.method === "POST") {
+		const archivedId = continueMatch[1];
+		const body = await readBody(req);
+		const mode = body?.mode;
+		if (mode !== "summary" && mode !== "full") {
+			json({ error: "mode must be 'summary' or 'full'" }, 400);
+			return;
+		}
+
+		// Resolve the archived session across all project contexts.
+		const ps = sessionManager.getPersistedSession(archivedId);
+		if (!ps) { json({ error: "session not found" }, 404); return; }
+		if (!ps.archived) { json({ error: "source not archived" }, 409); return; }
+		if (ps.goalId || ps.delegateOf || ps.teamGoalId || ps.assistantType) {
+			json({ error: "goal, delegate, team, or assistant sessions cannot be continued" }, 422);
+			return;
+		}
+		if (!ps.projectId || !projectRegistry.get(ps.projectId)) {
+			json({ error: "source project no longer registered" }, 410);
+			return;
+		}
+
+		const messages = await sessionManager.getArchivedMessages(archivedId);
+		if (!messages || messages.length === 0) {
+			json({ error: "archived transcript missing or empty" }, 404);
+			return;
+		}
+
+		let seedContext: string;
+		try {
+			const { buildSeedContext } = await import("./agent/continue-archived.js");
+			const namingOpts = sessionManager.getNamingModelOptions();
+			seedContext = await buildSeedContext(messages, mode, ps, namingOpts);
+		} catch (err) {
+			json({ error: `failed to build seed context: ${String(err)}` }, 500);
+			return;
+		}
+
+		const proj = projectRegistry.get(ps.projectId)!;
+		const projCwd = proj.rootPath;
+		const wantWorktree = !!ps.worktreePath;
+		let worktreeOpts: { repoPath: string } | undefined;
+		if (wantWorktree) {
+			try {
+				if (await isGitRepo(projCwd)) {
+					worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+				}
+			} catch { /* ignore — no worktree */ }
+		}
+
+		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+		const createOpts: any = {
+			projectId: ps.projectId,
+			sandboxed: !!ps.sandboxed,
+			worktreeOpts,
+			seedContext,
+			seedContextSourceId: archivedId,
+			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
+			skipAutoModel: !!(ps.modelProvider && ps.modelId),
+		};
+		if (role) {
+			createOpts.rolePrompt = role.promptTemplate;
+			createOpts.roleName = role.name;
+			createOpts.role = role.name;
+			createOpts.accessory = role.accessory;
+		}
+		if (ps.personalities?.length) {
+			createOpts.personalityNames = ps.personalities;
+			createOpts.personalities = personalityManager.resolvePersonalities(ps.personalities);
+		}
+
+		let newSession;
+		try {
+			newSession = await sessionManager.createSession(
+				projCwd, undefined, undefined, undefined, createOpts,
+			);
+		} catch (err) {
+			json({ error: `failed to create session: ${String(err)}` }, 500);
+			return;
+		}
+
+		const baseTitle = (ps.title || "session").trim() || "session";
+		const continuedTitle = `Continued: ${baseTitle}`;
+		// markGenerated: prevents the first-message auto-titler from overwriting
+		// "Continued: …" once the user sends their first prompt in the new session.
+		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
+
+		if (ps.modelProvider && ps.modelId) {
+			// Fire-and-forget: set the model and persist. For worktree sessions the
+			// agent isn't ready yet, so setModel can fail — persist regardless so
+			// later restore picks it up.
+			const provider = ps.modelProvider;
+			const modelId = ps.modelId;
+			(async () => {
+				try {
+					// Wait briefly for the session to become idle if it's still preparing
+					for (let i = 0; i < 40; i++) {
+						const s = sessionManager.getSession(newSession.id);
+						if (s && (s.status === "idle" || s.status === "streaming")) break;
+						await new Promise(r => setTimeout(r, 50));
+					}
+					const s = sessionManager.getSession(newSession.id);
+					if (s) await s.rpcClient.setModel(provider, modelId).catch(() => {});
+				} catch { /* best-effort */ }
+				sessionManager.persistSessionModel(newSession.id, provider, modelId);
+			})().catch(() => {});
+		}
+
+		json({
+			id: newSession.id,
+			cwd: newSession.cwd,
+			status: newSession.status,
+			title: continuedTitle,
+		}, 201);
 		return;
 	}
 

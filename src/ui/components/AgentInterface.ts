@@ -17,6 +17,11 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
+import "./ContinueSessionChooser.js";
+import { estimateTranscriptBytes } from "./ContinueSessionChooser.js";
+import { state as appState } from "../../app/state.js";
+import { gatewayFetch } from "../../app/api.js";
+import { setHashRoute } from "../../app/routing.js";
 import type { Agent, AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
@@ -37,6 +42,11 @@ export class AgentInterface extends LitElement {
 	@property() cwd?: string;
 	// Project ID for palette resolution
 	@property() projectId?: string;
+	// Session metadata from REST PersistedSession (not on remote-agent _state)
+	@property() goalId?: string;
+	@property() delegateOf?: string;
+	@property() teamGoalId?: string;
+	@property() assistantType?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget
@@ -89,6 +99,81 @@ export class AgentInterface extends LitElement {
 	@property({ type: Boolean }) readOnly = false;
 	// When true, show the editor only while agent is streaming (steer-only mode)
 	@property({ type: Boolean }) nonInteractive = false;
+
+	/**
+	 * Scope gate for the archived-continue button. The button is hidden for
+	 * goal-linked, delegate, team, or assistant sessions — and for sessions
+	 * whose source project is no longer registered. The server enforces the
+	 * same rules; this is defence-in-depth UX.
+	 */
+	private get canContinueArchived(): boolean {
+		if (!this.readOnly) return false;
+		// These fields live on the REST PersistedSession — threaded via
+		// session-manager's connectToSession, not on the remote-agent _state.
+		if (this.goalId) return false;
+		if (this.delegateOf) return false;
+		if (this.assistantType) return false;
+		if (this.teamGoalId) return false;
+		if (!this.projectId) return false;
+		const known = appState?.projects?.some((p: any) => p.id === this.projectId);
+		return !!known;
+	}
+
+	private async _openContinueChooser() {
+		const chooser = document.createElement("continue-session-chooser") as any;
+		chooser.sessionId = this.session?.sessionId ?? "";
+		chooser.messageCount = this.session?.state?.messages?.length ?? 0;
+		chooser.transcriptBytes = estimateTranscriptBytes(this.session?.state);
+		document.body.appendChild(chooser);
+
+		const cleanup = () => {
+			if (chooser.parentElement) chooser.parentElement.removeChild(chooser);
+		};
+
+		chooser.addEventListener("cancel", () => cleanup());
+		chooser.addEventListener("continue", async (e: Event) => {
+			const { mode } = (e as CustomEvent).detail || {};
+			cleanup();
+			const archivedId = this.session?.sessionId;
+			if (!archivedId) return;
+			try {
+				const resp = await gatewayFetch(`/api/sessions/${archivedId}/continue`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ mode }),
+				});
+				if (!resp.ok) {
+					const text = await resp.text().catch(() => "");
+					console.error("Continue in new session failed:", resp.status, text);
+					this._showContinueError(`Failed to continue (${resp.status}): ${text || resp.statusText}`);
+					return;
+				}
+				const data = await resp.json();
+				const id = data?.id;
+				if (!id) {
+					this._showContinueError("Server returned no session id");
+					return;
+				}
+				setHashRoute("session", id);
+				window.dispatchEvent(new CustomEvent("focus-editor"));
+			} catch (err) {
+				console.error("Continue in new session threw:", err);
+				this._showContinueError(String(err));
+			}
+		});
+	}
+
+	private _showContinueError(message: string) {
+		const host = document.createElement("div");
+		host.setAttribute("data-continue-error", "");
+		host.style.cssText =
+			"position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;padding:10px 14px;border-radius:6px;font-size:13px;max-width:90vw;background:var(--destructive,#b91c1c);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,0.2);";
+		host.textContent = message;
+		document.body.appendChild(host);
+		setTimeout(() => {
+			if (host.parentElement) host.parentElement.removeChild(host);
+		}, 5000);
+	}
 
 	// References
 	@query("message-editor") private _messageEditor!: MessageEditor;
@@ -938,6 +1023,18 @@ export class AgentInterface extends LitElement {
 							</svg>
 							Aborting…
 						</div>` : nothing}
+						${this.canContinueArchived && !this.nonInteractive && !(state as any).isPreparing ? html`
+						<div class="flex flex-col items-center gap-2 px-4 py-6" style="border-top:1px solid var(--border);" data-continue-archived-footer>
+							<div class="text-xs text-muted-foreground">This session is archived.</div>
+							<button
+								type="button"
+								class="px-3 py-1.5 text-sm rounded-md text-white"
+								style="background:var(--primary,#3b82f6);border:1px solid var(--primary,#3b82f6);"
+								data-action="continue-archived"
+								@click=${() => this._openContinueChooser()}
+							>Continue in New Session</button>
+						</div>
+						` : nothing}
 						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}

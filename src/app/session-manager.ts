@@ -735,6 +735,34 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Mark as visited so unseen indicators clear
 		markSessionVisited(sessionId);
 
+		// Refresh scope-gate fields + archived readOnly on the restored
+		// AgentInterface. Between disconnect and reconnect the session may
+		// have been terminated elsewhere; without this the cached panel keeps
+		// showing the live chrome and hides the "Continue in new session"
+		// footer. Fire-and-forget — render runs immediately below.
+		if (state.chatPanel?.agentInterface) {
+			const ai = state.chatPanel.agentInterface;
+			const applyFrom = (s: any) => {
+				if (!s) return;
+				ai.projectId = s.projectId;
+				ai.goalId = s.goalId;
+				ai.delegateOf = s.delegateOf;
+				ai.teamGoalId = s.teamGoalId;
+				ai.assistantType = s.assistantType;
+				if (s.archived || s.status === "terminated" || s.status === "archived") {
+					ai.readOnly = true;
+				}
+			};
+			applyFrom(sessionData);
+			const archivedMatch: any = state.archivedSessions?.find((s: any) => s.id === sessionId);
+			applyFrom(archivedMatch);
+			if (!sessionData && !archivedMatch) {
+				gatewayFetch(`/api/sessions/${sessionId}`)
+					.then(async (r) => { if (r.ok) applyFrom(await r.json()); renderApp(); })
+					.catch(() => { /* best-effort */ });
+			}
+		}
+
 		renderApp();
 
 		// Re-bind draft handlers AFTER render so the cached message-editor is in the DOM.
@@ -1229,20 +1257,46 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		});
 
-		// Set cwd and branch on the AgentInterface stats bar
-		if (state.chatPanel.agentInterface && sessionData?.cwd) {
-			state.chatPanel.agentInterface.cwd = sessionData.cwd;
-			state.chatPanel.agentInterface.projectId = sessionData.projectId;
-			if (sessionData.goalId) {
-				const goal = state.goals.find((g) => g.id === sessionData.goalId);
+		// Set cwd and branch on the AgentInterface stats bar. For archived
+		// sessions re-opened later, sessionData lives in archivedSessions, not
+		// gatewaySessions — look there as a fallback so the scope-gate fields
+		// (goalId / delegateOf / teamGoalId / assistantType) that gate the
+		// "Continue in new session" footer are threaded through.
+	let sessionDataAny: any = sessionData
+			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
+		// Archived sessions re-opened directly (no prior sidebar load) aren't in
+		// either cache — fetch the record so the scope-gate fields threaded to
+		// AgentInterface (goalId / delegateOf / teamGoalId / assistantType) are
+		// available for the "Continue in new session" footer.
+		if (!sessionDataAny) {
+			try {
+				const resp = await gatewayFetch(`/api/sessions/${sessionId}`);
+				if (resp.ok) sessionDataAny = await resp.json();
+			} catch { /* best-effort */ }
+			if (isStale()) { cleanupRemote(remote); return; }
+		}
+		if (state.chatPanel.agentInterface && sessionDataAny) {
+			if (sessionDataAny.cwd) state.chatPanel.agentInterface.cwd = sessionDataAny.cwd;
+			state.chatPanel.agentInterface.projectId = sessionDataAny.projectId;
+			state.chatPanel.agentInterface.goalId = sessionDataAny.goalId;
+			state.chatPanel.agentInterface.delegateOf = sessionDataAny.delegateOf;
+			state.chatPanel.agentInterface.teamGoalId = sessionDataAny.teamGoalId;
+			state.chatPanel.agentInterface.assistantType = sessionDataAny.assistantType;
+			if (sessionDataAny.goalId) {
+				const goal = state.goals.find((g) => g.id === sessionDataAny.goalId);
 				if (goal?.branch) {
 					state.chatPanel.agentInterface.branch = goal.branch;
 				}
 			}
 		}
 
-		// Disable input for archived or explicitly read-only sessions
-		if (state.chatPanel.agentInterface && (remote.state.isArchived || options?.readOnly)) {
+		// Disable input for archived or explicitly read-only sessions.
+		// Also honour the REST session record — when re-opening a terminated
+		// session directly, remote.state.isArchived hasn't settled yet but the
+		// PersistedSession's `archived` / `status=="terminated"` flags are
+		// authoritative.
+		const recordArchived = !!sessionDataAny && (sessionDataAny.archived || sessionDataAny.status === "terminated");
+		if (state.chatPanel.agentInterface && (remote.state.isArchived || recordArchived || options?.readOnly)) {
 			state.chatPanel.agentInterface.readOnly = true;
 		}
 
@@ -1511,6 +1565,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (state.chatPanel?.agentInterface && !state.chatPanel.agentInterface.cwd && sessionForRole?.cwd) {
 					state.chatPanel.agentInterface.cwd = sessionForRole.cwd;
 					state.chatPanel.agentInterface.projectId = sessionForRole.projectId;
+					state.chatPanel.agentInterface.goalId = sessionForRole.goalId;
+					state.chatPanel.agentInterface.delegateOf = (sessionForRole as any).delegateOf;
+					state.chatPanel.agentInterface.teamGoalId = (sessionForRole as any).teamGoalId;
+					state.chatPanel.agentInterface.assistantType = (sessionForRole as any).assistantType;
 					if (sessionForRole.goalId) {
 						const goal = state.goals.find((g) => g.id === sessionForRole.goalId);
 						if (goal?.branch) {

@@ -21,6 +21,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
+| `POST` | `/api/sessions/:archivedId/continue` | Create a new session cloned from an archived one, seeded with its transcript. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
@@ -510,6 +511,49 @@ The client merges these affiliated sessions into `state.archivedSessions` (addit
 Note: `archivedDelegates` is only present in the sessions response when `?since` is omitted or when the generation has changed. It is absent in `?since` conditional responses (see above).
 
 The generation resets to 0 on server restart. Clients should initialize their tracked generation to -1 so the first request always fetches the full payload.
+
+### Continue-Archived endpoint
+
+`POST /api/sessions/:archivedId/continue` creates a brand-new session that mirrors the settings of an archived, non-goal, non-delegate session and seeds the archived transcript into the new session's system prompt. Used by the "Continue in New Session" footer button on archived session transcripts.
+
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, personality, sandbox mode, worktree mode) while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships.
+
+**Request body**:
+
+```json
+{ "mode": "summary" | "full" }
+```
+
+- `"full"` — injects the archived transcript verbatim (subject to the 128 KB seed-context budget enforced in `src/server/agent/continue-archived.ts`).
+- `"summary"` — asks the configured naming model to produce a bullet-point recap of the archived conversation. Falls back to `"full"` if the naming model is unavailable.
+
+**Success response** (`201 Created`):
+
+```json
+{
+  "id": "<new session id>",
+  "cwd": "<new session working directory>",
+  "status": "<idle | streaming | ...>",
+  "title": "Continued: <original title>"
+}
+```
+
+The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt.
+
+**Error responses**:
+
+| Status | Meaning |
+|---|---|
+| `400` | `mode` is missing or not `"summary"` / `"full"` |
+| `404` | Archived session not found, or its transcript (`.jsonl`) is missing or empty |
+| `409` | Source session is not archived |
+| `410` | Source project has been unregistered (session cannot be continued without its project context) |
+| `422` | Source is a goal, delegate, team member, or assistant session — not eligible for continuation |
+| `500` | Seed-context construction or session creation failed unexpectedly (see server logs) |
+
+**Scope gate**: The endpoint refuses goal-linked, delegate, team, and assistant sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead.
+
+**Seed context injection**: The archived messages are rendered by `buildSeedContext()` in `src/server/agent/continue-archived.ts` and passed to `createSession()` as `opts.seedContext` (plus `seedContextSourceId` for attribution). The session-setup plan propagates it to `PromptParts.seedContext`, and `assembleSystemPrompt()` in `src/server/agent/system-prompt.ts` emits it under a `## Prior Session Transcript` heading with a directive telling the agent it's context-only — not a request to act.
 
 ### Large content truncation
 
