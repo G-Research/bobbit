@@ -25,8 +25,12 @@ test("design-doc gate: prompt contains NO git diff instructions", async () => {
 		undefined, undefined, "spec", new Map(),
 		gate,
 	);
-	assert.doesNotMatch(prompt, /git diff/i);
-	assert.doesNotMatch(prompt, /git log/i);
+	// Must NOT contain an *actionable* `git diff <ref>...HEAD` instruction.
+	// The design-gate text may reference the phrase `git diff` inside a NEGATION
+	// ("Do NOT run `git diff`"), but must not include a runnable form like
+	// `git diff master...HEAD` or `git diff origin/main...HEAD`.
+	assert.doesNotMatch(prompt, /git diff \S+\.\.\.?HEAD/);
+	assert.doesNotMatch(prompt, /git log \S+\.\.\.?HEAD/);
 	assert.match(prompt, /pre-implementation/i);
 	assert.match(prompt, /Baseline: none/);
 });
