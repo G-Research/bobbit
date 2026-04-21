@@ -267,23 +267,18 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 ### Search
 
-Hybrid semantic + lexical search over goals, sessions, messages, and staff. Backed by a per-project LanceDB dataset. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/semantic-search.md](design/semantic-search.md).
+Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by a per-project FlexSearch index. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md).
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/search` | Hybrid query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`. Omit `projectId` to search across all projects. |
+| `GET` | `/api/search` | Query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`. Omit `projectId` to search across all projects. |
 | `POST` | `/api/search/rebuild` | Kick off a full rebuild in the background (`{ projectId }`) |
 | `GET` | `/api/search/stats` | Stats for the project's search index (`?projectId=`) |
-| `POST` | `/api/search/compact` | Trigger Lance dataset compaction (`{ projectId }`) |
+| `POST` | `/api/search/compact` | No-op under FlexSearch; retained for API compatibility (`{ projectId }`) |
 | `GET` | `/api/maintenance/orphaned-index-rows` | List index rows whose parent entity no longer exists (`?projectId=`) |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned index rows (`{ projectId }`) |
 
-**Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `reason` is one of:
-
-- `"disabled-no-native"` — LanceDB native binary failed to load for the current platform (not recoverable without reinstall).
-- `"disabled-no-model"` — embedding model download/load failed (recoverable — Settings → Maintenance → Retry Download).
-
-`state` mirrors `SearchService.getState()` (e.g. `"disabled"`, `"rebuilding"`, `"ready"`).
+**Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` mirrors `state` for diagnostic symmetry. The disabled path is catastrophic store-open failure — rare, and the Settings → Maintenance → Search Index panel exposes **Rebuild Index** as the recovery action.
 
 **`POST /api/search/rebuild`** — body `{ projectId }`. Returns **202 Accepted** on success; progress is streamed via the `index:progress` / `index:complete` / `index:error` WebSocket events (see [websocket-protocol.md](websocket-protocol.md)). **400** if `projectId` is missing.
 
@@ -293,16 +288,16 @@ Hybrid semantic + lexical search over goals, sessions, messages, and staff. Back
 {
   "lastRebuildAt": 1775812345000,
   "rowCountsBySource": { "goals": 12, "sessions": 48, "messages": 9321, "staff": 3 },
-  "datasetBytes": 184321024,
-  "embedderId": "nomic-embed-text-v1.5",
-  "embedderDim": 768,
+  "datasetBytes": 8432104,
+  "engine": "flexsearch",
+  "engineVersion": "0.8.158",
   "state": "ready"
 }
 ```
 
 Returns **400** if `projectId` is missing, **404** if the project is not registered.
 
-**`POST /api/search/compact`** — body `{ projectId }`. Runs Lance dataset compaction synchronously (fast for typical sizes). Returns `{ ok: true }`.
+**`POST /api/search/compact`** — body `{ projectId }`. No-op under the current engine; always returns `{ ok: true }`. Kept to avoid 404s from older clients.
 
 **`GET /api/maintenance/orphaned-index-rows?projectId=<id>`** — scans the dataset for rows whose parent entity (goal, session, message, staff) no longer exists in the source-of-truth stores. Returns:
 

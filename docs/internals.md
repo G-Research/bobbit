@@ -45,7 +45,7 @@ Each registered project is a self-contained unit on disk. State (goals, sessions
     team-state.json # Team state
     gates.json     # Gate state and signals
     staff.json     # Staff agents
-    search.lance/  # Semantic + lexical search index for THIS project (LanceDB dataset)
+    search.flex/   # Lexical search index for THIS project (FlexSearch JSON)
     costs/         # Cost tracking
 
 <server-cwd>/.bobbit/
@@ -113,7 +113,7 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 5. Renames central files with `.pre-migration` suffix (not deleted)
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
-The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Any legacy central or per-project `search.db` is deleted on first startup under the new code — LanceDB datasets rebuild automatically on first access (see [Semantic search](#semantic-search)).
+The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Any legacy central or per-project `search.db` is deleted on first startup under the new code — FlexSearch indexes rebuild automatically on first access (see [Semantic search](#semantic-search)).
 
 **What stays global**: `projects.json`, auth token, gateway URL, preferences, session colors, PR status.
 
@@ -451,30 +451,34 @@ This happens transparently in `normalizeGrantPolicy()` — existing role YAML an
 
 ## Semantic search
 
-Unified semantic + lexical search over goals, sessions, messages, and staff. One embedded store per project; everything runs locally and offline after first model download.
+Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
 
-> **Authoritative design:** [docs/design/semantic-search.md](design/semantic-search.md) — this section is the quick reference; the design doc is the source of truth for schema, rollout, and rationale.
+> **Authoritative design:** [docs/design/portable-search.md](design/portable-search.md) — this section is the quick reference; the design doc is the source of truth for schema, ranking, and rationale. The earlier [docs/design/semantic-search.md](design/semantic-search.md) covers the previous Nomic+LanceDB architecture and is kept for historical context only.
+
+### Why this shape
+
+Bobbit must install and run anywhere — including network-restricted environments. The previous stack (Nomic embeddings + LanceDB) pulled in `@huggingface/transformers`, `onnxruntime-node`, `sharp`, and platform-specific Rust binaries, plus a ~140–500 MB model download on first search. Any of those can fail in an airgap.
+
+The current engine is **[FlexSearch](https://github.com/nextapps-de/flexsearch)** — a pure-JS, zero-dependency full-text index library. One backend, one code path, no native compilation, no postinstall network work, no model cache. Natural-language "fuzzy meaning" queries are weaker than an embedding model; identifier/keyword search is **better** because strict tokenization ranks exact symbol matches first.
 
 ### Store
 
-- **LanceDB** (Rust, Apache-2.0, embedded via `@lancedb/lancedb`) — one dataset per project at `<project-root>/.bobbit/state/search.lance/`.
-- Single `content` table with both a vector index (IVF_PQ on a 768-dim `embedding` column, created lazily past 10K rows) and a Tantivy full-text index on `title` + `text`.
-- Single-row `search_meta` table tracks `embedder_id`, `dim`, `schema_version`, `content_policy_version`. Any mismatch on startup triggers a full rebuild.
-- Shared model cache at `~/.bobbit/models/` — reused across projects. Override the path with the `BOBBIT_MODEL_CACHE_DIR` env var for offline / air-gapped installs where the model files are pre-staged in a non-default location.
-
-### Embedding model
-
-`nomic-embed-text-v1.5` via `@huggingface/transformers` (ONNX runtime in Node). 768-dim, 8K context, Apache-2.0. Downloaded lazily on first use (~140MB), cached on disk, offline thereafter. Nomic prefix convention: `search_document: ` on index, `search_query: ` on query.
+- **FlexSearch `Document` index** — one per project at `<project-root>/.bobbit/state/search.flex/`.
+  - `index/<key>.json` — one file per FlexSearch export key (posting lists, document registry, tag index, cache).
+  - `meta.json` — engine name/version, schema version, content policy version, last rebuild timestamp.
+- Multi-field document schema: natural-language fields (`title`, `text`) use forward-prefix tokenization with stemming; an `identifier_text` field uses strict tokenization for exact-symbol matches (camelCase, snake_case, dotted paths all indexed as decomposed tokens).
+- Persistence is export/import via FlexSearch's built-in serializer, written per-key with an atomic `.tmp` → rename and a trailing-edge debounce. Crash-mid-write leaves `.tmp` files that the loader skips on next open.
+- Meta mismatch on startup triggers a full rebuild from the source-of-truth stores. Fields checked: `engine`, `engineVersion`, `schemaVersion`, `contentPolicyVersion`.
 
 ### Abstractions
 
-Three interfaces in `src/server/search/types.ts` are the only surface downstream code sees:
+The surface in `src/server/search/types.ts` that downstream code sees is unchanged from the previous backend, so v2 work (e.g. file indexing) drops in without a refactor:
 
-- **`Embedder`** — `embed(texts, "document"|"query")`, `countTokens`, `ready()`. Swappable (multilingual model drops in without refactor).
-- **`IndexSource`** — `iterate(ctx)` and optional `watch(ctx)`. Goals, sessions, messages, staff in v1. File indexing (v2) drops in via the same interface; the schema has nullable `file_path` / `start_line` / `end_line` columns already. `sources/files-source.stub.ts` ships as a test-only proof.
+- **`IndexSource`** — `iterate(ctx)` and optional `watch(ctx)`. Goals, sessions, messages, staff today. File indexing arrives via the same interface; `sources/files-source.stub.ts` ships as a reference shape.
 - **`Indexable`** — uniform shape handed to the indexer: `id`, `sourceId`, `text`, `metadata`, `contentHash`, `weight`, `role`, optional `display`.
+- **`SearchQuery`** / **`SearchResult`** / **`SearchResults`** — caller-facing query and result shapes.
 
-`SearchService` (`search-service.ts`) is the per-project facade that bundles `Embedder`, `LanceStore`, `Indexer`, `HybridQuery`, and the source array. `ProjectContext` constructs and owns one per project.
+`SearchService` (`search-service.ts`) is the per-project facade that bundles `FlexSearchStore`, `Indexer`, and the source array. `ProjectContext` constructs and owns one per project. No embedder component exists.
 
 ### Content policy (role-aware weighting)
 
@@ -494,26 +498,21 @@ Bump `CONTENT_POLICY_VERSION` when the policy changes — the meta-mismatch chec
 
 ### Chunking
 
-`chunker.ts` splits overlong text into 2000-token chunks with 200-token overlap, using the embedder's own tokenizer (no extra dep). Chunk IDs follow `<parentId>:chunk:<n>` (e.g. `message:<sid>:<idx>:chunk:0`) and the `parent_id` column stores the pre-chunk id. `HybridQuery` collapses by `parent_id` after ranking — one result per logical entity, keyed to the best-scoring chunk. The same chunker serves v2 file indexing unchanged.
+`chunker.ts` splits overlong text into bounded chunks with overlap using an approximate-token counter (~4 chars/token). Chunk IDs follow `<parentId>:chunk:<n>` and the `parent_id` field stores the pre-chunk id. The store collapses by `parent_id` after ranking — one result per logical entity, keyed to the best-scoring chunk. Chunking remains because BM25 prefers bounded documents; exact token counts no longer matter (there is no embedding context window).
 
-### Hybrid query
+### Ranking
 
-LanceDB's built-in hybrid search: `fullTextSearch` + `nearestTo` on the same query, fused with **Reciprocal Rank Fusion (k=60)**. Post-rank, `score *= weight`, then collapse by `parent_id`. Filters (`projectId`, `archived`, `types`) apply to both legs via a single `.where()` predicate. Snippet rendering lives in `snippet.ts` — same `<b>` contract as before, so `search-page.ts` consumes the existing result shape.
+BM25-style lexical scoring across three indexed fields (`identifier_text`, `title`, `text`) with per-field boost (identifiers outrank titles, titles outrank body text). The final score is `fieldScore × doc.weight × recencyMultiplier`, where `weight` is the role-aware content-policy multiplier and `recencyMultiplier` decays recent-content bias to 1.0× over a 30-day half-life. Results are then collapsed by `parent_id` and the window sliced by `offset`/`limit`. Filters (`projectId`, `archived`, `types`) apply via FlexSearch tag filters. Snippet rendering in `snippet.ts` uses the same `<b>` contract — `search-page.ts` consumes an unchanged result shape.
 
 ### Graceful degradation
 
-Two independent failure classes, both surfaced as the **red status dot** + "Search unavailable" — never a silent partial mode:
-
-- **`disabled-no-native`** — LanceDB native binary failed to load (platform mismatch). All index/search calls no-op; `/api/search` returns **503** with `{ error: "search-unavailable", reason: "native-binary" }`.
-- **`disabled-no-model`** — embedding model failed to download/load. Same no-op semantics; the Maintenance panel exposes a **Retry Download** button.
-
-See [docs/design/semantic-search.md §11](design/semantic-search.md) for the full state machine.
+Failure is surfaced as the **red status dot** + "Search unavailable" — never a silent partial mode. There is only one disabled path now (catastrophic store failure, e.g. the state dir is unwritable); `/api/search` returns **503** with `{ error: "search-unavailable", reason, state }`. See [docs/design/portable-search.md §10](design/portable-search.md) for the state machine (`initializing` → `ready` → `disabled` → `closed`).
 
 ### Re-indexing triggers
 
-- **Incremental** (continuous, invisible): new messages, goal/session/staff create/edit/rename/archive → embed + upsert via `SearchService.indexX(entity)`. Incremental upsert skips unchanged rows via `contentHash` comparison.
-- **Full rebuild** (rare): first boot after shipping, meta mismatch, dataset fails to open, or user clicks **Rebuild Index** in Settings. Runs in the background; status dot goes yellow.
-- **Background maintenance:** daily scheduled Lance dataset compaction; opportunistic ANN index rebuild when row count has grown >10% past 10K since last build (60-minute cooldown); orphaned-row cleanup after entity deletion.
+- **Incremental** (continuous, invisible): new messages, goal/session/staff create/edit/rename/archive → upsert via `SearchService.indexX(entity)`. Incremental upsert skips unchanged rows via `contentHash` comparison.
+- **Full rebuild** (rare): first boot on a project with no `search.flex/` directory, meta mismatch (engine upgrade, schema version bump, content-policy version bump), index fails to load, or user clicks **Rebuild Index** in Settings. Runs in the background; status dot goes yellow.
+- **Legacy cleanup:** on first open under the current engine, a stale `search.lance/` directory from the previous backend is deleted. The shared model cache at `~/.bobbit/models/` (from the earlier Nomic embedder) is no longer used — users can `rm -rf ~/.bobbit/models` to reclaim disk; Bobbit does not touch it automatically.
 
 ### WebSocket events
 
@@ -531,14 +530,18 @@ These drive the **search status dot** (`src/app/components/search-status-dot.ts`
 |---|---|
 | `GET /api/search?q=…&projectId=…&type=…&limit=…&offset=…` | Hybrid query. `projectId` omitted → search across all projects. Results include `projectId`/`projectName`. Returns **503** when the service is disabled. |
 | `POST /api/search/rebuild?projectId=…` | Kick off a full rebuild. Runs in background; progress via WS. |
-| `GET /api/search/stats?projectId=…` | Service state, per-source row counts, dataset size on disk, embedder id + dim, last rebuild timestamp. **400** if `projectId` missing; **503** if disabled. |
-| `POST /api/search/compact?projectId=…` | Trigger Lance dataset compaction. |
+| `GET /api/search/stats?projectId=…` | Service state, engine name + version, per-source row counts, dataset size on disk, last rebuild timestamp. **400** if `projectId` missing; **503** if disabled. |
+| `POST /api/search/compact?projectId=…` | No-op under FlexSearch. Retained for API compatibility so older clients don't 404; always returns `{ ok: true }`. |
 | `GET /api/maintenance/orphaned-index-rows?projectId=…` | Rows whose parent entity no longer exists. |
 | `POST /api/maintenance/cleanup-index-rows?projectId=…` | Delete them. |
 
 ### Migration
 
-On first startup after this feature ships, `state-migration.ts` deletes the legacy `search.db` (per-project and central) after the first successful LanceDB `open()`. No data loss — indexes are a rebuildable cache; the source-of-truth stores repopulate LanceDB automatically via `rebuildFromSources([...])`.
+Indexes are a rebuildable cache; the source-of-truth stores repopulate automatically via `rebuildFromSources([...])` on a meta mismatch. Any legacy `search.db` (pre-LanceDB) or `search.lance/` (pre-FlexSearch) directory is deleted on first startup under the current code — no data loss, just a one-time rebuild.
+
+### Maintenance panel
+
+**Settings → Maintenance → Search Index** surfaces engine name/version, state, last rebuild time, dataset size, and per-source row counts. Controls are **Refresh** and **Rebuild Index**; live rebuild progress is streamed over the WS events above. The earlier *Retry Download* and *Compact Dataset* buttons are gone — there is no model to download, and compaction is a no-op under the pure-JS engine.
 
 ### Two-mode search UX
 
@@ -1012,7 +1015,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `gates.json` | `GateStore` | Gate state + signals |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
-| `search.lance/` | `SearchService` | LanceDB dataset (vector + FTS). See [Semantic search](#semantic-search). |
+| `search.flex/` | `SearchService` | FlexSearch index (JSON files under `index/` plus `meta.json`). See [Semantic search](#semantic-search). |
 | `costs/` | `CostTracker` | Token/cost data |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
