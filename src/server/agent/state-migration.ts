@@ -18,7 +18,30 @@ const RECOVERY_MARKER = ".pre-migration-recovered";
  *
  * Distributes goals, sessions, tasks, teams, gates, and staff to the
  * correct project's state directory based on `projectId` tags.
- * Records without a `projectId` go to the default project.
+ *
+ * MIGRATION-ONLY default-project behavior
+ * ----------------------------------------
+ * Legacy records predate multi-project and therefore carry no `projectId`.
+ * To avoid dropping them on the floor, this migration anchors such records
+ * to a single "migration target" project: `projectRegistry.getByPath(serverCwd)`
+ * if one is registered, else `projects[0]`. The variable below is named
+ * `defaultProject` for historical reasons — it is NOT a runtime default
+ * project. Bobbit has no runtime default project concept any more:
+ *
+ *   - `ProjectRegistry` does not expose `ensureDefaultProject()`.
+ *   - `ProjectContextManager` does not expose `getDefault()` /
+ *     `getDefaultOrNull()` / `getDefaultProjectId()` /
+ *     `getDefaultProjectIdOrNull()`.
+ *   - `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require
+ *     an explicit `projectId` or a `cwd` that matches a registered
+ *     project's `rootPath`; otherwise they return 400.
+ *
+ * The `projects[0]` anchor below runs at most once per install (guarded by
+ * the `.migrated-to-per-project` marker file). If you are tempted to reuse
+ * this fallback anywhere outside this function, don't — resolve a project
+ * explicitly via `resolveProjectForRequest` instead. See
+ * [docs/internals.md — Multi-project architecture / State migration] for
+ * the full rationale.
  *
  * Renamed (not deleted) central files get a `.pre-migration` suffix.
  * A marker file prevents re-running.

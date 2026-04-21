@@ -224,7 +224,7 @@ Debugging checklist:
 - State is per-project: goals, sessions, tasks, teams, gates, search, costs all live in `<project-root>/.bobbit/state/`
 - `ProjectContextManager` manages all `ProjectContext` instances and routes store access
 - Project registry at `<server-cwd>/.bobbit/state/projects.json` — check file exists and is valid JSON
-- Server CWD auto-registered as default project via `ensureDefaultProject()` on startup
+- **No default project.** The server never auto-registers one. A fresh install has an empty `projects.json` and the UI forces Add Project before any goal/session work. `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require an explicit `projectId` or a `cwd` matching a registered project's `rootPath` and return **400** `"projectId required: ..."` otherwise (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)).
 - `GET /api/projects` to list all registered projects
 - Sessions/goals not appearing? Check `projectId` field matches the expected project. Verify the correct project's `sessions.json` / `goals.json` contains the record
 - Sidebar not grouping? Project folder rows are always shown — check that `state.projects` is populated and `renderProjectHeader()` is being called
@@ -233,7 +233,7 @@ Debugging checklist:
 - Config not cascading? Check all three `.bobbit/config/` directories (global, server, project) and verify `resolveScalarConfig()` / `resolveEntities()` return expected scope
 - **State migration**: On first startup after upgrade, central state is distributed to per-project dirs. Check for `.bobbit/state/.migrated-to-per-project` marker. Central files renamed with `.pre-migration` suffix (not deleted). If migration didn't run, check that projects are registered before migration runs
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
-- **Known limitations**: Cost tracking uses the default project's `CostTracker`. `active-verifications.json` stays in central state dir
+- **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
 
 ## Gate re-signal cancellation
 

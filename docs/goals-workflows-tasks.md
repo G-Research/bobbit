@@ -6,7 +6,9 @@ This document explains how Bobbit's goal orchestration system works — how goal
 
 ### Goals
 
-A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Goals carry an optional `projectId` linking them to a registered project (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Goals optionally create a dedicated git worktree for isolated work — when project-scoped, worktrees are created relative to the project's `rootPath`.
+A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Every goal is scoped to a registered project via its `projectId` field (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Worktrees are created relative to that project's `rootPath`.
+
+`POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` matching a registered project's `rootPath`. There is no default-project fallback — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). When enabled, the server automatically calls `teamManager.startTeam()` after worktree setup completes — no manual "Start Team" click needed. If auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable; the user can start the team manually. The retry-setup handler also respects this flag.
 
