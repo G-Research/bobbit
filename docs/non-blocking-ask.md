@@ -107,6 +107,31 @@ The envelope is a regular user message persisted to the session `.jsonl`. Everyt
 
 No `/pending` endpoint, no in-memory map, no rejection listener. The transcript is the state.
 
+## Widget UX
+
+The interactive widget is a Lit component (`<ask-user-choices-widget>`) rendered inside the `ask_user_choices` tool card. Its shape is driven entirely by the tool input — see `defaults/tools/ask/ask_user_choices.yaml` for the agent-facing contract. Summary for docs readers:
+
+### Labels
+
+- **Tabs** (multi-question asks only): `A. <tab_label>`, `B. <tab_label>`, … The letter prefix doubles as the tab-jump shortcut (see below); `tab_label` is required on every question when `questions.length > 1` and must be 2–4 words, ≤24 chars. The server rejects the call with a clear error if any question is missing it. Single-question asks hide the tab strip and ignore `tab_label`.
+- **Options**: every option is prefixed with a numeric badge (`1.`, `2.`, …) matching the number-key shortcut. The "Other" choice (when `allow_other: true`) takes the next number in sequence.
+- **Primary button**: on a multi-question ask, every tab except the last shows **Next** (advances to the next tab, disabled until the current question has a valid selection). The last tab shows **Submit**. Single-question asks keep the existing behaviour — single-select auto-submits on pick, multi-select / Other shows **Submit**.
+
+### Keyboard map
+
+A single keydown listener on the widget root handles shortcuts. While focus is inside the "Other" text field, only Enter and Escape are intercepted so normal typing works.
+
+| Key | Effect |
+|---|---|
+| Arrow Up / Down | Move focus between options (wraps at ends). |
+| Arrow Left / Right | On tab buttons, move across tabs (standard ARIA tablist). |
+| Enter | Click the primary button (Next / Submit). On a single-question single-select ask, picks the focused option and auto-submits. |
+| Escape | Clear the current question's selection and any "Other" text. Does not submit or close. |
+| 1–9 | Pick the option at that 1-based index on the active question. Single-select auto-submits (single-question) or auto-advances (multi-question); multi-select toggles. |
+| A–Z | Jump to the corresponding tab. Multi-question asks only. |
+
+The widget uses ARIA `role="radiogroup"` / `role="radio"` for options and the standard tablist pattern for tabs, with roving `tabindex` so screen readers announce selection state correctly. Mouse/touch behaviour is unchanged.
+
 ## Rendering note
 
 Envelope user messages are hidden from the **rendered** transcript by `src/ui/components/AgentInterface.ts` (via `isAskResponseEnvelope`). They're still present in the `.jsonl` and still sent to the LLM — the agent sees them on its next turn as part of history. The UI omits them because the answered widget card is the human-readable representation; showing both would be redundant.
@@ -121,6 +146,7 @@ Envelope user messages are hidden from the **rendered** transcript by `src/ui/co
 | `src/server/server.ts` — `POST /api/internal/user-question/submit` | Validate, cross-check against transcript, idempotency check, enqueue envelope via `sessionManager.enqueuePrompt`. |
 | `src/server/agent/ask-user-choices-validation.ts` | Input validators (`validateQuestions`, `validateAnswers`, `crossValidate`) shared by the submit handler. |
 | `src/ui/tools/renderers/AskUserChoicesRenderer.ts` | Two-mode rendering (interactive vs answered) via `ctx.getAskResponseAnswers(toolUseId)`. |
+| `src/ui/components/AskUserChoicesWidget.ts` | Interactive Lit widget: tabs, numbered option badges, keyboard navigation, ARIA radiogroup/tablist. |
 | `src/ui/components/AgentInterface.ts` | Filters envelope user messages out of the rendered transcript. |
 | `src/app/remote-agent.ts` | Exposes `findAskResponseAnswers` to renderers; dispatches `bobbit-transcript-message` on new user messages so tool cards re-render. |
 
