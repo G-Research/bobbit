@@ -5,6 +5,14 @@ import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
 
 /**
+ * Minimal session-resolver surface needed by the search orphan filter.
+ * Kept as a structural type to avoid a circular import with session-manager.
+ */
+interface SessionResolver {
+  getPersistedSession(id: string): PersistedSession | undefined;
+}
+
+/**
  * Central registry of ProjectContext instances.
  *
  * Manages per-project state contexts and provides aggregation methods
@@ -13,9 +21,21 @@ import type { SearchResults, SearchResult } from "../search/types.js";
 export class ProjectContextManager {
   private contexts = new Map<string, ProjectContext>();
   private registry: ProjectRegistry;
+  private sessionResolver: SessionResolver | null = null;
+  private _sessionResolverWarned = false;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
+  }
+
+  /**
+   * Wire dependencies used by cross-project services (notably the search
+   * orphan filter). Called once during boot after the SessionManager is
+   * instantiated. The manager itself is still constructed with only the
+   * registry so existing callers need no change.
+   */
+  setDependencies(deps: { sessionManager: SessionResolver }): void {
+    this.sessionResolver = deps.sessionManager;
   }
 
   /** Initialize contexts for all registered projects. */
@@ -109,8 +129,7 @@ export class ProjectContextManager {
       projectNames?: Map<string, string>;
     } = {},
   ): Promise<SearchResults> {
-    const allResults: SearchResult[] = [];
-    let totalCount = 0;
+    const rawResults: SearchResult[] = [];
     const limit = opts.limit ?? 50;
     const offset = opts.offset ?? 0;
 
@@ -128,18 +147,126 @@ export class ProjectContextManager {
         projectId: undefined, // Already filtered above
         projectNames: opts.projectNames,
       });
-      const { results, total } = out instanceof Promise ? await out : out;
+      const { results } = out instanceof Promise ? await out : out;
 
-      allResults.push(...results);
-      totalCount += total;
+      rawResults.push(...results);
     }
 
-    // Sort by timestamp descending (most recent first) and apply pagination
-    allResults.sort((a, b) => b.timestamp - a.timestamp);
+    // Orphan filter + weak-match drop (message-only).
+    const dropped: SearchResult[] = [];
+    const filtered = rawResults.filter((hit) => {
+      if (!this._hitExists(hit)) { dropped.push(hit); return false; }
+      if (hit.type === "message" && hit.matchedOn === "metadata") {
+        // Phantom match — token hit metadata only, user can't see why.
+        dropped.push(hit);
+        return false;
+      }
+      return true;
+    });
+
+    // Opportunistic cleanup — fire-and-forget.
+    if (dropped.length > 0) this._scheduleOpportunisticCleanup(dropped);
+
+    // Sort by timestamp descending (most recent first) and apply pagination.
+    filtered.sort((a, b) => b.timestamp - a.timestamp);
     return {
-      results: allResults.slice(offset, offset + limit),
-      total: totalCount,
+      results: filtered.slice(offset, offset + limit),
+      total: filtered.length,
     };
+  }
+
+  /**
+   * Orphan existence check. Returns false for hits whose backing entity
+   * (goal, session, message's parent session, staff) no longer exists, or
+   * whose project is no longer registered.
+   */
+  private _hitExists(hit: SearchResult): boolean {
+    // Project gate — registry is ultimate source of truth.
+    if (hit.projectId && !this.registry.get(hit.projectId)) return false;
+
+    const ctx = hit.projectId ? this.contexts.get(hit.projectId) : undefined;
+    if (!ctx) return false;
+
+    // SearchResult.id is now emitted as a bare entity id (the source
+    // prefix is stripped in toSearchResult for goal/session/staff). For
+    // messages, the parent session id is carried separately on hit.sessionId.
+    switch (hit.type) {
+      case "goal": {
+        const goalId = hit.goalId ?? hit.id;
+        return ctx.goalStore.get(goalId) !== undefined;
+      }
+      case "session": {
+        // Fail-open when session resolver isn't wired (e.g. unit tests or
+        // alternate bootstraps that skip setDependencies). Silently dropping
+        // every session/message hit is worse than returning a stale row.
+        if (!this.sessionResolver) {
+          this._warnSessionResolverMissing();
+          return true;
+        }
+        const sessionId = hit.sessionId ?? hit.id;
+        return this.sessionResolver.getPersistedSession(sessionId) !== undefined;
+      }
+      case "message":
+        if (!this.sessionResolver) {
+          this._warnSessionResolverMissing();
+          return true;
+        }
+        if (!hit.sessionId) return false;
+        return this.sessionResolver.getPersistedSession(hit.sessionId) !== undefined;
+      case "staff": {
+        return ctx.staffStore.get(hit.id) !== undefined;
+      }
+      case "file":
+        return true; // files source not in scope
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Fire-and-forget: when a hit is dropped as orphaned, enqueue a removal
+   * from the owning project's search index so subsequent queries don't
+   * return the same orphan row. Not awaited.
+   */
+  /** One-time warning when the session resolver wiring is missing. */
+  private _warnSessionResolverMissing(): void {
+    if (this._sessionResolverWarned) return;
+    this._sessionResolverWarned = true;
+    console.warn("[search] orphan filter disabled: sessionManager not wired");
+  }
+
+  private _scheduleOpportunisticCleanup(dropped: SearchResult[]): void {
+    // De-dupe session-level message purges — one op per session is enough.
+    const messageSessionsPurged = new Set<string>();
+    for (const hit of dropped) {
+      const ctx = hit.projectId ? this.contexts.get(hit.projectId) : undefined;
+      const idx = ctx?.searchIndex;
+      if (!idx) continue;
+      // hit.id is the bare entity id (prefix stripped in toSearchResult).
+      // The remove* methods re-apply the goal:/session:/staff: prefix
+      // internally when addressing the FlexSearch index.
+      try {
+        switch (hit.type) {
+          case "goal":
+            idx.removeGoal(hit.goalId ?? hit.id);
+            break;
+          case "session":
+            idx.removeSession(hit.sessionId ?? hit.id);
+            break;
+          case "message":
+            if (hit.sessionId && !messageSessionsPurged.has(hit.sessionId)) {
+              messageSessionsPurged.add(hit.sessionId);
+              idx.removeMessagesForSession(hit.sessionId);
+            }
+            break;
+          case "staff":
+            idx.removeStaff(hit.id);
+            break;
+        }
+      } catch (err) {
+        console.warn("[search] opportunistic cleanup failed:", err);
+      }
+    }
   }
 
   // ── Generation counters (for polling optimization) ─────────────

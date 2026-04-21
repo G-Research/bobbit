@@ -174,6 +174,11 @@ export class VerificationHarness {
 	private _persistActive(): void {
 		try {
 			const data = { verifications: [...this.activeVerifications.values()] };
+			// Defensive: ensure parent dir exists. It is created at startup but may
+			// be removed mid-run by external cleanup (test teardown, maintenance,
+			// AV quirks). Recreating on demand keeps persistence robust.
+			const dir = path.dirname(this._persistPath);
+			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 			fs.writeFileSync(this._persistPath, JSON.stringify(data, null, 2));
 		} catch (err) {
 			console.error("[verification] Failed to persist active verifications:", err);

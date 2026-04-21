@@ -108,6 +108,13 @@ export interface SearchResult {
 	filePath?: string;
 	startLine?: number;
 	endLine?: number;
+	/**
+	 * Where the query matched. "text" = snippet contains <b>; "metadata" =
+	 * match came from title/identifier/metadata and the snippet is only a
+	 * head-of-text preview with no highlights. UI renders "metadata" rows
+	 * with a muted "matched on title" note.
+	 */
+	matchedOn?: "text" | "metadata";
 }
 
 export interface SearchResults {

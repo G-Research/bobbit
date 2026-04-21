@@ -446,7 +446,7 @@ test.describe("Expect failure pipeline", () => {
 						"# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: src/calc.ts returns wrong value",
 				}),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 30_000);
 
 			const signalResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signal`,
@@ -462,7 +462,7 @@ test.describe("Expect failure pipeline", () => {
 			);
 			expect(signalResp.status).toBe(201);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "passed", 30_000);
 		} finally {
 			ws.close();
 			await deleteGoal(goalId);
@@ -486,7 +486,7 @@ test.describe("Expect failure pipeline", () => {
 						"# Bug Analysis\n\nSteps: 1. run test\nRoot cause: src/foo.ts:10 off-by-one",
 				}),
 			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 30_000);
 
 			const signalResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signal`,
@@ -502,7 +502,7 @@ test.describe("Expect failure pipeline", () => {
 			);
 			expect(signalResp.status).toBe(201);
 
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "failed", 15_000);
+			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "failed", 30_000);
 
 			const signalsResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signals`,

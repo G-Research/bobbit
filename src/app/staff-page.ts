@@ -101,6 +101,14 @@ export function navigateToStaffEdit(staffId: string): void {
 		saving = false;
 		deleting = false;
 		loadSessionAppearance(agent);
+	} else {
+		// Staff id unknown in current list — likely a stale search result.
+		// Dispatch a page-local event so the search page can show a toast.
+		try {
+			window.dispatchEvent(new CustomEvent("search-result-stale", {
+				detail: { kind: "staff", id: staffId },
+			}));
+		} catch { /* ignore */ }
 	}
 	renderApp();
 }

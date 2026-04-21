@@ -617,6 +617,10 @@ export function createGateway(config: GatewayConfig) {
 		projectContextManager,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+	// Wire sessionManager into the project context manager so the search
+	// orphan filter can resolve sessions across projects (live, dormant,
+	// archived). The registry is already passed via the constructor.
+	projectContextManager.setDependencies({ sessionManager });
 	// Wire gate status changes to bump goal generation for all project contexts
 	for (const ctx of projectContextManager.all()) {
 		ctx.gateStore.onStatusChange = () => {
@@ -948,6 +952,7 @@ export function createGateway(config: GatewayConfig) {
 	return {
 		server,
 		sessionManager,
+		projectContextManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before

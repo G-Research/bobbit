@@ -16,7 +16,7 @@ test.describe("Session lifecycle (full-stack)", () => {
 		await openApp(page);
 
 		// ── 2. Create a new session via the sidebar button ──────────
-		const newSessionBtn = page.locator("button[title='New session']").first();
+		const newSessionBtn = page.locator("button[title^='New session']").first();
 		await newSessionBtn.click();
 
 		// Wait for the message editor textarea to appear — means the

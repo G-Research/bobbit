@@ -96,6 +96,11 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 		}
 
+		// Pre-create subdirectories that the server writes into. Under heavy
+		// parallel load on Windows, concurrent first-use of these dirs races
+		// with scaffolding and produces spurious ENOENT.
+		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
+
 		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
