@@ -66,6 +66,11 @@ export class AgentInterface extends LitElement {
 		status: Array<{ file: string; status: string }>;
 	};
 	@property({ type: Boolean }) gitStatusLoading = false;
+	/** Tri-state repo detection — widget renders whenever this is not 'no'.
+	 *  Only flipped to 'no' on explicit HTTP 400 "Not a git repository". */
+	@property({ attribute: false }) gitRepoKnown: 'yes' | 'no' | 'unknown' = 'unknown';
+	/** True when the server returned Phase A data but porcelain timed out. */
+	@property({ type: Boolean }) partial = false;
 	// PR status properties for goal-linked sessions
 	@property() prState?: string;
 	@property() prUrl?: string;
@@ -970,7 +975,7 @@ export class AgentInterface extends LitElement {
 				<!-- Input Area -->
 				<div class="shrink-0 pt-0 pb-1">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
-						${this.bgProcesses.length > 0 || this.gitStatus || this.gitStatusLoading ? html`
+						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html`
 						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
 							<!-- Layer 0: Glow shadows only — no content, no interaction -->
 							<div class="flex items-center gap-1.5 flex-wrap justify-end pointer-events-none" aria-hidden="true" style="position:absolute;inset:0;z-index:0">
@@ -979,7 +984,7 @@ export class AgentInterface extends LitElement {
 							<!-- Layer 1: Real interactive pills -->
 							<div data-pill-content class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1">
 							${this._renderPillStrip()}
-							${this.gitStatus || this.gitStatusLoading ? html`<git-status-widget
+							${this.gitRepoKnown !== 'no' ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
 								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
@@ -996,6 +1001,7 @@ export class AgentInterface extends LitElement {
 								.unpushed=${this.gitStatus?.unpushed ?? false}
 								.statusFiles=${this.gitStatus?.status ?? []}
 								.loading=${this.gitStatusLoading}
+								.partial=${this.partial}
 								.prState=${this.prState}
 								.prUrl=${this.prUrl}
 								.prNumber=${this.prNumber}
@@ -1194,7 +1200,7 @@ export class AgentInterface extends LitElement {
 		}
 
 		// Git status glow placeholder
-		if (this.gitStatus || this.gitStatusLoading) {
+		if (this.gitRepoKnown !== 'no') {
 			glowPills.push(html`<div style="${glowStyle}"><span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px]" style="visibility:hidden">⎇ ${this.gitStatus?.branch ?? ''}</span></div>`);
 		}
 
