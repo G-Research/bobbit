@@ -909,7 +909,7 @@ export class SpecContext {
 
 	// --- Setup helpers ---
 
-	async createTestSession(name: string, opts?: { cwd?: string; goalId?: string }): Promise<string> {
+	async createTestSession(name: string, opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
 		const id = await createSession(opts);
 		await waitForSessionStatus(id, "idle");
 		const handle = this.session(name);
