@@ -23,7 +23,49 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	"spawn UNKNOWN",
 	"socket hang up",
 	"connect ECONNREFUSED",
+	// LLM streaming/tool-argument glitches — essentially infrastructure-class from
+	// our perspective: the model emitted malformed JSON or args that failed
+	// schema validation. Fresh runs almost always succeed. maxAttempts caps blast
+	// radius if a model is reliably broken.
+	"Expected double-quoted property name",
+	"Expected property name",
+	"Unexpected token",
+	"Unexpected end of JSON",
+	"Validation failed for tool",
 ];
+
+/**
+ * Patterns that specifically look like an LLM-side JSON / tool-argument glitch.
+ * A superset of these is already in TRANSIENT_ERROR_PATTERNS, but this smaller
+ * list is used to decide whether to send a *targeted* in-session nudge that
+ * quotes the error back to the model before giving up on the step.
+ */
+export const JSON_VALIDATION_ERROR_PATTERNS = [
+	"Expected double-quoted property name",
+	"Expected property name",
+	"Unexpected token",
+	"Unexpected end of JSON",
+	"Validation failed for tool",
+];
+
+/**
+ * Return the matched JSON/validation error substring (roughly one line of
+ * context around the match) if `output` looks like an LLM tool-argument
+ * glitch, otherwise null. Used to craft a targeted retry prompt.
+ */
+export function detectJsonValidationError(output: string): string | null {
+	if (!output) return null;
+	for (const pattern of JSON_VALIDATION_ERROR_PATTERNS) {
+		const idx = output.indexOf(pattern);
+		if (idx < 0) continue;
+		// Extract the line containing the match, trimmed.
+		const start = output.lastIndexOf("\n", idx) + 1;
+		const endNl = output.indexOf("\n", idx);
+		const end = endNl < 0 ? output.length : endNl;
+		return output.slice(start, end).trim().slice(0, 400);
+	}
+	return null;
+}
 
 /**
  * Patterns that are transient for LLM reviews but NOT for agent-qa steps.
