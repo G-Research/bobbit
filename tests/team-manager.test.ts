@@ -723,6 +723,8 @@ describe("TeamManager", () => {
 				clients: new Set(),
 			};
 			sm._sessions.set("worker-1", workerSession);
+			// Worker is idle — the workers-nudge fires regardless of streaming-threshold guard
+			workerSession.status = "idle";
 			entry.agents.push({
 				sessionId: "worker-1",
 				role: "coder",
@@ -775,7 +777,7 @@ describe("TeamManager", () => {
 
 			const entry = (team as any).teams.get("goal-1")!;
 			const workerSession = {
-				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
+				id: "worker-1", status: "idle", cwd: "/tmp/worker",
 				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
 				clients: new Set(),
 			};
@@ -827,7 +829,7 @@ describe("TeamManager", () => {
 
 			const entry = (team as any).teams.get("goal-1")!;
 			const workerSession = {
-				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
+				id: "worker-1", status: "idle", cwd: "/tmp/worker",
 				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
 				clients: new Set(),
 			};
@@ -878,6 +880,147 @@ describe("TeamManager", () => {
 			t.mock.timers.tick(5 * 60 * 60 * 1000);
 
 			assert.equal(enqueuePrompt.mock.callCount(), 0, "Archived goal team lead must not be nudged");
+
+			t.mock.timers.reset();
+		});
+
+		it("should skip workers-nudge when all streaming workers are under 30 min", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				session.rpcClient.onEvent = mock.fn((cb: any) => { eventCallbacks.push(cb); return () => {}; });
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			const entry = (team as any).teams.get("goal-1")!;
+			// Worker streaming since "now" (mocked clock) — well under 30m
+			const workerSession = {
+				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
+				streamingStartedAt: Date.now(), // after timers enabled — mocked clock baseline
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+
+			// Advance past the 10-minute base workers-nudge delay
+			// (and keep worker streamingStartedAt under threshold by tick < 30m from its start)
+			t.mock.timers.tick(15 * 60 * 1000);
+
+			assert.equal(
+				enqueuePrompt.mock.callCount(), 0,
+				"Should not nudge when all streaming workers are under the 30m threshold",
+			);
+
+			t.mock.timers.reset();
+		});
+
+		it("should nudge when any streaming worker exceeds 30 min", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				session.rpcClient.onEvent = mock.fn((cb: any) => { eventCallbacks.push(cb); return () => {}; });
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			const entry = (team as any).teams.get("goal-1")!;
+			// Worker that has been streaming for a long time already (45m ago, mocked clock)
+			const workerSession = {
+				id: "worker-1", status: "streaming", cwd: "/tmp/worker",
+				streamingStartedAt: Date.now() - 45 * 60 * 1000,
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+
+			// Advance past the 10-minute base workers-nudge delay
+			t.mock.timers.tick(15 * 60 * 1000);
+
+			assert.equal(
+				enqueuePrompt.mock.callCount(), 1,
+				"Should nudge when a streaming worker has exceeded the 30m threshold",
+			);
+
+			t.mock.timers.reset();
+		});
+
+		it("should still nudge when a worker is idle (not streaming)", async (t) => {
+			t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+
+			const eventCallbacks: Array<(event: any) => void> = [];
+			const origCreateSession = sm.createSession.bind(sm);
+			sm.createSession = async (cwd: string, args?: string[], goalId?: string, goalAssistant?: boolean, opts?: any) => {
+				const session = await origCreateSession(cwd, args, goalId, goalAssistant, opts);
+				session.rpcClient.onEvent = mock.fn((cb: any) => { eventCallbacks.push(cb); return () => {}; });
+				return session;
+			};
+
+			const team = createTeamManager(sm);
+			await team.startTeam("goal-1");
+
+			const entry = (team as any).teams.get("goal-1")!;
+			const workerSession = {
+				id: "worker-1", status: "idle", cwd: "/tmp/worker",
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+
+			const tlSession = sm._sessions.get(entry.teamLeadSessionId)!;
+			tlSession.status = "idle";
+
+			for (const cb of eventCallbacks) cb({ type: "agent_end" });
+			t.mock.timers.tick(15 * 60 * 1000);
+
+			assert.equal(
+				enqueuePrompt.mock.callCount(), 1,
+				"Idle workers should not block the workers-nudge",
+			);
 
 			t.mock.timers.reset();
 		});
