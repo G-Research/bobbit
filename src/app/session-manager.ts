@@ -1778,7 +1778,10 @@ export async function acceptProjectProposal(): Promise<void> {
 			state.remoteAgent?.disconnect();
 			state.remoteAgent = null;
 		}
-		await gatewayFetch(`/api/sessions/${propSessionId}/terminate`, { method: "POST" });
+		// DELETE /api/sessions/:id terminates (live) or purges (archived).
+		// There is no POST /terminate endpoint — the previous call silently 404'd,
+		// which is why the assistant session lingered in the sidebar.
+		await gatewayFetch(`/api/sessions/${propSessionId}`, { method: "DELETE" });
 		// Clean up drafts and navigate away
 		deleteGoalDraft(propSessionId);
 		deleteRoleDraft(propSessionId);
