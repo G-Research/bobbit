@@ -1921,6 +1921,7 @@ async function handleApiRoute(
 					id: archived.id,
 					title: archived.title,
 					cwd: archived.cwd,
+					projectId: archived.projectId,
 					status: "archived",
 					createdAt: archived.createdAt,
 					lastActivity: archived.lastActivity,

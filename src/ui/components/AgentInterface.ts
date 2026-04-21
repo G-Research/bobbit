@@ -42,6 +42,11 @@ export class AgentInterface extends LitElement {
 	@property() cwd?: string;
 	// Project ID for palette resolution
 	@property() projectId?: string;
+	// Session metadata from REST PersistedSession (not on remote-agent _state)
+	@property() goalId?: string;
+	@property() delegateOf?: string;
+	@property() teamGoalId?: string;
+	@property() assistantType?: string;
 	// Git branch name shown in the stats bar
 	@property() branch?: string;
 	// Git status data for the widget
@@ -103,16 +108,14 @@ export class AgentInterface extends LitElement {
 	 */
 	private get canContinueArchived(): boolean {
 		if (!this.readOnly) return false;
-		const s: any = this.session?.state;
-		if (!s) return false;
-		// remote-agent mirrors PersistedSession onto `state` — these fields
-		// come straight from the gateway's session record.
-		if (s.goalId) return false;
-		if (s.delegateOf) return false;
-		if (s.assistantType) return false;
-		if (s.teamGoalId) return false;
-		if (!s.projectId) return false;
-		const known = appState?.projects?.some((p: any) => p.id === s.projectId);
+		// These fields live on the REST PersistedSession — threaded via
+		// session-manager's connectToSession, not on the remote-agent _state.
+		if (this.goalId) return false;
+		if (this.delegateOf) return false;
+		if (this.assistantType) return false;
+		if (this.teamGoalId) return false;
+		if (!this.projectId) return false;
+		const known = appState?.projects?.some((p: any) => p.id === this.projectId);
 		return !!known;
 	}
 

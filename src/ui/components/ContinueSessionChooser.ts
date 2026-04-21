@@ -57,6 +57,11 @@ export class ContinueSessionChooser extends LitElement {
 
 	override connectedCallback() {
 		super.connectedCallback();
+		// The custom element must have non-zero layout for Playwright's
+		// visibility heuristic (zero-size elements are treated as hidden).
+		this.style.position = "fixed";
+		this.style.inset = "0";
+		this.style.zIndex = "50";
 		document.addEventListener("keydown", this._boundKeyDown);
 	}
 
