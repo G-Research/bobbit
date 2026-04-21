@@ -13,6 +13,7 @@ import {
 	GW_SESSION_KEY,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
+import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
@@ -619,6 +620,10 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	_flushDraft();
 	_teardownDraftHandlers();
 
+	// Abort any in-flight git-status refresh for the outgoing session, and stop the poll.
+	stopGitStatusPoll();
+	if (state.selectedSessionId) abortGitStatusForSession(state.selectedSessionId);
+
 	// Cache the outgoing session's panel + agent for fast switch-back
 	const outgoingId = state.selectedSessionId;
 	if (outgoingId && outgoingId !== sessionId && state.chatPanel && state.remoteAgent?.connected) {
@@ -768,9 +773,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Re-bind draft handlers AFTER render so the cached message-editor is in the DOM.
 		_setupPromptDraftHandlers(sessionId);
 
+		// Reset tri-state on cached switch-back (last-known data still rendered).
+		if (state.chatPanel?.agentInterface) {
+			(state.chatPanel.agentInterface as any).gitRepoKnown = "unknown";
+		}
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
+		startGitStatusPoll(sessionId);
 
 		return;
 	}
@@ -908,6 +918,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (status === "connected" && isActive) {
 				refreshGitStatusForSession(sessionId);
 				refreshBgProcessesForSession(sessionId);
+				startGitStatusPoll(sessionId);
+			} else if (status === "disconnected" && isActive) {
+				stopGitStatusPoll();
+				abortGitStatusForSession(sessionId);
 			}
 			if (isActive) renderApp();
 		};
@@ -1315,8 +1329,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				dismissBgProcess(sessionId, processId);
 			};
 			state.chatPanel.agentInterface.onGitFetch = () => {
-				refreshGitStatusForSession(sessionId, true);
+				refreshGitStatusForSession(sessionId, { fetch: true, source: "user" });
 			};
+			// Dropdown-open → refetch with untracked=1 for full file list.
+			state.chatPanel.agentInterface.addEventListener("git-status-dropdown-open", () => {
+				refreshGitStatusForSession(sessionId, { untracked: true, source: "user" });
+			});
 			state.chatPanel.agentInterface.onGitPush = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
@@ -1440,6 +1458,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Initial git status and bg process fetch (fire-and-forget)
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
+		startGitStatusPoll(sessionId);
 
 		// ── Run draft restores, refreshSessions, and storage.providerKeys
 		// in parallel. Draft restores must complete before we unlock proposal
@@ -1791,7 +1810,10 @@ export async function acceptProjectProposal(): Promise<void> {
 		// DELETE /api/sessions/:id terminates (live) or purges (archived).
 		// There is no POST /terminate endpoint — the previous call silently 404'd,
 		// which is why the assistant session lingered in the sidebar.
-		await gatewayFetch(`/api/sessions/${propSessionId}`, { method: "DELETE" });
+		const termRes = await gatewayFetch(`/api/sessions/${propSessionId}`, { method: "DELETE" });
+		if (!termRes.ok && termRes.status !== 404) {
+			console.warn(`[project-proposal] Terminate returned ${termRes.status}`);
+		}
 		// Clean up drafts and navigate away
 		deleteGoalDraft(propSessionId);
 		deleteRoleDraft(propSessionId);
@@ -1893,26 +1915,119 @@ async function dismissBgProcess(sessionId: string, processId: string): Promise<v
 	} catch { /* ignore */ }
 }
 
-async function refreshGitStatusForSession(sessionId: string, fetch?: boolean): Promise<void> {
+// ── git-status refresh state ─────────────────────────────────────────
+/** One in-flight refresh per session. Used for de-dupe + cross-session abort. */
+const _gitStatusAborts = new Map<string, AbortController>();
+/** Last time (performance.now()) we *started* a refresh for the active session.
+ *  Event-driven refreshes bump this so the poll can coalesce and skip ticks. */
+let gitStatusLastRefreshAt = 0;
+let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopGitStatusPoll(): void {
+	if (gitStatusPollTimer) {
+		clearInterval(gitStatusPollTimer);
+		gitStatusPollTimer = null;
+	}
+}
+
+function startGitStatusPoll(sessionId: string): void {
+	stopGitStatusPoll();
+	gitStatusPollTimer = setInterval(() => {
+		if (activeSessionId() !== sessionId) { stopGitStatusPoll(); return; }
+		if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+		const ai = state.chatPanel?.agentInterface;
+		if (!ai) return;
+		if ((ai as any).gitRepoKnown === "no") { stopGitStatusPoll(); return; }
+		const elapsed = performance.now() - gitStatusLastRefreshAt;
+		if (elapsed < 10_000) return;
+		refreshGitStatusForSession(sessionId, { source: "poll" });
+	}, 30_000);
+}
+
+// Visibility listener — fire an immediate refresh when tab becomes visible,
+// covering the case where the tab slept past several poll intervals.
+if (typeof document !== "undefined") {
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState !== "visible") return;
+		const sid = activeSessionId();
+		if (!sid) return;
+		const ai = state.chatPanel?.agentInterface;
+		if (!ai || (ai as any).gitRepoKnown === "no") return;
+		refreshGitStatusForSession(sid, { source: "event" });
+	});
+}
+
+async function refreshGitStatusForSession(
+	sessionId: string,
+	opts?: { fetch?: boolean; untracked?: boolean; source?: "event" | "poll" | "user" },
+): Promise<void> {
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
 
+	// De-dupe: if a refresh is already in flight for this session, skip.
+	// (Dropdown "untracked" refetch is allowed to proceed — it's a different shape.)
+	if (_gitStatusAborts.has(sessionId) && !opts?.untracked) return;
+
+	// Abort any prior controller for this session before starting fresh.
+	const prev = _gitStatusAborts.get(sessionId);
+	if (prev) prev.abort();
+	const ctl = new AbortController();
+	_gitStatusAborts.set(sessionId, ctl);
+
 	ai.gitStatusLoading = true;
-	try {
-		const data = await fetchGitStatus(sessionId, fetch ? { fetch: true } : undefined);
-		if (data && activeSessionId() === sessionId) {
-			ai.gitStatus = data;
-			// Also update the branch in the stats bar
-			if (data.branch) ai.branch = data.branch;
-		}
-	} catch {
-		// silently ignore — widget just won't show
-	} finally {
-		if (activeSessionId() === sessionId) {
+	gitStatusLastRefreshAt = performance.now();
+
+	await runGitStatusRefresh(ctl.signal, {
+		fetch: (signal) => fetchGitStatus(sessionId, {
+			fetch: opts?.fetch,
+			untracked: opts?.untracked,
+			signal,
+		}),
+		sleep: abortableSleep,
+		isStale: () => activeSessionId() !== sessionId,
+		onOk: (data) => {
+			if (activeSessionId() !== sessionId) return;
+			ai.gitStatus = data as any;
+			ai.partial = !!(data as any).partial;
+			(ai as any).gitRepoKnown = "yes";
+			if ((data as any).branch) ai.branch = (data as any).branch;
+		},
+		onNotARepo: () => {
+			if (activeSessionId() !== sessionId) return;
+			(ai as any).gitRepoKnown = "no";
+			ai.gitStatus = undefined;
+		},
+		onFinally: () => {
+			if (_gitStatusAborts.get(sessionId) === ctl) _gitStatusAborts.delete(sessionId);
+			if (activeSessionId() !== sessionId) return;
 			ai.gitStatusLoading = false;
-		}
-	}
+			// Final give-up (4 errors in a row) — leave gitRepoKnown unchanged,
+			// leave last-known data in place, log once.
+			if ((ai as any).gitRepoKnown === "unknown" && !ai.gitStatus) {
+				// Only warn on a full miss; successful attempts short-circuit earlier.
+				// Note: we only reach here if all attempts errored or were aborted.
+				if (!ctl.signal.aborted) {
+					console.warn("[git-status] refresh failed after retries", { sessionId });
+				}
+			}
+		},
+	});
+
 	refreshPrStatusForSession(sessionId);
+}
+
+/** Export for UI event wiring — callable from outside this module (dropdown open). */
+export function requestGitStatusUntrackedRefetch(sessionId: string): void {
+	refreshGitStatusForSession(sessionId, { untracked: true, source: "user" });
+}
+
+/** Abort and drop any in-flight refresh for `sessionId`. Called on session switch / disconnect. */
+function abortGitStatusForSession(sessionId: string): void {
+	const ctl = _gitStatusAborts.get(sessionId);
+	if (ctl) {
+		ctl.abort();
+		_gitStatusAborts.delete(sessionId);
+	}
 }
 
 async function refreshPrStatusForSession(sessionId: string): Promise<void> {

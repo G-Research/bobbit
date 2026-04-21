@@ -186,16 +186,122 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
 }
 
-/** Batched git status — runs all queries in a single shell invocation.
- *  Returns null if not a git repository. */
-async function batchGitStatus(cwd: string, containerId?: string): Promise<{
+/** Git status result shape (+ optional partial/untrackedIncluded flags). */
+export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
 	status: { file: string; status: string }[];
 	hasUpstream: boolean; ahead: number; behind: number;
 	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
 	clean: boolean; summary: string; unpushed: boolean;
-} | null> {
-	// Single script with NUL-delimited sections — avoids spawning 6-8 processes.
+	/** true if porcelain (Phase B) was skipped or timed-out */
+	partial?: boolean;
+	/** true only when ?untracked=1 was passed (-uall); false on default -uno */
+	untrackedIncluded?: boolean;
+}
+
+// ── Git status cache + single-flight ──
+// Short TTL (750ms) to coalesce the storm of event-driven refreshes (reconnect,
+// agent-idle, session-switch, etc.) into one underlying git invocation. Errors
+// are NOT cached (so a transient failure doesn't stick). Key includes the
+// untracked flag so dropdown (full) and pill-strip (summary) responses never
+// cross-contaminate each other.
+const GIT_STATUS_TTL_MS = 750;
+interface GitStatusCacheEntry {
+	promise: Promise<GitStatusResult | null>;
+	resolvedAt: number; // 0 while in flight
+	result: GitStatusResult | null | undefined; // undefined while in flight
+}
+const gitStatusCache = new Map<string, GitStatusCacheEntry>();
+
+/** Test-only invocation counter (underlying git script runs). */
+let _runBatchGitStatusCount = 0;
+export function __getGitStatusInvocationCount(): number { return _runBatchGitStatusCount; }
+export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCount = 0; }
+
+/** Test-only hook: if set, replaces the real `runBatchGitStatus` git-spawn
+ *  path with a fake. Used by `tests/e2e/git-status-caching.spec.ts` to
+ *  exercise the TTL/single-flight/coalesce logic deterministically without
+ *  spawning Git Bash under CI load (which fails unpredictably). Production
+ *  code never sets this. */
+let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean }) => Promise<GitStatusResult | null>) | undefined;
+export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
+export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
+
+function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
+	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
+}
+
+/** Invalidate both summary and untracked cache entries for a cwd (optionally
+ *  scoped to a container). Call after any local git mutation (commit, pull,
+ *  push, rebase, merge). */
+export function invalidateGitStatusCache(cwd: string, containerId?: string): void {
+	gitStatusCache.delete(gitStatusCacheKey(cwd, containerId, true));
+	gitStatusCache.delete(gitStatusCacheKey(cwd, containerId, false));
+}
+
+function evictExpired(now: number): void {
+	if (gitStatusCache.size <= 200) return;
+	for (const [k, v] of gitStatusCache) {
+		if (v.resolvedAt !== 0 && now - v.resolvedAt > 5000) gitStatusCache.delete(k);
+	}
+}
+
+/** Cached wrapper over runBatchGitStatus with TTL + single-flight. */
+async function batchGitStatus(
+	cwd: string,
+	containerId?: string,
+	opts?: { untracked?: boolean },
+): Promise<GitStatusResult | null> {
+	const key = gitStatusCacheKey(cwd, containerId, opts?.untracked);
+	const now = Date.now();
+	evictExpired(now);
+	const existing = gitStatusCache.get(key);
+	if (existing) {
+		if (existing.result === undefined) return existing.promise; // in flight
+		if (now - existing.resolvedAt < GIT_STATUS_TTL_MS) return existing.result; // fresh
+		// stale — fall through and re-run
+	}
+
+	const promise = runBatchGitStatus(cwd, containerId, opts).then(
+		(result) => {
+			const entry = gitStatusCache.get(key);
+			if (entry && entry.promise === promise) {
+				entry.result = result;
+				entry.resolvedAt = Date.now();
+			}
+			return result;
+		},
+		(err) => {
+			// Do NOT cache errors — next caller will retry fresh.
+			const entry = gitStatusCache.get(key);
+			if (entry && entry.promise === promise) gitStatusCache.delete(key);
+			throw err;
+		},
+	);
+	gitStatusCache.set(key, { promise, resolvedAt: 0, result: undefined });
+	return promise;
+}
+
+/** Batched git status — runs all metadata + porcelain in a single shell
+ *  invocation (spawning Git Bash on Windows is ~500-1000ms on its own, so
+ *  we keep this to a single spawn rather than two phases). Timeout is 15s
+ *  total; porcelain accepts `-uno` (default, fast) or `-uall` when opts.untracked.
+ *  Returns null if not a git repository. `partial` is reserved for a future
+ *  Phase A/B split but is currently always `false` on success. */
+async function runBatchGitStatus(
+	cwd: string,
+	containerId?: string,
+	opts?: { untracked?: boolean },
+): Promise<GitStatusResult | null> {
+	_runBatchGitStatusCount++;
+
+	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
+
+	const untracked = opts?.untracked === true;
+	const porcelainLine = untracked
+		? 'git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null'
+		: 'git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null';
+
 	const batchScript = [
 		'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__',
 		'printf "\\0"',
@@ -205,7 +311,7 @@ async function batchGitStatus(cwd: string, containerId?: string): Promise<{
 		'printf "\\0"',
 		'git rev-parse --verify refs/heads/main 2>/dev/null && echo yes || echo no',
 		'printf "\\0"',
-		'git -c core.filemode=false status --porcelain 2>/dev/null',
+		porcelainLine,
 		'printf "\\0"',
 		'BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)',
 		'git rev-parse --abbrev-ref "$BRANCH@{u}" 2>/dev/null || echo __FAIL__',
@@ -222,19 +328,51 @@ async function batchGitStatus(cwd: string, containerId?: string): Promise<{
 		'git rev-list --count "HEAD..$PREF" 2>/dev/null || echo 0',
 	].join('\n');
 
-	let rawOutput: string;
-	if (containerId) {
-		const { stdout } = await execFileAsync("docker", [
-			"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
-		], { encoding: "utf-8", timeout: 10000, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		rawOutput = stdout;
-	} else {
-		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: 10000, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
-		rawOutput = stdout;
+	const TIMEOUT_MS = 15000;
+	const runOnce = async (): Promise<string> => {
+		if (containerId) {
+			const { stdout } = await execFileAsync("docker", [
+				"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
+			], { encoding: "utf-8", timeout: TIMEOUT_MS, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+			return stdout;
+		}
+		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: TIMEOUT_MS, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
+		return stdout;
+	};
+	// On Windows (and under CPU load anywhere) spawning Git Bash + running the
+	// batch script can legitimately exceed the timeout or fail with transient
+	// spawn errors (EAGAIN, ENOBUFS, EBUSY, etc). Retry broadly — transient
+	// contention is a real-world condition, not a flake. Only genuine git
+	// errors (non-empty stderr, exit code from git itself) are thrown on the
+	// final attempt.
+	let rawOutput: string | undefined;
+	let lastErr: any;
+	const backoffs = [0, 250, 500, 1000, 2000, 4000];
+	const isTransient = (err: any): boolean => {
+		if (!err) return false;
+		if (err?.killed === true) return true;
+		if (err?.signal === "SIGTERM" || err?.signal === "SIGKILL") return true;
+		const code = err?.code;
+		if (code === "ETIMEDOUT" || code === "EAGAIN" || code === "ENOBUFS" ||
+			code === "EBUSY" || code === "EMFILE" || code === "ENFILE") return true;
+		// Windows: spawn can fail with ENOENT temporarily when /dev/null-style
+		// redirection in the batch script is interrupted under load.
+		if (code === "ENOENT" && typeof err?.path === "string") return true;
+		return false;
+	};
+	for (const delay of backoffs) {
+		if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+		try {
+			rawOutput = await runOnce();
+			lastErr = undefined;
+			break;
+		} catch (err: any) {
+			lastErr = err;
+			if (!isTransient(err)) throw err;
+		}
 	}
+	if (rawOutput === undefined) throw lastErr;
 
-	// Trim trailing whitespace only — porcelain status lines have meaningful
-	// leading spaces (e.g. " M file.txt") that substring(3) relies on.
 	const sections = rawOutput.split('\0').map(s => s.replace(/\s+$/, ''));
 
 	const branchRaw = sections[0] || '';
@@ -252,32 +390,34 @@ async function batchGitStatus(cwd: string, containerId?: string): Promise<{
 	}
 
 	const isOnPrimary = branch === primaryBranch;
-
-	// Parse porcelain status — preserve leading spaces in status codes
 	const statusRaw = sections[4] || '';
-	const statusLines = statusRaw ? statusRaw.split("\n") : [];
-	const status = statusLines.map(line => {
-		const l = line.endsWith("\r") ? line.slice(0, -1) : line;
-		return { file: l.substring(3), status: l.substring(0, 2).trim() };
-	});
 
 	const upstreamRaw = sections[5] || '';
 	const hasUpstream = upstreamRaw !== '__FAIL__' && upstreamRaw !== '';
-
 	let ahead = 0, behind = 0;
 	if (hasUpstream) {
 		ahead = parseInt(sections[6] || '0', 10) || 0;
 		behind = parseInt(sections[7] || '0', 10) || 0;
 	}
-
 	let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
 	if (!isOnPrimary) {
 		aheadOfPrimary = parseInt(sections[8] || '0', 10) || 0;
 		behindPrimary = parseInt(sections[9] || '0', 10) || 0;
 		mergedIntoPrimary = aheadOfPrimary === 0;
 	}
+	const partial = false;
 
+	const statusLines = statusRaw ? statusRaw.split("\n") : [];
+	const status = statusLines.map(line => {
+		const l = line.endsWith("\r") ? line.slice(0, -1) : line;
+		return { file: l.substring(3), status: l.substring(0, 2).trim() };
+	});
+
+	// With -uno (untracked=false) `clean` reflects *tracked* changes only.
+	// Clients aware of the flag should treat `untrackedIncluded=false` as
+	// "clean does not include untracked files".
 	const clean = statusLines.length === 0;
+	void partial;
 	let summary = 'clean';
 	if (!clean) {
 		const counts: Record<string, number> = {};
@@ -300,6 +440,8 @@ async function batchGitStatus(cwd: string, containerId?: string): Promise<{
 		branch, primaryBranch, isOnPrimary, status, hasUpstream,
 		ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
 		clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
+		partial,
+		untrackedIncluded: untracked,
 	};
 }
 
@@ -4227,11 +4369,13 @@ async function handleApiRoute(
 		}
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const goalUntracked = url.searchParams.get('untracked') === '1';
 		if (url.searchParams.get('fetch') === 'true') {
 			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
+			invalidateGitStatusCache(cwd, cid);
 		}
 		try {
-			const result = await batchGitStatus(cwd, cid);
+			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked });
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
 			json(result);
 		} catch (err: any) {
@@ -5049,27 +5193,45 @@ async function handleApiRoute(
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 
 		// Optional: run git fetch first when ?fetch=true is passed
+		const sessUntracked = url.searchParams.get('untracked') === '1';
 		if (url.searchParams.get('fetch') === 'true') {
 			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
+			invalidateGitStatusCache(cwd, cid);
 		}
 
-		try {
-			const result = await batchGitStatus(cwd, cid);
-			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-
-			json(result);
-
-			// Auto-push: for feature branches with unpushed commits, push in background
-			if (!shouldSkipRemotePush()) {
-				if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
-					execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
-				} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-					// Session branches without upstream: set up tracking and push
-					execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
-				}
+		// Belt-and-braces: even with spawn-level retry inside runBatchGitStatus,
+		// rare transient errors (e.g. fs contention, git index lock) can still
+		// surface. Retry the whole cached call once after 250ms before returning
+		// 500 — errors are not cached so a second call will re-run fresh.
+		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
+		let handlerErr: any;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
+				handlerErr = undefined;
+				break;
+			} catch (err: any) {
+				handlerErr = err;
+				if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
 			}
-		} catch (err: any) {
-			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
+		}
+		if (handlerErr) {
+			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", handlerErr?.code, "signal=", handlerErr?.signal, "killed=", handlerErr?.killed, "stderr=", handlerErr?.stderr, "message=", handlerErr?.message);
+			json({ error: handlerErr.stderr?.trim() || handlerErr.message || "git status failed" }, 500);
+			return;
+		}
+		if (!result) { json({ error: "Not a git repository" }, 400); return; }
+
+		json(result);
+
+		// Auto-push: for feature branches with unpushed commits, push in background
+		if (!shouldSkipRemotePush()) {
+			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
+				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
+				// Session branches without upstream: set up tracking and push
+				execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			}
 		}
 		return;
 	}
@@ -5232,6 +5394,7 @@ async function handleApiRoute(
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
 			const output = await execGit('git pull', cwd, 30000, cid);
+			invalidateGitStatusCache(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -5251,6 +5414,7 @@ async function handleApiRoute(
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
 			const output = await execGit('git push', cwd, 30000, cid);
+			invalidateGitStatusCache(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -5320,6 +5484,7 @@ async function handleApiRoute(
 			}
 			// 3. Push that commit to master
 			await execGit(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, cwd, 30000, cid);
+			invalidateGitStatusCache(cwd, cid);
 
 			json({ ok: true, output: `Squash pushed ${aheadCount} commit${aheadCount > 1 ? "s" : ""} to ${primaryBranch}` });
 		} catch (err: unknown) {
@@ -5364,10 +5529,12 @@ async function handleApiRoute(
 				if (diff.trim() === "") {
 					// Tree is identical — these are orphaned commits from a squash merge
 					await execGit(`git reset --hard origin/${primaryBranch}`, cwd, 10000, cid);
+					invalidateGitStatusCache(cwd, cid);
 					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
 					return;
 				}
 			}
+			invalidateGitStatusCache(cwd, cid);
 
 			json({ ok: true, output });
 		} catch (err: unknown) {
