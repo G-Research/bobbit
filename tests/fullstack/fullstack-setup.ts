@@ -4,7 +4,8 @@
  * These tests run against the real gateway + real UI in a Playwright browser.
  * The server uses a mock agent and an isolated BOBBIT_DIR.
  */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Page, expect } from "@playwright/test";
 
@@ -40,14 +41,36 @@ export function apiFetch(path: string, opts: RequestInit = {}): Promise<Response
  * Waits for the authenticated UI to be ready.
  */
 export async function openApp(page: Page): Promise<void> {
+	// Since commit d69485f8 ("Eliminate default project") a fresh install
+	// has zero projects and the sidebar hides the "+ New session" button
+	// until one is registered. Seed a scratch project so the rest of the
+	// fullstack flow (which assumes a project exists) can proceed.
+	await ensureFullstackProject();
+
 	const token = readToken();
 	await page.goto(`/?token=${encodeURIComponent(token)}`);
 	// The app stores the token in localStorage and redirects.
-	// Wait for the sidebar to appear — it's the signal that auth succeeded
-	// and sessions have loaded.
+	// Wait for the sidebar to appear — the "+ New session" button is the
+	// signal that auth succeeded, sessions loaded, and a project exists.
+	// In multi-project mode the button title is "New session in <project>".
 	await expect(
-		page.locator("button[title='New session']").first(),
+		page.locator("button[title^='New session']").first(),
 	).toBeVisible({ timeout: 15_000 });
+}
+
+/** Seed a throwaway project for the fullstack harness (idempotent). */
+async function ensureFullstackProject(): Promise<void> {
+	const resp = await apiFetch("/api/projects");
+	if (resp.ok) {
+		const data = await resp.json();
+		const projects = Array.isArray(data) ? data : data.projects || [];
+		if (projects.length > 0) return;
+	}
+	const rootPath = mkdtempSync(join(tmpdir(), "bobbit-fullstack-proj-"));
+	await apiFetch("/api/projects", {
+		method: "POST",
+		body: JSON.stringify({ name: "fullstack", rootPath, upsert: true }),
+	});
 }
 
 /**
