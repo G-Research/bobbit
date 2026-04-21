@@ -2008,6 +2008,7 @@ async function handleApiRoute(
 			personalities: session.personalities,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
+			restoreError: session.restoreError,
 		});
 		return;
 	}

@@ -398,8 +398,12 @@ export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 		}
 	} else if (ctx.mcpManager) {
 		const mcpExtPaths = writeMcpProxyExtensions(ctx.mcpManager);
+		// Always disable auto-discovery — Bobbit controls all extension loading.
+		// Without this the agent would scan the session cwd and pick up stray
+		// `.pi/extensions/*` entries (e.g. checked-in bobbit source trees in test worktrees).
+		plan.bridgeOptions.args = [...(plan.bridgeOptions.args || []), "--no-extensions"];
 		for (const extPath of mcpExtPaths) {
-			plan.bridgeOptions.args = [...(plan.bridgeOptions.args || []), "--extension", extPath];
+			plan.bridgeOptions.args.push("--extension", extPath);
 		}
 	}
 }

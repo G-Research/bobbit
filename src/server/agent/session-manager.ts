@@ -27,6 +27,7 @@ import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
+import { isTransientReviewError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { modelRecencyRank } from "./model-registry.js";
@@ -105,10 +106,18 @@ export interface SessionInfo {
 	allowedTools?: string[];
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
+	/** Error message captured when restoreSession() failed; cleared on successful revive. */
+	restoreError?: string;
 	/** In-flight persistSessionMetadata promise (awaited before terminate) */
 	pendingMetadataPersist?: Promise<void>;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
+	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
+	lastTurnErrorMessage?: string;
+	/** Number of consecutive auto-retries attempted for transient errors on this turn */
+	transientRetryAttempts?: number;
+	/** Pending auto-retry timer, so we can cancel it if the session terminates */
+	pendingAutoRetryTimer?: ReturnType<typeof setTimeout>;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -1183,6 +1192,9 @@ export class SessionManager {
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
 			session.lastTurnErrored = event.message.stopReason === "error";
+			session.lastTurnErrorMessage = session.lastTurnErrored
+				? (event.message.errorMessage || "")
+				: undefined;
 		}
 
 		// When a steered user message appears in chat, remove the dispatched pill
@@ -1195,6 +1207,7 @@ export class SessionManager {
 		if (event.type === "agent_start") {
 			session.status = "streaming";
 			session.lastTurnErrored = false;
+			session.lastTurnErrorMessage = undefined;
 			session.turnHadToolCalls = false;
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
@@ -1222,7 +1235,15 @@ export class SessionManager {
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
+				session.transientRetryAttempts = 0;
 				this.drainQueue(session);
+			} else {
+				// Auto-retry transient model/streaming glitches (e.g. malformed
+				// tool-call JSON from the model's streamed input_json_delta).
+				// Matches the set of patterns the verification harness already
+				// treats as transient. Bounded by maxAttempts so a reliably
+				// broken model surfaces the error instead of looping.
+				this.maybeAutoRetryTransient(session);
 			}
 
 			// Trigger deferred setup after the first agent turn completes.
@@ -1295,6 +1316,46 @@ export class SessionManager {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Auto-retry a turn that ended with a transient model/streaming error
+	 * (e.g. malformed tool-call JSON from input_json_delta accumulation, or a
+	 * transport blip matching TRANSIENT_ERROR_PATTERNS). Bounded retries with
+	 * exponential backoff; after the cap, the error surfaces to the user as
+	 * before and they can manually retry.
+	 */
+	private maybeAutoRetryTransient(session: SessionInfo): void {
+		const MAX_ATTEMPTS = 3;
+		const errMsg = session.lastTurnErrorMessage || "";
+		if (!errMsg) return;
+		if (!isTransientReviewError(errMsg)) return;
+
+		const attempt = (session.transientRetryAttempts ?? 0) + 1;
+		if (attempt > MAX_ATTEMPTS) {
+			console.warn(
+				`[session-manager] Session ${session.id} exhausted ${MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
+			);
+			session.transientRetryAttempts = 0;
+			return;
+		}
+		session.transientRetryAttempts = attempt;
+
+		const delayMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
+		console.log(
+			`[session-manager] Session ${session.id} turn failed transiently (attempt ${attempt}/${MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
+		);
+
+		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+		session.pendingAutoRetryTimer = setTimeout(() => {
+			session.pendingAutoRetryTimer = undefined;
+			// Session may have been terminated in the meantime
+			if (!this.sessions.has(session.id)) return;
+			if (session.status !== "idle") return; // user sent something, or already retrying
+			this.retryLastPrompt(session.id).catch((err) => {
+				console.error(`[session-manager] Auto-retry failed for session ${session.id}:`, err);
+			});
+		}, delayMs);
 	}
 
 	/**
@@ -1786,17 +1847,19 @@ export class SessionManager {
 			await this.restoreSession(ps);
 			console.log(`[session-manager] Restored: "${ps.title}" (${ps.id})`);
 		} catch (err) {
+			const msg = err instanceof Error ? (err.stack || err.message) : String(err);
 			console.error(`[session-manager] Failed to restore "${ps.title}" (${ps.id}), will retry next restart:`, err);
-			this.addDormantSession(ps);
+			this.addDormantSession(ps, msg);
 		}
 	}
 
-	private addDormantSession(ps: PersistedSession): void {
+	private addDormantSession(ps: PersistedSession, restoreError?: string): void {
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
 			cwd: ps.cwd,
 			status: "terminated",
+			restoreError,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
@@ -1920,15 +1983,17 @@ export class SessionManager {
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 				for (const extPath of mcpExtPaths) {
-					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+					bridgeOptions.args.push("--extension", extPath);
 				}
 			}
 		} else if (!ps.role && this.mcpManager) {
 			// Roleless sessions still need MCP extensions (e.g. playwright tools)
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+				bridgeOptions.args.push("--extension", extPath);
 			}
 		}
 
@@ -2977,8 +3042,9 @@ export class SessionManager {
 			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 		} else if (this.mcpManager) {
 			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+			bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+				bridgeOptions.args.push("--extension", extPath);
 			}
 		}
 
@@ -3130,8 +3196,9 @@ export class SessionManager {
 				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 			} else if (this.mcpManager) {
 				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+				bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 				for (const extPath of mcpExtPaths) {
-					bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+					bridgeOptions.args.push("--extension", extPath);
 				}
 			}
 		}
@@ -3305,6 +3372,12 @@ export class SessionManager {
 			clearTimeout(session.pendingGrantRequest.timer);
 			session.pendingGrantRequest.resolve({ granted: false });
 			session.pendingGrantRequest = undefined;
+		}
+
+		// Cancel any pending transient auto-retry so it doesn't fire after terminate
+		if (session.pendingAutoRetryTimer) {
+			clearTimeout(session.pendingAutoRetryTimer);
+			session.pendingAutoRetryTimer = undefined;
 		}
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
@@ -3979,8 +4052,9 @@ export class SessionManager {
 					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 				} else if (this.mcpManager) {
 					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
+					bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
 					for (const extPath of mcpExtPaths) {
-						bridgeOptions.args = [...(bridgeOptions.args || []), "--extension", extPath];
+						bridgeOptions.args.push("--extension", extPath);
 					}
 				}
 			}

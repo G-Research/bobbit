@@ -284,9 +284,12 @@ export class RpcBridge {
 				: "";
 			console.warn(`[rpc-bridge] Agent process exited (${reason})${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}${stderrContext}`);
 
+			// Include the stderr tail in the rejection error so callers (e.g. restoreSession)
+			// can surface the actual failure reason instead of a generic "exited with code 1".
+			const exitMsg = `Agent process exited with ${reason}${stderrContext}`;
 			for (const [, p] of this.pending) {
 				clearTimeout(p.timeout);
-				p.reject(new Error(`Agent process exited with ${reason}`));
+				p.reject(new Error(exitMsg));
 			}
 			this.pending.clear();
 			this.stderrTail = [];

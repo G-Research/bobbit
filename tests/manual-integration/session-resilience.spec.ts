@@ -129,7 +129,10 @@ async function pollIdle(gw: GW, id: string, ms = 120_000) {
 		const s = await res.json();
 		if (s.status === "idle") return s;
 		if (s.status === "archived") throw new Error(`Session ${id} archived`);
-		if (s.status === "error" || s.status === "terminated") throw new Error(`Session ${id} ${s.status}`);
+		if (s.status === "error" || s.status === "terminated") {
+			const extra = s.restoreError ? `\n  restoreError: ${s.restoreError}` : "";
+			throw new Error(`Session ${id} ${s.status}${extra}`);
+		}
 		await new Promise(r => setTimeout(r, 1_000));
 	}
 	throw new Error(`Session ${id} not idle in ${ms}ms`);
