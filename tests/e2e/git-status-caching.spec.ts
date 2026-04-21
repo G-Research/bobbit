@@ -64,9 +64,10 @@ async function mkSessionInRepo(cwd: string): Promise<string> {
 }
 
 // Each test spawns Git Bash multiple times on Windows; a cold spawn can cost
-// 500-1500ms, so baseline Playwright 15s timeout is tight when a test runs
-// 2-3 git invocations sequentially. 60s is safe and matches other git E2Es.
-test.describe.configure({ timeout: 60_000 });
+// 500-1500ms normally, but under CI load (full test suite in parallel) it can
+// stretch to 5-10s. 180s keeps us safe under heavy contention without masking
+// real hangs.
+test.describe.configure({ timeout: 180_000 });
 
 test.describe("git-status server cache + single-flight", () => {
 	let gitRepo: string;
