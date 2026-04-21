@@ -194,24 +194,10 @@ describe("ProjectRegistry", () => {
 		assert.strictEqual(loaded.createdAt, proj.createdAt);
 	});
 
-	it("ensureDefaultProject creates if not present", () => {
-		const reg = new ProjectRegistry(stateDir);
-		const root = freshProjectRoot();
-		const proj = reg.ensureDefaultProject(root);
-		assert.strictEqual(proj.name, path.basename(root));
-		assert.strictEqual(proj.rootPath, root);
-
-		// Calling again returns the same project
-		const proj2 = reg.ensureDefaultProject(root);
-		assert.strictEqual(proj2.id, proj.id);
-	});
-
-	it("ensureDefaultProject uses custom name", () => {
-		const reg = new ProjectRegistry(stateDir);
-		const root = freshProjectRoot();
-		const proj = reg.ensureDefaultProject(root, "custom-name");
-		assert.strictEqual(proj.name, "custom-name");
-	});
+	// ensureDefaultProject() was removed as part of the "eliminate default project"
+	// refactor — fresh installs now start with zero projects and the UI forces the
+	// user through explicit Add Project. Tests previously here are superseded by
+	// GR-09 (first-run zero-project UX) in tests/e2e/ui/stories-goal-routing.spec.ts.
 });
 
 // ── ConfigResolver ──────────────────────────────────────────────────

@@ -199,7 +199,7 @@ export class ProjectRegistry {
   /**
    * Remove a project from the registry.
    * Does NOT delete files on disk — only unregisters.
-   * Callers (e.g. server.ts) should guard against removing the default project.
+   * Callers (e.g. server.ts) should guard against removing the last remaining project.
    */
   remove(id: string): void {
     if (!this.projects.has(id)) {
@@ -286,19 +286,4 @@ export class ProjectRegistry {
     this.save();
   }
 
-  /**
-   * Ensure the server CWD is registered as the default project.
-   * If a project already exists at `serverCwd`, returns it.
-   * Otherwise registers a new one with name defaulting to the directory basename.
-   */
-  ensureDefaultProject(
-    serverCwd: string,
-    name?: string,
-  ): RegisteredProject {
-    const existing = this.getByPath(serverCwd);
-    if (existing) return existing;
-
-    const projectName = name ?? (path.basename(serverCwd) || "default");
-    return this.register(projectName, serverCwd);
-  }
 }

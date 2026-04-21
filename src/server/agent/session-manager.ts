@@ -1734,16 +1734,12 @@ export class SessionManager {
 				} catch { /* best-effort */ }
 			}
 		}
-		// Backfill missing projectId for non-goal sessions: default to CWD project
-		if (!ps.projectId && !ps.goalId && this.projectContextManager) {
-			const defaultId = this.projectContextManager.getDefaultProjectId();
-			if (defaultId) {
-				ps = { ...ps, projectId: defaultId };
-				try {
-					this.getSessionStore(defaultId).update(ps.id, { projectId: defaultId });
-					console.log(`[session-manager] Backfilled projectId for session ${ps.id} (default project)`);
-				} catch { /* best-effort */ }
-			}
+		// No projectId and no goalId: session predates multi-project and cannot be
+		// safely assigned to any project at runtime. Skip restore rather than
+		// silently dumping it into an arbitrary "default" project.
+		if (!ps.projectId && !ps.goalId) {
+			console.warn(`[session-manager] Session ${ps.id} has no projectId and predates multi-project — skipping restore`);
+			return;
 		}
 		let sessionStore: SessionStore;
 		try {
@@ -2620,6 +2616,7 @@ export class SessionManager {
 		role?: string;
 		goalId?: string;
 		teamGoalId?: string;
+		projectId?: string;
 	}): () => void {
 		const eventBuffer = new EventBuffer();
 		const now = Date.now();
@@ -2655,14 +2652,16 @@ export class SessionManager {
 
 		this.sessions.set(id, session);
 
-		// Resolve project from goal, or fall back to default project for creation context
+		// Resolve project from goal (if provided) or from opts.projectId — which the
+		// REST handler must have resolved via resolveProjectForRequest. No fallback.
 		let extProjectId = opts.goalId
 			? this.projectContextManager?.getContextForGoal(opts.goalId)?.project.id
 			: undefined;
-		if (!extProjectId && this.projectContextManager) {
-			extProjectId = this.projectContextManager.getDefaultProjectId();
+		if (!extProjectId) extProjectId = opts.projectId;
+		if (!extProjectId) {
+			throw new Error("createSession requires projectId or a goalId that resolves to a project");
 		}
-		if (extProjectId) session.projectId = extProjectId;
+		session.projectId = extProjectId;
 		const extStore = this.resolveStoreForSession(session.id);
 
 		// Initial persist — structural fields (store.put must precede persistSessionMetadata
