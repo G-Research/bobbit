@@ -515,3 +515,12 @@ export const STORY_GR10 = defineStory({
 	contracts: [CT_19],
 	covers: ["single-project-shortcircuit"],
 });
+
+// ── Continue-Archived story (CT-05 / CT-16) ──
+
+export const STORY_CA01 = defineStory({
+	id: "CA-01",
+	title: "Continue archived session into a new session with seeded history",
+	contracts: [CT_05, CT_16],
+	covers: ["page-reload"],
+});

@@ -5,6 +5,7 @@ export type { Model } from "@mariozechner/pi-ai";
 export { ChatPanel } from "./ChatPanel.js";
 // Components
 export { AgentInterface } from "./components/AgentInterface.js";
+export { ContinueSessionChooser, estimateTranscriptBytes, type ContinueMode } from "./components/ContinueSessionChooser.js";
 export { bobbitLoadingAnimation } from "./components/BobbitLoadingAnimation.js";
 export { BgProcessPill, type BgProcessInfo } from "./components/BgProcessPill.js";
 export { AttachmentTile } from "./components/AttachmentTile.js";
