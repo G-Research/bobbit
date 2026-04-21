@@ -114,6 +114,11 @@ export class AskUserChoicesWidget extends LitElement {
 			return;
 		}
 		this._draft = this._draft.map((d, i) => i === qIdx ? { ...d, selected: option } : d);
+		// Single-question, non-Other: auto-submit (no Submit button rendered).
+		if (option !== OTHER_SENTINEL && this.questions.length === 1) {
+			setTimeout(() => { void this._submit(); }, 50);
+			return;
+		}
 		// Auto-advance unless "Other" was selected or this is the last question.
 		// Defer one tick so the current touch/click gesture settles on the Q1
 		// label before Q2 mounts — otherwise mobile browsers can deliver the
@@ -126,6 +131,23 @@ export class AskUserChoicesWidget extends LitElement {
 				if (this._activeTab === qIdx) this._activeTab = nextIdx;
 			}, 250);
 		}
+	}
+
+	/**
+	 * For a single-question ask, suppress the Submit button when the pending
+	 * selection would auto-submit on pick (single-select, non-Other). We still
+	 * show Submit for multi-select (needs confirmation) and for "Other"
+	 * (needs text entry + confirmation).
+	 */
+	private _shouldHideSubmit(): boolean {
+		if (this.questions.length !== 1) return false;
+		const q = this.questions[0];
+		if (q?.multi) return false;
+		const d = this._draft[0];
+		if (d && d.selected === OTHER_SENTINEL) return false;
+		// If a previous auto-submit failed, re-show Submit so the user can retry.
+		if (this._submitError) return false;
+		return true;
 	}
 
 	private _setOtherText(qIdx: number, text: string): void {
@@ -209,13 +231,16 @@ export class AskUserChoicesWidget extends LitElement {
 		}
 		if (!Array.isArray(this.questions) || this.questions.length === 0) return nothing;
 		const readOnly = this._isReadOnly();
+		const showTabs = this.questions.length > 1;
+		const hideSubmit = this._shouldHideSubmit();
 		return html`
 			<div class="ask-widget border border-border rounded p-3 bg-card">
+				${showTabs ? html`
 				<div role="tablist" class="flex flex-wrap gap-1 border-b border-border mb-3">
 					${this.questions.map((_, i) => this._renderTab(i))}
-				</div>
+				</div>` : nothing}
 				${this._renderActivePanel(readOnly)}
-				${!readOnly ? html`
+				${!readOnly && !hideSubmit ? html`
 					<div class="mt-3 flex items-center gap-2 justify-end">
 						${this._submitError
 							? html`<span class="ask-submit-error text-xs text-destructive">${this._submitError}</span>`

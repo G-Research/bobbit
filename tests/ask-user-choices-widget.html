@@ -111,10 +111,25 @@ class AskWidget {
       return;
     }
     this.draft[qIdx] = { ...this.draft[qIdx], selected: option };
+    if (option !== OTHER_SENTINEL && this.questions.length === 1) {
+      setTimeout(() => { this.submit(); }, 0);
+      this.render();
+      return;
+    }
     if (option !== OTHER_SENTINEL && qIdx < this.questions.length - 1) {
       this.activeTab = qIdx + 1;
     }
     setTimeout(() => this.render(), 0);
+  }
+
+  shouldHideSubmit() {
+    if (this.questions.length !== 1) return false;
+    const q = this.questions[0];
+    if (q && q.multi) return false;
+    const d = this.draft[0];
+    if (d && d.selected === OTHER_SENTINEL) return false;
+    if (this.submitError) return false;
+    return true;
   }
 
   setOtherText(qIdx, text) {
@@ -196,10 +211,11 @@ class AskWidget {
 
     const readOnly = this.isReadOnly();
 
-    // Tabs
+    // Tabs — omitted entirely for single-question asks.
     const tablist = document.createElement("div");
     tablist.setAttribute("role", "tablist");
-    this.questions.forEach((q, i) => {
+    const showTabs = this.questions.length > 1;
+    if (showTabs) this.questions.forEach((q, i) => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.setAttribute("role", "tab");
@@ -217,7 +233,7 @@ class AskWidget {
       btn.addEventListener("click", () => this.selectTab(i));
       tablist.appendChild(btn);
     });
-    root.appendChild(tablist);
+    if (showTabs) root.appendChild(tablist);
 
     // Active panel
     const q = this.questions[this.activeTab];
@@ -262,7 +278,7 @@ class AskWidget {
     root.appendChild(panel);
 
     // Submit row
-    if (!readOnly) {
+    if (!readOnly && !this.shouldHideSubmit()) {
       const row = document.createElement("div");
       row.className = "ask-submit-row";
       if (this.submitError) {

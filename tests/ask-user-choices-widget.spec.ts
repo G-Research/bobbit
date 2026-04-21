@@ -318,13 +318,66 @@ test.describe("ask_user_choices widget", () => {
 		await expect(page.locator('.ask-other-input')).toHaveValue("zed");
 	});
 
-	test("failed submit surfaces server error message", async ({ page }) => {
+	test("single question: tabs are hidden and picking an option auto-submits", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [{ question: "Q1", options: ["a", "b"] }],
+			submitFetch: async (_u: string, init: any) => {
+				(window as any)._lastSubmitBody = JSON.parse(init.body);
+				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+			},
+		}));
+		// No tablist rendered for a single question.
+		await expect(page.locator('[role="tab"]')).toHaveCount(0);
+		// No Submit button before selection either.
+		await expect(page.locator(".ask-submit")).toHaveCount(0);
+		// Picking an option auto-submits.
+		await page.locator('input[type=radio][value="a"]').click({ force: true });
+		await expect.poll(() => page.evaluate(() => (window as any)._lastSubmitBody)).toBeTruthy();
+		const body = await page.evaluate(() => (window as any)._lastSubmitBody);
+		expect(body.answers[0]).toEqual({ question: "Q1", selected: "a", other_text: null });
+		// Widget is read-only; no Submit button.
+		await expect(page.locator(".ask-submit")).toHaveCount(0);
+	});
+
+	test("single question + Other: Submit is shown and auto-submit suppressed", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Q1", options: ["a", "b"], allow_other: true }],
+		}));
+		await expect(page.locator('[role="tab"]')).toHaveCount(0);
+		// No Submit until something is picked.
+		await expect(page.locator(".ask-submit")).toHaveCount(0);
+		// Selecting Other reveals the text input and a Submit button (disabled until text).
+		await page.locator('input[type=radio][value="__OTHER__"]').click({ force: true });
+		await expect(page.locator(".ask-other-input")).toBeVisible();
+		await expect(page.locator(".ask-submit")).toBeDisabled();
+		await page.locator(".ask-other-input").fill("custom");
+		await expect(page.locator(".ask-submit")).toBeEnabled();
+	});
+
+	test("single question multi-select: tabs hidden but Submit button remains", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Pick all", options: ["a", "b"], multi: true }],
+		}));
+		await expect(page.locator('[role="tab"]')).toHaveCount(0);
+		// Multi-select always needs explicit confirmation.
+		await expect(page.locator(".ask-submit")).toBeDisabled();
+		await page.locator('label:has(input[value="a"])').click();
+		await expect(page.locator(".ask-submit")).toBeEnabled();
+	});
+
+	test("failed submit surfaces server error message", async ({ page }) => {
+		// Use two questions so the Submit button is rendered and the flow is explicit
+		// (single-question mode auto-submits, which is covered separately).
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"] },
+				{ question: "Q2", options: ["c", "d"] },
+			],
 			submitFetch: async () =>
 				new Response(JSON.stringify({ error: "No pending question for this session/toolUseId" }), { status: 404, headers: { "Content-Type": "application/json" } }),
 		}));
 		await page.locator('input[type=radio][value="a"]').click({ force: true });
+		await page.locator('input[type=radio][value="c"]').click({ force: true });
 		await page.locator(".ask-submit").click();
 		// Submit button remains visible (not read-only); error surfaces.
 		await expect(page.locator(".ask-submit-error")).toHaveText(/No pending question/);
