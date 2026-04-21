@@ -218,6 +218,15 @@ let _runBatchGitStatusCount = 0;
 export function __getGitStatusInvocationCount(): number { return _runBatchGitStatusCount; }
 export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCount = 0; }
 
+/** Test-only hook: if set, replaces the real `runBatchGitStatus` git-spawn
+ *  path with a fake. Used by `tests/e2e/git-status-caching.spec.ts` to
+ *  exercise the TTL/single-flight/coalesce logic deterministically without
+ *  spawning Git Bash under CI load (which fails unpredictably). Production
+ *  code never sets this. */
+let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean }) => Promise<GitStatusResult | null>) | undefined;
+export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
+export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
+
 function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
 	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
 }
@@ -285,6 +294,8 @@ async function runBatchGitStatus(
 	opts?: { untracked?: boolean },
 ): Promise<GitStatusResult | null> {
 	_runBatchGitStatusCount++;
+
+	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
 
 	const untracked = opts?.untracked === true;
 	const porcelainLine = untracked

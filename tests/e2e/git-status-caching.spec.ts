@@ -5,17 +5,20 @@
  *
  * See docs/design/git-status-widget-reliability.md §5–§7.
  *
- * The tests spy on the exported `__getGitStatusInvocationCount` counter
- * in `dist/server/server.js` to assert how many times the underlying
- * git script ran — regardless of how many concurrent HTTP callers
- * hit `/api/sessions/:id/git-status`.
+ * These tests DO NOT depend on spawning Git Bash. Under CI load the Git Bash
+ * spawn path fails unpredictably with transient spawn errors that the
+ * production retry logic already handles for real users — but asserting
+ * deterministic invocation counts on top of a flaky spawn is impossible.
+ * Instead we install a `__setGitStatusFake` hook that replaces the real
+ * spawn path with a fast, deterministic fake. The cache/TTL/single-flight
+ * layer ABOVE runBatchGitStatus is what these tests actually verify — that
+ * layer doesn't care whether the producer is git or a fake.
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession, defaultProjectId } from "./e2e-setup.js";
+import { apiFetch, deleteSession, defaultProjectId } from "./e2e-setup.js";
 
 let serverModule: any;
 
@@ -23,118 +26,116 @@ test.beforeAll(async () => {
 	serverModule = await import("../../dist/server/server.js");
 	expect(typeof serverModule.__getGitStatusInvocationCount).toBe("function");
 	expect(typeof serverModule.__resetGitStatusInvocationCount).toBe("function");
+	expect(typeof serverModule.__setGitStatusFake).toBe("function");
+	expect(typeof serverModule.__clearGitStatusFake).toBe("function");
 	expect(typeof serverModule.invalidateGitStatusCache).toBe("function");
 });
 
-// Build a real git repo we can run git-status against.
-function makeGitRepo(tag: string): string {
-	const dir = join(tmpdir(), `bobbit-e2e-git-status-${tag}-${process.pid}-${Date.now()}`);
-	mkdirSync(dir, { recursive: true });
-	writeFileSync(join(dir, "README.md"), "# test\n");
-	execFileSync("git", ["init", "--quiet", "-b", "master"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
-	return dir;
-}
-
-async function mkSessionInRepo(cwd: string): Promise<string> {
-	// Session creation with a git cwd would normally trigger worktree creation.
-	// We bypass that by providing a projectId that already owns this cwd — but
-	// since this is an isolated test repo, we just pass cwd + projectId and
-	// rely on the harness to register a project. Simpler: create a session on
-	// the default (non-git) project but then call git-status against the real
-	// repo by pointing cwd via the session record. We do need session.cwd = gitRepo.
-	//
-	// The harness default project root is a non-git temp dir. We can pass
-	// `cwd: gitRepoDir` to createSession and accept that the server will try
-	// to create a worktree. To avoid that, set the session's `goalId` to
-	// undefined and pass `worktree: false`-equivalent via projectId only.
-	// createSession() already uses the default projectId when caller doesn't
-	// specify one; it passes cwd straight through. That path skips worktree
-	// provisioning for plain sessions.
+// Create a session pointing at an arbitrary cwd (doesn't need to be a git
+// repo — the fake returns whatever we program). We still need cwd to exist
+// so the handler's fs.existsSync check passes.
+async function mkFakeSession(tag: string): Promise<{ id: string; cwd: string }> {
+	const cwd = join(tmpdir(), `bobbit-e2e-gitfake-${tag}-${process.pid}-${Date.now()}`);
+	mkdirSync(cwd, { recursive: true });
 	const projectId = await defaultProjectId();
 	const resp = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify({ cwd, projectId }),
 	});
 	expect(resp.status).toBe(201);
-	return (await resp.json()).id;
+	const { id } = await resp.json();
+	// Session creation in a non-git cwd may skip worktree provisioning, but
+	// fetch the actual session cwd to be safe (worktree path if applicable).
+	const s = await apiFetch(`/api/sessions/${id}`);
+	const { cwd: realCwd } = await s.json();
+	// Ensure the dir exists (worktree path is created by the server; our
+	// original temp dir also exists).
+	try { mkdirSync(realCwd, { recursive: true }); } catch { /* already exists */ }
+	return { id, cwd: realCwd };
 }
 
-// Each test spawns Git Bash multiple times on Windows; a cold spawn can cost
-// 500-1500ms normally, but under CI load (full test suite in parallel) it can
-// stretch to 5-10s. 180s keeps us safe under heavy contention without masking
-// real hangs.
-test.describe.configure({ timeout: 180_000 });
+test.describe.configure({ timeout: 60_000 });
 
 test.describe("git-status server cache + single-flight", () => {
-	let gitRepo: string;
 	let sessionId: string;
 	let sessionCwd: string;
 
+	// The fake's shape matches GitStatusResult from the server.
+	function okResult(overrides: Record<string, unknown> = {}) {
+		return {
+			branch: "master",
+			primaryBranch: "master",
+			isOnPrimary: true,
+			hasPrimary: true,
+			ahead: 0,
+			behind: 0,
+			aheadOfPrimary: 0,
+			behindPrimary: 0,
+			hasUpstream: false,
+			upstream: null,
+			status: [],
+			clean: true,
+			partial: false,
+			untrackedIncluded: false,
+			...overrides,
+		};
+	}
+
+	// Delay controls how long the fake takes to resolve — used to exercise
+	// in-flight single-flight coalescing.
+	let fakeDelayMs = 0;
+	// Error controls whether the fake throws (for testing error-not-cached).
+	let fakeShouldThrow = false;
+	// Null controls whether the fake returns null (not-a-repo).
+	let fakeReturnsNull = false;
+
 	test.beforeAll(async () => {
-		gitRepo = makeGitRepo("cache");
-		sessionId = await mkSessionInRepo(gitRepo);
-		// Sessions in a git cwd auto-create worktrees — the server's actual
-		// `cwd` for git-status is the worktree path, not the source repo. We
-		// need that path to invalidate the right cache key between tests.
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(resp.status).toBe(200);
-		sessionCwd = (await resp.json()).cwd;
+		const s = await mkFakeSession("cache");
+		sessionId = s.id;
+		sessionCwd = s.cwd;
+		serverModule.__setGitStatusFake(async (_cwd: string, _cid: string | undefined, opts?: { untracked?: boolean }) => {
+			if (fakeDelayMs > 0) await new Promise((r) => setTimeout(r, fakeDelayMs));
+			if (fakeShouldThrow) throw new Error("fake git error");
+			if (fakeReturnsNull) return null;
+			return okResult({ untrackedIncluded: opts?.untracked === true });
+		});
 	});
 
 	test.afterAll(async () => {
+		serverModule.__clearGitStatusFake();
 		if (sessionId) await deleteSession(sessionId);
 	});
 
 	test.beforeEach(async () => {
-		// Bust any previous caching so each test starts deterministically.
+		fakeDelayMs = 0;
+		fakeShouldThrow = false;
+		fakeReturnsNull = false;
 		serverModule.invalidateGitStatusCache(sessionCwd);
-		// Wait past TTL so any in-flight-but-not-yet-cleaned entries from a
-		// prior test's last request cannot be seen as "fresh" by this test.
 		await new Promise((r) => setTimeout(r, 800));
 		serverModule.invalidateGitStatusCache(sessionCwd);
 		serverModule.__resetGitStatusInvocationCount();
 	});
 
-	// Helper: fetch git-status and, if the server returns 500 (transient spawn
-	// failure under CI load), log the failure body so we can see what's
-	// happening. The real client has its own retry loop for 500s — but these
-	// tests need deterministic invocation-count assertions, so we surface the
-	// body and fail loudly rather than silently retrying here.
-	async function statusOrFail(path: string) {
-		const r = await apiFetch(path);
-		if (r.status !== 200) {
-			const body = await r.text().catch(() => "<no body>");
-			throw new Error(`git-status ${path} returned ${r.status}: ${body}`);
-		}
-		return r;
-	}
-	void statusOrFail; // silence unused-var if not referenced below
-
 	test("5 concurrent calls coalesce into 1 underlying git invocation", async () => {
+		fakeDelayMs = 80; // enough that all 5 arrive while first is in-flight
 		const calls = await Promise.all(
 			Array.from({ length: 5 }, () =>
 				apiFetch(`/api/sessions/${sessionId}/git-status`),
 			),
 		);
-		for (const r of calls) expect(r.status).toBe(200);
+		for (const r of calls) {
+			if (r.status !== 200) {
+				const body = await r.text().catch(() => "<no body>");
+				throw new Error(`expected 200 got ${r.status}: ${body}`);
+			}
+		}
 		const bodies = await Promise.all(calls.map((r) => r.json()));
-		const firstBranch = bodies[0].branch;
-		for (const b of bodies) expect(b.branch).toBe(firstBranch);
-
+		for (const b of bodies) expect(b.branch).toBe("master");
 		expect(serverModule.__getGitStatusInvocationCount()).toBe(1);
 	});
 
-	test("in-flight single-flight + post-resolution cache hit both coalesce", async () => {
-		// First call resolves; second call fired immediately (before TTL expiry).
-		// On slow platforms the first git invocation may exceed TTL (750ms), so
-		// this test's strongest guarantee is single-flight during in-flight.
-		// Fire a burst: one that drives the first invocation, three that join
-		// it mid-flight, then one after resolution. The in-flight three MUST
-		// share the promise.
+	test("in-flight single-flight — 4 callers share one invocation", async () => {
+		fakeDelayMs = 80;
 		const burst = Promise.all(
 			Array.from({ length: 4 }, () =>
 				apiFetch(`/api/sessions/${sessionId}/git-status`),
@@ -142,19 +143,16 @@ test.describe("git-status server cache + single-flight", () => {
 		);
 		const results = await burst;
 		for (const r of results) expect(r.status).toBe(200);
-
-		// All 4 callers arriving before the first resolves share one invocation.
 		expect(serverModule.__getGitStatusInvocationCount()).toBe(1);
 	});
 
 	test("TTL expiry re-runs git after 750ms", async () => {
+		fakeDelayMs = 0;
 		const before = serverModule.__getGitStatusInvocationCount();
 		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r1.status).toBe(200);
-		const mid = serverModule.__getGitStatusInvocationCount();
-		expect(mid - before).toBe(1);
+		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(1);
 
-		// Enough past TTL that even with clock skew we re-run.
 		await new Promise((res) => setTimeout(res, 1200));
 
 		const r2 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
@@ -162,9 +160,20 @@ test.describe("git-status server cache + single-flight", () => {
 		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(2);
 	});
 
-	test("?untracked=1 and summary use separate cache keys", async () => {
+	test("within TTL a second call is a cache hit (1 invocation)", async () => {
+		fakeDelayMs = 0;
 		const before = serverModule.__getGitStatusInvocationCount();
-		// Fire concurrently so both enter in-flight before either resolves.
+		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
+		expect(r1.status).toBe(200);
+		// Fire second call well within the 750ms TTL window.
+		const r2 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
+		expect(r2.status).toBe(200);
+		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(1);
+	});
+
+	test("?untracked=1 and summary use separate cache keys", async () => {
+		fakeDelayMs = 50;
+		const before = serverModule.__getGitStatusInvocationCount();
 		const [rSum, rU] = await Promise.all([
 			apiFetch(`/api/sessions/${sessionId}/git-status`),
 			apiFetch(`/api/sessions/${sessionId}/git-status?untracked=1`),
@@ -174,16 +183,14 @@ test.describe("git-status server cache + single-flight", () => {
 
 		const bSum = await rSum.json();
 		const bU = await rU.json();
-
 		expect(bU.untrackedIncluded).toBe(true);
 		expect(bSum.untrackedIncluded).toBe(false);
 
-		// Two distinct cache keys → two underlying git invocations.
 		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(2);
 	});
 
 	test("?fetch=true invalidates the cache entry", async () => {
-		// Prime the cache with two parallel calls (single-flight → 1 invocation).
+		fakeDelayMs = 0;
 		const [a, b] = await Promise.all([
 			apiFetch(`/api/sessions/${sessionId}/git-status`),
 			apiFetch(`/api/sessions/${sessionId}/git-status`),
@@ -192,29 +199,33 @@ test.describe("git-status server cache + single-flight", () => {
 		expect(b.status).toBe(200);
 		const primed = serverModule.__getGitStatusInvocationCount();
 
-		// ?fetch=true explicitly invalidates both cache keys before the
-		// status call, so even within the TTL window it must re-run.
 		const r = await apiFetch(`/api/sessions/${sessionId}/git-status?fetch=true`);
 		expect(r.status).toBe(200);
 		expect(serverModule.__getGitStatusInvocationCount()).toBeGreaterThan(primed);
 	});
 
-	test("errors are NOT cached — non-git dir returns 400 each time, status can re-run", async () => {
-		const nonGit = join(tmpdir(), `bobbit-e2e-nongit-${process.pid}-${Date.now()}`);
-		mkdirSync(nonGit, { recursive: true });
-		const sid = await mkSessionInRepo(nonGit);
-		try {
-			const r1 = await apiFetch(`/api/sessions/${sid}/git-status`);
-			expect(r1.status).toBe(400);
-			const b1 = await r1.json();
-			expect(b1.error).toBe("Not a git repository");
+	test("errors are NOT cached — error then success both run fresh", async () => {
+		fakeShouldThrow = true;
+		const before = serverModule.__getGitStatusInvocationCount();
+		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
+		// Handler retries once internally, so 2 invocations for a single
+		// failed HTTP call; verify the outer status is 500 and that state
+		// didn't leak into the cache.
+		expect(r1.status).toBe(500);
 
-			// Second call should also return 400 (not stuck on a cached error).
-			const r2 = await apiFetch(`/api/sessions/${sid}/git-status`);
-			expect(r2.status).toBe(400);
-		} finally {
-			await deleteSession(sid);
-		}
+		fakeShouldThrow = false;
+		const r2 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
+		expect(r2.status).toBe(200);
+		// >=3 because handler does 2 internal attempts on failure + 1 fresh success.
+		expect(serverModule.__getGitStatusInvocationCount() - before).toBeGreaterThanOrEqual(3);
+	});
+
+	test("not-a-repo (null result) returns 400", async () => {
+		fakeReturnsNull = true;
+		const r = await apiFetch(`/api/sessions/${sessionId}/git-status`);
+		expect(r.status).toBe(400);
+		const b = await r.json();
+		expect(b.error).toBe("Not a git repository");
 	});
 
 	test("response includes partial + untrackedIncluded shape fields", async () => {
@@ -223,7 +234,6 @@ test.describe("git-status server cache + single-flight", () => {
 		const b = await r.json();
 		expect(typeof b.branch).toBe("string");
 		expect(b).toHaveProperty("untrackedIncluded");
-		// partial is optional but, on a healthy repo, must not be true
 		expect(b.partial === undefined || b.partial === false).toBe(true);
 	});
 });
