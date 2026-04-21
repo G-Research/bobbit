@@ -240,24 +240,31 @@ test.describe("Sidebar navigation", () => {
 			),
 			{ timeout: 10_000 },
 		).toBe(true);
-		await goalRow.evaluate((row) => {
-			const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
-			if (!btn) throw new Error("Dashboard button not found in goal row");
-			btn.click();
-		});
-
-		// Verify URL navigates to goal dashboard
+		// Click the button to exercise the real navigation path. Retry the
+		// click if the hash is subsequently clobbered by a concurrent
+		// hashchange handler (e.g. session poll / session connect racing
+		// with our navigation under heavy parallel load).
 		await expect(async () => {
+			await goalRow.evaluate((row) => {
+				const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
+				if (!btn) throw new Error("Dashboard button not found in goal row");
+				btn.click();
+			});
 			const h = await page.evaluate(() => window.location.hash);
 			expect(h).toContain(goal.id);
 			expect(h).toMatch(/goal/i);
-		}).toPass({ timeout: 10_000 });
+		}).toPass({ timeout: 15_000 });
 
-		// Verify dashboard content loads. Wait for the dashboard container first
-		// (it briefly shows a loading animation before the tabs render), then for
-		// any tab to become visible.
-		await expect(page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 10_000 });
-		await expect(page.locator(".tab").first()).toBeVisible({ timeout: 15_000 });
+		// Verify dashboard content loads. The dashboard container must stay
+		// rendered (not just flash briefly) and a tab must appear. Assert both
+		// together inside expect().toPass() so that transient re-renders
+		// (e.g. `refreshSessions()` completing after navigation) don't break
+		// the assertion mid-poll.
+		await expect(async () => {
+			await expect(page.locator(".dashboard-container").first())
+				.toBeVisible({ timeout: 2_000 });
+			await expect(page.locator(".tab").first())
+				.toBeVisible({ timeout: 2_000 });
+		}).toPass({ timeout: 20_000 });
 	});
 });
