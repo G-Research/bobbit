@@ -595,7 +595,7 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, personalityStore, workflowStore);
 
 			return;
 		}
@@ -1176,7 +1176,15 @@ async function handleApiRoute(
 	sandboxTokenStore?: SandboxTokenStore,
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
+	roleStore?: RoleStore,
+	personalityStore?: PersonalityStore,
+	workflowStore?: WorkflowStore,
 ) {
+	// These are always wired by the sole caller; the optional markers are only to avoid
+	// touching every existing signature site.
+	const serverRoleStore = roleStore!;
+	const serverPersonalityStore = personalityStore!;
+	const serverWorkflowStore = workflowStore!;
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -3147,14 +3155,14 @@ async function handleApiRoute(
 		if (!source) { json({ error: "Role not found" }, 404); return; }
 
 		let targetStore;
-		if (scope === "project" && projectId) {
+		if (scope === "project") {
+			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
 			const ctx = projectContextManager.getOrCreate(projectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			targetStore = ctx.roleStore;
 		} else {
-			const ctx = projectContextManager.getDefaultOrNull();
-			if (!ctx) { json({ error: "No default project" }, 400); return; }
-			targetStore = ctx.roleStore;
+			// scope === "server" (or unspecified) → system/server layer
+			targetStore = serverRoleStore;
 		}
 
 		const now = Date.now();
@@ -3172,14 +3180,14 @@ async function handleApiRoute(
 		const projectId = url.searchParams.get("projectId") || undefined;
 
 		let targetStore;
-		if (scope === "project" && projectId) {
+		if (scope === "project") {
+			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
 			const ctx = projectContextManager.getOrCreate(projectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			targetStore = ctx.roleStore;
 		} else {
-			const ctx = projectContextManager.getDefaultOrNull();
-			if (!ctx) { json({ error: "No default project" }, 400); return; }
-			targetStore = ctx.roleStore;
+			// scope === "server" (or unspecified) → system/server layer
+			targetStore = serverRoleStore;
 		}
 
 		targetStore.remove(name);
@@ -3333,14 +3341,14 @@ async function handleApiRoute(
 		if (!source) { json({ error: "Personality not found" }, 404); return; }
 
 		let targetStore;
-		if (scope === "project" && projectId) {
+		if (scope === "project") {
+			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
 			const ctx = projectContextManager.getOrCreate(projectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			targetStore = ctx.personalityStore;
 		} else {
-			const ctx = projectContextManager.getDefaultOrNull();
-			if (!ctx) { json({ error: "No default project" }, 400); return; }
-			targetStore = ctx.personalityStore;
+			// scope === "server" (or unspecified) → system/server layer
+			targetStore = serverPersonalityStore;
 		}
 
 		const now = Date.now();
@@ -3358,14 +3366,14 @@ async function handleApiRoute(
 		const projectId = url.searchParams.get("projectId") || undefined;
 
 		let targetStore;
-		if (scope === "project" && projectId) {
+		if (scope === "project") {
+			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
 			const ctx = projectContextManager.getOrCreate(projectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			targetStore = ctx.personalityStore;
 		} else {
-			const ctx = projectContextManager.getDefaultOrNull();
-			if (!ctx) { json({ error: "No default project" }, 400); return; }
-			targetStore = ctx.personalityStore;
+			// scope === "server" (or unspecified) → system/server layer
+			targetStore = serverPersonalityStore;
 		}
 
 		targetStore.remove(name);
@@ -5339,14 +5347,14 @@ async function handleApiRoute(
 		if (!source) { json({ error: "Workflow not found" }, 404); return; }
 
 		let targetStore;
-		if (scope === "project" && projectId) {
+		if (scope === "project") {
+			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
 			const ctx = projectContextManager.getOrCreate(projectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			targetStore = ctx.workflowStore;
 		} else {
-			const ctx = projectContextManager.getDefaultOrNull();
-			if (!ctx) { json({ error: "No default project" }, 400); return; }
-			targetStore = ctx.workflowStore;
+			// scope === "server" (or unspecified) → system/server layer
+			targetStore = serverWorkflowStore;
 		}
 
 		const now = Date.now();
@@ -5364,14 +5372,14 @@ async function handleApiRoute(
 		const projectId = url.searchParams.get("projectId") || undefined;
 
 		let targetStore;
-		if (scope === "project" && projectId) {
+		if (scope === "project") {
+			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
 			const ctx = projectContextManager.getOrCreate(projectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			targetStore = ctx.workflowStore;
 		} else {
-			const ctx = projectContextManager.getDefaultOrNull();
-			if (!ctx) { json({ error: "No default project" }, 400); return; }
-			targetStore = ctx.workflowStore;
+			// scope === "server" (or unspecified) → system/server layer
+			targetStore = serverWorkflowStore;
 		}
 
 		targetStore.remove(id);
