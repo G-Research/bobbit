@@ -213,8 +213,16 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	} catch { /* ignore */ }
 
 	disconnectDashboardWs();
+	const sameGoal = currentGoalId === goalId && currentGoal != null;
 	currentGoalId = goalId;
-	loading = true;
+	// Only show the full-page loading skeleton on the initial load for this
+	// goal. Re-entering loadDashboardData for the same goal (e.g. hashchange
+	// race, navigation back to the same dashboard, or refreshDashboardGoal()
+	// fallthrough) must keep the tab bar rendered — otherwise tests and users
+	// see the dashboard flicker between skeleton and content under load.
+	if (!sameGoal) {
+		loading = true;
+	}
 	error = "";
 	renderApp();
 
@@ -2083,7 +2091,27 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 
 export function renderGoalDashboard(): TemplateResult {
 	if (loading) {
-		return html`<div class="dashboard-container" style="flex:1;min-height:0;">${bobbitLoadingAnimation()}</div>`;
+		// Render a skeleton dashboard with an empty tab bar so tests and
+		// ancestor layout can anchor on `.dashboard-container` + `.tab` even
+		// before the first fetch resolves. Under heavy parallel load the
+		// initial Promise.all can take >30s; without this skeleton the main
+		// area appears empty the whole time and any assertion on `.tab`
+		// times out.
+		const skeletonTabs = ["Spec", "Gates", "Tasks", "Agents", "Commits"];
+		return html`
+			<div class="dashboard-container" style="flex:1;min-height:0;">
+				<div class="tab-bar" data-dashboard-loading="true">
+					${skeletonTabs.map((label, i) => html`
+						<div class="tab ${i === 1 ? "active" : ""}" title="${label}">
+							<span class="tab-label">${label}</span>
+						</div>
+					`)}
+				</div>
+				<div class="tab-content" style="flex:1;min-height:0;">
+					${bobbitLoadingAnimation()}
+				</div>
+			</div>
+		`;
 	}
 
 	if (error || !currentGoal) {

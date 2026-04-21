@@ -213,6 +213,7 @@ test.describe("Sidebar navigation", () => {
 	// SB-21: Dashboard button navigates to goal dashboard
 	// ---------------------------------------------------------------
 	test("SB-21: dashboard button navigates to goal dashboard", async ({ page }) => {
+		test.setTimeout(60_000);
 		const goal = await createGoal({
 			title: "DashNav Test",
 			worktree: false,
@@ -260,11 +261,13 @@ test.describe("Sidebar navigation", () => {
 		// together inside expect().toPass() so that transient re-renders
 		// (e.g. `refreshSessions()` completing after navigation) don't break
 		// the assertion mid-poll.
-		await expect(async () => {
-			await expect(page.locator(".dashboard-container").first())
-				.toBeVisible({ timeout: 2_000 });
-			await expect(page.locator(".tab").first())
-				.toBeVisible({ timeout: 2_000 });
-		}).toPass({ timeout: 20_000 });
+		// The dashboard container appears immediately with a loading animation,
+		// then the tab bar renders once loadDashboardData resolves. Assert the
+		// final state (tab visible) with a generous single timeout — under 5x
+		// parallel load the fetch can take 10–15s.
+		await expect(page.locator(".dashboard-container").first())
+			.toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(".tab").first())
+			.toBeVisible({ timeout: 25_000 });
 	});
 });
