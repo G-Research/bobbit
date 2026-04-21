@@ -154,7 +154,11 @@ function dynamicGatewayProxy(): Plugin {
 		configureServer(server) {
 			// --- HTTP proxy for /api/* ----------------------------------
 			server.middlewares.use((req, res, next) => {
-				if (!req.url?.startsWith("/api")) return next();
+				// Proxy /api/* and /manifest.json (the gateway serves a dynamic manifest
+				// that bakes the auth token into start_url for PWA installs).
+				const u = req.url || "";
+				const isManifest = u === "/manifest.json" || u.startsWith("/manifest.json?");
+				if (!u.startsWith("/api") && !isManifest) return next();
 				const target = new URL(readGatewayUrl());
 				const opts: http.RequestOptions = {
 					hostname: target.hostname,
