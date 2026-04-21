@@ -443,6 +443,7 @@ export async function showQrCodeDialog(): Promise<void> {
 
 	const token = localStorage.getItem(GW_TOKEN_KEY) || "";
 	const mobileUrl = `${window.location.origin}?token=${encodeURIComponent(token)}`;
+	const caCertUrl = `${window.location.origin}/api/ca-cert`;
 
 	let dataUrl = "";
 	let error = "";
@@ -461,7 +462,7 @@ export async function showQrCodeDialog(): Promise<void> {
 		Dialog({
 			isOpen: true,
 			onClose: cleanup,
-			width: "min(380px, 92vw)",
+			width: "min(420px, 92vw)",
 			height: "auto",
 			backdropClassName: "bg-black/50 backdrop-blur-sm",
 			children: html`
@@ -478,6 +479,40 @@ export async function showQrCodeDialog(): Promise<void> {
 										<p class="text-xs text-muted-foreground text-center max-w-[260px]">
 											Scan with your phone camera to open this session in your mobile browser.
 										</p>
+										<details class="w-full text-sm mt-2 border-t border-border pt-3">
+											<summary class="cursor-pointer text-foreground font-medium select-none">
+												First time on this device? (iPhone / iPad)
+											</summary>
+											<div class="text-xs text-muted-foreground mt-2 space-y-2 leading-relaxed">
+												<p>
+													Bobbit uses a local certificate authority. Install it once so iOS trusts the connection:
+												</p>
+												<ol class="list-decimal list-inside space-y-1 pl-1">
+													<li>
+														In <strong>Safari</strong> (must be Safari), open:
+														<a
+															class="text-primary underline break-all"
+															href="${caCertUrl}"
+															target="_blank"
+															rel="noopener"
+														>${caCertUrl}</a>
+														and tap <strong>Allow</strong> when prompted to download a profile.
+													</li>
+													<li>
+														Open <strong>Settings → General → VPN &amp; Device Management</strong>,
+														tap <strong>Bobbit Local CA</strong>, then <strong>Install</strong>.
+													</li>
+													<li>
+														Open <strong>Settings → General → About → Certificate Trust Settings</strong>
+														and enable full trust for <strong>Bobbit Local CA</strong>.
+													</li>
+													<li>
+														Scan the QR code above, then in Safari tap
+														<strong>Share → Add to Home Screen</strong> to install the PWA.
+													</li>
+												</ol>
+											</div>
+										</details>
 									`}
 						</div>
 					`,
