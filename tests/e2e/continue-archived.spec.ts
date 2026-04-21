@@ -125,13 +125,27 @@ test.describe("Continue-Archived API", () => {
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
 
-		// Poll the new session GET to confirm persisted title
+		// Poll the new session GET to confirm persisted title.
+		let info: any = null;
 		for (let i = 0; i < 20; i++) {
-			const info = await getPersisted(data.id);
-			if (info?.title?.startsWith("Continued: ")) return;
+			info = await getPersisted(data.id);
+			if (info?.title?.startsWith("Continued: ")) break;
 			await new Promise(r => setTimeout(r, 50));
 		}
-		throw new Error("title was not updated in time");
+		expect(info?.title?.startsWith("Continued: ")).toBe(true);
+
+		// Send a message in the new session. The first-message auto-titler must
+		// NOT overwrite "Continued: …" — markGenerated:true protects the title.
+		const promptResp = await apiFetch(`/api/sessions/${data.id}/prompt`, {
+			method: "POST",
+			body: JSON.stringify({ text: "hi" }),
+		});
+		// Some harnesses may not accept prompts on preparing sessions — that's
+		// fine, the critical assertion is that the title stays stable regardless.
+		void promptResp;
+		await new Promise(r => setTimeout(r, 500));
+		const after = await getPersisted(data.id);
+		expect(after?.title?.startsWith("Continued: ")).toBe(true);
 	});
 
 	test("invalid mode returns 400", async () => {

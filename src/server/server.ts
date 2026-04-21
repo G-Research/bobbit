@@ -4674,8 +4674,11 @@ async function handleApiRoute(
 			return;
 		}
 
-		const continuedTitle = `Continued: ${ps.title}`;
-		sessionManager.setTitle(newSession.id, continuedTitle);
+		const baseTitle = (ps.title || "session").trim() || "session";
+		const continuedTitle = `Continued: ${baseTitle}`;
+		// markGenerated: prevents the first-message auto-titler from overwriting
+		// "Continued: …" once the user sends their first prompt in the new session.
+		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
 		if (ps.modelProvider && ps.modelId) {
 			// Fire-and-forget: set the model and persist. For worktree sessions the

@@ -1023,7 +1023,7 @@ export class AgentInterface extends LitElement {
 							</svg>
 							Aborting…
 						</div>` : nothing}
-						${this.readOnly && this.canContinueArchived && !this.nonInteractive && !(state as any).isPreparing ? html`
+						${this.canContinueArchived && !this.nonInteractive && !(state as any).isPreparing ? html`
 						<div class="flex flex-col items-center gap-2 px-4 py-6" style="border-top:1px solid var(--border);" data-continue-archived-footer>
 							<div class="text-xs text-muted-foreground">This session is archived.</div>
 							<button

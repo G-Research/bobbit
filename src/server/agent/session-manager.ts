@@ -2797,10 +2797,11 @@ export class SessionManager {
 		return [...ids];
 	}
 
-	setTitle(id: string, title: string): boolean {
+	setTitle(id: string, title: string, opts?: { markGenerated?: boolean }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		session.title = title;
+		if (opts?.markGenerated) session.titleGenerated = true;
 		this.resolveStoreForSession(id).update(id, { title });
 		broadcast(session.clients, { type: "session_title", sessionId: id, title });
 		return true;
