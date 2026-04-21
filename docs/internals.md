@@ -582,6 +582,25 @@ Bump `CONTENT_POLICY_VERSION` when the policy changes — the meta-mismatch chec
 
 BM25-style lexical scoring across three indexed fields (`identifier_text`, `title`, `text`) with per-field boost (identifiers outrank titles, titles outrank body text). The final score is `fieldScore × doc.weight × recencyMultiplier`, where `weight` is the role-aware content-policy multiplier and `recencyMultiplier` decays recent-content bias to 1.0× over a 30-day half-life. Results are then collapsed by `parent_id` and the window sliced by `offset`/`limit`. Filters (`projectId`, `archived`, `types`) apply via FlexSearch tag filters. Snippet rendering in `snippet.ts` uses the same `<b>` contract — `search-page.ts` consumes an unchanged result shape.
 
+### Orphan filtering & stale-click safety net
+
+Search indexes lag behind deletes — a goal, session, or staff record can be removed between the index write and the next query, and the user ends up clicking a result that goes nowhere (blank goal dashboard, `SESSION_NOT_FOUND` modal, blank staff form). Two layers catch this:
+
+- **Server-side orphan filter** (`ProjectContextManager.searchAll()` in `src/server/agent/project-context-manager.ts`): after merging per-project results, each hit is checked against the authoritative stores — `projectRegistry.has(projectId)`, `goalStore.get(id)` (live or archived), `sessionManager.getPersistedSession(id)` (live/dormant/archived), `staffStore.get(id)`. Hits that fail the check are dropped, `total` is recomputed from the filtered list (so Load More's remainder is honest), and a fire-and-forget opportunistic cleanup removes the stale rows from the owning project's `SearchService` (`removeGoal` / `removeSession` / `removeMessagesForSession` / `removeStaff`). The response does not wait on cleanup. This complements — does not replace — the Maintenance → Orphaned Index Rows scanner.
+- **Weak-match tagging** (`toSearchResult()` in `src/server/search/flex-store.ts`): every `SearchResult` carries `matchedOn: "text" | "metadata"` based on whether the sanitized snippet contains a `<b>` highlight. `message` rows with `matchedOn === "metadata"` are phantom matches (token hit metadata only — the user can't see why) and are dropped in the same post-filter pass. Goal/session/staff weak-matches are kept (the match is real — the highlighter's window just didn't land on the token) and rendered with a muted "matched on title/metadata" note. Field is optional for back-compat; legacy clients treat an absent value as `"text"`.
+
+### Grouped search results & stale-click toast
+
+The full search page (`src/app/search-page.ts`) runs a purely client-side transform over the flat `SearchResult[]` into `ResultGroup` cards via `buildGroups()`: one card per unique goal / session / staff (staff are standalone; messages nest under their session; goals/sessions/staff render as peer top-level cards to keep nesting at two levels max). The collapsed card header carries up to two `<b>`-highlighted snippet fragments and a match-count pill; the chevron button toggles a per-render `_expanded` set (keyed by `kind:id`, not persisted across reloads); groups with `totalMatches === 1` auto-expand. The client-side type-filter runs *before* grouping so pill counts stay honest.
+
+A click can still race a concurrent delete (entity existed at query time, gone at click time). Rather than bubble that up as a blocking `showConnectionError` modal or a blank dashboard, navigation from the search page is origin-tagged:
+
+- `connectToSession(id, true, { onMissing: "toast" })` in `src/app/session-manager.ts` — on `SESSION_NOT_FOUND` / WS close code 4005, skip the modal and dispatch `window.dispatchEvent(new CustomEvent("search-result-stale", { detail: { kind, id } }))`.
+- `src/app/goal-dashboard.ts` — on a 404 from the dashboard loader, dispatch the same event when the previous hash was `#/search`.
+- `src/app/staff-page.ts` — same pattern for missing staff ids.
+
+`search-page.ts` listens for `search-result-stale`, shows an inline 5s auto-dismiss toast, and marks the corresponding row with muted opacity + a "stale" badge. Non-search callers of `connectToSession` keep the default `onMissing: "modal"` behavior unchanged.
+
 ### Graceful degradation
 
 Failure is surfaced as the **red status dot** + "Search unavailable" — never a silent partial mode. There is only one disabled path now (catastrophic store failure, e.g. the state dir is unwritable); `/api/search` returns **503** with `{ error: "search-unavailable", reason, state }`. See [docs/design/portable-search.md §10](design/portable-search.md) for the state machine (`initializing` → `ready` → `disabled` → `closed`).

@@ -95,9 +95,29 @@ export function gitCwd(): string {
 	return _gitCwd;
 }
 
-/** Read the auth token that the test server auto-created on startup. */
+/**
+ * Read the auth token that the test server auto-created on startup.
+ *
+ * Retries briefly on ENOENT because Windows filesystem under heavy parallel
+ * load occasionally returns ENOENT for files that exist — the token is
+ * written once per worker by the gateway fixture and then never removed
+ * until worker teardown, so any ENOENT mid-run is spurious.
+ */
 export function readE2EToken(): string {
-	return readFileSync(join(bobbitDir(), "state", "token"), "utf-8").trim();
+	const p = join(bobbitDir(), "state", "token");
+	let lastErr: unknown;
+	for (let attempt = 0; attempt < 10; attempt++) {
+		try {
+			return readFileSync(p, "utf-8").trim();
+		} catch (err: any) {
+			lastErr = err;
+			if (err?.code !== "ENOENT") throw err;
+			// Busy-wait briefly — 10×50ms = 500ms worst case.
+			const until = Date.now() + 50;
+			while (Date.now() < until) { /* spin */ }
+		}
+	}
+	throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +248,14 @@ export async function defaultProjectId(): Promise<string | undefined> {
 	return undefined;
 }
 
-/** Create a session via REST, return its ID. Defaults cwd to a non-git temp dir. */
+/**
+ * Create a session via REST, return its ID. Defaults cwd to a non-git temp dir.
+ *
+ * Retries once on 500 to absorb a known Windows-only race where the server's
+ * session-prompts directory briefly appears missing under heavy parallel
+ * load even though the harness + scaffolder both created it. Real product
+ * failures still surface via the second attempt.
+ */
 export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
 	const body: Record<string, unknown> = {
 		cwd: opts?.cwd || nonGitCwd(),
@@ -245,10 +272,22 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		const pid = await defaultProjectId();
 		if (pid) body.projectId = pid;
 	}
-	const resp = await apiFetch("/api/sessions", {
+	let resp = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify(body),
 	});
+	if (resp.status === 500) {
+		// Windows FS race: brief retry. Ensure session-prompts dir exists first.
+		try {
+			const { mkdirSync } = await import("node:fs");
+			mkdirSync(join(bobbitDir(), "state", "session-prompts"), { recursive: true });
+		} catch { /* best-effort */ }
+		await new Promise(r => setTimeout(r, 100));
+		resp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+	}
 	expect(resp.status).toBe(201);
 	return (await resp.json()).id;
 }
