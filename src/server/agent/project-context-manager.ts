@@ -5,6 +5,14 @@ import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
 
 /**
+ * Minimal session-resolver surface needed by the search orphan filter.
+ * Kept as a structural type to avoid a circular import with session-manager.
+ */
+interface SessionResolver {
+  getPersistedSession(id: string): PersistedSession | undefined;
+}
+
+/**
  * Central registry of ProjectContext instances.
  *
  * Manages per-project state contexts and provides aggregation methods
@@ -13,9 +21,20 @@ import type { SearchResults, SearchResult } from "../search/types.js";
 export class ProjectContextManager {
   private contexts = new Map<string, ProjectContext>();
   private registry: ProjectRegistry;
+  private sessionResolver: SessionResolver | null = null;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
+  }
+
+  /**
+   * Wire dependencies used by cross-project services (notably the search
+   * orphan filter). Called once during boot after the SessionManager is
+   * instantiated. The manager itself is still constructed with only the
+   * registry so existing callers need no change.
+   */
+  setDependencies(deps: { sessionManager: SessionResolver }): void {
+    this.sessionResolver = deps.sessionManager;
   }
 
   /** Initialize contexts for all registered projects. */
@@ -109,8 +128,7 @@ export class ProjectContextManager {
       projectNames?: Map<string, string>;
     } = {},
   ): Promise<SearchResults> {
-    const allResults: SearchResult[] = [];
-    let totalCount = 0;
+    const rawResults: SearchResult[] = [];
     const limit = opts.limit ?? 50;
     const offset = opts.offset ?? 0;
 
@@ -128,18 +146,111 @@ export class ProjectContextManager {
         projectId: undefined, // Already filtered above
         projectNames: opts.projectNames,
       });
-      const { results, total } = out instanceof Promise ? await out : out;
+      const { results } = out instanceof Promise ? await out : out;
 
-      allResults.push(...results);
-      totalCount += total;
+      rawResults.push(...results);
     }
 
-    // Sort by timestamp descending (most recent first) and apply pagination
-    allResults.sort((a, b) => b.timestamp - a.timestamp);
+    // Orphan filter + weak-match drop (message-only).
+    const dropped: SearchResult[] = [];
+    const filtered = rawResults.filter((hit) => {
+      if (!this._hitExists(hit)) { dropped.push(hit); return false; }
+      if (hit.type === "message" && hit.matchedOn === "metadata") {
+        // Phantom match — token hit metadata only, user can't see why.
+        dropped.push(hit);
+        return false;
+      }
+      return true;
+    });
+
+    // Opportunistic cleanup — fire-and-forget.
+    if (dropped.length > 0) this._scheduleOpportunisticCleanup(dropped);
+
+    // Sort by timestamp descending (most recent first) and apply pagination.
+    filtered.sort((a, b) => b.timestamp - a.timestamp);
     return {
-      results: allResults.slice(offset, offset + limit),
-      total: totalCount,
+      results: filtered.slice(offset, offset + limit),
+      total: filtered.length,
     };
+  }
+
+  /**
+   * Orphan existence check. Returns false for hits whose backing entity
+   * (goal, session, message's parent session, staff) no longer exists, or
+   * whose project is no longer registered.
+   */
+  private _hitExists(hit: SearchResult): boolean {
+    // Project gate — registry is ultimate source of truth.
+    if (hit.projectId && !this.registry.get(hit.projectId)) return false;
+
+    const ctx = hit.projectId ? this.contexts.get(hit.projectId) : undefined;
+    if (!ctx) return false;
+
+    // SearchResult.id is the FlexDoc row id and is prefixed ("goal:<id>",
+    // "session:<id>", "staff:<id>"). Strip the prefix to recover the
+    // backing entity id for store lookups. For messages, the parent
+    // session id is carried separately on hit.sessionId.
+    const stripPrefix = (id: string, prefix: string): string =>
+      id.startsWith(prefix) ? id.slice(prefix.length) : id;
+    switch (hit.type) {
+      case "goal": {
+        const goalId = hit.goalId ?? stripPrefix(hit.id, "goal:");
+        return ctx.goalStore.get(goalId) !== undefined;
+      }
+      case "session": {
+        const sessionId = hit.sessionId ?? stripPrefix(hit.id, "session:");
+        return this.sessionResolver?.getPersistedSession(sessionId) !== undefined;
+      }
+      case "message":
+        if (!hit.sessionId) return false;
+        return this.sessionResolver?.getPersistedSession(hit.sessionId) !== undefined;
+      case "staff": {
+        const staffId = stripPrefix(hit.id, "staff:");
+        return ctx.staffStore.get(staffId) !== undefined;
+      }
+      case "file":
+        return true; // files source not in scope
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Fire-and-forget: when a hit is dropped as orphaned, enqueue a removal
+   * from the owning project's search index so subsequent queries don't
+   * return the same orphan row. Not awaited.
+   */
+  private _scheduleOpportunisticCleanup(dropped: SearchResult[]): void {
+    // De-dupe session-level message purges — one op per session is enough.
+    const messageSessionsPurged = new Set<string>();
+    for (const hit of dropped) {
+      const ctx = hit.projectId ? this.contexts.get(hit.projectId) : undefined;
+      const idx = ctx?.searchIndex;
+      if (!idx) continue;
+      const stripPrefix = (id: string, prefix: string): string =>
+        id.startsWith(prefix) ? id.slice(prefix.length) : id;
+      try {
+        switch (hit.type) {
+          case "goal":
+            idx.removeGoal(hit.goalId ?? stripPrefix(hit.id, "goal:"));
+            break;
+          case "session":
+            idx.removeSession(hit.sessionId ?? stripPrefix(hit.id, "session:"));
+            break;
+          case "message":
+            if (hit.sessionId && !messageSessionsPurged.has(hit.sessionId)) {
+              messageSessionsPurged.add(hit.sessionId);
+              idx.removeMessagesForSession(hit.sessionId);
+            }
+            break;
+          case "staff":
+            idx.removeStaff(stripPrefix(hit.id, "staff:"));
+            break;
+        }
+      } catch (err) {
+        console.warn("[search] opportunistic cleanup failed:", err);
+      }
+    }
   }
 
   // ── Generation counters (for polling optimization) ─────────────

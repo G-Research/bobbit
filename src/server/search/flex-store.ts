@@ -618,6 +618,7 @@ export function toSearchResult(doc: FlexDoc, query: string, finalScore: number):
 	const type = SOURCE_ID_TO_TYPE[doc.source_id] ?? "message";
 	const title = doc.title && doc.title.length > 0 ? doc.title : titleFromText(doc.text ?? "");
 	const snippet = highlight(doc.text ?? "", query);
+	const hasHighlight = /<b>/i.test(snippet);
 	const result: SearchResult = {
 		type,
 		id: doc.id,
@@ -626,6 +627,7 @@ export function toSearchResult(doc: FlexDoc, query: string, finalScore: number):
 		timestamp: doc.timestamp,
 		archived: doc.archived === true,
 		score: finalScore,
+		matchedOn: hasHighlight ? "text" : "metadata",
 	};
 	if (doc.parent_id) result.parentId = doc.parent_id;
 	if (doc.goal_id) result.goalId = doc.goal_id;
