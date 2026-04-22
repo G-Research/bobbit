@@ -34,7 +34,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -4019,9 +4019,12 @@ async function handleApiRoute(
 		// Cancel any in-flight verifications for the same gate before starting new ones
 		await verificationHarness.cancelStaleVerifications(goalId, gateId);
 
-		// Fire-and-forget verification
+		// Fire-and-forget verification — resolve primary branch dynamically so
+		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
+		// hardcoded "master". See docs/goals-workflows-tasks.md — Gate baselines.
+		const primary = await detectPrimaryBranch(goal.cwd).catch(() => "master");
 		verificationHarness.verifyGateSignal(
-			signal, gateDef, goal.cwd, goal.branch, "master", allGateStates, goal.spec,
+			signal, gateDef, goal.cwd, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));

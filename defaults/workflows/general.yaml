@@ -67,7 +67,7 @@ gates:
           The goal spec is:
           {{goal_spec}}
 
-          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see the implementation diff.
+          Run `git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'` to see the implementation diff.
           Read the design document content from upstream gates.
 
           Identify:
@@ -80,10 +80,10 @@ gates:
         role: code-reviewer
         phase: 1
         prompt: |
-          Review the code changes on branch {{branch}} vs {{master}} for quality.
+          Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
 
-          Start with `git diff --stat {{master}}...{{branch}} -- . ':!package-lock.json'` to see which files changed.
-          Then use `git diff {{master}}...{{branch}} -M -- . ':!package-lock.json'` (with rename detection) to see actual content changes — this collapses pure renames into one-line summaries.
+          Start with `git diff --stat origin/{{master}}...{{branch}} -- . ':!package-lock.json'` to see which files changed.
+          Then use `git diff origin/{{master}}...{{branch}} -M -- . ':!package-lock.json'` (with rename detection) to see actual content changes — this collapses pure renames into one-line summaries.
           For large diffs, review files individually with `read` rather than dumping the entire diff into context.
 
           Check:
@@ -103,7 +103,7 @@ gates:
           The goal spec is:
           {{goal_spec}}
 
-          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
+          Run `git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
 
           **Step 1 — Identify what the feature adds or changes:**
           From the diff, determine the user-facing behavior: new UI views, settings tabs,
@@ -137,9 +137,9 @@ gates:
         role: security-reviewer
         phase: 1
         prompt: |
-          Security review of changes on branch {{branch}} vs {{master}}.
+          Security review of changes on branch {{branch}} vs origin/{{master}}.
 
-          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see changes.
+          Run `git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'` to see changes.
 
           Check:
           1. Injection risks — command injection, path traversal, template injection
@@ -156,9 +156,9 @@ gates:
         type: llm-review
         phase: 1
         prompt: |
-          Review documentation for the changes on branch {{branch}} vs {{master}}.
+          Review documentation for the changes on branch {{branch}} vs origin/{{master}}.
 
-          Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
+          Run `git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'` to see all changes.
           Read the key documentation files: AGENTS.md, README.md, and files in docs/.
 
           The goal spec is:

@@ -140,6 +140,28 @@ Gates can define automated verification that runs when signaled:
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
 
+#### Gate verification baselines
+
+A gate's **baseline** is the git reference the reviewer diffs `HEAD` against when deciding what to comment on. Choosing the right baseline matters: too broad and the reviewer critiques upstream work that another agent already merged; too narrow and real goal-branch changes slip through unreviewed. It is also the single biggest source of false-positive "branch doesn't match design doc" findings when it drifts.
+
+Gate verification is **baseline-aware** — different gate kinds compare against different git references:
+
+| Gate kind              | Baseline                                  | How it's detected                     |
+|------------------------|-------------------------------------------|---------------------------------------|
+| Pre-implementation     | None — no diff is run                     | `content: true` AND no `depends_on` (see `isPreImplementationGate` in `src/server/agent/verification-logic.ts`) |
+| Implementation & later | `origin/<primary>...HEAD`                 | All other verify-bearing gates        |
+| `ready-to-merge`       | `origin/<primary>` via `git merge-base`   | Hardcoded in workflow YAML            |
+
+**Why `origin/<primary>` and not local `<primary>`:** local refs are only as fresh as the last `git pull` on the host. Goal worktrees are created from `origin/<primary>`; verification must diff against the same anchor or it surfaces commits that have already been merged upstream as if they were goal-unique work. The harness runs `git fetch origin <primary>` before each review so `origin/<primary>` is current.
+
+**Why pre-implementation gates skip the diff entirely:** a design-doc or issue-analysis gate, by workflow construction, runs before any code is committed. A branch with zero goal-unique commits is the normal expected state. Running a diff produces noise at best, and — if local `<primary>` is stale — false positives at worst. The reviewer prompt explicitly forbids `git diff` / `git log` for these gates.
+
+**Primary branch detection:** the harness calls `detectPrimaryBranch(cwd)` from `src/server/skills/git.ts`, which uses `git symbolic-ref refs/remotes/origin/HEAD` with a `master` → `main` fallback. Never hardcode `"master"` in new gate logic — always resolve via this helper. The resolved baseline (e.g. `origin/main@abc1234`) is printed into every review prompt's "Signal Context" so failures are trivial to diagnose.
+
+**How the harness enforces this per-gate:** reviewer/architect/spec-auditor role YAMLs contain a `{{REVIEW_CONTEXT}}` placeholder in their preamble. `buildReviewPrompt()` in `src/server/agent/verification-harness.ts` substitutes it with either (a) an "implementation review" block containing the concrete `origin/<primary>...HEAD` diff instructions and the resolved baseline SHA, or (b) a "pre-implementation" notice that explicitly forbids `git diff` / `git log` and reminds the reviewer that zero goal-unique commits is the normal state. The branching decision uses `isPreImplementationGate()` on the signalled gate — role YAMLs never hardcode diff commands.
+
+**Migration note for user-authored workflow YAMLs in `.bobbit/config/workflows/`:** the harness resolves `{{master}}` to the dynamically-detected primary branch, but the `origin/` prefix is now injected only by built-in YAMLs (the ones in `defaults/workflows/`). User overrides that still say `{{master}}...HEAD` (without `origin/`) will diff against the local ref. To get the full RC1 fix, rewrite those references to `origin/{{master}}...HEAD` in your override. Pre-implementation gates in user overrides automatically benefit from the RC2 fix regardless, because that logic lives in the harness's review-prompt builder.
+
 #### Phased verification
 
 Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within each phase, steps run in **parallel** (preserving pre-phase behavior for phase-0 steps).

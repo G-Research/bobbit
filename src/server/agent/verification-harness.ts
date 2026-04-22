@@ -7,6 +7,7 @@ import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
+import { detectPrimaryBranch } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
 import { getVerificationShell } from "./shell-util.js";
@@ -24,6 +25,7 @@ import {
 	computeAllPassed,
 	canSkipAllSteps,
 	detectJsonValidationError,
+	isPreImplementationGate,
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 
@@ -101,6 +103,176 @@ export interface ActiveVerification {
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
 	cancelled?: boolean;
+}
+
+/**
+ * Build the combined system prompt for a review step.
+ *
+ * Exported at module scope so unit tests can import it directly without
+ * instantiating a harness. See docs/goals-workflows-tasks.md — "Gate
+ * verification baselines".
+ *
+ * Branches on `isPreImplementationGate(gate)`:
+ * - Pre-implementation (content gate with no upstream): no git diff/log
+ *   instructions; `Baseline: none (design gate — no implementation expected)`.
+ * - Implementation and later: `git diff origin/<primary>...HEAD` forms; the
+ *   `Baseline` line records the resolved origin SHA so failures are trivial
+ *   to diagnose.
+ */
+export async function buildReviewPrompt(
+	role: { promptTemplate: string; name?: string },
+	step: { name: string; prompt?: string },
+	cwd: string,
+	builtinVars: Record<string, string>,
+	signalContent?: string,
+	signalMetadata?: Record<string, string>,
+	goalSpec?: string,
+	allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
+	gate?: { content?: boolean; depends_on?: string[]; dependsOn?: string[] },
+): Promise<string> {
+	const isDesignGate = gate ? isPreImplementationGate(gate) : false;
+	const master = builtinVars.master || "master";
+	const branch = builtinVars.branch || "HEAD";
+	const commit = builtinVars.commit || "HEAD";
+
+	// Working-directory / review-context block, branches on gate kind.
+	const reviewContext = isDesignGate
+		? [
+			"## Working Directory",
+			"Your working directory is the goal's worktree. **This is a pre-implementation",
+			"design gate — there is no code on the branch yet.** Do NOT run `git diff` or",
+			"`git log`. Evaluate the design content (provided in your prompt) only.",
+		].join("\n")
+		: [
+			"## Working Directory",
+			`Your working directory is already set to the goal's worktree, checked out on`,
+			`branch \`${branch}\` at the correct commit. **Do NOT run \`git checkout\` or`,
+			"`git pull`** — the directory is already in the right state.",
+			"",
+			"To see what changed:",
+			`- \`git diff --stat origin/${master}...HEAD -- . ':!package-lock.json'\` — summary`,
+			`- \`git diff origin/${master}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
+			`- \`git log --oneline origin/${master}..HEAD\` — commits on this branch`,
+			"- Read files directly with `read` — they are already at the correct version",
+		].join("\n");
+
+	let rolePrompt = role.promptTemplate
+		.replace(/\{\{REVIEW_CONTEXT\}\}/g, reviewContext)
+		.replace(/\{\{GOAL_BRANCH\}\}/g, branch)
+		.replace(/\{\{AGENT_ID\}\}/g, role.name || "reviewer");
+
+	const sections: string[] = [rolePrompt];
+
+	if (step.prompt) {
+		sections.push(`\n## Review Step Instructions\n\n${step.prompt}`);
+	}
+
+	sections.push([
+		"\n## CRITICAL: Submitting Your Results",
+		"",
+		"When your review is complete, you MUST call the `verification_result` tool:",
+		'- `verdict`: "pass" if no critical or high severity findings, "fail" otherwise',
+		"- `summary`: detailed markdown summary of your findings — use headings, bullet lists, code blocks with file:line references",
+		"Your summary should be detailed markdown: use headings, bullet lists, code blocks with file references.",
+		"Structure it as: what was reviewed, specific findings with file:line, verdict rationale.",
+		"",
+		"This tool call is how the verification system receives your results.",
+		"If you go idle without calling it, your review fails automatically.",
+		"",
+		"Do NOT emit <verdict> tags. Do NOT call gate_signal. Just call verification_result.",
+	].join("\n"));
+
+	if (goalSpec) {
+		sections.push(`\n## Goal Specification\n\n${goalSpec}`);
+	}
+
+	if (allGateStates) {
+		const upstreamParts: string[] = [];
+		for (const [gateId, gs] of allGateStates) {
+			if (gs.status === "passed" && gs.injectDownstream && gs.content) {
+				upstreamParts.push(`### Gate: ${gateId}\n\n${gs.content}`);
+			}
+		}
+		if (upstreamParts.length > 0) {
+			sections.push(`\n## Upstream Gate Content\n\n${upstreamParts.join("\n\n")}`);
+		}
+	}
+
+	// Resolve baseline SHA for implementation gates. Non-fatal if unresolved.
+	let baselineLine: string;
+	if (isDesignGate) {
+		baselineLine = "- Baseline: none (design gate — no implementation expected)";
+	} else {
+		let baselineSha: string | null = null;
+		try {
+			const { execFile: execFileCb } = await import("node:child_process");
+			const { promisify } = await import("node:util");
+			const execFileAsync = promisify(execFileCb);
+			const { stdout } = await execFileAsync("git", ["rev-parse", `origin/${master}`], { cwd, timeout: 5_000 });
+			baselineSha = stdout.toString().trim().slice(0, 12);
+		} catch {
+			baselineSha = null;
+		}
+		baselineLine = baselineSha
+			? `- Baseline: diffed against origin/${master}@${baselineSha}`
+			: `- Baseline: origin/${master} (sha unresolved)`;
+	}
+
+	const contextLines: string[] = [];
+	if (isDesignGate) {
+		contextLines.push(
+			"\n## Pre-Implementation Design Gate",
+			"",
+			"This is a PRE-IMPLEMENTATION design gate. The goal branch is expected to have",
+			"zero goal-unique commits at this stage. **Do NOT run `git diff`, `git log`,",
+			"or any branch-comparison command — there is no implementation to compare",
+			"against.** Evaluate the design content only, using the \"Signal Content\" and",
+			"\"Upstream Gate Content\" sections below.",
+			"",
+			"## Signal Context",
+			`- Branch: ${branch}`,
+			`- Commit: ${commit}`,
+			baselineLine,
+			`- Working directory: ${cwd}`,
+		);
+	} else {
+		contextLines.push(
+			"\n## Working Directory & Branch Setup",
+			"",
+			"**Your working directory is already set up correctly.** It is the goal's worktree,",
+			`checked out on branch \`${branch}\` at commit \`${commit}\`.`,
+			"",
+			"**Do NOT run `git checkout`, `git pull`, `git fetch`, or any command that modifies the working tree.**",
+			"Other reviewers may be reading from this directory concurrently. Mutating it causes stale reads.",
+			"",
+			"To see what changed (read-only, safe for concurrent use):",
+			`- \`git diff --stat origin/${master}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
+			`- \`git diff origin/${master}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
+			`- For large diffs, review individual files with \`read\` instead of loading the full diff into context`,
+			`- \`git log --oneline origin/${master}..HEAD\` — commits on this branch`,
+			"- Use `read` to view files directly — they are already at the correct version",
+			"",
+			"## Signal Context",
+			`- Branch: ${branch}`,
+			`- Commit: ${commit}`,
+			`- Primary branch: ${master}`,
+			baselineLine,
+			`- Working directory: ${cwd}`,
+		);
+	}
+
+	if (signalContent) {
+		contextLines.push(`\n### Signal Content\n${signalContent}`);
+	}
+	if (signalMetadata && Object.keys(signalMetadata).length > 0) {
+		contextLines.push("\n### Signal Metadata");
+		for (const [k, v] of Object.entries(signalMetadata)) {
+			contextLines.push(`- **${k}**: ${v}`);
+		}
+	}
+	sections.push(contextLines.join("\n"));
+
+	return sections.join("\n");
 }
 
 export class VerificationHarness {
@@ -268,13 +440,14 @@ export class VerificationHarness {
 	 * Gather the context needed to re-run an LLM review step from scratch.
 	 * Returns null if context is unavailable (goal deleted, etc.).
 	 */
-	private _gatherRerunContext(goalId: string, gateId: string, signalId: string): {
+	private async _gatherRerunContext(goalId: string, gateId: string, signalId: string): Promise<{
 		signal: GateSignal;
 		cwd: string;
 		builtinVars: Record<string, string>;
 		goalSpec?: string;
 		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
-	} | null {
+		gate?: WorkflowGate;
+	} | null> {
 		const goal = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 		if (!goal) return null;
 
@@ -286,13 +459,15 @@ export class VerificationHarness {
 		if (!signal) return null;
 
 		const cwd = goal.worktreePath || goal.cwd;
+		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
-			master: "master",
+			master: primary,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
 		};
+		const rerunGate = goal.workflow?.gates?.find((g: any) => g.id === gateId) as WorkflowGate | undefined;
 
 		// Build allGateStates for variable substitution
 		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
@@ -307,7 +482,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, builtinVars, goalSpec: goal.spec, allGateStates };
+		return { signal, cwd, builtinVars, goalSpec: goal.spec, allGateStates, gate: rerunGate };
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
@@ -504,7 +679,7 @@ export class VerificationHarness {
 			return null;
 		}
 
-		const ctx = this._gatherRerunContext(goalId, gateId, signalId);
+		const ctx = await this._gatherRerunContext(goalId, gateId, signalId);
 		if (!ctx) {
 			console.warn(`[verification] Cannot re-run "${stepName}" — goal/signal context unavailable`);
 			return null;
@@ -533,6 +708,7 @@ export class VerificationHarness {
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
+				undefined, ctx.gate,
 			);
 			if (result.passed || !isTransientReviewError(result.output) || attempt === maxAttempts) break;
 			const delayMs = 2000 * Math.pow(2, attempt - 1);
@@ -564,7 +740,7 @@ export class VerificationHarness {
 			return null;
 		}
 
-		const ctx = this._gatherRerunContext(goalId, gateId, signalId);
+		const ctx = await this._gatherRerunContext(goalId, gateId, signalId);
 		if (!ctx) {
 			console.warn(`[verification] Cannot re-run QA "${stepName}" — goal/signal context unavailable`);
 			return null;
@@ -903,6 +1079,19 @@ export class VerificationHarness {
 					// Non-fatal — local-only repos without a remote will fail fetch
 					console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
 				}
+
+				// Also fetch the primary branch so origin/<primary> is up-to-date for
+				// implementation-gate diff baselines. Non-fatal on failure (offline / no remote).
+				if (builtinVars.master) {
+					try {
+						const { execFile: execFileCb } = await import("node:child_process");
+						const { promisify } = await import("node:util");
+						const execFileAsync = promisify(execFileCb);
+						await execFileAsync("git", ["fetch", "origin", builtinVars.master], { cwd, timeout: 30_000 });
+					} catch (err) {
+						console.warn(`[verification] Failed to fetch origin/${builtinVars.master} (non-fatal):`, err);
+					}
+				}
 			}
 
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -1139,6 +1328,7 @@ export class VerificationHarness {
 											cwd, builtinVars,
 											signal.content, signal.metadata,
 											goalSpec, allGateStates, signal.goalId, stepSessionId,
+											gate,
 										);
 										const isTransient = isTransientReviewError(result.output);
 										if (result.passed || !isTransient || attempt === maxAttempts) break;
@@ -1283,6 +1473,7 @@ export class VerificationHarness {
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		goalId?: string,
 		sessionId?: string,
+		gate?: WorkflowGate,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const roleName = step.role || "reviewer";
 		const role = this.roleStore.get(roleName) || this.roleStore.get("reviewer");
@@ -1293,7 +1484,7 @@ export class VerificationHarness {
 		const timeoutMs = (step.timeout || 600) * 1000;
 
 		// Build the combined prompt sections (shared between session-based and direct-RpcBridge paths)
-		const combinedPrompt = this.buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates);
+		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate);
 
 		// Build the kickoff message (shared between both paths)
 		const kickoff = [
@@ -1322,95 +1513,9 @@ export class VerificationHarness {
 		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs);
 	}
 
-	/**
-	 * Build the combined system prompt for a review step.
-	 */
-	private buildReviewPrompt(
-		role: { promptTemplate: string; name?: string },
-		step: { name: string; prompt?: string },
-		cwd: string,
-		builtinVars: Record<string, string>,
-		signalContent?: string,
-		signalMetadata?: Record<string, string>,
-		goalSpec?: string,
-		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
-	): string {
-		let rolePrompt = role.promptTemplate
-			.replace(/\{\{GOAL_BRANCH\}\}/g, builtinVars.branch || "HEAD")
-			.replace(/\{\{AGENT_ID\}\}/g, role.name || "reviewer");
+	// buildReviewPrompt is exported at module scope (below) so unit tests can
+	// import it directly without going through a class instance.
 
-		const sections: string[] = [rolePrompt];
-
-		if (step.prompt) {
-			sections.push(`\n## Review Step Instructions\n\n${step.prompt}`);
-		}
-
-		sections.push([
-			"\n## CRITICAL: Submitting Your Results",
-			"",
-			"When your review is complete, you MUST call the `verification_result` tool:",
-			'- `verdict`: "pass" if no critical or high severity findings, "fail" otherwise',
-			"- `summary`: detailed markdown summary of your findings — use headings, bullet lists, code blocks with file:line references",
-			"Your summary should be detailed markdown: use headings, bullet lists, code blocks with file references.",
-			"Structure it as: what was reviewed, specific findings with file:line, verdict rationale.",
-			"",
-			"This tool call is how the verification system receives your results.",
-			"If you go idle without calling it, your review fails automatically.",
-			"",
-			"Do NOT emit <verdict> tags. Do NOT call gate_signal. Just call verification_result.",
-		].join("\n"));
-
-		if (goalSpec) {
-			sections.push(`\n## Goal Specification\n\n${goalSpec}`);
-		}
-
-		if (allGateStates) {
-			const upstreamParts: string[] = [];
-			for (const [gateId, gs] of allGateStates) {
-				if (gs.status === "passed" && gs.injectDownstream && gs.content) {
-					upstreamParts.push(`### Gate: ${gateId}\n\n${gs.content}`);
-				}
-			}
-			if (upstreamParts.length > 0) {
-				sections.push(`\n## Upstream Gate Content\n\n${upstreamParts.join("\n\n")}`);
-			}
-		}
-
-		const contextLines: string[] = [
-			"\n## Working Directory & Branch Setup",
-			"",
-			"**Your working directory is already set up correctly.** It is the goal's worktree,",
-			`checked out on branch \`${builtinVars.branch || "HEAD"}\` at commit \`${builtinVars.commit || "HEAD"}\`.`,
-			"",
-			"**Do NOT run `git checkout`, `git pull`, `git fetch`, or any command that modifies the working tree.**",
-			"Other reviewers may be reading from this directory concurrently. Mutating it causes stale reads.",
-			"",
-			"To see what changed (read-only, safe for concurrent use):",
-			`- \`git diff --stat ${builtinVars.master || "master"}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
-			`- \`git diff ${builtinVars.master || "master"}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
-			`- For large diffs, review individual files with \`read\` instead of loading the full diff into context`,
-			`- \`git log --oneline ${builtinVars.master || "master"}..HEAD\` — commits on this branch`,
-			"- Use `read` to view files directly — they are already at the correct version",
-			"",
-			"## Signal Context",
-			`- Branch: ${builtinVars.branch || "HEAD"}`,
-			`- Commit: ${builtinVars.commit || "HEAD"}`,
-			`- Primary branch: ${builtinVars.master || "master"}`,
-			`- Working directory: ${cwd}`,
-		];
-		if (signalContent) {
-			contextLines.push(`\n### Signal Content\n${signalContent}`);
-		}
-		if (signalMetadata && Object.keys(signalMetadata).length > 0) {
-			contextLines.push("\n### Signal Metadata");
-			for (const [k, v] of Object.entries(signalMetadata)) {
-				contextLines.push(`- **${k}**: ${v}`);
-			}
-		}
-		sections.push(contextLines.join("\n"));
-
-		return sections.join("\n");
-	}
 
 	/**
 	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
