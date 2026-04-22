@@ -1056,7 +1056,7 @@ export class TeamManager {
 		try {
 			if (teamLeadSession.status === "streaming") {
 				// Mid-turn: inject directly as a real-time steer interrupt
-				await teamLeadSession.rpcClient.steer(message);
+				await this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message);
 			} else {
 				// Idle: enqueue as a steered prompt so it drains immediately
 				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
@@ -1082,7 +1082,7 @@ export class TeamManager {
 		const message = `Task "${taskTitle}" transitioned to ${taskState}. Use task_list for result summaries and gate_status for verification details.`;
 
 		if (teamLeadSession.status === "streaming") {
-			teamLeadSession.rpcClient.steer(message).catch((err: any) => {
+			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message).catch((err: any) => {
 				console.error(`[team-manager] Failed to steer team lead on task completion for goal ${goalId}:`, err);
 			});
 		} else {

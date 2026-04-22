@@ -914,7 +914,7 @@ export function createGateway(config: GatewayConfig) {
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 		try {
 			if (teamLeadSession.status === "streaming") {
-				teamLeadSession.rpcClient.steer(message);
+				sessionManager.deliverLiveSteer(team.teamLeadSessionId, message);
 			} else {
 				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true });
 			}
@@ -952,6 +952,7 @@ export function createGateway(config: GatewayConfig) {
 	return {
 		server,
 		sessionManager,
+		bgProcessManager,
 		projectContextManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
@@ -4520,7 +4521,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			await session.rpcClient.steer(body.message);
+			await sessionManager.deliverLiveSteer(session.id, body.message);
 			json({ ok: true, dispatched: true });
 		} catch (err) {
 			json({ error: String(err) }, 500);
@@ -6059,9 +6060,15 @@ async function handleApiRoute(
 	if (bgWaitMatch && req.method === "GET") {
 		const [, sessionId, processId] = bgWaitMatch;
 		const timeout = parseInt(url.searchParams.get("timeout") || "300", 10);
-		const result = await bgProcessManager.waitForExit(sessionId, processId, timeout * 1000);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
+		const controller = new AbortController();
+		bgProcessManager.registerWait(sessionId, controller);
+		try {
+			const result = await bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal);
+			if (!result) { json({ error: "Process not found" }, 404); return; }
+			json(result);
+		} finally {
+			bgProcessManager.unregisterWait(sessionId, controller);
+		}
 		return;
 	}
 
