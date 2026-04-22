@@ -386,6 +386,9 @@ export default function (pi: ExtensionAPI) {
 							header(id),
 						]);
 						const info = waitResult.info;
+						if (waitResult.aborted) {
+							return text(`Process ${hdr} wait interrupted by steer. Use 'logs' or 'wait' again to continue monitoring.`);
+						}
 						if (waitResult.timedOut) {
 							return text(`Process ${hdr} still running after ${waitSec}s (pid=${info.pid}, status=${info.status}). Use "logs", "grep", or "kill" to manage it.`);
 						}

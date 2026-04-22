@@ -1049,6 +1049,25 @@ export class SessionManager {
 	}
 
 	/**
+	 * Deliver a live steer to a streaming session.
+	 *
+	 * Before calling rpcClient.steer(), aborts any in-flight `bash_bg wait`
+	 * HTTP handlers for this session so the agent is not stuck inside a
+	 * tool call while the steer is queued on the SDK side. The bg processes
+	 * themselves are left running untouched.
+	 *
+	 * Returns the underlying rpcClient.steer() promise so callers can await
+	 * or attach their own error handler.
+	 */
+	deliverLiveSteer(sessionId: string, message: string): Promise<unknown> {
+		const session = this.sessions.get(sessionId);
+		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
+		const bg = (this as any).bgProcessManager;
+		if (bg) bg.abortAllWaits(sessionId);
+		return session.rpcClient.steer(message);
+	}
+
+	/**
 	 * Promote a queued message to steered and reorder.
 	 * If the agent is streaming, all steered+undispatched messages are
 	 * batched and dispatched immediately via rpcClient.steer() so they
@@ -1087,6 +1106,9 @@ export class SessionManager {
 			session.promptQueue.markDispatched(m.id);
 		}
 
+		// Same abort behaviour as deliverLiveSteer — unblock any bash_bg wait first.
+		const bg = (this as any).bgProcessManager;
+		if (bg) bg.abortAllWaits(session.id);
 		session.rpcClient.steer(batchText).catch((err: any) => {
 			console.error(`[session-manager] Failed to dispatch steered messages for ${session.id}:`, err);
 		});
@@ -3402,8 +3424,10 @@ export class SessionManager {
 		await session.rpcClient.stop();
 		session.status = "terminated";
 
-		// Clean up background processes
+		// Clean up background processes (abort any in-flight waits first so
+		// hanging HTTP handlers resolve cleanly, then kill the bg processes).
 		if ((this as any).bgProcessManager) {
+			(this as any).bgProcessManager.abortAllWaits(id);
 			(this as any).bgProcessManager.cleanup(id);
 		}
 
