@@ -67,7 +67,11 @@ try {
 }
 
 const stats = report.stats || {};
-const passed = stats.expected || 0;
+// Playwright's stats.expected counts only first-try passes; flaky tests
+// (passed on retry) are reported separately. Roll flaky into `passed` so the
+// summary and exit code match the final outcome the developer sees.
+const flaky = stats.flaky || 0;
+const passed = (stats.expected || 0) + flaky;
 const failed = stats.unexpected || 0;
 const skipped = stats.skipped || 0;
 const total = passed + failed + skipped;
@@ -82,7 +86,12 @@ function walkSuite(suite, ancestors) {
     for (const test of spec.tests || []) {
       const lastResult = test.results?.[test.results.length - 1];
       // test.status is "expected" | "unexpected" | "skipped" | "flaky"
-      const ok = test.status === "expected";
+      // Treat "flaky" as passing — by definition Playwright only marks a test
+      // flaky after a retry succeeded, so the final outcome is pass. Reporting
+      // these as failures blocks downstream gates for infrastructure flakes
+      // (Windows transform-cache EPERM, etc.) that the retry already recovered
+      // from.
+      const ok = test.status === "expected" || test.status === "flaky";
       const skip = test.status === "skipped";
       tests.push({
         title: [...path, spec.title].filter(Boolean).join(" > "),
@@ -105,6 +114,7 @@ const status = failed > 0 ? "FAILED" : "PASSED";
 let summary = `${status}: ${passed}/${total} passed`;
 if (skipped > 0) summary += `, ${skipped} skipped`;
 if (failed > 0) summary += `, ${failed} failed`;
+if (flaky > 0) summary += `, ${flaky} flaky (recovered on retry)`;
 summary += ` (${duration})`;
 console.log(summary);
 
