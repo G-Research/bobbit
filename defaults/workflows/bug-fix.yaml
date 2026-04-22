@@ -63,6 +63,11 @@ gates:
         run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
+        # E2E suite on Windows runs ~6-8 min under parallel-worker load; the
+        # default 300s step timeout SIGTERMs the pipeline mid-run, and the
+        # filter's buffered "PASSED" stdout then lands with a non-zero exit.
+        # Matches the 900s timeout used in general.yaml and feature.yaml.
+        timeout: 900
         run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
