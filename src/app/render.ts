@@ -2360,7 +2360,7 @@ export function doRenderApp(): void {
 	// Disconnected state
 	if (state.appView === "disconnected") {
 		render(html`
-			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
 				<div class="flex items-center justify-between border-b border-border shrink-0">
 					<div class="flex items-center gap-2 px-4 py-1">
 						${bobbitIcon}
@@ -2399,7 +2399,7 @@ export function doRenderApp(): void {
 	// Gateway starting — server not yet responsive, polling until ready
 	if (state.appView === "gateway-starting") {
 		render(html`
-			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
 				<div class="flex items-center justify-between border-b border-border shrink-0">
 					<div class="flex items-center gap-2 px-4 py-1">
 						${bobbitIcon}
@@ -2937,7 +2937,7 @@ export function doRenderApp(): void {
 	if (desktop) {
 		teardownMobileScrollTracking();
 		render(html`
-			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
 				<div class="flex items-center border-b border-border shrink-0 header-shadow">
 					${state.sidebarCollapsed ? html`
 					<div class="w-14 shrink-0 flex items-center justify-center self-stretch" style="background: var(--sidebar);">
@@ -2977,7 +2977,7 @@ export function doRenderApp(): void {
 		`, app);
 	} else if (connected) {
 		render(html`
-			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden relative"
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
 				<div id="app-header"
 					class="fixed top-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-sm border-b border-border flex flex-col header-shadow">
@@ -3003,7 +3003,7 @@ export function doRenderApp(): void {
 		});
 	} else {
 		render(html`
-			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
 				<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow">
 					${headerLeft()}
 					${headerRight()}

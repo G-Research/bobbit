@@ -1,6 +1,36 @@
 /* Import Claude theme from mini-lit */
 @import "@mariozechner/mini-lit/styles/themes/default.css";
 
+/* ── iOS PWA safe-area + dvh app shell ──
+   Used on the top-level app container(s) in src/app/render.ts.
+   - `100dvh` avoids iOS Safari/PWA 100vh paint-gap bugs (falls back to 100vh).
+   - `env(safe-area-inset-*)` reserves space for the Dynamic Island / home-bar
+     region when the PWA runs with viewport-fit=cover + status-bar-style=black-translucent.
+   Desktop and Android browsers report 0 insets, so this is a no-op there. */
+.h-screen-dvh {
+	height: 100vh;
+	height: 100dvh;
+}
+.app-shell {
+	height: 100vh;
+	height: 100dvh;
+}
+/* Scope safe-area padding to installed PWA (standalone) mode only. On desktop,
+   env(safe-area-inset-*) resolves to 0 so the padding is a no-op in practice,
+   but wrapping it in the display-mode media query keeps the default stylesheet
+   cascade for non-PWA contexts identical to the pre-fix layout — a safety net
+   against any subtle layout recalc effects in browsers/headless engines. The
+   iOS blank-gap bug only reproduces in standalone mode anyway. */
+@media (display-mode: standalone) {
+	.app-shell {
+		padding-top: env(safe-area-inset-top);
+		padding-right: env(safe-area-inset-right);
+		padding-bottom: env(safe-area-inset-bottom);
+		padding-left: env(safe-area-inset-left);
+		box-sizing: border-box;
+	}
+}
+
 /* Tell Tailwind to scan mini-lit components */
 /* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
 @source "../../node_modules/@mariozechner/mini-lit/dist";
