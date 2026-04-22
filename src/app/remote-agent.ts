@@ -91,6 +91,22 @@ export class RemoteAgent {
 	// notify the user if a long task finishes while the tab is hidden.
 	private _taskStartTime: number | null = null;
 
+	// Streaming dedup/reorder (per-session monotonic seq assigned by server).
+	// See docs/design/streaming-dedup-reorder.md.
+	private _highestSeq = 0;
+	/** True once we've seen any seq-bearing frame. Before this flips, the first
+	 *  seq'd frame initializes `_highestSeq = seq - 1` so we don't stall on the
+	 *  initial-connect gap (the server doesn't replay the pre-connect buffer as
+	 *  event frames — it sends a state snapshot instead). */
+	private _seqInitialized = false;
+	private _pendingEvents: Array<{ seq: number; ts?: number; data: any }> = [];
+	/** Defensive cap — if we ever buffer more than this while waiting for a
+	 *  gap to fill, fall back to a snapshot refresh instead of growing forever. */
+	private readonly _pendingEventsMax = 500;
+	/** True while we've asked for a snapshot refresh due to a seq gap / fallback.
+	 *  While set we keep the _liveEventMessages text-merge hack active. */
+	private _inResumeFallback = false;
+
 	// Auto-reconnect state
 	private _stateRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -345,10 +361,18 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
-						// On reconnect, request current messages to resync state
+						// On reconnect, try a seq-based resume before falling back
+						// to a full snapshot. If the server still holds our last seen
+						// seq in its EventBuffer, it will replay only missed events
+						// (each carrying their original seq so we dedupe naturally).
+						// Otherwise it replies with resume_gap and we fall back below.
 						if (!initial) {
 							this._pendingReconnectNotif = true;
-							this.requestMessages();
+							if (this._highestSeq > 0) {
+								this.send({ type: "resume", fromSeq: this._highestSeq });
+							} else {
+								this.requestMessages();
+							}
 							this.send({ type: "get_state" });
 							// Retry get_state after 3s if we still don't have real model info
 							if (this._stateRetryTimer) clearTimeout(this._stateRetryTimer);
@@ -614,6 +638,23 @@ export class RemoteAgent {
 		this._deferredAssistantMessage = null;
 		this._pendingAttachments = null;
 		this._liveEventMessages = [];
+		this._highestSeq = 0;
+		this._seqInitialized = false;
+		this._pendingEvents = [];
+		this._inResumeFallback = false;
+	}
+
+	/** Drain any pending out-of-order events whose predecessor has now arrived. */
+	private _drainOrderedEvents(): void {
+		while (this._pendingEvents.length > 0 && this._pendingEvents[0].seq === this._highestSeq + 1) {
+			const next = this._pendingEvents.shift()!;
+			this._highestSeq = next.seq;
+			this.handleAgentEvent(next.data);
+		}
+		// Drop any stale entries already at/below highestSeq (safety).
+		while (this._pendingEvents.length > 0 && this._pendingEvents[0].seq <= this._highestSeq) {
+			this._pendingEvents.shift();
+		}
 	}
 
 	// ── Setters (Agent interface) ────────────────────────────────────
@@ -834,6 +875,11 @@ export class RemoteAgent {
 						this._pendingReconnectNotif = false;
 						this._appendNotification("Reconnected to server", "system");
 					}
+					if (this._inResumeFallback) {
+						// Snapshot applied — exit fallback so subsequent live events
+						// (which carry seq) go through the normal dedup path.
+						this._inResumeFallback = false;
+					}
 					// Note: we intentionally do NOT try to reconstruct streamingMessage
 					// for late-joining clients. The message-list will show all messages
 					// including pending tool calls. The streaming container will pick up
@@ -842,12 +888,64 @@ export class RemoteAgent {
 				break;
 			}
 
-			case "event":
+			case "event": {
+				const seq = typeof msg.seq === "number" ? msg.seq : undefined;
+				if (seq === undefined) {
+					// Old server or non-seq frame — dispatch directly (compat fallback).
+					if (msg.data?.type === "agent_start" || msg.data?.type === "agent_end") {
+						console.log(`[RemoteAgent] event: ${msg.data.type}, isStreaming: ${this._state.isStreaming}`);
+					}
+					this.handleAgentEvent(msg.data);
+					break;
+				}
+				if (!this._seqInitialized) {
+					// First seq'd frame after connect (or reset). Adopt (seq - 1) as
+					// our baseline so we don't stall waiting for pre-connect events
+					// the server never replayed. This is safe: the server's initial
+					// catch-up path sent a state snapshot, not individual event frames.
+					this._highestSeq = seq - 1;
+					this._seqInitialized = true;
+				}
+				if (seq <= this._highestSeq) {
+					// Duplicate — silently drop. This is the core dedup path that
+					// fixes ST-DEDUP-01.
+					break;
+				}
+				if (seq !== this._highestSeq + 1) {
+					// Out-of-order — buffer until predecessor arrives.
+					this._pendingEvents.push({ seq, ts: msg.ts, data: msg.data });
+					this._pendingEvents.sort((a, b) => a.seq - b.seq);
+					if (this._pendingEvents.length > this._pendingEventsMax) {
+						// Gap too large — abandon ordering and force a snapshot refresh.
+						console.warn(`[RemoteAgent] pending-events overflow (${this._pendingEvents.length}); forcing snapshot refresh`);
+						this._pendingEvents = [];
+						this._inResumeFallback = true;
+						this._highestSeq = 0;
+						this.requestMessages();
+					}
+					this._drainOrderedEvents();
+					break;
+				}
+				this._highestSeq = seq;
 				if (msg.data?.type === "agent_start" || msg.data?.type === "agent_end") {
 					console.log(`[RemoteAgent] event: ${msg.data.type}, isStreaming: ${this._state.isStreaming}`);
 				}
 				this.handleAgentEvent(msg.data);
+				this._drainOrderedEvents();
 				break;
+			}
+
+			case "resume_gap": {
+				// Server couldn't replay from our seq — reset to its lastSeq and
+				// fall back to today's get_messages snapshot path.
+				const lastSeq = typeof (msg as any).lastSeq === "number" ? (msg as any).lastSeq : 0;
+				console.log(`[RemoteAgent] resume_gap — falling back to snapshot. lastSeq=${lastSeq}`);
+				this._highestSeq = lastSeq;
+				this._pendingEvents = [];
+				this._inResumeFallback = true;
+				this.requestMessages();
+				break;
+			}
 
 			case "session_status":
 				console.log(`[RemoteAgent] session_status: ${msg.status}, isStreaming was: ${this._state.isStreaming}`);

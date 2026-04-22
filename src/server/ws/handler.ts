@@ -517,6 +517,22 @@ export function handleWebSocketConnection(
 				case "ping":
 					send(ws, { type: "pong" });
 					break;
+				case "resume": {
+					// Client requesting resume-from-seq. If the requested seq is
+					// still in the EventBuffer window, replay buffered entries as
+					// individual {type:"event"} frames with their original seq/ts
+					// so the client can dedupe. Otherwise signal a gap — the client
+					// will fall back to a full get_messages snapshot.
+					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
+					if (!session.eventBuffer.canResumeFrom(fromSeq)) {
+						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
+						break;
+					}
+					for (const entry of session.eventBuffer.since(fromSeq)) {
+						send(ws, { type: "event", data: entry.event, seq: entry.seq, ts: entry.ts });
+					}
+					break;
+				}
 				default:
 					send(ws, { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" });
 			}
