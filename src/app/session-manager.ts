@@ -725,7 +725,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
-		state.previewProjectId = "";
+		// Restore previewProjectId from the session record on fast-path switch-back.
+		// The draft-restore on the slow path has a matching fallback at ~line 1488;
+		// without this, clicking "Create Goal" in the proposal form after switching
+		// away and back to a goal-assistant session fails with "Select a project…".
+		state.previewProjectId = sessionData?.projectId || "";
 		state.previewTitleEdited = false;
 		state.previewSpecEdited = false;
 		state.previewCwdEdited = false;
