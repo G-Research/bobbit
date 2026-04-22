@@ -42,6 +42,7 @@ export interface GatewayInfo {
 	wsBase: string;
 	bobbitDir: string;
 	sessionManager: any;  // Exposed for sandbox security tests
+	bgProcessManager: any;  // Exposed for bg-wait abort tests
 }
 
 /**
@@ -164,6 +165,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 			wsBase: `ws://127.0.0.1:${port}`,
 			bobbitDir,
 			sessionManager: gw.sessionManager,
+			bgProcessManager: gw.bgProcessManager,
 		};
 
 		await use(info);

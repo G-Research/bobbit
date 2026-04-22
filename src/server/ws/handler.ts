@@ -333,7 +333,7 @@ export function handleWebSocketConnection(
 					// (real-time interrupt, bypasses queue intentionally).
 					// Otherwise enqueue as a steered message and drain if idle.
 					if (session.status === "streaming") {
-						await session.rpcClient.steer(msg.text);
+						await sessionManager.deliverLiveSteer(sessionId, msg.text);
 					} else {
 						await sessionManager.enqueuePrompt(sessionId, msg.text, { isSteered: true });
 					}
