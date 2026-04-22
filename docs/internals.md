@@ -1062,6 +1062,73 @@ Agent process → message_update (full content)
 
 ---
 
+## Event stream ordering & dedup
+
+Live-streaming agent events (`message_update`, `message_end`, `tool_execution_start`, …) are delivered to the browser as `{type:"event", data, seq, ts}` WebSocket frames. The `seq` + `ts` fields exist to solve a pair of transport-level bugs that manifested as duplicated or reordered chat messages — **not** bugs in agent execution, and **not** visible on reload-replay (the snapshot path is already self-consistent).
+
+### Why
+
+Before this, `{type:"event"}` frames had no server-assigned identity. Two failure modes followed:
+
+- **Snapshot-vs-live race on reconnect.** When the WebSocket dropped mid-turn, the client reconnected and requested a `get_messages` snapshot. Events arriving in the window between the snapshot request and its response were either dropped (snapshot overwrote them) or duplicated (snapshot already contained them **and** the live event re-arrived). The client had only text equality to fall back on, which covered user messages but not assistant/toolResult messages.
+- **No tiebreaker for parallel tool bursts.** Back-to-back `message_end` frames from parallel tool calls could be dispatched in whichever order the renderer happened to reach them; without a server-assigned key the client could not restore the intended order.
+
+The fix is additive and session-scoped: a monotonic `seq` per session plus a wall-clock `ts`. Existing `{type:"event"}` consumers ignore unknown keys, so old clients against new servers (and vice-versa) keep working — they just miss the new guarantees.
+
+Full reasoning and alternatives considered are in [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
+
+### Server side
+
+`EventBuffer` (`src/server/agent/event-buffer.ts`) stores `{seq, ts, event}` tuples in a 1000-entry ring. `push()` assigns the next `seq` and stamps `ts = Date.now()`. It exposes:
+
+- `since(fromSeq)` — entries with `seq > fromSeq` (the reconnect tail).
+- `canResumeFrom(fromSeq)` — false if `fromSeq` is older than the retained window (ring eviction).
+- `lastSeq` — highest assigned seq (used in `resume_gap` so the client can resync).
+
+All `{type:"event"}` broadcasts flow through a single helper `emitSessionEvent(session, event)` in `src/server/agent/session-manager.ts`. It truncates large content, pushes into the buffer, and broadcasts `{type:"event", data, seq, ts}` in lockstep. This replaces the previous pattern of paired `eventBuffer.push(…) + broadcast(…)` calls at six call sites; the helper is the only place that can assign a seq, which keeps the stream strictly monotonic even across call sites.
+
+Other broadcast types (`session_status`, `session_title`, `messages`, `state`, `queue_update`, …) do **not** carry `seq` — they are idempotent snapshots, not stream deltas, and the dup/reorder class of bug doesn't apply.
+
+### Resume handshake
+
+The WS protocol (`src/server/ws/protocol.ts`) gains two message types:
+
+- `{type:"resume", fromSeq}` — client → server, sent immediately after `auth_ok` on a reconnect when the client has a non-zero `_highestSeq`.
+- `{type:"resume_gap", lastSeq}` — server → client, sent when `canResumeFrom(fromSeq)` is false (the missed tail has already been evicted). The client resets its seq tracking to `lastSeq` and falls back to the `get_messages` snapshot path.
+
+`src/server/ws/handler.ts` handles `resume` by replaying `since(fromSeq)` as normal `{type:"event"}` frames (same seq/ts as the originals), then the session continues to broadcast live events as they arrive. Clients that never send `resume` (old clients, or first-time connections with `_highestSeq === 0`) get the existing cold-connect path — `getState()` + `get_messages` — which is backward-compatible.
+
+### Client side
+
+`RemoteAgent` in `src/app/remote-agent.ts` tracks `_highestSeq` and a small `_pendingEvents` array:
+
+- **Duplicate drop.** `seq <= _highestSeq` is silently discarded.
+- **In-order dispatch.** `seq === _highestSeq + 1` advances the watermark and dispatches the event.
+- **Out-of-order buffering.** Any higher seq is inserted into `_pendingEvents` (sorted by seq). After every ingest the drain loop pops entries whose seq is now contiguous and dispatches them. If `_pendingEvents` exceeds 500 entries the client abandons the gap and forces a snapshot refresh — a safety valve so a permanently-gapped client can't grow unbounded.
+- **Baseline adoption.** The first seq’d frame on a fresh connection adopts `seq - 1` as the baseline, so the initial state-snapshot path doesn’t stall waiting for a non-existent seq 1.
+- **Reconnect.** On WS reopen, if `_highestSeq > 0`, the client sends `{type:"resume", fromSeq: _highestSeq}` **before** any other traffic. On `resume_gap` it resets `_highestSeq` to the server’s `lastSeq` and falls back to `get_messages`.
+
+Seq-less frames (old servers) fall through the dispatch path unchanged — the reducer still runs and the pre-seq dedup heuristics (user messages by text, assistant messages by id) still apply. There is no hard dependency on seq at render time; `messages[]` remains the authoritative ordered list, and seq only governs the event→state reducer.
+
+### Tests
+
+- `tests/event-buffer.test.ts` — seq monotonicity, eviction invariants, `since()` / `canResumeFrom()` / `lastSeq` semantics.
+- `tests/remote-agent-seq-dedup.spec.ts` (+ `tests/fixtures/remote-agent-seq-dedup.html`) — file:// fixture driving synthetic WS frames through the reducer: duplicate drop, out-of-order buffering, `resume` on reconnect, compat fallback for seq-less frames, full-buffer replay dedup.
+- `tests/e2e/ui/stories-streaming.spec.ts` — `ST-DEDUP-01` reproducing test: reconnect mid-stream must not duplicate or reorder events. Fails on master pre-fix, passes after.
+- `tests/e2e/ui/stories-resilience.spec.ts` — `RE-07` (reconnect catch-up) unchanged and still green; the new `resume` path is a strict superset of its coverage.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/server/agent/event-buffer.ts` | `{seq, ts, event}` ring buffer + `since()` / `canResumeFrom()` / `lastSeq` |
+| `src/server/agent/session-manager.ts` | `emitSessionEvent()` — single push+broadcast helper |
+| `src/server/ws/protocol.ts` | Additive `seq`/`ts` on `event`; new `resume` / `resume_gap` types |
+| `src/server/ws/handler.ts` | Handles `resume`, emits `resume_gap` on eviction |
+| `src/app/remote-agent.ts` | `_highestSeq`, `_pendingEvents`, reconnect `resume`, gap fallback |
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved — the agent is stuck mid tool-call and the steer feels ignored.
