@@ -467,3 +467,83 @@ SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 | **Total** | **~1,230** | **<5 min** | **Manual-integration-level** |
 
 The manual integration tests remain as an optional "nuclear option" (`npm run test:manual`) for validating real-agent behavior, but the automated suite provides equivalent confidence for code changes.
+
+## E2E suite parallelism budget
+
+The E2E suite historically produced ~12 intermittent "flaky" failures per full
+`npm test` run (708 tests). The same specs passed 100% of the time in isolation,
+even under `--repeat-each=15` — a classic suite-level contention signature.
+Root cause was not per-test logic but resource pressure when many workers each
+spun up a gateway + WebSocket + (for browser tests) a Chromium instance on a
+constrained Windows host. This section documents the budget that eliminated the
+flakes.
+
+### Worker counts
+
+Configured in `playwright-e2e.config.ts`:
+
+- Top-level: `workers: 6`
+- `api` project: `workers: 4` (in-process gateway only)
+- `browser` project: `workers: 3`, **`fullyParallel: false`**
+
+Each worker runs a full in-process gateway; browser workers add a Chromium
+instance on top. On constrained machines — especially Windows, where the temp
+directory is heavily scanned by Defender — higher counts caused tmpdir lock
+storms and intermittent WS `waitFor` timeouts. Serialising the `browser` project
+(`fullyParallel: false`) keeps tests within a worker sequential, which
+dramatically reduces the simultaneous-browser-startup cost without gutting
+throughput across workers.
+
+### Windows temp root
+
+Windows `%LOCALAPPDATA%\Temp\` is scanned by Defender and has historically been
+the hottest FS path on the machine. The E2E harnesses relocate their scratch
+space:
+
+- On Windows, the default temp root is `C:\bobbit-e2e\` (not `%LOCALAPPDATA%\Temp\bobbit-e2e\`).
+- Override with the env var `BOBBIT_E2E_TMP_ROOT` — useful for ramdisks or CI
+  runners with a dedicated scratch volume.
+- The Windows path branch and env-var override are duplicated across
+  `tests/e2e/gateway-harness.ts`, `tests/e2e/in-process-harness.ts`, and
+  `tests/e2e/e2e-teardown.ts`. Keep them in sync when editing.
+
+### Teardown strategy
+
+Per-worker teardown uses **fire-and-forget async `rm`** to release the worker as
+soon as its tests finish. The global teardown
+(`tests/e2e/e2e-teardown.ts`) then sweeps any `.e2e-browser-*` and
+`.e2e-inproc-*` subdirectories under `E2E_TEMP_ROOT` at suite end as a safety
+net.
+
+Do **not** re-add synchronous `rmSync` to per-worker teardown. It serialises
+under FS pressure (Windows handle churn, Defender locks) and was one of the
+original causes of the flake pattern.
+
+### Measurement protocol
+
+When changing anything that touches this budget — worker counts, temp root,
+teardown, or webServer hooks — measure with:
+
+```bash
+npx playwright test --config playwright-e2e.config.ts --retries=0
+```
+
+Run the above **three times consecutively**. Target: **zero first-attempt
+failures across all three runs**.
+
+`--retries=0` is a CLI flag used only for measurement. The committed config
+keeps `retries: 2` as the production value so real runs tolerate genuinely
+rare flakes (e.g. Windows port allocation races) without red-lighting CI.
+
+### What not to change without re-measuring
+
+- Don't raise `workers` above 6.
+- Don't set `fullyParallel: true` on the `browser` project.
+- Don't remove the `BOBBIT_E2E_TMP_ROOT` env-var override or the Windows
+  `C:\bobbit-e2e\` path branch.
+- Don't serialise the `api` project — only `browser` needs it; `api` tests are
+  lightweight (no browser) and benefit from full parallelism within their
+  4-worker budget.
+
+If a future change must violate any of the above, re-run the 3× measurement
+protocol and update this section with the new numbers.

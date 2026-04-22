@@ -25,8 +25,15 @@ export default function globalTeardown() {
 		}
 	} catch {}
 
-	// Current worker dirs live under $TMP/bobbit-e2e/.e2e-{inproc,browser}-*
-	const tmpRoot = join(tmpdir(), "bobbit-e2e");
+	// Current worker dirs live under E2E_TEMP_ROOT/.e2e-{inproc,browser}-*.
+	// Must match the logic in gateway-harness.ts / in-process-harness.ts so the
+	// global sweep actually finds per-worker dirs on Windows (which now live
+	// under C:\bobbit-e2e to avoid %LOCALAPPDATA%\Temp\ Defender contention).
+	const tmpRoot = existsSync("/.dockerenv")
+		? "/tmp"
+		: process.platform === "win32"
+			? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
+			: join(tmpdir(), "bobbit-e2e");
 	if (existsSync(tmpRoot)) {
 		try {
 			for (const entry of readdirSync(tmpRoot)) {

@@ -21,6 +21,7 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { rm as rmAsync } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +35,11 @@ const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 // local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
 // is outside the git repo — otherwise isGitRepo() returns true for the project
 // rootPath and sessions auto-create worktrees (slow, conflicts with git state).
-const E2E_TEMP_ROOT = existsSync("/.dockerenv") ? "/tmp" : join(tmpdir(), "bobbit-e2e");
+const E2E_TEMP_ROOT = existsSync("/.dockerenv")
+	? "/tmp"
+	: process.platform === "win32"
+		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
+		: join(tmpdir(), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -172,11 +177,13 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 
 		// Teardown — use existing shutdown() for proper cleanup
 		await gw.shutdown();
-		try {
-			rmSync(bobbitDir, { recursive: true, force: true });
-		} catch {
+		// Fire-and-forget async cleanup — synchronous rmSync of the entire
+		// bobbitDir tree serializes under Windows Defender and starves other
+		// workers mid-teardown. The global teardown sweeps E2E_TEMP_ROOT at
+		// end-of-suite anyway, so dropped failures here are benign.
+		void rmAsync(bobbitDir, { recursive: true, force: true }).catch(() => {
 			// Best-effort cleanup
-		}
+		});
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 });
 

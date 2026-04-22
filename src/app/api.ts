@@ -688,14 +688,86 @@ export interface GitStatusData {
 	status: Array<{ file: string; status: string }>;
 }
 
-export async function fetchGitStatus(sessionId: string, opts?: { fetch?: boolean }): Promise<GitStatusData | null> {
+/**
+ * Discriminated result from a git-status fetch. Distinguishes an explicit
+ * "this is not a git repository" (terminal, don't retry) from any kind of
+ * transient failure (retry-eligible) and from success.
+ */
+export type GitStatusResult =
+	| { kind: 'ok'; data: GitStatusData & { partial?: boolean; untrackedIncluded?: boolean } }
+	| { kind: 'not-a-repo' }
+	| { kind: 'error'; status?: number; message: string };
+
+function buildGitStatusQuery(opts?: { fetch?: boolean; untracked?: boolean }): string {
+	const parts: string[] = [];
+	if (opts?.fetch) parts.push('fetch=true');
+	if (opts?.untracked) parts.push('untracked=1');
+	return parts.length ? `?${parts.join('&')}` : '';
+}
+
+export async function fetchGitStatus(
+	sessionId: string,
+	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal },
+): Promise<GitStatusResult> {
+	const qs = buildGitStatusQuery(opts);
 	try {
-		const qs = opts?.fetch ? '?fetch=true' : '';
-		const res = await gatewayFetch(`/api/sessions/${sessionId}/git-status${qs}`);
-		if (!res.ok) return null;
-		return await res.json();
-	} catch {
-		return null;
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/git-status${qs}`, { signal: opts?.signal });
+		if (res.ok) {
+			try {
+				const data = await res.json();
+				return { kind: 'ok', data };
+			} catch (err) {
+				return { kind: 'error', status: res.status, message: (err as Error).message };
+			}
+		}
+		if (res.status === 400) {
+			try {
+				const body = await res.json();
+				if (body && body.error === 'Not a git repository') return { kind: 'not-a-repo' };
+				return { kind: 'error', status: 400, message: body?.error ?? 'Bad request' };
+			} catch {
+				return { kind: 'error', status: 400, message: 'Bad request' };
+			}
+		}
+		return { kind: 'error', status: res.status, message: `HTTP ${res.status}` };
+	} catch (err) {
+		if (err instanceof DOMException && err.name === 'AbortError') {
+			return { kind: 'error', message: 'aborted' };
+		}
+		return { kind: 'error', message: (err as Error).message };
+	}
+}
+
+export async function fetchGoalGitStatus(
+	goalId: string,
+	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal },
+): Promise<GitStatusResult> {
+	const qs = buildGitStatusQuery(opts);
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/git-status${qs}`, { signal: opts?.signal });
+		if (res.ok) {
+			try {
+				const data = await res.json();
+				return { kind: 'ok', data };
+			} catch (err) {
+				return { kind: 'error', status: res.status, message: (err as Error).message };
+			}
+		}
+		if (res.status === 400) {
+			try {
+				const body = await res.json();
+				if (body && body.error === 'Not a git repository') return { kind: 'not-a-repo' };
+				return { kind: 'error', status: 400, message: body?.error ?? 'Bad request' };
+			} catch {
+				return { kind: 'error', status: 400, message: 'Bad request' };
+			}
+		}
+		return { kind: 'error', status: res.status, message: `HTTP ${res.status}` };
+	} catch (err) {
+		if (err instanceof DOMException && err.name === 'AbortError') {
+			return { kind: 'error', message: 'aborted' };
+		}
+		return { kind: 'error', message: (err as Error).message };
 	}
 }
 

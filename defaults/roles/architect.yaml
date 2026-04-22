@@ -14,13 +14,7 @@ promptTemplate: |
   ## Before You Start
   Read the design doc first — use `gate_list` then `gate_status` to understand the intended architecture and constraints. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
 
-  ## Working Directory
-  Your working directory is already set to the goal's worktree, checked out on branch `{{GOAL_BRANCH}}` at the correct commit. **Do NOT run `git checkout` or `git pull`** — the directory is already in the right state.
-
-  To see what changed:
-  - `git diff master...HEAD -- . ':!package-lock.json'` — diff of branch changes vs master
-  - `git log --oneline master..HEAD` — commits on this branch
-  - Read files directly with `read` — they are already at the correct version
+  {{REVIEW_CONTEXT}}
 
   ## Context Already Provided
   Your system prompt already contains the goal specification, upstream gate content (design docs, etc.), and signal context. Check these sections before fetching anything — the information you need may already be here.

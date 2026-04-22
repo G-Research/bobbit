@@ -40,9 +40,30 @@ let report;
 try {
   report = JSON.parse(raw);
 } catch {
-  // Not valid JSON — pass through raw (probably line reporter output)
-  process.stdout.write(raw);
-  process.exit(1);
+  // Not clean JSON — Playwright / npm may have prefixed non-JSON lines
+  // (npm warnings, vite messages, etc.) or the trailing newline got doubled.
+  // Try to locate the outer JSON object by scanning for a top-level '{' that
+  // parses to a complete document.
+  let recovered = null;
+  const firstBrace = raw.indexOf("{");
+  if (firstBrace >= 0) {
+    // Try from firstBrace to end, shrinking from the right if trailing junk.
+    const candidate = raw.slice(firstBrace);
+    try { recovered = JSON.parse(candidate); } catch {
+      // Try trimming trailing non-} chars.
+      const lastBrace = candidate.lastIndexOf("}");
+      if (lastBrace > 0) {
+        try { recovered = JSON.parse(candidate.slice(0, lastBrace + 1)); } catch { /* give up */ }
+      }
+    }
+  }
+  if (recovered) {
+    report = recovered;
+  } else {
+    // Pass through raw (probably line reporter output) and exit 1
+    process.stdout.write(raw);
+    process.exit(1);
+  }
 }
 
 const stats = report.stats || {};

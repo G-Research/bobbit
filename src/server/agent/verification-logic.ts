@@ -88,6 +88,23 @@ export function isTransientQaError(output: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Gate kind classification
+// ---------------------------------------------------------------------------
+
+/**
+ * A workflow gate is "pre-implementation" iff it is a content gate with no
+ * upstream dependencies — meaning nothing it reviews has been produced yet,
+ * and the branch cannot contain code satisfying this gate.
+ *
+ * Derived purely from workflow topology to avoid drift with an explicit
+ * `kind` field. See design doc §3.1.
+ */
+export function isPreImplementationGate(gate: { content?: boolean; depends_on?: string[]; dependsOn?: string[] }): boolean {
+	const deps = gate.depends_on ?? gate.dependsOn ?? [];
+	return gate.content === true && deps.length === 0;
+}
+
+// ---------------------------------------------------------------------------
 // Variable substitution
 // ---------------------------------------------------------------------------
 

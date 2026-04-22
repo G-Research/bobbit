@@ -41,6 +41,36 @@ export function stripTokenFromGitUrl(url: string): string {
  * Uses `git symbolic-ref refs/remotes/origin/HEAD` which is set by `git clone`.
  * Falls back to "HEAD" if detection fails.
  */
+/**
+ * Detect the bare primary branch name (e.g. "main" or "master").
+ * Uses `git symbolic-ref refs/remotes/origin/HEAD`, which is set by `git clone`.
+ * Falls back to local `master`, then local `main`, then literal "master".
+ *
+ * Unlike `resolveRemotePrimary` (which returns the ref with `origin/` prefix),
+ * this returns the bare branch name suitable for substituting into prompt
+ * templates as `{{master}}`.
+ */
+export async function detectPrimaryBranch(cwd: string): Promise<string> {
+	try {
+		const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
+			cwd,
+			timeout: 5_000,
+		});
+		const ref = stdout.trim().replace("refs/remotes/origin/", "");
+		if (ref) return ref;
+	} catch { /* fall through */ }
+	try {
+		await execFile("git", ["rev-parse", "--verify", "refs/heads/master"], { cwd, timeout: 5_000 });
+		return "master";
+	} catch { /* ignore */ }
+	try {
+		await execFile("git", ["rev-parse", "--verify", "refs/heads/main"], { cwd, timeout: 5_000 });
+		return "main";
+	} catch { /* ignore */ }
+	console.warn(`[git] detectPrimaryBranch(${cwd}): could not detect primary branch; defaulting to "master"`);
+	return "master";
+}
+
 async function resolveRemotePrimary(repoPath: string): Promise<string> {
 	try {
 		const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
