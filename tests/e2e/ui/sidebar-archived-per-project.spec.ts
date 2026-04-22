@@ -63,14 +63,22 @@ async function resetSidebarState(page: import("@playwright/test").Page, opts: { 
 
 test.describe("Per-project Archived subsections", () => {
 	// Per-test state — set in beforeEach, torn down in afterEach.
-	let projectA: { id: string; rootPath: string };
-	let projectB: { id: string; rootPath: string };
+	// All per-test state is optional so a partially-failed beforeEach (e.g.
+	// Windows playwright-transform-cache EPERM before projectA is assigned)
+	// doesn't crash afterEach with `Cannot read properties of undefined`.
+	let projectA: { id: string; rootPath: string } | undefined;
+	let projectB: { id: string; rootPath: string } | undefined;
 	let goalATitle: string;
 	let goalBTitle: string;
-	let goalAId: string;
-	let goalBId: string;
+	let goalAId: string | undefined;
+	let goalBId: string | undefined;
 
 	test.beforeEach(async () => {
+		// Reset between tests so a previous failure doesn't leak ids.
+		projectA = undefined;
+		projectB = undefined;
+		goalAId = undefined;
+		goalBId = undefined;
 		await waitForHealth();
 		const suffix = uniqueSuffix(test.info().title);
 		projectA = await registerProject(`proj-archived-a-${suffix}`);
@@ -82,10 +90,10 @@ test.describe("Per-project Archived subsections", () => {
 	});
 
 	test.afterEach(async () => {
-		await deleteGoal(goalAId).catch(() => {});
-		await deleteGoal(goalBId).catch(() => {});
-		await apiFetch(`/api/projects/${projectA.id}`, { method: "DELETE" }).catch(() => {});
-		await apiFetch(`/api/projects/${projectB.id}`, { method: "DELETE" }).catch(() => {});
+		if (goalAId) await deleteGoal(goalAId).catch(() => {});
+		if (goalBId) await deleteGoal(goalBId).catch(() => {});
+		if (projectA) await apiFetch(`/api/projects/${projectA.id}`, { method: "DELETE" }).catch(() => {});
+		if (projectB) await apiFetch(`/api/projects/${projectB.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
 	test("each project gets its own Archived subsection; no global block", async ({ page }) => {
