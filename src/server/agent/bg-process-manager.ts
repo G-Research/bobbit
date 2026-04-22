@@ -56,6 +56,8 @@ export class BgProcessManager {
 	private processes = new Map<string, Map<string, BgProcess>>();
 	/** sessionId → Set<WebSocket> — populated by session manager */
 	private clientsProvider: (sessionId: string) => Set<WebSocket> | undefined;
+	/** sessionId → in-flight wait AbortControllers. Aborted when a steer arrives. */
+	private waits = new Map<string, Set<AbortController>>();
 
 	constructor(clientsProvider: (sessionId: string) => Set<WebSocket> | undefined) {
 		this.clientsProvider = clientsProvider;
@@ -304,6 +306,8 @@ export class BgProcessManager {
 
 	/** Clean up all bg processes for a session (on terminate) */
 	cleanup(sessionId: string): void {
+		// Release any hanging wait handlers first so the HTTP responses resolve cleanly.
+		this.abortAllWaits(sessionId);
 		const map = this.processes.get(sessionId);
 		if (!map) return;
 		for (const [, bg] of map) {
@@ -314,24 +318,83 @@ export class BgProcessManager {
 		this.processes.delete(sessionId);
 	}
 
-	/** Wait for a process to exit or timeout. Returns the process info and whether it timed out. */
-	async waitForExit(sessionId: string, processId: string, timeoutMs: number): Promise<{ info: BgProcessInfo; timedOut: boolean } | null> {
+	/**
+	 * Register an AbortController so that `abortAllWaits(sessionId)` (called from
+	 * live-steer call sites or on session termination) can cancel in-flight waits.
+	 */
+	registerWait(sessionId: string, controller: AbortController): void {
+		let set = this.waits.get(sessionId);
+		if (!set) {
+			set = new Set();
+			this.waits.set(sessionId, set);
+		}
+		set.add(controller);
+	}
+
+	/** Unregister a previously registered controller (called in the handler's finally). */
+	unregisterWait(sessionId: string, controller: AbortController): void {
+		const set = this.waits.get(sessionId);
+		if (!set) return;
+		set.delete(controller);
+		if (set.size === 0) this.waits.delete(sessionId);
+	}
+
+	/** Abort every in-flight wait for a session. Leaves the bg processes untouched. */
+	abortAllWaits(sessionId: string): void {
+		const set = this.waits.get(sessionId);
+		if (!set) return;
+		for (const controller of set) {
+			try { controller.abort(); } catch { /* ignore */ }
+		}
+		// cleanup happens via unregisterWait in the handler's finally
+	}
+
+	/**
+	 * Wait for a process to exit, the timeout to fire, or the provided AbortSignal.
+	 * Return shape is additive — happy-path/timeout set `aborted: false`; on abort
+	 * the process is left running and `info` is a snapshot (status still running).
+	 */
+	async waitForExit(sessionId: string, processId: string, timeoutMs: number, signal?: AbortSignal): Promise<{ info: BgProcessInfo; timedOut: boolean; aborted: boolean } | null> {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg) return null;
-		if (bg.status === "exited") return { info: this.toInfo(bg), timedOut: false };
+		if (bg.status === "exited") return { info: this.toInfo(bg), timedOut: false, aborted: false };
+		if (signal?.aborted) return { info: this.toInfo(bg), timedOut: false, aborted: true };
 
 		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | null = null;
+
+			const cleanup = () => {
+				if (timer) { clearTimeout(timer); timer = null; }
 				bg.child.removeListener("exit", onExit);
-				resolve({ info: this.toInfo(bg), timedOut: true });
-			}, timeoutMs);
+				if (signal) signal.removeEventListener("abort", onAbort);
+			};
 
 			const onExit = () => {
-				clearTimeout(timer);
+				if (settled) return;
+				settled = true;
+				cleanup();
 				// Small delay to let the exit handler update status
-				setTimeout(() => resolve({ info: this.toInfo(bg), timedOut: false }), 50);
+				setTimeout(() => resolve({ info: this.toInfo(bg), timedOut: false, aborted: false }), 50);
 			};
+
+			const onTimeout = () => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve({ info: this.toInfo(bg), timedOut: true, aborted: false });
+			};
+
+			const onAbort = () => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve({ info: this.toInfo(bg), timedOut: false, aborted: true });
+			};
+
+			timer = setTimeout(onTimeout, timeoutMs);
 			bg.child.once("exit", onExit);
+			if (signal) signal.addEventListener("abort", onAbort, { once: true });
 		});
 	}
 
