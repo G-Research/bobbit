@@ -45,7 +45,11 @@ detail_docs: |
   - `create`: Start a background process. Returns a handle ID.
   - `wait`: Block until the process exits or a timeout is reached. Use when
     you started a process, did other work, and now need it to finish before
-    continuing. Param: `timeout` (seconds, default 300).
+    continuing. Param: `timeout` (seconds, default 300). **Interruptible by
+    steer**: if the user (or `team_steer`) sends a steer while you are
+    waiting, the wait aborts within ~100ms and returns "wait interrupted by
+    steer" — the background process keeps running and can be re-queried
+    with `logs` or another `wait`.
   - `kill`: Terminate a running process.
   - `list`: Show all background processes for this session.
 

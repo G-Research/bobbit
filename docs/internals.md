@@ -1038,6 +1038,55 @@ Agent process → message_update (full content)
 
 ---
 
+## Steer-interruptible bash_bg wait
+
+`bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved — the agent is stuck mid tool-call and the steer feels ignored.
+
+**Contract.** When a steer is delivered for a session that has one or more in-flight `bash_bg wait` handlers:
+
+- Every in-flight wait for that session is aborted immediately (the wait HTTP response resolves with `{ info, timedOut: false, aborted: true }`).
+- The backgrounded processes are **not** killed — they keep running and can be re-queried via `bash_bg logs`, `grep`, or another `wait`.
+- The shell extension translates the aborted result into a visible tool_result: `Process <hdr> wait interrupted by steer. Use 'logs' or 'wait' again to continue monitoring.`.
+- The steer is then forwarded to `rpcClient.steer()` as usual and processed on the next turn.
+
+### Why
+
+Long waits made the agent feel unresponsive: users would type a correction, see it accepted, and then watch the UI sit idle for minutes because the agent was parked inside a `wait` tool call. Aborting the wait (not the process) keeps the correction latency proportional to the WebSocket round-trip, while preserving the original intent of having the process run in the background.
+
+### Architecture
+
+- `BgProcessManager.waits: Map<sessionId, Set<AbortController>>` — per-session registry of pending waits.
+- `registerWait(sessionId, controller)` / `unregisterWait(sessionId, controller)` — called by the `/api/sessions/:id/bg-processes/:pid/wait` REST handler in its `try`/`finally` around `waitForExit(..., signal)`.
+- `abortAllWaits(sessionId)` — aborts every registered controller for a session. Registry cleanup happens via the handlers' `finally` blocks (not inside `abortAllWaits`), so a single iterator pass is safe.
+- `waitForExit(sessionId, processId, timeoutMs, signal?)` — races process `exit`, `setTimeout`, and `signal.abort` in a single promise with a shared `cleanup()` that clears the timer and removes the exit/abort listeners. A single `settled` flag guards against double-resolve.
+
+### Call sites
+
+Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId, message)`, which calls `bgProcessManager.abortAllWaits(sessionId)` before forwarding to `session.rpcClient.steer(message)`. All steer paths that run while the agent is `streaming` go through this helper:
+
+- `src/server/ws/handler.ts` — `case "steer"` (user-initiated live steer).
+- `src/server/agent/team-manager.ts` — `injectSteerMessage()` and the task-completion nudge (mid-turn `team_steer`).
+- `src/server/agent/session-manager.ts` — `SessionManager.drainQueue()` when dispatching a batch of steered messages while streaming (same abort behaviour, inline rather than through `deliverLiveSteer` because the rpc call is wrapped in batching).
+
+### Termination cleanup
+
+`SessionManager.terminateSession()` calls `bgProcessManager.abortAllWaits(id)` before `bgProcessManager.cleanup(id)`. `BgProcessManager.cleanup()` also calls `abortAllWaits()` defensively as its first step. This ensures any long-poll HTTP handlers still hanging in the server event loop resolve cleanly (as `aborted: true`) before the processes are killed and the session entry is dropped — no leaked Promises, no dangling `exit` listeners.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/server/agent/bg-process-manager.ts` | `waits` registry, `registerWait`/`unregisterWait`/`abortAllWaits`, `waitForExit` with `AbortSignal` support |
+| `src/server/agent/session-manager.ts` | `deliverLiveSteer()` helper; `drainQueue()` abort-before-dispatch; `terminateSession()` termination-time abort |
+| `src/server/agent/team-manager.ts` | Team-initiated steers routed through `deliverLiveSteer()` |
+| `src/server/ws/handler.ts` | WebSocket `case "steer"` routed through `deliverLiveSteer()` |
+| `src/server/server.ts` | `/bg-processes/:pid/wait` REST handler — creates the `AbortController`, registers it, passes `signal` to `waitForExit`, unregisters in `finally` |
+| `defaults/tools/shell/extension.ts` | Translates `aborted: true` into the user-facing "wait interrupted by steer" tool_result |
+| `tests/bg-process-manager.test.ts` | Unit tests (abort before exit, abort after exit no-op, abort after timeout no-op) |
+| `tests/e2e/bg-wait-steer-abort.spec.ts` | API E2E: long-sleep bg process + concurrent steer, asserts fast abort and process still running |
+
+---
+
 ## Viewer WebSocket
 
 The `/ws/viewer` endpoint provides a read-only, sessionless WebSocket connection for the goal dashboard to receive live gate verification events.
