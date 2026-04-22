@@ -241,8 +241,17 @@ test.describe("CT-01: Streaming lifecycle", () => {
 			bashOutputs: Array.from(document.querySelectorAll("tool-message"))
 				.filter(el => (el.textContent || "").includes("BOBBIT_TOOL_TEST_OK_12345")).length,
 		}));
+		// wait_for_idle returns when the server reports idle, but the final
+		// toolResult message_end may still be in-flight to the client. Poll the
+		// DOM until the echoed unique marker is rendered before capturing the
+		// baseline — otherwise the replay assertion is meaningless.
+		await expect.poll(
+			async () => (await snapshot()).bashOutputs,
+			{ timeout: 15_000, message: "bash tool output did not render before baseline" },
+		).toBeGreaterThan(0);
 		const baseline = await snapshot();
 		expect(baseline.assistant).toBeGreaterThan(0);
+		expect(baseline.tool).toBeGreaterThan(0);
 
 		// act — replay every buffered event to the live client, simulating a
 		// reconnect-catch-up stream that overlaps with already-rendered state.
