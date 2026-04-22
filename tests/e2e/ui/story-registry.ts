@@ -101,6 +101,13 @@ export const STORY_CT01_F = defineStory({
 	covers: ["page-reload"],
 });
 
+export const STORY_ST_DEDUP_01 = defineStory({
+	id: "ST-DEDUP-01",
+	title: "Reconnect mid-stream does not duplicate or reorder events",
+	contracts: [CT_01, CT_05],
+	covers: ["reconnect-mid-stream-dedup"],
+});
+
 // ── Focus Follows Intent stories (CT-06) ──
 
 export const STORY_CT06_A = defineStory({
