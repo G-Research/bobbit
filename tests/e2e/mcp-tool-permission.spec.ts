@@ -279,9 +279,8 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 		// The scaffolded "general" role has toolPolicies, so sessions without
 		// an explicit role still get tool restrictions. To test a truly
 		// unrestricted session, temporarily give the general role empty toolPolicies.
-		// Small delay to let any in-flight session restarts from prior tests settle
-		await new Promise(r => setTimeout(r, 1500));
-
+		// Prior tests' afterEach awaited deleteSession, so no new sleep is needed —
+		// their grant-triggered session restarts touched custom roles only, not "general".
 		const origResp = await apiFetch("/api/roles/general").catch(() => null);
 		if (!origResp || !origResp.ok) {
 			test.skip();
@@ -374,13 +373,17 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 			setTimeout(() => reject(new Error("WS auth timeout")), 5_000);
 		});
 
-		// Listen for tool_permission_needed
-		let permissionReceived = false;
-		ws.on("message", (raw: Buffer) => {
-			const msg = JSON.parse(raw.toString());
-			if (msg.type === "tool_permission_needed") {
-				permissionReceived = true;
-			}
+		// Event-driven wait: register the listener BEFORE firing the long-poll
+		// so we can't miss the tool_permission_needed broadcast.
+		const permissionReceived = new Promise<boolean>((resolvePerm, rejectPerm) => {
+			const t = setTimeout(() => rejectPerm(new Error("tool_permission_needed not received within 5s")), 5_000);
+			ws.on("message", (raw: Buffer) => {
+				const msg = JSON.parse(raw.toString());
+				if (msg.type === "tool_permission_needed") {
+					clearTimeout(t);
+					resolvePerm(true);
+				}
+			});
 		});
 
 		// Call the tool-grant-request endpoint (long-poll)
@@ -390,11 +393,7 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 		});
 
 		// Wait for the WS broadcast
-		const deadline = Date.now() + 5_000;
-		while (!permissionReceived && Date.now() < deadline) {
-			await new Promise(r => setTimeout(r, 100));
-		}
-		expect(permissionReceived).toBe(true);
+		expect(await permissionReceived).toBe(true);
 
 		// Grant the tool via WS
 		ws.send(JSON.stringify({
