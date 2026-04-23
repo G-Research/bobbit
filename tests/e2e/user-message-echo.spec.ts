@@ -5,7 +5,7 @@
  * are combined where they share the same pattern.
  */
 import { test, expect } from "./in-process-harness.js";
-import { createSession, connectWs, messageEndPredicate } from "./e2e-setup.js";
+import { createSession, connectWs, messageEndPredicate, agentEndPredicate } from "./e2e-setup.js";
 
 test.describe("User message echo", () => {
 	test.describe.configure({ mode: "parallel" });
@@ -84,13 +84,15 @@ test.describe("User message echo", () => {
 
 		try {
 			conn1.send({ type: "prompt", text: "Race condition test message" });
-			await new Promise((r) => setTimeout(r, 50));
+			// Wait for the user message to be persisted server-side before
+			// dropping the socket — avoids racing against message_end.
+			await conn1.waitFor(messageEndPredicate("user"));
 			conn1.close();
 
-			// Wait for the agent to process
-			await new Promise((r) => setTimeout(r, 500));
-
 			const conn2 = await connectWs(sessionId);
+			// Wait for the agent turn to settle so get_messages returns the
+			// finalized transcript deterministically (no fixed padding).
+			await conn2.waitFor(agentEndPredicate(), 10_000).catch(() => {});
 			try {
 				conn2.send({ type: "get_messages" });
 				const messagesResponse = await conn2.waitFor((m) => m.type === "messages");

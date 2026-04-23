@@ -49,6 +49,21 @@ let cacheExpiry = 0;
 let cacheConfigVersion = 0;
 
 /**
+ * Invalidate the models cache. Call when upstream config changes in a way
+ * that the prefs-version hash doesn't reflect (e.g. external mutation of
+ * the aigw endpoint's model list after a successful reconfigure/refresh).
+ * The next `getAvailableModels` call will assemble fresh.
+ *
+ * This keeps the UX snappy: when a user reconfigures the gateway, clicks
+ * Refresh, or removes the gateway, the next /api/models response reflects
+ * reality immediately instead of serving up to 5s of stale data.
+ */
+export function invalidateModelCache(): void {
+	cachedModels = null;
+	cacheExpiry = 0;
+}
+
+/**
  * Get all available models, merged from all sources.
  * Results are cached for 5 seconds.
  */
