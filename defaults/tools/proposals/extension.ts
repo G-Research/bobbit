@@ -150,6 +150,11 @@ export default function (pi: ExtensionAPI) {
 			test_unit_command: Type.Optional(Type.String({ description: "Unit test command" })),
 			test_e2e_command: Type.Optional(Type.String({ description: "E2E test command" })),
 			worktree_setup_command: Type.Optional(Type.String({ description: "Worktree setup command" })),
+			qa_start_command: Type.Optional(Type.String({ description: "QA start command" })),
+			sandbox: Type.Optional(Type.String({ description: "Sandbox mode (e.g. 'docker')" })),
+			session_model: Type.Optional(Type.String({ description: "Default session model (provider/model-id)" })),
+			review_model: Type.Optional(Type.String({ description: "Reviewer model (provider/model-id)" })),
+			naming_model: Type.Optional(Type.String({ description: "Naming model (provider/model-id)" })),
 		}),
 		async execute() { return ack(); },
 	});

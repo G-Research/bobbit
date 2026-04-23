@@ -1185,10 +1185,27 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onProjectProposal = async (fields: Record<string, string>) => {
 			if (activeSessionId() !== sessionId) return;
-			state.activeProjectProposal = { sessionId, fields };
+			const session = state.gatewaySessions.find(s => s.id === sessionId);
+			const project = state.projects.find(p => p.id === session?.projectId);
+			const mode: "provisional" | "registered" = project?.provisional ? "provisional" : "registered";
+			const isFirstProposal = state.activeProjectProposal == null;
+			const prevCurrent = state.activeProjectProposal?.currentConfig;
+			state.activeProjectProposal = { sessionId, fields, mode, currentConfig: prevCurrent };
 			state.assistantHasProposal = true;
-			if (state.assistantTab === "chat" && !isDesktop()) {
-				state.assistantTab = "preview";
+			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
+				if (state.assistantTab === "chat" && !isDesktop()) {
+					state.assistantTab = "preview";
+				}
+			} else if (isFirstProposal) {
+				// Non-assistant session: first proposal auto-selects the new Project tab.
+				state.previewPanelActiveTab = "project";
+				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
+				localStorage.removeItem(collapseKey);
+				if (!isDesktop()) state.previewPanelTab = "project";
+			}
+			// Lazy-load current config snapshot for registered-mode diff view.
+			if (mode === "registered" && session?.projectId && !prevCurrent) {
+				void loadCurrentProjectConfig(session.projectId, sessionId);
 			}
 			saveProjectDraft(sessionId);
 			renderApp();
@@ -1473,7 +1490,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantType !== "role") state.activeRoleProposal = null;
 			if (state.assistantType !== "personality") state.activePersonalityProposal = null;
 			if (state.assistantType !== "staff") state.activeStaffProposal = null;
-			if (state.assistantType !== "project" && state.assistantType !== "project-scaffolding") state.activeProjectProposal = undefined;
+			// Project proposals are valid for ANY session — leave state.activeProjectProposal alone.
+			// Draft restore below handles rehydration for project-assistant sessions.
 
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
@@ -1764,7 +1782,39 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // PROJECT PROPOSAL ACCEPTANCE
 // ============================================================================
 
+/** Lazily fetch current project registry + config and stash into activeProjectProposal.
+ *  Exported so tests and render can trigger a refresh. */
+export async function loadCurrentProjectConfig(projectId: string, sessionId: string): Promise<void> {
+	const { gatewayFetch } = await import("./api.js");
+	try {
+		const [cfgRes, projRes] = await Promise.all([
+			gatewayFetch(`/api/projects/${projectId}/config`),
+			gatewayFetch(`/api/projects/${projectId}`),
+		]);
+		if (!cfgRes.ok || !projRes.ok) return;
+		const config = await cfgRes.json();
+		const proj = await projRes.json();
+		if (state.activeProjectProposal?.sessionId !== sessionId) return; // stale
+		state.activeProjectProposal.currentConfig = {
+			name: proj.name || "",
+			rootPath: proj.rootPath || proj.root_path || "",
+			config: (config && typeof config === "object") ? config : {},
+		};
+		saveProjectDraft(sessionId);
+		renderApp();
+	} catch { /* ignore */ }
+}
+
 export async function acceptProjectProposal(): Promise<void> {
+	const proposal = state.activeProjectProposal;
+	if (!proposal) return;
+	if (proposal.mode === "registered") {
+		return acceptRegisteredProjectProposal();
+	}
+	return acceptProvisionalProjectProposal();
+}
+
+async function acceptProvisionalProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
 	const { fields, sessionId: propSessionId } = proposal;
@@ -1783,7 +1833,8 @@ export async function acceptProjectProposal(): Promise<void> {
 	// Write config fields
 	const configFields: Record<string, string> = {};
 	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
-		'test_unit_command', 'test_e2e_command', 'worktree_setup_command'];
+		'test_unit_command', 'test_e2e_command', 'worktree_setup_command',
+		'qa_start_command', 'sandbox'];
 	for (const key of CONFIG_KEYS) {
 		if (fields[key]) configFields[key] = fields[key];
 	}
@@ -1828,6 +1879,58 @@ export async function acceptProjectProposal(): Promise<void> {
 	} catch (err) {
 		console.error('[project-proposal] Failed to terminate assistant session:', err);
 	}
+	renderApp();
+}
+
+/** Registered-mode accept: apply diffed config fields to the live project
+ *  without terminating or navigating away. */
+async function acceptRegisteredProjectProposal(): Promise<void> {
+	const proposal = state.activeProjectProposal;
+	if (!proposal) return;
+	const { fields, sessionId: propSessionId, currentConfig } = proposal;
+	const session = state.gatewaySessions.find(s => s.id === propSessionId);
+	const projectId = session?.projectId;
+	if (!projectId) return;
+
+	const { gatewayFetch, fetchProjects } = await import("./api.js");
+	const currentName = currentConfig?.name ?? "";
+	const currentCfg = currentConfig?.config ?? {};
+
+	// 1. Rename via PUT /api/projects/:id if name changed.
+	if (fields.name && fields.name !== currentName) {
+		try {
+			await gatewayFetch(`/api/projects/${projectId}`, {
+				method: "PUT",
+				body: JSON.stringify({ name: fields.name }),
+			});
+		} catch (err) {
+			console.error('[project-proposal] Rename failed:', err);
+		}
+	}
+
+	// 2. Compute config diff — only fields that differ from currentConfig.config.
+	//    root_path never sent. name handled above.
+	const diff: Record<string, string> = {};
+	for (const [k, v] of Object.entries(fields)) {
+		if (k === "name" || k === "root_path") continue;
+		if ((currentCfg[k] ?? "") !== v) diff[k] = v;
+	}
+	if (Object.keys(diff).length > 0) {
+		try {
+			await gatewayFetch(`/api/projects/${projectId}/config`, {
+				method: 'PUT',
+				body: JSON.stringify(diff),
+			});
+		} catch (err) {
+			console.error('[project-proposal] Config write error:', err);
+		}
+	}
+
+	// 3. Refresh projects list; clear proposal; stay connected.
+	try { setProjects(await fetchProjects()); } catch { /* ignore */ }
+	state.activeProjectProposal = undefined;
+	state.assistantHasProposal = false;
+	deleteProjectDraft(propSessionId);
 	renderApp();
 }
 
