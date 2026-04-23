@@ -9,6 +9,44 @@
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { discoverAigwModels } from "./aigw-manager.js";
+import { modelRecencyRank } from "./model-registry.js";
+
+/** Cache for the fallback naming model id, keyed by gateway URL. TTL ~60s. */
+let _fallbackCache: { url: string; modelId: string | null; expiresAt: number } | null = null;
+const FALLBACK_TTL_MS = 60_000;
+
+/**
+ * Pick a low-cost Claude model from the gateway to use as a naming model
+ * when the user has no explicit `default.namingModel`. Prefers Haiku.
+ * Returns the *stripped* id (no provider prefix) suitable for generateViaGateway,
+ * or null if the gateway exposes no Claude-family model.
+ */
+export async function pickFallbackAigwNamingModel(aigwUrl: string): Promise<string | null> {
+	const normalized = aigwUrl.replace(/\/+$/, "");
+	const now = Date.now();
+	if (_fallbackCache && _fallbackCache.url === normalized && _fallbackCache.expiresAt > now) {
+		return _fallbackCache.modelId;
+	}
+	let picked: string | null = null;
+	try {
+		const models = await discoverAigwModels(normalized);
+		const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
+		const claude = models.filter(m => m.id.toLowerCase().includes("claude"));
+		if (claude.length > 0) {
+			// Prefer Haiku (cheapest); else highest-ranked Claude by recency (still cheaper than running reviews on Opus).
+			const haiku = claude.filter(m => m.id.toLowerCase().includes("haiku"));
+			const pool = haiku.length > 0 ? haiku : claude;
+			pool.sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id));
+			picked = stripPrefix(pool[0].id);
+		}
+	} catch (err) {
+		console.warn("[title-gen] pickFallbackAigwNamingModel: discoverAigwModels failed:", err);
+		picked = null;
+	}
+	_fallbackCache = { url: normalized, modelId: picked, expiresAt: now + FALLBACK_TTL_MS };
+	return picked;
+}
 
 const DEFAULT_TITLE_MODEL = "claude-haiku-4-5-20251001";
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
@@ -320,9 +358,20 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
 
-	// Default: direct Anthropic API (works for both public and gateway-less setups).
-	// We don't fall back to the gateway without an explicit naming model because
-	// the gateway may not host the default Haiku model ID.
+	// Gateway configured but no explicit naming model — auto-select a low-cost
+	// Claude model from the gateway (prefer Haiku). This avoids silent failures
+	// in secure-zone deployments that cannot reach api.anthropic.com directly.
+	if (options?.aigwUrl) {
+		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl);
+		if (fallbackId) {
+			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}"`);
+			return generateViaGateway(options.aigwUrl, fallbackId, preview, options.thinkingLevel);
+		}
+		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back to direct Anthropic API");
+	}
+
+	// Default: direct Anthropic API (works for public, gateway-less, and
+	// gateway-but-no-Claude setups).
 	return generateViaAnthropic(preview, options?.thinkingLevel);
 }
 
@@ -484,6 +533,17 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 			return generateGoalSummaryViaGateway(options.aigwUrl, modelId, goalTitle);
 		}
 		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
+	}
+
+	// Gateway configured but no explicit naming model — auto-select a low-cost
+	// Claude model (prefer Haiku) rather than hitting api.anthropic.com.
+	if (options?.aigwUrl) {
+		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl);
+		if (fallbackId) {
+			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}" for goal summary`);
+			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle);
+		}
+		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back to direct Anthropic API");
 	}
 
 	return generateGoalSummaryViaAnthropic(goalTitle);
