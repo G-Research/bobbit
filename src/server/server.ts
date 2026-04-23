@@ -3254,6 +3254,105 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/models/test — send a trivial "Reply with OK" completion to verify
+	// that a default-model preference actually resolves and responds. Used by
+	// the Settings > Models tab per-row Test button.
+	if (url.pathname === "/api/models/test" && req.method === "POST") {
+		const body = await readBody(req);
+		const pref = typeof body?.pref === "string" ? body.pref.trim() : "";
+		if (!pref) {
+			json({ ok: false, error: "Missing 'pref' field" }, 400);
+			return;
+		}
+		const slash = pref.indexOf("/");
+		if (slash <= 0) {
+			json({ ok: false, error: "Malformed pref — expected 'provider/modelId'" }, 400);
+			return;
+		}
+		const provider = pref.slice(0, slash);
+		const modelId = pref.slice(slash + 1);
+		try {
+			const models = await getAvailableModels(preferencesStore);
+			const resolved = models.find((m) => m.provider === provider && m.id === modelId);
+			if (!resolved) {
+				json({
+					ok: false,
+					error: `Model "${pref}" is not in the current available-models list. It may be a stale preference.`,
+				});
+				return;
+			}
+			if (provider !== "aigw") {
+				json({
+					ok: false,
+					modelResolved: resolved.id,
+					error: "Test not supported for this provider yet — only AI Gateway models can be tested from here.",
+				});
+				return;
+			}
+			const aigwUrl = getAigwUrl(preferencesStore);
+			if (!aigwUrl) {
+				json({ ok: false, error: "No AI Gateway configured." });
+				return;
+			}
+			const baseUrl = aigwUrl.replace(/\/+$/, "");
+			const chatUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
+
+			// The aigw registry strips the provider prefix (e.g. "aws/") from Claude
+			// model IDs; reconstruct the full ID by querying the gateway's /v1/models.
+			let sendId = modelId;
+			try {
+				const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+				const r = await fetch(modelsUrl, { signal: AbortSignal.timeout(5000) });
+				if (r.ok) {
+					const data = await r.json() as { data?: Array<{ id: string }> };
+					if (Array.isArray(data.data)) {
+						const exact = data.data.find((m) => m.id === modelId);
+						if (exact) sendId = exact.id;
+						else {
+							const match = data.data.find((m) => {
+								const idx = m.id.indexOf("/");
+								return idx >= 0 && m.id.slice(idx + 1) === modelId;
+							});
+							if (match) sendId = match.id;
+						}
+					}
+				}
+			} catch {
+				/* keep sendId = modelId — gateway will reject if wrong */
+			}
+			const started = Date.now();
+			try {
+				const resp = await fetch(chatUrl, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						model: sendId,
+						max_tokens: 5,
+						messages: [
+							{ role: "user", content: "Reply with OK" },
+						],
+					}),
+					signal: AbortSignal.timeout(15000),
+				});
+				const latencyMs = Date.now() - started;
+				if (!resp.ok) {
+					const errText = (await resp.text().catch(() => "")).slice(0, 300);
+					json({ ok: false, modelResolved: sendId, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
+					return;
+				}
+				// Best-effort parse; we don't require specific text content—just a successful round-trip.
+				await resp.json().catch(() => ({}));
+				json({ ok: true, modelResolved: sendId, latencyMs });
+			} catch (err: any) {
+				const latencyMs = Date.now() - started;
+				json({ ok: false, modelResolved: sendId, latencyMs, error: err?.message || "Request failed" });
+			}
+		} catch (err: any) {
+			json({ ok: false, error: err?.message || "Test failed" }, 500);
+		}
+		return;
+	}
+
 	// Proxy: /api/aigw/v1/* → forward to configured aigw URL
 	if (url.pathname.startsWith("/api/aigw/v1/") && getAigwUrl(preferencesStore)) {
 		const aigwUrl = getAigwUrl(preferencesStore)!;

@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
-import { ArrowLeft, Brain, Plus, RotateCcw, Sparkles, X } from "lucide";
+import { ArrowLeft, Brain, Check, FlaskConical, Loader2, Plus, RotateCcw, Sparkles, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -25,6 +25,7 @@ import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
+import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
 
 type SettingsTab = SettingsTabId;
 const DEFAULT_TAB: SettingsTab = "shortcuts";
@@ -1068,6 +1069,55 @@ let prefNamingThinking = "";
 let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
 let _modelsLoaded = false;
 
+// Per-row Test-button state. Keyed by the pref value ("provider/id").
+// Cached results live ~30s so repeated clicks don't re-hit the gateway.
+type ModelTestResult = { ok: boolean; latencyMs?: number; error?: string; at: number };
+let modelTestResults: Record<string, ModelTestResult> = {};
+let modelTestInFlight: Record<string, boolean> = {};
+const MODEL_TEST_TTL_MS = 30_000;
+
+async function runModelTest(pref: string): Promise<void> {
+	if (!pref) return;
+	if (modelTestInFlight[pref]) return;
+	modelTestInFlight[pref] = true;
+	renderApp();
+	const started = Date.now();
+	try {
+		const res = await gatewayFetch("/api/models/test", {
+			method: "POST",
+			body: JSON.stringify({ pref }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && data?.ok) {
+			modelTestResults[pref] = {
+				ok: true,
+				latencyMs: data.latencyMs ?? Date.now() - started,
+				at: Date.now(),
+			};
+		} else {
+			modelTestResults[pref] = {
+				ok: false,
+				error: data?.error || `HTTP ${res.status}`,
+				at: Date.now(),
+			};
+		}
+	} catch (err: any) {
+		modelTestResults[pref] = { ok: false, error: err?.message || "Request failed", at: Date.now() };
+	}
+	delete modelTestInFlight[pref];
+	renderApp();
+}
+
+function modelIsAvailable(pref: string): boolean {
+	if (!pref) return true;
+	if (allModels.length === 0) return true; // not loaded yet — don't flag as unavailable
+	return allModels.some((m) => `${m.provider}/${m.id}` === pref);
+}
+
+function openAigwModelsDialog(): void {
+	AigwModelsDialog.open(aigwModels);
+}
+
 function loadModelsState(): void {
 	if (_modelsLoaded) return;
 	_modelsLoaded = true;
@@ -1115,6 +1165,13 @@ async function savePref(key: string, value: string | null): Promise<void> {
 			body: JSON.stringify({ [key]: value }),
 		});
 	} catch {}
+}
+
+// Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
+export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string }>): void {
+	if (p.session !== undefined) prefSessionModel = p.session;
+	if (p.review !== undefined) prefReviewModel = p.review;
+	if (p.naming !== undefined) prefNamingModel = p.naming;
 }
 
 async function setSessionModel(value: string): Promise<void> {
@@ -1259,12 +1316,6 @@ async function removeAigwConfig(): Promise<void> {
 	renderApp();
 }
 
-function formatTokens(tokens: number): string {
-	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(0)}M`;
-	if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(0)}K`;
-	return String(tokens);
-}
-
 /** Format a "provider/modelId" pref value for display. Shows just the model ID. */
 function formatModelPref(value: string): string {
 	if (!value) return "Auto (best available)";
@@ -1306,8 +1357,15 @@ function renderModelRow(
 		}
 	}
 
+	// Availability + Test button state
+	const available = modelIsAvailable(modelValue);
+	const showUnavailable = !!modelValue && allModels.length > 0 && !available;
+	const testing = !!modelTestInFlight[modelValue];
+	const cached = modelValue ? modelTestResults[modelValue] : undefined;
+	const testResult = cached && Date.now() - cached.at < MODEL_TEST_TTL_MS ? cached : undefined;
+
 	return html`
-		<div class="flex flex-col gap-1">
+		<div class="flex flex-col gap-1" data-testid="model-row" data-row-label=${label}>
 			<div class="flex items-center gap-2">
 				<span class="text-sm font-medium text-foreground shrink-0 w-14">${label}</span>
 				<div class="flex items-center gap-1.5 rounded-lg border border-input bg-background px-1 py-1 flex-1 min-w-0">
@@ -1323,12 +1381,50 @@ function renderModelRow(
 						<span class="text-muted-foreground shrink-0">${icon(Sparkles, "sm")}</span>
 						<span class="truncate">${modelDisplay}</span>
 					</button>
+					${showUnavailable ? html`
+						<span
+							class="text-[10px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded bg-destructive/15 text-destructive shrink-0"
+							title="This saved preference does not match any currently available model. It may be a stale ID from a previous gateway configuration."
+							data-testid="model-unavailable-badge"
+						>Unavailable</span>
+					` : ""}
 					${modelValue ? html`
 						<button
 							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-							title="Reset model to auto"
-							@click=${() => onModelChange("")}
+							title=${showUnavailable ? "Clear unavailable model" : "Reset model to auto"}
+							data-testid="model-clear-btn"
+							@click=${() => {
+								delete modelTestResults[modelValue];
+								onModelChange("");
+							}}
 						>${icon(X, "xs")}</button>
+					` : ""}
+					<!-- Test button -->
+					${modelValue ? html`
+						<button
+							class="p-1 rounded-md shrink-0 transition-colors focus:outline-none focus:ring-2 focus:ring-ring
+								${testResult?.ok ? "text-green-600 hover:bg-green-500/10" : ""}
+								${testResult && !testResult.ok ? "text-destructive hover:bg-destructive/10" : ""}
+								${!testResult ? "text-muted-foreground hover:text-foreground hover:bg-secondary" : ""}"
+							title=${testing
+								? "Testing…"
+								: testResult?.ok
+									? `OK (${testResult.latencyMs ?? 0}ms)`
+									: testResult?.error
+										? `Failed: ${testResult.error}`
+										: "Send a 'Reply with OK' test prompt to this model"}
+							data-testid="model-test-btn"
+							?disabled=${testing || showUnavailable}
+							@click=${() => runModelTest(modelValue)}
+						>
+							${testing
+								? html`<span class="inline-flex animate-spin">${icon(Loader2, "xs")}</span>`
+								: testResult?.ok
+									? icon(Check, "xs")
+									: testResult && !testResult.ok
+										? icon(X, "xs")
+										: icon(FlaskConical, "xs")}
+						</button>
 					` : ""}
 					<!-- Divider -->
 					<div class="w-px h-5 bg-border shrink-0"></div>
@@ -1353,53 +1449,60 @@ function renderModelRow(
 					</div>
 				</div>
 			</div>
+			${testResult && !testing ? html`
+				<p class="text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}" data-testid="model-test-result">
+					${testResult.ok
+						? `Test OK${testResult.latencyMs != null ? ` (${testResult.latencyMs}ms)` : ""}`
+						: `Test failed: ${testResult.error}`}
+				</p>
+			` : ""}
+			${showUnavailable ? html`
+				<p class="text-xs text-destructive">
+					This model is not in the current available-models list. Clear it or pick another.
+				</p>
+			` : ""}
 			<p class="text-xs text-muted-foreground">${hint}</p>
 		</div>
 	`;
 }
 
-function renderModelsTab() {
+// Exported for fixture tests (tests/settings-models-tab-redesign.spec.ts).
+export function __testResetModelsTab(opts: {
+	aigwConfigured?: boolean;
+	aigwUrl?: string;
+	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }>;
+	allModels?: Array<{ id: string; provider: string; reasoning: boolean }>;
+	prefSessionModel?: string;
+	prefReviewModel?: string;
+	prefNamingModel?: string;
+} = {}): void {
+	_modelsLoaded = true; // skip the fetcher
+	aigwConfigured = opts.aigwConfigured ?? false;
+	aigwConfiguredUrl = opts.aigwUrl ?? "";
+	aigwUrl = opts.aigwUrl ?? "";
+	aigwModels = opts.aigwModels ?? [];
+	allModels = opts.allModels ?? [];
+	prefSessionModel = opts.prefSessionModel ?? "";
+	prefReviewModel = opts.prefReviewModel ?? "";
+	prefNamingModel = opts.prefNamingModel ?? "";
+	prefSessionThinking = "";
+	prefReviewThinking = "";
+	prefNamingThinking = "";
+	modelTestResults = {};
+	modelTestInFlight = {};
+}
+
+export function renderModelsTab() {
 	loadModelsState();
 
 	const busy = aigwStatus !== "idle";
 	const hasModels = aigwModels.length > 0;
 
 	return html`
-		<div class="flex flex-col gap-6">
-
-			<!-- Default model preferences -->
-			<div class="flex flex-col gap-4">
-				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
-				${renderModelRow(
-					"Session",
-					"Model and thinking level for new sessions.",
-					prefSessionModel,
-					setSessionModel,
-					prefSessionThinking,
-					setSessionThinking,
-				)}
-				${renderModelRow(
-					"Review",
-					"Model and thinking for automated gate verification reviews.",
-					prefReviewModel,
-					setReviewModel,
-					prefReviewThinking,
-					setReviewThinking,
-					"off",
-				)}
-				${renderModelRow(
-					"Naming",
-					"Lightweight model for auto-generating session titles. Best with a fast, cheap model.",
-					prefNamingModel,
-					setNamingModel,
-					prefNamingThinking,
-					setNamingThinking,
-					"off",
-				)}
-			</div>
+		<div class="flex flex-col gap-6" data-testid="models-tab">
 
 			<!-- AI Gateway section -->
-			<div class="flex flex-col gap-4 pt-4 border-t border-border">
+			<div class="flex flex-col gap-4" data-testid="aigw-section">
 				<h3 class="text-sm font-semibold text-foreground">AI Gateway</h3>
 				<p class="text-sm text-muted-foreground">
 					Connect to an AI Gateway for on-prem LLM access through a single
@@ -1488,26 +1591,44 @@ function renderModelsTab() {
 					` : ""}
 				</div>
 
-				<!-- Available models list -->
+			</div>
+
+			<!-- Default model preferences -->
+			<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="defaults-section">
+				<h3 class="text-sm font-semibold text-foreground">Default Models</h3>
+				${renderModelRow(
+					"Session",
+					"Model and thinking level for new sessions.",
+					prefSessionModel,
+					setSessionModel,
+					prefSessionThinking,
+					setSessionThinking,
+				)}
+				${renderModelRow(
+					"Review",
+					"Model and thinking for automated gate verification reviews.",
+					prefReviewModel,
+					setReviewModel,
+					prefReviewThinking,
+					setReviewThinking,
+					"off",
+				)}
+				${renderModelRow(
+					"Naming",
+					"Lightweight model for auto-generating session titles. If unset under an AI Gateway, Bobbit picks the cheapest Claude model automatically.",
+					prefNamingModel,
+					setNamingModel,
+					prefNamingThinking,
+					setNamingThinking,
+					"off",
+				)}
 				${hasModels ? html`
-					<div class="flex flex-col gap-2 mt-1">
-						<h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-							Available Models (${aigwModels.length})
-						</h4>
-						<div class="border border-border rounded-md divide-y divide-border max-h-60 overflow-y-auto">
-							${aigwModels.map((m: any) => html`
-								<div class="px-3 py-1.5 flex items-center justify-between">
-									<div class="flex flex-col gap-0 min-w-0">
-										<span class="text-sm text-foreground truncate">${m.name}</span>
-										<span class="text-[11px] text-muted-foreground font-mono">${m.id}</span>
-									</div>
-									<div class="flex items-center gap-2 text-xs text-muted-foreground shrink-0 ml-2">
-										${m.reasoning ? html`<span class="px-1.5 py-0.5 rounded bg-secondary">Reasoning</span>` : ""}
-										<span>${formatTokens(m.contextWindow)} ctx</span>
-									</div>
-								</div>
-							`)}
-						</div>
+					<div>
+						<button
+							class="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+							data-testid="view-aigw-models-btn"
+							@click=${openAigwModelsDialog}
+						>View available models… (${aigwModels.length})</button>
 					</div>
 				` : ""}
 			</div>
