@@ -243,6 +243,22 @@ The helper implementing this is `resolveProjectForRequest` in `src/server/agent/
 | `GET` | `/api/preferences` | Get all preferences |
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
 
+### Models
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
+| `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
+
+`POST /api/models/test` responses:
+
+- `200 { ok: true, modelResolved, latencyMs }` — success.
+- `400 { ok: false, error: "Malformed pref" }` — pref could not be parsed as `provider/modelId`.
+- `404 { ok: false, error: "Model \"...\" is not in the current available-models list..." }` — pref does not resolve against `/api/models`.
+- `422 { ok: false, error: "Test not supported for this provider yet..." }` — non-aigw providers are not probed.
+
+Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debug a review or naming model picking the wrong model under AI Gateway](../AGENTS.md).
+
 ### AI Gateway
 
 | Method | Path | Description |
