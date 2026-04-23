@@ -167,7 +167,7 @@ test.describe("Abort status E2E", () => {
 
 			// Give drain a brief window to dispatch the re-armed steer and for
 			// the mock agent to emit the resulting user message_end.
-			await conn.waitForFrom(
+			const userMsgIdx = await conn.waitForFrom(
 				cursor,
 				(m) =>
 					m.type === "event" &&
@@ -175,7 +175,17 @@ test.describe("Abort status E2E", () => {
 					m.data?.message?.role === "user" &&
 					m.data?.message?.content?.[0]?.text === "S_DIRECT",
 				8_000,
-			).catch(() => { /* handled below */ });
+			).then(() => conn.messageCount()).catch(() => -1);
+
+			// Wait for the agent to complete its turn in response to the redelivered
+			// steer (the assertion below keys on this follow-up agent_end).
+			if (userMsgIdx > 0) {
+				await conn.waitForFrom(
+					userMsgIdx,
+					(m) => m.type === "event" && m.data?.type === "agent_end",
+					8_000,
+				).catch(() => { /* handled below */ });
+			}
 
 			// Collect the event stream post-cursor and find the abort-induced
 			// agent_end + any subsequent user message_end carrying "S_DIRECT".
@@ -217,6 +227,99 @@ test.describe("Abort status E2E", () => {
 				laterAgentEnds.length,
 				"PI-25b: expected the agent to run a new turn in response to the redelivered steer",
 			).toBeGreaterThanOrEqual(1);
+		} finally {
+			conn.close();
+		}
+	});
+
+	test("PI-25c: live-steer + followup during aborting window preserves order", async () => {
+		// Acceptance criterion #2: if the user sends a follow-up prompt after
+		// Stop but before the steer drains, both messages appear in chronological
+		// order — the steered one first (it was in-flight when abort arrived) —
+		// and the agent processes both.
+		sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+
+		try {
+			await conn.waitFor((m) => m.type === "queue_update");
+
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 long running task" });
+			await conn.waitFor(statusPredicate("streaming"));
+
+			const cursor = conn.messageCount();
+
+			// Live-steer, then abort, then follow-up while aborting.
+			conn.send({ type: "steer", text: "S_DIRECT" });
+			conn.send({ type: "abort" });
+			// Follow-up during the aborting window. `enqueuePrompt` will see
+			// status=="aborting" (not idle) and enqueue behind the steered row.
+			conn.send({ type: "prompt", text: "FOLLOWUP" });
+
+			// Wait for both user turns to be observed, then for both agent_ends.
+			await conn.waitForFrom(
+				cursor,
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					m.data?.message?.content?.[0]?.text === "S_DIRECT",
+				10_000,
+			);
+
+			await conn.waitForFrom(
+				cursor,
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					m.data?.message?.content?.[0]?.text === "FOLLOWUP",
+				10_000,
+			);
+
+			// Inspect the ordering: we expect, after `cursor`:
+			//   agent_end (abort)
+			//   -> user message_end "S_DIRECT"
+			//   -> agent_end (steer turn)
+			//   -> user message_end "FOLLOWUP"
+			//   -> agent_end (followup turn)
+			const post = conn.messages.slice(cursor);
+			const directIdx = post.findIndex(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					m.data?.message?.content?.[0]?.text === "S_DIRECT",
+			);
+			const followupIdx = post.findIndex(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					m.data?.message?.content?.[0]?.text === "FOLLOWUP",
+			);
+
+			expect(directIdx).toBeGreaterThanOrEqual(0);
+			expect(followupIdx).toBeGreaterThanOrEqual(0);
+			expect(
+				directIdx,
+				"PI-25c: S_DIRECT must be processed before FOLLOWUP (steered messages drain first)",
+			).toBeLessThan(followupIdx);
+
+			// At least one agent_end between the two user turns (the steer's turn).
+			const agentEndsBetween = post
+				.slice(directIdx + 1, followupIdx)
+				.filter((m) => m.type === "event" && m.data?.type === "agent_end");
+			expect(
+				agentEndsBetween.length,
+				"PI-25c: agent must complete a turn on S_DIRECT before FOLLOWUP is dispatched",
+			).toBeGreaterThanOrEqual(1);
+
+			// And an agent_end after FOLLOWUP so both turns complete.
+			await conn.waitForFrom(
+				cursor + followupIdx,
+				(m) => m.type === "event" && m.data?.type === "agent_end",
+				10_000,
+			);
 		} finally {
 			conn.close();
 		}
