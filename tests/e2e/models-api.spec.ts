@@ -103,8 +103,12 @@ test.describe("GET /api/models with AI Gateway", () => {
 			res.end(JSON.stringify(NEW_MODELS));
 		});
 
-		// Wait for the cache TTL to expire (5 seconds)
-		await new Promise(r => setTimeout(r, 5500));
+		// Trigger a refresh — this is what the Settings UI does, and the
+		// server invalidates its model cache on refresh so the next
+		// /api/models response reflects reality immediately (no 5s TTL
+		// wait needed, both in tests and for real users).
+		const refreshRes = await apiFetch("/api/aigw/refresh", { method: "POST" });
+		expect(refreshRes.status).toBe(200);
 
 		// Second call — should pick up the new model
 		const res2 = await apiFetch("/api/models");
