@@ -21,6 +21,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `get_messages` | — | Request full message history |
 | `set_title` | `title` | Set session title |
 | `generate_title` | — | Auto-generate title from conversation |
+| `resume` | `fromSeq` | Resume streaming after a reconnect — server replays only events with `seq > fromSeq` (see [Streaming resume](#streaming-resume)) |
 | `ping` | — | Keepalive ping |
 | `task_create` | `goalId`, `title`, `taskType`, `parentTaskId?`, `spec?`, `dependsOn?` | Create a task |
 | `task_update` | `taskId`, `updates` | Update a task (title, spec, state, assignment, deps) |
@@ -35,7 +36,8 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `auth_failed` | — | Authentication failed |
 | `state` | `data` | Current agent state snapshot |
 | `messages` | `data` | Full message history array |
-| `event` | `data` | Streaming agent event (message_start, content_delta, tool calls, etc.) |
+| `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
+| `resume_gap` | `lastSeq` | Server's reply to a `resume` whose `fromSeq` is older than the retained EventBuffer window. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
 | `client_joined` | `clientId` | Another client connected |
@@ -67,6 +69,10 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
 | `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |
+
+### Streaming resume
+
+Every `event` broadcast carries a server-assigned monotonic `seq` (per session, starting at 1) and wall-clock `ts`. The client tracks the highest `seq` it has seen and, on WebSocket reopen, sends `{ type: "resume", fromSeq: <highest> }` so the server replays only the tail it missed. If `fromSeq` is older than the oldest entry retained in the session's EventBuffer ring, the server replies `{ type: "resume_gap", lastSeq }` — the client then fetches a full snapshot via `get_messages` and resets its counter to `lastSeq`. This eliminates the duplicate/out-of-order frames that could appear during mid-stream reconnects. See [docs/internals.md — Event stream ordering & dedup](internals.md#event-stream-ordering--dedup) and [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
 
 ### Search index events
 

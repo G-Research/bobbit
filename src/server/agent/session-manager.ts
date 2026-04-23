@@ -151,6 +151,17 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	}
 }
 
+/** Push a raw event into the session's EventBuffer (assigning seq/ts) and
+ *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
+ *  This is the single emit path for live agent events — every call site that
+ *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
+ *  must route through here so envelope fields stay consistent.
+ *  See docs/design/streaming-dedup-reorder.md §4.2. */
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer }, truncated: unknown): void {
+	const entry = session.eventBuffer.push(truncated);
+	broadcast(session.clients, { type: "event", data: truncated, seq: entry.seq, ts: entry.ts });
+}
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -2146,8 +2157,7 @@ export class SessionManager {
 			this.handleAgentLifecycle(session, event);
 
 			const truncated = truncateLargeToolContent(event);
-			eventBuffer.push(truncated);
-			broadcast(session.clients, { type: "event", data: truncated });
+			emitSessionEvent(session, truncated);
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
@@ -2739,8 +2749,7 @@ export class SessionManager {
 			session.lastActivity = Date.now();
 			this.handleAgentLifecycle(session, event);
 			const truncated = truncateLargeToolContent(event);
-			eventBuffer.push(truncated);
-			broadcast(session.clients, { type: "event", data: truncated });
+			emitSessionEvent(session, truncated);
 			this.trackCostFromEvent(session, event);
 		});
 		session.unsubscribe = unsub;
@@ -3078,8 +3087,7 @@ export class SessionManager {
 			roleStore.update(id, { lastActivity: session.lastActivity });
 			this.handleAgentLifecycle(session, event);
 			const truncated = truncateLargeToolContent(event);
-			session.eventBuffer.push(truncated);
-			broadcast(session.clients, { type: "event", data: truncated });
+			emitSessionEvent(session, truncated);
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -3233,8 +3241,7 @@ export class SessionManager {
 			persoStore.update(id, { lastActivity: session.lastActivity });
 			this.handleAgentLifecycle(session, event);
 			const truncated = truncateLargeToolContent(event);
-			session.eventBuffer.push(truncated);
-			broadcast(session.clients, { type: "event", data: truncated });
+			emitSessionEvent(session, truncated);
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -4093,8 +4100,7 @@ export class SessionManager {
 				this.handleAgentLifecycle(session, event);
 
 				const truncated = truncateLargeToolContent(event);
-				session.eventBuffer.push(truncated);
-				broadcast(session.clients, { type: "event", data: truncated });
+				emitSessionEvent(session, truncated);
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 

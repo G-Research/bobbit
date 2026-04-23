@@ -14,6 +14,7 @@ import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
+import { emitSessionEvent } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -417,8 +418,7 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
 		ctx.handleAgentLifecycle(session, event);
 		const truncated = truncateLargeToolContent(event);
-		session.eventBuffer.push(truncated);
-		ctx.broadcast(session.clients, { type: "event", data: truncated });
+		emitSessionEvent(session, truncated);
 		ctx.trackCostFromEvent(session, event);
 	});
 }

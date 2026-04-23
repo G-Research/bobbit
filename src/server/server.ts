@@ -1438,6 +1438,39 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/internal/test/replay-buffered-events/:sessionId — BOBBIT_E2E-only hook
+	// used by ST-DEDUP-01 to reproduce live-streaming duplication. Iterates the
+	// session's EventBuffer and re-broadcasts each buffered entry on the SAME
+	// wire path production uses, so when the fix adds `seq`/`ts` to the
+	// broadcast envelope the endpoint will naturally carry them too (because it
+	// inspects the buffer's stored entries — which upgrade from raw events to
+	// {seq,ts,event} tuples post-fix). Pre-fix: clients receive duplicate
+	// events and dupe-append assistant/toolResult messages. Post-fix: clients
+	// dedupe by seq and the message list stays stable.
+	const replayMatch = url.pathname.match(/^\/api\/internal\/test\/replay-buffered-events\/([^/]+)$/);
+	if (replayMatch && req.method === "POST") {
+		if (process.env.BOBBIT_E2E !== "1") { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
+		const sessionId = replayMatch[1];
+		const session = sessionManager.getSession(sessionId);
+		if (!session) { json({ error: "session not found" }, 404); return; }
+		const entries = session.eventBuffer.getAll() as any[];
+		let replayed = 0;
+		for (const entry of entries) {
+			// Accept both raw-event shape (pre-fix) and {seq,ts,event} (post-fix).
+			const isWrapped = entry && typeof entry === "object" && "event" in entry && ("seq" in entry || "ts" in entry);
+			const framePayload = isWrapped
+				? { type: "event" as const, data: entry.event, seq: entry.seq, ts: entry.ts }
+				: { type: "event" as const, data: entry };
+			const data = JSON.stringify(framePayload);
+			for (const client of session.clients) {
+				if ((client as any).readyState === 1) (client as any).send(data);
+			}
+			replayed++;
+		}
+		json({ replayed, bufferSize: session.eventBuffer.size });
+		return;
+	}
+
 	// GET /api/setup-status — check if project setup has been completed
 	if (url.pathname === "/api/setup-status" && req.method === "GET") {
 		json({ complete: isSetupComplete() });

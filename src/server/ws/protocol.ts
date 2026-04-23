@@ -38,7 +38,8 @@ export type ClientMessage =
 	| { type: "grant_tool_permission"; toolName: string; scope: "tool" | "group"; group?: string; mode?: "persistent" | "session-only" | "one-time" }
 	| { type: "deny_tool_permission"; toolName: string }
 	| { type: "reorder_queue"; messageIds: string[] }
-	| { type: "restart_agent" };
+	| { type: "restart_agent" }
+	| { type: "resume"; fromSeq: number };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
@@ -46,7 +47,8 @@ export type ServerMessage =
 	| { type: "auth_failed" }
 	| { type: "state"; data: unknown }
 	| { type: "messages"; data: unknown[] }
-	| { type: "event"; data: unknown }
+	| { type: "event"; data: unknown; seq?: number; ts?: number }
+	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }
 	| { type: "client_left"; clientId: string }
 	| { type: "error"; message: string; code: string }

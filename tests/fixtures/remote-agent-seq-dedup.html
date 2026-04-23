@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head><title>RemoteAgent seq-dedup tests</title></head>
+<body>
+<script>
+/**
+ * Minimal reimplementation of RemoteAgent's seq-based dedup + ordering reducer
+ * (see src/app/remote-agent.ts `case "event"` handler) so we can drive it with
+ * synthetic WS frames without booting the full RemoteAgent (which pulls in
+ * state.ts, pi-ai, the review pane, etc.). The behavior here mirrors the real
+ * implementation line-for-line; if the production reducer diverges these tests
+ * should be updated to match.
+ */
+class FakeRemoteAgent {
+	constructor() {
+		this._highestSeq = 0;
+		this._seqInitialized = false;
+		this._pendingEvents = [];
+		this._inResumeFallback = false;
+		this._dispatched = [];      // observed event order
+		this._messages = [];        // simulated message list
+		this._sent = [];            // outbound WS frames
+	}
+
+	// Simulated dispatcher — mirrors `handleAgentEvent`'s effect for the
+	// scenarios we care about (message_end → append by id, dedup by id).
+	handleAgentEvent(data) {
+		this._dispatched.push(data);
+		if (data && data.type === "message_end" && data.message) {
+			const id = data.message.id;
+			if (!this._messages.some(m => m.id === id)) {
+				this._messages.push(data.message);
+			}
+		}
+	}
+
+	send(msg) { this._sent.push(msg); }
+
+	// Mirrors the production `case "event"` in handleServerMessage.
+	handleServerMessage(msg) {
+		if (msg.type !== "event") return;
+		const seq = typeof msg.seq === "number" ? msg.seq : undefined;
+		if (seq === undefined) { this.handleAgentEvent(msg.data); return; }
+		if (!this._seqInitialized) {
+			this._highestSeq = seq - 1;
+			this._seqInitialized = true;
+		}
+		if (seq <= this._highestSeq) return; // duplicate
+		if (seq !== this._highestSeq + 1) {
+			this._pendingEvents.push({ seq, ts: msg.ts, data: msg.data });
+			this._pendingEvents.sort((a, b) => a.seq - b.seq);
+			this._drainOrderedEvents();
+			return;
+		}
+		this._highestSeq = seq;
+		this.handleAgentEvent(msg.data);
+		this._drainOrderedEvents();
+	}
+
+	_drainOrderedEvents() {
+		while (this._pendingEvents.length > 0 && this._pendingEvents[0].seq === this._highestSeq + 1) {
+			const next = this._pendingEvents.shift();
+			this._highestSeq = next.seq;
+			this.handleAgentEvent(next.data);
+		}
+		while (this._pendingEvents.length > 0 && this._pendingEvents[0].seq <= this._highestSeq) {
+			this._pendingEvents.shift();
+		}
+	}
+
+	// Mirrors the reconnect path in `_connectWs` → onopen → auth_ok handler.
+	onReconnect() {
+		if (this._highestSeq > 0) {
+			this.send({ type: "resume", fromSeq: this._highestSeq });
+		} else {
+			this.send({ type: "get_messages" });
+		}
+		this.send({ type: "get_state" });
+	}
+}
+
+const results = [];
+function t(name, fn) {
+	try { fn(); results.push({ name, passed: true }); }
+	catch (e) { results.push({ name, passed: false, error: String(e && e.message || e) }); }
+}
+function assertEq(a, b, msg) {
+	const ja = JSON.stringify(a), jb = JSON.stringify(b);
+	if (ja !== jb) throw new Error((msg || "assertEq") + `: expected ${jb}, got ${ja}`);
+}
+
+// 1. Deliver seq:1 (message_end). Deliver seq:1 AGAIN → no duplicate message.
+t("duplicate seq is dropped", () => {
+	const a = new FakeRemoteAgent();
+	const frame = { type: "event", seq: 1, ts: 100, data: { type: "message_end", message: { id: "m1", role: "assistant", content: "hi" } } };
+	a.handleServerMessage(frame);
+	a.handleServerMessage(frame); // duplicate
+	assertEq(a._messages.length, 1, "messages count");
+	assertEq(a._dispatched.length, 1, "dispatched count");
+	assertEq(a._highestSeq, 1, "highestSeq");
+});
+
+// 2. Deliver seq:3 before seq:2 → neither fires. Deliver seq:2 → both dispatch in order.
+t("out-of-order events buffer until gap fills", () => {
+	const a = new FakeRemoteAgent();
+	const mk = (seq, id) => ({ type: "event", seq, ts: seq * 10, data: { type: "message_end", message: { id, role: "assistant", content: String(seq) } } });
+	// First frame initializes the seq baseline; dispatch seq:1 to establish it.
+	a.handleServerMessage(mk(1, "m1"));
+	assertEq(a._messages.map(m => m.id), ["m1"], "m1 dispatched");
+	a.handleServerMessage(mk(3, "m3"));
+	assertEq(a._dispatched.length, 1, "seq 3 buffered while waiting for seq 2");
+	a.handleServerMessage(mk(2, "m2"));
+	assertEq(a._dispatched.length, 3, "both 2 and 3 dispatched once gap fills");
+	assertEq(a._messages.map(m => m.id), ["m1", "m2", "m3"], "order preserved");
+	assertEq(a._highestSeq, 3, "highestSeq advanced");
+});
+
+// 3. On WS reopen with _highestSeq > 0, client sends {type:"resume", fromSeq}.
+t("reconnect sends resume when highestSeq > 0", () => {
+	const a = new FakeRemoteAgent();
+	a.handleServerMessage({ type: "event", seq: 1, ts: 10, data: { type: "noop" } });
+	a.handleServerMessage({ type: "event", seq: 2, ts: 20, data: { type: "noop" } });
+	a._sent = [];
+	a.onReconnect();
+	assertEq(a._sent[0], { type: "resume", fromSeq: 2 }, "first frame is resume");
+	assertEq(a._sent[1], { type: "get_state" }, "then get_state");
+});
+
+// 4. Reconnect with no events seen → fall back to get_messages.
+t("reconnect falls back to get_messages when highestSeq === 0", () => {
+	const a = new FakeRemoteAgent();
+	a.onReconnect();
+	assertEq(a._sent[0], { type: "get_messages" }, "first frame is get_messages");
+	assertEq(a._sent[1], { type: "get_state" }, "then get_state");
+});
+
+// 5. Compat fallback: frame without seq is dispatched as today.
+t("frame without seq is dispatched (compat)", () => {
+	const a = new FakeRemoteAgent();
+	a.handleServerMessage({ type: "event", data: { type: "message_end", message: { id: "x", role: "assistant", content: "hi" } } });
+	assertEq(a._dispatched.length, 1);
+	assertEq(a._highestSeq, 0, "highestSeq unchanged when seq missing");
+});
+
+// 6. A burst of duplicates (replay of entire buffer) does not dupe any message.
+t("full buffer replay is fully deduped", () => {
+	const a = new FakeRemoteAgent();
+	const frames = [1, 2, 3, 4, 5].map(seq => ({
+		type: "event", seq, ts: seq * 10,
+		data: { type: "message_end", message: { id: "m" + seq, role: "assistant", content: String(seq) } },
+	}));
+	for (const f of frames) a.handleServerMessage(f);
+	assertEq(a._messages.length, 5, "initial count");
+	// Replay identical buffer
+	for (const f of frames) a.handleServerMessage(f);
+	assertEq(a._messages.length, 5, "after replay: still 5");
+	assertEq(a._highestSeq, 5);
+});
+
+window.__TEST_RESULTS = results;
+</script>
+</body>
+</html>
