@@ -1075,6 +1075,16 @@ export class SessionManager {
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(sessionId);
+		// Persist the live-steer text in promptQueue as {isSteered, dispatched}
+		// so it survives abort. The SDK parks the steer until the next tool
+		// boundary and discards it if the turn is aborted; without a server-side
+		// record the text would be silently lost. The happy path cleans up via
+		// the `message_end(user)` → removeDispatched() hook in handleAgentLifecycle.
+		// On abort, the agent_end handler re-arms non-flushed steered rows so
+		// drainQueue redelivers them. See goal "Fix steer-lost-on-abort bug".
+		const queued = session.promptQueue.enqueue(message, { isSteered: true });
+		session.promptQueue.markDispatched(queued.id);
+		this.broadcastQueue(session);
 		return session.rpcClient.steer(message);
 	}
 
@@ -1203,13 +1213,15 @@ export class SessionManager {
 		if (event.type === "tool_execution_start") {
 			session.turnHadToolCalls = true;
 
-			// Enforce allowedTools — warn when a disallowed tool is used (case-insensitive)
+			// Enforce allowedTools — log when a disallowed tool slips past the guard
+			// extension. This is a last-resort observability signal; actual blocking
+			// happens in the tool_call guard (see tool-guard-extension.ts). If we see
+			// this log line the guard is misconfigured or missing for this session.
 			if (session.allowedTools && session.allowedTools.length > 0 && event.toolName) {
 				const toolLower = event.toolName.toLowerCase();
 				if (!session.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
-					console.warn(
-						`[session-manager] Session ${session.id} used disallowed tool "${event.toolName}". ` +
-						`Allowed: [${session.allowedTools.join(", ")}]`
+					console.error(
+						`[session-manager] Session ${session.id} executed disallowed tool "${event.toolName}" — guard extension did not block it.`
 					);
 				}
 			}
@@ -1260,6 +1272,22 @@ export class SessionManager {
 			// but if steers arrive after the last tool call or during a non-tool
 			// turn, they would otherwise be lost. This is the safety net.
 			this._dispatchSteeredMessages(session);
+
+			// If this agent_end is the result of an abort, re-arm any steered
+			// rows still flagged dispatched. Those are live-steers (or batched
+			// steers) the SDK parked and then discarded when the turn was torn
+			// down. Any successfully-delivered steer has already been removed
+			// via the message_end(user) → removeDispatched() hook above, so
+			// whatever remains is genuinely undelivered. drainQueue below will
+			// redispatch them (steered first, then normal) once the session is
+			// idle. Edge case: if the SDK delivered the steer to the transcript
+			// but the unsubscribe raced and we missed the message_end, we may
+			// redeliver once — at-least-once is preferred over lost user text.
+			const wasAborting = session.status === "aborting";
+			if (wasAborting) {
+				session.promptQueue.resetDispatched();
+				this.broadcastQueue(session);
+			}
 
 			session.status = "idle";
 			session.streamingStartedAt = undefined;

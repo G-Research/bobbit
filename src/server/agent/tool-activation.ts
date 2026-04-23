@@ -311,9 +311,10 @@ export function writeToolGuardExtension(
 ): string | undefined {
 	const policies = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore);
 
-	// Check if any tools have 'ask' policy
-	const hasAskTools = Object.values(policies).some(p => p.policy === 'ask');
-	if (!hasAskTools) return undefined;
+	// Generate the guard if any tool needs interception — 'ask' (long-poll for
+	// user grant) or 'never' (hard-block). 'allow' tools don't need the guard.
+	const hasGuardedTools = Object.values(policies).some(p => p.policy === 'ask' || p.policy === 'never');
+	if (!hasGuardedTools) return undefined;
 
 	// Generate the guard extension source
 	const code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);

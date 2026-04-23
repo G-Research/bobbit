@@ -656,7 +656,55 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 **Coverage:** tests/queue-dispatch.spec.ts
 
-> **Implementation note:** `steerQueued()` dispatches steered messages immediately via `rpcClient.steer()` when the agent is streaming (PI-10 fix). All steered+undispatched messages are batched and sent together. If the agent is idle, steered messages reorder in the queue and dispatch via `drainQueue()` after `agent_end` or abort+restart.
+> **Implementation note:** There are two distinct steer paths, and PI-25 covers only the first:
+>
+> 1. **`steer_queued` (queued-pill promotion)** — the user already enqueued a plain message and then clicks the "Steer" button on its pill. The WS `{type:"steer_queued", id}` message reorders the row to the steered-batch slot, flips `isSteered: true`, and if the agent is mid-turn dispatches the whole steered batch via `_dispatchSteeredMessages()` → `rpcClient.steer()`. Because the row already lives in `promptQueue`, it survives abort naturally and `drainQueue()` picks it up on the next `idle`.
+> 2. **`steer` (direct live-steer)** — the user types into the textarea while the agent is streaming and presses the live-steer affordance. The WS `{type:"steer", text}` message goes through `SessionManager.deliverLiveSteer()`, which **first persists** the text into `promptQueue` as `{ isSteered: true, dispatched: true }` and then forwards it to `rpcClient.steer()`. This persistence is what guarantees PI-25b/PI-25c below — without it, a mid-turn abort would silently discard the parked steer. See AGENTS.md → Debugging for the invariant.
+>
+> In both paths, if the agent is idle the message is reordered to the steered slot and dispatched normally via `drainQueue()`.
+
+---
+
+## PI-25b: Live-steer survives abort
+
+**Preconditions:** Active session with a connected agent.
+
+**Steps and expectations:**
+1. Ask the agent to run a long command (e.g. `bash sleep 60`).
+   - Agent begins streaming. Stop button appears.
+2. While the agent is mid-tool-call, type "S_DIRECT" in the textarea and press the live-steer affordance (WS `{type:"steer", text:"S_DIRECT"}`).
+   - A steered pill for "S_DIRECT" appears in the queue area with `dispatched` styling.
+   - The SDK parks the text internally, waiting for the next tool boundary.
+3. Before the tool finishes, click Stop (or press Escape).
+   - Session transitions to `aborting`. The "S_DIRECT" pill remains visible during the grace window so the user is never left wondering where their message went.
+   - The SDK discards its parked copy of the steer as the turn is torn down.
+4. After the abort-induced `agent_end` fires:
+   - `forceAbort` (and the `agent_end` path when `status === "aborting"`) calls `promptQueue.resetDispatched()`, re-arming the steered row.
+   - `drainQueue()` picks it up and delivers it as a fresh user turn.
+   - A user `message_end` with text "S_DIRECT" is emitted **after** the abort's `agent_end`, and the agent begins a new turn responding to it — without the user having to resend.
+
+**Coverage:** `tests/e2e/abort-status-e2e.spec.ts` — "PI-25b: live-steer (direct) survives abort and is delivered as next user turn".
+
+> **Contrast with PI-25:** PI-25 covers the `steer_queued` promotion path, where the message was already in `promptQueue` before the user asked to steer it. PI-25b covers the direct `{type:"steer", text}` WS path where the server must itself insert the row into `promptQueue` (inside `deliverLiveSteer`) for abort-resilience.
+
+---
+
+## PI-25c: Live-steer + followup ordering during aborting window
+
+**Preconditions:** Active session, agent streaming.
+
+**Steps and expectations:**
+1. Kick off a long tool call as in PI-25b. Agent is streaming.
+2. Send a live-steer "S_DIRECT" (WS `{type:"steer", text:"S_DIRECT"}`).
+3. Click Stop. Session transitions to `aborting`.
+4. While status is still `aborting` (grace window not yet elapsed), send a plain followup "FOLLOWUP" (WS `{type:"prompt", text:"FOLLOWUP"}`).
+   - Both pills are visible in the queue in chronological order: S_DIRECT (steered slot) then FOLLOWUP (normal slot).
+5. After abort completes and the session reaches `idle`:
+   - `drainQueue()` dispatches the steered batch first, then the normal queue.
+   - Observed order in the transcript: user `message_end` "S_DIRECT" → agent turn → user `message_end` "FOLLOWUP" → agent turn.
+6. All pills are consumed. Textarea is ready for new input.
+
+**Coverage:** `tests/e2e/abort-status-e2e.spec.ts` — "PI-25c: live-steer + followup during aborting window preserves order".
 
 ---
 

@@ -46,3 +46,5 @@ tests/fixtures/bash-renderer-bundle.js
 tests/fixtures/bash-renderer-bundle.css
 tests/fixtures/settings-models-tab-bundle.js
 tests/fixtures/settings-models-tab-bundle.css
+tests/fixtures/preview-renderer-bundle.js
+tests/fixtures/preview-renderer-bundle.css

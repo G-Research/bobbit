@@ -108,6 +108,15 @@ export class MockAgentCore {
 			};
 		}
 
+		// Preview snapshot trigger for tests — must precede review_open matching
+		// (the substring "review_open" occurs inside "preview_open").
+		const previewMatch = text.match(/PREVIEW_OPEN_SNAPSHOT\s+SIZE=(\d+)/);
+		if (previewMatch) {
+			const size = Math.max(1, parseInt(previewMatch[1], 10));
+			const body = "<!DOCTYPE html><html><body>" + "x".repeat(size) + "</body></html>";
+			return { previewSnapshot: body };
+		}
+
 		if (lower.includes("review_multi")) {
 			const docs = [
 				{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
@@ -226,6 +235,8 @@ export class MockAgentCore {
 			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
+		} else if (toolAction && toolAction.previewSnapshot) {
+			this._handlePreviewSnapshot(toolAction.previewSnapshot);
 		} else if (toolAction && toolAction.mockError) {
 			const assistantMsg = {
 				role: "assistant",
@@ -455,6 +466,37 @@ export class MockAgentCore {
 		const assistantMsg = { role: "assistant", content: contentBlocks };
 		this.conversationMessages.push(assistantMsg);
 		this.emit({ type: "message_end", message: assistantMsg });
+	}
+
+	_handlePreviewSnapshot(html) {
+		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+		const input = { html };
+		this.emit({ type: "tool_execution_start", toolName: "preview_open", toolId, input });
+		this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output: "Preview panel is open and will auto-update." });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: false });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input },
+				{ type: "text", text: "Opened preview." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: "__preview_snapshot_v1__\n" + html },
+			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
 	_handleSingleTool(toolAction) {

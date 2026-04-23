@@ -5385,7 +5385,12 @@ async function handleApiRoute(
 			const content = Array.isArray(msg.content) ? msg.content : [];
 			const block = content[blockIndex];
 			if (!block) { json({ error: "Block not found" }, 404); return; }
-			const toolContent = block.arguments?.content ?? block.input?.content;
+			let toolContent = block.arguments?.content ?? block.input?.content;
+			// Fallback: text blocks (e.g. preview_open snapshot blocks in
+			// toolResult messages) store their payload in `block.text`.
+			if (toolContent === undefined && block.type === "text" && typeof block.text === "string") {
+				toolContent = block.text;
+			}
 			if (toolContent === undefined) { json({ error: "No content in block" }, 404); return; }
 			json({ content: toolContent });
 		} catch (err) {
