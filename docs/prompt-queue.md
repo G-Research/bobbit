@@ -121,7 +121,18 @@ The message editor saves drafts to the server so unsent text survives page reloa
 
 If a turn ends with `stopReason: "error"` (tracked via `lastTurnErrored`), `drainQueue()` is skipped on `agent_end`. Queued messages wait for the user to retry rather than being fed into a broken agent.
 
-**Error-state queue gating**: While `lastTurnErrored` is true, `enqueuePrompt()` always adds to the queue — it never dispatches directly, even if the queue is empty and the agent appears idle. This prevents new messages from bypassing a failed state. The queue only resumes draining after a successful retry clears the error flag.
+**Error-state queue gating (implicit unstick)**: When a turn ends with `stopReason: "error"`, `session.lastTurnErrored = true` and `session.consecutiveErrorTurns` is incremented. An incoming prompt or steer then takes one of two paths:
+
+- **Below the cap** (`consecutiveErrorTurns < MAX_CONSECUTIVE_ERROR_TURNS`, currently `3`): `enqueuePrompt()` / `deliverLiveSteer()` implicitly unstick the session. They clear `lastTurnErrored` / `lastTurnErrorMessage` / `turnHadToolCalls`, cancel any `pendingAutoRetryTimer`, reset `transientRetryAttempts`, prepend a short `[SYSTEM: previous turn failed with: …. Ignore the incomplete last turn and handle the following.]` prefix to the new text, and dispatch it. The previous failed turn is **not** retried — the incoming message is treated as fresh intent. Any messages parked in the queue while the session was wedged then drain normally (without the prefix, since the error is already cleared).
+- **At or above the cap** (`consecutiveErrorTurns ≥ 3`): the incoming message is parked in `promptQueue` (the pre-change behaviour) and a warning is logged. This is the brake for persistently broken upstreams (quota exhausted, auth revoked, content filter) so we don't re-trigger the failing model on every nudge. Parked messages drain once a human clicks Retry and the underlying issue is fixed.
+
+The counter resets to `0` on any successful `message_end` (non-error, non-aborted) and on a successful explicit `retryLastPrompt`. Steers must still route through `deliverLiveSteer()` so they persist to `promptQueue` first (`persisted: true`), preserving the Stop/retry invariant (PI-25b/PI-25c).
+
+**Explicit UI Retry bypasses the cap.** `retryLastPrompt()` always runs regardless of `consecutiveErrorTurns` — the cap only gates the implicit path.
+
+**TeamManager no longer second-guesses.** The previous suppression that dropped team-lead nudges when `teamLeadSession.lastTurnErrored` was true has been removed. SessionManager is the single source of truth: the nudge either unsticks the lead (≤ cap) or parks (≥ cap). If the lead is persistently broken, parked nudges drain automatically once a human fixes the upstream issue — strictly better than the old "drop on the floor" behaviour.
+
+See also [docs/debugging.md — Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn) and the AGENTS.md debug-keyword entry of the same name.
 
 ### Retry
 
