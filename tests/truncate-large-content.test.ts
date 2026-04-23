@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import {
 	truncateLargeToolContent,
 	truncateLargeToolContentInMessages,
+	truncateSnapshotBlock,
 	LARGE_CONTENT_THRESHOLD,
 } from "../src/server/agent/truncate-large-content.js";
+
+const PREVIEW_MARKER = "__preview_snapshot_v1__\n";
 
 describe("truncateLargeToolContent", () => {
 	it("returns the same object for non-message events", () => {
@@ -360,5 +363,138 @@ describe("truncateLargeToolContentInMessages", () => {
 		assert.strictEqual(truncateLargeToolContentInMessages(null as any), null);
 		const obj = { messages: [] };
 		assert.strictEqual(truncateLargeToolContentInMessages(obj as any), obj);
+	});
+});
+
+describe("preview_open snapshot truncation", () => {
+	it("truncateSnapshotBlock: short snapshot passes through", () => {
+		const block = { type: "text", text: PREVIEW_MARKER + "<p>hi</p>" };
+		assert.strictEqual(truncateSnapshotBlock(block), block);
+	});
+
+	it("truncateSnapshotBlock: marker-less text block passes through", () => {
+		const block = { type: "text", text: "x".repeat(LARGE_CONTENT_THRESHOLD + 10) };
+		assert.strictEqual(truncateSnapshotBlock(block), block);
+	});
+
+	it("truncateSnapshotBlock: large snapshot is truncated", () => {
+		const body = "h".repeat(LARGE_CONTENT_THRESHOLD + 100);
+		const full = PREVIEW_MARKER + body;
+		const block = { type: "text", text: full };
+		const out = truncateSnapshotBlock(block) as any;
+		assert.notStrictEqual(out, block);
+		assert.strictEqual(out._truncated, true);
+		assert.strictEqual(out._originalLength, full.length);
+		assert.strictEqual(out.text, PREVIEW_MARKER);
+		assert.strictEqual(out.preview, body.slice(0, 512));
+		// Original not mutated
+		assert.strictEqual(block.text, full);
+	});
+
+	it("truncateSnapshotBlock: already-truncated block passes through", () => {
+		const block = {
+			type: "text",
+			text: PREVIEW_MARKER,
+			_truncated: true,
+			_originalLength: 99999,
+			preview: "abc",
+		};
+		assert.strictEqual(truncateSnapshotBlock(block), block);
+	});
+
+	it("truncateLargeToolContentInMessages: truncates toolResult snapshot >32KB", () => {
+		const body = "H".repeat(LARGE_CONTENT_THRESHOLD + 5);
+		const full = PREVIEW_MARKER + body;
+		const msg = {
+			role: "toolResult",
+			toolCallId: "tc-1",
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: full },
+			],
+		};
+		const result = truncateLargeToolContentInMessages([msg]) as any[];
+		assert.notStrictEqual(result, [msg]);
+		const newMsg = result[0];
+		// Status block untouched (same reference)
+		assert.strictEqual(newMsg.content[0], msg.content[0]);
+		const snap = newMsg.content[1];
+		assert.strictEqual(snap._truncated, true);
+		assert.strictEqual(snap._originalLength, full.length);
+		assert.strictEqual(snap.preview, body.slice(0, 512));
+		assert.strictEqual(snap.text, PREVIEW_MARKER);
+		// Original not mutated
+		assert.strictEqual(msg.content[1].text, full);
+	});
+
+	it("truncateLargeToolContentInMessages: leaves short snapshot untouched (same array ref)", () => {
+		const msg = {
+			role: "toolResult",
+			toolCallId: "tc-1",
+			content: [
+				{ type: "text", text: "ok" },
+				{ type: "text", text: PREVIEW_MARKER + "<p>small</p>" },
+			],
+		};
+		const messages = [msg];
+		assert.strictEqual(truncateLargeToolContentInMessages(messages), messages);
+	});
+
+	it("truncateLargeToolContentInMessages: leaves marker-less text blocks untouched even when large", () => {
+		const big = "x".repeat(LARGE_CONTENT_THRESHOLD + 100);
+		const msg = {
+			role: "toolResult",
+			toolCallId: "tc-1",
+			content: [{ type: "text", text: big }],
+		};
+		const messages = [msg];
+		const result = truncateLargeToolContentInMessages(messages);
+		// Marker-less text blocks in toolResult are not snapshots — untouched,
+		// so the array reference is returned as-is.
+		assert.strictEqual(result, messages);
+		assert.strictEqual((result as any[])[0].content[0].text, big);
+		assert.strictEqual((result as any[])[0].content[0]._truncated, undefined);
+	});
+
+	it("truncateLargeToolContent on message_end toolResult with large snapshot returns new event", () => {
+		const body = "Z".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const full = PREVIEW_MARKER + body;
+		const event = {
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolCallId: "tc-2",
+				content: [
+					{ type: "text", text: "Preview opened" },
+					{ type: "text", text: full },
+				],
+			},
+		};
+		const result = truncateLargeToolContent(event);
+		assert.notStrictEqual(result, event);
+		const snap = result.message.content[1];
+		assert.strictEqual(snap._truncated, true);
+		assert.strictEqual(snap._originalLength, full.length);
+		assert.strictEqual(snap.text, PREVIEW_MARKER);
+		assert.strictEqual(snap.preview, body.slice(0, 512));
+		// Status block preserved by reference
+		assert.strictEqual(result.message.content[0], event.message.content[0]);
+		// Original untouched
+		assert.strictEqual(event.message.content[1].text, full);
+	});
+
+	it("truncateLargeToolContent on message_end toolResult with small snapshot returns same event", () => {
+		const event = {
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolCallId: "tc-3",
+				content: [
+					{ type: "text", text: "ok" },
+					{ type: "text", text: PREVIEW_MARKER + "<p>small</p>" },
+				],
+			},
+		};
+		assert.strictEqual(truncateLargeToolContent(event), event);
 	});
 });

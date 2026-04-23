@@ -10,6 +10,7 @@ import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { PREVIEW_SNAPSHOT_MARKER } from "./snapshot.js";
 
 // ── Gateway API helpers (copied from agent/extension.ts) ──
 
@@ -119,7 +120,12 @@ const extension: ExtensionFactory = (pi) => {
 					return { content: [{ type: "text", text: `Error writing preview HTML: ${postResp.status} ${errText}` }] };
 				}
 
-				return { content: [{ type: "text", text: "Preview panel is open and will auto-update." }] };
+				return {
+					content: [
+						{ type: "text", text: "Preview panel is open and will auto-update." },
+						{ type: "text", text: PREVIEW_SNAPSHOT_MARKER + content },
+					],
+				};
 			} catch (err: any) {
 				return { content: [{ type: "text", text: `Error opening preview: ${err.message}` }] };
 			}
