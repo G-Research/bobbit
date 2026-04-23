@@ -24,7 +24,11 @@ async function terminateSession(id: string): Promise<void> {
 
 test.describe("Archived session merge (Gap 3)", () => {
 
-	test("both fetch paths return enriched delegates enabling safe client merge", async () => {
+	// Combined test: the original pair of tests shared the same fixture shape
+	// (live parent + archived delegate) and essentially covered the same two
+	// fetch paths. We build the fixture ONCE and run every assertion from
+	// both originals against it.
+	test("both fetch paths return enriched delegates enabling safe client merge (and preserve them across live-poll → paginated transition)", async () => {
 		// 1. Create a live parent session with an archived delegate
 		const parentId = await createSession();
 		const delegateId = await createSession();
@@ -53,6 +57,7 @@ test.describe("Archived session merge (Gap 3)", () => {
 		await terminateSession(memberId);
 
 		// 3. Normal fetch — should include both archived sessions in archivedDelegates
+		//    (covers original test 1 steps 3 + original test 2 step A — "live poll")
 		const normalResp = await apiFetch("/api/sessions");
 		expect(normalResp.status).toBe(200);
 		const normalBody = await normalResp.json();
@@ -62,7 +67,12 @@ test.describe("Archived session merge (Gap 3)", () => {
 		expect(normalEnrichedIds, "Normal fetch archivedDelegates should include archived delegate").toContain(delegateId);
 		expect(normalEnrichedIds, "Normal fetch archivedDelegates should include archived team member").toContain(memberId);
 
+		// From original test 2: "Live poll should enrich archived delegate"
+		const normalDelegateIdsOnly = (normalBody.archivedDelegates || []).map((s: any) => s.id);
+		expect(normalDelegateIdsOnly, "Live poll should enrich archived delegate").toContain(delegateId);
+
 		// 4. Paginated archived fetch — should also return archivedDelegates
+		//    (covers original test 1 step 4 + original test 2 step B — "See archived" toggle)
 		const archivedResp = await apiFetch("/api/sessions?include=archived&limit=50");
 		expect(archivedResp.status).toBe(200);
 		const archivedBody = await archivedResp.json();
@@ -80,41 +90,11 @@ test.describe("Archived session merge (Gap 3)", () => {
 		expect(allArchivedIds.has(delegateId), "Delegate should be in combined set").toBe(true);
 		expect(allArchivedIds.has(memberId), "Team member should be in combined set").toBe(true);
 
-		// Cleanup
-		await terminateSession(parentId);
-		await terminateSession(leadId);
-	});
-
-	test("enriched delegates from normal path are not lost when paginated path is called", async () => {
-		// This simulates the race: live poll returns archivedDelegates, then
-		// "See archived" triggers paginated fetch. Both should have the data.
-
-		// Create live session with archived delegate
-		const parentId = await createSession();
-		const delegateId = await createSession();
-
-		const patchDel = await apiFetch(`/api/sessions/${delegateId}`, {
-			method: "PATCH",
-			body: JSON.stringify({ delegateOf: parentId }),
-		});
-		expect(patchDel.ok).toBe(true);
-		await terminateSession(delegateId);
-
-		// Step A: normal fetch (simulates live poll) — gets delegate in archivedDelegates
-		const normalResp = await apiFetch("/api/sessions");
-		const normalBody = await normalResp.json();
-		const normalDelegateIds = (normalBody.archivedDelegates || []).map((s: any) => s.id);
-		expect(normalDelegateIds, "Live poll should enrich archived delegate").toContain(delegateId);
-
-		// Step B: paginated archived fetch (simulates "See archived" toggle)
-		const archResp = await apiFetch("/api/sessions?include=archived&limit=50");
-		const archBody = await archResp.json();
-
-		// The delegate should appear in either sessions or archivedDelegates
-		const archSessionIds = (archBody.sessions || []).map((s: any) => s.id);
-		const archDelegateIds = (archBody.archivedDelegates || []).map((s: any) => s.id);
-		const allFromArch = new Set([...archSessionIds, ...archDelegateIds]);
-
+		// From original test 2: explicit assertion that paginated fetch preserves
+		// the delegate so the client-side merge doesn't drop it.
+		const archSessionIds = (archivedBody.sessions || []).map((s: any) => s.id);
+		const archDelegateIdsOnly = (archivedBody.archivedDelegates || []).map((s: any) => s.id);
+		const allFromArch = new Set([...archSessionIds, ...archDelegateIdsOnly]);
 		expect(
 			allFromArch.has(delegateId),
 			"Paginated fetch must include the delegate (in sessions or archivedDelegates) so client merge preserves it",
@@ -122,5 +102,6 @@ test.describe("Archived session merge (Gap 3)", () => {
 
 		// Cleanup
 		await terminateSession(parentId);
+		await terminateSession(leadId);
 	});
 });

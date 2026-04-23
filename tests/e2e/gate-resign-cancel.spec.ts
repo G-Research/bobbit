@@ -209,9 +209,14 @@ test.describe("Gate Re-signal Cancellation", () => {
 				body: JSON.stringify({ content: "Signal v2" }),
 			});
 			expect(s2Res.status).toBe(201);
+			const s2Data = await s2Res.json();
+			const signal2Id = s2Data.signal.id;
 
-			// Wait briefly for signal 2's verification to start
-			await new Promise(r => setTimeout(r, 200));
+			// Wait for signal 2's verification to start (event-driven, replaces 200ms sleep)
+			await conn.waitFor(
+				(m) => m.type === "gate_verification_started" && m.gateId === "slow-gate" && m.signalId === signal2Id,
+				5000,
+			);
 
 			// Signal 3 (cancels signal 2)
 			const s3Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
