@@ -12,7 +12,16 @@ import type { VerifyStep } from "./workflow-store.js";
 // Transient error detection
 // ---------------------------------------------------------------------------
 
-/** Patterns that indicate a transient/infrastructure failure worth retrying. */
+/**
+ * Literal substring patterns that indicate a transient/infrastructure failure
+ * worth retrying. Matched via `output.includes(pattern)`.
+ *
+ * For LLM streaming/tool-argument glitches (malformed JSON from
+ * `input_json_delta` accumulation, schema-validation failures), prefer the
+ * regex list `TRANSIENT_ERROR_REGEXES` below — it catches every V8/Node
+ * `SyntaxError` variant in one place instead of chasing new substrings as
+ * they're discovered.
+ */
 export const TRANSIENT_ERROR_PATTERNS = [
 	"timed out",
 	"Agent process not running",
@@ -23,29 +32,40 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	"spawn UNKNOWN",
 	"socket hang up",
 	"connect ECONNREFUSED",
-	// LLM streaming/tool-argument glitches — essentially infrastructure-class from
-	// our perspective: the model emitted malformed JSON or args that failed
-	// schema validation. Fresh runs almost always succeed. maxAttempts caps blast
-	// radius if a model is reliably broken.
-	"Expected double-quoted property name",
-	"Expected property name",
-	"Unexpected token",
-	"Unexpected end of JSON",
+	// Tool-call schema validation failure from the provider SDK — distinct
+	// from the raw JSON parse errors, which live in TRANSIENT_ERROR_REGEXES.
 	"Validation failed for tool",
 ];
 
 /**
- * Patterns that specifically look like an LLM-side JSON / tool-argument glitch.
- * A superset of these is already in TRANSIENT_ERROR_PATTERNS, but this smaller
- * list is used to decide whether to send a *targeted* in-session nudge that
- * quotes the error back to the model before giving up on the step.
+ * Regex patterns for LLM streaming / tool-argument JSON glitches.
+ *
+ * Fresh runs of these almost always succeed — the model's streamed
+ * `input_json_delta` just accumulated into something that didn't parse. We
+ * treat the whole V8/Node `SyntaxError` family, plus pi-ai's wrapper
+ * messages, as one class. `maxAttempts` caps blast radius if a model is
+ * reliably broken.
+ *
+ * Known concrete variants this covers:
+ *   - "Expected ',' or '}' after property value in JSON at position 320"
+ *   - "Expected double-quoted property name in JSON at position 42"
+ *   - "Expected property name or '}' in JSON at position 1"
+ *   - "Unexpected token 'x', \"...\" is not valid JSON"
+ *   - "Unexpected character ... in JSON at position 5"
+ *   - "Unexpected end of JSON input"
+ *   - "Unexpected end of input while parsing JSON"
+ *   - "Unexpected non-whitespace character after JSON at position ..."
+ *   - anything else ending in "in JSON at position <n>"
  */
-export const JSON_VALIDATION_ERROR_PATTERNS = [
-	"Expected double-quoted property name",
-	"Expected property name",
-	"Unexpected token",
-	"Unexpected end of JSON",
-	"Validation failed for tool",
+export const TRANSIENT_ERROR_REGEXES: RegExp[] = [
+	// V8/Node JSON parser position marker — present in almost every modern variant.
+	/in JSON at position \d+/i,
+	// "Unexpected token ..." / "Unexpected character ..." / "Unexpected end of (JSON|input) ..."
+	/Unexpected (?:token|character|non-whitespace character|end of (?:JSON|input))/i,
+	// "Expected <something> in JSON" (covers the Node 20+ "Expected ',' or '}' ..." phrasing)
+	/Expected [^\n]{1,120}? in JSON/i,
+	// Older "Expected <something>" phrasings without "in JSON" (Node 18 / browsers).
+	/Expected (?:double-quoted )?property name/i,
 ];
 
 /**
@@ -55,16 +75,24 @@ export const JSON_VALIDATION_ERROR_PATTERNS = [
  */
 export function detectJsonValidationError(output: string): string | null {
 	if (!output) return null;
-	for (const pattern of JSON_VALIDATION_ERROR_PATTERNS) {
-		const idx = output.indexOf(pattern);
-		if (idx < 0) continue;
-		// Extract the line containing the match, trimmed.
-		const start = output.lastIndexOf("\n", idx) + 1;
-		const endNl = output.indexOf("\n", idx);
-		const end = endNl < 0 ? output.length : endNl;
-		return output.slice(start, end).trim().slice(0, 400);
+
+	let idx = -1;
+	// Try regex patterns first (cover the V8/Node SyntaxError family).
+	for (const re of TRANSIENT_ERROR_REGEXES) {
+		const m = re.exec(output);
+		if (m && m.index >= 0) { idx = m.index; break; }
 	}
-	return null;
+	// Fall back to the tool-validation substring.
+	if (idx < 0) {
+		const i = output.indexOf("Validation failed for tool");
+		if (i >= 0) idx = i;
+	}
+	if (idx < 0) return null;
+
+	const start = output.lastIndexOf("\n", idx) + 1;
+	const endNl = output.indexOf("\n", idx);
+	const end = endNl < 0 ? output.length : endNl;
+	return output.slice(start, end).trim().slice(0, 400);
 }
 
 /**
@@ -76,15 +104,20 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 	"Agent did not call verification_result",
 ];
 
+function matchesAnyTransient(output: string): boolean {
+	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
+	return TRANSIENT_ERROR_REGEXES.some(re => re.test(output));
+}
+
 /** Check if an LLM review error output matches a transient failure pattern. */
 export function isTransientReviewError(output: string): boolean {
-	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
+	return matchesAnyTransient(output);
 }
 
 /** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
 export function isTransientQaError(output: string): boolean {
 	if (QA_NON_TRANSIENT_PATTERNS.some(pattern => output.includes(pattern))) return false;
-	return TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern));
+	return matchesAnyTransient(output);
 }
 
 // ---------------------------------------------------------------------------
