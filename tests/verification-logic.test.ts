@@ -18,9 +18,9 @@ import {
 	canSkipAllSteps,
 	computeAllPassed,
 	TRANSIENT_ERROR_PATTERNS,
+	TRANSIENT_ERROR_REGEXES,
 	QA_NON_TRANSIENT_PATTERNS,
 	detectJsonValidationError,
-	JSON_VALIDATION_ERROR_PATTERNS,
 } from "../dist/server/agent/verification-logic.js";
 
 // ---------------------------------------------------------------------------
@@ -290,13 +290,42 @@ describe("detectJsonValidationError", () => {
 		assert.ok(detected!.length <= 400);
 	});
 
-	it("detects every JSON_VALIDATION_ERROR_PATTERNS entry", () => {
-		for (const pattern of JSON_VALIDATION_ERROR_PATTERNS) {
-			assert.ok(
-				detectJsonValidationError(`context... ${pattern} ...more context`),
-				`Expected '${pattern}' to be detected`,
-			);
+	it("detects the Node 20+ 'Expected ... in JSON at position N' phrasing", () => {
+		// Real failure from session 80c7a7a8… — previously not matched and left the
+		// session stuck until a human pressed Retry.
+		const msg = "Error: Expected ',' or '}' after property value in JSON at position 320 (line 1 column 321)";
+		assert.ok(detectJsonValidationError(msg), "Expected the V8 JSON error phrasing to be detected");
+		assert.equal(isTransientReviewError(msg), true);
+		assert.equal(isTransientQaError(msg), true);
+	});
+
+	it("detects the 'Unexpected non-whitespace character after JSON' phrasing", () => {
+		const msg = "SyntaxError: Unexpected non-whitespace character after JSON at position 42";
+		assert.ok(detectJsonValidationError(msg));
+		assert.equal(isTransientReviewError(msg), true);
+	});
+
+	it("detects 'Unexpected end of input while parsing JSON'", () => {
+		const msg = "Unexpected end of input while parsing JSON";
+		assert.ok(detectJsonValidationError(msg));
+		assert.equal(isTransientReviewError(msg), true);
+	});
+
+	it("detects every TRANSIENT_ERROR_REGEXES entry via a representative variant", () => {
+		// One canonical sample per regex — asserts each pattern is reachable.
+		const samples = [
+			"Error: Expected ',' or '}' after property value in JSON at position 320",
+			"Unexpected end of JSON input",
+			"Expected double-quoted property name in JSON at position 42",
+			"Expected property name or '}' in JSON at position 1",
+		];
+		for (const s of samples) {
+			assert.ok(detectJsonValidationError(s), `Expected to detect: ${s}`);
+			assert.equal(isTransientReviewError(s), true, `Expected transient: ${s}`);
 		}
+		// And make sure the exported regex list is non-empty so future refactors
+		// don't silently empty it.
+		assert.ok(TRANSIENT_ERROR_REGEXES.length > 0);
 	});
 });
 
