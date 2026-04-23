@@ -868,8 +868,11 @@ export class MessageEditor extends LitElement {
 					</div>
 				` : nothing}
 
-				<!-- Compact input row: [attach] [textarea] [mic] [send] -->
-				<div class="flex items-center gap-1 px-2 py-2">
+				<!-- Compact input row: [attach] [textarea] [mic] [send]
+				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
+				     own GPU compositing layer the textarea caret is invisible in this position
+				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
+				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}
 					<textarea
 						class="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none resize-none overflow-y-auto py-1 px-1"
