@@ -358,9 +358,18 @@ export function handleWebSocketConnection(
 					});
 					break;
 				case "set_model":
-					await session.rpcClient.setModel(msg.provider, msg.modelId);
-					sessionManager.updateModelNameFile(session.id, msg.modelId);
-					sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
+					try {
+						await session.rpcClient.setModel(msg.provider, msg.modelId);
+						sessionManager.updateModelNameFile(session.id, msg.modelId);
+						sessionManager.persistSessionModel(session.id, msg.provider, msg.modelId);
+					} catch (err: any) {
+						// Surface set_model failures to the UI instead of silently swallowing
+						// them — otherwise the client keeps showing the new model while the
+						// agent stays bound to the previous one and subsequent prompts go
+						// to the wrong model.
+						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, err?.message || err);
+						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
+					}
 					break;
 				case "set_thinking_level":
 					await session.rpcClient.setThinkingLevel(msg.level);

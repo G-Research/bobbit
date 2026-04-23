@@ -155,6 +155,63 @@ test.describe("AI Gateway Configure Flow", () => {
 		// aigw.models is no longer cached in preferences — models are discovered fresh via GET /api/models
 	});
 
+	test("/api/models returns aigw Claude IDs with prefix stripped (regression: model picker silently fails)", async () => {
+		// Regression test for the bug where picking a Claude model served by the
+		// AI Gateway via the prompt model picker appeared to succeed but actually
+		// did not switch the agent's bound model: a subsequent prompt went to the
+		// previously bound model, and refreshing snapped the UI back.
+		//
+		// Root cause: configureAigw() strips the provider prefix from Claude IDs
+		// when writing models.json (e.g. "aws/us.anthropic.claude-..." becomes
+		// "us.anthropic.claude-..."), but GET /api/models (which powers the
+		// ModelSelector popover) was returning the raw prefixed IDs. The agent's
+		// rpc `set_model` does a strict equality match against models.json, so the
+		// lookup failed, the error was swallowed by the WS handler, and the UI
+		// optimistically updated to a model the agent never actually switched to.
+		//
+		// Guarantee: IDs surfaced by /api/models for the `aigw` provider must
+		// match the IDs written to models.json — i.e. Claude models must be
+		// prefix-stripped and tagged api=bedrock-converse-stream; non-Claude
+		// models retain their original form.
+		const configureRes = await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
+		});
+		const configureData = await configureRes.json();
+
+		const res = await apiFetch("/api/models");
+		expect(res.status).toBe(200);
+		const models = await res.json();
+
+		const aigwModels = models.filter((m: any) => m.provider === "aigw");
+		expect(aigwModels.length).toBe(3);
+
+		// Claude: prefix stripped, routed through Bedrock Converse
+		const claude = aigwModels.find((m: any) => m.id.includes("claude"));
+		expect(claude).toBeTruthy();
+		expect(claude.id).toBe("us.anthropic.claude-sonnet-4-6");
+		expect(claude.id).not.toContain("/");
+		expect(claude.api).toBe("bedrock-converse-stream");
+
+		// Non-Claude aigw models keep their original ID (including any slash)
+		const gpt = aigwModels.find((m: any) => m.id.includes("gpt"));
+		expect(gpt).toBeTruthy();
+		expect(gpt.id).toBe("openai/gpt-5.2");
+
+		const qwen = aigwModels.find((m: any) => m.id.includes("qwen"));
+		expect(qwen).toBeTruthy();
+		expect(qwen.id).toBe("gresearch/qwen3-coder-480b-a35b");
+
+		// The critical invariant: every aigw ID surfaced by /api/models must
+		// also exist in models.json (reflected by the configure response, which
+		// applies the same transform before persisting). Without this, the
+		// agent's strict-equality set_model lookup silently rejects the pick.
+		const modelsJsonIds = new Set(configureData.models.map((m: any) => m.id));
+		for (const m of aigwModels) {
+			expect(modelsJsonIds.has(m.id)).toBe(true);
+		}
+	});
+
 	test("preferences cleaned after delete", async () => {
 		await apiFetch("/api/aigw/configure", {
 			method: "POST",

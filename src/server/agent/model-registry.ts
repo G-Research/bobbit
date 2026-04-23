@@ -134,13 +134,23 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	if (aigwUrl) {
 		try {
 			const aigwModels = await discoverAigwModels(aigwUrl);
+			// IMPORTANT: Claude models get their provider prefix stripped and are
+			// routed through bedrock-converse-stream by configureAigw() when writing
+			// models.json. The agent's rpc `set_model` does a strict equality match
+			// against that file, so the IDs we return here MUST match the stripped
+			// form — otherwise picking a Claude model from the UI silently fails
+			// (the agent rejects with "Model not found", the error is swallowed,
+			// and the next prompt goes to the previously bound model).
+			const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
+			const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
 			for (const m of aigwModels) {
-				const meta = inferMeta(m.id);
+				const normalizedId = isClaudeModel(m.id) ? stripPrefix(m.id) : m.id;
+				const meta = inferMeta(normalizedId);
 				results.push({
-					id: m.id,
+					id: normalizedId,
 					name: m.name,
 					provider: "aigw",
-					api: m.api || "openai-completions",
+					api: isClaudeModel(m.id) ? "bedrock-converse-stream" : (m.api || "openai-completions"),
 					baseUrl: aigwUrl,
 					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
 					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
