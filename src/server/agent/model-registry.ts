@@ -75,6 +75,7 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 	let hash = 0;
 	const str = JSON.stringify([
 		all["aigw.url"],
+		all["aigw.exclusive"],
 		all["customProviders"],
 		...Object.keys(all).filter(k => k.startsWith("providerKey.")).sort(),
 	]);
@@ -88,36 +89,48 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 
 async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
+	const aigwUrl = getAigwUrl(prefs);
 
-	// 1. Built-in providers from pi-ai
-	try {
-		const providers = getProviders();
-		for (const providerId of providers) {
-			const models = getModels(providerId as any);
-			const isAuth = detectProviderAuth(providerId as string, prefs);
-			for (const m of models) {
-				const meta = inferMeta(m.id);
-				results.push({
-					id: m.id,
-					name: m.name,
-					provider: providerId as string,
-					api: m.api as string,
-					baseUrl: m.baseUrl,
-					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
-					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
-					reasoning: meta.reasoning || m.reasoning || false,
-					input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
-					cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					authenticated: isAuth,
-				});
+	// When an AI Gateway is configured, it is treated as the single egress path
+	// by default — built-in upstream providers (anthropic, openai, bedrock, ...)
+	// are hidden because in a secure-zone deployment they can't be reached
+	// directly. Users who need to see built-ins alongside the gateway (e.g. for
+	// local development against a real API key AND a dev gateway) can opt out
+	// by setting `aigw.exclusive` to false in preferences.
+	// Custom local providers (Ollama, LM Studio) are always shown because they
+	// live on the user's own machine, not behind the gateway.
+	const aigwExclusive = aigwUrl ? (prefs.get("aigw.exclusive") as boolean | undefined) ?? true : false;
+
+	if (!aigwExclusive) {
+		// 1. Built-in providers from pi-ai
+		try {
+			const providers = getProviders();
+			for (const providerId of providers) {
+				const models = getModels(providerId as any);
+				const isAuth = detectProviderAuth(providerId as string, prefs);
+				for (const m of models) {
+					const meta = inferMeta(m.id);
+					results.push({
+						id: m.id,
+						name: m.name,
+						provider: providerId as string,
+						api: m.api as string,
+						baseUrl: m.baseUrl,
+						contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
+						maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
+						reasoning: meta.reasoning || m.reasoning || false,
+						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
+						cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						authenticated: isAuth,
+					});
+				}
 			}
+		} catch (err) {
+			console.error("[model-registry] Failed to load built-in providers:", err);
 		}
-	} catch (err) {
-		console.error("[model-registry] Failed to load built-in providers:", err);
 	}
 
 	// 2. AI Gateway models (if configured)
-	const aigwUrl = getAigwUrl(prefs);
 	if (aigwUrl) {
 		try {
 			const aigwModels = await discoverAigwModels(aigwUrl);

@@ -1057,6 +1057,7 @@ let aigwError = "";
 let aigwConfigured = false;
 let aigwConfiguredUrl = "";
 let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }> = [];
+let aigwExclusive = true; // hide built-in providers while gateway is configured
 // Preferences
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
 let prefReviewModel = "";    // same format
@@ -1094,6 +1095,7 @@ function loadModelsState(): void {
 				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
+				aigwExclusive = prefs["aigw.exclusive"] !== false; // default true
 			}
 			if (modelsRes.ok) {
 				const models = await modelsRes.json();
@@ -1196,6 +1198,26 @@ async function saveAigwConfig(): Promise<void> {
 		aigwError = err.message || "Save failed";
 	}
 	aigwStatus = "idle";
+	renderApp();
+}
+
+async function setAigwExclusive(value: boolean): Promise<void> {
+	aigwExclusive = value;
+	// Default is true — persist only the explicit "false" override, clear otherwise.
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "aigw.exclusive": value ? null : false }),
+		});
+	} catch {}
+	// Refresh the selector lists used on this page (registry cache is keyed on prefs version).
+	try {
+		const res = await gatewayFetch("/api/models");
+		if (res.ok) {
+			const models = await res.json();
+			if (Array.isArray(models)) allModels = models;
+		}
+	} catch {}
 	renderApp();
 }
 
@@ -1420,6 +1442,23 @@ function renderModelsTab() {
 						<span class="w-2 h-2 rounded-full bg-green-500"></span>
 						<span class="text-sm text-foreground">Connected to <code class="text-xs">${aigwConfiguredUrl}</code></span>
 					</div>
+					<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
+						<input
+							type="checkbox"
+							class="mt-0.5"
+							.checked=${aigwExclusive}
+							?disabled=${busy}
+							@change=${(e: Event) => setAigwExclusive((e.target as HTMLInputElement).checked)}
+						/>
+						<span class="flex flex-col">
+							<span>Hide built-in providers while the gateway is configured</span>
+							<span class="text-xs text-muted-foreground">
+								When enabled (default), the model picker only shows gateway models
+								and local custom providers. Turn this off for local dev when you
+								want direct API access alongside a dev gateway.
+							</span>
+						</span>
+					</label>
 				` : ""}
 
 				<!-- Action buttons -->

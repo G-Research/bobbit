@@ -39,6 +39,11 @@ test.describe("GET /api/models with AI Gateway", () => {
 
 	test.afterEach(async () => {
 		await apiFetch("/api/aigw/configure", { method: "DELETE" });
+		// Reset exclusive flag to default so it doesn't leak between tests.
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "aigw.exclusive": null }),
+		});
 	});
 
 	test("includes gateway models when aigw is configured @smoke", async () => {
@@ -109,8 +114,11 @@ test.describe("GET /api/models with AI Gateway", () => {
 		expect(aigwIds2).toContain("test-provider/brand-new-model");
 	});
 
-	test("built-in providers still included alongside aigw models", async () => {
-		// Configure the mock gateway
+	test("built-in providers are hidden while aigw is configured (default)", async () => {
+		// By default, `aigw.exclusive` is true: when a gateway is configured, only
+		// gateway models + local custom providers are shown. Built-in upstream
+		// providers (anthropic, openai, bedrock, …) are hidden because they aren't
+		// reachable in a secure-zone deployment.
 		await apiFetch("/api/aigw/configure", {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
@@ -120,9 +128,48 @@ test.describe("GET /api/models with AI Gateway", () => {
 		const models = await res.json();
 
 		const providers = new Set(models.map((m: any) => m.provider));
-		// Should have both built-in and aigw
+		expect(providers.has("aigw")).toBe(true);
+		expect(providers.has("anthropic")).toBe(false);
+		expect(providers.has("amazon-bedrock")).toBe(false);
+		expect(providers.has("openai")).toBe(false);
+	});
+
+	test("built-in providers return when aigw.exclusive is set to false", async () => {
+		await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
+		});
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "aigw.exclusive": false }),
+		});
+
+		const res = await apiFetch("/api/models");
+		const models = await res.json();
+		const providers = new Set(models.map((m: any) => m.provider));
 		expect(providers.has("aigw")).toBe(true);
 		const hasBuiltIn = providers.has("anthropic") || providers.has("amazon-bedrock");
 		expect(hasBuiltIn).toBe(true);
+
+		// Reset to default for subsequent tests.
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ "aigw.exclusive": null }),
+		});
+	});
+
+	test("built-in providers return once aigw is removed", async () => {
+		await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
+		});
+		await apiFetch("/api/aigw/configure", { method: "DELETE" });
+
+		const res = await apiFetch("/api/models");
+		const models = await res.json();
+		const providers = new Set(models.map((m: any) => m.provider));
+		const hasBuiltIn = providers.has("anthropic") || providers.has("amazon-bedrock");
+		expect(hasBuiltIn).toBe(true);
+		expect(providers.has("aigw")).toBe(false);
 	});
 });
