@@ -14,10 +14,42 @@
 /** Default threshold: 32KB. Normal code files pass through untouched. */
 export const LARGE_CONTENT_THRESHOLD = 32 * 1024;
 
+/** Sentinel prefix on preview_open snapshot tool_result text blocks. */
+const PREVIEW_SNAPSHOT_MARKER = "__preview_snapshot_v1__\n";
+
 export interface TruncatedContent {
 	_truncated: true;
 	_originalLength: number;
 	preview: string;
+}
+
+/**
+ * If `block` is a text block whose `text` starts with the preview snapshot
+ * marker and exceeds `threshold`, return a shallow-cloned truncated block.
+ * Otherwise returns the original block (referential equality).
+ *
+ * The resulting block keeps its marker prefix (so downstream consumers can
+ * still detect it) and embeds a `TruncatedContent` descriptor alongside the
+ * preview text (first 512 chars of the full snapshot, excluding the marker).
+ */
+export function truncateSnapshotBlock(block: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
+	if (!block || block.type !== "text" || typeof block.text !== "string") return block;
+	if (!block.text.startsWith(PREVIEW_SNAPSHOT_MARKER)) return block;
+	if (block._truncated) return block;
+	if (block.text.length <= threshold) return block;
+	const html = block.text.slice(PREVIEW_SNAPSHOT_MARKER.length);
+	return {
+		...block,
+		text: PREVIEW_SNAPSHOT_MARKER,
+		_truncated: true,
+		_originalLength: block.text.length,
+		preview: html.slice(0, 512),
+	};
+}
+
+/** True if the message's role marks it as a tool_result. */
+function isToolResultMessage(msg: any): boolean {
+	return msg?.role === "toolResult" || msg?.role === "tool_result" || msg?.role === "tool";
 }
 
 /** Helper: check if a content block is a tool call (either format) */
@@ -42,7 +74,16 @@ export function truncateLargeToolContentInMessages(messages: any, threshold: num
 		const content = msg?.content;
 		if (!Array.isArray(content)) return msg;
 		let msgChanged = false;
+		const isToolResult = isToolResultMessage(msg);
 		const newContent = content.map((block: any) => {
+			if (isToolResult) {
+				const truncatedSnap = truncateSnapshotBlock(block, threshold);
+				if (truncatedSnap !== block) {
+					msgChanged = true;
+					return truncatedSnap;
+				}
+				return block;
+			}
 			if (!isToolBlock(block)) return block;
 			const c = getToolContent(block);
 			if (c === undefined || c.length <= threshold) return block;
@@ -89,9 +130,17 @@ export function truncateLargeToolContent(event: any, threshold: number = LARGE_C
 	const content = event.message?.content;
 	if (!Array.isArray(content)) return event;
 
-	// Scan for any tool block that needs truncation
+	const isToolResult = isToolResultMessage(event.message);
+
+	// Scan for any block that needs truncation
 	let needsTruncation = false;
 	for (const block of content) {
+		if (isToolResult) {
+			if (truncateSnapshotBlock(block, threshold) !== block) {
+				needsTruncation = true;
+				break;
+			}
+		}
 		if (isToolBlock(block)) {
 			const c = getToolContent(block);
 			if (c !== undefined && c.length > threshold) {
@@ -105,6 +154,11 @@ export function truncateLargeToolContent(event: any, threshold: number = LARGE_C
 
 	// Build a shallow clone of the event with truncated content blocks
 	const newContent = content.map((block: any) => {
+		if (isToolResult) {
+			const truncatedSnap = truncateSnapshotBlock(block, threshold);
+			if (truncatedSnap !== block) return truncatedSnap;
+			return block;
+		}
 		if (!isToolBlock(block)) return block;
 		const c = getToolContent(block);
 		if (c === undefined || c.length <= threshold) return block;
