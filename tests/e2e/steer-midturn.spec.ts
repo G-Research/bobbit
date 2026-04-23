@@ -58,12 +58,18 @@ test.describe("Steer mid-turn delivery", () => {
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_REDIRECT_123");
 
-			// The steer should NOT have been queued — verify no queue_update
-			// with items was emitted
+			// PI-25b fix: live steer is now persisted in promptQueue as
+			// {isSteered:true, dispatched:true} so it survives abort. The
+			// queue_update should reflect that, and any queued steer row
+			// should carry isSteered=true (not a plain user prompt).
 			const queuedMsgs = conn.messages.filter(
 				(m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0,
 			);
-			expect(queuedMsgs.length).toBe(0);
+			for (const m of queuedMsgs) {
+				for (const row of m.queue as any[]) {
+					expect(row.isSteered).toBe(true);
+				}
+			}
 		} finally {
 			conn.close();
 			await deleteSession(sessionId);
