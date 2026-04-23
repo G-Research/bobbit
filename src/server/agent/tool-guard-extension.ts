@@ -4,7 +4,12 @@
  * The guard intercepts every tool invocation and enforces access policy:
  * - `allow` or already-granted tools pass through immediately
  * - `ask` tools block until the gateway grants permission (via REST long-poll)
- * - `never` tools are never registered, so no guard is needed for them
+ * - `never` tools are blocked immediately with a clear error message. (In
+ *   principle `never` tools should not be registered at all, but some tool
+ *   extensions register multiple tools from a single file — e.g.
+ *   `defaults/tools/shell/extension.ts` registers both `bash` and `bash_bg`.
+ *   When a role allows `bash` but denies `bash_bg`, the extension still
+ *   registers both, so the guard has to hard-block the denied one.)
  */
 
 /**
@@ -28,11 +33,15 @@ export function generateToolGuardExtension(
 	policies: Record<string, ToolPolicyEntry>,
 	grantedTools: string[],
 ): string {
-	// Only include 'ask' policies in the generated code — 'allow' tools don't need the guard
+	// Only include 'ask' and 'never' policies in the generated code —
+	// 'allow' tools don't need the guard.
 	const askPolicies: Record<string, ToolPolicyEntry> = {};
+	const neverPolicies: Record<string, ToolPolicyEntry> = {};
 	for (const [name, entry] of Object.entries(policies)) {
 		if (entry.policy === 'ask') {
 			askPolicies[name] = entry;
+		} else if (entry.policy === 'never') {
+			neverPolicies[name] = entry;
 		}
 	}
 
@@ -43,6 +52,11 @@ import * as os from "node:os";
 export default function(pi) {
   // Policy map: tool name → { policy, group } (only 'ask' tools included)
   const askPolicies = ${JSON.stringify(askPolicies)};
+
+  // Tools that must be hard-blocked (role/group resolved policy = 'never').
+  // Some extensions register multiple tools from one file, so a 'never' tool
+  // can still appear in the agent's tool registry — the guard rejects it here.
+  const neverPolicies = ${JSON.stringify(neverPolicies)};
 
   // In-memory grant set — tools that have been granted during this session
   const grantedTools = new Set(${JSON.stringify(grantedTools)});
@@ -55,6 +69,16 @@ export default function(pi) {
 
   pi.on("tool_call", async (event) => {
     const toolName = event.toolName || event.tool;
+
+    // Hard-block 'never' tools immediately with a clear reason. The agent sees
+    // this as a tool error so it can adapt (e.g. reviewers falling back to
+    // read-only analysis instead of running bash_bg).
+    if (neverPolicies[toolName]) {
+      return {
+        block: true,
+        reason: "Tool \"" + toolName + "\" is not permitted for this role. Do not call it again — choose a different approach."
+      };
+    }
 
     // If tool is already granted or not in the ask-policies map, pass through
     if (grantedTools.has(toolName) || !askPolicies[toolName]) {
