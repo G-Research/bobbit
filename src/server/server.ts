@@ -38,6 +38,14 @@ import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, det
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
+
+// In-memory dedup guard for ask_user_choices /submit. Keyed by
+// `${sessionId}::${toolUseId}`. Populated synchronously before enqueuing the
+// response envelope so a concurrent duplicate /submit returns alreadySubmitted
+// even when the transcript hasn't yet reflected the first envelope.
+// Entries are also refilled from the transcript check, so survive process
+// restarts via the transcript fallback in findAskResponseAnswers.
+const askSubmittedToolUseIds = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -6738,9 +6746,21 @@ async function handleApiRoute(
 		}
 
 		// Idempotency: if a response envelope for this toolUseId already exists,
-		// return success without appending again.
+		// return success without appending again. Check in-memory guard first
+		// (covers the race where a duplicate /submit arrives before the first
+		// envelope has propagated into the transcript), then the transcript
+		// (covers process restart / external writers).
+		const dedupKey = `${sessionId}::${toolUseId}`;
+		if (askSubmittedToolUseIds.has(dedupKey)) {
+			json({ ok: true, alreadySubmitted: true });
+			return;
+		}
 		const existing = findAskResponseAnswers(messages, toolUseId);
-		if (existing) { json({ ok: true, alreadySubmitted: true }); return; }
+		if (existing) {
+			askSubmittedToolUseIds.add(dedupKey);
+			json({ ok: true, alreadySubmitted: true });
+			return;
+		}
 
 		// Locate the ask_user_choices tool_use block; use its input to cross-validate.
 		let matchedQuestions: UserQuestion[] | null = null;
@@ -6768,9 +6788,14 @@ async function handleApiRoute(
 		if (crossErr) { json({ error: crossErr }, 400); return; }
 
 		const envelope = buildAskResponseEnvelope(toolUseId, answers);
+		// Mark as submitted BEFORE awaiting enqueuePrompt so a concurrent
+		// duplicate /submit is rejected deterministically.
+		askSubmittedToolUseIds.add(dedupKey);
 		try {
 			await sessionManager.enqueuePrompt(sessionId, envelope);
 		} catch (e: any) {
+			// Roll back the dedup flag so the caller can retry.
+			askSubmittedToolUseIds.delete(dedupKey);
 			json({ error: `Failed to enqueue response: ${e?.message || String(e)}` }, 500);
 			return;
 		}
