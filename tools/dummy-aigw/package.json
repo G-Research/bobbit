@@ -1,0 +1,18 @@
+{
+  "name": "dummy-aigw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dummy AI Gateway for testing Bobbit's AI Gateway integration outside the secure zone. Proxies to Anthropic's Messages API and translates between OpenAI chat completions, AWS Bedrock Converse Stream, and Anthropic.",
+  "bin": {
+    "dummy-aigw": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "*",
+    "@smithy/eventstream-codec": "*",
+    "@smithy/util-utf8": "*"
+  }
+}
