@@ -1,0 +1,121 @@
+# Overnight performance improvement loop
+
+**Goal:** bring `npm run test:e2e` from **6.6 min → sub-3-min** via ~10 chunky, evidence-driven wins.
+
+**Branch:** `session/new-session-e58c59bf`  •  **Baseline commit:** `d7f4b825` (PR #365 already merged locally)
+
+### Hard constraints
+
+- **Do NOT increase CPU usage.** Many full E2E suites run in parallel across different goals; extra workers, extra concurrency, or extra parallel probes hurt every other run. If anything, reducing worker count is desirable once per-test time drops.
+- **Reduce wall-time-per-test**, not parallelism. The wins must come from removing sleeps, tightening event-driven signalling, eliminating duplicate setup work, and cutting wasted round-trips — not from burning more cores.
+
+---
+
+## Method
+
+1. Take the last measured wall time as the current baseline.
+2. Use real profiling data — not guesses — to find hotspots:
+   - **Playwright traces** (`trace: on`) for browser specs: every action recorded with precise timing.
+   - **Server-side per-request timing** via in-process gateway instrumentation for API specs.
+   - Playwright JSON reporter for the full-suite distribution.
+3. Write proposed improvements here — each with its evidence source.
+4. Spawn **non-overlapping** delegates to implement independent wins in parallel.
+5. Rerun the suite; record wall-time delta per attempt.
+
+No delegate edits the same file; no delegate modifies a test spec another is also modifying.
+
+---
+
+## Baseline — cycle 0
+
+- **Full E2E wall time: 6.6 min (396 s)** — `npm run test:e2e` at commit `d7f4b825`.
+- 742 passed · 7 skipped · 3 flaky (browser UI, retried green).
+
+### Longest individual tests (from the cycle-0 log)
+
+| Rank | Spec • Test | Project | Time |
+| ---: | --- | --- | ---: |
+| 1 | `ui/stories-navigation.spec.ts` • N-08 Keyboard shortcuts | browser | 23.5 s |
+| 2 | `ui/stories-sessions.spec.ts` • S-12 Sequential messages | browser | 17.7 s (flaky) |
+| 3 | `ui/sidebar-archived-per-project.spec.ts` • search surfaces… | browser | 17.0 s (flaky, retried 16.7 s) |
+| 4 | `ui/goal-creation.spec.ts` • create goal via assistant flow | browser | 15.7 s (flaky) |
+| 5 | `ui/search-result-navigation.spec.ts` • every result type navigates | browser | 13.6 s |
+| 6 | `verification-core.spec.ts` • multi-step verification | api | 12.7 s |
+| 7 | `archived-session-merge.spec.ts` • both fetch paths | api | 11.8 s |
+| 8 | `ui/sidebar-archived-delegates-e2e.spec.ts` • archived delegate visible | browser | 11.3 s |
+| 9 | `verification-core.spec.ts` • expect:failure matching error_pattern | api | 10.8 s |
+| 10 | `mcp-tool-permission.spec.ts` • broadcasts tool_permission_needed | browser | 10.8 s |
+| 11 | `gate-resign-cancel.spec.ts` • triple re-signal | api | 10.2 s |
+| 12 | `verification-core.spec.ts` • expect:failure non-matching | api | 10.2 s |
+
+Plus ~40 tests in the 5–10 s range.
+
+### Observed infra costs in logs
+
+- `worktree setup` path runs npm/git operations even when opted-out via `BOBBIT_SKIP_WORKTREE_POOL`.
+- Some specs repeatedly push/delete remote branches mid-run (`Failed to delete remote branch goal/auto-start-…`).
+- `waitForTimeout` still used 79× in tests after my first pass.
+
+---
+
+## Attempts
+
+Each attempt has: **Hypothesis → Evidence → Change → Result**.
+
+<!-- APPEND NEW ATTEMPTS BELOW AS THEY COMPLETE -->
+
+### A0 — Deep-profiling sweep
+
+**Evidence gathered (tools: Playwright traces + server per-endpoint timing):**
+
+- Most API tests spend **~0 ms** in assertions; the wall time is in one or two 1.6–2.5 s gaps between expects.
+- Every gap is dominated by a single call: **`POST /api/sessions`** or **`POST /api/sessions/:id/continue`**.
+- Server-side timing (`BOBBIT_TIMING_LOG=1`) on `POST /api/sessions`:
+  - `executePlan` total: **~870 ms** per session creation
+  - `resolveTools`: **~370 ms** ← calls `computeEffectiveAllowedTools` (iterates every tool + MCP, calls `resolveGrantPolicy` per item)
+  - `resolveToolActivation`: **~480 ms** ← calls `writeMcpProxyExtensions` (createHash + mkdir + writeFile per server) + `computeToolActivationArgs` + `writeToolGuardExtension` (generates + transpiles TypeScript for every session)
+  - All other steps: **<15 ms** combined
+- The remaining ~900 ms (1.8 s − 0.87 s) is unaccounted for — likely inside helpers (project resolution, git checks, thinking-level/model auto-select) on top of the plan itself. The plan alone is the first ~870 ms.
+- There are **~200 session creations** per full suite run. Saving even 500 ms each is **~100 s off wall time** — the single biggest lever in the test suite.
+- Tool-activation outputs depend only on (role, toolManager, mcpManager, groupPolicyStore). These **don't change between sessions** inside a Playwright worker — a cache keyed by role+mcp-fingerprint would hit for almost every session after the first.
+- No CPU added; in fact, fewer SHA hashes + fewer file writes = less CPU.
+
+Secondary findings:
+
+- `terminateSession()` awaits `session.rpcClient.getState()` and `stop()` — for the in-process mock these should be instant, so the ~1.7 s "session archive" gap in `archived-session-merge.spec.ts` likely inherits from the _next_ `POST /api/sessions` (which fires right after the DELETE). Needs a follow-up trace pass to confirm.
+- Many slow API tests (`continue-archived` × 10+) call `makeArchivedSourceSession()` which creates + prompts + archives a source session just to assert a rejection 400/404/409/422. These could share a single archived source fixture per describe block.
+
+**Result:** analysis complete — see the proposed attempts below.
+
+---
+
+## Proposed attempts (10, non-overlapping)
+
+Ranked by expected impact. Each attempt lists the file(s) it will touch so we can verify non-overlap before spawning parallel delegates.
+
+| # | Title | Files touched | Expected saving |
+|---:|---|---|---|
+| A1 | Cache `computeEffectiveAllowedTools` result keyed by `(role, mcp-fingerprint, groupPolicy-fingerprint)` — almost 100% hit rate within a Playwright worker | `src/server/agent/tool-activation.ts` | **~350 ms × 200 = ~70 s** |
+| A2 | Cache `writeMcpProxyExtensions` by `(allowedTools.sorted, role.id, mcp servers fingerprint)` — skip fs writes + hash when content unchanged (already has partial dedup via hash subdir, but still walks all tools every time) | `src/server/agent/tool-activation.ts` | **~150 ms × 200 = ~30 s** |
+| A3 | Cache `writeToolGuardExtension` generator output keyed by the policy hash (already hashes code, but regenerates + writes TS every time) | `src/server/agent/tool-activation.ts`, `src/server/agent/tool-guard-extension.ts` | **~200 ms × 200 = ~40 s** |
+| A4 | Share one archived-source fixture across the 10 rejection-case tests in `continue-archived.spec.ts` (use `test.beforeAll`) | `tests/e2e/continue-archived.spec.ts` | **~9 × 2 s = ~18 s** |
+| A5 | Same pattern in `verification-core.spec.ts` — hoist shared setup into `beforeAll` where safe | `tests/e2e/verification-core.spec.ts` | **~10 s** |
+| A6 | `SessionManager.terminateSession` — the `await session.rpcClient.getState()` flush before archive is unnecessary for in-process-mock sessions and for sessions that have already been idle for a while; skip when no messages have arrived since last persist | `src/server/agent/session-manager.ts` | **~5 s** |
+| A7 | `goal-resign-cancel.spec.ts` — replace 2 s blind polls for "verification finished" with WS-event waits; same pattern applied in my earlier PR | `tests/e2e/gate-resign-cancel.spec.ts` | **~5 s** |
+| A8 | `archived-session-merge.spec.ts` — combine the two nearly-identical tests; only one server cycle needed to verify both invariants | `tests/e2e/archived-session-merge.spec.ts` | **~6 s** |
+| A9 | Browser spec: `stories-navigation.spec.ts` N-08 (23.5 s) — profile a browser trace, identify the largest waits (likely sequential navigations without waiting on ready-state) | `tests/e2e/ui/stories-navigation.spec.ts` | **~8 s** |
+| A10 | Reduce browser-project worker count from 3 → 2 and drop `fullyParallel:false` once per-test time is lower — fewer concurrent Chromium instances, same wall time, **less CPU** | `playwright-e2e.config.ts` | **CPU saving, neutral-or-better wall time** |
+
+**Conflict map for parallel execution:**
+
+- A1, A2, A3 all touch `tool-activation.ts` — they must run **sequentially**, not parallel.
+- A4, A5, A7, A8, A9 each touch a different test spec — fully parallel-safe.
+- A6 touches `session-manager.ts`; no overlap with A1–A3.
+- A10 touches the config only and should run LAST after per-test savings are realised.
+
+---
+
+### A0 result
+
+**Analysis complete.** Attempts A1–A10 scheduled. Baseline: **6.6 min (396 s)**.
+
