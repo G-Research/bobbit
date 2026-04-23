@@ -1027,6 +1027,56 @@ describe("TeamManager", () => {
 	});
 
 	// ---------------------------------------------------------------------------
+	// Tests: notifyTeamLead no longer suppressed when team lead errored
+	// (part of "Unstick sessions on new input" goal)
+	// ---------------------------------------------------------------------------
+
+	describe("notifyTeamLead (errored-suppression removed)", () => {
+		it("delivers worker agent_end nudge even when team lead lastTurnErrored", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			const deliverLiveSteer = mock.fn(async (_id: string, _msg: string) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+			sm.deliverLiveSteer = deliverLiveSteer;
+
+			const team = createTeamManager(sm);
+			const teamLead = await team.startTeam("goal-1");
+			// Put the team lead into errored+idle state.
+			(teamLead as any).status = "idle";
+			(teamLead as any).lastTurnErrored = true;
+
+			// Register a worker in the team so notifyTeamLead has a target.
+			const entry = (team as any).teams.get("goal-1")!;
+			const workerSession = {
+				id: "worker-1",
+				status: "idle",
+				cwd: "/tmp/worker",
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			};
+			sm._sessions.set("worker-1", workerSession);
+			entry.agents.push({ sessionId: "worker-1", role: "coder", task: "work", createdAt: Date.now() });
+
+			// Directly invoke the private notifyTeamLead.
+			await (team as any).notifyTeamLead("goal-1", "worker-1", "coder", "coder-xyz");
+
+			// Team lead is idle — should use enqueuePrompt. Pre-fix, this was
+			// suppressed entirely and callCount would be 0.
+			assert.equal(
+				enqueuePrompt.mock.callCount(), 1,
+				"notifyTeamLead should deliver the nudge even when team lead lastTurnErrored",
+			);
+			const [sessionId, message, opts] = enqueuePrompt.mock.calls[0].arguments as any[];
+			assert.equal(sessionId, teamLead.id);
+			assert.ok(String(message).includes("coder-xyz"), "nudge message should reference the worker");
+			assert.equal(opts?.isSteered, true);
+		});
+	});
+
+	// ---------------------------------------------------------------------------
 	// Tests: multiple teams for different goals
 	// ---------------------------------------------------------------------------
 
