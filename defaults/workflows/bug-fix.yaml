@@ -51,18 +51,26 @@ gates:
     name: Implementation
     depends_on: [reproducing-test]
     verify:
+      - name: "Build"
+        type: command
+        timeout: 600
+        run: "{{project.build_command}}"
       - name: "Type check"
         type: command
+        phase: 1
         run: "{{project.typecheck_command}}"
       - name: "Repro test passes (bug fixed)"
         type: command
+        phase: 1
         run: "{{reproducing-test.meta.test_command}}"
         expect: success
       - name: "Unit tests"
         type: command
+        phase: 1
         run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
+        phase: 1
         # E2E suite on Windows runs ~6-8 min under parallel-worker load; the
         # default 300s step timeout SIGTERMs the pipeline mid-run, and the
         # filter's buffered "PASSED" stdout then lands with a non-zero exit.
@@ -72,7 +80,7 @@ gates:
       - name: "Gap analysis"
         type: llm-review
         role: spec-auditor
-        phase: 1
+        phase: 2
         prompt: |
           Compare the goal specification and design document to the actual implementation on this branch.
 
@@ -89,7 +97,7 @@ gates:
       - name: "Code quality review"
         type: llm-review
         role: code-reviewer
-        phase: 1
+        phase: 2
         prompt: |
           Review the code changes on branch {{branch}} vs {{master}} for quality.
 
@@ -106,7 +114,7 @@ gates:
 
       - name: "Regression test coverage"
         type: llm-review
-        phase: 1
+        phase: 2
         prompt: |
           Verify that the bug fix includes a regression test that would catch reintroduction.
 
@@ -131,7 +139,7 @@ gates:
       - name: "Security review"
         type: llm-review
         role: security-reviewer
-        phase: 1
+        phase: 2
         prompt: |
           Security review of changes on branch {{branch}} vs {{master}}.
 
@@ -147,7 +155,7 @@ gates:
       - name: "QA testing"
         type: agent-qa
         role: qa-tester
-        phase: 2
+        phase: 3
         optional: true
         label: "Enable QA Testing"
         description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios to validate the fix works end-to-end."

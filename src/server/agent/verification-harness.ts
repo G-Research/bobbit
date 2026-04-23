@@ -20,6 +20,7 @@ import {
 	matchExpectFailure,
 	groupStepsByPhase,
 	getSortedPhases,
+	isCommandStepSkippable,
 	partitionOptionalSteps,
 	buildStepCache,
 	computeAllPassed,
@@ -1216,6 +1217,15 @@ export class VerificationHarness {
 								phase,
 							});
 							const cmd = this.substituteVars(step.run || "", builtinVars, projectVars, agentVars, allGateStates);
+							// Auto-skip command steps whose run string is empty or contains
+							// unresolved template vars (e.g. {{project.build_command}} when the
+							// project has no build_command configured). Skipped-as-passed so
+							// optional infrastructure steps (build, custom commands) don't fail
+							// the gate for projects that don't define them.
+							const skipReason = isCommandStepSkippable(cmd);
+							if (skipReason) {
+								result = { passed: true, output: skipReason };
+							} else {
 							const expectFailure = step.expect === "failure";
 
 							// Look up error_pattern for expect: failure steps
@@ -1286,6 +1296,7 @@ export class VerificationHarness {
 								result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
 							} finally {
 								this.commandSemaphore.release();
+							}
 							}
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent

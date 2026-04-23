@@ -39,20 +39,27 @@ gates:
     name: Implementation
     depends_on: [design-doc]
     verify:
+      - name: "Build"
+        type: command
+        timeout: 600
+        run: "{{project.build_command}}"
       - name: "Type check passes"
         type: command
+        phase: 1
         run: "{{project.typecheck_command}}"
       - name: "Unit tests"
         type: command
+        phase: 1
         run: "{{project.test_unit_command}}"
       - name: "E2E tests"
         type: command
+        phase: 1
         timeout: 900
         run: "{{project.test_e2e_command}}"
       - name: "Gap analysis"
         type: llm-review
         role: spec-auditor
-        phase: 1
+        phase: 2
         prompt: |
           Compare the goal specification and design document to the actual implementation on this branch.
 
@@ -70,7 +77,7 @@ gates:
       - name: "Code quality review"
         type: llm-review
         role: code-reviewer
-        phase: 1
+        phase: 2
         prompt: |
           Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
 
@@ -88,7 +95,7 @@ gates:
       - name: "Security review"
         type: llm-review
         role: security-reviewer
-        phase: 1
+        phase: 2
         prompt: |
           Security review of changes on branch {{branch}} vs origin/{{master}}.
 
@@ -104,7 +111,7 @@ gates:
       - name: "QA testing"
         type: agent-qa
         role: qa-tester
-        phase: 2
+        phase: 3
         optional: true
         label: "Enable QA Testing"
         description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios to validate the feature works end-to-end."

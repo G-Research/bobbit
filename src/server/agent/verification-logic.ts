@@ -196,6 +196,36 @@ export function substituteVars(
 	});
 }
 
+/**
+ * Decide whether a command step should be auto-skipped based on its resolved
+ * `run` string (after template substitution).
+ *
+ * Returns a human-readable skip reason if the step should be skipped, or null
+ * if it should execute normally.
+ *
+ * A step is skippable when:
+ * - The resolved run string is empty or whitespace-only
+ * - The resolved run string still contains an unresolved `{{...}}` template
+ *   variable — typically because the referenced project/agent config key is
+ *   not set (e.g. `{{project.build_command}}` for a project that doesn't
+ *   define a build command).
+ *
+ * This lets workflows declare optional infrastructure steps (build, lint,
+ * custom commands) that gracefully skip-as-passed for projects that don't
+ * configure them, rather than failing the gate.
+ */
+export function isCommandStepSkippable(resolvedCmd: string): string | null {
+	const trimmed = resolvedCmd.trim();
+	if (trimmed === "") {
+		return "Skipped — command is empty (no value configured)";
+	}
+	const unresolved = trimmed.match(/\{\{([^}]+)\}\}/);
+	if (unresolved) {
+		return `Skipped — unresolved template variable {{${unresolved[1].trim()}}} (not configured for this project)`;
+	}
+	return null;
+}
+
 // ---------------------------------------------------------------------------
 // Error pattern matching (expect: failure)
 // ---------------------------------------------------------------------------

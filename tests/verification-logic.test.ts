@@ -13,6 +13,7 @@ import {
 	matchExpectFailure,
 	groupStepsByPhase,
 	getSortedPhases,
+	isCommandStepSkippable,
 	partitionOptionalSteps,
 	buildStepCache,
 	canSkipAllSteps,
@@ -673,5 +674,46 @@ describe("computeAllPassed", () => {
 			signalStep("qa", { passed: false, skipped: true }),
 			signalStep("review", { passed: false, skipped: true }),
 		]), true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isCommandStepSkippable — auto-skip empty / unresolved-template commands
+// ---------------------------------------------------------------------------
+
+describe("isCommandStepSkippable", () => {
+	it("returns null for a resolved non-empty command", () => {
+		assert.equal(isCommandStepSkippable("npm run build"), null);
+		assert.equal(isCommandStepSkippable("npx tsc --noEmit"), null);
+	});
+
+	it("returns a skip reason when the command is empty", () => {
+		const reason = isCommandStepSkippable("");
+		assert.ok(reason && reason.includes("empty"));
+	});
+
+	it("returns a skip reason when the command is only whitespace", () => {
+		const reason = isCommandStepSkippable("   \n  \t");
+		assert.ok(reason && reason.includes("empty"));
+	});
+
+	it("returns a skip reason when a {{project.*}} template is unresolved", () => {
+		const reason = isCommandStepSkippable("{{project.build_command}}");
+		assert.ok(reason);
+		assert.ok(reason.includes("project.build_command"));
+		assert.ok(reason.includes("not configured"));
+	});
+
+	it("returns a skip reason when an unresolved template is embedded mid-command", () => {
+		const reason = isCommandStepSkippable("echo {{project.custom_thing}} && true");
+		assert.ok(reason);
+		assert.ok(reason.includes("project.custom_thing"));
+	});
+
+	it("does not skip a fully-resolved command that happens to contain braces", () => {
+		// Real commands can contain `{}` (e.g. find -exec, awk) — only `{{...}}`
+		// patterns count as unresolved templates.
+		assert.equal(isCommandStepSkippable("find . -exec echo {} \\;"), null);
+		assert.equal(isCommandStepSkippable("awk '{print $1}'"), null);
 	});
 });
