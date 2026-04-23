@@ -117,6 +117,38 @@ export interface Goal {
 export type AppView = "disconnected" | "gateway-starting" | "authenticated";
 
 // ============================================================================
+// SIDEBAR WIDTH (user-resizable) — helpers declared before `state` so the
+// object initializer can safely call loadSidebarWidth() under bundlers that
+// convert hoisted `function` declarations into const bindings (TDZ-sensitive).
+// ============================================================================
+
+export const SIDEBAR_WIDTH_KEY = "bobbit-sidebar-width";
+export const SIDEBAR_WIDTH_DEFAULT = 240;
+export const SIDEBAR_WIDTH_MIN = 180;
+export const SIDEBAR_WIDTH_MAX = 480;
+
+export function clampSidebarWidth(w: number): number {
+	if (!Number.isFinite(w)) return SIDEBAR_WIDTH_DEFAULT;
+	return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(w)));
+}
+
+function loadSidebarWidth(): number {
+	if (typeof localStorage === "undefined") return SIDEBAR_WIDTH_DEFAULT;
+	const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+	if (!raw) return SIDEBAR_WIDTH_DEFAULT;
+	const n = Number.parseInt(raw, 10);
+	return clampSidebarWidth(n);
+}
+
+export function applySidebarWidthVar(w: number): void {
+	if (typeof document === "undefined") return;
+	document.documentElement.style.setProperty("--sidebar-w", `${w}px`);
+}
+
+// Apply immediately so first paint has the right width.
+applySidebarWidthVar(loadSidebarWidth());
+
+// ============================================================================
 // MUTABLE STATE
 // ============================================================================
 
@@ -157,6 +189,9 @@ export const state = {
 
 	/** Whether the sidebar is collapsed */
 	sidebarCollapsed: localStorage.getItem("bobbit-sidebar-collapsed") === "true",
+	/** User-resizable sidebar width in px (expanded state). Clamped 180–480. */
+	sidebarWidth: loadSidebarWidth(),
+
 	/** Whether to show archived sessions in the sidebar */
 	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
 	/** Whether the archived section is expanded */
@@ -485,6 +520,13 @@ export function setProjects(projects: Project[]): void {
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+export function setSidebarWidth(w: number, persist = true): void {
+	const clamped = clampSidebarWidth(w);
+	state.sidebarWidth = clamped;
+	applySidebarWidthVar(clamped);
+	if (persist) localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
+}
 
 export const SIDEBAR_BREAKPOINT = 768;
 let windowWidth = window.innerWidth;

@@ -2944,7 +2944,7 @@ export function doRenderApp(): void {
 						${bobbitIcon}
 					</div>
 					` : html`
-					<div class="w-[240px] shrink-0 flex items-center justify-between px-3 self-stretch" style="background: var(--sidebar);">
+					<div class="shrink-0 flex items-center justify-between px-3 self-stretch" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
 						<div class="flex items-center gap-2">
 							${bobbitIcon}
 							<span class="text-base font-semibold text-foreground">Bobbit</span>

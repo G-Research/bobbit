@@ -10,6 +10,8 @@ import {
 	renderApp,
 	activeSessionId,
 	isDesktop,
+	setSidebarWidth,
+	SIDEBAR_WIDTH_DEFAULT,
 	expandedGoals,
 	isUngroupedExpanded,
 	setUngroupedExpanded,
@@ -483,6 +485,43 @@ function _focusCwdIfNeeded(items: PickerItem[]): void {
 // SIDEBAR TOGGLE
 // ============================================================================
 
+// ============================================================================
+// SIDEBAR RESIZE HANDLE
+// ============================================================================
+
+function onSidebarResizePointerDown(e: PointerEvent): void {
+	e.preventDefault();
+	const handle = e.currentTarget as HTMLElement;
+	const sidebar = handle.parentElement as HTMLElement | null;
+	if (!sidebar) return;
+	const startX = e.clientX;
+	const startW = sidebar.getBoundingClientRect().width;
+	try { handle.setPointerCapture(e.pointerId); } catch {}
+	document.body.style.cursor = "col-resize";
+	document.body.style.userSelect = "none";
+
+	const onMove = (ev: PointerEvent) => {
+		const next = startW + (ev.clientX - startX);
+		setSidebarWidth(next);
+	};
+	const onUp = (ev: PointerEvent) => {
+		handle.removeEventListener("pointermove", onMove);
+		handle.removeEventListener("pointerup", onUp);
+		handle.removeEventListener("pointercancel", onUp);
+		try { handle.releasePointerCapture(ev.pointerId); } catch {}
+		document.body.style.cursor = "";
+		document.body.style.userSelect = "";
+	};
+	handle.addEventListener("pointermove", onMove);
+	handle.addEventListener("pointerup", onUp);
+	handle.addEventListener("pointercancel", onUp);
+}
+
+function onSidebarResizeDoubleClick(e: MouseEvent): void {
+	e.preventDefault();
+	setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+}
+
 export function toggleSidebar(): void {
 	state.sidebarCollapsed = !state.sidebarCollapsed;
 	localStorage.setItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
@@ -857,7 +896,8 @@ export function renderSidebar() {
 	const isSkillsActive = isRouteActive("skills");
 
 	return html`
-		<div class="w-[240px] shrink-0 h-full flex flex-col sidebar-edge" style="background: var(--sidebar);">
+		<div class="shrink-0 h-full flex flex-col sidebar-edge relative" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+			<div class="sidebar-resize-handle" @pointerdown=${onSidebarResizePointerDown} @dblclick=${onSidebarResizeDoubleClick} title="Drag to resize (double-click to reset)"></div>
 			<div class="flex flex-col border-b border-border/50 px-0.5 py-1 gap-0.5">
 				<div class="flex items-center">
 					<button
