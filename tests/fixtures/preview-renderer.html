@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>PreviewRenderer fixture</title>
+<style>
+	body { font-family: sans-serif; padding: 8px; }
+	.font-mono { font-family: ui-monospace, monospace; }
+	.hidden { display: none; }
+	.text-muted-foreground { color: #888; }
+	.max-h-0 { max-height: 0; overflow: hidden; }
+	.max-h-\[2000px\] { max-height: 2000px; }
+	button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<script>
+	// localStorage stubs so gatewayFetch doesn't crash reading them.
+	try { localStorage.setItem("bobbit_gateway_url", "http://127.0.0.1:1/"); } catch {}
+	try { localStorage.setItem("bobbit_gateway_token", "test"); } catch {}
+</script>
+<script src="./preview-renderer-bundle.js"></script>
+</body>
+</html>
