@@ -1,6 +1,6 @@
 name: propose_project
-description: "Submit a project proposal for user review"
-summary: "Propose a project with name, root_path, and optional command fields."
+description: "Submit a project proposal for user review. Works both for new/provisional projects (from the project assistant) and mid-session for the currently registered project — in the latter case, the user sees a diff of the proposed fields against the current project.yaml and accepting writes the changes via PUT /api/projects/:id/config without ending the session."
+summary: "Propose a project with name, root_path, and optional command fields. Usable mid-session to edit the current project's config."
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -8,3 +8,5 @@ group: Proposals
 docs: >-
   Parameters: name (required), root_path (required), build_command, test_command,
   typecheck_command, test_unit_command, test_e2e_command, worktree_setup_command.
+  Also works mid-session against an already-registered project: the user reviews a
+  diff and accepts without terminating the session.

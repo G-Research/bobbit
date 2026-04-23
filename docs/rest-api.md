@@ -192,12 +192,25 @@ The helper implementing this is `resolveProjectForRequest` in `src/server/agent/
 
 ### Project Config
 
+Per-project overrides (recommended — scoped to a registered project):
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/project-config` | Get project settings (build/test/typecheck commands, custom config) |
-| `GET` | `/api/project-config/defaults` | Get default project config values |
-| `PUT` | `/api/project-config` | Update project config fields |
-| `GET` | `/api/config-directories` | List all config scan directories (skills, MCP, tools) with path, types, scope, exists, isRemovable |
+| `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set). |
+| `GET` | `/api/projects/:id/config/defaults` | Built-in defaults for all known config keys. |
+| `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. |
+| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. |
+
+`PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
+
+Server-level fallback (applied when no project override is set):
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/project-config` | Server-level project config (legacy; used as fallback for per-project overrides). |
+| `GET` | `/api/project-config/defaults` | Built-in defaults. |
+| `PUT` | `/api/project-config` | Update server-level config fields. |
+| `GET` | `/api/config-directories` | List all config scan directories (skills, MCP, tools) with path, types, scope, exists, isRemovable. |
 
 ### Setup
 
