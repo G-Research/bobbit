@@ -92,7 +92,7 @@
           "column": 6,
           "specs": [
             {
-              "title": "invalid mode returns 400",
+              "title": "mode=full happy path: returns 201 and seeds system prompt with transcript",
               "ok": true,
               "tags": [],
               "tests": [
@@ -107,14 +107,14 @@
                       "workerIndex": 0,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 1024,
+                      "duration": 1037,
                       "errors": [],
                       "stdout": [
                         {
-                          "text": "Creating .bobbit/ in C:\\bobbit-e2e\\.e2e-inproc-9968-0-1776980088902...\n"
+                          "text": "Creating .bobbit/ in C:\\bobbit-e2e\\.e2e-inproc-49548-0-1776980810211...\n"
                         },
                         {
-                          "text": "Created .bobbit/ in C:\\bobbit-e2e\\.e2e-inproc-9968-0-1776980088902. Customize roles, workflows, and system prompt in .bobbit/config/\n"
+                          "text": "Created .bobbit/ in C:\\bobbit-e2e\\.e2e-inproc-49548-0-1776980810211. Customize roles, workflows, and system prompt in .bobbit/config/\n"
                         },
                         {
                           "text": "[trigger-engine] Started (60s poll interval)\n"
@@ -126,54 +126,63 @@
                           "text": "[team-manager] Re-subscribed to events for 0 team(s)\n"
                         },
                         {
-                          "text": "[timing][plan] resolveBridgeOptions: 0.0ms\n"
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
                         },
                         {
-                          "text": "[timing][plan] resolveGoalExtensions: 0.0ms\n"
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
                         },
                         {
-                          "text": "[timing][plan] resolveTools: 368.7ms\n"
+                          "text": "[timing] executePlan resolveTools 395.8ms\n"
                         },
                         {
-                          "text": "[timing][plan] resolvePrompt: 10.8ms\n"
+                          "text": "[timing] executePlan resolvePrompt 11.8ms\n"
                         },
                         {
-                          "text": "[timing][plan] resolveToolActivation: 480.9ms\n"
+                          "text": "[timing] executePlan resolveToolActivation 438.9ms\n"
                         },
                         {
-                          "text": "[timing][plan] persistOnce(pre): 2.8ms\n"
+                          "text": "[timing] executePlan TOTAL 846.8ms\n"
                         },
                         {
-                          "text": "[timing][plan] spawnAgent: 0.9ms\n"
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 49fff1aa-1a86-447b-978f-21c77096d17c\n"
                         },
                         {
-                          "text": "[timing][plan] persistOnce(post): 0.7ms\n"
+                          "text": "[timing] POST /api/sessions 881.0ms\n"
                         },
                         {
-                          "text": "[timing][plan] postSpawn: 0.4ms\n"
+                          "text": "[ws-handler] Prompt received: text=\"UNIQUE_MARKER_ALPHA hello world...\", images=0\n"
                         },
                         {
-                          "text": "[timing][plan] executePlan TOTAL: 866.2ms\n"
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
                         },
                         {
-                          "text": "[session-manager] Applied default thinking level \"medium\" for session 53c507ef-ed43-48b4-813f-7289514333d4\n"
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
                         },
                         {
-                          "text": "[timing] POST /api/sessions 891.4ms\n"
+                          "text": "[timing] executePlan resolveTools 7.2ms\n"
                         },
                         {
-                          "text": "[ws-handler] Prompt received: text=\"Hello from the original session, please acknowledg...\", images=0\n"
+                          "text": "[timing] executePlan resolvePrompt 7.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 12.9ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 28.1ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 0f170a06-0a6e-47a5-97d5-f843359946f3\n"
                         }
                       ],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2026-04-23T21:34:48.895Z",
+                      "startTime": "2026-04-23T21:46:50.206Z",
                       "annotations": [],
                       "attachments": [
                         {
                           "name": "trace",
                           "contentType": "application/zip",
-                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-26c55-PI-invalid-mode-returns-400-api\\trace.zip"
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-fa8a3-stem-prompt-with-transcript-api\\trace.zip"
                         }
                       ]
                     }
@@ -181,10 +190,855 @@
                   "status": "expected"
                 }
               ],
-              "id": "04f7c5485da565895c26-90366c820146376377f1",
+              "id": "04f7c5485da565895c26-d822f5af3137a57ea910",
               "file": "tests/e2e/continue-archived.spec.ts",
-              "line": 151,
+              "line": 79,
               "column": 2
+            },
+            {
+              "title": "mode=summary happy path: naming model unavailable in tests, falls back to full transcript",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 401,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 7.6ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 8.3ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 17.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 33.7ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session eb993de2-343c-44d4-b15b-62742f4b352f\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 194.1ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"UNIQUE_MARKER_BETA summarize me please...\", images=0\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 6.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 8.2ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 53.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 68.8ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 93940bc2-3804-412d-be40-54d4c41d03cc\n"
+                        }
+                      ],
+                      "stderr": [
+                        {
+                          "text": "[continue-archived] Naming model unavailable — falling back to full transcript\n"
+                        }
+                      ],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:51.822Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-90d0b-lls-back-to-full-transcript-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-4a80864e9d6365350579",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 99,
+              "column": 2
+            },
+            {
+              "title": "unknown session returns 404",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 4,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:53.041Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-fd67c-unknown-session-returns-404-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-ef2d0224c5b6393f5414",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 181,
+              "column": 2
+            },
+            {
+              "title": "not-archived (live) session returns 409",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 277,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 20.3ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 17.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 31.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 68.6ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 4fc09d2d-236b-4242-b741-0eac85b7c9fb\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 139.4ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"hello...\", images=0\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:53.060Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-d17d5-ed-live-session-returns-409-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-95849d522beb69e09253",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 189,
+              "column": 2
+            },
+            {
+              "title": "goal-linked session returns 422",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 245,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 14.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 24.4ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 31.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 71.4ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 5143e9df-b4c5-4d28-8f05-331b8b969421\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"goal session message...\", images=0\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:53.353Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-576ba--linked-session-returns-422-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-6e29d7f99e88c2d6aef0",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 203,
+              "column": 2
+            },
+            {
+              "title": "delegate session returns 422",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 463,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 16.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 18.3ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 36.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 71.4ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session ae0e4032-c2ec-4f24-83d6-937dcfb672a9\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 102.4ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"parent...\", images=0\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 16.2ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 21.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 34.6ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 72.2ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session fccee38e-f54c-468e-9ac1-7b98dcc75ee5\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 101.2ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"delegate msg...\", images=0\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:53.619Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-b1c2d-elegate-session-returns-422-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-4e8b8dbc041fbaac8145",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 230,
+              "column": 2
+            },
+            {
+              "title": "assistant session (assistantType) returns 422",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1161,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 18.4ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 976.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 31.9ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 1027.7ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session e99c37a2-b555-4749-a18e-be2de6adf5b2\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 1033.5ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"assistant init...\", images=0\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:54.098Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-9ed22-n-assistantType-returns-422-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-7d0172b1712cabb54196",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 251,
+              "column": 2
+            },
+            {
+              "title": "role + personalities copied to new session",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 364,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 15.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 19.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 38.9ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 73.7ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 41ca3cbc-58d3-4a8d-8d93-64b4e83fc81b\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 101.9ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"Hello from the original session, please acknowledg...\", images=0\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.2ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 35.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 20.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 29.6ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 85.5ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session cf9b752b-6f2c-4c12-b5aa-85567933a8d5\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:55.277Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-c3088-ities-copied-to-new-session-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-0fad9ba724786bd8bd3f",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 270,
+              "column": 2
+            },
+            {
+              "title": "large transcript (full mode) truncated to ≤128KB seed budget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 341,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.2ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 19.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 22.8ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 40.7ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 83.7ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session 1e261105-2171-4fbf-b32b-6dd6bf004001\n"
+                        },
+                        {
+                          "text": "[timing] POST /api/sessions 116.0ms\n"
+                        },
+                        {
+                          "text": "[ws-handler] Prompt received: text=\"Marker X...\", images=0\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 16.3ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 24.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 34.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 74.5ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session b863ab6f-3825-4568-823c-e0d2420831f9\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:55.657Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-d5d55-cated-to-≤128KB-seed-budget-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-f668ed8bd9a9ef27b6e4",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 296,
+              "column": 2
+            },
+            {
+              "title": "continue on archived session with no transcript returns 404",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "api",
+                  "projectName": "api",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 106,
+                      "errors": [],
+                      "stdout": [
+                        {
+                          "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveGoalExtensions 0.3ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveTools 17.6ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolvePrompt 18.5ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan resolveToolActivation 29.0ms\n"
+                        },
+                        {
+                          "text": "[timing] executePlan TOTAL 65.5ms\n"
+                        },
+                        {
+                          "text": "[session-manager] Applied default thinking level \"medium\" for session ddc90999-2fb1-4576-abcf-e14ea33aff25\n"
+                        }
+                      ],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-04-23T21:46:56.015Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-e97a9-h-no-transcript-returns-404-api\\trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "04f7c5485da565895c26-72fd35e5037e7f313098",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 335,
+              "column": 2
+            }
+          ],
+          "suites": [
+            {
+              "title": "shared archived source (no mutation)",
+              "file": "tests/e2e/continue-archived.spec.ts",
+              "line": 126,
+              "column": 16,
+              "specs": [
+                {
+                  "title": "title format: 'Continued: <original title>'",
+                  "ok": true,
+                  "tags": [],
+                  "tests": [
+                    {
+                      "timeout": 60000,
+                      "annotations": [],
+                      "expectedStatus": "passed",
+                      "projectId": "api",
+                      "projectName": "api",
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 565,
+                          "errors": [],
+                          "stdout": [
+                            {
+                              "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveTools 7.3ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolvePrompt 10.4ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveToolActivation 13.5ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan TOTAL 31.5ms\n"
+                            },
+                            {
+                              "text": "[session-manager] Applied default thinking level \"medium\" for session 4e4c8fc6-559f-4ec6-a1dc-74172d4f4751\n"
+                            },
+                            {
+                              "text": "[ws-handler] Prompt received: text=\"Hello from the original session, please acknowledg...\", images=0\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveBridgeOptions 0.0ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveGoalExtensions 0.1ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveTools 10.6ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolvePrompt 9.6ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan resolveToolActivation 13.7ms\n"
+                            },
+                            {
+                              "text": "[timing] executePlan TOTAL 34.1ms\n"
+                            },
+                            {
+                              "text": "[session-manager] Applied default thinking level \"medium\" for session 5daa1239-03f9-45d7-bb44-dd86acd3aa84\n"
+                            }
+                          ],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-04-23T21:46:52.234Z",
+                          "annotations": [],
+                          "attachments": [
+                            {
+                              "name": "trace",
+                              "contentType": "application/zip",
+                              "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-a0e52-t-Continued-original-title--api\\trace.zip"
+                            }
+                          ]
+                        }
+                      ],
+                      "status": "expected"
+                    }
+                  ],
+                  "id": "04f7c5485da565895c26-255e3d3af3ecb698b4b7",
+                  "file": "tests/e2e/continue-archived.spec.ts",
+                  "line": 133,
+                  "column": 3
+                },
+                {
+                  "title": "invalid mode returns 400",
+                  "ok": true,
+                  "tags": [],
+                  "tests": [
+                    {
+                      "timeout": 60000,
+                      "annotations": [],
+                      "expectedStatus": "passed",
+                      "projectId": "api",
+                      "projectName": "api",
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 5,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-04-23T21:46:52.990Z",
+                          "annotations": [],
+                          "attachments": [
+                            {
+                              "name": "trace",
+                              "contentType": "application/zip",
+                              "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-bc9d5-on-invalid-mode-returns-400-api\\trace.zip"
+                            }
+                          ]
+                        }
+                      ],
+                      "status": "expected"
+                    }
+                  ],
+                  "id": "04f7c5485da565895c26-1b38744dfe2722c8b2ac",
+                  "file": "tests/e2e/continue-archived.spec.ts",
+                  "line": 164,
+                  "column": 3
+                },
+                {
+                  "title": "missing mode returns 400",
+                  "ok": true,
+                  "tags": [],
+                  "tests": [
+                    {
+                      "timeout": 60000,
+                      "annotations": [],
+                      "expectedStatus": "passed",
+                      "projectId": "api",
+                      "projectName": "api",
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 4,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-04-23T21:46:53.019Z",
+                          "annotations": [],
+                          "attachments": [
+                            {
+                              "name": "trace",
+                              "contentType": "application/zip",
+                              "path": "C:\\Users\\jsubr\\w\\bobbit-wt\\session-_pool-e849b519\\reports\\profiles\\test-results\\continue-archived-Continue-a54c9-on-missing-mode-returns-400-api\\trace.zip"
+                            }
+                          ]
+                        }
+                      ],
+                      "status": "expected"
+                    }
+                  ],
+                  "id": "04f7c5485da565895c26-980d31155ec646294406",
+                  "file": "tests/e2e/continue-archived.spec.ts",
+                  "line": 172,
+                  "column": 3
+                }
+              ]
             }
           ]
         }
@@ -193,9 +1047,9 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2026-04-23T21:34:47.999Z",
-    "duration": 4465.622,
-    "expected": 1,
+    "startTime": "2026-04-23T21:46:49.381Z",
+    "duration": 8547.976,
+    "expected": 13,
     "skipped": 0,
     "unexpected": 0,
     "flaky": 0

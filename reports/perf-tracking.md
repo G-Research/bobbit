@@ -119,3 +119,41 @@ Ranked by expected impact. Each attempt lists the file(s) it will touch so we ca
 
 **Analysis complete.** Attempts A1–A10 scheduled. Baseline: **6.6 min (396 s)**.
 
+---
+
+## Cycle 1 — attempts A1/A2/A3/A4/A5/A7/A8 completed
+
+Four delegates ran in parallel, each in a non-overlapping file set:
+
+| Attempt | Commit | File(s) touched | Delegate report |
+|---|---|---|---|
+| A1+A2+A3 (tool-activation cache) | `1176f91b` | `src/server/agent/tool-activation.ts` | `executePlan TOTAL`: first call ~846 ms (unchanged), subsequent calls **28–70 ms** (was ~870 ms). Step-level: `resolveTools` 440 → 7 ms, `resolveToolActivation` 440 → 15 ms. Process-level caches keyed on sha256-fingerprints over (role, toolManager providers, mcp servers, groupPolicy). `fs.existsSync` guard on cached paths to handle external deletion. |
+| A4 (continue-archived share fixture) | `a30d9688` | `tests/e2e/continue-archived.spec.ts` | 3 rejection-path tests (`title format`, `invalid mode`, `missing mode`) now share a single archived source via `beforeAll`. ~4 s saved per run (after tool-activation caching, these tests were already much cheaper, so the marginal win is smaller than predicted). |
+| A5 (verification-core share + event-driven) | `bef6dca4` | `tests/e2e/verification-core.spec.ts` | DRY'd the two `Expect-failure pipeline` tests via `prepBugFixGoalWithAnalysis()` helper. Removed 200 ms defensive pad — `activeVerifications.delete()` happens before the `gate_status_changed` broadcast, so the pad was dead weight. Switched to `signalAndWaitForGate` helper for race-safety. |
+| A8 (archived-session-merge dedup + gate-resign event-driven) | `3213546b` | `tests/e2e/archived-session-merge.spec.ts`, `tests/e2e/gate-resign-cancel.spec.ts` | Combined the two merge tests into one (same fixture, union of assertions). Replaced a 200 ms pad in gate-resign-cancel with a `gate_verification_started` event wait. |
+
+**Cumulative:** 4 commits, unit tests still pass (991), per-spec local runs all green.
+
+### Cycle 1 result
+
+**🎉 6.6 min → 3.3 min. 50% reduction, one cycle.** 741 passed · 7 skipped · 3 flaky (all pre-existing, retried green).
+
+| Test | Before | After | Speedup |
+|---|---:|---:|---:|
+| `archived-session-merge` combined | 11.8 s | 0.57 s | **20×** |
+| `continue-archived` full happy-path | 5.5 s | 0.45 s | 12× |
+| `continue-archived` summary happy-path | 5.6 s | 0.44 s | 12× |
+| `continue-archived` title format | 5.9 s | 0.62 s | 10× |
+| `continue-archived` large transcript | 5.0 s | 0.38 s | 13× |
+| `continue-archived` goal-linked 422 | 2.6 s | 0.25 s | 10× |
+| `continue-archived` delegate 422 | 5.3 s | 0.55 s | 10× |
+| `verification-core` multi-step | 12.7 s | 6.1 s | 2.1× |
+| `verification-core` expect-fail matching | 10.8 s | 4.0 s | 2.7× |
+| `verification-core` expect-fail non-matching | 10.2 s | 4.8 s | 2.1× |
+| `gate-resign-cancel` triple re-signal | 10.2 s | 4.6 s | 2.2× |
+| `gate-resign-cancel` re-signaling | 8.7 s | 4.5 s | 1.9× |
+| `mcp-tool-permission` denied broadcast | 10.8 s | 6.1 s | 1.8× |
+| `mcp-tool-permission` grant toolPolicies | 9.1 s | 4.5 s | 2.0× |
+
+The dominant lever was **A1 (tool-activation cache)** — every test creating sessions benefited, which is almost every test. Fixture-sharing (A4/A8) was secondary but freed up parallel worker slots.
+
