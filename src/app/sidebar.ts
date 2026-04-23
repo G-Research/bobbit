@@ -896,7 +896,7 @@ export function renderSidebar() {
 	const isSkillsActive = isRouteActive("skills");
 
 	return html`
-		<div class="shrink-0 h-full flex flex-col sidebar-edge relative" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+		<div class="shrink-0 h-full flex flex-col sidebar-edge relative" data-testid="sidebar-expanded" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
 			<div class="sidebar-resize-handle" @pointerdown=${onSidebarResizePointerDown} @dblclick=${onSidebarResizeDoubleClick} title="Drag to resize (double-click to reset)"></div>
 			<div class="flex flex-col border-b border-border/50 px-0.5 py-1 gap-0.5">
 				<div class="flex items-center">
@@ -1182,7 +1182,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 	};
 
 	return html`
-		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge" style="background: var(--sidebar);">
+		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
 			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
 				${sortedGoals.map((goal, i) => {
 					const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);

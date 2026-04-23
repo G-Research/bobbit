@@ -307,9 +307,9 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	test("SB-32: Sidebar collapses to icon-only mode and persists", async ({ page }) => {
 		s.begin(STORY_SB32);
 
-		// setup — verify sidebar is expanded (240px wide)
+		// setup — verify sidebar is expanded
 		await s.sidebar.is_visible();
-		const fullSidebar = page.locator(".w-\\[240px\\]").first();
+		const fullSidebar = page.locator("[data-testid='sidebar-expanded']").first();
 		await expect(fullSidebar).toBeVisible({ timeout: 10_000 });
 
 		// act — click the collapse button
@@ -318,23 +318,23 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
 		await collapseBtn.click();
 
-		// Sidebar should now be narrow (w-14 = 56px)
-		await expect(page.locator(".w-14").first()).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator(".w-\\[240px\\]")).toHaveCount(0, { timeout: 3_000 });
+		// Sidebar should now be collapsed (icon-only strip)
+		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
 
 		// Reload — collapsed state should persist
 		await s.reload();
 
 		// assert — sidebar still collapsed after reload
 		s.assert();
-		await expect(page.locator(".w-14").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator(".w-\\[240px\\]")).toHaveCount(0, { timeout: 3_000 });
+		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
 
 		// Expand to restore state for other tests
 		const expandBtn = page.locator("button[title*='Expand sidebar']").first();
 		await expect(expandBtn).toBeVisible({ timeout: 5_000 });
 		await expandBtn.click();
-		await expect(page.locator(".w-\\[240px\\]").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 	});
 
 	// ---------------------------------------------------------------
@@ -359,19 +359,19 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await page.waitForTimeout(300);
 
 		// Test Ctrl+[ toggles sidebar collapse
-		await expect(page.locator(".w-\\[240px\\]").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 		await page.keyboard.press("Control+[");
 		await page.waitForTimeout(500);
 
-		// Sidebar should be collapsed (w-14)
-		await expect(page.locator(".w-14").first()).toBeVisible({ timeout: 5_000 });
+		// Sidebar should be collapsed
+		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 5_000 });
 
 		// assert — keyboard shortcuts work
 		s.assert();
 		// Toggle back to expanded
 		await page.keyboard.press("Control+[");
 		await page.waitForTimeout(500);
-		await expect(page.locator(".w-\\[240px\\]").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 	});
 
 	// ---------------------------------------------------------------

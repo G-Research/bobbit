@@ -190,8 +190,8 @@ test.describe("SB-32: Collapsed sidebar", () => {
 	test("collapse button narrows sidebar, persists across reload, expand restores", async ({ page }) => {
 		await openApp(page);
 
-		// The sidebar should be ~240px wide initially (full width)
-		const sidebar = page.locator(".w-\\[240px\\]").first();
+		// The sidebar should be expanded initially
+		const sidebar = page.locator("[data-testid='sidebar-expanded']").first();
 		await expect(sidebar).toBeVisible({ timeout: 10_000 });
 
 		// Click the collapse button (PanelLeftClose icon button)
@@ -199,27 +199,27 @@ test.describe("SB-32: Collapsed sidebar", () => {
 		await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
 		await collapseBtn.click();
 
-		// Sidebar should now be narrow (~56px / w-14)
-		const collapsedSidebar = page.locator(".w-14").first();
+		// Sidebar should now be collapsed (icon-only strip)
+		const collapsedSidebar = page.locator("[data-testid='sidebar-collapsed']").first();
 		await expect(collapsedSidebar).toBeVisible({ timeout: 5_000 });
-		// Full-width sidebar should be gone
-		await expect(page.locator(".w-\\[240px\\]")).toHaveCount(0, { timeout: 3_000 });
+		// Expanded sidebar should be gone
+		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
 
 		// Reload — collapsed state should persist
 		await page.reload();
 		await expect(
-			page.locator(".w-14").first(),
+			page.locator("[data-testid='sidebar-collapsed']").first(),
 		).toBeVisible({ timeout: 15_000 });
-		// Full-width sidebar should still be gone after reload
-		await expect(page.locator(".w-\\[240px\\]")).toHaveCount(0, { timeout: 3_000 });
+		// Expanded sidebar should still be gone after reload
+		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
 
 		// Click expand button to restore
 		const expandBtn = page.locator("button[title*='Expand sidebar']").first();
 		await expect(expandBtn).toBeVisible({ timeout: 5_000 });
 		await expandBtn.click();
 
-		// Full-width sidebar should be back
-		await expect(page.locator(".w-\\[240px\\]").first()).toBeVisible({ timeout: 5_000 });
+		// Expanded sidebar should be back
+		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 	});
 });
 
