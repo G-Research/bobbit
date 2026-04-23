@@ -204,76 +204,67 @@ export class StreamingMessageContainer extends LitElement {
 	}
 
 	override render() {
-		// Show loading indicator if loading but no message yet
-		if (!this._message) {
-			if (this._blobVisible)
-				return html`<div class="flex flex-col gap-3 mb-3">
-					<div class="${this._blobClass}">
-						${renderBlobSpriteImg(this._blobClass.includes("idle"), this.archived)}
-						<div class="bobbit-blob__crown"></div>
-						<div class="bobbit-blob__bandana"></div>
-						<div class="bobbit-blob__magnifier"></div>
-						<div class="bobbit-blob__palette"></div>
-						<div class="bobbit-blob__pencil"></div>
-						<div class="bobbit-blob__shield"></div>
-						<div class="bobbit-blob__set-square"></div>
-						<div class="bobbit-blob__flask"></div>
-						<div class="bobbit-blob__wand"></div>
-						<div class="bobbit-blob__wizard-hat"></div>
-						<div class="bobbit-blob__stamp"></div>
-						<div class="bobbit-blob__clipboard"></div>
-						<div class="bobbit-blob__shadow"></div>
-					</div>
-					${this.isStreaming && this.turnStartTime
-						? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">
-							<live-timer .startTime=${this.turnStartTime} .running=${true}></live-timer>
-						</div>`
-						: nothing}
-				</div>`;
-			return html``; // Empty until a message is set
-		}
+		// Unified render: the blob lives in a single, stable DOM slot so its
+		// CSS animations keep their clock across message transitions (e.g.
+		// assistant → toolResult → next assistant). Previously each branch
+		// returned a different html`` template, which caused Lit to tear down
+		// and re-create the blob node on every transition — resetting the
+		// bounce/squash/shadow keyframes to frame 0 and producing the jarring
+		// restart the user reported.
 		const msg = this._message;
 
-		if (msg.role === "toolResult") {
-			// Skip standalone tool result in streaming; the stable list will render paired tool-message
-			return html``;
-		} else if (msg.role === "user" || msg.role === "user-with-attachments") {
-			// Skip standalone tool result in streaming; the stable list will render it immediiately
-			return html``;
-		} else if (msg.role === "assistant") {
-			// Assistant message - render inline tool messages during streaming
-			return html`
-				<div class="flex flex-col gap-3 mb-3">
-					<assistant-message
-						.message=${msg}
-						.tools=${this.tools}
-						.isStreaming=${this.isStreaming}
-						.pendingToolCalls=${this.pendingToolCalls}
-						.toolResultsById=${this.toolResultsById}
-						.toolPartialResults=${this.toolPartialResults}
-						.hideToolCalls=${false}
-						.onCostClick=${this.onCostClick}
-						.turnStartTime=${this.turnStartTime}
-					></assistant-message>
-					${this._blobVisible ? html`<div class="${this._blobClass}">
-						${renderBlobSpriteImg(this._blobClass.includes("idle"), this.archived)}
-						<div class="bobbit-blob__crown"></div>
-						<div class="bobbit-blob__bandana"></div>
-						<div class="bobbit-blob__magnifier"></div>
-						<div class="bobbit-blob__palette"></div>
-						<div class="bobbit-blob__pencil"></div>
-						<div class="bobbit-blob__shield"></div>
-						<div class="bobbit-blob__set-square"></div>
-						<div class="bobbit-blob__flask"></div>
-						<div class="bobbit-blob__wand"></div>
-						<div class="bobbit-blob__wizard-hat"></div>
-						<div class="bobbit-blob__stamp"></div>
-						<div class="bobbit-blob__clipboard"></div>
-						<div class="bobbit-blob__shadow"></div>
-					</div>` : ""}
-				</div>
-			`;
+		// Message content: only assistant messages render inline here. User
+		// and toolResult messages are rendered by the stable message-list.
+		let content: unknown = nothing;
+		if (msg && msg.role === "assistant") {
+			content = html`<assistant-message
+				.message=${msg}
+				.tools=${this.tools}
+				.isStreaming=${this.isStreaming}
+				.pendingToolCalls=${this.pendingToolCalls}
+				.toolResultsById=${this.toolResultsById}
+				.toolPartialResults=${this.toolPartialResults}
+				.hideToolCalls=${false}
+				.onCostClick=${this.onCostClick}
+				.turnStartTime=${this.turnStartTime}
+			></assistant-message>`;
 		}
+
+		const hasContent = content !== nothing;
+
+		// Nothing to show at all — render empty.
+		if (!hasContent && !this._blobVisible) return html``;
+
+		// Live timer is only shown in the "no message yet" pre-stream state,
+		// matching the previous behavior.
+		const showTimer = !msg && this.isStreaming && this.turnStartTime;
+
+		return html`
+			<div class="flex flex-col gap-3 mb-3">
+				${content}
+				${this._blobVisible ? html`<div class="${this._blobClass}">
+					${renderBlobSpriteImg(this._blobClass.includes("idle"), this.archived)}
+					<div class="bobbit-blob__crown"></div>
+					<div class="bobbit-blob__bandana"></div>
+					<div class="bobbit-blob__magnifier"></div>
+					<div class="bobbit-blob__palette"></div>
+					<div class="bobbit-blob__pencil"></div>
+					<div class="bobbit-blob__shield"></div>
+					<div class="bobbit-blob__set-square"></div>
+					<div class="bobbit-blob__flask"></div>
+					<div class="bobbit-blob__wand"></div>
+					<div class="bobbit-blob__wizard-hat"></div>
+					<div class="bobbit-blob__stamp"></div>
+					<div class="bobbit-blob__clipboard"></div>
+					<div class="bobbit-blob__shadow"></div>
+				</div>` : nothing}
+				${showTimer
+					? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">
+						<live-timer .startTime=${this.turnStartTime} .running=${true}></live-timer>
+					</div>`
+					: nothing}
+			</div>
+		`;
 	}
 }
 
