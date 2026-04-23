@@ -28,6 +28,7 @@ import {
 	isPreImplementationGate,
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
+import { applyReviewModelOverrides } from "./review-model-override.js";
 
 /** Create a deferred promise with exposed resolve/reject. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
@@ -1587,24 +1588,23 @@ export class VerificationHarness {
 				}
 			}
 
-			// Override model if default.reviewModel preference is set
+			// Override model if default.reviewModel preference is set.
+			// Throws on failure/mismatch — outer catch converts to a failed gate result.
 			if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
-				if (reviewModelPref) {
-					const slash = reviewModelPref.indexOf("/");
-					if (slash > 0 && slash < reviewModelPref.length - 1) {
-						const provider = reviewModelPref.slice(0, slash);
-						const modelId = reviewModelPref.slice(slash + 1);
-						try {
-							await session.rpcClient.setModel(provider, modelId);
-							this.sessionManager?.persistSessionModel(sessionId, provider, modelId);
-							console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
-						} catch (err) {
-							console.warn(`[verification] Failed to set review model "${reviewModelPref}", using default:`, err);
-						}
-					} else {
-						console.warn(`[verification] Malformed default.reviewModel preference: "${reviewModelPref}", ignoring`);
+				try {
+					await applyReviewModelOverrides(session.rpcClient, {
+						prefs: { get: (k) => this.preferencesStore!.get(k) as string | undefined },
+						sessionManager: this.sessionManager ?? null,
+						sessionId,
+						role: "reviewer",
+					});
+					if (reviewModelPref) {
+						console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
 					}
+				} catch (err) {
+					console.error(`[verification] applyReviewModelOverrides failed for reviewer ${sessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					throw err;
 				}
 			}
 
@@ -1618,7 +1618,7 @@ export class VerificationHarness {
 					await session.rpcClient.setThinkingLevel(level);
 					console.log(`[verification] Set review thinking level "${level}" for ${sessionId}`);
 				} catch (err) {
-					console.warn(`[verification] Failed to set review thinking level:`, err);
+					console.error(`[verification] Failed to set review thinking level:`, err);
 				}
 			}
 
@@ -1804,22 +1804,23 @@ export class VerificationHarness {
 				}
 			}
 
-			// Override model if default.reviewModel preference is set
+			// Override model if default.reviewModel preference is set.
+			// Throws on failure/mismatch — outer catch converts to a failed gate result.
 			if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
-				if (reviewModelPref) {
-					const slash = reviewModelPref.indexOf("/");
-					if (slash > 0 && slash < reviewModelPref.length - 1) {
-						const provider = reviewModelPref.slice(0, slash);
-						const modelId = reviewModelPref.slice(slash + 1);
-						try {
-							await session.rpcClient.setModel(provider, modelId);
-							this.sessionManager?.persistSessionModel(qaSessionId, provider, modelId);
-							console.log(`[verification] Set QA model "${reviewModelPref}" for ${qaSessionId}`);
-						} catch (err) {
-							console.warn(`[verification] Failed to set QA model "${reviewModelPref}", using default:`, err);
-						}
+				try {
+					await applyReviewModelOverrides(session.rpcClient, {
+						prefs: { get: (k) => this.preferencesStore!.get(k) as string | undefined },
+						sessionManager: this.sessionManager ?? null,
+						sessionId: qaSessionId,
+						role: "qa",
+					});
+					if (reviewModelPref) {
+						console.log(`[verification] Set QA model "${reviewModelPref}" for ${qaSessionId}`);
 					}
+				} catch (err) {
+					console.error(`[verification] applyReviewModelOverrides failed for QA ${qaSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					throw err;
 				}
 			}
 
@@ -1831,7 +1832,7 @@ export class VerificationHarness {
 				try {
 					await session.rpcClient.setThinkingLevel(level);
 				} catch (err) {
-					console.warn(`[verification] Failed to set QA thinking level:`, err);
+					console.error(`[verification] Failed to set QA thinking level:`, err);
 				}
 			}
 
@@ -1972,23 +1973,24 @@ export class VerificationHarness {
 				}
 			}
 
-			// Override model if default.reviewModel preference is set
+			// Override model if default.reviewModel preference is set.
+			// Sub-session path: no UI session, no persistence (sessionManager=null).
+			// Throws on failure/mismatch — outer catch converts to a failed gate result.
 			if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
-				if (reviewModelPref) {
-					const slash = reviewModelPref.indexOf("/");
-					if (slash > 0 && slash < reviewModelPref.length - 1) {
-						const provider = reviewModelPref.slice(0, slash);
-						const modelId = reviewModelPref.slice(slash + 1);
-						try {
-							await rpc.setModel(provider, modelId);
-							console.log(`[verification] Set review model "${reviewModelPref}" for ${subSessionId}`);
-						} catch (err) {
-							console.warn(`[verification] Failed to set review model "${reviewModelPref}", using default:`, err);
-						}
-					} else {
-						console.warn(`[verification] Malformed default.reviewModel preference: "${reviewModelPref}", ignoring`);
+				try {
+					await applyReviewModelOverrides(rpc, {
+						prefs: { get: (k) => this.preferencesStore!.get(k) as string | undefined },
+						sessionManager: null,
+						sessionId: null,
+						role: "subsession",
+					});
+					if (reviewModelPref) {
+						console.log(`[verification] Set review model "${reviewModelPref}" for ${subSessionId}`);
 					}
+				} catch (err) {
+					console.error(`[verification] applyReviewModelOverrides failed for sub-session ${subSessionId} (pref="${reviewModelPref ?? "<unset>"}"):`, err);
+					throw err;
 				}
 			}
 
@@ -2002,7 +2004,7 @@ export class VerificationHarness {
 					await rpc.setThinkingLevel(level);
 					console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}`);
 				} catch (err) {
-					console.warn(`[verification] Failed to set review thinking level:`, err);
+					console.error(`[verification] Failed to set review thinking level:`, err);
 				}
 			}
 
