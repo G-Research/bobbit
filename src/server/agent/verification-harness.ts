@@ -690,8 +690,9 @@ export class VerificationHarness {
 		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
 
 		// Resolve project vars and substitute the prompt template
-		const projectVars: Record<string, string> = this.projectConfigStore
-			? this.projectConfigStore.getWithDefaults()
+		const projectConfigStore = this.resolveProjectConfigStore(goalId);
+		const projectVars: Record<string, string> = projectConfigStore
+			? projectConfigStore.getWithDefaults()
 			: {};
 		const agentVars: Record<string, string> = ctx.signal.metadata || {};
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
@@ -747,7 +748,7 @@ export class VerificationHarness {
 		}
 
 		const startedAt = Date.now();
-		const projectVars = this.projectConfigStore?.getWithDefaults() ?? {};
+		const projectVars = this.resolveProjectConfigStore(goalId)?.getWithDefaults() ?? {};
 		const agentVars: Record<string, string> = ctx.signal.metadata || {};
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
@@ -797,6 +798,15 @@ export class VerificationHarness {
 		for (const v of persisted) {
 			this.activeVerifications.set(v.signalId, v);
 		}
+	}
+
+	private resolveProjectConfigStore(goalId: string): ProjectConfigStore | undefined {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			if (ctx) return ctx.projectConfigStore;
+			console.warn(`[verification] Goal "${goalId}" not found in any project context — falling back to server-level projectConfigStore. This likely means the gate will run with wrong commands.`);
+		}
+		return this.projectConfigStore;
 	}
 
 	private resolveGateStore(goalId: string): GateStore {
@@ -974,8 +984,9 @@ export class VerificationHarness {
 			};
 
 			// Project config — resolved via {{project.key}}
-			const projectVars: Record<string, string> = this.projectConfigStore
-				? this.projectConfigStore.getWithDefaults()
+			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
+			const projectVars: Record<string, string> = projectConfigStore
+				? projectConfigStore.getWithDefaults()
 				: {};
 
 			// Signal metadata — resolved via {{agent.key}}
@@ -1721,7 +1732,7 @@ export class VerificationHarness {
 		const combinedPrompt = sections.join("\n");
 
 		// Compute timeout: qa_max_duration_minutes + 5 min buffer
-		const projectVars = this.projectConfigStore?.getWithDefaults() ?? {};
+		const projectVars = this.resolveProjectConfigStore(goalId)?.getWithDefaults() ?? {};
 		const qaMinutes = parseInt(projectVars["qa_max_duration_minutes"] || "10", 10) || 10;
 		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
 		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
