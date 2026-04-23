@@ -19,7 +19,7 @@ async function pollGoal(
 		const res = await apiFetch(`/api/goals/${goalId}`);
 		const goal = await res.json();
 		if (predicate(goal)) return goal;
-		await new Promise(r => setTimeout(r, 500));
+		await new Promise(r => setTimeout(r, 100));
 	}
 	const res = await apiFetch(`/api/goals/${goalId}`);
 	const goal = await res.json();
@@ -37,7 +37,7 @@ async function pollTeamStarted(goalId: string, timeoutMs = 30_000): Promise<any>
 			const team = await res.json();
 			if (team.teamLeadSessionId) return team;
 		}
-		await new Promise(r => setTimeout(r, 500));
+		await new Promise(r => setTimeout(r, 100));
 	}
 	throw new Error(`Team not started for goal ${goalId} within ${timeoutMs}ms`);
 }

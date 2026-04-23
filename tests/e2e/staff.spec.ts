@@ -399,8 +399,8 @@ test.describe("Staff Agents — REST API", () => {
 		});
 		expect(wakeRes.status).toBe(201);
 
-		// Wait for the async refreshWorktree to complete
-		await new Promise((r) => setTimeout(r, 5_000));
+		// The /wake endpoint awaits refreshWorktree() before responding 201,
+		// so by the time we're here the rebase is already complete.
 
 		// Verify the marker commit is now in the worktree's log
 		const log = execFileSync("git", ["log", "--oneline", "-5"], { cwd: worktreePath, encoding: "utf-8" });

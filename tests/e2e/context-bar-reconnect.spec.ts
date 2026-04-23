@@ -44,8 +44,16 @@ test.describe("context bar after reconnect", () => {
 		// 5. Also send an explicit get_state (like the client does on reconnect)
 		ws2.send({ type: "get_state" });
 
-		// 6. Collect messages for a few seconds
-		await new Promise(r => setTimeout(r, 3000));
+		// 6. Wait for a state message with the correct contextWindow. As soon
+		// as we see one, the assertion passes — no need to pad 3s. If none
+		// arrives within the timeout we fall through to the diagnostic
+		// assertion below which reports what we DID see.
+		await ws2.waitFor(
+			(m: WsMsg) =>
+				m.type === "state" &&
+				(m.data as any)?.model?.contextWindow === 1_000_000,
+			5_000,
+		).catch(() => {});
 
 		// 7. Find all state messages received after auth
 		const stateMessages = ws2.messages.filter((m: WsMsg) => m.type === "state");
