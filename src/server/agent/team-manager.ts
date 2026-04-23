@@ -1032,11 +1032,11 @@ export class TeamManager {
 		}
 		this.lastNotifyTime.set(workerSessionId, now);
 
-		// Skip notification if team lead's last turn errored (API errors cause cascading agent_end events)
-		if (teamLeadSession.lastTurnErrored) {
-			console.log(`[team-manager] Suppressing notification for ${agentId} — team lead is in error state`);
-			return;
-		}
+		// Note: we no longer suppress notifications when the team lead's last
+		// turn errored. SessionManager.enqueuePrompt / deliverLiveSteer now own
+		// the error-state policy (implicit unstick up to MAX_CONSECUTIVE_ERROR_TURNS,
+		// park afterwards). A single source of truth avoids nudges being
+		// silently dropped on the floor.
 
 		// Look up tasks assigned to the worker
 		const tasks = this.resolveTasksForSession(goalId, workerSessionId);

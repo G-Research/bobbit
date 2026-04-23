@@ -315,40 +315,37 @@ test.describe("Queue E2E", () => {
 			conn.close();
 		}
 
-		// Fresh approach: send MOCK_ERROR to trigger error, then queue messages
+		// Fresh approach: drive 3 consecutive MOCK_ERROR turns to hit the
+		// MAX_CONSECUTIVE_ERROR_TURNS cap, then verify that further messages
+		// park in the queue (instead of implicit unstick).
 		const sid2 = await createSession();
 		const conn2 = await connectWs(sid2);
 
 		try {
 			await conn2.waitFor((m) => m.type === "queue_update");
 
-			// Send MOCK_ERROR — this triggers an error turn
-			conn2.send({ type: "prompt", text: "MOCK_ERROR please fail" });
-			await conn2.waitFor(statusPredicate("streaming"));
-			await conn2.waitFor(statusPredicate("idle"), 10_000);
+			for (let i = 0; i < 3; i++) {
+				const cursor = conn2.messageCount();
+				conn2.send({ type: "prompt", text: `MOCK_ERROR attempt ${i}` });
+				await conn2.waitForFrom(cursor, statusPredicate("streaming"), 10_000);
+				await conn2.waitForFrom(cursor, statusPredicate("idle"), 10_000);
+				// Each MOCK_ERROR dispatch errors again; under cap this triggers
+				// implicit unstick on the next send, so the counter advances
+				// linearly: 1, 2, 3.
+			}
 
-			// After error, the session should have lastTurnErrored = true
-			// Clear messages to track only what happens during queueing
 			conn2.messages.length = 0;
 
-			// Now queue 2 messages — they should stay queued (error gating)
-			conn2.send({ type: "prompt", text: "queued after error A" });
+			// Now at cap — subsequent messages park.
+			conn2.send({ type: "prompt", text: "queued after cap A" });
 			const q1 = await conn2.waitFor(queueLenPredicate(1));
-			expect(q1.queue![0].text).toBe("queued after error A");
+			expect(q1.queue![0].text).toBe("queued after cap A");
 
-			conn2.send({ type: "prompt", text: "queued after error B" });
+			conn2.send({ type: "prompt", text: "queued after cap B" });
 			const q2 = await conn2.waitFor(queueLenPredicate(2));
-			expect(q2.queue![1].text).toBe("queued after error B");
+			expect(q2.queue![1].text).toBe("queued after cap B");
 
-			// Verify queue stays intact — the agent is idle and in error state,
-			// so no drain should occur. Check the last queue_update still has 2 items.
-			const finalQueue = conn2.messages.filter(
-				(m: WsMsg) => m.type === "queue_update",
-			);
-			const lastQueueUpdate = finalQueue[finalQueue.length - 1];
-			expect(lastQueueUpdate.queue.length).toBe(2);
-
-			// Double-check: no streaming started (messages were NOT dispatched)
+			// No streaming started — messages parked, not dispatched.
 			const streamingStatuses = conn2.messages.filter(
 				(m: WsMsg) => m.type === "session_status" && m.status === "streaming",
 			);
@@ -358,60 +355,62 @@ test.describe("Queue E2E", () => {
 		}
 	});
 
-	test("story 36: error then retry drains the queue", async () => {
+	test("story 36 (updated): error + cap reached, then retry drains parked messages", async () => {
+		// Updated for "Unstick sessions on new input": parking only happens at
+		// the cap now. We drive 3 errored turns, park a message, then Retry.
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Trigger error
-			conn.send({ type: "prompt", text: "MOCK_ERROR please fail" });
-			await conn.waitFor(statusPredicate("streaming"));
-			await conn.waitFor(statusPredicate("idle"), 10_000);
+			for (let i = 0; i < 3; i++) {
+				const cursor = conn.messageCount();
+				conn.send({ type: "prompt", text: `MOCK_ERROR ${i}` });
+				await conn.waitForFrom(cursor, statusPredicate("streaming"), 10_000);
+				await conn.waitForFrom(cursor, statusPredicate("idle"), 10_000);
+			}
 
-			// Queue a message while in error state
-			conn.send({ type: "prompt", text: "queued msg after error" });
+			// Now at cap — queued message parks.
+			conn.send({ type: "prompt", text: "queued msg after cap" });
 			await conn.waitFor(queueLenPredicate(1));
 
-			// Retry the failed turn
+			// Retry the failed turn — resets cap + clears error + drains queue.
 			conn.send({ type: "retry" });
 
-			// The retry should succeed (mock agent responds normally on retry)
-			// and then the queue should drain
 			await conn.waitFor(queueLenPredicate(0), 15_000);
 		} finally {
 			conn.close();
 		}
 	});
 
-	test("story 37: error state — new message enqueued, not directly dispatched", async () => {
+	test("story 37 (updated): error state — implicit unstick dispatches new message (under cap)", async () => {
+		// Updated for "Unstick sessions on new input": under cap, a new message
+		// after an errored turn dispatches immediately (prefixed) rather than
+		// parking. Full prefix + transcript coverage lives in
+		// tests/e2e/stuck-session-recovery.spec.ts.
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Trigger error
+			const c0 = conn.messageCount();
 			conn.send({ type: "prompt", text: "MOCK_ERROR please fail" });
-			await conn.waitFor(statusPredicate("streaming"));
-			await conn.waitFor(statusPredicate("idle"), 10_000);
+			await conn.waitForFrom(c0, statusPredicate("streaming"), 10_000);
+			await conn.waitForFrom(c0, statusPredicate("idle"), 10_000);
 
-			// Clear messages to track what happens next
-			conn.messages.length = 0;
+			const cursor = conn.messageCount();
+			conn.send({ type: "prompt", text: "continue please" });
 
-			// Send a new message while in error state
-			conn.send({ type: "prompt", text: "new message after error" });
+			// Under cap — should dispatch (streaming), not park.
+			await conn.waitForFrom(cursor, statusPredicate("streaming"), 10_000);
 
-			// It should be queued (queue_update with 1 item), NOT directly dispatched
-			const queued = await conn.waitFor(queueLenPredicate(1));
-			expect(queued.queue![0].text).toBe("new message after error");
-
-			// Verify no streaming started (the message was NOT dispatched)
-			const streamingStatuses = conn.messages.filter(
-				(m: WsMsg) => m.type === "session_status" && m.status === "streaming",
-			);
-			expect(streamingStatuses.length).toBe(0);
+			// Queue should stay empty (direct dispatch, not parked).
+			const queueUpdatesWithItems = conn.messages
+				.slice(cursor)
+				.filter((m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0);
+			expect(queueUpdatesWithItems.length).toBe(0);
 		} finally {
 			conn.close();
 		}

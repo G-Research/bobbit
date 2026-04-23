@@ -2193,6 +2193,8 @@ async function handleApiRoute(
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
 			restoreError: session.restoreError,
+			lastTurnErrored: session.lastTurnErrored ?? false,
+			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 		});
 		return;
 	}
