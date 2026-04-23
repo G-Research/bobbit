@@ -29,7 +29,49 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 /** Interface for the group policy store to avoid circular dependency on the class. */
 export interface GroupPolicyProvider {
 	getGroupPolicy(group: string): GrantPolicy | null;
+	/** Optional bulk-read used by cache fingerprinting. */
+	getAll?(): Record<string, GrantPolicy>;
 }
+
+// ── Process-level caches ────────────────────────────────────────────────────
+// These caches memoize the expensive tool-activation pipeline steps. Inputs
+// rarely change during a server lifetime (role policies, tool YAML, MCP tool
+// schemas), and we create ~200 sessions per full test run, so caching saves
+// substantial wall-time. Cache entries are keyed by content-based fingerprints
+// (sha256 of a stable canonical JSON serialization). No eviction — entries are
+// cleared only on process restart. Correctness is preserved by (a) hashing all
+// inputs that affect output, and (b) verifying on-disk paths still exist
+// before returning a cached fs path.
+
+function stableStringify(v: unknown): string {
+	if (v === null || v === undefined) return JSON.stringify(v ?? null);
+	if (typeof v !== 'object') return JSON.stringify(v);
+	if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+	const obj = v as Record<string, unknown>;
+	const keys = Object.keys(obj).sort();
+	return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}';
+}
+
+function hashKey(parts: unknown): string {
+	return createHash('sha256').update(stableStringify(parts)).digest('hex');
+}
+
+function readGroupPolicies(gp?: GroupPolicyProvider): Record<string, GrantPolicy> | null {
+	if (!gp) return null;
+	if (typeof gp.getAll === 'function') return gp.getAll();
+	return null;
+}
+
+/** Cached output of `computeEffectiveAllowedTools`. Keyed by a content hash of role/policy/tool inputs. */
+const allowedToolsCache = new Map<string, string[]>();
+/** Cached output of `computeToolPolicies`. */
+const policiesCache = new Map<string, Record<string, ToolPolicyEntry>>();
+/** Cached result of `writeMcpProxyExtensions` — value must be validated via fs.existsSync before return. */
+const mcpProxyCache = new Map<string, string[]>();
+/** Cached generated guard-extension source (skips the template-gen step). Keyed by (sessionId, policies, grantedTools). */
+const guardCodeCache = new Map<string, string>();
+/** Cached guard-extension file path (skips fs read-compare-write when the same code was already persisted). Must be validated via fs.existsSync before return. */
+const guardFileCache = new Map<string, string>();
 
 /**
  * Normalize old grant policy values to the new simplified set.
@@ -121,11 +163,25 @@ export function computeEffectiveAllowedTools(
 	groupPolicyStore?: GroupPolicyProvider,
 	mcpManager?: { getToolInfos(): Array<{ name: string; group: string }> },
 ): string[] {
+	const availableTools = toolManager.getAvailableTools();
+	const mcpInfos = mcpManager?.getToolInfos() ?? [];
+
+	// Content-based fingerprint: same inputs → same cache key → same output.
+	const cacheKey = hashKey({
+		kind: 'effectiveAllowedTools',
+		toolPolicies: role?.toolPolicies ?? null,
+		groupPolicies: readGroupPolicies(groupPolicyStore),
+		tools: availableTools.map(t => [t.name, t.group, t.grantPolicy ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+		mcp: mcpInfos.map(i => [i.name, i.group]).sort((a, b) => a[0].localeCompare(b[0])),
+	});
+	const cached = allowedToolsCache.get(cacheKey);
+	if (cached) return cached.slice();
+
 	const result: string[] = [];
 	const seen = new Set<string>();
 
 	// Builtin + bobbit-extension tools
-	for (const tool of toolManager.getAvailableTools()) {
+	for (const tool of availableTools) {
 		if (seen.has(tool.name.toLowerCase())) continue;
 		seen.add(tool.name.toLowerCase());
 		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
@@ -134,15 +190,14 @@ export function computeEffectiveAllowedTools(
 	}
 
 	// MCP tools
-	if (mcpManager) {
-		for (const info of mcpManager.getToolInfos()) {
-			if (seen.has(info.name.toLowerCase())) continue;
-			seen.add(info.name.toLowerCase());
-			const policy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
-			if (!isNeverPolicy(policy)) result.push(info.name);
-		}
+	for (const info of mcpInfos) {
+		if (seen.has(info.name.toLowerCase())) continue;
+		seen.add(info.name.toLowerCase());
+		const policy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+		if (!isNeverPolicy(policy)) result.push(info.name);
 	}
 
+	allowedToolsCache.set(cacheKey, result.slice());
 	return result;
 }
 
@@ -269,10 +324,23 @@ export function computeToolPolicies(
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 ): Record<string, ToolPolicyEntry> {
+	const availableTools = toolManager.getAvailableTools();
+	const mcpInfos = mcpManager?.getToolInfos() ?? [];
+
+	const cacheKey = hashKey({
+		kind: 'toolPolicies',
+		toolPolicies: role?.toolPolicies ?? null,
+		groupPolicies: readGroupPolicies(groupPolicyStore),
+		tools: availableTools.map(t => [t.name, t.group, t.grantPolicy ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+		mcp: mcpInfos.map(i => [i.name, i.group]).sort((a, b) => a[0].localeCompare(b[0])),
+	});
+	const cachedPolicies = policiesCache.get(cacheKey);
+	if (cachedPolicies) return { ...cachedPolicies };
+
 	const result: Record<string, ToolPolicyEntry> = {};
 
 	// Builtin + bobbit-extension tools
-	for (const tool of toolManager.getAvailableTools()) {
+	for (const tool of availableTools) {
 		const rawPolicy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
 		let policy: string;
 		if (isAllowPolicy(rawPolicy)) policy = 'allow';
@@ -282,18 +350,17 @@ export function computeToolPolicies(
 	}
 
 	// MCP tools
-	if (mcpManager) {
-		for (const info of mcpManager.getToolInfos()) {
-			if (result[info.name]) continue; // already seen
-			const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
-			let policy: string;
-			if (isAllowPolicy(rawPolicy)) policy = 'allow';
-			else if (isAskPolicy(rawPolicy)) policy = 'ask';
-			else policy = 'never';
-			result[info.name] = { policy, group: info.group };
-		}
+	for (const info of mcpInfos) {
+		if (result[info.name]) continue; // already seen
+		const rawPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
+		let policy: string;
+		if (isAllowPolicy(rawPolicy)) policy = 'allow';
+		else if (isAskPolicy(rawPolicy)) policy = 'ask';
+		else policy = 'never';
+		result[info.name] = { policy, group: info.group };
 	}
 
+	policiesCache.set(cacheKey, { ...result });
 	return result;
 }
 
@@ -316,8 +383,26 @@ export function writeToolGuardExtension(
 	const hasGuardedTools = Object.values(policies).some(p => p.policy === 'ask' || p.policy === 'never');
 	if (!hasGuardedTools) return undefined;
 
-	// Generate the guard extension source
-	const code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);
+	// Fingerprint of all inputs that affect the generated code. Used to cache
+	// both the generated source (skip template gen) and the written file path
+	// (skip fs read-compare-write).
+	const genKey = hashKey({
+		kind: 'guardCode',
+		sessionId,
+		policies,
+		grantedTools: (grantedTools ?? []).slice().sort(),
+	});
+
+	// Fast path: same code was already written to disk — reuse path if it still exists.
+	const cachedPath = guardFileCache.get(genKey);
+	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
+
+	// Generate (or fetch cached) source code
+	let code = guardCodeCache.get(genKey);
+	if (!code) {
+		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);
+		guardCodeCache.set(genKey, code);
+	}
 
 	// Write to .bobbit/state/tool-guard/ with content hash for dedup
 	const baseDir = path.join(bobbitStateDir(), "tool-guard");
@@ -329,9 +414,13 @@ export function writeToolGuardExtension(
 	// Only write if content changed (avoid unnecessary fs writes)
 	try {
 		const existing = fs.readFileSync(filePath, "utf-8");
-		if (existing === code) return filePath;
+		if (existing === code) {
+			guardFileCache.set(genKey, filePath);
+			return filePath;
+		}
 	} catch { /* file doesn't exist yet */ }
 	fs.writeFileSync(filePath, code, "utf-8");
+	guardFileCache.set(genKey, filePath);
 
 	return filePath;
 }
@@ -352,6 +441,28 @@ export function writeMcpProxyExtensions(
 	groupPolicyStore?: GroupPolicyProvider,
 ): string[] {
 	const infos = mcpManager.getToolInfos();
+
+	// Content-based cache key: MCP tool schemas + filter + role/group policy.
+	// On cache hit, every file path is validated before returning; if any was
+	// deleted externally we fall through and regenerate.
+	const cacheKey = hashKey({
+		kind: 'mcpProxy',
+		infos: infos.map(i => ({
+			name: i.name,
+			server: i.serverName,
+			mcpToolName: i.mcpToolName,
+			description: i.description,
+			inputSchema: i.inputSchema ?? null,
+			group: i.group,
+		})).sort((a, b) => a.name.localeCompare(b.name)),
+		allowedTools: allowedTools ? allowedTools.slice().sort() : null,
+		toolPolicies: role?.toolPolicies ?? null,
+		groupPolicies: readGroupPolicies(groupPolicyStore),
+	});
+	const cachedPaths = mcpProxyCache.get(cacheKey);
+	if (cachedPaths && cachedPaths.every(p => fs.existsSync(p))) {
+		return cachedPaths.slice();
+	}
 
 	// Determine if we're filtering
 	const filtering = allowedTools && allowedTools.length > 0;
@@ -403,10 +514,16 @@ export function writeMcpProxyExtensions(
 		}));
 		const code = generateMcpProxyExtension(serverName, toolDefs);
 		const filePath = path.join(extDir, `${serverName}.ts`);
-		fs.writeFileSync(filePath, code, "utf-8");
+		// Skip rewrite if existing content matches (avoids needless fs writes).
+		let needWrite = true;
+		try {
+			if (fs.readFileSync(filePath, "utf-8") === code) needWrite = false;
+		} catch { /* file doesn't exist */ }
+		if (needWrite) fs.writeFileSync(filePath, code, "utf-8");
 		extensionPaths.push(filePath);
 	}
 
+	mcpProxyCache.set(cacheKey, extensionPaths.slice());
 	return extensionPaths;
 }
 
