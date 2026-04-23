@@ -76,7 +76,7 @@ export default function(pi) {
     if (neverPolicies[toolName]) {
       return {
         block: true,
-        reason: "Tool \"" + toolName + "\" is not permitted for this role. Do not call it again — choose a different approach."
+        reason: 'Tool "' + toolName + '" is not permitted for this role. Do not call it again — choose a different approach.'
       };
     }
 
