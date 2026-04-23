@@ -1213,13 +1213,15 @@ export class SessionManager {
 		if (event.type === "tool_execution_start") {
 			session.turnHadToolCalls = true;
 
-			// Enforce allowedTools — warn when a disallowed tool is used (case-insensitive)
+			// Enforce allowedTools — log when a disallowed tool slips past the guard
+			// extension. This is a last-resort observability signal; actual blocking
+			// happens in the tool_call guard (see tool-guard-extension.ts). If we see
+			// this log line the guard is misconfigured or missing for this session.
 			if (session.allowedTools && session.allowedTools.length > 0 && event.toolName) {
 				const toolLower = event.toolName.toLowerCase();
 				if (!session.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
-					console.warn(
-						`[session-manager] Session ${session.id} used disallowed tool "${event.toolName}". ` +
-						`Allowed: [${session.allowedTools.join(", ")}]`
+					console.error(
+						`[session-manager] Session ${session.id} executed disallowed tool "${event.toolName}" — guard extension did not block it.`
 					);
 				}
 			}

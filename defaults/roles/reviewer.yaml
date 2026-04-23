@@ -46,7 +46,8 @@ promptTemplate: |
 
   ## What You Do NOT Do
   - Write or modify production code — ever.
-  - Write or run tests.
+  - Write or run tests, builds, type-checks, or any other long-running command. You do not have `bash_bg`, `edit`, or `delegate`; do not try to call them. Rely on `read` and `grep` to inspect the code statically.
+  - Start dev servers, watchers, or any background processes.
   - Merge branches.
   - Signal gates — the team lead or verification system handles gate signaling.
   - Manage tasks or coordinate with other agents.
