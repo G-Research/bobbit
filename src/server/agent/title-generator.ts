@@ -34,11 +34,22 @@ export async function pickFallbackAigwNamingModel(aigwUrl: string): Promise<stri
 		const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
 		const claude = models.filter(m => m.id.toLowerCase().includes("claude"));
 		if (claude.length > 0) {
-			// Prefer Haiku (cheapest); else highest-ranked Claude by recency (still cheaper than running reviews on Opus).
-			const haiku = claude.filter(m => m.id.toLowerCase().includes("haiku"));
-			const pool = haiku.length > 0 ? haiku : claude;
-			pool.sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id));
-			picked = stripPrefix(pool[0].id);
+			// Rank by cheapness tier (haiku < sonnet < opus) so that when no Haiku is
+			// available we fall back to Sonnet before ever picking Opus. Within the
+			// same tier, prefer the most recent model.
+			const tier = (id: string): number => {
+				const lc = id.toLowerCase();
+				if (lc.includes("haiku")) return 0;
+				if (lc.includes("sonnet")) return 1;
+				if (lc.includes("opus")) return 2;
+				return 3;
+			};
+			claude.sort((a, b) => {
+				const t = tier(a.id) - tier(b.id);
+				if (t !== 0) return t;
+				return modelRecencyRank(b.id) - modelRecencyRank(a.id);
+			});
+			picked = stripPrefix(claude[0].id);
 		}
 	} catch (err) {
 		console.warn("[title-gen] pickFallbackAigwNamingModel: discoverAigwModels failed:", err);

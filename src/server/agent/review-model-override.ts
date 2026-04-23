@@ -11,9 +11,19 @@
  *   - Persist via sessionManager when both sessionManager and sessionId are provided.
  */
 
+interface ModelShape { id?: string; provider?: string }
+/**
+ * The real RpcBridge.getState() resolves to `{ success, data: { model, ... } }`
+ * (see src/server/agent/rpc-bridge.ts). Some unit-test mocks return the
+ * `{ model }` shape directly. Accept both so the helper works in both places.
+ */
 export interface ReviewModelRpc {
 	setModel(provider: string, modelId: string): Promise<unknown>;
-	getState(): Promise<{ model?: { id?: string; provider?: string } } | undefined>;
+	getState(): Promise<
+		| { success?: boolean; data?: { model?: ModelShape } }
+		| { model?: ModelShape }
+		| undefined
+	>;
 }
 
 export interface ReviewModelPrefs {
@@ -83,15 +93,19 @@ export async function applyReviewModelOverrides(
 	}
 
 	// Read-back verification
-	let state: { model?: { id?: string; provider?: string } } | undefined;
+	let stateRaw: unknown;
 	try {
-		state = await rpc.getState();
+		stateRaw = await rpc.getState();
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		throw new Error(`setModel read-back failed (getState threw) for "${pref}": ${msg}`);
 	}
-	const boundId = state?.model?.id;
-	const boundProvider = state?.model?.provider;
+	// Accept both the real RpcBridge shape `{ success, data: { model } }` and
+	// the simpler `{ model }` shape used by unit-test mocks.
+	const s = (stateRaw ?? {}) as { data?: { model?: ModelShape }; model?: ModelShape };
+	const boundModel: ModelShape | undefined = s.data?.model ?? s.model;
+	const boundId = boundModel?.id;
+	const boundProvider = boundModel?.provider;
 	if (boundId !== modelId || boundProvider !== provider) {
 		throw new Error(
 			`setModel read-back mismatch for "${pref}": expected ${provider}/${modelId}, ` +

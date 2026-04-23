@@ -3278,7 +3278,7 @@ async function handleApiRoute(
 				json({
 					ok: false,
 					error: `Model "${pref}" is not in the current available-models list. It may be a stale preference.`,
-				});
+				}, 404);
 				return;
 			}
 			if (provider !== "aigw") {
@@ -3286,7 +3286,7 @@ async function handleApiRoute(
 					ok: false,
 					modelResolved: resolved.id,
 					error: "Test not supported for this provider yet — only AI Gateway models can be tested from here.",
-				});
+				}, 422);
 				return;
 			}
 			const aigwUrl = getAigwUrl(preferencesStore);
