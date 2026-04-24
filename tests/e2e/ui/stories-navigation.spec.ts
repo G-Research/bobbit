@@ -396,62 +396,60 @@ test.describe("CT-13: URL routing and navigation", () => {
 				{ timeout, intervals: [50, 100, 200, 400] },
 			).toContain(needle);
 
-		// Helper: press a shortcut and wait for its effect. If the first press
-		// is swallowed by a transient focus race, retry once.
-		const pressUntil = async (key: string, check: () => Promise<void>, maxAttempts = 3) => {
+		// Helper: dispatch a shortcut and wait for its effect. Since dispatchKey
+		// targets window directly (bypassing focus), a single dispatch suffices
+		// once the `shortcutsReady` marker is set. Retry via re-dispatch (NOT a
+		// real key press) on the rare chance the first event is lost — using
+		// real keyboard would double-toggle the shortcut.
+		const dispatchUntil = async (
+			key: string,
+			code: string,
+			check: () => Promise<void>,
+			maxAttempts = 3,
+		) => {
 			for (let attempt = 0; attempt < maxAttempts; attempt++) {
-				// Re-blur each attempt — any late focus steal would kill the shortcut.
-				await s.page.evaluate(() => {
-					(document.activeElement as HTMLElement | null)?.blur();
-					document.body.focus?.();
-				});
-				await s.press_key(key);
+				await dispatchKey(key, code);
 				try { await check(); return; } catch (err) {
 					if (attempt === maxAttempts - 1) throw err;
 				}
 			}
 		};
 
-		// act — Ctrl+[ toggles sidebar. Listener is attached by this point,
-		// so a single dispatch suffices.
-
+		// act — Ctrl+[ toggles sidebar.
 		s.act();
-		await dispatchKey("[", "BracketLeft");
 		s.assert();
-		await pressUntil("Control+BracketLeft", () => pollLocalStorage("bobbit-sidebar-collapsed", "true"));
+		await dispatchUntil("[", "BracketLeft", () =>
+			pollLocalStorage("bobbit-sidebar-collapsed", "true", 2000),
+		);
 
 		// Toggle back
 		s.act();
-		await dispatchKey("[", "BracketLeft");
 		s.assert();
-		await pressUntil("Control+BracketLeft", async () => {
+		await dispatchUntil("[", "BracketLeft", async () => {
 			await expect.poll(
 				() => s.page.evaluate(() => localStorage.getItem("bobbit-sidebar-collapsed")),
-				{ timeout: 5000, intervals: [50, 100, 200, 400] },
+				{ timeout: 2000, intervals: [50, 100, 200, 400] },
 			).not.toBe("true");
 		});
 
 		// act — Ctrl+, opens settings
 		s.act();
-		await dispatchKey(",", "Comma");
 		s.assert();
-		await pressUntil("Control+,", () => pollHashContains("/settings"));
+		await dispatchUntil(",", "Comma", () => pollHashContains("/settings", 2000));
 
 		// act — Ctrl+, again closes settings (returns to previous view)
 		s.act();
-		await dispatchKey(",", "Comma");
 		s.assert();
-		await pressUntil("Control+,", () => pollHashNotContains("/settings"));
+		await dispatchUntil(",", "Comma", () => pollHashNotContains("/settings", 2000));
 
 		// act — Ctrl+K focuses search
 		s.act();
-		await dispatchKey("k", "KeyK");
 		s.assert();
 		const searchLocator = s.page.locator(
 			'input[type="search"], input[placeholder*="Search"], .search-page input, .sidebar-search input'
 		).first();
-		await pressUntil("Control+k", async () => {
-			await expect(searchLocator).toBeVisible({ timeout: 5000 });
+		await dispatchUntil("k", "KeyK", async () => {
+			await expect(searchLocator).toBeVisible({ timeout: 2000 });
 		});
 	});
 

@@ -9,11 +9,27 @@ import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse, navigat
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for title input. */
 async function openGoalAssistantProposal(page: import("@playwright/test").Page) {
 	await openApp(page);
+	// The button title flips to "Add a project first" until state.projects is
+	// populated — waiting for the enabled "New goal (Alt+G)" title also
+	// guarantees the click handler will call startNewGoalFlow() rather than
+	// showProjectDialog(). Without this, a cold first run can click too early
+	// and silently no-op (or open the wrong dialog), leaving the textarea
+	// never to appear within 15s.
 	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
 	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
+	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
+	// Arm the response listener *before* clicking so a fast session-create
+	// response can't slip past; then wait for the hash route to flip to
+	// #/session/<id> which only happens after connectToSession() resolves.
+	const sessionCreated = page.waitForResponse(
+		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
+		{ timeout: 15_000 },
+	);
 	await newGoalBtn.click();
+	await sessionCreated;
+	await page.waitForURL(/#\/session\//, { timeout: 10_000 });
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 15_000 });
+	await expect(textarea).toBeVisible({ timeout: 10_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
 	await expect(titleInput).toBeVisible({ timeout: 10_000 });

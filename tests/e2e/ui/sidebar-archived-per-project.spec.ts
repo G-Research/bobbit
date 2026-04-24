@@ -35,6 +35,30 @@ async function createArchivedGoal(projectId: string, title: string): Promise<str
 	return goal.id;
 }
 
+/**
+ * Poll `/api/goals?archived=true&projectId=<id>` until the given goal id is
+ * present in the response. Confirms the archive write is durable and visible
+ * via REST before the UI search path tries to fetch+filter it. Without this,
+ * typing into the search box can race: the client's lazy `fetchArchivedGoalsPaginated`
+ * resolves after the 15s visibility timeout because a concurrent `refreshSessions`
+ * overwrites `state.goals` with live-only goals mid-flight.
+ */
+async function waitForArchivedGoalVisible(projectId: string, goalId: string, timeoutMs = 15_000): Promise<void> {
+	const start = Date.now();
+	let lastStatus = 0;
+	while (Date.now() - start < timeoutMs) {
+		const resp = await apiFetch(`/api/goals?archived=true&projectId=${projectId}&limit=200`);
+		lastStatus = resp.status;
+		if (resp.ok) {
+			const data = await resp.json();
+			const goals: Array<{ id: string }> = data.goals || [];
+			if (goals.some(g => g.id === goalId)) return;
+		}
+		await new Promise(r => setTimeout(r, 50));
+	}
+	throw new Error(`Archived goal ${goalId} not visible via REST within ${timeoutMs}ms (last status ${lastStatus})`);
+}
+
 function uniqueSuffix(label: string): string {
 	// Per-test unique suffix: label + hi-res time + random. Avoids collisions
 	// with sibling tests/workers and retries.
@@ -175,6 +199,14 @@ test.describe("Per-project Archived subsections", () => {
 	});
 
 	test("search surfaces archived items in the correct project subsection", async ({ page }) => {
+		// Event-driven readiness: confirm BOTH archived goals are persisted and
+		// returned by the server BEFORE the UI is even loaded. This closes the
+		// race where the client's lazy archived-goals fetch (kicked off by the
+		// search handler) resolves after the visibility timeout because a
+		// concurrent refreshSessions overwrites state.goals with live-only goals.
+		await waitForArchivedGoalVisible(projectA!.id, goalAId!);
+		await waitForArchivedGoalVisible(projectB!.id, goalBId!);
+
 		// Start with See Archived OFF so the search auto-open path runs.
 		await resetSidebarState(page, { showArchived: false });
 

@@ -750,7 +750,15 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
+			// Optional per-request timing for performance profiling.
+			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
+			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
+			const _timingStart = _timingEnabled ? performance.now() : 0;
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, personalityStore, workflowStore);
+			if (_timingEnabled) {
+				const dur = performance.now() - _timingStart;
+				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
+			}
 
 			return;
 		}

@@ -13,7 +13,7 @@ import {
 	nonGitCwd,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, createSessionViaUI } from "./ui-helpers.js";
 
 const ASK_ROLE = "e2e-ask-policy-role";
 const TOOL_NAME = "Bash";
@@ -40,18 +40,16 @@ test.describe("Tool ask policy (UI)", () => {
 	test("permission card appears and grant button works @smoke", async ({ page }) => {
 		await openApp(page);
 
-		// Create session via UI so it's properly wired with the app's RemoteAgent
+		// Create session via UI so it's properly wired with the app's RemoteAgent.
+		// No agent round-trip needed: the tool-grant-request is fired via REST and
+		// the card is rendered purely from session events — firing an idle agent
+		// turn first just serializes the later role PATCH behind it.
 		await createSessionViaUI(page);
 
-		// Send a message and wait for response to confirm session is fully connected
-		await sendMessage(page, "Say OK");
-		await waitForAgentResponse(page);
-
-		// Now assign the ask-policy role to this session
-		// Get the session ID from the URL hash
+		// Wait for the URL hash to carry the session ID, then grab it.
+		await page.waitForFunction(() => /#\/session\/[\w-]+/.test(location.hash), null, { timeout: 10_000 });
 		const sessionId = await page.evaluate(() => {
-			const hash = location.hash;
-			const match = hash.match(/#\/session\/(.+)/);
+			const match = location.hash.match(/#\/session\/([\w-]+)/);
 			return match?.[1] ?? "";
 		});
 		expect(sessionId).toBeTruthy();
@@ -98,11 +96,10 @@ test.describe("Tool ask policy (UI)", () => {
 	test("deny button resolves long-poll and removes card", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
-		await sendMessage(page, "Say OK");
-		await waitForAgentResponse(page);
 
+		await page.waitForFunction(() => /#\/session\/[\w-]+/.test(location.hash), null, { timeout: 10_000 });
 		const sessionId = await page.evaluate(() => {
-			const match = location.hash.match(/#\/session\/(.+)/);
+			const match = location.hash.match(/#\/session\/([\w-]+)/);
 			return match?.[1] ?? "";
 		});
 		expect(sessionId).toBeTruthy();
@@ -135,11 +132,10 @@ test.describe("Tool ask policy (UI)", () => {
 	test("session-only grant does not modify role permanently", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
-		await sendMessage(page, "Say OK");
-		await waitForAgentResponse(page);
 
+		await page.waitForFunction(() => /#\/session\/[\w-]+/.test(location.hash), null, { timeout: 10_000 });
 		const sessionId = await page.evaluate(() => {
-			const match = location.hash.match(/#\/session\/(.+)/);
+			const match = location.hash.match(/#\/session\/([\w-]+)/);
 			return match?.[1] ?? "";
 		});
 		expect(sessionId).toBeTruthy();
