@@ -163,7 +163,21 @@ export const state = {
 	projects: [] as Project[],
 	/** @deprecated No longer used — provisional projects replace pending projects */
 	pendingProjects: [] as Array<{ sessionId: string; dirPath: string; name: string }>,
-	activeProjectProposal: undefined as undefined | { sessionId: string; fields: Record<string, string> },
+	activeProjectProposal: undefined as undefined | {
+		sessionId: string;
+		fields: Record<string, string>;
+		/** Provisional = project is still in .bobbit/state/projects.json with
+		 *  provisional:true (existing assistant flow). Registered = any other
+		 *  project (regular/goal/staff session pointing at a live project). */
+		mode?: "provisional" | "registered";
+		/** Current project snapshot + registry fields, loaded lazily after the
+		 *  panel mounts. `undefined` = not fetched yet (panel shows skeleton). */
+		currentConfig?: {
+			name: string;
+			rootPath: string;
+			config: Record<string, string>;
+		};
+	},
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
@@ -276,12 +290,12 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project",
 	previewPanelHtml: "" as string,
 	previewPanelFullscreen: false,
 
 	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
-	previewPanelActiveTab: "preview" as "preview" | "goal" | "review",
+	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project",
 
 	// Review pane state (agent-initiated markdown review documents)
 	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,

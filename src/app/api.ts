@@ -470,6 +470,30 @@ export async function removeProject(id: string): Promise<boolean> {
   }
 }
 
+/** Fetch the raw project.yaml config for a project. */
+export async function getProjectConfig(id: string): Promise<Record<string, string> | null> {
+  try {
+    const res = await gatewayFetch(`/api/projects/${id}/config`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** PUT a partial config update to a project. Returns true on success. */
+export async function updateProjectConfig(id: string, partial: Record<string, string>): Promise<boolean> {
+  try {
+    const res = await gatewayFetch(`/api/projects/${id}/config`, {
+      method: "PUT",
+      body: JSON.stringify(partial),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Promote a provisional project to a full project (clears provisional flag, optionally updates name). */
 export async function promoteProject(id: string, name?: string): Promise<Project | null> {
   try {

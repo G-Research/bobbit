@@ -1782,12 +1782,28 @@ function workflowPreviewPanel() {
 	`;
 }
 
+/** Editable field set rendered by projectProposalPanel's diff view. */
+const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
+	{ key: "name", label: "Project Name" },
+	{ key: "build_command", label: "Build Command" },
+	{ key: "test_command", label: "Test Command" },
+	{ key: "typecheck_command", label: "Type Check Command" },
+	{ key: "test_unit_command", label: "Unit Test Command" },
+	{ key: "test_e2e_command", label: "E2E Test Command" },
+	{ key: "worktree_setup_command", label: "Worktree Setup Command" },
+	{ key: "qa_start_command", label: "QA Start Command" },
+	{ key: "sandbox", label: "Sandbox" },
+	{ key: "session_model", label: "Session Model" },
+	{ key: "review_model", label: "Review Model" },
+	{ key: "naming_model", label: "Naming Model" },
+];
+
 function projectProposalPanel() {
 	const proposal = state.activeProjectProposal;
 
 	if (!proposal) {
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
 					Waiting for project analysis…
 				</div>
@@ -1796,16 +1812,30 @@ function projectProposalPanel() {
 	}
 
 	const fields = { ...proposal.fields };
+	const mode = proposal.mode ?? "provisional";
+	const current = proposal.currentConfig;
+	const isRegistered = mode === "registered";
+	const loading = isRegistered && !current;
 
-	const CMD_FIELDS = [
-		{ key: "build_command", label: "Build Command" },
-		{ key: "test_command", label: "Test Command" },
-		{ key: "typecheck_command", label: "Type Check Command" },
-		{ key: "test_unit_command", label: "Unit Test Command" },
-		{ key: "test_e2e_command", label: "E2E Test Command" },
+	/** Get the current value for a given key (for diff comparison). */
+	const currentValueFor = (key: string): string => {
+		if (!current) return "";
+		if (key === "name") return current.name ?? "";
+		return current.config?.[key] ?? "";
+	};
 
-		{ key: "worktree_setup_command", label: "Worktree Setup Command" },
-	];
+	/** Build union of keys to render: known editable + proposal fields + current config keys. */
+	const knownKeys = new Set(PROJECT_EDITABLE_FIELDS.map(f => f.key));
+	const extraKeys: string[] = [];
+	for (const k of Object.keys(fields)) {
+		if (k === "root_path") continue;
+		if (!knownKeys.has(k)) extraKeys.push(k);
+	}
+	if (current) {
+		for (const k of Object.keys(current.config || {})) {
+			if (!knownKeys.has(k) && !extraKeys.includes(k)) extraKeys.push(k);
+		}
+	}
 
 	const handleAccept = async () => {
 		const { acceptProjectProposal } = await import("./session-manager.js");
@@ -1819,54 +1849,106 @@ function projectProposalPanel() {
 		renderApp();
 	};
 
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Project Name</label>
-					${Input({
-						type: "text",
-						value: fields.name || "",
-						placeholder: "Project name",
-						onInput: (e: Event) => {
-							if (state.activeProjectProposal) {
-								state.activeProjectProposal.fields.name = (e.target as HTMLInputElement).value;
-								saveProjectDraft(state.activeProjectProposal.sessionId);
-								renderApp();
-							}
-						},
-					})}
+	const onFieldInput = (key: string, value: string) => {
+		if (!state.activeProjectProposal) return;
+		state.activeProjectProposal.fields[key] = value;
+		saveProjectDraft(state.activeProjectProposal.sessionId);
+		renderApp();
+	};
+
+	const renderRow = (key: string, label: string, readOnly = false) => {
+		const proposed = fields[key] ?? "";
+		const cur = currentValueFor(key);
+		const changed = isRegistered && current != null && proposed !== cur;
+		if (readOnly) {
+			return html`
+				<div data-field=${key}>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
+					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${proposed}>
+						${proposed || "—"}
+					</div>
 				</div>
+			`;
+		}
+		return html`
+			<div data-field=${key} data-changed=${changed ? "true" : "false"}>
+				<div class="flex items-center gap-2 mb-1.5">
+					<label class="text-xs text-muted-foreground block font-medium">${label}</label>
+					${changed ? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-400 font-medium" data-testid="changed-badge">Changed</span>` : ""}
+				</div>
+				${isRegistered && current != null ? html`
+					<div class="text-[11px] text-muted-foreground mb-1 font-mono truncate" title=${cur}>current: ${cur || "(unset)"}</div>
+				` : ""}
+				${Input({
+					type: "text",
+					value: proposed,
+					placeholder: key === "name" ? "Project name" : `e.g. ${key}`,
+					onInput: (e: Event) => onFieldInput(key, (e.target as HTMLInputElement).value),
+				})}
+			</div>
+		`;
+	};
+
+	// Partition editable fields into changed vs unchanged (registered mode only).
+	const changedKeys: string[] = [];
+	const unchangedKeys: string[] = [];
+	for (const { key } of PROJECT_EDITABLE_FIELDS) {
+		const proposed = fields[key] ?? "";
+		const cur = currentValueFor(key);
+		if (isRegistered && current != null && proposed === cur) unchangedKeys.push(key);
+		else changedKeys.push(key);
+	}
+	for (const key of extraKeys) {
+		const proposed = fields[key] ?? "";
+		const cur = currentValueFor(key);
+		if (isRegistered && current != null && proposed === cur) unchangedKeys.push(key);
+		else changedKeys.push(key);
+	}
+
+	const labelFor = (key: string): string => {
+		const known = PROJECT_EDITABLE_FIELDS.find(f => f.key === key);
+		return known?.label ?? key;
+	};
+
+	const diffCount = isRegistered && current != null ? changedKeys.filter(k => {
+		const proposed = fields[k] ?? "";
+		return proposed !== currentValueFor(k);
+	}).length : 0;
+
+	const acceptLabel = isRegistered
+		? (diffCount > 0 ? `Apply Changes (${diffCount})` : "Apply Changes")
+		: "Accept Project";
+
+	const acceptDisabled = !fields.name?.trim() || (isRegistered && diffCount === 0);
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal" data-mode=${mode}>
+			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+				${loading ? html`<div class="text-sm text-muted-foreground" data-testid="loading-current-config">Loading current config…</div>` : ""}
+				${renderRow("name", "Project Name")}
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
-					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || ""}>
-						${fields.root_path || "—"}
+					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || current?.rootPath || ""}>
+						${fields.root_path || current?.rootPath || "—"}
 					</div>
 				</div>
-				${CMD_FIELDS.map(({ key, label }) => html`
-					<div>
-						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
-						${Input({
-							type: "text",
-							value: fields[key] || "",
-							placeholder: `e.g. npm run ${key.replace(/_command$/, "").replace(/_/g, ":")}`,
-							onInput: (e: Event) => {
-								if (state.activeProjectProposal) {
-									state.activeProjectProposal.fields[key] = (e.target as HTMLInputElement).value;
-									saveProjectDraft(state.activeProjectProposal.sessionId);
-								}
-							},
-						})}
-					</div>
-				`)}
+				${changedKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
+				${isRegistered && unchangedKeys.length > 0 ? html`
+					<details data-testid="unchanged-group">
+						<summary class="text-xs text-muted-foreground cursor-pointer select-none py-1">No changes (${unchangedKeys.length} fields)</summary>
+						<div class="flex flex-col gap-4 mt-3 pl-2">
+							${unchangedKeys.map(k => renderRow(k, labelFor(k)))}
+						</div>
+					</details>
+				` : ""}
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
 				${Button({
 					variant: "default",
 					onClick: handleAccept,
-					disabled: !fields.name?.trim(),
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(FolderOpen, "sm")} Accept Project</span>`,
+					disabled: acceptDisabled,
+					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
 				})}
 			</div>
 		</div>
@@ -2125,15 +2207,21 @@ const PREVIEW_SWIPE_SCRIPT = `<script>
 
 /** Whether the unified panel is active for the current non-assistant session. */
 function hasUnifiedPanel(): boolean {
-	return !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null || state.reviewPanelOpen);
+	return !state.assistantType && (
+		state.isPreviewSession ||
+		state.activeGoalProposal != null ||
+		state.activeProjectProposal != null ||
+		state.reviewPanelOpen
+	);
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review"> {
-	const tabs: Array<"chat" | "preview" | "goal" | "review"> = ["chat"];
+function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project"> {
+	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
 	if (state.activeGoalProposal != null) tabs.push("goal");
+	if (state.activeProjectProposal != null) tabs.push("project");
 	return tabs;
 }
 
@@ -2617,6 +2705,13 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
+				${state.activeProjectProposal != null ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "project" ? "goal-tab-pill--active" : ""}"
+						title="Project"
+						@click=${() => { state.previewPanelTab = "project"; renderApp(); }}
+					>Project <span class="goal-tab-dot"></span></button>
+				` : ""}
 			</div>
 		`;
 	};
@@ -2695,16 +2790,21 @@ export function doRenderApp(): void {
 	const unifiedPreviewPanel = () => {
 		// Auto-correct tab if the active tab's content is no longer available
 		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeGoalProposal != null ? "goal" : "preview");
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeGoalProposal != null ? "goal" : (state.activeProjectProposal != null ? "project" : "preview"));
 		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
 			state.previewPanelActiveTab = "goal";
 		} else if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal == null && state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
+		} else if (state.previewPanelActiveTab === "project" && state.activeProjectProposal == null) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
+				: (state.activeGoalProposal != null ? "goal"
+				: (state.reviewPanelOpen ? "review" : "preview"));
 		}
 
 		const showPreviewTab = state.isPreviewSession;
 		const showGoalTab = state.activeGoalProposal != null;
 		const showReviewTab = state.reviewPanelOpen;
+		const showProjectTab = state.activeProjectProposal != null;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -2732,6 +2832,13 @@ export function doRenderApp(): void {
 								@click=${() => { state.previewPanelActiveTab = "goal"; renderApp(); }}
 							>Goal <span class="goal-tab-dot"></span></button>
 						` : ""}
+						${showProjectTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "project" ? "goal-tab-pill--active" : ""}"
+								title="Project"
+								@click=${() => { state.previewPanelActiveTab = "project"; renderApp(); }}
+							>Project <span class="goal-tab-dot"></span></button>
+						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab ? html`
@@ -2750,7 +2857,9 @@ export function doRenderApp(): void {
 						? htmlPreviewContent()
 						: state.previewPanelActiveTab === "goal" && showGoalTab
 							? goalProposalPanel()
-							: ""}
+							: state.previewPanelActiveTab === "project" && showProjectTab
+								? projectProposalPanel()
+								: ""}
 			</div>
 		`;
 	};
@@ -2761,7 +2870,7 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review") => {
+	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review" | "project") => {
 		if (tab === "chat") return state.chatPanel;
 		if (tab === "preview" && state.isPreviewSession) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
@@ -2771,6 +2880,9 @@ export function doRenderApp(): void {
 		}
 		if (tab === "goal" && state.activeGoalProposal != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${goalProposalPanel()}</div>`;
+		}
+		if (tab === "project" && state.activeProjectProposal != null) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
 		}
 		return html``;
 	};

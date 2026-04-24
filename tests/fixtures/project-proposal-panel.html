@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /><title>project proposal panel fixture</title></head>
+<body>
+<div id="out"></div>
+<script>
+// Mirror of the diff-classification + badge logic in projectProposalPanel()
+// (src/app/render.ts). Kept in sync by test assertions — if the real code
+// changes its field set or partitioning, this must move in lockstep.
+
+const PROJECT_EDITABLE_FIELDS = [
+  { key: "name", label: "Project Name" },
+  { key: "build_command", label: "Build Command" },
+  { key: "test_command", label: "Test Command" },
+  { key: "typecheck_command", label: "Type Check Command" },
+  { key: "test_unit_command", label: "Unit Test Command" },
+  { key: "test_e2e_command", label: "E2E Test Command" },
+  { key: "worktree_setup_command", label: "Worktree Setup Command" },
+  { key: "qa_start_command", label: "QA Start Command" },
+  { key: "sandbox", label: "Sandbox" },
+  { key: "session_model", label: "Session Model" },
+  { key: "review_model", label: "Review Model" },
+  { key: "naming_model", label: "Naming Model" },
+];
+
+function renderProposal(proposal) {
+  const out = document.getElementById("out");
+  out.innerHTML = "";
+  out.setAttribute("data-panel", "project-proposal");
+  out.setAttribute("data-mode", proposal.mode);
+  const fields = proposal.fields || {};
+  const isRegistered = proposal.mode === "registered";
+  const current = proposal.currentConfig;
+
+  const currentValueFor = (key) => {
+    if (!current) return "";
+    if (key === "name") return current.name || "";
+    return (current.config && current.config[key]) || "";
+  };
+
+  const knownKeys = new Set(PROJECT_EDITABLE_FIELDS.map(f => f.key));
+  const extraKeys = [];
+  for (const k of Object.keys(fields)) {
+    if (k === "root_path") continue;
+    if (!knownKeys.has(k)) extraKeys.push(k);
+  }
+  if (current) {
+    for (const k of Object.keys(current.config || {})) {
+      if (!knownKeys.has(k) && !extraKeys.includes(k)) extraKeys.push(k);
+    }
+  }
+
+  const changed = [], unchanged = [];
+  for (const { key } of PROJECT_EDITABLE_FIELDS) {
+    const p = fields[key] ?? "";
+    const c = currentValueFor(key);
+    if (isRegistered && current && p === c) unchanged.push(key);
+    else changed.push(key);
+  }
+  for (const key of extraKeys) {
+    const p = fields[key] ?? "";
+    const c = currentValueFor(key);
+    if (isRegistered && current && p === c) unchanged.push(key);
+    else changed.push(key);
+  }
+
+  const labelFor = (k) => {
+    const f = PROJECT_EDITABLE_FIELDS.find(x => x.key === k);
+    return f ? f.label : k;
+  };
+
+  const rootDiv = document.createElement("div");
+  rootDiv.className = "goal-preview-panel";
+
+  // name first
+  const renderRow = (key) => {
+    const p = fields[key] ?? "";
+    const c = currentValueFor(key);
+    const isChanged = isRegistered && current && p !== c;
+    const row = document.createElement("div");
+    row.setAttribute("data-field", key);
+    row.setAttribute("data-changed", isChanged ? "true" : "false");
+    const label = document.createElement("label");
+    label.textContent = labelFor(key);
+    row.appendChild(label);
+    if (isChanged) {
+      const badge = document.createElement("span");
+      badge.setAttribute("data-testid", "changed-badge");
+      badge.textContent = "Changed";
+      row.appendChild(badge);
+    }
+    if (isRegistered && current) {
+      const cur = document.createElement("div");
+      cur.className = "current-value";
+      cur.textContent = "current: " + (c || "(unset)");
+      row.appendChild(cur);
+    }
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = p;
+    input.setAttribute("data-input", key);
+    row.appendChild(input);
+    return row;
+  };
+
+  rootDiv.appendChild(renderRow("name"));
+
+  const rootPathDiv = document.createElement("div");
+  rootPathDiv.setAttribute("data-field", "root_path");
+  rootPathDiv.setAttribute("data-readonly", "true");
+  const rpLabel = document.createElement("label"); rpLabel.textContent = "Root Path";
+  rootPathDiv.appendChild(rpLabel);
+  const rpVal = document.createElement("div"); rpVal.textContent = fields.root_path || (current && current.rootPath) || "—";
+  rootPathDiv.appendChild(rpVal);
+  rootDiv.appendChild(rootPathDiv);
+
+  for (const k of changed) {
+    if (k === "name") continue;
+    rootDiv.appendChild(renderRow(k));
+  }
+  if (isRegistered && unchanged.length > 0) {
+    const details = document.createElement("details");
+    details.setAttribute("data-testid", "unchanged-group");
+    const summary = document.createElement("summary");
+    summary.textContent = "No changes (" + unchanged.length + " fields)";
+    details.appendChild(summary);
+    for (const k of unchanged) details.appendChild(renderRow(k));
+    rootDiv.appendChild(details);
+  }
+
+  const acceptDiv = document.createElement("div");
+  acceptDiv.setAttribute("data-testid", "accept-label");
+  const diffCount = isRegistered && current ? changed.filter(k => (fields[k] ?? "") !== currentValueFor(k)).length : 0;
+  acceptDiv.textContent = isRegistered ? (diffCount > 0 ? ("Apply Changes (" + diffCount + ")") : "Apply Changes") : "Accept Project";
+  rootDiv.appendChild(acceptDiv);
+
+  out.appendChild(rootDiv);
+  return { changed, unchanged, diffCount };
+}
+
+window.renderProposal = renderProposal;
+window.__ready = true;
+</script>
+</body>
+</html>
