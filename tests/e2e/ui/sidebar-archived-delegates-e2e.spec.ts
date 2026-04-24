@@ -86,8 +86,10 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		await navigateToHash(page, `#/session/${parentId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// 5. The delegate should NOT be visible yet (Show Archived is off)
-		await page.waitForTimeout(500);
+		// 5. Wait for the parent row to render (positive sentinel that the
+		// sidebar has populated), then assert the archived delegate is NOT
+		// visible yet. The toHaveCount assertion polls, so no blind pad needed.
+		await expect(page.getByText(PARENT_TITLE, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByText(DELEGATE_TITLE, { exact: true })).toHaveCount(0, { timeout: 3_000 });
 
 		// 6. Toggle "Show Archived" on
@@ -106,13 +108,29 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 			{ timeout: 10_000 },
 		).toBe(true);
 
-		// Wait for sidebar to fully render with archived data
-		await page.waitForTimeout(2000);
-
-		// 8. The parent row may have a ▸ chevron if it detects its archived delegate.
-		//    Try to find and click it to expand children.
+		// 8. Wait for sidebar to render with archived data. Either the parent
+		// row gains an expand chevron ▸, or the delegate appears standalone.
 		const parentText = page.getByText(PARENT_TITLE, { exact: true }).first();
-		await expect(parentText).toBeVisible({ timeout: 5_000 });
+		await expect(parentText).toBeVisible({ timeout: 10_000 });
+		await page.waitForFunction(
+			({ parentTitle, delegateTitle }) => {
+				if (Array.from(document.querySelectorAll(".truncate")).some(
+					(el) => el.textContent?.trim() === delegateTitle,
+				)) return true;
+				for (const el of document.querySelectorAll(".truncate")) {
+					if (el.textContent?.trim() !== parentTitle) continue;
+					const row = el.closest("[class*='cursor-pointer']");
+					if (!row) continue;
+					for (const s of row.querySelectorAll("span")) {
+						const t = s.textContent?.trim();
+						if (t === "▸" || t === "▾") return true;
+					}
+				}
+				return false;
+			},
+			{ parentTitle: PARENT_TITLE, delegateTitle: DELEGATE_TITLE },
+			{ timeout: 10_000 },
+		);
 
 		// Look for expand chevron ▸ near the parent row — use evaluate for reliability
 		const expanded = await page.evaluate((parentTitle: string) => {
@@ -134,9 +152,8 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 			return false;
 		}, PARENT_TITLE);
 
-		if (expanded) {
-			await page.waitForTimeout(500);
-		}
+		// No pad needed — delegateLocator assertion below polls up to 10s.
+		void expanded;
 
 		// 9. Check if the delegate appears anywhere — it could be nested under the
 		//    parent OR in the standalone archived section at the bottom.
@@ -146,8 +163,11 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 
 		// 10. Toggle OFF then ON — delegate should survive the cycle
 		await seeArchivedBtn.click();
-		await page.waitForTimeout(500);
-		// Delegate should be gone while archived is off
+		// Wait for button to leave active state, then assert delegate is gone.
+		await expect.poll(
+			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
+			{ timeout: 10_000 },
+		).toBe(false);
 		await expect(page.getByText(DELEGATE_TITLE, { exact: true })).toHaveCount(0, { timeout: 3_000 });
 
 		// Toggle back on
@@ -156,7 +176,26 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
 			{ timeout: 10_000 },
 		).toBe(true);
-		await page.waitForTimeout(2000);
+		// Wait until sidebar repopulates with archived data.
+		await page.waitForFunction(
+			({ parentTitle, delegateTitle }) => {
+				if (Array.from(document.querySelectorAll(".truncate")).some(
+					(el) => el.textContent?.trim() === delegateTitle,
+				)) return true;
+				for (const el of document.querySelectorAll(".truncate")) {
+					if (el.textContent?.trim() !== parentTitle) continue;
+					const row = el.closest("[class*='cursor-pointer']");
+					if (!row) continue;
+					for (const s of row.querySelectorAll("span")) {
+						const t = s.textContent?.trim();
+						if (t === "▸" || t === "▾") return true;
+					}
+				}
+				return false;
+			},
+			{ parentTitle: PARENT_TITLE, delegateTitle: DELEGATE_TITLE },
+			{ timeout: 10_000 },
+		);
 
 		// Re-expand parent if needed
 		await page.evaluate((parentTitle: string) => {
@@ -173,7 +212,6 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 				}
 			}
 		}, PARENT_TITLE);
-		await page.waitForTimeout(500);
 
 		// Delegate should still be visible after toggle cycle
 		await expect(
@@ -203,8 +241,9 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		await navigateToHash(page, `#/session/${parentId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		// 3. Give the sidebar time to render
-		await page.waitForTimeout(1000);
+		// 3. Wait for the parent row to render as a positive sentinel that the
+		// sidebar has populated (archived toggle is off, so parent is live).
+		await expect(page.getByText(PARENT_TITLE, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 
 		// 4. The archived delegate title should NOT appear in the sidebar
 		await expect(page.getByText(DELEGATE_TITLE, { exact: true })).toHaveCount(0, { timeout: 3_000 });

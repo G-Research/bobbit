@@ -116,54 +116,66 @@ test.describe("Continue-Archived API", () => {
 		expect(content).toContain("UNIQUE_MARKER_BETA");
 	});
 
-	test("title format: 'Continued: <original title>'", async () => {
-		const archivedId = await makeArchivedSourceSession();
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
-			method: "POST",
-			body: JSON.stringify({ mode: "full" }),
-		});
-		expect(resp.status).toBe(201);
-		const data = await resp.json();
+	// ── Shared-source rejection-path tests ───────────────────────────────
+	//
+	// These tests only need an archived source session's ID to exercise
+	// rejection / continuation logic; they never mutate the source. We build
+	// one archived source per worker and reuse it to avoid ~2 s/test of
+	// create-prompt-archive setup. `test.describe.serial` ensures all three
+	// tests land on the same worker so the beforeAll payoff is realised.
+	test.describe.serial("shared archived source (no mutation)", () => {
+		let sharedArchivedId: string;
 
-		// Poll the new session GET to confirm persisted title.
-		let info: any = null;
-		for (let i = 0; i < 20; i++) {
-			info = await getPersisted(data.id);
-			if (info?.title?.startsWith("Continued: ")) break;
-			await new Promise(r => setTimeout(r, 50));
-		}
-		expect(info?.title?.startsWith("Continued: ")).toBe(true);
-
-		// Send a message in the new session. The first-message auto-titler must
-		// NOT overwrite "Continued: …" — markGenerated:true protects the title.
-		const promptResp = await apiFetch(`/api/sessions/${data.id}/prompt`, {
-			method: "POST",
-			body: JSON.stringify({ text: "hi" }),
+		test.beforeAll(async () => {
+			sharedArchivedId = await makeArchivedSourceSession();
 		});
-		// Some harnesses may not accept prompts on preparing sessions — that's
-		// fine, the critical assertion is that the title stays stable regardless.
-		void promptResp;
-		await new Promise(r => setTimeout(r, 500));
-		const after = await getPersisted(data.id);
-		expect(after?.title?.startsWith("Continued: ")).toBe(true);
-	});
 
-	test("invalid mode returns 400", async () => {
-		const archivedId = await makeArchivedSourceSession();
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
-			method: "POST",
-			body: JSON.stringify({ mode: "xxx" }),
-		});
-		expect(resp.status).toBe(400);
-	});
+		test("title format: 'Continued: <original title>'", async () => {
+			const resp = await apiFetch(`/api/sessions/${sharedArchivedId}/continue`, {
+				method: "POST",
+				body: JSON.stringify({ mode: "full" }),
+			});
+			expect(resp.status).toBe(201);
+			const data = await resp.json();
 
-	test("missing mode returns 400", async () => {
-		const archivedId = await makeArchivedSourceSession();
-		const resp = await apiFetch(`/api/sessions/${archivedId}/continue`, {
-			method: "POST",
-			body: JSON.stringify({}),
+			// Poll the new session GET to confirm persisted title.
+			let info: any = null;
+			for (let i = 0; i < 20; i++) {
+				info = await getPersisted(data.id);
+				if (info?.title?.startsWith("Continued: ")) break;
+				await new Promise(r => setTimeout(r, 50));
+			}
+			expect(info?.title?.startsWith("Continued: ")).toBe(true);
+
+			// Send a message in the new session. The first-message auto-titler must
+			// NOT overwrite "Continued: …" — markGenerated:true protects the title.
+			const promptResp = await apiFetch(`/api/sessions/${data.id}/prompt`, {
+				method: "POST",
+				body: JSON.stringify({ text: "hi" }),
+			});
+			// Some harnesses may not accept prompts on preparing sessions — that's
+			// fine, the critical assertion is that the title stays stable regardless.
+			void promptResp;
+			await new Promise(r => setTimeout(r, 500));
+			const after = await getPersisted(data.id);
+			expect(after?.title?.startsWith("Continued: ")).toBe(true);
 		});
-		expect(resp.status).toBe(400);
+
+		test("invalid mode returns 400", async () => {
+			const resp = await apiFetch(`/api/sessions/${sharedArchivedId}/continue`, {
+				method: "POST",
+				body: JSON.stringify({ mode: "xxx" }),
+			});
+			expect(resp.status).toBe(400);
+		});
+
+		test("missing mode returns 400", async () => {
+			const resp = await apiFetch(`/api/sessions/${sharedArchivedId}/continue`, {
+				method: "POST",
+				body: JSON.stringify({}),
+			});
+			expect(resp.status).toBe(400);
+		});
 	});
 
 	test("unknown session returns 404", async () => {
