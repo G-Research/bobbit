@@ -22,8 +22,10 @@ import {
 	connectWs,
 	createSession,
 	deleteSession,
+	signalAndWaitForGate,
 	nonGitCwd,
 	type WsMsg,
+	type WsConnection,
 } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
@@ -40,6 +42,30 @@ async function createTestFastGoal(): Promise<string> {
 async function createGeneralGoal(): Promise<string> {
 	const goal = await createGoal({ title: `Verification General E2E ${Date.now()}`, workflowId: "general" });
 	return goal.id;
+}
+
+/**
+ * Shared setup for expect-failure pipeline tests: create a bug-fix goal,
+ * a session, connect WS, and pass the issue-analysis prerequisite gate.
+ * Returned resources are cleaned up by the caller.
+ */
+async function prepBugFixGoalWithAnalysis(
+	titlePrefix: string,
+	rootCause: string,
+): Promise<{ goalId: string; sessionId: string; ws: WsConnection }> {
+	const goal = await createGoal({ title: `${titlePrefix} ${Date.now()}`, workflowId: "bug-fix" });
+	const goalId = goal.id;
+	const sessionId = await createSession({ goalId });
+	const ws = await connectWs(sessionId);
+	await signalAndWaitForGate(
+		ws,
+		goalId,
+		"issue-analysis",
+		{ content: `# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: ${rootCause}` },
+		"passed",
+		30_000,
+	);
+	return { goalId, sessionId, ws };
 }
 
 // Gate status waiting uses WS events via ws.waitFor() — no polling needed.
@@ -376,11 +402,11 @@ test.describe("Verification REST API", () => {
 				}
 			}
 
-			// Wait for completion
+			// Wait for completion. Server deletes from activeVerifications BEFORE
+			// broadcasting gate_status_changed (see verification-harness.ts), so once
+			// this event fires the active list is guaranteed empty — no sleep needed.
 			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "design-doc" && m.status === "passed", 15_000);
 
-			// Active verifications should be empty after completion
-			await new Promise(r => setTimeout(r, 200));
 			const afterResp = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 			const afterData = await afterResp.json();
 			expect(afterData.verifications.length).toBe(0);
@@ -430,39 +456,25 @@ test.describe("Expect failure pipeline", () => {
 	test.describe.configure({ mode: "parallel" });
 
 	test("expect:failure gate with matching error_pattern passes", async () => {
-		const goal = await createGoal({
-			title: `Error Pattern Match ${Date.now()}`,
-			workflowId: "bug-fix",
-		});
-		const goalId = goal.id;
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
+		const { goalId, ws } = await prepBugFixGoalWithAnalysis(
+			"Error Pattern Match",
+			"src/calc.ts returns wrong value",
+		);
 
 		try {
-			await apiFetch(`/api/goals/${goalId}/gates/issue-analysis/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content:
-						"# Bug Analysis\n\nSteps: 1. run failing test\nRoot cause: src/calc.ts returns wrong value",
-				}),
-			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 30_000);
-
-			const signalResp = await apiFetch(
-				`/api/goals/${goalId}/gates/reproducing-test/signal`,
+			await signalAndWaitForGate(
+				ws,
+				goalId,
+				"reproducing-test",
 				{
-					method: "POST",
-					body: JSON.stringify({
-						metadata: {
-							test_command: "echo Expected 5 but got 3 1>&2 & exit 1",
-							error_pattern: "Expected 5 but got 3",
-						},
-					}),
+					metadata: {
+						test_command: "echo Expected 5 but got 3 1>&2 & exit 1",
+						error_pattern: "Expected 5 but got 3",
+					},
 				},
+				"passed",
+				30_000,
 			);
-			expect(signalResp.status).toBe(201);
-
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "passed", 30_000);
 		} finally {
 			ws.close();
 			await deleteGoal(goalId);
@@ -470,39 +482,25 @@ test.describe("Expect failure pipeline", () => {
 	});
 
 	test("expect:failure gate with non-matching error_pattern fails", async () => {
-		const goal = await createGoal({
-			title: `Error Pattern NoMatch ${Date.now()}`,
-			workflowId: "bug-fix",
-		});
-		const goalId = goal.id;
-		const sessionId = await createSession({ goalId });
-		const ws = await connectWs(sessionId);
+		const { goalId, ws } = await prepBugFixGoalWithAnalysis(
+			"Error Pattern NoMatch",
+			"src/foo.ts:10 off-by-one",
+		);
 
 		try {
-			await apiFetch(`/api/goals/${goalId}/gates/issue-analysis/signal`, {
-				method: "POST",
-				body: JSON.stringify({
-					content:
-						"# Bug Analysis\n\nSteps: 1. run test\nRoot cause: src/foo.ts:10 off-by-one",
-				}),
-			});
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "issue-analysis" && m.status === "passed", 30_000);
-
-			const signalResp = await apiFetch(
-				`/api/goals/${goalId}/gates/reproducing-test/signal`,
+			await signalAndWaitForGate(
+				ws,
+				goalId,
+				"reproducing-test",
 				{
-					method: "POST",
-					body: JSON.stringify({
-						metadata: {
-							test_command: "echo Module not found 1>&2 & exit 1",
-							error_pattern: "Expected 5 but got 3",
-						},
-					}),
+					metadata: {
+						test_command: "echo Module not found 1>&2 & exit 1",
+						error_pattern: "Expected 5 but got 3",
+					},
 				},
+				"failed",
+				30_000,
 			);
-			expect(signalResp.status).toBe(201);
-
-			await ws.waitFor(m => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === "reproducing-test" && m.status === "failed", 30_000);
 
 			const signalsResp = await apiFetch(
 				`/api/goals/${goalId}/gates/reproducing-test/signals`,
