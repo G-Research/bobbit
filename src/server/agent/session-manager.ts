@@ -58,6 +58,25 @@ const execFileAsync = promisify(execFileCb);
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
+/**
+ * Max consecutive errored agent turns before an incoming prompt/steer is
+ * parked instead of implicitly unsticking the session. Counter increments on
+ * every `message_end` with `stopReason:"error"` and resets on any successful
+ * terminal assistant message OR on an explicit `retryLastPrompt` call.
+ */
+const MAX_CONSECUTIVE_ERROR_TURNS = 3;
+
+/**
+ * Build a user-visible system-prefix explaining that the previous turn
+ * errored. Injected in front of the user's new text when SessionManager
+ * implicitly unsticks a wedged session — orients the model to ignore the
+ * incomplete last turn.
+ */
+function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
+	const snippet = (errMsg || "unknown error").slice(0, 200);
+	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -116,6 +135,8 @@ export interface SessionInfo {
 	lastTurnErrorMessage?: string;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
 	transientRetryAttempts?: number;
+	/** Count of consecutive agent turns that ended with stopReason:"error". Resets on any non-error message_end or explicit retry. */
+	consecutiveErrorTurns?: number;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
 	pendingAutoRetryTimer?: ReturnType<typeof setTimeout>;
 	/** Whether tool calls were executed during the current/last turn */
@@ -1024,15 +1045,56 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
 
-		// ERROR STATE GATING: if last turn errored, always enqueue (never direct dispatch)
-		// User must retry the error first before queue drains
+		// ERROR STATE GATING: if last turn errored, either implicitly unstick
+		// (up to MAX_CONSECUTIVE_ERROR_TURNS) or park the message in the queue.
 		if (session.lastTurnErrored) {
-			session.promptQueue.enqueue(text, {
-				images: opts?.images,
-				attachments: opts?.attachments,
-				isSteered: opts?.isSteered,
-			});
-			this.broadcastQueue(session);
+			const consec = session.consecutiveErrorTurns ?? 0;
+			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
+				// Cap reached — park. Human must click Retry (or fix upstream) to drain.
+				console.log(
+					`[session-manager] Session ${session.id} has ${consec} consecutive errored turns; parking incoming prompt. Human action required (click Retry or fix upstream issue).`
+				);
+				session.promptQueue.enqueue(text, {
+					images: opts?.images,
+					attachments: opts?.attachments,
+					isSteered: opts?.isSteered,
+				});
+				this.broadcastQueue(session);
+				return;
+			}
+
+			// Implicit unstick — new intent supersedes the failed turn.
+			const errSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
+			console.log(
+				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
+			);
+
+			// Cancel any pending auto-retry timer so it doesn't fire a second dispatch.
+			if (session.pendingAutoRetryTimer) {
+				clearTimeout(session.pendingAutoRetryTimer);
+				session.pendingAutoRetryTimer = undefined;
+			}
+
+			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
+			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
+			session.lastTurnErrored = false;
+			session.lastTurnErrorMessage = undefined;
+			session.turnHadToolCalls = false;
+			session.transientRetryAttempts = 0;
+
+			// Dispatch the prefixed new message immediately, ahead of any parked
+			// items. After agent_end the normal drainQueue path picks up parked
+			// items in FIFO order, unprefixed (since lastTurnErrorMessage is now
+			// cleared).
+			const prefixed = buildErrorRecoveryPrefix(errSnippet, text);
+			this.tryGenerateTitleFromPrompt(sessionId, prefixed);
+			session.lastPromptText = prefixed;
+			session.lastPromptImages = opts?.images;
+			session.status = "streaming";
+			session.streamingStartedAt = Date.now();
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
+			await session.rpcClient.prompt(prefixed, opts?.images);
 			return;
 		}
 
@@ -1075,6 +1137,33 @@ export class SessionManager {
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(sessionId);
+
+		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
+		// there is no live turn to inject into, so we either dispatch a regular
+		// prefixed prompt (unstick) or park the steer in the queue (cap).
+		if (session.lastTurnErrored) {
+			const consec = session.consecutiveErrorTurns ?? 0;
+			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
+				console.log(
+					`[session-manager] Session ${sessionId} has ${consec} consecutive errored turns; parking live-steer. Human action required.`
+				);
+				// Preserve PI-25b/c invariant: persist to promptQueue so it survives
+				// Stop/Retry. Keep isSteered; do NOT mark dispatched (no in-flight
+				// turn to inject into). drainQueue will pick it up after user Retry.
+				const queued = session.promptQueue.enqueue(message, { isSteered: true });
+				this.broadcastQueue(session);
+				return Promise.resolve({ queued: true, parked: true, id: queued.id });
+			}
+
+			const errSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
+			console.log(
+				`[session-manager] Session ${sessionId} implicit unstick from deliverLiveSteer (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
+			);
+			// enqueuePrompt handles its own state-clear + pending-timer cancel +
+			// prefix application; we just route through it with the raw message.
+			return this.enqueuePrompt(sessionId, message, { isSteered: true });
+		}
+
 		// Persist the live-steer text in promptQueue as {isSteered, dispatched}
 		// so it survives abort. The SDK parks the steer until the next tool
 		// boundary and discards it if the turn is aborted; without a server-side
@@ -1236,10 +1325,16 @@ export class SessionManager {
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
-			session.lastTurnErrored = event.message.stopReason === "error";
-			session.lastTurnErrorMessage = session.lastTurnErrored
-				? (event.message.errorMessage || "")
-				: undefined;
+			const errored = event.message.stopReason === "error";
+			session.lastTurnErrored = errored;
+			session.lastTurnErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
+			if (errored) {
+				session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+			} else {
+				// Any non-error terminal assistant message resets the cap budget.
+				// Only stopReason:"error" advances the counter.
+				session.consecutiveErrorTurns = 0;
+			}
 		}
 
 		// When a steered user message appears in chat, remove the dispatched pill
@@ -1431,6 +1526,12 @@ export class SessionManager {
 		const hadToolCalls = session.turnHadToolCalls;
 		session.lastTurnErrored = false;
 		session.turnHadToolCalls = false;
+		// Explicit retry resets the cap — human intervention gets a fresh budget.
+		session.consecutiveErrorTurns = 0;
+		if (session.pendingAutoRetryTimer) {
+			clearTimeout(session.pendingAutoRetryTimer);
+			session.pendingAutoRetryTimer = undefined;
+		}
 
 		if (hadToolCalls) {
 			// Agent was mid-work — send a system continuation prompt

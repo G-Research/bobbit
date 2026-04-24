@@ -1244,6 +1244,48 @@ Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId
 
 ---
 
+## Errored-turn recovery (implicit unstick on new input)
+
+When an agent turn ends with `stopReason: "error"` (malformed tool_use JSON, provider transport blip not on the whitelist, content-filter trip, etc.), `SessionManager.handleAgentLifecycle` sets `session.lastTurnErrored = true`. Historically the queue was then fully gated: any subsequent prompt or steer sat in `promptQueue` forever until the user clicked the UI Retry button. That worked for "human needs to decide", but it created a permanent-wedge failure mode for transient glitches the `TRANSIENT_ERROR_PATTERNS` list didn't match, and it silently swallowed team-lead nudges to errored workers (stalling whole teams overnight).
+
+### Design
+
+**Process, don't retry.** A new prompt or steer arriving at a wedged session is treated as fresh intent. `SessionManager` clears the error flag, prepends a short `[SYSTEM: previous turn failed with: <snippet>. Ignore the incomplete last turn and handle the following.]` stub (via `buildErrorRecoveryPrefix`), and dispatches the new message. The failed turn is **not** re-attempted — the sender gets to decide what happens next, not the stuck turn. The explicit UI Retry button still exists for the "please re-attempt that turn" case; implicit unstick is strictly additive.
+
+The broken assistant message (with a malformed `tool_use` block and no matching `tool_result`) stays in transcript history. Providers tolerate this as long as the next message is regular user text, not a `tool_result`; the system-prefix keeps the model oriented.
+
+### Consecutive-error cap
+
+`session.consecutiveErrorTurns: number` (on `SessionInfo`) is the brake. It increments on every `message_end` with `stopReason: "error"`, resets to 0 on any successful `message_end`, and is forced to 0 by the explicit-Retry path (`retryLastPrompt`) so a deliberate human action never erodes the budget.
+
+`MAX_CONSECUTIVE_ERROR_TURNS = 3` (module-local constant in `src/server/agent/session-manager.ts`). Behaviour:
+
+- `consecutiveErrorTurns < 3`: implicit unstick fires. `lastTurnErrored`, `lastTurnErrorMessage`, `turnHadToolCalls`, `transientRetryAttempts` are cleared (but **not** `consecutiveErrorTurns` — that only drops on a real success). Any `pendingAutoRetryTimer` is cancelled so we don't double-dispatch. Prefixed message dispatches; any already-parked queue items drain after it (unprefixed).
+- `consecutiveErrorTurns ≥ 3`: the incoming message parks in `promptQueue` (today's pre-fix behaviour), and `[session-manager] Session … has N consecutive errors; parking incoming prompt. Human action required (click Retry or fix upstream issue).` is logged. Parked items drain automatically once a human resolves the upstream problem and clicks Retry.
+
+This is strictly better than the pre-fix state: one-off glitches self-heal on the next message; persistent failures stop costing model calls after 3 attempts and match the old "parked awaiting human" endpoint. No exponential backoff — for auth/quota failures no wait helps, so a hard stop is the right final state.
+
+### Entry points
+
+- `SessionManager.enqueuePrompt` (`src/server/agent/session-manager.ts`) — user / REST prompt arrival.
+- `SessionManager.deliverLiveSteer` — WS `{type:"steer"}` and team-manager steer paths. Still persists to `promptQueue` as `{ isSteered: true, dispatched: true }` **before** dispatching, to preserve the PI-25b/c invariant that steers survive a Stop/retry roundtrip.
+- Both emit a one-line log on the implicit-unstick path recording `sessionId`, `source` (`enqueuePrompt` vs `deliverLiveSteer`), and current `consecutiveErrorTurns`, so the rescue-vs-park ratio is observable in practice.
+
+### Team-manager suppression removed
+
+The old `if (teamLeadSession.lastTurnErrored) { suppress }` guard in `team-manager.ts` existed solely because a nudge to an errored team lead would vanish into the queue forever. With implicit unstick + the cap, `SessionManager` is the single source of truth for error-state policy: the nudge either unsticks the lead (≤ 3 errors) or parks (≥ 3). TeamManager no longer second-guesses, which closes the "worker idle → nudge dropped → team stalls" path.
+
+### Key files
+
+| File | Role |
+| --- | --- |
+| `src/server/agent/session-manager.ts` | `SessionInfo.consecutiveErrorTurns`, `MAX_CONSECUTIVE_ERROR_TURNS`, increment/reset in `handleAgentLifecycle`, implicit-unstick branches in `enqueuePrompt` and `deliverLiveSteer`, cap-driven parking, `buildErrorRecoveryPrefix`, reset-on-success in `retryLastPrompt` |
+| `src/server/agent/team-manager.ts` | Removed `lastTurnErrored` suppression in the worker-idle notify path; delivery now unconditional |
+| `tests/queue-dispatch.spec.ts` | Unit coverage: happy-path unstick, cap parking, success resets counter, explicit Retry bypasses cap, steer path, queue drain, auto-retry timer cancellation |
+| `tests/e2e/stuck-session-recovery.spec.ts` | API E2E: mock-agent error turn → new prompt dispatches without UI Retry |
+
+---
+
 ## Viewer WebSocket
 
 The `/ws/viewer` endpoint provides a read-only, sessionless WebSocket connection for the goal dashboard to receive live gate verification events.

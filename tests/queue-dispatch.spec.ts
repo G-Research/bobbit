@@ -2,6 +2,13 @@ import { test, expect } from "@playwright/test";
 import { PromptQueue } from "../dist/server/agent/prompt-queue.js";
 import type { QueuedMessage } from "../dist/server/ws/protocol.js";
 
+const MAX_CONSECUTIVE_ERROR_TURNS = 3;
+const SYSTEM_PREFIX_RE = /^\[SYSTEM: previous turn failed with: .+\. Ignore the incomplete last turn and handle the following\.\]\n\n/;
+function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
+	const snippet = (errMsg || "unknown error").slice(0, 200);
+	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
+}
+
 /**
  * Simulates the SessionManager dispatch logic without needing real RPC/sessions.
  * Tracks dispatched messages, status transitions, and models the idle/busy state machine.
@@ -12,6 +19,12 @@ class DispatchSimulator {
 	dispatched: Array<{ message: QueuedMessage; method: "prompt" | "steer" | "followUp" }> = [];
 	statusTransitions: Array<"idle" | "streaming" | "aborting"> = [];
 	lastTurnErrored = false;
+	lastTurnErrorMessage = "";
+	consecutiveErrorTurns = 0;
+	transientRetryAttempts = 0;
+	turnHadToolCalls = false;
+	pendingAutoRetryTimer: { cancelled: boolean } | undefined = undefined;
+	logs: string[] = [];
 
 	constructor(queue?: PromptQueue) {
 		this.queue = queue ?? new PromptQueue();
@@ -33,10 +46,39 @@ class DispatchSimulator {
 	 * - busy → enqueue only
 	 */
 	enqueue(text: string, opts?: { isSteered?: boolean; isFollowUp?: boolean }): QueuedMessage | null {
-		// Error-state gating: always enqueue when last turn errored
+		// Error-state gating with implicit unstick up to MAX_CONSECUTIVE_ERROR_TURNS.
 		if (this.lastTurnErrored) {
-			const msg = this.queue.enqueue(text, opts);
-			return msg;
+			if (this.consecutiveErrorTurns >= MAX_CONSECUTIVE_ERROR_TURNS) {
+				this.logs.push(
+					`park:consecutiveErrorTurns=${this.consecutiveErrorTurns}`
+				);
+				const msg = this.queue.enqueue(text, opts);
+				return msg;
+			}
+			// Implicit unstick.
+			this.logs.push(
+				`unstick:consecutiveErrorTurns=${this.consecutiveErrorTurns}`
+			);
+			if (this.pendingAutoRetryTimer) {
+				this.pendingAutoRetryTimer.cancelled = true;
+				this.pendingAutoRetryTimer = undefined;
+			}
+			const errSnippet = (this.lastTurnErrorMessage || "").slice(0, 200);
+			this.lastTurnErrored = false;
+			this.lastTurnErrorMessage = "";
+			this.turnHadToolCalls = false;
+			this.transientRetryAttempts = 0;
+			const prefixed = buildErrorRecoveryPrefix(errSnippet, text);
+			// Dispatch ahead of any parked items (spec: "new first" ordering).
+			const msg: QueuedMessage = {
+				id: `unstick-${Date.now()}-${Math.random()}`,
+				text: prefixed,
+				isSteered: opts?.isSteered ?? false,
+				isFollowUp: opts?.isFollowUp ?? false,
+				createdAt: Date.now(),
+			};
+			this.dispatch(msg);
+			return null;
 		}
 
 		if (this.status === "idle" && this.queue.isEmpty) {
@@ -60,6 +102,25 @@ class DispatchSimulator {
 		}
 
 		return msg;
+	}
+
+	/** Models deliverLiveSteer — routes through enqueue under cap (implicit unstick); parks directly at cap. */
+	steerLive(message: string): { parked: boolean } {
+		if (this.lastTurnErrored) {
+			if (this.consecutiveErrorTurns >= MAX_CONSECUTIVE_ERROR_TURNS) {
+				this.logs.push(`park-steer:consecutiveErrorTurns=${this.consecutiveErrorTurns}`);
+				this.queue.enqueue(message, { isSteered: true });
+				return { parked: true };
+			}
+			this.logs.push(`unstick-steer:consecutiveErrorTurns=${this.consecutiveErrorTurns}`);
+			this.enqueue(message, { isSteered: true });
+			return { parked: false };
+		}
+		// Happy path — persist steered+dispatched and simulate steer().
+		const queued = this.queue.enqueue(message, { isSteered: true });
+		this.queue.markDispatched(queued.id);
+		this.dispatched.push({ message: queued, method: "steer" });
+		return { parked: false };
 	}
 
 	/** Models drainQueue from SessionManager — batches steered, then falls back to single. */
@@ -102,8 +163,24 @@ class DispatchSimulator {
 	}
 
 	/** Simulate a turn ending with an error (message_end with stopReason "error"). */
-	errorEnd(): void {
+	errorEnd(errMsg = "simulated error"): void {
 		this.lastTurnErrored = true;
+		this.lastTurnErrorMessage = errMsg;
+		this.consecutiveErrorTurns += 1;
+	}
+
+	/** Simulate a successful terminal message_end — resets the cap. */
+	successEnd(): void {
+		this.lastTurnErrored = false;
+		this.lastTurnErrorMessage = "";
+		this.consecutiveErrorTurns = 0;
+	}
+
+	/** Simulate scheduling an auto-retry timer (from maybeAutoRetryTransient). */
+	scheduleAutoRetry(): { cancelled: boolean } {
+		const timer = { cancelled: false };
+		this.pendingAutoRetryTimer = timer;
+		return timer;
 	}
 
 	/**
@@ -187,6 +264,12 @@ class DispatchSimulator {
 	 */
 	retry(): void {
 		this.lastTurnErrored = false;
+		// Explicit retry bypasses the cap — fresh budget.
+		this.consecutiveErrorTurns = 0;
+		if (this.pendingAutoRetryTimer) {
+			this.pendingAutoRetryTimer.cancelled = true;
+			this.pendingAutoRetryTimer = undefined;
+		}
 		// Simulate dispatching a retry prompt
 		const retryMsg: QueuedMessage = {
 			id: `retry-${Date.now()}`,
@@ -567,26 +650,27 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.status).toBe("idle");
 	});
 
-	test("(story 37) error → new message: enqueue goes to queue, not direct dispatch", () => {
+	test("(story 37, updated) error → new message: implicit unstick under cap dispatches prefixed", () => {
+		// Updated for "Unstick sessions on new input": a new message after an
+		// errored turn now dispatches immediately with a system-prefix (up to
+		// MAX_CONSECUTIVE_ERROR_TURNS). Parking only happens at the cap — see
+		// (unstick 2) above.
 		const sim = new DispatchSimulator();
 
-		// Send initial prompt, error
 		sim.enqueue("Initial");
 		sim.errorEnd();
 		sim.agentEnd();
 		expect(sim.status).toBe("idle");
 		expect(sim.lastTurnErrored).toBe(true);
 
-		// User sends a new message in error state — should be enqueued, not dispatched
 		const queued = sim.enqueue("NewMessage");
-		expect(queued).not.toBeNull();
-		expect(queued!.text).toBe("NewMessage");
-		expect(sim.queue.length).toBe(1);
-		// Should NOT have been dispatched directly
-		expect(sim.dispatched.length).toBe(1); // only Initial
-		expect(sim.dispatchedTexts).toEqual(["Initial"]);
-		// Status should still be idle (not streaming)
-		expect(sim.status).toBe("idle");
+		expect(queued).toBeNull(); // direct-dispatched, not parked
+		expect(sim.queue.isEmpty).toBe(true);
+		expect(sim.dispatched.length).toBe(2); // Initial + NewMessage (prefixed)
+		expect(sim.dispatched[1].message.text).toMatch(SYSTEM_PREFIX_RE);
+		expect(sim.dispatched[1].message.text.endsWith("NewMessage")).toBe(true);
+		expect(sim.lastTurnErrored).toBe(false);
+		expect(sim.status).toBe("streaming");
 	});
 
 	// ── Batched steer tests ────────────────────────────────────────────
@@ -829,6 +913,183 @@ test.describe("Queue Dispatch Integration", () => {
 
 		// Verify aborting status was included
 		expect(sim.statusTransitions).toContain("aborting");
+	});
+
+	// ── Implicit-unstick tests ("Unstick sessions on new input" goal) ──────
+
+	test("(unstick 1) happy path: errored session, new enqueue dispatches prefixed", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("initial");
+		const timer = sim.scheduleAutoRetry();
+		sim.errorEnd("JSON parse failure at position 320");
+		expect(sim.consecutiveErrorTurns).toBe(1);
+		expect(sim.lastTurnErrored).toBe(true);
+
+		const result = sim.enqueue("new work");
+
+		// Dispatched directly, not parked
+		expect(result).toBeNull();
+		expect(sim.queue.isEmpty).toBe(true);
+		const last = sim.dispatched[sim.dispatched.length - 1];
+		expect(last.message.text).toMatch(SYSTEM_PREFIX_RE);
+		expect(last.message.text).toContain("JSON parse failure at position 320");
+		expect(last.message.text.endsWith("new work")).toBe(true);
+		expect(sim.lastTurnErrored).toBe(false);
+		// Counter NOT reset by unstick — only by success or explicit retry.
+		expect(sim.consecutiveErrorTurns).toBe(1);
+		// Auto-retry timer cancelled.
+		expect(timer.cancelled).toBe(true);
+		expect(sim.pendingAutoRetryTimer).toBeUndefined();
+		expect(sim.logs.some(l => l.startsWith("unstick:"))).toBe(true);
+	});
+
+	test("(unstick 2) cap triggers parking after 3 errored turns", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("first");
+		sim.errorEnd("err 1");
+		sim.errorEnd("err 2");
+		sim.errorEnd("err 3");
+		expect(sim.consecutiveErrorTurns).toBe(3);
+
+		const dispatchedBefore = sim.dispatched.length;
+		const result = sim.enqueue("fourth");
+
+		expect(result).not.toBeNull();
+		expect(sim.queue.length).toBe(1);
+		expect(sim.queue.toArray()[0].text).toBe("fourth");
+		expect(sim.lastTurnErrored).toBe(true);
+		// No new dispatch
+		expect(sim.dispatched.length).toBe(dispatchedBefore);
+		expect(sim.logs.filter(l => l.startsWith("park:")).length).toBe(1);
+	});
+
+	test("(unstick 3) success resets counter", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("first");
+		sim.errorEnd("e1");
+		sim.errorEnd("e2");
+		expect(sim.consecutiveErrorTurns).toBe(2);
+
+		sim.successEnd();
+		expect(sim.consecutiveErrorTurns).toBe(0);
+
+		sim.errorEnd("e3");
+		expect(sim.consecutiveErrorTurns).toBe(1);
+
+		const result = sim.enqueue("recovery");
+		expect(result).toBeNull(); // unstick dispatch
+		const last = sim.dispatched[sim.dispatched.length - 1];
+		expect(last.message.text).toMatch(SYSTEM_PREFIX_RE);
+	});
+
+	test("(unstick 4) explicit retry bypasses cap", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("first");
+		for (let i = 0; i < 5; i++) sim.errorEnd(`err ${i}`);
+		expect(sim.consecutiveErrorTurns).toBe(5);
+
+		const before = sim.dispatched.length;
+		sim.retry();
+
+		expect(sim.dispatched.length).toBe(before + 1);
+		const last = sim.dispatched[sim.dispatched.length - 1];
+		expect(last.message.text).toBe("[RETRY]");
+		expect(sim.lastTurnErrored).toBe(false);
+		expect(sim.consecutiveErrorTurns).toBe(0);
+	});
+
+	test("(unstick 5) steer path implicit unstick", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("first");
+		sim.errorEnd("transport blip");
+
+		const result = sim.steerLive("hi");
+
+		expect(result.parked).toBe(false);
+		const last = sim.dispatched[sim.dispatched.length - 1];
+		expect(last.message.text).toMatch(SYSTEM_PREFIX_RE);
+		expect(last.message.text.endsWith("hi")).toBe(true);
+		expect(last.message.isSteered).toBe(true);
+		expect(sim.lastTurnErrored).toBe(false);
+		expect(sim.logs.some(l => l.startsWith("unstick-steer:"))).toBe(true);
+	});
+
+	test("(unstick 5b) steer path parks at cap, persists to queue (PI-25 invariant)", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("first");
+		for (let i = 0; i < 3; i++) sim.errorEnd(`e${i}`);
+
+		const result = sim.steerLive("hi");
+
+		expect(result.parked).toBe(true);
+		expect(sim.queue.length).toBe(1);
+		const parked = sim.queue.toArray()[0];
+		expect(parked.text).toBe("hi");
+		expect(parked.isSteered).toBe(true);
+		// NOT marked dispatched — drainQueue should pick it up after Retry.
+		expect(parked.dispatched).toBeFalsy();
+	});
+
+	test("(unstick 6) queue drain ordering: new prefixed first, then parked FIFO unprefixed", () => {
+		const sim = new DispatchSimulator();
+		// Busy with initial, park parked1 while busy (normal path)
+		sim.enqueue("initial"); // direct dispatch, status=streaming
+		sim.enqueue("parked1"); // enqueued (busy)
+		// Agent errors; while wedged, parked2 enqueues (error path puts to queue when at cap
+		// but here we still have consecutiveErrorTurns<3 so — wait, unstick fires. To
+		// model "parked while wedged at cap" we push the cap first.
+		// Better: simulate 1 error + direct enqueue while wedged using queue enqueue.
+		// Re-model: we just directly push parked2 via queue to simulate "queued during error".
+		sim.errorEnd("glitch");
+		// Simulate an under-cap enqueue that still wanted to park — we simulate by direct
+		// queue push to represent pre-existing wedged queue items that landed via earlier
+		// at-cap parks before being relaxed. For spec coverage of "new first, parked after"
+		// what matters is that parked items already exist and the new unstick dispatches
+		// ahead of them.
+		sim.queue.enqueue("parked2");
+
+		expect(sim.queue.length).toBe(2); // parked1 + parked2
+
+		const before = sim.dispatched.length;
+		sim.enqueue("new");
+
+		// New prefixed dispatched first, ahead of parked items.
+		const nextDispatch = sim.dispatched[before];
+		expect(nextDispatch.message.text).toMatch(SYSTEM_PREFIX_RE);
+		expect(nextDispatch.message.text.endsWith("new")).toBe(true);
+		expect(sim.queue.length).toBe(2); // parked items untouched
+
+		// After turn ends, parked items drain in FIFO, unprefixed.
+		sim.agentEnd();
+		const d2 = sim.dispatched[sim.dispatched.length - 1];
+		expect(d2.message.text).toBe("parked1");
+		expect(d2.message.text).not.toMatch(SYSTEM_PREFIX_RE);
+
+		sim.agentEnd();
+		const d3 = sim.dispatched[sim.dispatched.length - 1];
+		expect(d3.message.text).toBe("parked2");
+		expect(d3.message.text).not.toMatch(SYSTEM_PREFIX_RE);
+
+		sim.agentEnd();
+		expect(sim.queue.isEmpty).toBe(true);
+		expect(sim.status).toBe("idle");
+	});
+
+	test("(unstick 7) auto-retry timer cancelled by new input", () => {
+		const sim = new DispatchSimulator();
+		sim.enqueue("initial");
+		sim.errorEnd("transient");
+		const timer = sim.scheduleAutoRetry();
+		expect(sim.pendingAutoRetryTimer).toBe(timer);
+		expect(timer.cancelled).toBe(false);
+
+		const before = sim.dispatched.length;
+		sim.enqueue("user-input");
+
+		expect(timer.cancelled).toBe(true);
+		expect(sim.pendingAutoRetryTimer).toBeUndefined();
+		// Only ONE dispatch from the unstick (no double dispatch from retry timer).
+		expect(sim.dispatched.length).toBe(before + 1);
 	});
 
 	test("aborting status transition during force-abort (PI-21b)", () => {
