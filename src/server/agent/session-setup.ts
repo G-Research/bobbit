@@ -375,37 +375,26 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 
 /** Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension. */
 export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
-		const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
-		const mcpExtPaths = ctx.mcpManager
-			? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
-			: undefined;
+	const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+	const mcpExtPaths = ctx.mcpManager
+		? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
+		: undefined;
 
-		const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
+	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
 
-		plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
 
-		// Generate and add the tool_call guard extension if any tools have 'ask' policy
-		const guardPath = ctx.toolManager ? writeToolGuardExtension(
-			plan.id,
-			ctx.toolManager,
-			ctx.mcpManager ?? undefined,
-			effectiveRole ?? undefined,
-			ctx.groupPolicyStore ?? undefined,
-			[],
-		) : undefined;
-		if (guardPath) {
-			plan.bridgeOptions.args.push("--extension", guardPath);
-		}
-	} else if (ctx.mcpManager) {
-		const mcpExtPaths = writeMcpProxyExtensions(ctx.mcpManager);
-		// Always disable auto-discovery — Bobbit controls all extension loading.
-		// Without this the agent would scan the session cwd and pick up stray
-		// `.pi/extensions/*` entries (e.g. checked-in bobbit source trees in test worktrees).
-		plan.bridgeOptions.args = [...(plan.bridgeOptions.args || []), "--no-extensions"];
-		for (const extPath of mcpExtPaths) {
-			plan.bridgeOptions.args.push("--extension", extPath);
-		}
+	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
+	const guardPath = ctx.toolManager ? writeToolGuardExtension(
+		plan.id,
+		ctx.toolManager,
+		ctx.mcpManager ?? undefined,
+		effectiveRole ?? undefined,
+		ctx.groupPolicyStore ?? undefined,
+		[],
+	) : undefined;
+	if (guardPath) {
+		plan.bridgeOptions.args.push("--extension", guardPath);
 	}
 }
 

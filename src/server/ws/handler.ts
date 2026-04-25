@@ -17,21 +17,29 @@ import { truncateLargeToolContentInMessages } from "../agent/truncate-large-cont
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
+	const data: Record<string, unknown> = {};
 	if (persisted?.modelProvider && persisted?.modelId) {
 		const meta = inferMeta(persisted.modelId);
-		send(ws, {
-			type: "state",
-			data: {
-				model: {
-					provider: persisted.modelProvider,
-					id: persisted.modelId,
-					contextWindow: meta.contextWindow,
-					maxTokens: meta.maxTokens,
-					reasoning: meta.reasoning,
-				}
-			}
-		});
+		data.model = {
+			provider: persisted.modelProvider,
+			id: persisted.modelId,
+			contextWindow: meta.contextWindow,
+			maxTokens: meta.maxTokens,
+			reasoning: meta.reasoning,
+		};
 	}
+	const imageModel = sessionManager.getImageModelForSession(sessionId);
+	if (imageModel) {
+		data.imageGenerationModel = imageModel;
+	}
+	if (Object.keys(data).length > 0) {
+		send(ws, { type: "state", data });
+	}
+}
+
+function sendImageModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
+	const imageModel = sessionManager.getImageModelForSession(sessionId);
+	if (imageModel) send(ws, { type: "state", data: { imageGenerationModel: imageModel } });
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
@@ -167,6 +175,7 @@ export function handleWebSocketConnection(
 				session.rpcClient.getState().then((stateResponse) => {
 					if (stateResponse.success) {
 						send(ws, { type: "state", data: stateResponse.data });
+						sendImageModelState(ws, sessionManager, sessionId);
 						// If agent state lacks model info, supplement with persisted data
 						const data = stateResponse.data as Record<string, unknown> | undefined;
 						if (!data?.model) {
@@ -371,6 +380,13 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
+				case "set_image_model":
+					sessionManager.persistSessionImageModel(session.id, msg.provider, msg.modelId);
+					broadcast(session.clients, {
+						type: "state",
+						data: { imageGenerationModel: { provider: msg.provider, id: msg.modelId } },
+					});
+					break;
 				case "set_thinking_level":
 					await session.rpcClient.setThinkingLevel(msg.level);
 					break;
@@ -407,6 +423,7 @@ export function handleWebSocketConnection(
 						const stateResp = await session.rpcClient.getState();
 						if (stateResp.success) {
 							send(ws, { type: "state", data: stateResp.data });
+							sendImageModelState(ws, sessionManager, sessionId);
 							// If agent state lacks model info, supplement with persisted data
 							const data = stateResp.data as Record<string, unknown> | undefined;
 							if (!data?.model) {

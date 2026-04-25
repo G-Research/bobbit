@@ -37,7 +37,7 @@ export interface ApiModel {
 export interface CustomProviderConfig {
 	id: string;
 	name: string;
-	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual";
+	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual" | "openai-images" | "gemini-images" | "google-imagen";
 	baseUrl: string;
 	apiKey?: string;
 	models?: Array<{ id: string; name: string }>;

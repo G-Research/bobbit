@@ -129,10 +129,13 @@ export function resolveGrantPolicy(
 	toolManager: ToolManager | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 ): GrantPolicy {
+	const mcpPrefix = mcpPolicyPrefix(toolName);
+
 	// 1. Role-level tool-specific override
 	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
 
 	// 2. Role-level group override (e.g. "mcp__playwright" matches "mcp__playwright__snap")
+	if (mcpPrefix && role?.toolPolicies?.[mcpPrefix]) return normalizePolicy(role.toolPolicies[mcpPrefix]);
 	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
 	// 3. Tool definition default from YAML
@@ -140,13 +143,24 @@ export function resolveGrantPolicy(
 	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
 
 	// 4. Group-level default policy
-	if (toolGroup && groupPolicyStore) {
-		const gp = groupPolicyStore.getGroupPolicy(toolGroup);
-		if (gp) return normalizePolicy(gp);
+	if (groupPolicyStore) {
+		if (mcpPrefix) {
+			const mcpGp = groupPolicyStore.getGroupPolicy(mcpPrefix);
+			if (mcpGp) return normalizePolicy(mcpGp);
+		}
+		if (toolGroup) {
+			const gp = groupPolicyStore.getGroupPolicy(toolGroup);
+			if (gp) return normalizePolicy(gp);
+		}
 	}
 
 	// 5. System fallback — always allow
 	return 'allow';
+}
+
+function mcpPolicyPrefix(toolName: string): string | undefined {
+	const match = toolName.match(/^(mcp__.+?)__/);
+	return match?.[1];
 }
 
 /**

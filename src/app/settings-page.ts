@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
-import { ArrowLeft, Brain, Check, FlaskConical, Loader2, Plus, RotateCcw, Sparkles, X } from "lucide";
+import { ArrowLeft, Brain, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -25,6 +25,7 @@ import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
+import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
 
 type SettingsTab = SettingsTabId;
@@ -1063,10 +1064,12 @@ let aigwExclusive = true; // hide built-in providers while gateway is configured
 let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
 let prefReviewModel = "";    // same format
 let prefNamingModel = "";    // same format
+let prefImageModel = "";     // same format, defaults to openai/gpt-image-2 when unset
 let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|""
 let prefReviewThinking = "";
 let prefNamingThinking = "";
 let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
+let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
 
 // Per-row Test-button state. Keyed by the pref value ("provider/id").
@@ -1114,6 +1117,12 @@ function modelIsAvailable(pref: string): boolean {
 	return allModels.some((m) => `${m.provider}/${m.id}` === pref);
 }
 
+function imageModelIsAvailable(pref: string): boolean {
+	if (!pref) return true;
+	if (allImageModels.length === 0) return true;
+	return allImageModels.some((m) => `${m.provider}/${m.id}` === pref);
+}
+
 function openAigwModelsDialog(): void {
 	AigwModelsDialog.open(aigwModels);
 }
@@ -1142,6 +1151,7 @@ function loadModelsState(): void {
 				prefSessionModel = prefs["default.sessionModel"] || "";
 				prefReviewModel = prefs["default.reviewModel"] || "";
 				prefNamingModel = prefs["default.namingModel"] || "";
+				prefImageModel = prefs["default.imageModel"] || "";
 				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
@@ -1152,6 +1162,11 @@ function loadModelsState(): void {
 				if (Array.isArray(models)) {
 					allModels = models;
 				}
+			}
+			const imageModelsRes = await gatewayFetch("/api/image-models");
+			if (imageModelsRes.ok) {
+				const imageModels = await imageModelsRes.json();
+				if (Array.isArray(imageModels)) allImageModels = imageModels;
 			}
 		} catch {}
 		renderApp();
@@ -1168,10 +1183,11 @@ async function savePref(key: string, value: string | null): Promise<void> {
 }
 
 // Exposed for fixture tests to avoid triggering network writes; normal UI path unchanged.
-export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string }>): void {
+export function __testSetPrefs(p: Partial<{ session: string; review: string; naming: string; image: string }>): void {
 	if (p.session !== undefined) prefSessionModel = p.session;
 	if (p.review !== undefined) prefReviewModel = p.review;
 	if (p.naming !== undefined) prefNamingModel = p.naming;
+	if (p.image !== undefined) prefImageModel = p.image;
 }
 
 async function setSessionModel(value: string): Promise<void> {
@@ -1189,6 +1205,12 @@ async function setReviewModel(value: string): Promise<void> {
 async function setNamingModel(value: string): Promise<void> {
 	prefNamingModel = value;
 	await savePref("default.namingModel", value || null);
+	renderApp();
+}
+
+async function setImageModel(value: string): Promise<void> {
+	prefImageModel = value;
+	await savePref("default.imageModel", value || null);
 	renderApp();
 }
 
@@ -1337,6 +1359,19 @@ function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	});
 }
 
+function openImageModelPicker(currentValue: string, onChange: (v: string) => void) {
+	let currentModel: ImageGenerationModel | null = null;
+	if (currentValue) {
+		const slash = currentValue.indexOf("/");
+		if (slash > 0) {
+			currentModel = { provider: currentValue.slice(0, slash), id: currentValue.slice(slash + 1), name: "", api: "openai-images" };
+		}
+	}
+	ImageModelSelector.open(currentModel, (model) => {
+		onChange(`${model.provider}/${model.id}`);
+	});
+}
+
 function renderModelRow(
 	label: string,
 	hint: string,
@@ -1466,15 +1501,70 @@ function renderModelRow(
 	`;
 }
 
+function renderImageModelRow(
+	label: string,
+	hint: string,
+	modelValue: string,
+	onModelChange: (v: string) => void,
+) {
+	const modelDisplay = modelValue ? formatModelPref(modelValue) : "Auto (GPT Image 2)";
+	const available = imageModelIsAvailable(modelValue);
+	const showUnavailable = !!modelValue && allImageModels.length > 0 && !available;
+
+	return html`
+		<div class="flex flex-col gap-1" data-testid="image-model-row" data-row-label=${label}>
+			<div class="flex items-center gap-2">
+				<span class="text-sm font-medium text-foreground shrink-0 w-14">${label}</span>
+				<div class="flex items-center gap-1.5 rounded-lg border border-input bg-background px-1 py-1 flex-1 min-w-0">
+					<button
+						class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm
+							hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-ring
+							flex-1 min-w-0 text-left
+							${modelValue ? "text-foreground" : "text-muted-foreground"}"
+						title="Choose image generation model"
+						@click=${() => openImageModelPicker(modelValue, onModelChange)}
+					>
+						<span class="text-muted-foreground shrink-0">${icon(ImageIcon, "sm")}</span>
+						<span class="truncate">${modelDisplay}</span>
+					</button>
+					${showUnavailable ? html`
+						<span
+							class="text-[10px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded bg-destructive/15 text-destructive shrink-0"
+							title="This saved preference does not match any currently available image model."
+							data-testid="image-model-unavailable-badge"
+						>Unavailable</span>
+					` : ""}
+					${modelValue ? html`
+						<button
+							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+							title=${showUnavailable ? "Clear unavailable model" : "Reset image model to auto"}
+							data-testid="image-model-clear-btn"
+							@click=${() => onModelChange("")}
+						>${icon(X, "xs")}</button>
+					` : ""}
+				</div>
+			</div>
+			${showUnavailable ? html`
+				<p class="text-xs text-destructive">
+					This image model is not in the current available-models list. Clear it or pick another.
+				</p>
+			` : ""}
+			<p class="text-xs text-muted-foreground">${hint}</p>
+		</div>
+	`;
+}
+
 // Exported for fixture tests (tests/settings-models-tab-redesign.spec.ts).
 export function __testResetModelsTab(opts: {
 	aigwConfigured?: boolean;
 	aigwUrl?: string;
 	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean }>;
 	allModels?: Array<{ id: string; provider: string; reasoning: boolean }>;
+	allImageModels?: ImageGenerationModel[];
 	prefSessionModel?: string;
 	prefReviewModel?: string;
 	prefNamingModel?: string;
+	prefImageModel?: string;
 } = {}): void {
 	_modelsLoaded = true; // skip the fetcher
 	aigwConfigured = opts.aigwConfigured ?? false;
@@ -1482,9 +1572,11 @@ export function __testResetModelsTab(opts: {
 	aigwUrl = opts.aigwUrl ?? "";
 	aigwModels = opts.aigwModels ?? [];
 	allModels = opts.allModels ?? [];
+	allImageModels = opts.allImageModels ?? [];
 	prefSessionModel = opts.prefSessionModel ?? "";
 	prefReviewModel = opts.prefReviewModel ?? "";
 	prefNamingModel = opts.prefNamingModel ?? "";
+	prefImageModel = opts.prefImageModel ?? "";
 	prefSessionThinking = "";
 	prefReviewThinking = "";
 	prefNamingThinking = "";
@@ -1621,6 +1713,12 @@ export function renderModelsTab() {
 					prefNamingThinking,
 					setNamingThinking,
 					"off",
+				)}
+				${renderImageModelRow(
+					"Image",
+					"Image generation model used by the generate_image tool and as the default for new sessions.",
+					prefImageModel,
+					setImageModel,
 				)}
 				${hasModels ? html`
 					<div>
