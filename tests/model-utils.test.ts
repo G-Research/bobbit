@@ -68,6 +68,21 @@ describe("inferMeta()", () => {
 		assert.equal(meta.contextWindow, 400_000);
 	});
 
+	it("GPT-5.5 → 1M context, 128K max, reasoning=true", () => {
+		const meta = inferMeta("gpt-5.5");
+		assert.equal(meta.contextWindow, 1_000_000);
+		assert.equal(meta.maxTokens, 128_000);
+		assert.equal(meta.reasoning, true);
+		assert.ok(meta.input!.includes("image"));
+	});
+
+	it("GPT-5.5 pro → 1.05M context, 128K max, reasoning=true", () => {
+		const meta = inferMeta("gpt-5.5-pro");
+		assert.equal(meta.contextWindow, 1_050_000);
+		assert.equal(meta.maxTokens, 128_000);
+		assert.equal(meta.reasoning, true);
+	});
+
 	it("o4-mini → 200K context, reasoning=true", () => {
 		const meta = inferMeta("o4-mini");
 		assert.equal(meta.contextWindow, 200_000);
@@ -145,10 +160,12 @@ describe("modelRecencyRank()", () => {
 		assert.ok(sonnet4 > haiku45);
 	});
 
-	it("OpenAI: gpt-5.4 > gpt-5.3 > gpt-5", () => {
+	it("OpenAI: gpt-5.5 > gpt-5.4 > gpt-5.3 > gpt-5", () => {
+		const gpt55 = modelRecencyRank("gpt-5.5");
 		const gpt54 = modelRecencyRank("gpt-5.4");
 		const gpt53 = modelRecencyRank("gpt-5.3");
 		const gpt5 = modelRecencyRank("gpt-5");
+		assert.ok(gpt55 > gpt54);
 		assert.ok(gpt54 > gpt53);
 		assert.ok(gpt53 > gpt5);
 	});

@@ -7,6 +7,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { getOAuthProvider, type OAuthCredentials } from "@mariozechner/pi-ai/oauth";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
 
@@ -17,10 +18,30 @@ const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
 const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
 const SCOPES = "org:create_api_key user:profile user:inference";
 
-interface PendingOAuth {
+export type OAuthProviderId = "anthropic" | "openai-codex";
+
+const OAUTH_PROVIDER_LABELS: Record<OAuthProviderId, string> = {
+	anthropic: "Anthropic",
+	"openai-codex": "OpenAI",
+};
+
+interface PendingAnthropicOAuth {
+	provider: "anthropic";
 	verifier: string;
 	createdAt: number;
 }
+
+interface PendingExternalOAuth {
+	provider: "openai-codex";
+	createdAt: number;
+	submitCode: (code: string) => void;
+	rejectCode: (err: Error) => void;
+	loginPromise: Promise<void>;
+	completed: boolean;
+	error?: string;
+}
+
+type PendingOAuth = PendingAnthropicOAuth | PendingExternalOAuth;
 
 // In-memory store for pending OAuth flows (verifier keyed by a flow ID)
 const pendingFlows = new Map<string, PendingOAuth>();
@@ -42,21 +63,72 @@ async function generatePKCE(): Promise<{ verifier: string; challenge: string }> 
 	return { verifier, challenge };
 }
 
+function normalizeProvider(provider?: string | null): OAuthProviderId {
+	if (!provider || provider === "anthropic") return "anthropic";
+	if (provider === "openai" || provider === "openai-codex") return "openai-codex";
+	throw new Error(`Unsupported OAuth provider: ${provider}`);
+}
+
+function cleanupExpiredFlows(): void {
+	const now = Date.now();
+	for (const [id, flow] of pendingFlows) {
+		if (now - flow.createdAt > FLOW_TTL_MS) {
+			if (flow.provider !== "anthropic") {
+				flow.rejectCode(new Error("OAuth flow expired"));
+			}
+			pendingFlows.delete(id);
+		}
+	}
+}
+
+function readAuthData(): Record<string, any> {
+	const authPath = getAuthJsonPath();
+	if (!existsSync(authPath)) return {};
+	try {
+		return JSON.parse(readFileSync(authPath, "utf-8"));
+	} catch {
+		return {};
+	}
+}
+
+function writeAuthData(authData: Record<string, any>): void {
+	const authPath = getAuthJsonPath();
+	const dir = dirname(authPath);
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+	}
+	writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+	try {
+		chmodSync(authPath, 0o600);
+	} catch {
+		// chmod may fail on Windows, that's OK
+	}
+	clearOAuthCache();
+}
+
+function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCredentials): void {
+	const authData = readAuthData();
+	authData[provider] = { type: "oauth", ...credentials };
+	writeAuthData(authData);
+}
+
 /**
  * Start an OAuth flow. Returns the authorization URL and a flow ID.
  */
-export async function oauthStart(): Promise<{ flowId: string; url: string }> {
-	// Clean up expired flows
-	const now = Date.now();
-	for (const [id, flow] of pendingFlows) {
-		if (now - flow.createdAt > FLOW_TTL_MS) pendingFlows.delete(id);
+export async function oauthStart(providerInput?: string): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
+	cleanupExpiredFlows();
+
+	const provider = normalizeProvider(providerInput);
+	if (provider !== "anthropic") {
+		return oauthStartExternal(provider);
 	}
 
 	const { randomBytes } = await import("node:crypto");
+	const now = Date.now();
 	const flowId = randomBytes(16).toString("hex");
 	const { verifier, challenge } = await generatePKCE();
 
-	pendingFlows.set(flowId, { verifier, createdAt: now });
+	pendingFlows.set(flowId, { provider: "anthropic", verifier, createdAt: now });
 
 	const params = new URLSearchParams({
 		code: "true",
@@ -69,7 +141,65 @@ export async function oauthStart(): Promise<{ flowId: string; url: string }> {
 		state: verifier,
 	});
 
-	return { flowId, url: `${AUTHORIZE_URL}?${params.toString()}` };
+	return { flowId, url: `${AUTHORIZE_URL}?${params.toString()}`, provider };
+}
+
+async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic">): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
+	const oauthProvider = getOAuthProvider(provider);
+	if (!oauthProvider) throw new Error(`OAuth provider unavailable: ${provider}`);
+	await Promise.all([import("node:crypto"), import("node:http")]);
+
+	const { randomBytes } = await import("node:crypto");
+	const flowId = randomBytes(16).toString("hex");
+	const createdAt = Date.now();
+
+	let submitCode!: (code: string) => void;
+	let rejectCode!: (err: Error) => void;
+	const manualCodePromise = new Promise<string>((resolve, reject) => {
+		submitCode = resolve;
+		rejectCode = reject;
+	});
+
+	let resolveStarted!: (info: { url: string; instructions?: string }) => void;
+	let rejectStarted!: (err: Error) => void;
+	const started = new Promise<{ url: string; instructions?: string }>((resolve, reject) => {
+		resolveStarted = resolve;
+		rejectStarted = reject;
+	});
+
+	const flow: PendingExternalOAuth = {
+		provider,
+		createdAt,
+		submitCode,
+		rejectCode,
+		loginPromise: Promise.resolve(),
+		completed: false,
+	};
+	pendingFlows.set(flowId, flow);
+
+	flow.loginPromise = oauthProvider.login({
+		onAuth: (info) => resolveStarted(info),
+		onPrompt: async () => manualCodePromise,
+		onManualCodeInput: async () => manualCodePromise,
+		onProgress: (message) => console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${message}`),
+	}).then((credentials) => {
+		storeOAuthCredentials(provider, credentials);
+		flow.completed = true;
+	}).catch((err) => {
+		flow.error = err instanceof Error ? err.message : String(err);
+		rejectStarted(err instanceof Error ? err : new Error(String(err)));
+		throw err;
+	});
+	void flow.loginPromise.catch(() => {});
+
+	const info = await started;
+	return {
+		flowId,
+		url: info.url,
+		provider,
+		callbackServer: !!oauthProvider.usesCallbackServer,
+		instructions: info.instructions,
+	};
 }
 
 /**
@@ -86,8 +216,23 @@ export async function oauthComplete(
 	}
 
 	if (Date.now() - flow.createdAt > FLOW_TTL_MS) {
+		if (flow.provider !== "anthropic") {
+			flow.rejectCode(new Error("OAuth flow expired"));
+		}
 		pendingFlows.delete(flowId);
 		return { success: false, error: "OAuth flow expired" };
+	}
+
+	if (flow.provider !== "anthropic") {
+		if (authCode.trim()) flow.submitCode(authCode.trim());
+		try {
+			await flow.loginPromise;
+			pendingFlows.delete(flowId);
+			return { success: true };
+		} catch (err) {
+			pendingFlows.delete(flowId);
+			return { success: false, error: err instanceof Error ? err.message : String(err) };
+		}
 	}
 
 	pendingFlows.delete(flowId);
@@ -122,21 +267,7 @@ export async function oauthComplete(
 			expires_in: number;
 		};
 
-		// Store in ~/.bobbit/agent/auth.json
-		const authPath = getAuthJsonPath();
-		const dir = dirname(authPath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true, mode: 0o700 });
-		}
-
-		let authData: Record<string, unknown> = {};
-		if (existsSync(authPath)) {
-			try {
-				authData = JSON.parse(readFileSync(authPath, "utf-8"));
-			} catch {
-				// Corrupted file, start fresh
-			}
-		}
+		const authData = readAuthData();
 
 		authData.anthropic = {
 			type: "oauth",
@@ -145,15 +276,7 @@ export async function oauthComplete(
 			expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
 		};
 
-		writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-		try {
-			chmodSync(authPath, 0o600);
-		} catch {
-			// chmod may fail on Windows, that's OK
-		}
-
-		// Invalidate any cached auth reads so subsequent calls pick up new tokens immediately
-		clearOAuthCache();
+		writeAuthData(authData);
 
 		return { success: true };
 	} catch (err) {
@@ -162,26 +285,43 @@ export async function oauthComplete(
 }
 
 /**
- * Check if Anthropic OAuth credentials exist and are valid (not expired).
+ * Check if OAuth credentials exist and are valid (not expired).
  */
-export function oauthStatus(): { authenticated: boolean; expires?: number } {
+export function oauthStatus(providerInput?: string): { authenticated: boolean; expires?: number; provider: OAuthProviderId } {
+	const provider = normalizeProvider(providerInput);
 	const authPath = getAuthJsonPath();
-	if (!existsSync(authPath)) return { authenticated: false };
+	if (!existsSync(authPath)) return { authenticated: false, provider };
 
 	try {
 		const data = JSON.parse(readFileSync(authPath, "utf-8"));
-		const cred = data.anthropic;
-		if (!cred || cred.type !== "oauth") return { authenticated: false };
+		const cred = data[provider];
+		if (!cred || cred.type !== "oauth") return { authenticated: false, provider };
 
 		const expired = cred.expires && Date.now() > cred.expires;
 
 		return {
+			provider,
 			authenticated: !expired,
 			expires: cred.expires,
 		};
 	} catch {
-		return { authenticated: false };
+		return { authenticated: false, provider };
 	}
+}
+
+export function oauthFlowStatus(flowId: string): { complete: boolean; error?: string } {
+	const flow = pendingFlows.get(flowId);
+	if (!flow) return { complete: false, error: "Unknown or expired flow ID" };
+	if (flow.provider === "anthropic") return { complete: false };
+	if (flow.completed) {
+		pendingFlows.delete(flowId);
+		return { complete: true };
+	}
+	if (flow.error) {
+		pendingFlows.delete(flowId);
+		return { complete: false, error: flow.error };
+	}
+	return { complete: false };
 }
 
 /**

@@ -1990,20 +1990,48 @@ function renderDirectoriesTab() {
 
 // ── Account tab state ──
 
-let accountStatus: { authenticated: boolean; expires?: number } | null = null;
+type AccountProviderId = "anthropic" | "openai-codex";
+
+const ACCOUNT_PROVIDERS: Array<{
+	id: AccountProviderId;
+	title: string;
+	description: string;
+	authenticatedLabel: string;
+}> = [
+	{
+		id: "anthropic",
+		title: "Anthropic OAuth",
+		description: "OAuth credentials used by agent sessions to access the Anthropic API. Re-authenticate to refresh expired tokens or switch accounts.",
+		authenticatedLabel: "Authenticated",
+	},
+	{
+		id: "openai-codex",
+		title: "OpenAI OAuth",
+		description: "OAuth credentials used by agent sessions to access ChatGPT subscription GPT models through the OpenAI Codex provider.",
+		authenticatedLabel: "Authenticated",
+	},
+];
+
+let accountStatus: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null = null;
 let accountLoading = false;
-let accountReauthing = false;
+let accountReauthing: AccountProviderId | null = null;
 
 function loadAccountStatus(): void {
 	if (accountLoading) return;
 	accountLoading = true;
 	(async () => {
 		try {
-			const res = await gatewayFetch("/api/oauth/status");
-			if (res.ok) accountStatus = await res.json();
-			else accountStatus = { authenticated: false };
+			const entries = await Promise.all(ACCOUNT_PROVIDERS.map(async (provider) => {
+				try {
+					const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider.id)}`);
+					return [provider.id, res.ok ? await res.json() : { authenticated: false }] as const;
+				} catch {
+					return [provider.id, { authenticated: false }] as const;
+				}
+			}));
+			accountStatus = Object.fromEntries(entries) as Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>>;
 		} catch {
-			accountStatus = { authenticated: false };
+			accountStatus = Object.fromEntries(ACCOUNT_PROVIDERS.map(provider => [provider.id, { authenticated: false }])) as Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>>;
 		} finally {
 			accountLoading = false;
 			renderApp();
@@ -2011,18 +2039,18 @@ function loadAccountStatus(): void {
 	})();
 }
 
-async function handleReauthenticate(): Promise<void> {
-	accountReauthing = true;
+async function handleReauthenticate(provider: AccountProviderId): Promise<void> {
+	accountReauthing = provider;
 	renderApp();
 	try {
-		const success = await openOAuthDialog();
+		const success = await openOAuthDialog(provider);
 		if (success) {
 			// Refresh status after successful re-auth
 			accountStatus = null;
 			loadAccountStatus();
 		}
 	} finally {
-		accountReauthing = false;
+		accountReauthing = null;
 		renderApp();
 	}
 }
@@ -2034,45 +2062,50 @@ function renderAccountTab() {
 		return html`<p class="text-sm text-muted-foreground">Loading...</p>`;
 	}
 
-	const authenticated = accountStatus?.authenticated ?? false;
-	const expires = accountStatus?.expires;
-	const expiresDate = expires ? new Date(expires) : null;
-	const isExpired = expires ? Date.now() > expires : false;
-
 	return html`
 		<div class="flex flex-col gap-4">
-			<div class="flex flex-col gap-1.5">
-				<h3 class="text-sm font-semibold text-foreground">Anthropic OAuth</h3>
-				<p class="text-xs text-muted-foreground">
-					OAuth credentials used by agent sessions to access the Anthropic API.
-					Re-authenticate to refresh expired tokens or switch accounts.
-				</p>
-			</div>
+			${ACCOUNT_PROVIDERS.map((provider) => {
+				const status = accountStatus?.[provider.id];
+				const authenticated = status?.authenticated ?? false;
+				const expires = status?.expires;
+				const expiresDate = expires ? new Date(expires) : null;
+				const isExpired = expires ? Date.now() > expires : false;
+				const isReauthing = accountReauthing === provider.id;
 
-			<div class="flex flex-col gap-2 rounded-md border border-border p-3">
-				<div class="flex items-center gap-2">
-					<span class="text-sm font-medium text-foreground">Status:</span>
-					${authenticated
-						? html`<span class="text-sm text-green-600 dark:text-green-400">Authenticated</span>`
-						: html`<span class="text-sm text-destructive">${isExpired ? "Expired" : "Not authenticated"}</span>`}
-				</div>
-				${expiresDate
-					? html`<div class="flex items-center gap-2">
-						<span class="text-sm font-medium text-foreground">Expires:</span>
-						<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}">${expiresDate.toLocaleString()}</span>
-					</div>`
-					: ""}
-			</div>
+				return html`
+					<div class="flex flex-col gap-4">
+						<div class="flex flex-col gap-1.5">
+							<h3 class="text-sm font-semibold text-foreground">${provider.title}</h3>
+							<p class="text-xs text-muted-foreground">${provider.description}</p>
+						</div>
 
-			<div>
-				${Button({
-					variant: authenticated ? "outline" : "default",
-					size: "sm",
-					disabled: accountReauthing,
-					onClick: handleReauthenticate,
-					children: accountReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",
-				})}
-			</div>
+						<div class="flex flex-col gap-2 rounded-md border border-border p-3">
+							<div class="flex items-center gap-2">
+								<span class="text-sm font-medium text-foreground">Status:</span>
+								${authenticated
+									? html`<span class="text-sm text-green-600 dark:text-green-400">${provider.authenticatedLabel}</span>`
+									: html`<span class="text-sm text-destructive">${isExpired ? "Expired" : "Not authenticated"}</span>`}
+							</div>
+							${expiresDate
+								? html`<div class="flex items-center gap-2">
+									<span class="text-sm font-medium text-foreground">Expires:</span>
+									<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}">${expiresDate.toLocaleString()}</span>
+								</div>`
+								: ""}
+						</div>
+
+						<div>
+							${Button({
+								variant: authenticated ? "outline" : "default",
+								size: "sm",
+								disabled: accountReauthing !== null,
+								onClick: () => handleReauthenticate(provider.id),
+								children: isReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",
+							})}
+						</div>
+					</div>
+				`;
+			})}
 		</div>
 	`;
 }

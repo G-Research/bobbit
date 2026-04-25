@@ -14,7 +14,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { discoverSlashSkills, getSkillDirectories } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -60,6 +60,7 @@ import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
+import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -976,6 +977,7 @@ export function createGateway(config: GatewayConfig) {
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
+			writeOpenAIModelAdditions();
 
 			// Initialize MCP servers (skip in test environments)
 			if (!process.env.BOBBIT_SKIP_MCP) {
@@ -5247,14 +5249,30 @@ async function handleApiRoute(
 
 	// GET /api/oauth/status
 	if (url.pathname === "/api/oauth/status" && req.method === "GET") {
-		json(oauthStatus());
+		try {
+			json(oauthStatus(url.searchParams.get("provider") ?? undefined));
+		} catch (err) {
+			json({ error: String(err) }, 400);
+		}
+		return;
+	}
+
+	// GET /api/oauth/flow-status?flowId=<id> — callback-based OAuth progress
+	if (url.pathname === "/api/oauth/flow-status" && req.method === "GET") {
+		const flowId = url.searchParams.get("flowId");
+		if (!flowId) {
+			json({ error: "Missing flowId" }, 400);
+			return;
+		}
+		json(oauthFlowStatus(flowId));
 		return;
 	}
 
 	// POST /api/oauth/start — begin OAuth flow, returns auth URL
 	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
 		try {
-			const result = await oauthStart();
+			const body = await readBody(req).catch(() => ({}));
+			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
 			json({ error: String(err) }, 500);
