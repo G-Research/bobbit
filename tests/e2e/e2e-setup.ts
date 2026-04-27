@@ -228,22 +228,40 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
  * a single project named "default" at the server CWD after startup. The server
  * no longer auto-resolves a default, so API callers that omit projectId must
  * pass one explicitly. This helper fetches and caches the id per-port.
+ *
+ * NOTE on cache invalidation: tests like stories-goal-routing run
+ * `forceDeleteAllProjects()` to exercise the zero-project path. Anything
+ * cached here would then point at a deleted project and the next
+ * `createSession()` would 500 with "Cannot resolve session store". To stay
+ * robust under shared-worker harness reuse, every call re-checks the live
+ * project list and re-derives the cache from it; the caller still gets
+ * O(1)-ish behaviour because /api/projects is in-memory and dirt cheap.
  */
 const _defaultProjectIdCache: Record<string, string> = {};
 export async function defaultProjectId(): Promise<string | undefined> {
 	const p = port();
-	if (_defaultProjectIdCache[p]) return _defaultProjectIdCache[p];
 	try {
 		const resp = await apiFetch("/api/projects");
-		if (!resp.ok) return undefined;
+		if (!resp.ok) {
+			delete _defaultProjectIdCache[p];
+			return undefined;
+		}
 		const list = await resp.json() as Array<{ id: string; name: string }>;
-		const match = Array.isArray(list)
-			? (list.find(pr => pr.name === "default") ?? list[0])
-			: undefined;
+		if (!Array.isArray(list)) {
+			delete _defaultProjectIdCache[p];
+			return undefined;
+		}
+		// If a previously-cached id still exists in the live list, keep using
+		// it (stable across calls). Otherwise pick the "default" project, or
+		// fall back to the first registered project.
+		const cachedId = _defaultProjectIdCache[p];
+		if (cachedId && list.some(pr => pr.id === cachedId)) return cachedId;
+		const match = list.find(pr => pr.name === "default") ?? list[0];
 		if (match?.id) {
 			_defaultProjectIdCache[p] = match.id;
 			return match.id;
 		}
+		delete _defaultProjectIdCache[p];
 	} catch { /* zero-project harnesses are a valid state (see GR-09) */ }
 	return undefined;
 }
@@ -277,20 +295,34 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 	// setup contention, disk latency, or the Windows FS race where the
 	// session-prompts state dir hasn't been created yet). The request is a
 	// clean POST with no side effect on 500, so retry is safe.
+	//
+	// Bumped from 3 to 5 attempts with backoff to absorb persistent FS
+	// contention under heavy parallel browser load, and we now capture and
+	// surface the server's error body so a failed retry tells us *why*
+	// instead of just "got 500".
 	let resp: Response | undefined;
-	for (let attempt = 0; attempt < 3; attempt++) {
+	let lastBody: string | undefined;
+	for (let attempt = 0; attempt < 5; attempt++) {
 		resp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (resp.status !== 500 || attempt === 2) break;
+		if (resp.status !== 500) break;
+		try { lastBody = await resp.clone().text(); } catch { /* ignore */ }
+		if (attempt === 4) break;
 		try {
 			const { mkdirSync } = await import("node:fs");
 			mkdirSync(join(bobbitDir(), "state", "session-prompts"), { recursive: true });
 		} catch { /* best-effort */ }
 		await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
 	}
-	expect(resp!.status).toBe(201);
+	if (resp!.status !== 201) {
+		// Surface the server-side error body in the assertion message so flaky
+		// 500s can be diagnosed without a separate log dive.
+		throw new Error(
+			`createSession expected 201, got ${resp!.status}. body=${lastBody ?? "<empty>"}`,
+		);
+	}
 	return (await resp!.json()).id;
 }
 

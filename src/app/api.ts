@@ -182,10 +182,27 @@ export async function refreshSessions(): Promise<void> {
 			} else {
 				goalsChanged = true;
 				const prevGoalIds = new Set(state.goals.map((g) => g.id));
-				state.goals = goalsData.goals || [];
+				const incoming: Goal[] = goalsData.goals || [];
+				// Merge instead of overwrite. The /api/goals endpoint returns only
+				// live goals by default; archived goals arrive via a separate
+				// fetchArchivedGoalsPaginated() call. A naive overwrite here
+				// destroys any archived goals that fetch already populated, which
+				// caused races where typing in the search box (which kicks off the
+				// archived fetch) collided with a concurrent refreshSessions and
+				// the search briefly showed an empty Archived section.
+				//
+				// Rule: the live payload is authoritative for non-archived goals,
+				// but never silently drops archived entries the server didn't
+				// include. Archived goals are removed only by an explicit archived
+				// fetch or unarchive event.
+				const incomingIds = new Set(incoming.map((g) => g.id));
+				const preservedArchived = state.goals.filter(
+					(g) => g.archived && !incomingIds.has(g.id),
+				);
+				state.goals = [...incoming, ...preservedArchived];
 				// Auto-expand only newly discovered goals that have sessions — never
 				// re-expand a goal the user has already seen (and may have collapsed).
-				for (const g of state.goals) {
+				for (const g of incoming) {
 					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
 						expandedGoals.add(g.id);
 						saveExpandedGoals();

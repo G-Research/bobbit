@@ -19,7 +19,12 @@ export default defineConfig({
 	// all projects. Per-project `workers` fields below further constrain
 	// individual projects — the browser project needs fewer workers than
 	// the API project because each Chromium instance is CPU-heavy.
-	workers: 6,
+	//
+	// Lowered from 6 to 4: empirically, 6 workers triggered FS-contention
+	// flakes (POST /api/sessions → 500 under worktree setup races) without
+	// providing a meaningful wall-clock win once browser project is capped
+	// at 3 anyway.
+	workers: 4,
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	// Default artifact / launch settings. Chromium's GPU process, prerenderer,

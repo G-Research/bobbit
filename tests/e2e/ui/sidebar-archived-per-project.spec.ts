@@ -199,6 +199,12 @@ test.describe("Per-project Archived subsections", () => {
 	});
 
 	test("search surfaces archived items in the correct project subsection", async ({ page }) => {
+		// Per-test budget bump: under heavy parallel browser load this whole
+		// flow (resetSidebarState + reload + initial refresh + lazy archived
+		// fetch + render) can take 25–40 s. Default 30 s test timeout is too
+		// tight — the inner expect timeouts already sum past 40 s.
+		test.setTimeout(60_000);
+
 		// Event-driven readiness: confirm BOTH archived goals are persisted and
 		// returned by the server BEFORE the UI is even loaded. This closes the
 		// race where the client's lazy archived-goals fetch (kicked off by the
@@ -214,10 +220,13 @@ test.describe("Per-project Archived subsections", () => {
 		await expect(searchInput).toBeVisible({ timeout: 15_000 });
 		await searchInput.click();
 		await searchInput.fill(goalATitle);
-		await page.waitForTimeout(500);
 
-		// Only project A's archived subsection should match (unique suffix guarantees this).
-		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+		// Only project A's archived subsection should match (unique suffix
+		// guarantees this). Generous timeout absorbs concurrent
+		// refreshSessions racing with the lazy archived-goals fetch — the
+		// reducer in api.ts now merges instead of overwriting, but the network
+		// round-trips themselves still need wallclock time under load.
+		await expect(page.getByText(goalATitle, { exact: false }).first()).toBeVisible({ timeout: 25_000 });
 		const archivedButtons = page.locator("button").filter({ has: page.locator("span.uppercase", { hasText: /^Archived$/ }) });
 		await expect(archivedButtons).toHaveCount(1, { timeout: 10_000 });
 		await expect(page.getByText(goalBTitle, { exact: false })).toHaveCount(0, { timeout: 3_000 });

@@ -2517,7 +2517,22 @@ async function handleApiRoute(
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			// Log full error context server-side so that flaky 500s in tests
+			// (e.g. resilience suite under FS contention) leave a usable trail.
+			// `String(err)` alone drops the stack and any error.cause chain.
+			const e = err as Error & { code?: string; cause?: unknown };
+			console.error(
+				`[POST /api/sessions] failed cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"} ` +
+				`goal=${goalId ?? "(none)"} assistant=${assistantType ?? "(none)"} sandbox=${sandboxed ? "yes" : "no"}: ` +
+				`${e.message ?? String(err)}\n${e.stack ?? ""}`,
+			);
+			if (e.cause) console.error("  caused by:", e.cause);
+			json({
+				error: String(err),
+				message: e.message,
+				code: e.code,
+				cause: e.cause ? String(e.cause) : undefined,
+			}, 500);
 		}
 		return;
 	}

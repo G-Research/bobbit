@@ -8,6 +8,14 @@ import { test, expect } from "../gateway-harness.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 import { apiFetch } from "../e2e-setup.js";
 
+// Goal-assistant cold-start (mock agent registry warm-up + workflow YAML scan +
+// session-prompts dir creation) can comfortably eat 25–40s on first call under
+// parallel browser load. The default 30s per-test timeout was overflowing
+// because the helper compounds two 20s waits (visible + value) on top of a 30s
+// textarea wait. Bump the budget for this whole spec well past the worst-case
+// sum of the inner waits so a single slow turn doesn't tip the test over.
+test.describe.configure({ timeout: 90_000 });
+
 /**
  * Configure qa_start_command on the default project so the goal form's
  * "Enable QA Testing" tooltip shows the real workflow description
@@ -35,17 +43,21 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	await newGoalBtn.click();
 
 	// Goal assistant session creation can be slow under parallel load —
-	// extend the textarea-visible timeout accordingly.
+	// extend the textarea-visible timeout accordingly. The full suite has
+	// observed 30s+ cold-starts when many browser workers race to spin up
+	// goal-assistant sessions concurrently.
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 30_000 });
+	await expect(textarea).toBeVisible({ timeout: 45_000 });
 
 	// Send GOAL_PROPOSAL — mock agent responds with a proposal (workflow=general)
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
-	// Wait for the proposal panel to render
+	// Wait for the proposal panel to render. `toHaveValue` already auto-waits
+	// for the element to be attached and stable, so a single 25s budget is
+	// enough — the previous two 20s waits compounded to 40s and would tip the
+	// test over its 30s default budget under load.
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
-	await expect(titleInput).toBeVisible({ timeout: 20_000 });
-	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 25_000 });
 
 	// Switch workflow to "feature" which has optional QA step with description
 	const workflowSelect = page.locator(".goal-preview-panel select").first();
@@ -121,14 +133,15 @@ test.describe("Step description tooltips", () => {
 		await newGoalBtn.click();
 
 		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 30_000 });
+		await expect(textarea).toBeVisible({ timeout: 45_000 });
 
 		// Send GOAL_PROPOSAL — mock agent uses "general" workflow by default
 		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
+		// Single auto-waiting `toHaveValue` instead of two compounded waits —
+		// see comment in `openGoalFormWithFeatureWorkflow` above.
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 20_000 });
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 25_000 });
 
 		// General workflow has no optional steps — no ⓘ icons should be present
 		const tooltipIcons = page.locator(".goal-preview-panel span.cursor-help");
