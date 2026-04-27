@@ -84,6 +84,9 @@ Most AI coding tools are either locked inside an IDE or limited to a terminal. B
 
 ## Features
 
+### Feature X
+A tiny demonstration module — `featureX()` from `src/feature-x.ts` returns `'hello from feature X'`. Used as a smoke test for module addition.
+
 ### Multi-Project Support
 Register multiple project directories with a single Bobbit server. Each project gets its own `.bobbit/` directory for config and state. Config cascades hierarchically (global → server → project). Sessions, goals, and search are scoped per project, with cross-project search enabled by default. The sidebar always groups work under collapsible project folder rows. When only one project is registered, its row defaults to expanded.
 
