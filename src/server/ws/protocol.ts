@@ -80,4 +80,20 @@ export type ServerMessage =
 	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string }
 	| { type: "index:progress"; projectId: string; phase: "rebuild" | "incremental"; total: number; completed: number; backlog: number }
 	| { type: "index:complete"; projectId: string; phase: "rebuild" | "incremental"; durationMs: number; rowsWritten: number }
-	| { type: "index:error"; projectId: string; message: string; recoverable: boolean };
+	| { type: "index:error"; projectId: string; message: string; recoverable: boolean }
+	| {
+		type: "skill_expansions";
+		data: {
+			originalText: string;
+			modelText: string;
+			ts: number;
+			skillExpansions: Array<{
+				name: string;
+				args: string;
+				source: string;
+				filePath: string;
+				range: [number, number];
+				expanded: string;
+			}>;
+		};
+	};

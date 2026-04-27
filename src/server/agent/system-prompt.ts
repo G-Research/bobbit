@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
+import type { SlashSkill } from "../skills/slash-skills.js";
 
 /** Module-level cache of the prompts directory. Set once by ensurePromptsDir(). */
 let _promptsDir: string | undefined;
@@ -198,6 +199,52 @@ export interface PromptParts {
 	seedContext?: string;
 	/** Source ID for the prior archived session — used for prompt-section provenance. */
 	seedContextSource?: string;
+	/** Skills available for autonomous activation via the `activate_skill` tool.
+	 *  When non-empty, an "Available Skills" section is injected into the system prompt.
+	 *  Skills with `disable-model-invocation: true` should be filtered out by the caller. */
+	skillsCatalog?: SlashSkill[];
+}
+
+/** Max bytes of skills-catalog markdown to embed in the system prompt. */
+export const SKILLS_CATALOG_BUDGET = 4096;
+
+/**
+ * Build the "Available Skills" section. Skills are listed alphabetically;
+ * if the budget is exceeded, the tail is truncated with an `(N more …
+ * omitted, alphabetically truncated)` footer.
+ *
+ * Caller is responsible for filtering out skills with
+ * `disable-model-invocation: true` — this function trusts its input.
+ */
+export function buildSkillsCatalogSection(skills: SlashSkill[]): string | undefined {
+	if (!skills || skills.length === 0) return undefined;
+	const sorted = [...skills].sort((a, b) => a.name.localeCompare(b.name));
+
+	const header = "## Available Skills\n\n" +
+		"You can autonomously activate any of the following skills mid-turn by calling " +
+		"the `activate_skill` tool with `{ name, args? }`. The tool returns the skill's " +
+		"instructions as the tool result; follow them as if the user had typed `/<name> <args>`.\n\n";
+
+	const lines: string[] = [];
+	let length = header.length;
+	let truncated = 0;
+	for (let i = 0; i < sorted.length; i++) {
+		const s = sorted[i];
+		const desc = (s.description || "").replace(/\s+/g, " ").trim();
+		const hint = s.argumentHint ? ` _args: ${s.argumentHint}_` : "";
+		const line = `- **${s.name}** — ${desc}${hint}`;
+		if (length + line.length + 1 > SKILLS_CATALOG_BUDGET) {
+			truncated = sorted.length - i;
+			break;
+		}
+		lines.push(line);
+		length += line.length + 1;
+	}
+	if (truncated > 0) {
+		lines.push(`- _… (${truncated} more skill${truncated === 1 ? "" : "s"} omitted, alphabetically truncated)_`);
+		console.warn(`[system-prompt] Skills catalog exceeded ${SKILLS_CATALOG_BUDGET}B budget — truncated ${truncated} skill(s).`);
+	}
+	return header + lines.join("\n");
 }
 
 export interface PromptSection {
@@ -297,6 +344,12 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 		}
 
 		sections.push(taskLines.join("\n"));
+	}
+
+	// 5.5. Available Skills (autonomous activation catalog)
+	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog);
+		if (skillsSection) sections.push(skillsSection);
 	}
 
 	// 6. Workflow dependency context (accepted upstream gate content)
@@ -421,6 +474,14 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 		const taskContent = taskLines.join("\n");
 		sections.push({ label: "Task", source: `Task: ${parts.taskTitle || "Untitled"}`, content: taskContent, tokens: estimateTokens(taskContent) });
+	}
+
+	// 8.5. Available Skills
+	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog);
+		if (skillsSection) {
+			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
+		}
 	}
 
 	// 9. Workflow context
