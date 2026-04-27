@@ -76,7 +76,12 @@ export class SkillChip extends LitElement {
 	 * The header is for the model only — it shouldn't show up in the disclosure UI.
 	 * Anchored at `^\s*` so an in-body fence (rare, but possible if a SKILL.md
 	 * literally contains the marker) is preserved. The model-facing `expanded`
-	 * field is never mutated here. */
+	 * field is never mutated here.
+	 *
+	 * NOTE: This regex is duplicated from `ACTIVATION_HEADER_STRIP_RE` in
+	 * `src/server/skills/skill-manifest.ts`. Importing it from there would
+	 * drag `node:fs` / `node:path` into the UI bundle, so we keep an inline
+	 * copy. **Keep the two patterns in sync.** */
 	private get displayBody(): string {
 		const body = this.data?.expanded || "";
 		return body.replace(

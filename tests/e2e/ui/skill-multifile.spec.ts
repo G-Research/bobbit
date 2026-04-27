@@ -99,8 +99,44 @@ test.describe("multi-file skill activation", () => {
 
 		// (D) Reload preserves chip.
 		await page.reload();
+		// Re-assert the session route after reload — some sidebar layouts can
+		// land on a different default view depending on init order.
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await expect(userBubble(page)).toBeVisible({ timeout: 20_000 });
 		await expect(userBubble(page)).toContainText(`/${SKILL_NAME}`);
 		await expect(skillChip(page)).toBeVisible({ timeout: 10_000 });
+
+		// (E) Follow-up turn: the agent uses the path from the activation
+		// header to read `references/REFERENCE.md`. AC#5 — proves the header's
+		// path manifest actually enables end-to-end file reads.
+		//
+		// Extract the skill root the model would have seen from the
+		// REST-side `expanded` we captured in step (A). The mock agent's
+		// `respondToPrompt("use the read ...")` branch extracts an absolute
+		// path from the prompt text and emits a Read tool call — standing in
+		// for a real agent that would resolve `references/REFERENCE.md`
+		// against the absolute root from the activation header.
+		const rootMatch = data.expanded.match(/Skill root:\s+(.+)/);
+		expect(rootMatch).not.toBeNull();
+		const skillRoot = rootMatch![1].trim();
+		const refPath = `${skillRoot}/references/REFERENCE.md`;
+
+		await sendMessage(page, `Use the Read tool to read the file ${refPath}`);
+
+		// The agent emits a Read tool_use whose input.path matches the
+		// reference file under the activation-header skill root, and the tool
+		// result returns the file content.
+		await expect(
+			page.getByText("Done. Used Read tool.").first(),
+		).toBeVisible({ timeout: 20_000 });
+		await expect(
+			page.getByText("READ_THIS_CONTENT_E2E").first(),
+		).toBeVisible({ timeout: 5_000 });
+		// Path round-trip: the rendered tool input contains the references/
+		// path the agent resolved against the activation-header skill root.
+		await expect(
+			page.locator("code").filter({ hasText: "references/REFERENCE.md" }).first(),
+		).toBeVisible({ timeout: 5_000 });
 	});
 });

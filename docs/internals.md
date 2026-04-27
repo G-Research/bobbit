@@ -741,6 +741,46 @@ Skills follow the [Agent Skills spec](https://agentskills.io/specification)'s *p
 
 **WS handler echo.** `src/server/ws/handler.ts` must include `skillExpansions` in the user-message echo broadcast back to the client; dropping it causes chips to vanish until reload (when the sidecar replay path rehydrates them). Regression guarded by E2E coverage — see [docs/debugging.md — Skill chip not rendering](debugging.md#skill-chip-not-rendering).
 
+### Sandbox skill visibility
+
+When a skill is activated, Bobbit prepends an *activation header* to the SKILL.md body that tells the model the skill's root directory and a one-level-deep manifest of `references/`, `scripts/`, `assets/` (Level-3 progressive disclosure — see [docs/design/claude-code-skill-parity.md](design/claude-code-skill-parity.md)). This lets the agent read referenced files using the relative paths the skill author wrote.
+
+**Inside the Docker sandbox, only project-local skills are fully visible.**
+
+| Skill location                  | Level 1 (system-prompt listing) | Level 2 (SKILL.md body) | Level 3 (referenced files) |
+| ------------------------------- | :-----------------------------: | :---------------------: | :------------------------: |
+| `<project>/.claude/skills/<name>/` | yes                          | yes                     | **yes**                    |
+| `defaults/skills/<name>/` (built-in) | yes                       | yes                     | **no**                     |
+| `~/.claude/skills/<name>/` (personal) | yes                      | yes                     | **no**                     |
+
+The project worktree mounts at `/workspace` inside the container, so project-local skill roots resolve cleanly via the resolver's `pathRewrite` callback (host path → `/workspace/...`). `docker-args.ts` does **not** mount the Bobbit install directory or `~/.claude`, so built-in and personal skill roots are not reachable from inside the container.
+
+**Degraded header.** When a skill root cannot be exposed inside the sandbox, `buildActivationHeader()` (in `src/server/skills/skill-manifest.ts`) emits a degraded form with no resource manifest:
+
+```
+<!-- skill-activation-header -->
+Skill root: (not visible inside sandbox — see docs/internals.md "Sandbox skill visibility")
+<!-- /skill-activation-header -->
+```
+
+Level-1 (description listing) and Level-2 (the SKILL.md body itself, which is captured on the host before being passed to the sandboxed agent) continue to work for these skills. Only Level-3 — reading actual files under `references/` / `scripts/` / `assets/` — is unavailable. Skills that don't depend on referenced files behave identically inside and outside the sandbox.
+
+**Workaround.** If a built-in or personal skill needs Level-3 access inside the sandbox, copy its directory into the project's `.claude/skills/` tree. A bind-mount or copy-on-activate mechanism that exposes built-in/personal skill roots automatically is a planned follow-up, not part of v1.
+
+**Manual verification recipe.** Inside the sandbox:
+
+```bash
+# Project-local skill works (resource list populated):
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  -X POST "$GW/api/sessions/$SID/activate-skill" \
+  -d '{"name":"<project-skill-name>"}' | jq -r .expanded | head -10
+
+# Built-in skill emits degraded header (no "Available resources:" line):
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  -X POST "$GW/api/sessions/$SID/activate-skill" \
+  -d '{"name":"compact"}' | jq -r .expanded | head -10
+```
+
 ---
 
 ## MCP servers

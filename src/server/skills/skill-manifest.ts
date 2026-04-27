@@ -123,7 +123,7 @@ export type PathRewrite = (hostPath: string) => string | null;
  *
  * Sandboxed (non-rewritable):
  *   <!-- skill-activation-header -->
- *   Skill root: (not visible inside sandbox — see docs/internals.md "Skill activation in sandboxed sessions")
+ *   Skill root: (not visible inside sandbox — see docs/internals.md "Sandbox skill visibility")
  *   <!-- /skill-activation-header -->
  *
  * The header always ends with a blank line so the SKILL.md body that
@@ -148,7 +148,7 @@ export function buildActivationHeader(skill: Pick<SlashSkill, "filePath" | "sour
 			// Degraded header — no resources, root not accessible.
 			return [
 				HEADER_OPEN,
-				`Skill root: (not visible inside sandbox — see docs/internals.md "Skill activation in sandboxed sessions")`,
+				`Skill root: (not visible inside sandbox — see docs/internals.md "Sandbox skill visibility")`,
 				HEADER_CLOSE,
 				"",
 			].join("\n");
@@ -172,6 +172,11 @@ export function buildActivationHeader(skill: Pick<SlashSkill, "filePath" | "sour
 	return lines.join("\n");
 }
 
-/** Regex used to strip the activation header at chip render time. Anchored at `^\s*`. */
+/** Regex used to strip the activation header at chip render time. Anchored at `^\s*`.
+ *
+ * NOTE: An identical inline copy lives in `src/ui/components/SkillChip.ts`.
+ * Importing this constant into the UI bundle would drag server-only modules
+ * (`node:fs`, `node:path`) along, so the duplication is intentional. **Keep
+ * the two patterns in sync.** */
 export const ACTIVATION_HEADER_STRIP_RE =
 	/^\s*<!--\s*skill-activation-header\s*-->[\s\S]*?<!--\s*\/skill-activation-header\s*-->\s*/;
