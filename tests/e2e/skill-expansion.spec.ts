@@ -137,10 +137,18 @@ test.describe("Slash skill expansion mismatch", () => {
 				?.map((c: any) => c.text || "")
 				.join("");
 
-			// The skill content should be expanded (WS handler uses session.projectId)
-			expect(userText).toContain(SKILL_MARKER);
-			// The raw slash command should be replaced
-			expect(userText).not.toContain("/cross-project-skill");
+			// New contract: the persisted user message retains the literal
+			// slash invocation; the expanded body lives in skillExpansions[].
+			expect(userText).toContain("/cross-project-skill");
+			expect(userText).not.toContain(SKILL_MARKER);
+
+			const expansions = userMsgEnd.data.message.skillExpansions;
+			expect(Array.isArray(expansions)).toBe(true);
+			expect(expansions.length).toBeGreaterThan(0);
+			expect(expansions[0].name).toBe(SKILL_NAME);
+			// The skill content should be expanded into the snapshot body
+			// (WS handler uses session.projectId to resolve per-project skills).
+			expect(expansions[0].expanded).toContain(SKILL_MARKER);
 
 			await conn.waitFor(agentEndPredicate());
 		} finally {
