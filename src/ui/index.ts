@@ -15,6 +15,7 @@ export { DiffBlock, isGitDiff } from "./components/DiffBlock.js";
 export { ErrorMessage } from "./components/ErrorMessage.js";
 export { CustomProviderCard } from "./components/CustomProviderCard.js";
 export { ExpandableSection } from "./components/ExpandableSection.js";
+export { SkillChip, type SkillChipData } from "./components/SkillChip.js";
 export { Input } from "./components/Input.js";
 export { MessageEditor } from "./components/MessageEditor.js";
 export { MessageList } from "./components/MessageList.js";

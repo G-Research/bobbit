@@ -54,6 +54,16 @@ export class RemoteAgent {
 	// user message so thumbnails render in the message list.
 	private _pendingAttachments: any[] | null = null;
 
+	// Skill expansions from the most recent prompt. The server is the
+	// authoritative resolver of `/<name>` invocations, but if a caller
+	// constructs a user-with-attachments message that already carries
+	// `skillExpansions`, we forward them through to the optimistic echo
+	// so the chip renders immediately (parity with attachments). When the
+	// server later echoes back the canonical user message, the dedup path
+	// in message_end replaces the optimistic record (server is
+	// authoritative for the final `skillExpansions` shape).
+	private _pendingSkillExpansions: any[] | null = null;
+
 	// Messages added via live events (message_end) that might not yet be
 	// reflected in the next server "messages" response.  When a wholesale
 	// messages refresh arrives, any live-event messages missing from the
@@ -515,6 +525,13 @@ export class RemoteAgent {
 
 		// Stash attachments so we can enrich the echoed user message
 		this._pendingAttachments = attachments || null;
+		// Skill expansions are server-resolved — only forward if the caller
+		// attached them explicitly to the input message (e.g. tests / scripted
+		// stories). Reset otherwise so a stale value doesn’t leak across turns.
+		this._pendingSkillExpansions =
+			typeof input === "object" && input && Array.isArray((input as any).skillExpansions)
+				? (input as any).skillExpansions
+				: null;
 
 		// Clear compaction synthetic messages — they were only needed to survive
 		// the post-compaction refresh; a new prompt starts a fresh turn.
@@ -528,11 +545,16 @@ export class RemoteAgent {
 		if (!this._state.isStreaming) {
 			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 			const optimisticMsg: any = {
-				role: attachments?.length ? "user-with-attachments" : "user",
+				role: attachments?.length || this._pendingSkillExpansions?.length
+					? "user-with-attachments"
+					: "user",
 				content: [{ type: "text", text }],
 				timestamp: Date.now(),
 				id: optimisticId,
 				...(attachments?.length ? { attachments } : {}),
+				...(this._pendingSkillExpansions?.length
+					? { skillExpansions: this._pendingSkillExpansions }
+					: {}),
 			};
 			this._state.messages = [...this._state.messages, optimisticMsg];
 			this._liveEventMessages.push(optimisticMsg);
@@ -637,6 +659,7 @@ export class RemoteAgent {
 		this._state.turnStartTime = null;
 		this._deferredAssistantMessage = null;
 		this._pendingAttachments = null;
+		this._pendingSkillExpansions = null;
 		this._liveEventMessages = [];
 		this._highestSeq = 0;
 		this._seqInitialized = false;
@@ -1119,6 +1142,7 @@ export class RemoteAgent {
 				this._state.turnStartTime = null;
 				this._state.error = msg.message || "Unknown server error";
 				this._pendingAttachments = null;
+				this._pendingSkillExpansions = null;
 				// Add a dismissable error message to the chat history
 				this._state.messages = [...this._state.messages, {
 					role: "error",
@@ -1473,6 +1497,16 @@ export class RemoteAgent {
 								attachments: this._pendingAttachments,
 							};
 							this._pendingAttachments = null;
+						}
+						// Forward client-supplied skill expansions to the echoed user
+						// message if the server hasn’t already populated them.
+						if (
+							(msg.role === "user" || msg.role === "user-with-attachments") &&
+							this._pendingSkillExpansions &&
+							!(msg as any).skillExpansions
+						) {
+							msg = { ...msg, skillExpansions: this._pendingSkillExpansions };
+							this._pendingSkillExpansions = null;
 						}
 
 						// Deduplicate: if this is a server echo of an optimistic user
