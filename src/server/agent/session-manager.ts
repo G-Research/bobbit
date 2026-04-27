@@ -164,6 +164,47 @@ export interface SessionInfo {
 	setupComplete?: boolean;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
+	/**
+	 * FIFO queue of pending skill-expansion envelopes awaiting echo-back from
+	 * the agent. Each entry carries the modelText (what the agent will echo as
+	 * the user message body), the originalText we want the chat UI to display,
+	 * and the chip ranges. When a user-role message_end arrives whose text
+	 * equals `modelText`, we splice the matching envelope onto the message:
+	 * rewrite `content` to `originalText` and attach `skillExpansions`.
+	 */
+	pendingSkillExpansions?: Array<{
+		modelText: string;
+		originalText: string;
+		skillExpansions: SkillExpansion[];
+	}>;
+}
+
+/** Helper: extract the text body of a user message (string or block array). */
+function extractUserMessageText(message: any): string {
+	if (!message) return "";
+	if (typeof message.content === "string") return message.content;
+	if (Array.isArray(message.content)) {
+		const block = message.content.find((c: any) => c?.type === "text");
+		return block?.text ?? "";
+	}
+	return "";
+}
+
+/** Helper: rewrite the text body of a user message in place (returns a new object). */
+function rewriteUserMessageText(message: any, newText: string): any {
+	if (!message) return message;
+	if (typeof message.content === "string") return { ...message, content: newText };
+	if (Array.isArray(message.content)) {
+		const content = message.content.map((c: any) =>
+			c?.type === "text" ? { ...c, text: newText } : c,
+		);
+		// If no text block was present, prepend one.
+		if (!content.some((c: any) => c?.type === "text")) {
+			content.unshift({ type: "text", text: newText });
+		}
+		return { ...message, content };
+	}
+	return { ...message, content: newText };
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
@@ -181,9 +222,40 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
  *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
  *  must route through here so envelope fields stay consistent.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer }, truncated: unknown): void {
-	const entry = session.eventBuffer.push(truncated);
-	broadcast(session.clients, { type: "event", data: truncated, seq: entry.seq, ts: entry.ts });
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[] }> }, truncated: unknown): void {
+	const spliced = spliceSkillExpansionsIntoEvent(session, truncated);
+	const entry = session.eventBuffer.push(spliced);
+	broadcast(session.clients, { type: "event", data: spliced, seq: entry.seq, ts: entry.ts });
+}
+
+/**
+ * If `event` is a `message_end` for a user role and the session has a
+ * pending skill-expansion envelope whose `modelText` matches the message
+ * body, return a cloned event with:
+ *   - the user message body rewritten to `originalText`
+ *   - `skillExpansions` attached as a top-level field on the message
+ * The pending envelope is consumed (FIFO). The original event object is
+ * never mutated; the agent's internal transcript continues to reference
+ * the un-spliced (modelText) message — that is what the model has seen.
+ */
+function spliceSkillExpansionsIntoEvent(
+	session: { pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[] }> },
+	event: unknown,
+): unknown {
+	const ev = event as any;
+	if (!ev || typeof ev !== "object") return event;
+	if (ev.type !== "message_end") return event;
+	const msg = ev.message;
+	if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return event;
+	const pending = session.pendingSkillExpansions;
+	if (!pending || pending.length === 0) return event;
+	const body = extractUserMessageText(msg);
+	const idx = pending.findIndex((p) => p.modelText === body);
+	if (idx === -1) return event;
+	const envelope = pending.splice(idx, 1)[0];
+	const rewrittenMsg = rewriteUserMessageText(msg, envelope.originalText);
+	rewrittenMsg.skillExpansions = envelope.skillExpansions;
+	return { ...ev, message: rewrittenMsg };
 }
 
 export interface SessionManagerOptions {
@@ -1096,16 +1168,14 @@ export class SessionManager {
 				originalText: text,
 				skillExpansions: opts!.skillExpansions!,
 			});
-			// Broadcast metadata to connected clients so UI can chip the
-			// in-flight user message without waiting for a reload.
-			broadcast(session.clients, {
-				type: "skill_expansions",
-				data: {
-					originalText: text,
-					modelText: dispatchText,
-					skillExpansions: opts!.skillExpansions!,
-					ts: Date.now(),
-				},
+			// Stash the envelope so when the agent echoes the user message
+			// back via `message_end`, we can splice the original text +
+			// chip metadata onto the broadcast event before clients see it.
+			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
+			session.pendingSkillExpansions.push({
+				modelText: dispatchText,
+				originalText: text,
+				skillExpansions: opts!.skillExpansions!,
 			});
 		}
 
