@@ -63,9 +63,17 @@ test.describe("Slash skill E2E", () => {
 			const userMsgEnd = await conn.waitFor(userMessageEnd, 10_000);
 			const userText = extractText(userMsgEnd);
 
-			expect(userText).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
-			expect(userText).not.toContain("/e2e-test-skill");
-			expect(userText).toContain("some args");
+			// New contract: persisted user message text is the literal slash
+			// invocation; the expanded body lives in skillExpansions[].expanded.
+			expect(userText).toBe("/e2e-test-skill some args");
+			expect(userText).not.toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
+
+			const expansions = userMsgEnd.data.message.skillExpansions;
+			expect(Array.isArray(expansions)).toBe(true);
+			expect(expansions.length).toBe(1);
+			expect(expansions[0].name).toBe("e2e-test-skill");
+			expect(expansions[0].args).toBe("some args");
+			expect(expansions[0].expanded).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
 
 			await conn.waitFor(agentEndPredicate(), 10_000);
 		} finally {
@@ -98,10 +106,19 @@ test.describe("Slash skill E2E", () => {
 			const userMsgEnd = await conn.waitFor(userMessageEnd, 10_000);
 			const userText = extractText(userMsgEnd);
 
-			expect(userText).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
-			expect(userText).toContain("Analyse using");
-			expect(userText).toContain("the code");
-			expect(userText).not.toContain("/e2e-test-skill");
+			// New contract: persisted text retains the literal slash; expansion
+			// body is carried in skillExpansions[].expanded.
+			expect(userText).toBe("Analyse using /e2e-test-skill the code");
+			expect(userText).not.toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
+
+			const expansions = userMsgEnd.data.message.skillExpansions;
+			expect(Array.isArray(expansions)).toBe(true);
+			expect(expansions.length).toBe(1);
+			expect(expansions[0].name).toBe("e2e-test-skill");
+			expect(expansions[0].expanded).toContain("EXPANDED_SKILL_CONTENT_E2E_MARKER");
+			// Range should point at the literal `/e2e-test-skill` token.
+			const [start, end] = expansions[0].range;
+			expect(userText.slice(start, end)).toBe("/e2e-test-skill");
 
 			await conn.waitFor(agentEndPredicate(), 10_000);
 		} finally {
