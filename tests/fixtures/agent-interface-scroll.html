@@ -96,8 +96,13 @@ function _resizeObserverCallback() {
     return;
   }
 
-  // BUG: this branch fires for delta >= 0, including delta === 0.
-  // After the fix, this should only fire for delta > 0.
+  if (delta === 0) {
+    // No actual height change — width/border-box reflow only.
+    // Do nothing (mirrors the production fix in AgentInterface.ts).
+    return;
+  }
+
+  // delta > 0: real growth.
   if (_stickToBottom) {
     _lastScrollHeight = newScrollHeight;
     _isAutoScrolling = true;

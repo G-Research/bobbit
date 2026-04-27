@@ -809,33 +809,109 @@ export class RemoteAgent {
 					// authoritative and already contains it in the correct position.
 					this._deferredAssistantMessage = null;
 
+					// Server snapshot is authoritative for any id it contains, and
+					// for the compaction marker (server persists it under a different
+					// id than our synthetic). Build lookup sets so client-side
+					// buckets (live events / compaction syntheics / permission cards)
+					// only contribute messages the snapshot lacks.
+					const serverIds = new Set<string>(
+						this._state.messages
+							.map((m: any) => m.id)
+							.filter((id: any) => typeof id === "string" && id.length > 0)
+					);
+					const serverHasCompactionMarker = this._state.messages.some((m: any) => {
+						if (m.role !== "assistant") return false;
+						const t = extractText(m);
+						return typeof t === "string" && t.startsWith("Context compacted");
+					});
+
+					const extras: any[] = [];
+
 					// Re-append any live-event messages missing from the server
-					// response.  This prevents the wholesale replacement from
-					// silently dropping messages that arrived via message_end
-					// between a get_messages request and its response.
+					// snapshot. Dedup by id first (authoritative) and only fall
+					// back to text-equality for legacy entries without ids.
 					if (this._liveEventMessages.length > 0) {
-						const serverTexts = new Set(
+						const serverUserTexts = new Set(
 							this._state.messages
 								.filter((m: any) => m.role === "user" || m.role === "user-with-attachments")
 								.map((m: any) => extractText(m))
 						);
 						for (const liveMsg of this._liveEventMessages) {
-							if (!serverTexts.has(extractText(liveMsg))) {
-								this._state.messages = [...this._state.messages, liveMsg];
+							if (typeof liveMsg.id === "string" && liveMsg.id.length > 0) {
+								if (serverIds.has(liveMsg.id)) continue;
+							} else if (
+								(liveMsg.role === "user" || liveMsg.role === "user-with-attachments") &&
+								serverUserTexts.has(extractText(liveMsg))
+							) {
+								continue;
 							}
+							extras.push(liveMsg);
 						}
 						this._liveEventMessages = [];
 					}
 
-					// Re-append synthetic compaction messages (/compact + result)
-					// so they survive the server's post-compaction refresh.
+					// Re-append synthetic compaction messages only if the server
+					// snapshot doesn't already represent them. Drop synthetic
+					// compaction-result markers when the server has its own copy
+					// (different id, but assistant text starts with "Context compacted").
 					if (this._compactionSyntheticMessages.length > 0) {
-						this._state.messages = [...this._state.messages, ...this._compactionSyntheticMessages];
+						const surviving: any[] = [];
+						for (const m of this._compactionSyntheticMessages) {
+							if (typeof m.id === "string" && serverIds.has(m.id)) continue;
+							if (m.role === "assistant" && serverHasCompactionMarker) continue;
+							surviving.push(m);
+						}
+						extras.push(...surviving);
+						// Once the server confirms an equivalent marker, the bucket
+						// has done its job — clear it so subsequent snapshots don't
+						// re-introduce stale entries.
+						if (serverHasCompactionMarker) {
+							this._compactionSyntheticMessages = [];
+						} else {
+							this._compactionSyntheticMessages = surviving;
+						}
 					}
-					// Re-append pending tool_permission_needed cards — these are
-					// in-memory only and would be lost on message refresh.
+
+					// Re-append pending tool_permission_needed cards. Drop any whose
+					// id the server snapshot already contains. Also drop a card if
+					// the server snapshot contains any message strictly newer than
+					// the card's timestamp — the server has progressed past the
+					// card's creation point and either resolved it or no longer
+					// considers the tool to be awaiting permission. Live in-flight
+					// cards (created after the snapshot was taken) survive because
+					// no snapshot message is newer than their timestamp.
 					if (this._pendingPermissionCards.length > 0) {
-						this._state.messages = [...this._state.messages, ...this._pendingPermissionCards];
+						const maxServerTs = this._state.messages.reduce((acc: number, m: any) => {
+							const t = typeof m.timestamp === "number" ? m.timestamp : 0;
+							return t > acc ? t : acc;
+						}, 0);
+						const surviving: any[] = [];
+						for (const card of this._pendingPermissionCards) {
+							if (typeof card.id === "string" && serverIds.has(card.id)) continue;
+							const cardTs = typeof card.timestamp === "number" ? card.timestamp : 0;
+							if (maxServerTs > cardTs) continue;
+							surviving.push(card);
+						}
+						this._pendingPermissionCards = surviving;
+						extras.push(...surviving);
+					}
+
+					if (extras.length > 0) {
+						// Stable sort by timestamp (preserve relative order for
+						// equal timestamps via index tagging) so survivors land in
+						// chronological position rather than appended after newer
+						// server messages.
+						const tagged = [
+							...this._state.messages.map((m: any, i: number) => ({ m, i, src: 0 })),
+							...extras.map((m: any, i: number) => ({ m, i: this._state.messages.length + i, src: 1 })),
+						];
+						tagged.sort((a, b) => {
+							const ta = typeof a.m.timestamp === "number" ? a.m.timestamp : 0;
+							const tb = typeof b.m.timestamp === "number" ? b.m.timestamp : 0;
+							if (ta !== tb) return ta - tb;
+							return a.i - b.i;
+						});
+						this._state.messages = tagged.map((t) => t.m);
 					}
 					// Emit message_end for each message so AgentInterface re-renders
 					for (const m of this._state.messages) {
