@@ -25,6 +25,7 @@ import {
 	buildSlashSkillPrompt,
 	type SlashSkill,
 } from "./slash-skills.js";
+import { buildActivationHeader, type PathRewrite } from "./skill-manifest.js";
 
 /** Char range, in UTF-16 code units (matches `String.prototype.slice`). */
 export type SkillRange = [number, number];
@@ -66,6 +67,7 @@ export function resolveSkillExpansions(
 	text: string,
 	cwd: string,
 	store?: StoreLike,
+	pathRewrite?: PathRewrite,
 ): ResolvedSkills {
 	const originalText = text;
 	const unknown: string[] = [];
@@ -81,7 +83,8 @@ export function resolveSkillExpansions(
 		const skill = getSlashSkill(cwd, skillName, store);
 		if (skill) {
 			const args = argsPart.trim();
-			const expanded = buildSlashSkillPrompt(skill, args);
+			const body = buildSlashSkillPrompt(skill, args);
+			const expanded = buildActivationHeader(skill, pathRewrite) + body;
 			return {
 				originalText,
 				modelText: expanded,
@@ -120,7 +123,7 @@ export function resolveSkillExpansions(
 		const prefixLen = m[1].length; // 0 at string start, 1 after whitespace
 		const tokenStart = m.index + prefixLen; // position of "/"
 		const tokenEnd = tokenStart + 1 + skillName.length;
-		const expanded = buildSlashSkillPrompt(skill, "");
+		const expanded = buildActivationHeader(skill, pathRewrite) + buildSlashSkillPrompt(skill, "");
 		expansions.push({
 			name: skill.name,
 			args: "",
