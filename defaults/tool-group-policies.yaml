@@ -1,4 +1,11 @@
 Ask: allow
+# Skills group: gates the `activate_skill` tool, which lets the model autonomously
+# invoke any discovered slash skill mid-turn (Agent Skills level-1 progressive
+# disclosure). Set to `never` project-wide to suppress autonomous activation;
+# the system prompt's "Available Skills" catalog is then also omitted, since the
+# catalog is useless without an activator. User-typed `/<name>` invocations are
+# unaffected by this policy.
+Skills: allow
 # Block the @playwright/mcp browser group by default: it launches visible
 # Chromium windows on the host on first use, which is disruptive and can
 # steal focus. Agents should use the native `browser_*` tools (defaults/tools/browser)

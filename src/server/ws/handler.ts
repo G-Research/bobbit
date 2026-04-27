@@ -9,7 +9,7 @@ import type { ProjectContextManager } from "../agent/project-context-manager.js"
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
-import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
+import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 // patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
@@ -268,7 +268,6 @@ export function handleWebSocketConnection(
 			switch (msg.type) {
 				case "prompt": {
 					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
-					let promptText = msg.text;
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
@@ -287,44 +286,23 @@ export function handleWebSocketConnection(
 						}
 					}
 
-					// Check for slash skill invocations at word boundaries
-					// Matches "/skill-name" at start of string or after whitespace
-					const slashPattern = /(^|[\s])\/([\w-]+)/g;
-					let match: RegExpExecArray | null;
-					const replacements: Array<{ start: number; end: number; expanded: string }> = [];
-					while ((match = slashPattern.exec(promptText)) !== null) {
-						const skillName = match[2];
-						const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
-						if (!skill) {
-							console.warn(`[ws-handler] Slash skill "${skillName}" not found for session ${sessionId} (cwd=${session.cwd})`);
-						}
-						if (skill) {
-							const prefixLen = match[1].length; // 0 at start, 1 after whitespace
-							const tokenStart = match.index + prefixLen; // position of "/"
-							const tokenEnd = tokenStart + 1 + skillName.length; // end of "/skill-name"
-							// For prefix-only invocation (entire text is "/skill args"), use buildSlashSkillPrompt
-							// For inline, replace just the token with expanded content
-							if (tokenStart === 0 && promptText.match(/^\/([\w-]+)(?:\s+(.*))?$/)) {
-								// Prefix-only: use the full buildSlashSkillPrompt (includes args)
-								const skillArgs = promptText.slice(tokenEnd).trim();
-								promptText = buildSlashSkillPrompt(skill, skillArgs);
-								console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);
-								replacements.length = 0; // clear any partial matches
-								break;
-							}
-							replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildSlashSkillPrompt(skill, "") });
-							console.log(`[ws-handler] Inline slash skill "${skillName}" expanded for session ${sessionId}`);
-						}
+					const { originalText, modelText, expansions, unknown } = resolveSkillExpansions(
+						msg.text,
+						skillCwd,
+						resolvedConfigStore,
+					);
+					for (const name of unknown) {
+						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);
 					}
-					// Apply inline replacements right-to-left to preserve indices
-					for (let i = replacements.length - 1; i >= 0; i--) {
-						const r = replacements[i];
-						promptText = promptText.slice(0, r.start) + r.expanded + promptText.slice(r.end);
+					if (expansions.length > 0) {
+						console.log(`[ws-handler] Resolved ${expansions.length} slash-skill expansion(s) for session ${sessionId}`);
 					}
 
-					await sessionManager.enqueuePrompt(sessionId, promptText, {
+					await sessionManager.enqueuePrompt(sessionId, originalText, {
 						images: msg.images,
 						attachments: msg.attachments,
+						skillExpansions: expansions.length ? expansions : undefined,
+						modelText: expansions.length ? modelText : undefined,
 					});
 					break;
 				}

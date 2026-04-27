@@ -12,6 +12,8 @@ import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
+import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -23,6 +25,7 @@ import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { discoverSlashSkills } from "../skills/slash-skills.js";
 import type { GrantPolicy } from "./role-store.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
@@ -930,12 +933,45 @@ export class SessionManager {
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
+		// Skills catalog — progressive disclosure (level 1) for autonomous activation.
+		// Skipped when the session lacks `activate_skill` (catalog is useless without
+		// the activator) or when explicitly already populated.
+		if (!parts.skillsCatalog) {
+			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore);
+		}
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
 		if (session) session.promptParts = parts;
 		// Persist prompt sections snapshot for the inspector
 		persistPromptSections(sessionId, parts);
 		return assembleSystemPrompt(sessionId, parts);
+	}
+
+	/**
+	 * Build the skills-catalog list for autonomous activation.
+	 * Returns undefined when activate_skill is not allowed for the session
+	 * (signalling "no Available Skills section" to assembleSystemPrompt).
+	 */
+	private computeSkillsCatalog(
+		allowedTools: string[] | undefined,
+		discoveryRoot: string,
+		projectConfigStore?: { get(key: string): string | undefined },
+	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
+		// allowedTools=undefined or empty => no restrictions; include catalog.
+		// allowedTools restricted => require activate_skill in the list.
+		if (allowedTools && allowedTools.length > 0) {
+			const hasActivate = allowedTools.some(t => t.toLowerCase() === "activate_skill");
+			if (!hasActivate) return undefined;
+		}
+		try {
+			const all = discoverSlashSkills(discoveryRoot, projectConfigStore);
+			// Filter: omit disable-model-invocation and skills with empty descriptions.
+			// userInvocable=false skills are already filtered by discoverSlashSkills.
+			return all.filter(s => s.disableModelInvocation !== true && (s.description?.trim() || "").length > 0);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to discover skills for catalog (root=${discoveryRoot}):`, err);
+			return undefined;
+		}
 	}
 
 	/** Get cached PromptParts for serving prompt-sections API.
@@ -1041,9 +1077,37 @@ export class SessionManager {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
+		/** Original text was already expanded into this when sent to the model. */
+		modelText?: string;
+		/** Resolved slash-skill expansions, in original-text order. UI-only metadata. */
+		skillExpansions?: SkillExpansion[];
 	}): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
+
+		// modelText is what the model sees; text is the user's verbatim input.
+		// When no expansions, both are equal and dispatch is byte-equal to today.
+		const dispatchText = opts?.modelText ?? text;
+		const hasExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
+		if (hasExpansions) {
+			appendSkillSidecarEntry(session.id, {
+				ts: Date.now(),
+				modelText: dispatchText,
+				originalText: text,
+				skillExpansions: opts!.skillExpansions!,
+			});
+			// Broadcast metadata to connected clients so UI can chip the
+			// in-flight user message without waiting for a reload.
+			broadcast(session.clients, {
+				type: "skill_expansions",
+				data: {
+					originalText: text,
+					modelText: dispatchText,
+					skillExpansions: opts!.skillExpansions!,
+					ts: Date.now(),
+				},
+			});
+		}
 
 		// ERROR STATE GATING: if last turn errored, either implicitly unstick
 		// (up to MAX_CONSECUTIVE_ERROR_TURNS) or park the message in the queue.
@@ -1054,7 +1118,7 @@ export class SessionManager {
 				console.log(
 					`[session-manager] Session ${session.id} has ${consec} consecutive errored turns; parking incoming prompt. Human action required (click Retry or fix upstream issue).`
 				);
-				session.promptQueue.enqueue(text, {
+				session.promptQueue.enqueue(dispatchText, {
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -1086,29 +1150,34 @@ export class SessionManager {
 			// items. After agent_end the normal drainQueue path picks up parked
 			// items in FIFO order, unprefixed (since lastTurnErrorMessage is now
 			// cleared).
-			const prefixed = buildErrorRecoveryPrefix(errSnippet, text);
-			this.tryGenerateTitleFromPrompt(sessionId, prefixed);
-			session.lastPromptText = prefixed;
+			// Title generation uses the user-visible original text (better UX).
+			this.tryGenerateTitleFromPrompt(sessionId, text);
+			// Inject the recovery prefix into the model-facing dispatch text.
+			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
+			session.lastPromptText = prefixedDispatch;
 			session.lastPromptImages = opts?.images;
 			session.status = "streaming";
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
-			await session.rpcClient.prompt(prefixed, opts?.images);
+			await session.rpcClient.prompt(prefixedDispatch, opts?.images);
 			return;
 		}
 
 		// If agent is idle and queue is empty, dispatch directly
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
-			session.lastPromptText = text;
+			session.lastPromptText = dispatchText;
 			session.lastPromptImages = opts?.images;
-			await session.rpcClient.prompt(text, opts?.images);
+			await session.rpcClient.prompt(dispatchText, opts?.images);
 			return;
 		}
 
-		// Agent is busy or queue has items — enqueue
-		session.promptQueue.enqueue(text, {
+		// Agent is busy or queue has items — enqueue. Persisted queue holds
+		// the dispatch (model-facing) text so drainQueue passes the same
+		// expanded text to the agent later. The chip metadata is already
+		// in the sidecar/broadcast; the queued row is purely for delivery.
+		session.promptQueue.enqueue(dispatchText, {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
