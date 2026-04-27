@@ -187,8 +187,13 @@ export class AgentInterface extends LitElement {
 	private _contextPopoverOpen = false;
 	private _costPopoverOpen = false;
 	private _stickToBottom = true;
-	private _isAutoScrolling = false;
-	private _autoScrollTimer?: ReturnType<typeof setTimeout>;
+	// Deterministic programmatic-scroll detection: when we set scrollTop
+	// programmatically, capture the resulting (scrollTop, scrollHeight) pair.
+	// The next scroll event matching exactly that pair is the browser-emitted
+	// echo of our own assignment and is ignored. Cleared on first match so a
+	// later coincidental match still counts as a real user scroll. No timers.
+	private _lastProgrammaticScrollTop: number | null = null;
+	private _lastProgrammaticScrollHeight: number | null = null;
 	private _scrollContainer?: HTMLElement;
 	private _resizeObserver?: ResizeObserver;
 	private _lastScrollHeight = 0;
@@ -257,10 +262,9 @@ export class AgentInterface extends LitElement {
 
 			// When content changes size, scroll to bottom if we're already there.
 			// Uses _stickToBottom flag — no keyboard/focus/viewport tracking needed.
-			// We set _isAutoScrolling to prevent the scroll event handler from
-			// misinterpreting the programmatic scroll as a user scroll-up (which
-			// can happen when content grows between the programmatic scroll and
-			// the resulting scroll event).
+			// Programmatic-scroll echoes are filtered deterministically in
+			// _handleScroll via the (_lastProgrammaticScrollTop, _lastProgrammaticScrollHeight)
+			// latch — no timers.
 			this._resizeObserver = new ResizeObserver(() => {
 				if (!this._scrollContainer) return;
 				const newScrollHeight = this._scrollContainer.scrollHeight;
@@ -275,20 +279,29 @@ export class AgentInterface extends LitElement {
 					const { scrollTop, clientHeight } = this._scrollContainer;
 					const contentBottom = newScrollHeight - scrollTop;
 					if (contentBottom < clientHeight / 2) {
-						this._isAutoScrolling = true;
-						this._scrollContainer.scrollTop = newScrollHeight - clientHeight;
-						clearTimeout(this._autoScrollTimer);
-						this._autoScrollTimer = setTimeout(() => { this._isAutoScrolling = false; }, 150);
+						const target = newScrollHeight - clientHeight;
+						this._lastProgrammaticScrollTop = target;
+						this._lastProgrammaticScrollHeight = newScrollHeight;
+						this._scrollContainer.scrollTop = target;
 					}
 					return;
 				}
 
+				if (delta === 0) {
+					// No actual height change — width/border-box reflow only.
+					// Do nothing. Don't touch scrollTop, don't update
+					// _lastScrollHeight (it's already accurate), don't flip
+					// _stickToBottom. This is the fix for the vibration loop.
+					return;
+				}
+
+				// delta > 0: real growth.
 				if (this._stickToBottom) {
 					this._lastScrollHeight = newScrollHeight;
-					this._isAutoScrolling = true;
-					this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
-					clearTimeout(this._autoScrollTimer);
-					this._autoScrollTimer = setTimeout(() => { this._isAutoScrolling = false; }, 150);
+					const target = newScrollHeight - this._scrollContainer.clientHeight;
+					this._lastProgrammaticScrollTop = target;
+					this._lastProgrammaticScrollHeight = newScrollHeight;
+					this._scrollContainer.scrollTop = newScrollHeight;
 				} else {
 					this._lastScrollHeight = newScrollHeight;
 				}
@@ -301,6 +314,12 @@ export class AgentInterface extends LitElement {
 
 			// Track user scroll to decide stick-to-bottom state
 			this._scrollContainer.addEventListener("scroll", this._handleScroll, { passive: true });
+			// Explicit user-intent listeners — any of these immediately
+			// unsticks. Geometry alone can't reliably distinguish a user
+			// scroll-up from a programmatic scroll, so we trust intent.
+			this._scrollContainer.addEventListener("wheel", this._handleUserIntent, { passive: true });
+			this._scrollContainer.addEventListener("touchstart", this._handleUserIntent, { passive: true });
+			this._scrollContainer.addEventListener("keydown", this._handleScrollKeydown);
 		}
 
 		// Subscribe to external session if provided
@@ -310,8 +329,7 @@ export class AgentInterface extends LitElement {
 	override disconnectedCallback() {
 		super.disconnectedCallback();
 
-		// Clean up timers, observers, and listeners
-		clearTimeout(this._autoScrollTimer);
+		// Clean up observers and listeners
 		if (this._resizeObserver) {
 			this._resizeObserver.disconnect();
 			this._resizeObserver = undefined;
@@ -319,6 +337,9 @@ export class AgentInterface extends LitElement {
 
 		if (this._scrollContainer) {
 			this._scrollContainer.removeEventListener("scroll", this._handleScroll);
+			this._scrollContainer.removeEventListener("wheel", this._handleUserIntent);
+			this._scrollContainer.removeEventListener("touchstart", this._handleUserIntent);
+			this._scrollContainer.removeEventListener("keydown", this._handleScrollKeydown);
 		}
 
 		if (this._pillResizeObserver) {
@@ -480,39 +501,69 @@ export class AgentInterface extends LitElement {
 
 	private _scrollToBottom() {
 		this._stickToBottom = true;
-		this._isAutoScrolling = true;
 		if (this._scrollContainer) {
-			this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+			const sh = this._scrollContainer.scrollHeight;
+			const target = sh - this._scrollContainer.clientHeight;
+			this._lastProgrammaticScrollTop = target;
+			this._lastProgrammaticScrollHeight = sh;
+			this._scrollContainer.scrollTop = sh;
 		}
 		// Re-assert after next frame (layout may not have settled yet)
 		requestAnimationFrame(() => {
 			if (this._scrollContainer) {
-				this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+				const sh = this._scrollContainer.scrollHeight;
+				const target = sh - this._scrollContainer.clientHeight;
+				this._lastProgrammaticScrollTop = target;
+				this._lastProgrammaticScrollHeight = sh;
+				this._scrollContainer.scrollTop = sh;
 			}
 		});
-		// Clear auto-scroll guard on a timeout that outlasts the browser's
-		// scroll event dispatch (see ResizeObserver comment for rationale).
-		clearTimeout(this._autoScrollTimer);
-		this._autoScrollTimer = setTimeout(() => {
-			this._isAutoScrolling = false;
-		}, 150);
 	}
 
 	/**
-	 * Simple stick-to-bottom: if the user is near the bottom, stay there.
-	 * If they've scrolled up, don't pull them back down.
-	 * No keyboard/focus/viewport tracking — just geometry.
+	 * Stick-to-bottom: deterministic programmatic-scroll filter, no timers.
+	 *
+	 * The single scroll event whose (scrollTop, scrollHeight) exactly matches
+	 * the values we just programmatically wrote is the browser-emitted echo
+	 * of our own assignment — ignore it once, then clear the latch so a later
+	 * coincidental match still counts as a real user scroll.
+	 *
+	 * Anything else is user intent. We only re-stick if the user is within
+	 * 5 px of the bottom (the prior 50 px tail enabled the vibration symptom).
 	 */
 	private _handleScroll = () => {
-		if (!this._scrollContainer || this._isAutoScrolling) return;
+		if (!this._scrollContainer) return;
 		const { scrollTop, scrollHeight, clientHeight } = this._scrollContainer;
-		// Only update stickToBottom on genuine user scrolls, not browser-initiated
-		// scroll clamps during content resize. When content shrinks, the browser
-		// clamps scrollTop to the new max and fires a scroll event before the
-		// ResizeObserver runs — if we updated _stickToBottom here, it would
-		// incorrectly flip to true and prevent shrink compensation.
-		if (scrollHeight === this._lastScrollHeight) {
-			this._stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+		if (
+			this._lastProgrammaticScrollTop !== null &&
+			this._lastProgrammaticScrollHeight !== null &&
+			scrollTop === this._lastProgrammaticScrollTop &&
+			scrollHeight === this._lastProgrammaticScrollHeight
+		) {
+			// Consume the echo exactly once.
+			this._lastProgrammaticScrollTop = null;
+			this._lastProgrammaticScrollHeight = null;
+			return;
+		}
+		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 5;
+	};
+
+	/** Any direct user-input gesture on the scroll container immediately
+	 *  releases the stickiness. We don't second-guess the user via geometry. */
+	private _handleUserIntent = () => {
+		this._stickToBottom = false;
+	};
+
+	private _handleScrollKeydown = (e: KeyboardEvent) => {
+		switch (e.key) {
+			case "PageUp":
+			case "ArrowUp":
+			case "Home":
+			case "PageDown":
+			case "ArrowDown":
+			case "End":
+				this._stickToBottom = false;
+				break;
 		}
 	};
 

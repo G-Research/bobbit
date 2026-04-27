@@ -122,6 +122,22 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - `renderApp()` debounced via `requestAnimationFrame` — multiple calls collapse
 - For synchronous DOM updates, use `renderAppSync()`
 
+## Scroll snap-back / vibration in idle session
+
+- **Symptom**: in a completely idle session, dragging the scrollbar up snaps the viewport back to the bottom (often as a visible "vibration"). Resizing the window breaks the loop temporarily.
+- **Root cause in one line**: zero-delta `ResizeObserver` fires were re-clamping `scrollTop = scrollHeight` while a timer-based `_isAutoScrolling` guard silently swallowed the user's scroll events.
+- **Where the fix lives**: `src/ui/components/AgentInterface.ts` — the RO callback now no-ops on `delta === 0` and only auto-scrolls on `delta > 0`. The timer guard is gone. Programmatic scroll echoes are filtered via the `_lastProgrammaticScrollTop`/`_lastProgrammaticScrollHeight` latch in `_handleScroll`. User intent is captured via `_handleUserIntent` (wheel/touchstart) and `_handleScrollKeydown` (PageUp/Down/Home/End/Arrow). Stickiness tail shrunk from 50px to 5px.
+- **Invariant**: see [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant). Do not reintroduce timer-based auto-scroll guards.
+- **Repro test**: `tests/agent-interface-scroll.spec.ts` — behavioural twin of the RO + scroll handler. With `stickToBottom=true` and a small user scroll inside the tail, an RO fire with `delta === 0` must preserve `scrollTop` (asserts the no-op branch).
+
+## Stale messages trailing after newer ones on session navigate
+
+- **Symptom**: switching to a session via the sidebar shows older messages (often a synthetic compaction marker or a stale permission card) appended *after* the latest server-persisted messages. A hard reload fixes it; the bug is client-side merge order.
+- **Root cause in one line**: `_state.messages = snapshot` followed by unconditional pushes from `_compactionSyntheticMessages` / `_pendingPermissionCards` / `_liveEventMessages` placed bucket entries after newer snapshot messages, even when the snapshot already contained an equivalent server-persisted entry.
+- **Where the fix lives**: `src/app/remote-agent.ts`, the `messages` frame handler. Builds `serverIds = new Set(snapshot.map(m => m.id))`, drops bucket entries whose id is already in the snapshot (with a `"Context compacted"` text fallback for legacy ids), then stable-sorts the merged array by `(timestamp, insertionOrder)`. `_liveEventMessages` is cleared post-merge; the other two buckets retain only their unmatched survivors.
+- **Invariant**: see [docs/internals.md — Snapshot merge invariant](internals.md#snapshot-merge-invariant). The server snapshot is authoritative for any id it contains; client buckets only fill in gaps.
+- **Repro test**: `tests/remote-agent-snapshot-merge.test.ts` — imports `RemoteAgent` directly, feeds a snapshot frame containing the server-persisted compaction marker plus newer post-compaction messages, asserts the synthetic marker is dropped and the final order is by timestamp.
+
 ## Background process pills (BgProcessPill / AgentInterface)
 
 - **Dropdown renders via portal**: `BgProcessPill` appends its log dropdown to `document.body` instead of rendering it inline. This is necessary because the "More" overflow popover uses `backdrop-filter: blur()`, which creates a new CSS containing block — `position: fixed` children behave like `position: absolute` and `mask-image` clips them. If the dropdown appears mispositioned or clipped inside a popover, check that the portal is working (the `#bg-process-dropdown` element should be a direct child of `document.body`, not nested inside the pill or popover).
