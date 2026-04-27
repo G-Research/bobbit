@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+
+  .container {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* The scroll container — class name "overflow-y-auto" matches AgentInterface's
+     querySelector(".overflow-y-auto") so the production code's wiring would
+     find it identically. */
+  .overflow-y-auto {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    overflow-anchor: none; /* Disable browser CSS scroll anchoring — exercise JS logic only */
+  }
+
+  .max-w-5xl {
+    max-width: 64rem;
+    margin: 0 auto;
+    padding: 8px;
+    min-width: 0;
+  }
+
+  .message {
+    padding: 16px;
+    margin: 8px;
+    background: #f0f0f0;
+    border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="overflow-y-auto" id="scroll-container">
+    <div class="max-w-5xl" id="content">
+      <!-- messages injected below -->
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Mirror of the ResizeObserver + scroll handler logic from
+// src/ui/components/AgentInterface.ts (lines 264–296 for the RO callback,
+// 506–516 for the scroll handler). We exercise the *exact* invariant from
+// production code; this fixture is a behavioural twin, not a re-write.
+//
+// On master, the RO callback's stick-to-bottom branch fires whenever
+// `delta >= 0` AND `_stickToBottom === true`, which means a delta=0 RO
+// fire (no actual height change) still forces `scrollTop = scrollHeight`,
+// snapping the user back to the bottom even though they intentionally
+// scrolled up inside the 50 px tail. That is the vibration loop.
+// ---------------------------------------------------------------------------
+const scrollContainer = document.getElementById('scroll-container');
+const content = document.getElementById('content');
+
+// Generate enough messages to overflow the viewport comfortably
+for (let i = 0; i < 200; i++) {
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.textContent = `Message ${i + 1}: lorem ipsum dolor sit amet, consectetur adipiscing elit.`;
+  content.appendChild(div);
+}
+
+let _stickToBottom = true;
+let _isAutoScrolling = false;
+let _autoScrollTimer;
+let _lastScrollHeight = scrollContainer.scrollHeight;
+
+// Verbatim port of the production RO callback.
+function _resizeObserverCallback() {
+  if (!scrollContainer) return;
+  const newScrollHeight = scrollContainer.scrollHeight;
+  const delta = newScrollHeight - _lastScrollHeight;
+
+  if (delta < 0) {
+    _lastScrollHeight = newScrollHeight;
+    const { scrollTop, clientHeight } = scrollContainer;
+    const contentBottom = newScrollHeight - scrollTop;
+    if (contentBottom < clientHeight / 2) {
+      _isAutoScrolling = true;
+      scrollContainer.scrollTop = newScrollHeight - clientHeight;
+      clearTimeout(_autoScrollTimer);
+      _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
+    }
+    return;
+  }
+
+  // BUG: this branch fires for delta >= 0, including delta === 0.
+  // After the fix, this should only fire for delta > 0.
+  if (_stickToBottom) {
+    _lastScrollHeight = newScrollHeight;
+    _isAutoScrolling = true;
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    clearTimeout(_autoScrollTimer);
+    _autoScrollTimer = setTimeout(() => { _isAutoScrolling = false; }, 150);
+  } else {
+    _lastScrollHeight = newScrollHeight;
+  }
+}
+
+// Verbatim port of the production scroll handler.
+scrollContainer.addEventListener('scroll', () => {
+  if (_isAutoScrolling) return;
+  const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
+  if (scrollHeight === _lastScrollHeight) {
+    _stickToBottom = scrollHeight - scrollTop - clientHeight < 50;
+  }
+}, { passive: true });
+
+// Test hooks
+window.__startAtBottom = () => {
+  scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  _lastScrollHeight = scrollContainer.scrollHeight;
+  _stickToBottom = true;
+};
+
+window.__userScrollUp = (px) => {
+  // Simulate a small user scroll inside the 50 px tail.
+  scrollContainer.scrollTop = scrollContainer.scrollHeight - scrollContainer.clientHeight - px;
+};
+
+window.__fireResizeObserverDeltaZero = () => {
+  // Synthesize a ResizeObserver fire where the observed element changed
+  // (e.g. width/border-box reflow due to scrollbar gutter, pill-strip
+  // re-render, canvas remount, or any of the other idle-session triggers
+  // documented in the issue-analysis gate) but scrollHeight is unchanged.
+  // We don't actually mutate scrollHeight — that's the whole point.
+  _resizeObserverCallback();
+};
+
+window.__getState = () => ({
+  scrollTop: scrollContainer.scrollTop,
+  scrollHeight: scrollContainer.scrollHeight,
+  clientHeight: scrollContainer.clientHeight,
+  stickToBottom: _stickToBottom,
+  lastScrollHeight: _lastScrollHeight,
+  isAutoScrolling: _isAutoScrolling,
+});
+</script>
+</body>
+</html>
