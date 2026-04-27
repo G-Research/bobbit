@@ -149,6 +149,15 @@ export class MockAgentCore {
 
 		if (lower.includes("mock_error")) return { mockError: true };
 
+		// Autonomous skill activation: drives the activate_skill tool path.
+		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).
+		const activateMatch = text.match(/please\s+activate_skill\s+([\w-]+)(?:\s+([\s\S]*))?$/i);
+		if (activateMatch) {
+			return {
+				activateSkill: { name: activateMatch[1], args: (activateMatch[2] || "").trim() },
+			};
+		}
+
 		if (lower.includes("bash") || lower.includes("echo ")) {
 			return { tool: "Bash", input: { command: "echo BOBBIT_TOOL_TEST_OK_12345" }, output: "BOBBIT_TOOL_TEST_OK_12345\n" };
 		}
@@ -233,6 +242,8 @@ export class MockAgentCore {
 			await this._handleToolDenied(toolAction.toolDenied);
 		} else if (toolAction && toolAction.askUserChoices) {
 			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+		} else if (toolAction && toolAction.activateSkill) {
+			await this._handleActivateSkill(toolAction.activateSkill);
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.previewSnapshot) {
@@ -298,6 +309,109 @@ export class MockAgentCore {
 
 		this.emit({ type: "agent_end" });
 		this.emit({ type: "session_status", status: "idle" });
+	}
+
+	/**
+	 * Mock the activate_skill tool: call the gateway endpoint to get the
+	 * expanded skill body, then emit the same shape of events the real
+	 * extension would produce — a toolCall in an assistant message plus a
+	 * toolResult carrying `details.skillExpansion` so the UI's
+	 * ActivateSkillRenderer renders a <skill-chip>.
+	 */
+	async _handleActivateSkill({ name, args }) {
+		const toolId = `tool_act_${Date.now()}`;
+		const input = { name, ...(args ? { args } : {}) };
+		this.emit({ type: "tool_execution_start", toolName: "activate_skill", toolId, input });
+
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gwUrl = null;
+		}
+
+		let expanded = "";
+		let source, filePath, isError = false, errMsg = "";
+		if (gwUrl && sessionId) {
+			try {
+				const body = JSON.stringify({ name, args: args || "" });
+				const result = await new Promise((resolve, reject) => {
+					const u = new URL(`${gwUrl}/api/sessions/${sessionId}/activate-skill`);
+					const req = http.request(u, {
+						method: "POST",
+						headers: {
+							"Authorization": `Bearer ${token}`,
+							"Content-Type": "application/json",
+							"Content-Length": Buffer.byteLength(body),
+						},
+						timeout: 10_000,
+					}, (res) => {
+						let data = "";
+						res.on("data", (c) => data += c);
+						res.on("end", () => {
+							try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+							catch { resolve({ status: res.statusCode, body: { error: data } }); }
+						});
+					});
+					req.on("timeout", () => { req.destroy(); resolve({ status: 0, body: { error: "timeout" } }); });
+					req.on("error", reject);
+					req.write(body);
+					req.end();
+				});
+				if (result.status === 200 && result.body?.ok) {
+					expanded = result.body.expanded || "";
+					source = result.body.source;
+					filePath = result.body.filePath;
+				} else {
+					isError = true;
+					errMsg = result.body?.error || `HTTP ${result.status}`;
+				}
+			} catch (err) {
+				isError = true;
+				errMsg = err?.message || String(err);
+			}
+		} else {
+			isError = true;
+			errMsg = "gateway credentials unavailable";
+		}
+
+		this.emit({
+			type: "tool_execution_update",
+			toolId,
+			toolName: "activate_skill",
+			status: "complete",
+			output: isError ? `activate_skill failed: ${errMsg}` : expanded,
+		});
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "activate_skill", isError });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "activate_skill", arguments: input, input },
+				{ type: "text", text: isError ? `Skill activation failed: ${errMsg}` : `Activated /${name}.` },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "activate_skill",
+			isError,
+			content: [{ type: "text", text: isError ? `activate_skill failed: ${errMsg}` : expanded }],
+			details: isError
+				? undefined
+				: { skillExpansion: { name, args: args || "", source, filePath, expanded } },
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
 	async _handleAskUserChoices(multi = false) {
