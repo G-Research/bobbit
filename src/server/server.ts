@@ -28,6 +28,7 @@ import { PersonalityManager } from "./agent/personality-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
@@ -2150,7 +2151,29 @@ async function handleApiRoute(
 			json({ error: `Skill "${skillName}" has disable-model-invocation: true and cannot be activated by the model` }, 403);
 			return;
 		}
-		const expanded = buildSlashSkillPrompt(skill, skillArgs);
+		// Inject the activation header so autonomous activation is byte-equal
+		// to user `/<name>` invocation.
+		const pathRewrite = session.sandboxed
+			? (hostPath: string): string | null => {
+				// Project worktree mounts at /workspace; rewrite when the host
+				// path lives under it. Built-in / personal skills aren't mounted.
+				const projectRoot = (session.projectId
+					? ((sessionManager as any).projectContextManager as import("./agent/project-context-manager.js").ProjectContextManager | undefined)?.getOrCreate(session.projectId)?.project.rootPath
+					: undefined);
+				const normHost = hostPath.replace(/\\/g, "/");
+				const normProj = projectRoot ? projectRoot.replace(/\\/g, "/") : null;
+				const sessionCwdNorm = session.cwd.replace(/\\/g, "/");
+				for (const candidate of [normProj, sessionCwdNorm]) {
+					if (candidate && (normHost === candidate || normHost.startsWith(candidate + "/"))) {
+						const rel = normHost.slice(candidate.length).replace(/^\/+/, "");
+						return "/workspace" + (rel ? "/" + rel : "");
+					}
+				}
+				return null;
+			}
+			: undefined;
+		const skillBody = buildSlashSkillPrompt(skill, skillArgs);
+		const expanded = buildActivationHeader(skill, pathRewrite) + skillBody;
 		json({ ok: true, expanded, source: skill.source, filePath: skill.filePath });
 		return;
 	}

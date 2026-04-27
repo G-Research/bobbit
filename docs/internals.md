@@ -741,6 +741,71 @@ Skills follow the [Agent Skills spec](https://agentskills.io/specification)'s *p
 
 **WS handler echo.** `src/server/ws/handler.ts` must include `skillExpansions` in the user-message echo broadcast back to the client; dropping it causes chips to vanish until reload (when the sidecar replay path rehydrates them). Regression guarded by E2E coverage — see [docs/debugging.md — Skill chip not rendering](debugging.md#skill-chip-not-rendering).
 
+### Skill resource manifest (Level-3 progressive disclosure)
+
+Claude Code's skills spec describes three levels of progressive disclosure: (1) name + description in the system prompt, (2) full SKILL.md body on activation, (3) referenced files (`references/REFERENCE.md`, `scripts/extract.py`, `assets/template.docx`) read on demand using the relative paths the author wrote. Bobbit implements Level 3 by prepending a small synthetic *activation header* to the model-facing expanded body.
+
+**Header format.** Wrapped in an HTML comment fence so it's markdown-invisible (graceful fallback if any UI strip ever misses) and unambiguously regex-strippable:
+
+```
+<!-- skill-activation-header -->
+Skill root: /abs/path/to/skill
+Available resources: references/REFERENCE.md, scripts/extract.py, assets/template.docx
+<!-- /skill-activation-header -->
+```
+
+**Helpers.** `src/server/skills/skill-manifest.ts` exports two functions:
+- `buildSkillResourceManifest(skillRoot)` — scans `references/`, `scripts/`, `assets/` one level deep (subdirs are NOT recursed), returns `{ root, resources, truncated, truncationSuffix }` or `null` if none of those dirs exist. Resource list is sorted alphabetically and capped at **2 KB** of joined output (UTF-8 byte length); overflow is truncated with a `(N more files)` suffix.
+- `buildActivationHeader(skill, pathRewrite?)` — returns the header string (or `""` for legacy `.claude/commands/*.md` single-file skills and synthetic built-ins like `compact` that have no on-disk root). The optional `pathRewrite` callback maps host paths to container paths for sandboxed sessions; returning `null` from it forces a degraded header (see [Sandbox skill visibility](#sandbox-skill-visibility)).
+
+**Call sites.** The header is injected in two places, both server-side, so the model-facing string is identical regardless of activation path:
+- `src/server/skills/resolve-skill-expansions.ts` — for user-typed `/name` invocations, the header is prepended to each expansion's `expanded` field. Because expansions are snapshotted into the sidecar, replays render the same header the agent originally saw.
+- `POST /api/sessions/:id/activate-skill` handler in `src/server/server.ts` — for autonomous `activate_skill` tool calls.
+
+**UI strip.** `<skill-chip>` (`src/ui/components/SkillChip.ts`) strips the header from the disclosure body via `ACTIVATION_HEADER_STRIP_RE` so the user sees only what the SKILL.md author wrote. The regex is duplicated from `skill-manifest.ts` (importing from server code would drag `node:fs`/`node:path` into the UI bundle); **keep both copies in sync**.
+
+**Why `@path` auto-inline was removed.** `slash-skills.ts` previously called `resolveMarkdownRefs()` on every SKILL.md body, eagerly inlining `@references/foo.md` references at load time. This diverged from Claude Code (which keeps Level 3 strictly on-demand), bloated the system prompt, and broke the spec's "Keep your main SKILL.md under 500 lines" expectation. The call was dropped for skill bodies; `@path` text is now passed through verbatim to the model, which reads the referenced file via the activation header's manifest when (and only when) it actually needs the content.
+
+### Sandbox skill visibility
+
+When a skill is activated, Bobbit prepends an *activation header* to the SKILL.md body that tells the model the skill's root directory and a one-level-deep manifest of `references/`, `scripts/`, `assets/` (Level-3 progressive disclosure — see [docs/design/claude-code-skill-parity.md](design/claude-code-skill-parity.md)). This lets the agent read referenced files using the relative paths the skill author wrote.
+
+**Inside the Docker sandbox, only project-local skills are fully visible.**
+
+| Skill location                  | Level 1 (system-prompt listing) | Level 2 (SKILL.md body) | Level 3 (referenced files) |
+| ------------------------------- | :-----------------------------: | :---------------------: | :------------------------: |
+| `<project>/.claude/skills/<name>/` | yes                          | yes                     | **yes**                    |
+| `defaults/skills/<name>/` (built-in) | yes                       | yes                     | **no**                     |
+| `~/.claude/skills/<name>/` (personal) | yes                      | yes                     | **no**                     |
+
+The project worktree mounts at `/workspace` inside the container, so project-local skill roots resolve cleanly via the resolver's `pathRewrite` callback (host path → `/workspace/...`). `docker-args.ts` does **not** mount the Bobbit install directory or `~/.claude`, so built-in and personal skill roots are not reachable from inside the container.
+
+**Degraded header.** When a skill root cannot be exposed inside the sandbox, `buildActivationHeader()` (in `src/server/skills/skill-manifest.ts`) emits a degraded form with no resource manifest:
+
+```
+<!-- skill-activation-header -->
+Skill root: (not visible inside sandbox — see docs/internals.md "Sandbox skill visibility")
+<!-- /skill-activation-header -->
+```
+
+Level-1 (description listing) and Level-2 (the SKILL.md body itself, which is captured on the host before being passed to the sandboxed agent) continue to work for these skills. Only Level-3 — reading actual files under `references/` / `scripts/` / `assets/` — is unavailable. Skills that don't depend on referenced files behave identically inside and outside the sandbox.
+
+**Workaround.** If a built-in or personal skill needs Level-3 access inside the sandbox, copy its directory into the project's `.claude/skills/` tree. A bind-mount or copy-on-activate mechanism that exposes built-in/personal skill roots automatically is a planned follow-up, not part of v1.
+
+**Manual verification recipe.** Inside the sandbox:
+
+```bash
+# Project-local skill works (resource list populated):
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  -X POST "$GW/api/sessions/$SID/activate-skill" \
+  -d '{"name":"<project-skill-name>"}' | jq -r .expanded | head -10
+
+# Built-in skill emits degraded header (no "Available resources:" line):
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  -X POST "$GW/api/sessions/$SID/activate-skill" \
+  -d '{"name":"compact"}' | jq -r .expanded | head -10
+```
+
 ---
 
 ## MCP servers

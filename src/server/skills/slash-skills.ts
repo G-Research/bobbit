@@ -15,7 +15,6 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { parseCustomDirectories as parseCustomDirsFromConfig } from "../agent/config-directories.js";
-import { resolveMarkdownRefs } from "../agent/system-prompt.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Built-in skills shipped with Bobbit in defaults/skills/ (copied to dist/server/defaults/skills/ at build time). */
@@ -118,7 +117,10 @@ function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 		try {
 			const raw = fs.readFileSync(skillFile, "utf-8");
 			const { frontmatter, content: rawContent } = parseFrontmatter(raw);
-			const content = resolveMarkdownRefs(rawContent, path.dirname(skillFile));
+			// Do NOT auto-inline @path/foo.md references. Claude Code uses Level-3
+			// progressive disclosure — the agent reads referenced files on demand,
+			// and the activation-header manifest tells it what's available.
+			const content = rawContent;
 
 			const name = frontmatter.name || entry.name;
 			const description = frontmatter.description ||
@@ -167,7 +169,9 @@ function scanCommandsDir(dir: string): SlashSkill[] {
 		try {
 			const raw = fs.readFileSync(filePath, "utf-8");
 			const { frontmatter, content: rawContent } = parseFrontmatter(raw);
-			const content = resolveMarkdownRefs(rawContent, path.dirname(filePath));
+			// Do NOT auto-inline @path/foo.md references — Level-3 progressive
+			// disclosure (agent reads on demand).
+			const content = rawContent;
 
 			const name = frontmatter.name || baseName;
 			const description = frontmatter.description ||
