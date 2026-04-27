@@ -1,0 +1,11 @@
+name: activate_skill
+description: "Activate a discovered skill by name. Returns the skill's instructions as the tool result; follow them as if the user had typed `/<name> <args>`. Skills with `disable-model-invocation: true` are not callable via this tool."
+summary: "Activate a slash skill autonomously. Returns its expanded instructions."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Skills
+docs: >-
+  Parameters: name (required), args (optional). Returns the resolved skill body
+  via the gateway's POST /api/sessions/:id/activate-skill endpoint. 404 if the
+  skill is not found, 403 if the skill opts out of model invocation.

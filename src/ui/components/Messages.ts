@@ -16,6 +16,8 @@ import { state as appState } from "../../app/state.js";
 import "./ThinkingBlock.js";
 import "./LiveTimer.js";
 import "./ToolGroup.js";
+import "./SkillChip.js";
+import type { SkillChipData } from "./SkillChip.js";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 
 /** Format a message timestamp for display (locale-appropriate time). */
@@ -32,11 +34,26 @@ const MIN_GROUP_SIZE = 2;
 /** Tool names eligible for grouping */
 const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "delegate"]);
 
+/**
+ * Persisted record of a user-typed slash-skill invocation. Mirrors the
+ * server-side SkillExpansion shape — `range` uses UTF-16 code-unit offsets
+ * into the original `text`, matching `String.prototype.slice`.
+ */
+export interface SkillExpansion {
+	name: string;
+	args: string;
+	source?: string;
+	filePath?: string;
+	range: [number, number];
+	expanded: string;
+}
+
 export type UserMessageWithAttachments = {
 	role: "user-with-attachments";
 	content: string | (TextContent | ImageContent)[];
 	timestamp: number;
 	attachments?: Attachment[];
+	skillExpansions?: SkillExpansion[];
 };
 
 // Artifact message type for session persistence
@@ -54,6 +71,72 @@ declare module "@mariozechner/pi-agent-core" {
 		"user-with-attachments": UserMessageWithAttachments;
 		artifact: ArtifactMessage;
 	}
+}
+
+/**
+ * Render `text` with `<skill-chip>` elements spliced in at each expansion's
+ * recorded UTF-16 character range. Plain-text gaps are rendered through
+ * `<markdown-block>` so user formatting is preserved exactly as today; line
+ * breaks become `<br>` via the trailing-spaces trick used in render().
+ *
+ * Robustness: any expansion whose range is invalid (out of bounds, inverted,
+ * or overlapping) is dropped with a warning — the surrounding plain text
+ * still renders. This guarantees we never crash a user bubble because of a
+ * malformed sidecar entry.
+ */
+function renderTextWithSkillChips(
+	text: string,
+	expansions: SkillExpansion[],
+): TemplateResult {
+	const valid: SkillExpansion[] = [];
+	let lastEnd = 0;
+	// Sort by range start so we can splice left-to-right and detect overlap.
+	const sorted = [...expansions].sort((a, b) => a.range[0] - b.range[0]);
+	for (const e of sorted) {
+		const [start, end] = e.range;
+		if (
+			typeof start !== "number" ||
+			typeof end !== "number" ||
+			start < 0 ||
+			end > text.length ||
+			start >= end ||
+			start < lastEnd
+		) {
+			console.warn("[SkillChip] dropping invalid expansion", e);
+			continue;
+		}
+		valid.push(e);
+		lastEnd = end;
+	}
+
+	if (valid.length === 0) {
+		const c = text.replace(/\n/g, "  \n");
+		return html`<markdown-block .content=${c}></markdown-block>`;
+	}
+
+	const parts: TemplateResult[] = [];
+	let cursor = 0;
+	for (const e of valid) {
+		const [s, eIdx] = e.range;
+		if (s > cursor) {
+			const chunk = text.slice(cursor, s).replace(/\n/g, "  \n");
+			parts.push(html`<markdown-block .content=${chunk}></markdown-block>`);
+		}
+		const data: SkillChipData = {
+			name: e.name,
+			args: e.args,
+			source: e.source,
+			filePath: e.filePath,
+			expanded: e.expanded,
+		};
+		parts.push(html`<skill-chip .data=${data}></skill-chip>`);
+		cursor = eIdx;
+	}
+	if (cursor < text.length) {
+		const tail = text.slice(cursor).replace(/\n/g, "  \n");
+		parts.push(html`<markdown-block .content=${tail}></markdown-block>`);
+	}
+	return html`<div class="skill-chip-flow flex flex-wrap items-baseline gap-1">${parts}</div>`;
 }
 
 @customElement("user-message")
@@ -78,10 +161,16 @@ export class UserMessage extends LitElement {
 		// so markdown renders them as <br> instead of collapsing to a single space.
 		const content = rawContent.replace(/\n/g, "  \n");
 
+		const expansions = (this.message as UserMessageWithAttachments).skillExpansions;
+		const body =
+			expansions && expansions.length
+				? renderTextWithSkillChips(rawContent, expansions)
+				: html`<markdown-block .content=${content}></markdown-block>`;
+
 		return html`
 			<div class="flex justify-start mx-2 sm:mx-4 my-1">
 				<div class="user-message-container py-2 px-3 sm:px-4">
-					<markdown-block .content=${content}></markdown-block>
+					${body}
 					${
 						this.message.role === "user-with-attachments" &&
 						this.message.attachments &&

@@ -16,7 +16,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
-import { discoverSlashSkills, getSkillDirectories } from "./skills/slash-skills.js";
+import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
@@ -27,6 +27,7 @@ import { PersonalityStore } from "./agent/personality-store.js";
 import { PersonalityManager } from "./agent/personality-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
+import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
@@ -550,6 +551,7 @@ export function createGateway(config: GatewayConfig) {
 
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
+	initSkillSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
 	// Project registry — persisted at server level.
@@ -2109,6 +2111,47 @@ async function handleApiRoute(
 			const archivedDelegatesOfLive = bfsEnrichArchived([...liveIdSet, ...liveGoalIdsNonPaginated], allArchivedForBfsNonPaginated);
 			json({ generation: currentGen, sessions, archivedDelegates: archivedDelegatesOfLive });
 		}
+		return;
+	}
+
+	// POST /api/sessions/:id/activate-skill — autonomous skill activation
+	const activateSkillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/activate-skill$/);
+	if (activateSkillMatch && req.method === "POST") {
+		const sessionId = activateSkillMatch[1];
+		const session = sessionManager.getSession(sessionId);
+		if (!session) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const body = await readBody(req);
+		const skillName = typeof body?.name === "string" ? body.name : "";
+		const skillArgs = typeof body?.args === "string" ? body.args : "";
+		if (!skillName) {
+			json({ error: "name is required" }, 400);
+			return;
+		}
+		// Resolve skill discovery context: host-side cwd + per-project store.
+		let resolvedConfigStore: { get(key: string): string | undefined } | undefined = projectConfigStore;
+		let skillCwd = session.cwd;
+		if (session.projectId) {
+			const pcm = (sessionManager as any).projectContextManager as import("./agent/project-context-manager.js").ProjectContextManager | undefined;
+			const ctx = pcm?.getOrCreate(session.projectId);
+			if (ctx) {
+				resolvedConfigStore = ctx.projectConfigStore;
+				if (session.sandboxed) skillCwd = ctx.project.rootPath;
+			}
+		}
+		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
+		if (!skill) {
+			json({ error: `Skill "${skillName}" not found` }, 404);
+			return;
+		}
+		if (skill.disableModelInvocation === true) {
+			json({ error: `Skill "${skillName}" has disable-model-invocation: true and cannot be activated by the model` }, 403);
+			return;
+		}
+		const expanded = buildSlashSkillPrompt(skill, skillArgs);
+		json({ ok: true, expanded, source: skill.source, filePath: skill.filePath });
 		return;
 	}
 

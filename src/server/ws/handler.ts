@@ -9,10 +9,61 @@ import type { ProjectContextManager } from "../agent/project-context-manager.js"
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
-import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
+import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
+import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
 // patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
+
+/**
+ * Merge persisted skill-expansion sidecar entries into a list of agent
+ * messages. For each user message whose text body equals a sidecar
+ * `modelText`, rewrite the body to `originalText` and attach
+ * `skillExpansions`. Idempotent: messages without matching sidecar entries
+ * pass through unchanged.
+ */
+function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[] {
+	if (!Array.isArray(messages) || messages.length === 0) return messages;
+	const entries = readSkillSidecarEntries(sessionId);
+	if (entries.length === 0) return messages;
+	// Build a queue of envelopes per modelText so duplicate identical
+	// messages each get matched in FIFO order.
+	const queues = new Map<string, typeof entries>();
+	for (const e of entries) {
+		const arr = queues.get(e.modelText) ?? [];
+		arr.push(e);
+		queues.set(e.modelText, arr);
+	}
+	let changed = false;
+	const out = messages.map((msg: any) => {
+		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
+		let body: string;
+		if (typeof msg.content === "string") body = msg.content;
+		else if (Array.isArray(msg.content)) {
+			const block = msg.content.find((c: any) => c?.type === "text");
+			body = block?.text ?? "";
+		} else body = "";
+		const q = queues.get(body);
+		if (!q || q.length === 0) return msg;
+		const envelope = q.shift()!;
+		changed = true;
+		let newContent: any;
+		if (typeof msg.content === "string") {
+			newContent = envelope.originalText;
+		} else if (Array.isArray(msg.content)) {
+			newContent = msg.content.map((c: any) =>
+				c?.type === "text" ? { ...c, text: envelope.originalText } : c,
+			);
+			if (!newContent.some((c: any) => c?.type === "text")) {
+				newContent.unshift({ type: "text", text: envelope.originalText });
+			}
+		} else {
+			newContent = envelope.originalText;
+		}
+		return { ...msg, content: newContent, skillExpansions: envelope.skillExpansions };
+	});
+	return changed ? out : messages;
+}
 
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
@@ -268,7 +319,6 @@ export function handleWebSocketConnection(
 			switch (msg.type) {
 				case "prompt": {
 					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
-					let promptText = msg.text;
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
@@ -287,44 +337,23 @@ export function handleWebSocketConnection(
 						}
 					}
 
-					// Check for slash skill invocations at word boundaries
-					// Matches "/skill-name" at start of string or after whitespace
-					const slashPattern = /(^|[\s])\/([\w-]+)/g;
-					let match: RegExpExecArray | null;
-					const replacements: Array<{ start: number; end: number; expanded: string }> = [];
-					while ((match = slashPattern.exec(promptText)) !== null) {
-						const skillName = match[2];
-						const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
-						if (!skill) {
-							console.warn(`[ws-handler] Slash skill "${skillName}" not found for session ${sessionId} (cwd=${session.cwd})`);
-						}
-						if (skill) {
-							const prefixLen = match[1].length; // 0 at start, 1 after whitespace
-							const tokenStart = match.index + prefixLen; // position of "/"
-							const tokenEnd = tokenStart + 1 + skillName.length; // end of "/skill-name"
-							// For prefix-only invocation (entire text is "/skill args"), use buildSlashSkillPrompt
-							// For inline, replace just the token with expanded content
-							if (tokenStart === 0 && promptText.match(/^\/([\w-]+)(?:\s+(.*))?$/)) {
-								// Prefix-only: use the full buildSlashSkillPrompt (includes args)
-								const skillArgs = promptText.slice(tokenEnd).trim();
-								promptText = buildSlashSkillPrompt(skill, skillArgs);
-								console.log(`[ws-handler] Slash skill "${skillName}" invoked for session ${sessionId}`);
-								replacements.length = 0; // clear any partial matches
-								break;
-							}
-							replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildSlashSkillPrompt(skill, "") });
-							console.log(`[ws-handler] Inline slash skill "${skillName}" expanded for session ${sessionId}`);
-						}
+					const { originalText, modelText, expansions, unknown } = resolveSkillExpansions(
+						msg.text,
+						skillCwd,
+						resolvedConfigStore,
+					);
+					for (const name of unknown) {
+						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);
 					}
-					// Apply inline replacements right-to-left to preserve indices
-					for (let i = replacements.length - 1; i >= 0; i--) {
-						const r = replacements[i];
-						promptText = promptText.slice(0, r.start) + r.expanded + promptText.slice(r.end);
+					if (expansions.length > 0) {
+						console.log(`[ws-handler] Resolved ${expansions.length} slash-skill expansion(s) for session ${sessionId}`);
 					}
 
-					await sessionManager.enqueuePrompt(sessionId, promptText, {
+					await sessionManager.enqueuePrompt(sessionId, originalText, {
 						images: msg.images,
 						attachments: msg.attachments,
+						skillExpansions: expansions.length ? expansions : undefined,
+						modelText: expansions.length ? modelText : undefined,
 					});
 					break;
 				}
@@ -427,10 +456,11 @@ export function handleWebSocketConnection(
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {
-							data = truncateLargeToolContentInMessages(raw);
+							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(raw));
 						} else if (raw && Array.isArray(raw.messages)) {
 							const truncated = truncateLargeToolContentInMessages(raw.messages);
-							data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
+							data = merged === raw.messages ? raw : { ...raw, messages: merged };
 						}
 						send(ws, { type: "messages", data });
 					}
@@ -510,10 +540,11 @@ export function handleWebSocketConnection(
 									const raw = msgs.data ?? msgs;
 									let data: any = raw;
 									if (Array.isArray(raw)) {
-										data = truncateLargeToolContentInMessages(raw);
+										data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(raw));
 									} else if (raw && Array.isArray(raw.messages)) {
 										const truncated = truncateLargeToolContentInMessages(raw.messages);
-										data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+										const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
+										data = merged === raw.messages ? raw : { ...raw, messages: merged };
 									}
 									send(ws, { type: "messages", data });
 								})

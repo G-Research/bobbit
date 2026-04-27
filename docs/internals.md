@@ -725,6 +725,22 @@ Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additi
 
 **Key file:** `src/server/agent/config-directories.ts`
 
+### Skill chip rendering & autonomous activation
+
+Skills follow the [Agent Skills spec](https://agentskills.io/specification)'s *progressive disclosure* model: skill name + description load with the system prompt (level 1, ~100 tokens each), the full body loads only when the skill is activated (level 2). This keeps the system prompt cheap regardless of how many skills are installed while still letting the agent self-route to the right one mid-turn. Full design: [docs/design/skill-ux-and-autonomous-activation.md](design/skill-ux-and-autonomous-activation.md).
+
+**User invocation — literal text + chip.** When a user types `/name args` (prefix-only) or includes `/name` inline, `resolveSkillExpansions()` (`src/server/skills/resolve-skill-expansions.ts`) returns the original text plus a `skillExpansions[]` array of `{ name, args, source, filePath, range, expanded }`. The `expanded` body is *snapshotted at invocation time* so replaying the transcript later renders the same content the agent originally saw, even if SKILL.md has changed on disk. The chat bubble shows the literal text; each expansion is spliced in as a `<skill-chip>` element (`src/ui/components/SkillChip.ts`) at its recorded range. The model-facing prompt is byte-equal to the legacy fully-expanded form — only the persisted UI shape changed.
+
+**Sidecar persistence.** The pi-coding-agent CLI owns the `.jsonl` transcript schema, so expansions are stored out-of-band in `<stateDir>/skill-sidecar/<sessionId>.jsonl` (one JSON line per user message). Lookup on replay matches `modelText` exactly with a ±2 s timestamp tolerance (falls back to text-only match for clock skew). A missing or unreadable sidecar is treated as "no expansions" — old sessions render as plain text, fully backward compatible. Key file: `src/server/skills/skill-sidecar.ts`.
+
+**Autonomous activation — system prompt section.** At session start, `system-prompt.ts` injects an "Available Skills" section listing `name`, `description`, and `argument-hint` for every discovered skill where: (a) `disable-model-invocation` is not set, and (b) the role has access to the `Skills` tool group. The section is capped at 4 KB; if exceeded, skills are sorted alphabetically and truncated with a log warning. Existing 5-second cache TTL applies, so newly added skills appear within 5 s for autonomous use (immediately for slash use via cache miss).
+
+**Activation tool.** Built-in `activate_skill({ name, args? })` (`defaults/tools/skills/activate_skill.yaml` + `extension.ts`) looks up the skill via `getSlashSkill()`, runs `buildSlashSkillPrompt()` along the same snapshot path as user invocations, and returns the expanded body as the tool result. The chat UI renders the tool call as the same `<skill-chip>` UX (`src/ui/tools/renderers/ActivateSkillRenderer.ts`). Activation of a `disable-model-invocation` skill is rejected with a clear error.
+
+**Tool-group policy.** `activate_skill` is in the `Skills` tool group. Roles can opt out by setting `Skills: never` in their `toolPolicies`, which both removes the "Available Skills" section from the system prompt *and* hard-blocks any `activate_skill` call — see [Tool access policies](#tool-access-policies).
+
+**WS handler echo.** `src/server/ws/handler.ts` must include `skillExpansions` in the user-message echo broadcast back to the client; dropping it causes chips to vanish until reload (when the sidecar replay path rehydrates them). Regression guarded by E2E coverage — see [docs/debugging.md — Skill chip not rendering](debugging.md#skill-chip-not-rendering).
+
 ---
 
 ## MCP servers

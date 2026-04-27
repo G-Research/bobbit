@@ -31,6 +31,7 @@ import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRende
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
 import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
+import { ActivateSkillRenderer } from "./renderers/ActivateSkillRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -74,6 +75,7 @@ registerToolRenderer("review_open", new ReviewOpenRenderer());
 registerToolRenderer("review_close", new ReviewCloseRenderer());
 registerToolRenderer("verification_result", new VerificationResultRenderer());
 registerToolRenderer("ask_user_choices", new AskUserChoicesRenderer());
+registerToolRenderer("activate_skill", new ActivateSkillRenderer());
 
 // Proposal tools — one renderer per proposal type
 const PROPOSAL_TOOL_NAMES = [
