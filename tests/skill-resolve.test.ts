@@ -37,11 +37,12 @@ after(() => {
 
 const { resolveSkillExpansions } = await import("../src/server/skills/resolve-skill-expansions.ts");
 const { buildSlashSkillPrompt, getSlashSkill } = await import("../src/server/skills/slash-skills.ts");
+const { buildActivationHeader } = await import("../src/server/skills/skill-manifest.ts");
 
 function expandedFor(name: string, args = ""): string {
 	const skill = getSlashSkill(cwdDir, name);
 	if (!skill) throw new Error(`fixture skill not found: ${name}`);
-	return buildSlashSkillPrompt(skill, args);
+	return buildActivationHeader(skill) + buildSlashSkillPrompt(skill, args);
 }
 
 describe("resolveSkillExpansions", () => {
@@ -161,11 +162,11 @@ describe("resolveSkillExpansions", () => {
 				const tokenEnd = tokenStart + 1 + skillName.length;
 				if (tokenStart === 0 && promptText.match(/^\/([\w-]+)(?:\s+(.*))?$/)) {
 					const skillArgs = promptText.slice(tokenEnd).trim();
-					promptText = buildSlashSkillPrompt(skill, skillArgs);
+					promptText = buildActivationHeader(skill) + buildSlashSkillPrompt(skill, skillArgs);
 					replacements.length = 0;
 					break;
 				}
-				replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildSlashSkillPrompt(skill, "") });
+				replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildActivationHeader(skill) + buildSlashSkillPrompt(skill, "") });
 			}
 			for (let i = replacements.length - 1; i >= 0; i--) {
 				const r = replacements[i];

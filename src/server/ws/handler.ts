@@ -337,10 +337,27 @@ export function handleWebSocketConnection(
 						}
 					}
 
+					const sandboxPathRewrite = session.sandboxed
+						? (hostPath: string): string | null => {
+							const normHost = hostPath.replace(/\\/g, "/");
+							const projectRoot = (session.projectId && projectContextManager)
+								? projectContextManager.getOrCreate(session.projectId)?.project.rootPath?.replace(/\\/g, "/")
+								: undefined;
+							const sessionCwdNorm = session.cwd.replace(/\\/g, "/");
+							for (const candidate of [projectRoot, sessionCwdNorm]) {
+								if (candidate && (normHost === candidate || normHost.startsWith(candidate + "/"))) {
+									const rel = normHost.slice(candidate.length).replace(/^\/+/, "");
+									return "/workspace" + (rel ? "/" + rel : "");
+								}
+							}
+							return null;
+						}
+						: undefined;
 					const { originalText, modelText, expansions, unknown } = resolveSkillExpansions(
 						msg.text,
 						skillCwd,
 						resolvedConfigStore,
+						sandboxPathRewrite,
 					);
 					for (const name of unknown) {
 						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);

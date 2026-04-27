@@ -72,11 +72,24 @@ export class SkillChip extends LitElement {
 		`;
 	}
 
+	/** Strip the activation-header fence (Level-3 progressive disclosure) before rendering.
+	 * The header is for the model only — it shouldn't show up in the disclosure UI.
+	 * Anchored at `^\s*` so an in-body fence (rare, but possible if a SKILL.md
+	 * literally contains the marker) is preserved. The model-facing `expanded`
+	 * field is never mutated here. */
+	private get displayBody(): string {
+		const body = this.data?.expanded || "";
+		return body.replace(
+			/^\s*<!--\s*skill-activation-header\s*-->[\s\S]*?<!--\s*\/skill-activation-header\s*-->\s*/,
+			"",
+		);
+	}
+
 	private renderExpansion(): TemplateResult {
 		return html`
 			<div class="skill-chip-expansion mt-2 mb-1 border border-border/60 rounded-md bg-muted/40 overflow-hidden">
 				<div class="px-3 py-2 max-h-[420px] overflow-y-auto text-sm">
-					<markdown-block .content=${this.data.expanded}></markdown-block>
+					<markdown-block .content=${this.displayBody}></markdown-block>
 				</div>
 				${this.data.filePath
 					? html`<div class="px-3 py-1.5 border-t border-border/60 text-[11px] text-muted-foreground font-mono truncate">

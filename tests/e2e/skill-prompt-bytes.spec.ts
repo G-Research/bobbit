@@ -48,6 +48,7 @@ test.describe("model-prompt byte equality", () => {
 		// (the in-process harness imports from dist/server/...).
 		const { resolveSkillExpansions } = await import("../../dist/server/skills/resolve-skill-expansions.js");
 		const { getSlashSkill, buildSlashSkillPrompt } = await import("../../dist/server/skills/slash-skills.js");
+		const { buildActivationHeader } = await import("../../dist/server/skills/skill-manifest.js");
 
 		// Legacy reference algorithm — copied verbatim from the pre-refactor
 		// handler.ts inline block. Any change here is a deliberate spec change.
@@ -65,11 +66,11 @@ test.describe("model-prompt byte equality", () => {
 				const tokenEnd = tokenStart + 1 + skillName.length;
 				if (tokenStart === 0 && promptText.match(/^\/([\w-]+)(?:\s+(.*))?$/)) {
 					const skillArgs = promptText.slice(tokenEnd).trim();
-					promptText = buildSlashSkillPrompt(skill, skillArgs);
+					promptText = buildActivationHeader(skill) + buildSlashSkillPrompt(skill, skillArgs);
 					replacements.length = 0;
 					break;
 				}
-				replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildSlashSkillPrompt(skill, "") });
+				replacements.push({ start: tokenStart, end: tokenEnd, expanded: buildActivationHeader(skill) + buildSlashSkillPrompt(skill, "") });
 			}
 			for (let i = replacements.length - 1; i >= 0; i--) {
 				const r = replacements[i];
