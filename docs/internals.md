@@ -1251,6 +1251,32 @@ Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId
 
 ---
 
+## Chat surface UI invariants
+
+Two surfaces in the chat client previously relied on time-based heuristics that gave intermittent, hard-to-repro misbehaviour (scroll snap-back / vibration in idle sessions, stale messages trailing after newer ones on session navigate). Both have been replaced with deterministic invariants the implementation must preserve.
+
+### Chat scroll lock invariant
+
+`AgentInterface` (`src/ui/components/AgentInterface.ts`) keeps the message viewport pinned to the bottom only while `_stickToBottom` is true. The flag is governed by three rules — no timers, no debounces:
+
+1. **Auto-scroll only on positive delta.** The `ResizeObserver` callback computes `delta = newScrollHeight - _lastScrollHeight`. `delta < 0` (shrink) updates the cached height and returns. `delta === 0` is a no-op — the original snap-back bug came from clamping `scrollTop = scrollHeight` on every zero-delta RO fire, which converted a benign sub-pixel reflow into a vibration loop. Only `delta > 0` (real growth) triggers a programmatic scroll, and only when `_stickToBottom` is already true.
+2. **Programmatic scrolls are filtered, not timed.** Before each programmatic `scrollTop` write the code latches `(_lastProgrammaticScrollTop, _lastProgrammaticScrollHeight)`. The matching browser-emitted scroll event is consumed exactly once and the latch is cleared, so a later coincidental geometry match still counts as user intent. This replaces the previous `_isAutoScrolling` timer that would silently drop user scroll-ups whenever the RO happened to fire faster than its 150ms re-arm window.
+3. **User intent is observed, not inferred.** Explicit `wheel`, `touchstart`, and `keydown` (PageUp/Down, Arrow Up/Down, Home, End) listeners on the scroll container set `_stickToBottom = false` immediately. Geometry alone cannot reliably distinguish a user scroll-up from a programmatic one across browsers and pointer types, so the listeners are the source of truth for "the user took control". The 5px stick-to-bottom tail in `_handleScroll` is just a tolerance for sub-pixel rounding — not an intent heuristic.
+
+When modifying scroll behaviour: do not introduce new timers, do not widen the 5px tail, and do not reach for `_isAutoScrolling`-style flags. If a new code path scrolls programmatically, it must update the latch via the same helper used by the existing auto-scroll path so its echo gets consumed. Behavioural twin test: `tests/agent-interface-scroll.spec.ts` (the `delta === 0` no-op case is the canonical regression).
+
+### Snapshot merge invariant
+
+`RemoteAgent.messages` snapshot handling (`src/app/remote-agent.ts`, the `messages` frame handler around `serverIds`) merges three client-only buckets — `_liveEventMessages` (optimistic / live-streamed), `_pendingPermissionCards`, `_compactionSyntheticMessages` — into the server-persisted snapshot. The merge contract is:
+
+- **The server snapshot is authoritative for any id it contains.** Client buckets are filtered against `serverIds = new Set(snapshot.map(m => m.id))`; entries whose id appears in the snapshot are dropped from the bucket. Compaction synthetics also fall back to text-prefix matching (`"Context compacted"`) for legacy entries that predate stable ids.
+- **Client buckets only fill in messages the snapshot lacks.** They never override, reorder, or augment a server-persisted message. After reconciliation, `_liveEventMessages` is cleared (its purpose is purely the optimistic-render gap before the server confirms); `_compactionSyntheticMessages` and `_pendingPermissionCards` keep only their unmatched survivors.
+- **The merged result is sorted by `(timestamp, insertionOrder)`.** The sort is stable: each entry is index-tagged before sorting and the comparator falls back to the tag on equal timestamps, so server-snapshot order is preserved within a single timestamp. This is the fix for the "stale messages trailing after newer ones" bug — previously the buckets were appended after `_state.messages = snapshot`, so a synthetic compaction marker (or stale permission card) would land after newer post-compaction messages.
+
+When modifying snapshot handling: never push a client-bucket entry without checking `serverIds`; never replace the post-merge sort with an append; if a new client bucket is introduced, route it through the same `serverIds`-filter + timestamp-sort path. Pinned by `tests/remote-agent-snapshot-merge.test.ts`.
+
+---
+
 ## Errored-turn recovery (implicit unstick on new input)
 
 When an agent turn ends with `stopReason: "error"` (malformed tool_use JSON, provider transport blip not on the whitelist, content-filter trip, etc.), `SessionManager.handleAgentLifecycle` sets `session.lastTurnErrored = true`. Historically the queue was then fully gated: any subsequent prompt or steer sat in `promptQueue` forever until the user clicked the UI Retry button. That worked for "human needs to decide", but it created a permanent-wedge failure mode for transient glitches the `TRANSIENT_ERROR_PATTERNS` list didn't match, and it silently swallowed team-lead nudges to errored workers (stalling whole teams overnight).
