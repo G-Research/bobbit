@@ -8,6 +8,8 @@ import type {
 } from "@mariozechner/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import { marked } from "marked";
 import { renderTool } from "../tools/index.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
@@ -114,14 +116,21 @@ function renderTextWithSkillChips(
 		return html`<markdown-block .content=${c}></markdown-block>`;
 	}
 
+	// Render gap text as inline HTML so it flows next to the chip on the same
+	// line. Block-level markdown (headers/lists) is unusual in user messages;
+	// `parseInline` covers emphasis, code, links, and line breaks via the
+	// trailing-spaces trick. We emit a <span> per gap so the wrapping flex
+	// container can break between words naturally on mobile.
 	const parts: TemplateResult[] = [];
 	let cursor = 0;
+	const renderGap = (slice: string): TemplateResult => {
+		const withBreaks = slice.replace(/\n/g, "  \n");
+		const inlineHtml = marked.parseInline(withBreaks, { async: false }) as string;
+		return html`<span class="skill-chip-gap">${unsafeHTML(inlineHtml)}</span>`;
+	};
 	for (const e of valid) {
 		const [s, eIdx] = e.range;
-		if (s > cursor) {
-			const chunk = text.slice(cursor, s).replace(/\n/g, "  \n");
-			parts.push(html`<markdown-block .content=${chunk}></markdown-block>`);
-		}
+		if (s > cursor) parts.push(renderGap(text.slice(cursor, s)));
 		const data: SkillChipData = {
 			name: e.name,
 			args: e.args,
@@ -132,11 +141,8 @@ function renderTextWithSkillChips(
 		parts.push(html`<skill-chip .data=${data}></skill-chip>`);
 		cursor = eIdx;
 	}
-	if (cursor < text.length) {
-		const tail = text.slice(cursor).replace(/\n/g, "  \n");
-		parts.push(html`<markdown-block .content=${tail}></markdown-block>`);
-	}
-	return html`<div class="skill-chip-flow flex flex-wrap items-baseline gap-1">${parts}</div>`;
+	if (cursor < text.length) parts.push(renderGap(text.slice(cursor)));
+	return html`<div class="skill-chip-flow flex flex-wrap items-baseline gap-x-1 gap-y-1 markdown-content">${parts}</div>`;
 }
 
 @customElement("user-message")

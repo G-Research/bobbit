@@ -40,9 +40,11 @@ function userBubble(page: import("@playwright/test").Page) {
 	return page.locator("user-message").first();
 }
 
-/** Locator: a SkillChip element anywhere on the page. */
+/** Locator: a SkillChip element anywhere on the page. We target the inner
+ * `.skill-chip-pill` because the `<skill-chip>` host uses `display: contents`
+ * in inline mode and therefore has no bounding box of its own. */
 function skillChip(page: import("@playwright/test").Page) {
-	return page.locator("skill-chip").first();
+	return page.locator(".skill-chip-pill").first();
 }
 
 test.describe("skill-chip UI", () => {
@@ -79,7 +81,7 @@ test.describe("skill-chip UI", () => {
 		await expect(page.getByText(SKILL_BODY_MARKER).first()).toHaveCount(0);
 
 		// Click the chip pill to expand.
-		await chip.locator(".skill-chip-pill").first().click();
+		await chip.first().click();
 		await expect(page.getByText(SKILL_BODY_MARKER).first()).toBeVisible({ timeout: 5_000 });
 
 		// (3) reload \u2014 chip + literal text persist (replay from sidecar).
@@ -130,7 +132,7 @@ test.describe("skill-chip UI", () => {
 		await expect(chip).toContainText(`/${SKILL_NAME}`);
 
 		// Click to expand.
-		await chip.locator(".skill-chip-pill").first().click();
+		await chip.first().click();
 		await expect(page.getByText(SKILL_BODY_MARKER).first()).toBeVisible({ timeout: 5_000 });
 	});
 });

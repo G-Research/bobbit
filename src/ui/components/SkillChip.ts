@@ -43,8 +43,15 @@ export class SkillChip extends LitElement {
 
 	override connectedCallback(): void {
 		super.connectedCallback();
-		// inline-flex so multiple chips can sit on the same wrapped line of text
-		this.style.display = this.block ? "block" : "inline-flex";
+		if (this.block) {
+			this.style.display = "block";
+		} else {
+			// `display: contents` so our pill + expansion participate directly in
+			// the parent's flex-wrap layout. This lets the expansion claim a full
+			// row beneath the chip via `basis-full` instead of being squeezed
+			// inside the chip's narrow inline box.
+			this.style.display = "contents";
+		}
 	}
 
 	private toggle = (e: Event) => {
@@ -94,10 +101,14 @@ export class SkillChip extends LitElement {
 		// chips inline and CSS makes the expansion break to a new line via
 		// the `w-full` class.
 		if (!this.block) {
+			// With `display: contents` on the host, these two children sit at the
+			// same flex-wrap level as the surrounding text spans. `basis-full` on
+			// the expansion forces it onto its own row spanning the full bubble
+			// width — which is what we want on both desktop and mobile.
 			return html`
 				${this.renderPill()}
 				${this.expanded
-					? html`<span class="block w-full basis-full">${this.renderExpansion()}</span>`
+					? html`<div class="basis-full w-full">${this.renderExpansion()}</div>`
 					: ""}
 			`;
 		}
