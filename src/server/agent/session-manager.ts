@@ -3641,6 +3641,13 @@ export class SessionManager {
 	 * the agent is fully usable either way.
 	 */
 	private async renameSessionFromPool(session: SessionInfo, title: string): Promise<void> {
+		// TODO Phase 4 follow-up: multi-repo rename. When the session was claimed
+		// from a multi-repo pool entry (`session.repoWorktrees` populated), the
+		// rename below must run in parallel per repo:
+		//   await Promise.all(repos.map(r => renameOne(r.repoPath, oldBranch, ...)))
+		// followed by per-repo `git worktree move`. For now the single-repo path
+		// runs and any per-repo entries on the session record stay pointing at
+		// the pool path — sweeper will reclaim if the session is archived.
 		if (!session.poolId) return;
 		if (session.sandboxed) return;
 		if (!session.repoPath) return;

@@ -28,13 +28,17 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePush, moveWorktree, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, moveWorktree, createWorktreeSet, type WorktreeResult } from "../skills/git.js";
+import type { Component } from "./project-config-store.js";
 
 const execFile = promisify(execFileCb);
 
 interface PoolEntry {
 	branchName: string;       // e.g. "pool/_pool-<8hex>" — git ref after fill
+	/** Back-compat alias for `worktrees[0].worktreePath` in single-repo mode. */
 	worktreePath: string;
+	/** Multi-repo: per-repo worktree entries. Absent for single-repo. */
+	worktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 	createdAt: number;
 }
 
@@ -46,6 +50,10 @@ export interface PoolClaimResult extends WorktreeResult {
 	 * fully usable; callers may choose to surface this to the UI.
 	 */
 	degraded?: boolean;
+	/** Multi-repo: per-repo worktree entries. Absent for single-repo entries. */
+	worktrees?: Array<{ repo: string; worktreePath: string }>;
+	/** Multi-repo: the per-branch container directory (`<wtRoot>/<branchSlug>`). */
+	container?: string;
 }
 
 /** Result of an unnamed claim — the pool entry handed to the caller as-is. */
@@ -86,14 +94,19 @@ export class WorktreePool {
 	private targetSize: number;
 	private setupCommand?: string;
 
-	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string; components?: PoolComponent[] }) {
+	/** Components driving multi-repo fill. Undefined or single (repo===".") behaves as today. */
+	private components?: Component[];
+
+	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string; components?: PoolComponent[] | Component[] }) {
 		this.repoPath = opts.repoPath;
 		this.targetSize = opts.targetSize ?? 2;
 		this.setupCommand = opts.setupCommand;
-		// `components` is accepted (and stored on a future field) so Phase 4
-		// can flip the pool entry into a multi-repo set without breaking
-		// existing call sites. Today it has no behavioural effect.
-		void opts.components;
+		this.components = opts.components as Component[] | undefined;
+	}
+
+	/** Whether the pool's stored components imply multi-repo fill. */
+	private isMultiRepo(): boolean {
+		return !!this.components && this.components.some(c => c.repo !== ".");
 	}
 
 	/** Number of ready worktrees available. */
@@ -135,12 +148,11 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Phase 4 stub: replace the component set used for future pool fills.
-	 * Existing entries stay in the pool until claimed. No-op today —
-	 * single-repo only.
+	 * Replace the component set used for future pool fills. Existing entries
+	 * stay in the pool until claimed; the next `_fill()` will use the new shape.
 	 */
-	setComponents(_components: PoolComponent[]): void {
-		// Phase 4: invalidate-on-divergence + multi-repo entry rebuild.
+	setComponents(components: Component[] | PoolComponent[]): void {
+		this.components = components as Component[];
 	}
 
 	/**
@@ -197,7 +209,17 @@ export class WorktreePool {
 		this.freshenInBackground(finalPath, targetBranch);
 
 		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${finalPath}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
-		return { worktreePath: finalPath, branchName: targetBranch, degraded };
+		const result: PoolClaimResult = { worktreePath: finalPath, branchName: targetBranch, degraded };
+		if (entry.worktrees && entry.worktrees.length > 0) {
+			// TODO Phase 4 follow-up: claim() does not yet rename per-repo
+			// worktrees in parallel for multi-repo entries. Today the pool
+			// fills single-repo only (see `_fill`). When multi-repo prebuild
+			// lands, this block must `Promise.all(entry.worktrees.map(...))` the
+			// rename + move per repo.
+			result.worktrees = entry.worktrees.map(w => ({ repo: w.repo, worktreePath: w.worktreePath }));
+			result.container = finalPath;
+		}
+		return result;
 	}
 
 	/**
@@ -327,6 +349,18 @@ export class WorktreePool {
 			const uuid8 = randomUUID().slice(0, 8);
 			const branchName = `${POOL_BRANCH_PREFIX}${uuid8}`;
 			try {
+				if (this.isMultiRepo() && this.components) {
+					// Multi-repo prebuild via createWorktreeSet — entry carries per-repo paths.
+					const set = await createWorktreeSet(this.repoPath, this.components, branchName);
+					this.pool.push({
+						branchName,
+						worktreePath: set.container,
+						worktrees: set.worktrees,
+						createdAt: Date.now(),
+					});
+					console.log(`[worktree-pool] Ready (multi-repo): ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
+					continue;
+				}
 				const result = await createWorktree(this.repoPath, branchName, {
 					setupCommand: this.setupCommand,
 					skipPush: true,

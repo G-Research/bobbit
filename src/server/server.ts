@@ -1838,6 +1838,45 @@ async function handleApiRoute(
 					newCtx.goalStore.bumpGeneration();
 				};
 			}
+
+			// Multi-repo: accept optional components / workflows in the create body.
+			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
+			const createComponents = (body as Record<string, unknown>).components;
+			const createWorkflows = (body as Record<string, unknown>).workflows;
+			if (newCtx) {
+				if (Array.isArray(createComponents) && createComponents.length > 0) {
+					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
+						try {
+							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
+							const errors = validateAllWorkflows(
+								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
+								createComponents as Parameters<typeof validateAllWorkflows>[1],
+							);
+							if (errors.length > 0) {
+								projectRegistry.remove(project.id);
+								json({ error: "Workflow validation failed", details: errors }, 400);
+								return;
+							}
+						} catch { /* best-effort */ }
+					}
+					const normalized = (createComponents as Array<Record<string, unknown>>).map(c => ({
+						name: String(c.name ?? ""),
+						repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
+						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
+						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
+						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+					}));
+					newCtx.projectConfigStore.setComponents(normalized);
+					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
+						newCtx.projectConfigStore.setWorkflows(createWorkflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+					}
+				} else {
+					// Default single-repo component named after the project.
+					if (newCtx.projectConfigStore.getComponents().length === 0) {
+						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
+					}
+				}
+			}
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -1987,11 +2026,34 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 
-			// Validate ALL keys before writing ANY (atomic: all-or-nothing)
+			// Extract structured fields (components / workflows) before flat-key validation.
+			const components = (body as Record<string, unknown>).components;
+			const workflows = (body as Record<string, unknown>).workflows;
+			delete (body as Record<string, unknown>).components;
+			delete (body as Record<string, unknown>).workflows;
+
+			// Validate ALL flat keys before writing ANY (atomic: all-or-nothing)
 			for (const [key] of Object.entries(body)) {
 				if (key.includes(".")) {
 					json({ error: `Config key "${key}" must not contain dots` }, 400);
 					return;
+				}
+			}
+
+			// Validate workflows structurally if both components and workflows are present.
+			if (components && workflows && Array.isArray(components) && typeof workflows === "object") {
+				try {
+					const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
+					const errors = validateAllWorkflows(
+						workflows as Parameters<typeof validateAllWorkflows>[0],
+						components as Parameters<typeof validateAllWorkflows>[1],
+					);
+					if (errors.length > 0) {
+						json({ error: "Workflow validation failed", details: errors }, 400);
+						return;
+					}
+				} catch (err) {
+					console.warn("[server] workflow validation skipped:", err);
 				}
 			}
 
@@ -2004,6 +2066,22 @@ async function handleApiRoute(
 					ctx.projectConfigStore.set(key, value);
 				}
 			}
+
+			// Persist structured fields if provided.
+			if (Array.isArray(components)) {
+				const normalized = (components as Array<Record<string, unknown>>).map(c => ({
+					name: String(c.name ?? ""),
+					repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
+					relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
+					worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
+					commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+				}));
+				ctx.projectConfigStore.setComponents(normalized);
+			}
+			if (workflows && typeof workflows === "object" && !Array.isArray(workflows)) {
+				ctx.projectConfigStore.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+			}
+
 			json({ ok: true });
 			return;
 		}
@@ -4668,7 +4746,24 @@ async function handleApiRoute(
 		try {
 			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked });
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-			json(result);
+
+			// Multi-repo aware envelope: include `repos` map + `aggregate` for back-compat.
+			const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+			if (repoWorktrees && Object.keys(repoWorktrees).length > 0) {
+				const repos: Record<string, typeof result> = {};
+				for (const [repoName, repoPath] of Object.entries(repoWorktrees)) {
+					try {
+						if (cid || fs.existsSync(repoPath)) {
+							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked });
+							if (r) repos[repoName] = r;
+						}
+					} catch { /* per-repo failure non-fatal */ }
+				}
+				json({ ...result, aggregate: result, repos });
+			} else {
+				// Single-repo: include `repos: { ".": result }, aggregate: result` for back-compat.
+				json({ ...result, aggregate: result, repos: { ".": result } });
+			}
 		} catch (err: any) {
 			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
 		}
@@ -4695,8 +4790,14 @@ async function handleApiRoute(
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		const repoParam = url.searchParams.get("repo") || undefined;
+		const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+		let diffCwd = cwd;
+		if (repoParam && goalRepoWorktrees && goalRepoWorktrees[repoParam]) {
+			diffCwd = goalRepoWorktrees[repoParam];
+		}
 		try {
-			const diff = await getGitDiff(cwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }

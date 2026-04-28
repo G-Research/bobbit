@@ -78,6 +78,8 @@ export interface PersistedSession {
 	poolId?: string;
 	/** True when the session is on its target branch but the worktree dir is still at the pool path. */
 	worktreeDegraded?: boolean;
+	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
+	repoWorktrees?: Record<string, string>;
 }
 
 /**

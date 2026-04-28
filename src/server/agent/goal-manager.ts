@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../skills/git.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
+import type { Component } from "./project-config-store.js";
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -30,6 +31,13 @@ export class GoalManager {
 	 * falls back to a fresh `createWorktree` if the pool is empty.
 	 */
 	private poolResolver?: () => WorktreePool | null | undefined;
+	/**
+	 * Resolve the components[] for a goal's project. When set and the project
+	 * has any `repo !== "."` component, `_doSetupWorktree` uses
+	 * `createWorktreeSet()` instead of the single-repo `createWorktree()`
+	 * fallback. Single-repo behavior is unchanged.
+	 */
+	private componentsResolver?: (projectId: string) => Component[];
 
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
 		this.store = goalStore;
@@ -45,6 +53,14 @@ export class GoalManager {
 	 */
 	setPoolResolver(resolver: () => WorktreePool | null | undefined): void {
 		this.poolResolver = resolver;
+	}
+
+	/**
+	 * Wire the components resolver. When unset (or returning a single-component
+	 * list), goal worktrees use the legacy `createWorktree` fallback.
+	 */
+	setComponentsResolver(resolver: (projectId: string) => Component[]): void {
+		this.componentsResolver = resolver;
 	}
 
 	/**
@@ -194,12 +210,18 @@ export class GoalManager {
 					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 						? path.join(claim.worktreePath, preliminaryOffset)
 						: claim.worktreePath;
-					this.store.update(goal.id, {
+					const updates: Parameters<typeof this.store.update>[1] = {
 						worktreePath: claim.worktreePath,
 						cwd: offsetCwd,
 						setupStatus: "ready",
 						setupError: undefined,
-					});
+					};
+					if (claim.worktrees && claim.worktrees.length > 0) {
+						updates.repoWorktrees = Object.fromEntries(
+							claim.worktrees.map(w => [w.repo, w.worktreePath]),
+						);
+					}
+					this.store.update(goal.id, updates);
 					console.log(`[goal-manager] Worktree claimed from pool for goal "${goal.title}": ${claim.worktreePath} (branch: ${goal.branch}${claim.degraded ? ", degraded" : ""})`);
 					return;
 				}
@@ -208,9 +230,33 @@ export class GoalManager {
 			}
 		}
 
+		// If multi-repo and we have a components resolver, use createWorktreeSet.
+		const components = goal.projectId && this.componentsResolver
+			? this.componentsResolver(goal.projectId)
+			: undefined;
+		const isMulti = !!components && components.some(c => c.repo !== ".");
+
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
+				if (isMulti && components) {
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!);
+					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
+						? path.join(set.container, preliminaryOffset)
+						: set.container;
+					const repoWorktrees = Object.fromEntries(
+						set.worktrees.map(w => [w.repo, w.worktreePath]),
+					);
+					this.store.update(goal.id, {
+						worktreePath: set.container,
+						cwd: offsetCwd,
+						repoWorktrees,
+						setupStatus: "ready",
+						setupError: undefined,
+					});
+					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
+					return;
+				}
 				const result = await createWorktree(goal.repoPath!, goal.branch!);
 				// Apply the subdirectory offset to the actual worktree path
 				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."

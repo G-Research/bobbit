@@ -1,3 +1,13 @@
+// TODO Phase 4 follow-up: integrate repo-scan results into the Add-Project flow.
+// When the user picks a folder, server runs `repo-scan.ts::scanRepos` and the
+// project assistant proposes:
+//   - A checklist of detected repos (default all checked).
+//   - For each checked repo, an editable `commands` map pre-filled from
+//     package.json/pyproject.toml/Cargo.toml.
+//   - Per-repo "data-only" toggle that drops the commands map.
+//   - "Preview workflows" button rendering the auto-generated `workflows:` block.
+// Today this popover stays a single-folder picker and the assistant flow only
+// emits flat-field projects (legacy single-repo). See docs/design/multi-repo-components.md §8.1.
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 

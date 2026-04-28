@@ -50,6 +50,17 @@ When ready, call the \`propose_project\` tool with these parameters:
 
 Only include parameters you actually discovered — omit any whose value would be empty.
 
+## Multi-repo & components
+
+A project may hold one or more components (apps, libs, services, docs). When you propose a project, include a \`components\` array — each component is a separate build target with its own commands and per-component setup hook. Single-repo projects use exactly one component with \`repo: "."\` and **the component name MUST equal the project name**.
+
+Detection guidance:
+- \`rootPath\` itself has \`.git\` AND no qualifying subdirectories → single-repo, one component named after the project.
+- \`rootPath\` has no \`.git\` but children one level deep do → multi-repo; emit one component per child repo. Repo subfolders with no \`.git\` and no manifest are skipped.
+- A component without a \`commands\` map is **data-only** (think docs/, schemas/, fixtures) and contributes no workflow steps.
+
+When you generate \`workflows\`, every \`type: command\` step that targets a build/test/check command should use the structural \`{ component, command }\` shape (not literal shell strings) so the workflow stays in sync with components. Free-form \`run:\` shell remains available for ad-hoc operations like \`git push\`. See \`defaults/workflow-authoring-guide.md\` for the full schema.
+
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
 Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.`;

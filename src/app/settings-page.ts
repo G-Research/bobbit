@@ -1,3 +1,9 @@
+// TODO Phase 4 follow-up: add a "Components" section to the per-project settings
+// tab — read-only listing of components from `/api/projects/:id/config` with
+// a "(legacy single-repo)" hint when components is empty, plus a `worktree_root`
+// text input and "Re-scan repos" / "Regenerate workflows" buttons. The editable
+// per-component editor (rename / add / remove / commands map) lands in the same
+// follow-up. See docs/design/multi-repo-components.md §8.2.
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
