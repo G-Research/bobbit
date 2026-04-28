@@ -21,7 +21,6 @@ import { gatewayFetch, updateGoal } from "./api.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
-import { fetchPersonalities, type PersonalityData } from "./api.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 
@@ -604,18 +603,10 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 	const initialColorIndex: number = sessionColorMap.get(sessionId) ?? -1;
 	let pendingRole: string | null = null;
 	let pendingColorIndex: number | null = null;
-	// Track pending personality changes
-	const initialPersonalities: string[] = session0?.personalities || [];
-	let pendingPersonalities: string[] | null = null;
-	let availablePersonalities: PersonalityData[] = [];
 
-	// Load roles and personalities for the picker
+	// Load roles for the picker
 	import("./api.js").then(({ fetchRoles }) => {
 		if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
-	});
-	fetchPersonalities().then((personalities) => {
-		availablePersonalities = personalities;
-		renderDialog();
 	});
 
 	const cleanup = () => {
@@ -645,21 +636,19 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 			setSessionColor(sessionId, pendingColorIndex);
 		}
 
-		// Apply role/personality changes (these restart the agent — do last)
-		if (pendingRole !== null || pendingPersonalities !== null) {
+		// Apply role changes (these restart the agent — do last)
+		if (pendingRole !== null) {
 			saving = true;
 			renderDialog();
 			try {
-				const patchBody: any = {};
-				if (pendingRole !== null) patchBody.roleId = pendingRole;
-				if (pendingPersonalities !== null) patchBody.personalities = pendingPersonalities;
+				const patchBody: any = { roleId: pendingRole };
 				await gatewayFetch(`/api/sessions/${sessionId}`, {
 					method: "PATCH",
 					body: JSON.stringify(patchBody),
 				});
 				await refreshSessions();
 			} catch (err) {
-				console.error("[assign-role/personalities] Failed:", err);
+				console.error("[assign-role] Failed:", err);
 			}
 		}
 
@@ -722,10 +711,9 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 		const roleLabel = session?.assistantType === "goal" ? "Goal Assistant" : displayRoleObj?.label || displayRole || "None";
 		const hasRoleChange = pendingRole !== null;
 		const hasColorChange = pendingColorIndex !== null;
-		const hasPersonalityChange = pendingPersonalities !== null;
 		const hasTitleChange = titleValue.trim() !== "" && titleValue.trim() !== currentTitle;
-		const hasAnyChange = hasTitleChange || hasColorChange || hasRoleChange || hasPersonalityChange;
-		const saveLabel = saving ? "Saving…" : (hasRoleChange || hasPersonalityChange) ? "Save & Restart" : "Save";
+		const hasAnyChange = hasTitleChange || hasColorChange || hasRoleChange;
+		const saveLabel = saving ? "Saving…" : hasRoleChange ? "Save & Restart" : "Save";
 		const displayColorIndex = pendingColorIndex !== null ? pendingColorIndex : initialColorIndex;
 
 		render(
@@ -849,37 +837,6 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 											</div>
 										`}
 								</div>
-								<!-- Personalities -->
-								${availablePersonalities.length > 0 ? html`
-									<div>
-										<div class="text-xs text-muted-foreground mb-1.5">Personalities</div>
-										<div class="flex flex-wrap gap-1">
-											${availablePersonalities.map((personality) => {
-												const displayPersonalities = pendingPersonalities !== null ? pendingPersonalities : initialPersonalities;
-												const selected = displayPersonalities.includes(personality.name);
-												return html`<button
-													class="px-2 py-0.5 text-[11px] rounded-xl border transition-colors cursor-pointer ${selected
-														? "bg-primary/15 text-primary border-primary/30"
-														: "bg-muted/60 text-foreground/70 border-border"}"
-													title=${personality.description}
-													@click=${() => {
-														const current = pendingPersonalities !== null ? [...pendingPersonalities] : [...initialPersonalities];
-														if (selected) {
-															pendingPersonalities = current.filter((t) => t !== personality.name);
-														} else {
-															pendingPersonalities = [...current, personality.name];
-														}
-														// Reset to null if same as initial
-														if (pendingPersonalities.length === initialPersonalities.length && pendingPersonalities.every((t) => initialPersonalities.includes(t))) {
-															pendingPersonalities = null;
-														}
-														renderDialog();
-													}}
-												>${personality.label}</button>`;
-											})}
-										</div>
-									</div>
-								` : ""}
 							</div>
 						`,
 					})}

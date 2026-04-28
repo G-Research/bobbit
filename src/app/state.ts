@@ -62,8 +62,6 @@ export interface GatewaySession {
 	sandboxed?: boolean;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
-	/** Personality names assigned to this session */
-	personalities?: string[];
 }
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
@@ -275,18 +273,6 @@ export const state = {
 	rolePreviewAccessoryEdited: false,
 	hasReceivedRoleProposal: false,
 	rolePreviewPromptEditMode: false,
-
-	// Personality assistant split-screen state
-	activePersonalityProposal: null as { name: string; label: string; description: string; prompt_fragment: string } | null,
-	personalityPreviewName: "",
-	personalityPreviewLabel: "",
-	personalityPreviewDescription: "",
-	personalityPreviewPromptFragment: "",
-	personalityPreviewNameEdited: false,
-	personalityPreviewLabelEdited: false,
-	personalityPreviewDescriptionEdited: false,
-	personalityPreviewPromptFragmentEdited: false,
-	personalityPreviewPromptFragmentEditMode: false,
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,

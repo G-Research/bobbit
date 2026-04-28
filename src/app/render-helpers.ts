@@ -449,15 +449,6 @@ export function renderSessionRow(session: GatewaySession) {
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
 				<div class="${mobile ? "flex items-center gap-1 min-w-0" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span>${renderSessionTime(session)}` : ""}</div>
-				${session.personalities && session.personalities.length > 0 ? html`
-					<div class="flex flex-wrap gap-0.5 mt-0.5">
-						${session.personalities.map((t) => html`<span
-							class="text-[9px] leading-none px-1 py-px rounded-md"
-							class="bg-primary/15 text-primary"
-							title=${t}
-						>${t}</span>`)}
-					</div>
-				` : ""}
 			</div>
 			${mobile
 				? buttons
