@@ -31,7 +31,7 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { rm as rmAsync } from "node:fs/promises";
+import { awaitableRm } from "./test-utils/cleanup.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -187,12 +187,12 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 
 		// Teardown — use existing shutdown() for proper cleanup
 		await gw.shutdown();
-		// Fire-and-forget async cleanup — synchronous rmSync of the entire
-		// bobbitDir tree serializes under Windows Defender and starves other
-		// workers mid-teardown. The global teardown sweeps E2E_TEMP_ROOT at
-		// end-of-suite anyway, so dropped failures here are benign.
-		void rmAsync(bobbitDir, { recursive: true, force: true }).catch(() => {
-			// Best-effort cleanup
+		// Bounded-retry cleanup — see gateway-harness.ts for rationale.
+		await awaitableRm(bobbitDir, {
+			onFinalFailure: (err) => {
+				const msg = (err as Error)?.message ?? String(err);
+				console.warn(`[in-process-harness-realpush] cleanup deferred for ${bobbitDir}: ${msg}`);
+			},
 		});
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
 });

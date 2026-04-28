@@ -11,8 +11,12 @@ import { apiFetch, bobbitDir } from "./e2e-setup.js";
 import { mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-test.describe("Tool Config Cascade", () => {
-	test.describe.configure({ retries: 2, mode: "serial" });
+// @quarantine — Phase 1 of E2E flakiness fix. Tagged because the existing
+// `retries: 2` admits this suite is unstable. Tracked for proper fix; once
+// the in-process harness fully isolates tool-config FS state, drop the tag.
+// Expiry: 2026-06-30 — if still flaky after that, must be triaged.
+test.describe("Tool Config Cascade @quarantine", () => {
+	test.describe.configure({ mode: "serial" });
 
 	test("fresh scaffold has tools config directory @smoke", async () => {
 		// The in-process harness uses scaffoldBobbitDir which creates

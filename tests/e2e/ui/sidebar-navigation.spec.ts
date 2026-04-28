@@ -19,8 +19,9 @@ import {
 } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
-test.describe("Sidebar navigation", () => {
-	test.describe.configure({ retries: 2 });
+// @quarantine — Phase 1 of E2E flakiness fix. Sidebar render races on Windows.
+// Expiry: 2026-06-30.
+test.describe("Sidebar navigation @quarantine", () => {
 	const sessionIds: string[] = [];
 	const goalIds: string[] = [];
 

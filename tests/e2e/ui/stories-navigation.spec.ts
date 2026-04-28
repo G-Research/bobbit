@@ -28,8 +28,9 @@ import {
 } from "./story-registry.js";
 import { navigateToHash } from "./ui-helpers.js";
 
-test.describe("CT-13: URL routing and navigation", () => {
-	test.describe.configure({ retries: 2 });
+// @quarantine — Phase 1 of E2E flakiness fix. Hashchange/route races.
+// Expiry: 2026-06-30.
+test.describe("CT-13: URL routing and navigation @quarantine", () => {
 	let s: SpecContext;
 	const goalIds: string[] = [];
 
