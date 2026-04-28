@@ -1341,6 +1341,10 @@ export interface RoleData {
 	promptTemplate: string;
 	toolPolicies?: Record<string, string>;
 	accessory: string;
+	/** "<provider>/<modelId>" — overrides default.sessionModel / default.reviewModel for sessions running as this role. */
+	model?: string;
+	/** "off" | "minimal" | "low" | "medium" | "high" — overrides default.sessionThinkingLevel / default.reviewThinkingLevel. */
+	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -1502,7 +1506,7 @@ export async function createRole(role: {
 	}
 }
 
-export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory">>, projectId?: string): Promise<boolean> {
+export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory" | "model" | "thinkingLevel">>, projectId?: string): Promise<boolean> {
 	try {
 		const url = projectId ? `/api/roles/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/roles/${encodeURIComponent(name)}`;
 		const res = await gatewayFetch(url, {
