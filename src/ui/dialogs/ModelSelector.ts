@@ -37,6 +37,7 @@ function modelRecencyRank(id: string): number {
 	if (s.includes("claude")) return 50;
 
 	// ── OpenAI ──
+	if (s.includes("gpt-5.5")) return 104;
 	if (s.includes("gpt-5.4")) return 100;
 	if (s.includes("gpt-5.3")) return 98;
 	if (s.includes("gpt-5.2")) return 96;

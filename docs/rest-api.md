@@ -262,6 +262,8 @@ Server-level fallback (applied when no project override is set):
 |---|---|---|
 | `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
 | `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
+| `GET` | `/api/image-models` | List currently available image-generation models |
+| `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
 `POST /api/models/test` responses:
 

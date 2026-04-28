@@ -44,6 +44,25 @@ test.describe("Settings (full-stack UI)", () => {
 		await expect(page).toHaveURL(/#\/settings\/system\/palette/, { timeout: 5_000 });
 	});
 
+	test("account tab shows Anthropic and OpenAI OAuth providers", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/account");
+
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByText("Anthropic OAuth")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("OpenAI OAuth")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("ChatGPT subscription GPT models")).toBeVisible({ timeout: 5_000 });
+
+		await expect(page.getByText("Authenticated", { exact: true })).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Not authenticated", { exact: true })).toBeVisible({ timeout: 5_000 });
+
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/account");
+		await expect(page.getByText("OpenAI OAuth")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Anthropic OAuth")).toBeVisible({ timeout: 5_000 });
+	});
+
 	test("setting persists after reload", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
