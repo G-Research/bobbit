@@ -26,6 +26,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
 import { discoverSlashSkills } from "../skills/slash-skills.js";
 import type { GrantPolicy } from "./role-store.js";
+import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
@@ -2788,7 +2789,57 @@ export class SessionManager {
 	 * best-ranked model when gateway is configured, otherwise does nothing
 	 * (pi-coding-agent uses its own built-in default).
 	 */
+	/** Resolve a role-level model override for the session, if any. */
+	private resolveRoleModel(session: SessionInfo): string | undefined {
+		if (!session.role || !this.configCascade) return undefined;
+		try {
+			const resolved = this.configCascade.resolveRoles(session.projectId);
+			return resolved.find(r => r.item.name === session.role)?.item.model;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Resolve a role-level thinkingLevel override for the session, if any. */
+	private resolveRoleThinkingLevel(session: SessionInfo): string | undefined {
+		if (!session.role || !this.configCascade) return undefined;
+		try {
+			const resolved = this.configCascade.resolveRoles(session.projectId);
+			return resolved.find(r => r.item.name === session.role)?.item.thinkingLevel;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private async tryAutoSelectModel(session: SessionInfo): Promise<void> {
+		// 0. Role override (highest non-explicit precedence). Hard-fail on mismatch,
+		// matching the contract used for review/QA sessions: if a user explicitly
+		// pinned a model on a role and it cannot be bound, surface the failure.
+		const roleModel = this.resolveRoleModel(session);
+		if (roleModel) {
+			try {
+				await applyModelString(session.rpcClient, roleModel, {
+					sessionManager: this,
+					sessionId: session.id,
+					contextLabel: `role.${session.role}.model`,
+				});
+				this._writeModelNameFile(session.id, roleModel);
+				const slash = roleModel.indexOf("/");
+				const provider = roleModel.slice(0, slash);
+				const modelId = roleModel.slice(slash + 1);
+				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+				broadcast(session.clients, {
+					type: "state",
+					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+				});
+				console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
+				return;
+			} catch (err) {
+				console.error(`[session-manager] Role model "${roleModel}" failed for ${session.id}:`, err);
+				throw err;
+			}
+		}
+
 		if (!this.preferencesStore) return;
 
 		// Check explicit preference first (works for both aigw and public providers)
@@ -2855,6 +2906,20 @@ export class SessionManager {
 
 	/** Apply default_thinking_level from preferences (per-model) or project config (legacy). */
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
+		// 0. Role override (highest non-explicit precedence). Failure is non-fatal
+		// — matches the existing thinking-level fallback behaviour.
+		const roleThinking = this.resolveRoleThinkingLevel(session);
+		if (roleThinking) {
+			try {
+				await session.rpcClient.setThinkingLevel(roleThinking);
+				console.log(`[session-manager] Applied role thinking level "${roleThinking}" for session ${session.id} (role=${session.role})`);
+				return;
+			} catch (err) {
+				console.warn(`[session-manager] Role thinking level "${roleThinking}" failed for ${session.id}:`, err);
+				// Fall through to global default — thinking-level mismatch is non-fatal
+			}
+		}
+
 		// Prefer per-model thinking preference, fall back to project config, then "medium"
 		let level: string | undefined;
 		if (this.preferencesStore) {

@@ -15,7 +15,7 @@ import { parse } from "yaml";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { Role, GrantPolicy } from "./role-store.js";
-import { normalizeGrantPolicy } from "./role-store.js";
+import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from "./role-store.js";
 import type { Workflow, WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 
@@ -88,6 +88,8 @@ export class BuiltinConfigProvider {
 					promptTemplate: data.promptTemplate ?? "",
 					accessory: data.accessory ?? "none",
 					toolPolicies,
+					model: validateModelString(data.model),
+					thinkingLevel: validateThinkingLevel(data.thinkingLevel),
 					createdAt: data.createdAt ?? 0,
 					updatedAt: data.updatedAt ?? 0,
 				});

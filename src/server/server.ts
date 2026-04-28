@@ -916,7 +916,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -3484,6 +3484,8 @@ async function handleApiRoute(
 					promptTemplate: body?.promptTemplate || "",
 					accessory: body?.accessory ?? "none",
 					toolPolicies: body?.toolPolicies,
+					model: typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined,
+					thinkingLevel: typeof body?.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined,
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -3499,6 +3501,8 @@ async function handleApiRoute(
 					promptTemplate: body?.promptTemplate || "",
 					accessory: body?.accessory,
 					toolPolicies: body?.toolPolicies,
+					model: typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined,
+					thinkingLevel: typeof body?.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined,
 				});
 				json(role, 201);
 			}
@@ -3600,18 +3604,49 @@ async function handleApiRoute(
 					}
 					toolPolicies = cleaned;
 				}
+				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
+				let model = existing.model;
+				if (body.model !== undefined) {
+					model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+				}
+				let thinkingLevel = existing.thinkingLevel;
+				if (body.thinkingLevel !== undefined) {
+					thinkingLevel = typeof body.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined;
+				}
 				const updated = {
 					...existing,
 					label: body.label ?? existing.label,
 					promptTemplate: body.promptTemplate ?? existing.promptTemplate,
 					accessory: body.accessory ?? existing.accessory,
 					toolPolicies,
+					model,
+					thinkingLevel,
 					name,
 					updatedAt: Date.now(),
 				};
 				ctx.roleStore.put(updated);
 				json({ ok: true });
 			} else {
+				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
+				const modelUpdate = body.model !== undefined
+					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
+					: undefined;
+				const thinkingUpdate = body.thinkingLevel !== undefined
+					? (typeof body.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : "")
+					: undefined;
+				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
+				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
+					const existing = roleManager.getRole(name);
+					if (existing) {
+						const patched = {
+							...existing,
+							model: modelUpdate !== undefined ? (modelUpdate || undefined) : existing.model,
+							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
+							updatedAt: Date.now(),
+						};
+						serverRoleStore.put(patched);
+					}
+				}
 				const ok = roleManager.updateRole(name, {
 					label: body.label,
 					promptTemplate: body.promptTemplate,
