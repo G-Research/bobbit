@@ -9,6 +9,7 @@ import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { renderModelRow } from "./settings-page.js";
 
 // ============================================================================
 // HELPERS
@@ -57,7 +58,9 @@ let editPrompt = "";
 let editAccessory = "none";
 let editName = "";
 let editToolPolicies: Record<string, string> = {};
-let editTab: "prompt" | "tools" = "prompt";
+let editModelOverride = "";
+let editThinkingOverride = "";
+let editTab: "prompt" | "tools" | "model" = "prompt";
 
 let saving = false;
 let deleting = false;
@@ -172,6 +175,8 @@ function initEditState(role: RoleData): void {
 	editAccessory = role.accessory;
 	editName = role.name;
 	editToolPolicies = { ...(role.toolPolicies ?? {}) };
+	editModelOverride = role.model ?? "";
+	editThinkingOverride = role.thinkingLevel ?? "";
 	editTab = "prompt";
 	saving = false;
 	deleting = false;
@@ -247,6 +252,8 @@ async function handleSave(): Promise<void> {
 			promptTemplate: editPrompt,
 			accessory: editAccessory,
 			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
+			model: editModelOverride || undefined,
+			thinkingLevel: editThinkingOverride || undefined,
 		}, projectId || undefined);
 
 		// Save dirty sub-prompts
@@ -306,11 +313,15 @@ function renderNavBar(): TemplateResult {
 			([type, content]) => content !== (originalPrompts.get(type) ?? ""),
 		);
 		const toolPoliciesChanged = JSON.stringify(editToolPolicies) !== JSON.stringify(selectedRole?.toolPolicies ?? {});
+		const modelChanged = (editModelOverride || "") !== (selectedRole?.model || "");
+		const thinkingChanged = (editThinkingOverride || "") !== (selectedRole?.thinkingLevel || "");
 		const hasChanges = selectedRole && (
 			editLabel !== selectedRole.label ||
 			editPrompt !== selectedRole.promptTemplate ||
 			editAccessory !== selectedRole.accessory ||
 			toolPoliciesChanged ||
+			modelChanged ||
+			thinkingChanged ||
 			subPromptsDirty
 		);
 		return html`
@@ -592,6 +603,28 @@ function renderPromptTab(): TemplateResult {
 }
 
 // ============================================================================
+// RENDER: MODEL TAB
+// ============================================================================
+
+function renderModelTab(): TemplateResult {
+	return html`
+		<p class="roles-tools-note" data-testid="roles-model-tab">
+			Overrides the global default for sessions running as this role. Leave blank to inherit.
+		</p>
+		${renderModelRow(
+			"Model",
+			"When set, sessions assuming this role bind to this model on first turn. Empty = inherit default.sessionModel (or default.reviewModel for reviewer/QA sessions).",
+			editModelOverride,
+			(v: string) => { editModelOverride = v; renderApp(); },
+			editThinkingOverride,
+			(v: string) => { editThinkingOverride = v; renderApp(); },
+			"",
+			{ fallbackLabel: "(use default)" },
+		)}
+	`;
+}
+
+// ============================================================================
 // RENDER: EDIT VIEW
 // ============================================================================
 
@@ -653,11 +686,13 @@ function renderEditView(): TemplateResult {
 						@click=${() => { editTab = "prompt"; renderApp(); }}>Prompt</button>
 					<button class="roles-tab ${editTab === "tools" ? "roles-tab--active" : ""}"
 						@click=${() => { editTab = "tools"; renderApp(); }}>Tool Access</button>
+					<button class="roles-tab ${editTab === "model" ? "roles-tab--active" : ""}"
+						@click=${() => { editTab = "model"; renderApp(); }} data-testid="roles-tab-model">Model</button>
 				</div>
 
 				<!-- Tab content -->
 				<div class="roles-tab-content">
-					${editTab === "prompt" ? renderPromptTab() : renderToolAccessTab()}
+					${editTab === "prompt" ? renderPromptTab() : editTab === "tools" ? renderToolAccessTab() : renderModelTab()}
 				</div>
 			</div>
 		</div>

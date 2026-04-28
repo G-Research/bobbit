@@ -1317,8 +1317,8 @@ async function removeAigwConfig(): Promise<void> {
 }
 
 /** Format a "provider/modelId" pref value for display. Shows just the model ID. */
-function formatModelPref(value: string): string {
-	if (!value) return "Auto (best available)";
+export function formatModelPref(value: string, fallbackLabel: string = "Auto (best available)"): string {
+	if (!value) return fallbackLabel;
 	const slash = value.indexOf("/");
 	return slash > 0 ? value.slice(slash + 1) : value;
 }
@@ -1337,7 +1337,7 @@ function openModelPicker(currentValue: string, onChange: (v: string) => void) {
 	});
 }
 
-function renderModelRow(
+export function renderModelRow(
 	label: string,
 	hint: string,
 	modelValue: string,
@@ -1345,8 +1345,9 @@ function renderModelRow(
 	thinkingValue: string,
 	onThinkingChange: (v: string) => void,
 	thinkingDefault: string = "medium",
+	opts?: { fallbackLabel?: string },
 ) {
-	const modelDisplay = formatModelPref(modelValue);
+	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
 
 	// Determine if selected model supports reasoning
 	let thinkingDisabled = false;
@@ -1433,8 +1434,9 @@ function renderModelRow(
 						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
 					>
 						${Select({
-							value: thinkingValue || thinkingDefault,
+							value: thinkingValue || (opts?.fallbackLabel ? "" : thinkingDefault),
 							options: [
+								...(opts?.fallbackLabel ? [{ value: "", label: opts.fallbackLabel, icon: icon(Brain, "sm") }] : []),
 								{ value: "off", label: "Off", icon: icon(Brain, "sm") },
 								{ value: "minimal", label: "Minimal", icon: icon(Brain, "sm") },
 								{ value: "low", label: "Low", icon: icon(Brain, "sm") },
