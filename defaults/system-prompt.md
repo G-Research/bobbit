@@ -23,6 +23,20 @@ When a user asks to show, visualize, mock up, or demo something visual, prefer w
 
 For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles. See `.bobbit/config/docs/design-mockups.md` for the full reference.
 
+# AI image generation
+
+If the user asks you to generate an image — GPT Image / GPT Image 2, DALL-E 2/3, Nano Banana / Gemini Flash Image, Imagen, or anything similar — use the `generate_image` tool. Do **not** call MCP image tools like `mcp__nano-banana__generate_image`; Bobbit routes image generation through `generate_image` so the user's selected session image model is respected. The tool is generic; the gateway picks the provider.
+
+Omit `model` unless the user explicitly names a non-default image model or provider in the current prompt. Override with `model="provider/modelId"` only when they do. If the selected or requested model fails because of authentication or provider availability, **report that failure and ask** before switching providers — do not silently fall back to a different provider. Use `outputPath` when the image should become a project asset. For diagrams or images that need exact labels, include the full label text in the prompt and ask for a clean technical-diagram style.
+
+The canonical list of model IDs (OpenAI `gpt-image-2`, OpenAI DALL-E 2/3, Google Gemini 2.5/3 Flash Image and Imagen 4 tiers, etc.) lives in **`defaults/tools/images/generate_image.yaml::detail_docs`** — that's the source of truth, and the `generate_image` tool description shown to you already includes it. A few quick reminders that come up often:
+
+- GPT Image 2 / `gpt-image-2`: pass `model="openai/gpt-image-2"` (unless the session model is already that).
+- DALL-E: `model="openai/dall-e-3"` or `model="openai/dall-e-2"` — use these alongside `openai/gpt-image-2` when the user names DALL-E specifically.
+- "Nano Banana" → Gemini 2.5 Flash Image (`google/gemini-2.5-flash-image`); "Nano Banana Pro" or "Nano Banana 2" → Gemini 3 Pro Image (`google/gemini-3-pro-image-preview`) unless the user names a different Google model id.
+
+For the full Google ID table (`gemini-3.1-flash-image-preview`, `gemini-3-pro-image-preview`, `imagen-4.0-{ultra,fast,}-generate-001`, etc.) and provider-specific size tokens, consult the YAML file referenced above rather than relying on memory.
+
 # Gateway API access
 
 You are running inside the Bobbit gateway. To call gateway REST APIs (e.g. spawn team agents, list sessions, manage goals), read credentials from disk — never rely on environment variables which may not survive session restarts.

@@ -285,11 +285,141 @@ Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debu
 
 ### OAuth
 
+Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic` and `openai-codex`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/oauth/status` | OAuth provider status |
-| `POST` | `/api/oauth/start` | Begin an OAuth flow, returns auth URL |
-| `POST` | `/api/oauth/complete` | Exchange code for tokens (`{ flowId, code }`) |
+| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, hasToken, expiresAt? }`. |
+| `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, authUrl, expiresAt }`. |
+| `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ provider, flowId, code }`. Returns `{ provider, ok: true }`. |
+| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error?, expiresAt }`. |
+
+**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token) and `openai-codex` (ChatGPT subscription → bearer token). Unknown values reject with `400 { error: "unknown provider" }`.
+
+**Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for both at once. Keying every operation by `provider` (alongside `flowId`) keeps state strictly partitioned and lets the UI render Settings → Account as parallel rows that can be (re-)authed independently.
+
+**`GET /api/oauth/status?provider=<id>`** responses:
+
+- `200 { provider: "anthropic", hasToken: true, expiresAt: 1775812345000 }` — credential present.
+- `200 { provider: "anthropic", hasToken: false }` — no stored credential.
+- `400 { error: "unknown provider" }` — `provider` missing or unrecognised.
+
+The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
+
+**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" }`. Returns:
+
+```json
+{
+  "provider": "openai-codex",
+  "flowId": "f_8c2…",
+  "authUrl": "https://auth.openai.com/…",
+  "expiresAt": 1775812945000
+}
+```
+
+The caller opens `authUrl` in a system browser; the browser-redirect handler completes the flow via `POST /api/oauth/complete` once the provider returns a `code`.
+
+**`POST /api/oauth/complete`** body: `{ provider, flowId, code }`. Returns:
+
+- `200 { provider, ok: true }` — token stored.
+- `400 { error: "code required" }` — `code` missing or empty.
+- `400 { error: "unknown provider" }` — `provider` missing or unrecognised.
+- `404 { error: "flow not found" }` — `flowId` is unknown, expired, **or** the stored flow's `provider` does not match the body. The provider mismatch is treated as "not found" rather than "forbidden" so cross-provider polling cannot be used to enumerate live flow IDs.
+
+**`GET /api/oauth/flow-status?flowId=<id>&provider=<id>`** is the polling endpoint used by the Settings → Account UI while the user is in the browser. Returns:
+
+```json
+{ "complete": false, "expiresAt": 1775812945000 }
+```
+
+or on success / failure:
+
+```json
+{ "complete": true, "expiresAt": 1775812945000 }
+{ "complete": true, "error": "user denied access", "expiresAt": 1775812945000 }
+```
+
+Response contract:
+
+- `complete: boolean` — `false` while the flow is still pending, `true` once `/api/oauth/complete` has run for that `flowId` (regardless of success).
+- `error?: string` — present only when `complete: true` and the flow failed.
+- `expiresAt: number` — epoch-ms after which the flow will be garbage-collected.
+
+`provider` is **required** as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
+
+See [AGENTS.md — Add / debug per-provider OAuth](../AGENTS.md) for the file map and the Settings → Account UI walkthrough.
+
+### Image generation
+
+Bobbit routes image generation through the gateway so the agent's `generate_image` tool can call OpenAI (DALL-E 2/3 + Images API), Google (Gemini 2.5/3 Flash Image, Imagen 4), and OpenAI-Codex driver models behind one contract. The session-scoped image model is selected via the footer picker (UI) or `set_image_model` (WS); `POST /api/image-generation/generate` is the gateway-side execution endpoint the tool extension calls.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/image-models` | List currently-available image models — array of `ApiImageModel`. |
+| `POST` | `/api/image-generation/generate` | Generate one or more images via the configured provider. |
+
+**`GET /api/image-models`** returns the registry filtered by configured providers (e.g. an entry is omitted when its provider has no credential). Each item is an `ApiImageModel` (TypeScript type defined in `src/server/agent/image-generation.ts`):
+
+```json
+[
+  {
+    "id": "openai/gpt-image-2",
+    "provider": "openai",
+    "modelId": "gpt-image-2",
+    "label": "GPT Image 2",
+    "available": true,
+    "reason": null,
+    "sizes": ["1024x1024", "1536x1024", "1024x1536"]
+  },
+  {
+    "id": "google/gemini-2.5-flash-image",
+    "provider": "google",
+    "modelId": "gemini-2.5-flash-image",
+    "label": "Nano Banana (Gemini 2.5 Flash Image)",
+    "available": false,
+    "reason": "missing-credentials"
+  }
+]
+```
+
+Unavailable rows still appear so the Settings → Models → Image picker can render a red "Unavailable" badge with a tooltip pointing at the missing credential. See [docs/internals.md — Image generation routing](internals.md#image-generation-routing) for the full data flow.
+
+**`POST /api/image-generation/generate`** is the back-end called by the `generate_image` tool extension. Request body:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `prompt` | `string` | yes | Free-form prompt. **Capped at 8192 chars** — longer payloads reject with `400`. |
+| `n` | `integer` | no | Number of images. Clamped to `[1, 4]`; out-of-range values reject with `400`. Defaults to `1`. |
+| `model` | `string` | no | Override id in `provider/modelId` form. Must match an entry in `/api/image-models`. Defaults to the session's selected image model. |
+| `imageSize` | `string` | no | Provider-specific size token (e.g. `1024x1024`, `1536x1024`). Validated against the registry entry's `sizes`. |
+| `sessionId` | `string` | no | Used to resolve the session's selected image model when `model` is omitted. |
+
+Response on success:
+
+```json
+{
+  "model": "openai/gpt-image-2",
+  "images": [
+    { "url": "https://…", "format": "png" },
+    { "base64": "iVBORw0KG…", "format": "png" }
+  ]
+}
+```
+
+Each image carries either `url` or `base64` (some providers return only one), plus a `format` (`png` / `jpeg` / `webp`). The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
+
+Error responses:
+
+- `400 { error: "prompt exceeds 8192 chars" }` — prompt over the cap.
+- `400 { error: "n must be 1..4" }` — `n` outside the `[1, 4]` range or non-integer.
+- `400 { error: "openai-codex image driver supports n=1 only" }` — the OpenAI-Codex driver hard-clamps to `n=1`; requesting more is rejected up-front instead of silently returning a single image.
+- `400 { error: "unknown image model" }` — `model` does not appear in `/api/image-models` (or canonicalises to a different id than the registry entry — both sides are canonicalised before comparison).
+- `400 { error: "missing prompt" }` — `prompt` missing or non-string.
+- `502 { error: "<provider HTTP status>: <provider message>" }` — upstream provider rejected the call. The message starts with the upstream HTTP status code; `<provider message>` is `data?.error?.message` falling back to `JSON.stringify(data?.error)` so it never reads `[object Object]`.
+- `502 { error: "remote image exceeds 25 MB cap" }` — Bobbit refused to download a remote image referenced in the prompt because it crossed the 25 MB streaming cap (memory-exhaustion guard).
+- `503 { error: "image generation unavailable" }` — no provider credentials configured for any registered image model.
+
+Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (configured pref → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
 
 ### MCP Servers
 
