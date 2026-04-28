@@ -347,21 +347,35 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		// setup
 		await s.sidebar.is_visible();
 
+		// Wait for shortcut listener to be attached.
+		await expect.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
+		// Dispatch shortcuts via window.dispatchEvent so they reach the
+		// app's global listener regardless of focus, and set both ctrlKey
+		// and metaKey so the platform-aware ctrlOrMeta check matches on
+		// macOS (metaKey) and Linux/Windows (ctrlKey).
+		// Dispatch on document only — bubbling reaches both the SearchBox
+		// Ctrl+K listener (document) and the shortcut-registry listener (window).
+		const dispatchKey = (key: string, code: string) => page.evaluate(({ key, code }) => {
+			document.dispatchEvent(new KeyboardEvent("keydown", {
+				key, code, ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		}, { key, code });
+
 		// act — test Ctrl+K focuses search
 		s.act();
-		await page.keyboard.press("Control+k");
-		await page.waitForTimeout(300);
-
+		await dispatchKey("k", "KeyK");
 		await s.sidebar.search_input().is_focused();
 
-		// Press Escape to blur search
-		await page.keyboard.press("Escape");
-		await page.waitForTimeout(300);
+		// Blur search
+		await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
 		// Test Ctrl+[ toggles sidebar collapse
 		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
-		await page.keyboard.press("Control+[");
-		await page.waitForTimeout(500);
+		await dispatchKey("[", "BracketLeft");
 
 		// Sidebar should be collapsed
 		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 5_000 });
@@ -369,8 +383,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		// assert — keyboard shortcuts work
 		s.assert();
 		// Toggle back to expanded
-		await page.keyboard.press("Control+[");
-		await page.waitForTimeout(500);
+		await dispatchKey("[", "BracketLeft");
 		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 	});
 

@@ -855,6 +855,93 @@ curl -sk -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## Image generation routing
+
+Bobbit ships a `generate_image` tool that fans out to multiple image providers (OpenAI Images / DALL-E, Google Gemini Flash Image, Google Imagen 4, OpenAI-Codex driver models) behind a single contract. The selected model is **per-session, not per-call** — the agent only specifies `model=...` when the user explicitly names a non-default provider; otherwise the gateway resolves to whatever the user picked in the footer image-model picker. This mirrors how the chat session model works and avoids the agent guessing at provider availability on every call.
+
+### Per-session state
+
+`SessionStore` rows carry the selected image model as **two separate optional fields**: `imageModelProvider` (e.g. `"openai"`) and `imageModelId` (e.g. `"gpt-image-2"`). They are set by the user via the footer picker (see `set_image_model` below) and read by the gateway when the agent calls `generate_image` without an explicit `model` argument. Splitting provider and id avoids parsing a `provider/id` string at every read — the WS handler validated both halves against the registry once on write, and downstream code consumes the parsed pair directly.
+
+Key resolver: `SessionManager.getImageModelForSession(sessionId)` — returns `{ provider, id }` for the session if both fields are set, otherwise falls back to the system-default preference at key **`default.imageModel`** (full `provider/id` string, e.g. `"openai/gpt-image-2"`). If the preference is unset, `defaultImageModelPref()` returns the built-in default. There is no 503 "image generation unavailable" path on `POST /api/image-generation/generate` — if the resolved model has no credentials, the provider helper throws and the endpoint returns `500 { error: "<provider message>" }`.
+
+### WebSocket: `set_image_model`
+
+The footer picker mutates session state via the WS message:
+
+```json
+{ "type": "set_image_model", "provider": "openai", "modelId": "gpt-image-2" }
+```
+
+Handled in `src/server/ws/handler.ts`. The session ID is connection-derived — the server reads it from the WS connection context, not from the message payload — so the client never sends it. The handler validates `provider`/`modelId` against `getAvailableImageModels()` (registry + credential check). Unknown values reply with an error envelope `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and **do not** mutate session state — invalid values cannot wedge a session into an unrenderable picker state. On a valid value, the handler persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state.
+
+A confirmation snapshot is broadcast back as a normal session-update so all attached clients re-render the footer in sync.
+
+### Tool resolution & routing
+
+1. Agent calls `generate_image` (built-in tool, `defaults/tools/images/generate_image.yaml`).
+2. Tool extension (`defaults/tools/images/extension.ts`) reads `.bobbit/state/gateway-url` + `.bobbit/state/token` and POSTs to `/api/image-generation/generate` with the prompt, optional `model` override, `n`, `imageSize`, and the session ID.
+3. Server endpoint (`src/server/server.ts::handleApiRoute` for `POST /api/image-generation/generate`):
+   - Validates `prompt` length (≤8192 chars) and `n` range (`[1, 4]`).
+   - If `model` is omitted, looks up `getImageModelForSession(sessionId)`.
+   - Canonicalises both the request `model` and the session model through the same helper before comparing — prevents `OpenAI/GPT-Image-2` from being treated as a different model than `openai/gpt-image-2`.
+   - **Override resolution.** A request `model` is honoured when (a) it canonicalises equal to the session's selected model, (b) there is no `sessionId`, **or** (c) `imageModelMentionedInText` finds the request model id in the user's most-recent prompt text. Otherwise the request `model` is silently ignored and the session's selected model is used. This last-prompt check is why an explicit override sometimes "works" and sometimes doesn't — it must be named in the user's text, not just sent in the API body.
+   - If a request `model` is supplied that doesn't match any registered image model, the canonical helper returns `undefined` and the request silently falls back to the session's selected model. There is no 4xx response for unknown image models on this endpoint.
+   - Dispatches to one of `generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, or `generateOpenAICodexImage` in `src/server/agent/image-generation.ts`.
+4. The provider helper makes the upstream HTTP call and returns `{ images, format }`. Any error thrown from a helper is caught by the endpoint and surfaced as `500 { error: err?.message || "Image generation failed" }`. Helpers throw arbitrary `new Error(...)` strings (missing credentials, upstream HTTP failures, the Codex `n=1` clamp, the 25 MB remote-image cap, etc.) — there is no required prefix format, and the API surface never emits `502` or `503`.
+
+### OpenAI-Codex driver model fallback chain
+
+`generateOpenAICodexImage` runs through the AI Gateway and needs a chat-completion-capable model to drive image-tool calls. To avoid hard-coding a single model id (which goes stale every time OpenAI ships a new tier), `getCodexImageDriverModel()` walks a fallback chain mirroring `pickFallbackAigwNamingModel`:
+
+1. Environment variable `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` (explicit override — deliberately env-only, not a stored preference, so an operator can swap the driver without touching prefs).
+2. `gpt-5.5`
+3. `gpt-5`
+4. `gpt-4o`
+
+First non-empty entry wins; if none are set, the function throws `Error("no codex image driver model available")` which surfaces as a `500` to the agent rather than a confusing upstream `404`.
+
+The driver also clamps `n` to `1` — multi-image requests reject up-front with `Error("openai-codex image driver supports n=1 only")` instead of silently returning one image, since the upstream API does not support batch generation through this path.
+
+### Remote image size cap
+
+`imageFromUrl()` (used when prompts reference an existing image URL) streams the response with a hard cap of 25 MiB (`MAX_IMAGE_BYTES`). Crossing the cap aborts the controller and throws `Error("remote image exceeds 25 MB cap")` — a memory-exhaustion guard that prevents a malicious prompt from forcing the gateway to buffer an arbitrarily large remote payload.
+
+### `outputPath` containment
+
+When the agent passes `outputPath` to `generate_image`, the tool extension resolves it relative to the session worktree and rejects any path that escapes the worktree:
+
+```ts
+const resolved = path.resolve(process.cwd(), basePath);
+const rel = path.relative(process.cwd(), resolved);
+if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  throw new Error("outputPath escapes worktree");
+}
+```
+
+This is a hard security check — `outputPath` is model-controlled, and without containment a prompt-injection could write files outside the worktree (or to absolute paths like `/etc/…`).
+
+### Restoring image tools on dormant sessions
+
+The image tool group is included in `session-setup.ts::resolveToolActivation` for sessions that had it active when archived. `restoreSession()` round-trips the same activation list, so a session created before image tools existed never grows the tool group implicitly, and a session that did have it keeps it across restart.
+
+Round-tripping the same activation list is the user-friendly default — at session-creation the user explicitly enabled/disabled tool groups, and we grandfather that choice rather than re-deriving from the latest tool-group policy (which may have changed between then and the restore). See [docs/debugging.md — Image generation failure](debugging.md) when the tool is missing on a session that should have it.
+
+### Key files
+
+- `src/server/agent/image-generation.ts` — provider helpers (`generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, `generateOpenAICodexImage`), `imageFromUrl`, `getCodexImageDriverModel`, `getAvailableImageModels`.
+- `src/server/agent/session-manager.ts::getImageModelForSession` — per-session resolver.
+- `src/server/ws/handler.ts` — `set_image_model` handler.
+- `src/server/server.ts` — `GET /api/image-models`, `POST /api/image-generation/generate` routes.
+- `defaults/tools/images/{generate_image.yaml,extension.ts}` — tool surface.
+- `src/ui/dialogs/ImageModelSelector.ts` — footer picker.
+- `src/app/settings-page.ts::renderImageModelRow` — Settings → Models → Image row + Test button.
+- `defaults/system-prompt.md` — agent-facing routing rules (DALL-E vs `openai/gpt-image-2`, Google ID table).
+
+See also: [docs/rest-api.md — Image generation](rest-api.md#image-generation) for the wire-level contract; AGENTS.md debugging index for symptom-based pointers.
+
+---
+
 ## MCP servers
 
 Auto-discovered from Claude Code-compatible locations. Sources (later overrides earlier):

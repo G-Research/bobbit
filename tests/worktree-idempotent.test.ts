@@ -31,11 +31,16 @@ describe("createWorktree idempotency", () => {
 		// Create a bare repo (acts as "origin")
 		bareRepo = path.join(tmpDir, "bare.git");
 		fs.mkdirSync(bareRepo, { recursive: true });
-		await git(["init", "--bare", bareRepo], tmpDir);
+		// Force `master` regardless of the host's `init.defaultBranch` (Git ≥2.28
+		// honours the user's global default — typically `main` — which would break
+		// the `git push origin master` below).
+		await git(["-c", "init.defaultBranch=master", "init", "--bare", bareRepo], tmpDir);
 
 		// Clone it to get a working repo
 		cloneRepo = path.join(tmpDir, "clone");
-		await git(["clone", bareRepo, cloneRepo], tmpDir);
+		await git(["-c", "init.defaultBranch=master", "clone", bareRepo, cloneRepo], tmpDir);
+		// Belt-and-braces: in case clone inherited a non-master HEAD, rename it.
+		await git(["symbolic-ref", "HEAD", "refs/heads/master"], cloneRepo);
 
 		// Make an initial commit so HEAD exists
 		const testFile = path.join(cloneRepo, "README.md");

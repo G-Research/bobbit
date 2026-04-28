@@ -368,39 +368,48 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 	}
 }
 
-/** Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension. */
+/**
+ * Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension.
+ *
+ * Tool surface is selected by three intersecting paths, all funneled through
+ * `effectiveRole` and the policy cascade in `tool-activation.ts`:
+ *
+ *   1. **Role-with-policy**: `plan.roleName` resolves to a registered role;
+ *      its `toolPolicies` (allow/ask/never per group) override builtin
+ *      defaults. MCP proxy + guard extensions are emitted as needed.
+ *   2. **Team-lead / role-less**: `plan.roleName` is unset (regular sessions,
+ *      goal team-lead, goal/project/tool assistants). `effectiveRole` is
+ *      `undefined` and the cascade falls back to `groupPolicyStore` defaults
+ *      (which themselves fall back to builtin defaults). The full tool
+ *      surface allowed for the user is exposed.
+ *   3. **MCP-only**: when `mcpManager` is present, MCP-proxy extensions are
+ *      written regardless of role so MCP servers stay reachable; per-server
+ *      policies still apply.
+ *
+ * The guard extension is emitted whenever any tool resolves to `ask` or
+ * `never` so the agent can't bypass the policy by calling the tool directly.
+ */
 export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	if (plan.effectiveAllowedTools && plan.effectiveAllowedTools.length > 0) {
-		const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
-		const mcpExtPaths = ctx.mcpManager
-			? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
-			: undefined;
+	const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+	const mcpExtPaths = ctx.mcpManager
+		? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
+		: undefined;
 
-		const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
+	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
 
-		plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
 
-		// Generate and add the tool_call guard extension if any tools have 'ask' policy
-		const guardPath = ctx.toolManager ? writeToolGuardExtension(
-			plan.id,
-			ctx.toolManager,
-			ctx.mcpManager ?? undefined,
-			effectiveRole ?? undefined,
-			ctx.groupPolicyStore ?? undefined,
-			[],
-		) : undefined;
-		if (guardPath) {
-			plan.bridgeOptions.args.push("--extension", guardPath);
-		}
-	} else if (ctx.mcpManager) {
-		const mcpExtPaths = writeMcpProxyExtensions(ctx.mcpManager);
-		// Always disable auto-discovery — Bobbit controls all extension loading.
-		// Without this the agent would scan the session cwd and pick up stray
-		// `.pi/extensions/*` entries (e.g. checked-in bobbit source trees in test worktrees).
-		plan.bridgeOptions.args = [...(plan.bridgeOptions.args || []), "--no-extensions"];
-		for (const extPath of mcpExtPaths) {
-			plan.bridgeOptions.args.push("--extension", extPath);
-		}
+	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
+	const guardPath = ctx.toolManager ? writeToolGuardExtension(
+		plan.id,
+		ctx.toolManager,
+		ctx.mcpManager ?? undefined,
+		effectiveRole ?? undefined,
+		ctx.groupPolicyStore ?? undefined,
+		[],
+	) : undefined;
+	if (guardPath) {
+		plan.bridgeOptions.args.push("--extension", guardPath);
 	}
 }
 
