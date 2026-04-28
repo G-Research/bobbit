@@ -16,6 +16,7 @@ import { getProviders, getModels } from "@mariozechner/pi-ai";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
+import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ export interface ApiModel {
 export interface CustomProviderConfig {
 	id: string;
 	name: string;
-	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual";
+	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual" | "openai-images" | "gemini-images" | "google-imagen";
 	baseUrl: string;
 	apiKey?: string;
 	models?: Array<{ id: string; name: string }>;
@@ -123,7 +124,12 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 			for (const providerId of providers) {
 				const models = getModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
-				for (const m of models) {
+				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
+				const mergedModels = [
+					...models,
+					...bobbitAdditions.filter(addition => !models.some(m => m.id === addition.id)),
+				];
+				for (const m of mergedModels) {
 					const meta = inferMeta(m.id);
 					results.push({
 						id: m.id,
@@ -468,6 +474,7 @@ export function modelRecencyRank(id: string): number {
 	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
 	if (s.includes("claude")) return 50;
 	// OpenAI
+	if (s.includes("gpt-5.5")) return 104;
 	if (s.includes("gpt-5.4")) return 100;
 	if (s.includes("gpt-5.3")) return 98;
 	if (s.includes("gpt-5.2")) return 96;

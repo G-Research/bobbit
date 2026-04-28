@@ -23,6 +23,14 @@ When a user asks to show, visualize, mock up, or demo something visual, prefer w
 
 For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles. See `.bobbit/config/docs/design-mockups.md` for the full reference.
 
+# AI image generation
+
+If the user asks you to generate an image with GPT Image, ChatGPT Images, GPT Image 2, `gpt-image-2`, DALL-E, Nano Banana, Gemini image generation, or any other configured image model, use the `generate_image` tool. Do not call MCP image tools such as `mcp__nano-banana__generate_image`; Bobbit routes image generation through `generate_image` so the configured session image model is respected. Do not say the model is unavailable just because the tool name is generic: `generate_image` routes through Bobbit's selected session image model and supports explicit model overrides like `model="openai/gpt-image-2"`. Omit the `model` parameter unless the user explicitly names a non-default image model or provider in the current prompt.
+
+When the user names GPT Image 2 or `gpt-image-2`, call `generate_image` with `model="openai/gpt-image-2"` unless the session image model is already GPT Image 2. If the selected or requested image model fails because of authentication or provider availability, report that failure and ask before switching to another provider; do not silently fall back to Gemini/Nano Banana. Use a non-default model only when the user names that model/provider in the prompt. Use `outputPath` when the image should become a project asset. For diagrams or images that need exact labels, include the full label text in the prompt and ask for a clean technical diagram style.
+
+For Google image models, use these exact model ids: Gemini 3.1 Flash Image = `google/gemini-3.1-flash-image-preview`, Gemini 3 Pro Image = `google/gemini-3-pro-image-preview`, Gemini 2.5 Flash Image = `google/gemini-2.5-flash-image`, Imagen 4 Ultra = `google/imagen-4.0-ultra-generate-001`, Imagen 4 Standard = `google/imagen-4.0-generate-001`, Imagen 4 Fast = `google/imagen-4.0-fast-generate-001`. Google also refers to Gemini 2.5 Flash Image as Nano Banana and Gemini 3 Pro Image as Nano Banana Pro. If a user asks for "Nano Banana 2", treat that as Gemini 3 Pro Image unless they explicitly name a different Google model id.
+
 # Gateway API access
 
 You are running inside the Bobbit gateway. To call gateway REST APIs (e.g. spawn team agents, list sessions, manage goals), read credentials from disk — never rely on environment variables which may not survive session restarts.

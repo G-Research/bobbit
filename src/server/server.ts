@@ -14,7 +14,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -62,9 +62,11 @@ import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
+import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
+import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
 import { ProjectRegistry } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
@@ -645,6 +647,7 @@ export function createGateway(config: GatewayConfig) {
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
 	personalityStore.setBuiltins(builtinConfigProvider.getPersonalities());
 	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
+	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
@@ -979,6 +982,7 @@ export function createGateway(config: GatewayConfig) {
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
+			writeOpenAIModelAdditions();
 
 			// Initialize MCP servers (skip in test environments)
 			if (!process.env.BOBBIT_SKIP_MCP) {
@@ -2231,6 +2235,7 @@ async function handleApiRoute(
 					reattemptGoalId: archived.reattemptGoalId,
 					archived: true,
 					archivedAt: archived.archivedAt,
+					imageGenerationModel: sessionManager.getImageModelForSession(archived.id),
 				});
 				return;
 			}
@@ -2269,6 +2274,7 @@ async function handleApiRoute(
 			restoreError: session.restoreError,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
+			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
 		});
 		return;
 	}
@@ -3158,6 +3164,59 @@ async function handleApiRoute(
 			json(models);
 		} catch (err: any) {
 			json({ error: `Failed to load models: ${err.message}` }, 500);
+		}
+		return;
+	}
+
+	// GET /api/image-models — image generation model list
+	if (url.pathname === "/api/image-models" && req.method === "GET") {
+		try {
+			json(getAvailableImageModels(preferencesStore));
+		} catch (err: any) {
+			json({ error: `Failed to load image models: ${err.message}` }, 500);
+		}
+		return;
+	}
+
+	// POST /api/image-generation/generate — gateway-side image generation for the generate_image tool
+	if (url.pathname === "/api/image-generation/generate" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || typeof body.prompt !== "string") {
+			json({ error: "Missing prompt" }, 400);
+			return;
+		}
+		const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
+		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
+		const selectedModel = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
+		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
+		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
+		const model = requestedModel
+			&& (
+				!sessionId
+				|| requestedModel === selectedModel
+				|| imageModelMentionedInText(preferencesStore, requestedModel, lastUserPrompt)
+			)
+			? requestedModel
+			: selectedModel;
+		try {
+			const result = await generateImage(preferencesStore, {
+				prompt: body.prompt,
+				model,
+				size: typeof body.size === "string" ? body.size : undefined,
+				quality: typeof body.quality === "string" ? body.quality : undefined,
+				background: typeof body.background === "string" ? body.background : undefined,
+				format: typeof body.format === "string" ? body.format : undefined,
+				aspectRatio: typeof body.aspectRatio === "string" ? body.aspectRatio : undefined,
+				imageSize: typeof body.imageSize === "string" ? body.imageSize : undefined,
+				n: typeof body.n === "number" ? body.n : undefined,
+			});
+			json({
+				model: { provider: result.model.provider, id: result.model.id, name: result.model.name, api: result.model.api },
+				images: result.images,
+			});
+		} catch (err: any) {
+			json({ error: err?.message || "Image generation failed" }, 500);
 		}
 		return;
 	}
@@ -5328,14 +5387,30 @@ async function handleApiRoute(
 
 	// GET /api/oauth/status
 	if (url.pathname === "/api/oauth/status" && req.method === "GET") {
-		json(oauthStatus());
+		try {
+			json(oauthStatus(url.searchParams.get("provider") ?? undefined));
+		} catch (err) {
+			json({ error: String(err) }, 400);
+		}
+		return;
+	}
+
+	// GET /api/oauth/flow-status?flowId=<id> — callback-based OAuth progress
+	if (url.pathname === "/api/oauth/flow-status" && req.method === "GET") {
+		const flowId = url.searchParams.get("flowId");
+		if (!flowId) {
+			json({ error: "Missing flowId" }, 400);
+			return;
+		}
+		json(oauthFlowStatus(flowId));
 		return;
 	}
 
 	// POST /api/oauth/start — begin OAuth flow, returns auth URL
 	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
 		try {
-			const result = await oauthStart();
+			const body = await readBody(req).catch(() => ({}));
+			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
 			json({ error: String(err) }, 500);

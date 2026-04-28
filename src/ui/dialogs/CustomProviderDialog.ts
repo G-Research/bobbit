@@ -22,6 +22,7 @@ export class CustomProviderDialog extends DialogBase {
 	@state() private testing = false;
 	@state() private testError = "";
 	@state() private discoveredModels: Model<any>[] = [];
+	@state() private manualModelsText = "";
 
 	protected modalWidth = "min(800px, 90vw)";
 	protected modalHeight = "min(700px, 90vh)";
@@ -48,6 +49,7 @@ export class CustomProviderDialog extends DialogBase {
 			this.baseUrl = this.provider.baseUrl;
 			this.apiKey = this.provider.apiKey || "";
 			this.discoveredModels = this.provider.models || [];
+			this.manualModelsText = (this.provider.models || []).map((m) => m.name && m.name !== m.id ? `${m.id} | ${m.name}` : m.id).join("\n");
 		} else {
 			this.name = "";
 			this.type = this.initialType || "openai-completions";
@@ -55,6 +57,7 @@ export class CustomProviderDialog extends DialogBase {
 			this.updateDefaultBaseUrl();
 			this.apiKey = "";
 			this.discoveredModels = [];
+			this.manualModelsText = "";
 		}
 		this.testError = "";
 		this.testing = false;
@@ -71,6 +74,9 @@ export class CustomProviderDialog extends DialogBase {
 			"openai-completions": "",
 			"openai-responses": "",
 			"anthropic-messages": "",
+			"openai-images": "https://api.openai.com",
+			"gemini-images": "https://generativelanguage.googleapis.com",
+			"google-imagen": "https://generativelanguage.googleapis.com",
 		};
 
 		this.baseUrl = defaults[this.type] || "";
@@ -123,13 +129,14 @@ export class CustomProviderDialog extends DialogBase {
 		}
 
 		try {
+			const manualModels = this.isAutoDiscoveryType() ? undefined : this.parseManualModels();
 			const provider = {
 				id: this.provider?.id || crypto.randomUUID(),
 				name: this.name,
 				type: this.type,
 				baseUrl: this.baseUrl,
 				apiKey: this.apiKey || undefined,
-				models: this.isAutoDiscoveryType() ? undefined : this.provider?.models || [],
+				models: manualModels,
 			};
 
 			const res = await gatewayFetch("/api/custom-providers", {
@@ -149,6 +156,17 @@ export class CustomProviderDialog extends DialogBase {
 		}
 	}
 
+	private parseManualModels(): Array<{ id: string; name: string }> {
+		return this.manualModelsText
+			.split(/\n+/)
+			.map((line) => line.trim())
+			.filter(Boolean)
+			.map((line) => {
+				const [idPart, namePart] = line.split("|").map((part) => part.trim());
+				return { id: idPart, name: namePart || idPart };
+			});
+	}
+
 	protected override renderContent(): TemplateResult {
 		const providerTypes = [
 			{ value: "ollama", label: "Ollama (auto-discovery)" },
@@ -158,6 +176,9 @@ export class CustomProviderDialog extends DialogBase {
 			{ value: "openai-completions", label: "OpenAI Completions Compatible" },
 			{ value: "openai-responses", label: "OpenAI Responses Compatible" },
 			{ value: "anthropic-messages", label: "Anthropic Messages Compatible" },
+			{ value: "openai-images", label: "OpenAI Images Compatible" },
+			{ value: "gemini-images", label: "Gemini Images Compatible" },
+			{ value: "google-imagen", label: "Google Imagen Compatible" },
 		];
 
 		return html`
@@ -255,9 +276,25 @@ export class CustomProviderDialog extends DialogBase {
 										}
 									</div>
 								`
-								: html` <div class="text-sm text-muted-foreground">
-									${i18n("For manual provider types, add models after saving the provider.")}
-								</div>`
+								: html`
+									<div class="flex flex-col gap-2">
+										${Label({ htmlFor: "provider-models", children: i18n("Models") })}
+										<textarea
+											id="provider-models"
+											class="min-h-28 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+												focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+											placeholder="model-id&#10;model-id | Display name"
+											.value=${this.manualModelsText}
+											@input=${(e: Event) => {
+												this.manualModelsText = (e.target as HTMLTextAreaElement).value;
+												this.requestUpdate();
+											}}
+										></textarea>
+										<div class="text-sm text-muted-foreground">
+											Enter one model per line. Use <code>model-id | Display name</code> when the label should differ from the provider model ID.
+										</div>
+									</div>
+								`
 						}
 					</div>
 				</div>

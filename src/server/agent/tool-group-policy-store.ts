@@ -15,19 +15,24 @@ const VALID_POLICIES = new Set<string>(['allow', 'ask', 'never', 'always-ask', '
 
 export class ToolGroupPolicyStore {
 	private readonly policyFile: string;
+	private builtinPolicies: Record<string, GrantPolicy> = {};
 
 	constructor(configDir: string) {
 		this.policyFile = path.join(configDir, "tool-group-policies.yaml");
 	}
 
+	setBuiltins(policies: Record<string, GrantPolicy>): void {
+		this.builtinPolicies = { ...policies };
+	}
+
 	/** Read all group policies from disk. */
-	getAll(): Record<string, GrantPolicy> {
+	private getLocal(): Record<string, GrantPolicy> {
 		const filePath = this.policyFile;
+		const result: Record<string, GrantPolicy> = {};
 		try {
 			const raw = fs.readFileSync(filePath, "utf-8");
 			const data = parse(raw);
-			if (!data || typeof data !== "object") return {};
-			const result: Record<string, GrantPolicy> = {};
+			if (!data || typeof data !== "object") return result;
 			for (const [key, value] of Object.entries(data)) {
 				if (typeof value === "string" && VALID_POLICIES.has(value)) {
 					result[key] = value as GrantPolicy;
@@ -35,9 +40,14 @@ export class ToolGroupPolicyStore {
 			}
 			return result;
 		} catch {
-			// File doesn't exist or is invalid — return empty
-			return {};
+			// File doesn't exist or is invalid — return no local overrides.
+			return result;
 		}
+	}
+
+	/** Read all group policies from disk, merged over builtin defaults. */
+	getAll(): Record<string, GrantPolicy> {
+		return { ...this.builtinPolicies, ...this.getLocal() };
 	}
 
 	/** Get the default policy for a specific group. Returns null if not set. */
@@ -48,7 +58,7 @@ export class ToolGroupPolicyStore {
 
 	/** Set or clear the default policy for a group. Pass null to remove. */
 	setGroupPolicy(group: string, policy: GrantPolicy | null): void {
-		const all = this.getAll();
+		const all = this.getLocal();
 		if (policy === null) {
 			delete all[group];
 		} else {

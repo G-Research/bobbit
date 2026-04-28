@@ -1,0 +1,40 @@
+name: generate_image
+description: "Generate images using the configured image generation model"
+summary: "Generate one or more images with GPT Image 2, DALL-E, Nano Banana/Gemini, or another configured image model. Uses the session image model selected in the bottom bar unless `model` is provided."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Images
+docs: |-
+  Generates images through Bobbit's configured image provider. The selected model is controlled by the image model picker in the session footer, with the system default in Settings > Models > Image. Omit `model` unless the user explicitly names a non-default image model or provider in the prompt. You can override with `model` using `provider/modelId` only when the user asks for that model/provider. If the user asks for GPT Image 2 or `gpt-image-2`, use `model="openai/gpt-image-2"`. If the selected or requested model fails due to auth/provider availability, report that failure and ask before switching providers.
+detail_docs: |-
+  ## Purpose
+
+  Generate raster images from a text prompt using the configured image model. Bobbit currently supports OpenAI Images API models such as `openai/gpt-image-2` and Google image models such as `google/gemini-3.1-flash-image-preview`, `google/gemini-3-pro-image-preview`, and Imagen 4 variants, plus compatible custom providers configured in Settings.
+
+  The tool name is generic, but it can call GPT Image 2. Do not tell the user GPT Image 2 is unavailable when this tool is present; call `generate_image` with `model="openai/gpt-image-2"`.
+
+  Google image model ids: Gemini 3.1 Flash Image = `google/gemini-3.1-flash-image-preview`, Gemini 3 Pro Image = `google/gemini-3-pro-image-preview`, Gemini 2.5 Flash Image = `google/gemini-2.5-flash-image`, Imagen 4 Ultra = `google/imagen-4.0-ultra-generate-001`, Imagen 4 Standard = `google/imagen-4.0-generate-001`, Imagen 4 Fast = `google/imagen-4.0-fast-generate-001`. Google also refers to Gemini 2.5 Flash Image as Nano Banana and Gemini 3 Pro Image as Nano Banana Pro. If the user asks for "Nano Banana 2", use Gemini 3 Pro Image unless they explicitly provide another Google model id.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `prompt` | string | Yes | Detailed prompt describing the desired image. |
+  | `outputPath` | string | No | File path to save the image. Multiple images add `-1`, `-2`, etc. |
+  | `model` | string | No | Override model as `provider/modelId`; otherwise uses the session image model. |
+  | `size` | string | No | OpenAI image size, e.g. `1024x1024`, `1536x1024`, `1024x1536`, or `auto`. |
+  | `quality` | string | No | OpenAI quality, e.g. `auto`, `low`, `medium`, `high`, `standard`, or `hd`. |
+  | `background` | string | No | GPT Image background: `auto`, `transparent`, or `opaque`. |
+  | `format` | string | No | Output format for GPT Image models: `png`, `jpeg`, or `webp`. |
+  | `aspectRatio` | string | No | Gemini aspect ratio, e.g. `1:1`, `16:9`, or `9:16`. |
+  | `n` | number | No | Number of images to generate. Defaults to 1. |
+
+  ## Examples
+
+  ```
+  generate_image(prompt="A product photo of a matte black desk lamp on a walnut desk", outputPath="assets/lamp.png", size="1024x1024")
+  generate_image(prompt="Clean technical architecture diagram comparing two I/O paths", model="openai/gpt-image-2", size="1536x1024", outputPath="assets/io-diagram.png")
+  generate_image(prompt="Wide editorial illustration of a city at sunrise", aspectRatio="16:9")
+  generate_image(prompt="Transparent sticker of a smiling robot", background="transparent", format="png")
+  ```

@@ -115,11 +115,18 @@ describe("resolveGrantPolicy — unified 5-layer resolution", () => {
 		assert.equal(resolveGrantPolicy("read", "Filesystem", {}, mockToolManager({}), gps), "allow");
 	});
 
-	it("undefined toolGroup skips group-level checks", () => {
+	it("MCP prefix policies still apply when toolGroup is undefined", () => {
 		const role = { toolPolicies: { "mcp__pw": "ask" as const } };
 		const gps = mockGroupPolicyStore({ "mcp__pw": "ask" });
-		// With undefined toolGroup, neither role group nor group default apply
-		assert.equal(resolveGrantPolicy("mcp__pw__snap", undefined, role, undefined, gps), "allow");
+		assert.equal(resolveGrantPolicy("mcp__pw__snap", undefined, role, undefined, gps), "ask");
+	});
+
+	it("MCP group policy prefix matches full MCP tool names", () => {
+		const gps = mockGroupPolicyStore({ "mcp__nano-banana": "never" });
+		assert.equal(
+			resolveGrantPolicy("mcp__nano-banana__generate_image", "MCP: nano-banana", {}, mockToolManager({}), gps),
+			"never",
+		);
 	});
 
 	it("empty toolPolicies falls through to tool default", () => {
@@ -165,6 +172,14 @@ describe("ToolGroupPolicyStore", () => {
 		assert.deepEqual(all, {});
 	});
 
+	it("getAll includes builtin defaults when no file exists", () => {
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
+		store.setBuiltins({ "mcp__nano-banana": "never" });
+		assert.equal(store.getGroupPolicy("mcp__nano-banana"), "never");
+		assert.equal(store.getAll()["mcp__nano-banana"], "never");
+	});
+
 	it("setGroupPolicy creates file and stores policy", () => {
 		const configDir = path.join(tmpDir, "config");
 		const store = new ToolGroupPolicyStore(configDir);
@@ -185,6 +200,14 @@ describe("ToolGroupPolicyStore", () => {
 		assert.equal(store.getGroupPolicy("Browser"), "ask");
 		store.setGroupPolicy("Browser", null);
 		assert.equal(store.getGroupPolicy("Browser"), null);
+	});
+
+	it("server policy overrides builtin policy", () => {
+		const configDir = path.join(tmpDir, "config");
+		const store = new ToolGroupPolicyStore(configDir);
+		store.setBuiltins({ Browser: "never" });
+		store.setGroupPolicy("Browser", "ask");
+		assert.equal(store.getGroupPolicy("Browser"), "ask");
 	});
 
 	it("getAll returns all stored policies", () => {

@@ -123,40 +123,77 @@ export function showConnectionError(title: string, message: string): void {
 // OAUTH DIALOG
 // ============================================================================
 
-export async function checkOAuthStatus(): Promise<boolean> {
-	const res = await gatewayFetch("/api/oauth/status");
+export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean> {
+	const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider)}`);
 	if (!res.ok) return false;
 	const data = await res.json();
 	return data.authenticated === true;
 }
 
-export function openOAuthDialog(): Promise<boolean> {
+export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 	return new Promise((resolve) => {
 		const container = document.createElement("div");
 		document.body.appendChild(container);
 
 		let flowId = "";
 		let authUrl = "";
+		let callbackServer = false;
+		let instructions = "";
 		let codeValue = "";
 		let step: "loading" | "waiting" | "exchanging" | "done" | "error" = "loading";
 		let error = "";
+		let pollTimer: number | undefined;
+
+		const providerName = provider === "openai-codex" || provider === "openai" ? "OpenAI" : "Anthropic";
 
 		const cleanup = (result: boolean) => {
+			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
 			render(html``, container);
 			container.remove();
 			resolve(result);
 		};
 
+		const pollFlowStatus = async () => {
+			if (!flowId || step !== "waiting") return;
+			try {
+				const res = await gatewayFetch(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}`);
+				if (res.ok) {
+					const data = await res.json();
+					if (data.complete) {
+						step = "done";
+						renderOAuthDialog();
+						setTimeout(() => cleanup(true), 500);
+						return;
+					}
+					if (data.error) {
+						error = data.error;
+						step = "error";
+						renderOAuthDialog();
+						return;
+					}
+				}
+			} catch {
+				// Keep polling; the manual paste path remains available.
+			}
+			pollTimer = window.setTimeout(pollFlowStatus, 1000);
+		};
+
 		const startFlow = async () => {
 			try {
-				const res = await gatewayFetch("/api/oauth/start", { method: "POST" });
+				const res = await gatewayFetch("/api/oauth/start", {
+					method: "POST",
+					body: JSON.stringify({ provider }),
+				});
 				if (!res.ok) throw new Error("Failed to start OAuth flow");
 				const data = await res.json();
 				flowId = data.flowId;
 				authUrl = data.url;
+				callbackServer = data.callbackServer === true;
+				instructions = data.instructions || "";
 				step = "waiting";
 				window.open(authUrl, "_blank");
 				renderOAuthDialog();
+				if (callbackServer) pollFlowStatus();
 			} catch (err) {
 				error = err instanceof Error ? err.message : String(err);
 				step = "error";
@@ -200,14 +237,17 @@ export function openOAuthDialog(): Promise<boolean> {
 						return html`
 							<div class="flex flex-col gap-3">
 								<p class="text-sm text-muted-foreground">
-									A browser tab has been opened for Anthropic authentication.
-									After authorizing, copy the code and paste it below.
+									A browser tab has been opened for ${providerName} authentication.
+									${callbackServer
+										? "This should complete automatically after authorizing. If it does not, paste the full redirect URL or authorization code below."
+										: "After authorizing, copy the code and paste it below."}
 								</p>
+								${instructions ? html`<p class="text-xs text-muted-foreground">${instructions}</p>` : ""}
 								<div>
 									<label class="text-xs text-muted-foreground mb-1 block">Authorization Code</label>
 									${Input({
 										type: "text",
-										placeholder: "Paste code here (format: code#state)",
+										placeholder: callbackServer ? "Paste redirect URL or code" : "Paste code here (format: code#state)",
 										value: codeValue,
 										onInput: (e: Event) => {
 											codeValue = (e.target as HTMLInputElement).value;
@@ -251,7 +291,7 @@ export function openOAuthDialog(): Promise<boolean> {
 					children: html`
 						${DialogContent({
 							children: html`
-								${DialogHeader({ title: "Anthropic Login" })}
+								${DialogHeader({ title: `${providerName} Login` })}
 								<div class="mt-2">${content}</div>
 							`,
 						})}
