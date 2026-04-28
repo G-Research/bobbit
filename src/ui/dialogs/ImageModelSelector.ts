@@ -29,7 +29,7 @@ export interface ImageGenerationModel {
  * registry rank higher. Models not in `registry` (e.g. transient mock entries
  * in tests) sort below known ones.
  */
-function imageModelRank(model: ImageGenerationModel, registry: readonly ImageGenerationModel[]): number {
+export function imageModelRank(model: ImageGenerationModel, registry: readonly ImageGenerationModel[]): number {
 	const idx = registry.findIndex((m) => m.provider === model.provider && m.id === model.id);
 	if (idx < 0) return -1;
 	return registry.length - idx;

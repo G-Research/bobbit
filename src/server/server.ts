@@ -3162,10 +3162,11 @@ async function handleApiRoute(
 			n = body.n;
 		}
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
-		// Sandbox guard: callers under a sandbox-scoped token may only read state
-		// (per-session image-model pref + last user prompt) for sessions in their scope.
-		if (sandboxScope && sessionId && !sandboxScope.sessionIds.has(sessionId)) {
-			json({ error: "session not in scope" }, 403);
+		// Sandbox guard: callers under a sandbox-scoped token must identify a
+		// session in their scope. Without sessionId we cannot prove ownership,
+		// so refuse rather than silently broadcasting credentials.
+		if (sandboxScope && (!sessionId || !sandboxScope.sessionIds.has(sessionId))) {
+			json({ error: "session not in sandbox scope" }, 403);
 			return;
 		}
 		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
