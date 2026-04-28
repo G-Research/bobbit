@@ -12,13 +12,43 @@ function outputPathFor(basePath: string, index: number, count: number, mimeType:
 		? (parsed.ext ? basePath : `${basePath}${ext}`)
 		: path.join(parsed.dir, `${parsed.name}-${index + 1}${ext}`);
 	const resolved = path.resolve(process.cwd(), rawTarget);
-	// Containment: outputPath is model-controlled. Reject any path that escapes the
-	// session worktree (parent traversal or absolute path outside cwd).
+	// Containment (lexical): outputPath is model-controlled. Reject any path that
+	// escapes the session worktree (parent traversal or absolute path outside cwd).
 	const rel = path.relative(process.cwd(), resolved);
 	if (rel.startsWith("..") || path.isAbsolute(rel)) {
 		throw new Error("outputPath escapes worktree");
 	}
+	// Symlink containment (best-effort): if the parent directory already exists,
+	// realpath it and re-check containment against cwd's realpath. If the parent
+	// doesn't exist yet (we'll mkdir it), skip — the writeFileSync at the call
+	// site happens after mkdir, which won't materialise symlinks unless the user
+	// pre-created one. Belt-and-braces.
+	try {
+		const parent = path.dirname(resolved);
+		if (fs.existsSync(parent)) {
+			const realParent = fs.realpathSync(parent);
+			const realCwd = fs.realpathSync(process.cwd());
+			const realRel = path.relative(realCwd, realParent);
+			if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
+				throw new Error("outputPath escapes worktree");
+			}
+		}
+	} catch (err: any) {
+		if (err?.message === "outputPath escapes worktree") throw err;
+		// realpath failures (race, permissions) shouldn't block writes; the lexical
+		// check above already rejects the obvious traversal cases.
+	}
 	return resolved;
+}
+
+const MAX_DECODED_IMAGE_BYTES = 50 * 1024 * 1024;
+
+function writeImageBytes(filePath: string, base64: string): void {
+	const buf = Buffer.from(base64, "base64");
+	if (buf.byteLength > MAX_DECODED_IMAGE_BYTES) {
+		throw new Error("decoded image exceeds 50 MB cap");
+	}
+	fs.writeFileSync(filePath, buf);
 }
 
 const extension: ExtensionFactory = (pi) => {
@@ -113,14 +143,14 @@ const extension: ExtensionFactory = (pi) => {
 					const image = images[0];
 					const filePath = outputPathFor(params.outputPath, 0, 1, image.mimeType || "image/png");
 					fs.mkdirSync(path.dirname(filePath), { recursive: true });
-					fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
+					writeImageBytes(filePath, image.data);
 					savedPaths.push(filePath);
 				} else {
 					for (let i = 0; i < images.length; i++) {
 						const image = images[i];
 						const filePath = outputPathFor(params.outputPath, i, images.length, image.mimeType || "image/png");
 						fs.mkdirSync(path.dirname(filePath), { recursive: true });
-						fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
+						writeImageBytes(filePath, image.data);
 						savedPaths.push(filePath);
 					}
 				}

@@ -3495,8 +3495,14 @@ export class SessionManager {
 		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
 	}
 
-	/** Persist per-session image generation model override. */
+	/** Persist per-session image generation model override. Validates against the
+	 * registered image-model registry first; mirrors the WS handler's defence-in-depth
+	 * check so any code path that lands here can't poison session state with an
+	 * unknown (provider, modelId). */
 	persistSessionImageModel(sessionId: string, provider: string, modelId: string): void {
+		if (!this.isKnownImageModel(provider, modelId)) {
+			throw new Error("unknown image model");
+		}
 		this.resolveStoreForSession(sessionId).update(sessionId, { imageModelProvider: provider, imageModelId: modelId });
 	}
 

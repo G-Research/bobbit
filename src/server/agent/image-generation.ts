@@ -18,6 +18,10 @@ export interface ApiImageModel {
 	qualities?: string[];
 	aspectRatios?: string[];
 	formats?: string[];
+	/** For custom-provider image models: the underlying CustomProviderConfig.id.
+	 * Built-in providers leave this undefined. Used by getImageProviderKey to
+	 * resolve the API key by config.id rather than display-name collisions. */
+	customProviderId?: string;
 }
 
 export interface GeneratedImage {
@@ -181,6 +185,7 @@ export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[
 				api: config.type as ImageProviderType,
 				baseUrl: config.baseUrl,
 				authenticated: Boolean(config.apiKey) || (config.type === "openai-images" ? openaiAuth : googleAuth),
+				customProviderId: config.id,
 			}));
 		});
 
@@ -188,7 +193,10 @@ export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[
 }
 
 export function getImageModelByPref(prefs: PreferencesStore, pref?: string | null): ApiImageModel | undefined {
-	const parsed = parseImageModelPref(canonicalImageModelPref(pref || defaultImageModelPref()));
+	// Prefer canonicalised user input; fall back to the canonical default (already
+	// in canonical form, so no double-canonicalisation needed).
+	const canonical = canonicalImageModelPref(pref) || defaultImageModelPref();
+	const parsed = parseImageModelPref(canonical);
 	if (!parsed) return undefined;
 	return getAvailableImageModels(prefs).find((m) => m.provider === parsed.provider && m.id === parsed.id);
 }
@@ -310,7 +318,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 		if (row?.b64_json) {
 			images.push({ data: row.b64_json, mimeType: `image/${format}`, revisedPrompt: row.revised_prompt });
 		} else if (row?.url) {
-			images.push(await imageFromUrl(row.url, row.revised_prompt));
+			images.push(await imageFromUrl(row.url, model, row.revised_prompt));
 		}
 	}
 	if (images.length === 0) throw new Error("Image provider returned no image data");
@@ -373,6 +381,12 @@ async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel
 async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
 	const apiKey = getImageProviderKey(prefs, model);
 	if (!apiKey) throw new Error(`Missing API key for ${model.provider}`);
+	// Gemini image generation does not honour batch via generationConfig, so reject
+	// n>1 explicitly rather than silently returning a single image.
+	const requestedN = Math.max(Math.floor(request.n || 1), 1);
+	if (requestedN > 1) {
+		throw new Error("gemini image driver supports n=1 only");
+	}
 	const generationConfig: Record<string, unknown> = {
 		responseModalities: ["TEXT", "IMAGE"],
 	};
@@ -452,10 +466,13 @@ function getImageProviderKey(prefs: PreferencesStore, model: ApiImageModel): str
 	if (model.provider === "google") {
 		return getGoogleImageCredential(prefs);
 	}
+	// Custom provider — match by config.id (stored on the model entry at registration
+	// time) rather than by display name, which can collide between configs.
 	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
-	const config = configs.find((c) => (c.name || c.id) === model.provider && c.id === model.provider)
-		|| configs.find((c) => (c.name || c.id) === model.provider);
-	if (config?.apiKey) return config.apiKey;
+	if (model.customProviderId) {
+		const config = configs.find((c) => c.id === model.customProviderId);
+		if (config?.apiKey) return config.apiKey;
+	}
 	return model.api === "openai-images"
 		? getOpenAIImageApiKey(prefs)
 		: getGoogleImageCredential(prefs);
@@ -528,7 +545,15 @@ function getCodexAccountId(token: string): string {
 	try {
 		const payload = JSON.parse(Buffer.from(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8"));
 		const accountId = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-		if (typeof accountId === "string" && accountId) return accountId;
+		if (typeof accountId === "string" && accountId) {
+			// Defensive validation: the value is later sent verbatim as the
+			// `chatgpt-account-id` header. Reject anything outside [A-Za-z0-9_-]
+			// to prevent header smuggling via a tampered/forged token.
+			if (!/^[A-Za-z0-9_-]+$/.test(accountId)) {
+				throw new Error("invalid chatgpt-account-id");
+			}
+			return accountId;
+		}
 	} catch (err) {
 		// Degrade gracefully — the throw below is what the caller surfaces, but log to aid debugging
 		// of malformed JWTs (e.g. truncated token files, base64url decode failures).
@@ -573,9 +598,13 @@ function parseCodexImageEvents(sseText: string, format: string): GeneratedImage[
 					images[0] = { data: stripDataUrlPrefix(result), mimeType: `image/${format}` };
 				}
 			}
-			const partial = event.partial_image_b64 || event.partial_image || event.image;
-			if (images.length === 0 && event.type === "response.image_generation_call.partial_image" && typeof partial === "string" && partial) {
-				images[0] = { data: stripDataUrlPrefix(partial), mimeType: `image/${format}` };
+			// Partial-image branch is gated on the explicit event type so we never
+			// confuse a final-completion `event.image` payload with a partial frame.
+			if (images.length === 0 && event.type === "response.image_generation_call.partial_image") {
+				const partial = event.partial_image_b64 || event.partial_image;
+				if (typeof partial === "string" && partial) {
+					images[0] = { data: stripDataUrlPrefix(partial), mimeType: `image/${format}` };
+				}
 			}
 		} catch { /* ignore malformed SSE chunks */ }
 	}
@@ -623,13 +652,16 @@ function wellKnownModelAliases(provider: string, id: string): string[] {
 		return ["dall e", "dalle"];
 	}
 	if (provider === "google" && id === "gemini-3.1-flash-image-preview") {
-		return ["gemini 3.1 flash image", "gemini 3 flash image", "gemini image", "gemini"];
+		// NOTE: do NOT include the bare provider token "gemini" here — it would match
+		// any prompt mentioning Gemini (e.g. "use Gemini Pro") and gate-open the
+		// model-override path for ALL Google image models.
+		return ["gemini 3.1 flash image", "gemini 3 flash image", "gemini image"];
 	}
 	if (provider === "google" && id === "gemini-3-pro-image-preview") {
-		return ["nano banana pro", "nano banana 2", "gemini 3 pro image", "gemini pro image", "gemini"];
+		return ["nano banana pro", "nano banana 2", "gemini 3 pro image", "gemini pro image"];
 	}
 	if (provider === "google" && id === "gemini-2.5-flash-image") {
-		return ["nano banana", "gemini 2.5 flash image", "gemini image", "gemini"];
+		return ["nano banana", "gemini 2.5 flash image", "gemini image"];
 	}
 	if (provider === "google" && id === "imagen-4.0-ultra-generate-001") {
 		return ["imagen 4 ultra", "imagen ultra"];
@@ -644,10 +676,50 @@ function wellKnownModelAliases(provider: string, id: string): string[] {
 }
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const IMAGE_FETCH_TIMEOUT_MS = 60_000;
 
-async function imageFromUrl(url: string, revisedPrompt?: string): Promise<GeneratedImage> {
+// Built-in image-provider host allowlist for `imageFromUrl`. DALL-E images come
+// from the Azure blob host; OpenAI's edits/variants APIs return openai.com URLs.
+// Anything else is rejected for built-in providers (SSRF defence). Custom
+// providers (api === "openai-images" with a non-built-in baseUrl) skip the
+// allowlist but still get the timeout + size cap.
+const BUILTIN_IMAGE_HOST_ALLOWLIST: ReadonlyArray<RegExp> = [
+	/^([a-z0-9-]+\.)*openai\.com$/i,
+	/^([a-z0-9-]+\.)*oaistatic\.com$/i,
+	/^([a-z0-9-]+\.)*oaiusercontent\.com$/i,
+	/^oaidalleapiprodscus\.blob\.core\.windows\.net$/i,
+	/^([a-z0-9-]+\.)*googleapis\.com$/i,
+];
+
+function isBuiltinImageProvider(model: ApiImageModel | undefined): boolean {
+	if (!model) return true; // most-restrictive default for unknown caller
+	return !model.customProviderId;
+}
+
+async function imageFromUrl(url: string, model: ApiImageModel | undefined, revisedPrompt?: string): Promise<GeneratedImage> {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new Error("imageFromUrl: invalid URL");
+	}
+	if (parsed.protocol !== "https:") {
+		throw new Error("imageFromUrl: only https URLs allowed");
+	}
+	if (isBuiltinImageProvider(model)) {
+		const host = parsed.hostname;
+		const allowed = BUILTIN_IMAGE_HOST_ALLOWLIST.some((rx) => rx.test(host));
+		if (!allowed) {
+			throw new Error(`imageFromUrl: host not allowlisted for built-in provider: ${host}`);
+		}
+	}
 	const controller = new AbortController();
-	const resp = await fetch(url, { signal: controller.signal });
+	const timeoutSignal = AbortSignal.timeout(IMAGE_FETCH_TIMEOUT_MS);
+	timeoutSignal.addEventListener("abort", () => controller.abort(timeoutSignal.reason));
+	const resp = await fetch(url, { signal: controller.signal, redirect: "manual" });
+	if (resp.type === "opaqueredirect" || (resp.status >= 300 && resp.status < 400)) {
+		throw new Error(`imageFromUrl: redirects not followed (status ${resp.status})`);
+	}
 	if (!resp.ok) throw new Error(`Failed to download generated image: ${resp.status}`);
 	const mimeType = resp.headers.get("content-type")?.split(";")[0] || "image/png";
 
