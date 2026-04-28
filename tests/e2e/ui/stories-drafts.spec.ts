@@ -12,7 +12,6 @@
  *
  * Migrated from stories-draft-preservation.spec.ts with 3 new gap stories:
  *   CT-02-e: goal-dashboard-detour
- *   CT-02-f: personality-change
  *   CT-02-g: reconnect-after-disconnect
  */
 import { test, expect } from "../gateway-harness.js";
@@ -163,47 +162,6 @@ test.describe("CT-02: Draft preservation", () => {
 
 		// cleanup
 		if (goalId) await deleteGoal(goalId);
-	});
-
-	test("CT-02-f: Draft survives personality change", async () => {
-		s.begin(defineStory({
-			id: "CT-02-f",
-			title: "Draft survives personality change",
-			contracts: [CT_02],
-			covers: ["personality-change"],
-		}));
-
-		// setup
-		await s.navigate_to("session", "A");
-		await s.session("A").in_state("active");
-
-		// act
-		s.act();
-		await s.type_in(s.editor, "personality draft");
-
-		// Interact with context bar area — click a personality chip or any
-		// element in the context bar, then verify the draft is still present.
-		const contextBar = s.page.locator(".context-bar, .stats-bar").first();
-		const contextBarVisible = await contextBar.isVisible().catch(() => false);
-		if (contextBarVisible) {
-			// Try clicking the personality chip or any clickable element in the context bar
-			const personalityChip = s.page.locator(
-				".personality-chip, .personality-selector, [data-testid='personality'], .context-bar button, .stats-bar button"
-			).first();
-			const chipVisible = await personalityChip.isVisible().catch(() => false);
-			if (chipVisible) {
-				await personalityChip.click();
-				// If a dropdown appeared, press Escape to dismiss it
-				await s.page.keyboard.press("Escape");
-			}
-		}
-
-		// Click back in the editor to ensure focus returns
-		await s.page.locator("message-editor textarea").first().click();
-
-		// assert
-		s.assert();
-		await s.editor.contains_text("personality draft");
 	});
 
 	test("CT-02-g: Draft survives reconnect after disconnect", async () => {

@@ -101,7 +101,6 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/health", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/internal/mcp-call", "POST", scope)).toBe(false);
 		expect(isSandboxAllowed("/api/preview", "POST", scope)).toBe(true);
-		expect(isSandboxAllowed("/api/personalities", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions", "POST", scope)).toBe(true);
 
 		// Own session (tracked under project)

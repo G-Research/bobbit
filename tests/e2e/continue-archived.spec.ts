@@ -3,7 +3,7 @@
  *
  * Covers design-doc §9.1:
  *   - mode=summary / mode=full happy paths
- *   - settings copy (role, personalities, modelProvider/modelId)
+ *   - settings copy (role, modelProvider/modelId)
  *   - freshness (new cwd for worktree-backed sources)
  *   - rejection cases (goal/delegate/team/assistant/non-archived/bad mode)
  *   - project unregistered (410)
@@ -59,11 +59,9 @@ async function getPersisted(id: string): Promise<any> {
 
 async function makeArchivedSourceSession(opts?: {
 	promptText?: string;
-	personalities?: string[];
 	roleId?: string;
 }): Promise<string> {
 	const body: any = { cwd: nonGitCwd() };
-	if (opts?.personalities) body.personalities = opts.personalities;
 	if (opts?.roleId) body.roleId = opts.roleId;
 	const resp = await apiFetch("/api/sessions", { method: "POST", body: JSON.stringify(body) });
 	expect(resp.status).toBe(201);
@@ -267,10 +265,9 @@ test.describe("Continue-Archived API", () => {
 		void gateway;
 	});
 
-	test("role + personalities copied to new session", async ({ gateway }) => {
+	test("role copied to new session", async ({ gateway }) => {
 		const archivedId = await makeArchivedSourceSession({
 			roleId: "coder",
-			personalities: ["pragmatic"],
 		});
 		const ps = (await apiFetch(`/api/sessions/${archivedId}?include=archived`)).ok; void ps;
 
@@ -281,15 +278,15 @@ test.describe("Continue-Archived API", () => {
 		expect(resp.status).toBe(201);
 		const data = await resp.json();
 
-		// Poll persisted metadata for role + personalities
+		// Poll persisted metadata for role
 		for (let i = 0; i < 30; i++) {
 			const info = await getPersisted(data.id);
-			if (info?.role === "coder" && Array.isArray(info?.personalities) && info.personalities.includes("pragmatic")) {
+			if (info?.role === "coder") {
 				return;
 			}
 			await new Promise(r => setTimeout(r, 50));
 		}
-		throw new Error("role/personalities were not copied");
+		throw new Error("role was not copied");
 		void gateway;
 	});
 

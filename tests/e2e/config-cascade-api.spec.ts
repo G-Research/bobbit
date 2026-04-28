@@ -2,7 +2,7 @@
  * Config Cascade API E2E tests.
  *
  * Validates the three-layer resolution cascade (builtin → server → project)
- * for roles, personalities, workflows, and tools. Tests origin tagging,
+ * for roles, workflows, and tools. Tests origin tagging,
  * customize/override endpoints, and cascade correctness.
  */
 import { test, expect } from "./in-process-harness.js";
@@ -19,7 +19,6 @@ import { tmpdir } from "node:os";
 function createProjectDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "bobbit-cascade-"));
 	mkdirSync(join(dir, ".bobbit", "config", "roles"), { recursive: true });
-	mkdirSync(join(dir, ".bobbit", "config", "personalities"), { recursive: true });
 	mkdirSync(join(dir, ".bobbit", "config", "workflows"), { recursive: true });
 	mkdirSync(join(dir, ".bobbit", "config", "tools"), { recursive: true });
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
@@ -55,17 +54,6 @@ test.describe("Config Cascade API", () => {
 		for (const role of data.roles) {
 			expect(role.origin).toBeDefined();
 			expect(["builtin", "server", "project"]).toContain(role.origin);
-		}
-	});
-
-	test("GET /api/personalities returns items with origin field", async () => {
-		const res = await apiFetch("/api/personalities");
-		expect(res.ok).toBe(true);
-		const data = await res.json();
-		expect(data.personalities.length).toBeGreaterThan(0);
-		for (const p of data.personalities) {
-			expect(p.origin).toBeDefined();
-			expect(["builtin", "server", "project"]).toContain(p.origin);
 		}
 	});
 
@@ -279,49 +267,6 @@ test.describe("Config Cascade API", () => {
 			await deleteProject(projB.id);
 			rmSync(tmpDirA, { recursive: true, force: true });
 			rmSync(tmpDirB, { recursive: true, force: true });
-		}
-	});
-
-	test("customize personality at project level", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-personality", tmpDir);
-
-		try {
-			// List personalities — find one to customize
-			const before = await apiFetch(`/api/personalities?projectId=${proj.id}`);
-			const beforeData = await before.json();
-			expect(beforeData.personalities.length).toBeGreaterThan(0);
-			const first = beforeData.personalities[0];
-			const initialOrigin = first.origin;
-
-			// Customize at project level
-			const customizeRes = await apiFetch(
-				`/api/personalities/${first.name}/customize?scope=project&projectId=${proj.id}`,
-				{ method: "POST" },
-			);
-			expect(customizeRes.status).toBe(201);
-
-			// Verify
-			const after = await apiFetch(`/api/personalities?projectId=${proj.id}`);
-			const afterData = await after.json();
-			const customized = afterData.personalities.find((p: any) => p.name === first.name);
-			expect(customized.origin).toBe("project");
-			expect(customized.overrides).toBe(initialOrigin);
-
-			// Revert
-			const revertRes = await apiFetch(
-				`/api/personalities/${first.name}/override?scope=project&projectId=${proj.id}`,
-				{ method: "DELETE" },
-			);
-			expect(revertRes.status).toBe(200);
-
-			const reverted = await apiFetch(`/api/personalities?projectId=${proj.id}`);
-			const revertedData = await reverted.json();
-			const revertedItem = revertedData.personalities.find((p: any) => p.name === first.name);
-			expect(revertedItem.origin).toBe(initialOrigin);
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
 		}
 	});
 

@@ -357,7 +357,7 @@ Search UI (SR-01 through SR-06), content lifecycle (SR-08), project management (
 ## CT-15: Config changes apply without restart
 
 **Guarantee:**
-Changes to roles, personalities, tool policies, and other configuration take effect on new messages and sessions without requiring a server restart. The config cascade resolves settings in priority order — project-level overrides server-level, which overrides built-in defaults. The most specific setting always wins. Settings changed in the UI persist across page reloads.
+Changes to roles, tool policies, and other configuration take effect on new messages and sessions without requiring a server restart. The config cascade resolves settings in priority order — project-level overrides server-level, which overrides built-in defaults. The most specific setting always wins. Settings changed in the UI persist across page reloads.
 
 **Survives:**
 - Page reload (settings persisted)

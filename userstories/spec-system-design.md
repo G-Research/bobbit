@@ -114,7 +114,7 @@ s.editor.queue              // queued message pills
 s.editor.autocomplete       // slash skill dropdown
 
 s.sidebar                   // left navigation panel
-s.context_bar               // model/personality selectors
+s.context_bar               // model selector
 s.context_bar.model_selector
 s.stats_bar                 // cost, context usage, git status
 s.message_list              // chat message thread

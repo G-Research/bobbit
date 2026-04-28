@@ -230,23 +230,6 @@ describe("assembleSystemPrompt", () => {
 		assert.ok(content.includes("Some spec"));
 	});
 
-	it("includes personality fragments", () => {
-		const result = assembleSystemPrompt("test-session-5", {
-			cwd: cwdDir,
-			goalSpec: "Do something",
-			personalities: [
-				{ label: "Friendly", promptFragment: "Be warm and approachable." },
-				{ label: "Concise", promptFragment: "Keep answers short." },
-			],
-		});
-		assert.ok(result);
-		const content = fs.readFileSync(result, "utf-8");
-		assert.ok(content.includes("## Personality"));
-		assert.ok(content.includes("**Friendly**"));
-		assert.ok(content.includes("Be warm and approachable."));
-		assert.ok(content.includes("**Concise**"));
-	});
-
 	it("includes tool documentation", () => {
 		const result = assembleSystemPrompt("test-session-6", {
 			cwd: cwdDir,
