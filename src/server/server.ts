@@ -73,6 +73,7 @@ import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js"
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { PersistedTeamEntry } from "./agent/team-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
+import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade } from "./agent/config-cascade.js";
@@ -567,6 +568,14 @@ export function createGateway(config: GatewayConfig) {
 	// Recover data lost by the original migration bug (unconditional rename
 	// when central dir == default project dir). Must run before stores load.
 	recoverPreMigrationData(stateDir);
+
+	// One-shot project.yaml migration: synthesize components[] for legacy
+	// single-repo projects. Idempotent. Must run BEFORE ProjectContext
+	// instantiation so ProjectConfigStore.load() picks up the new shape,
+	// and BEFORE the worktree pool fills.
+	migrateAllProjectYaml(
+		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
+	);
 
 	// Initialize per-project contexts
 	const projectContextManager = new ProjectContextManager(projectRegistry);
