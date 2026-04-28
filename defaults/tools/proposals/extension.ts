@@ -1,7 +1,7 @@
 /**
  * Proposal tool extensions for Bobbit.
  *
- * Registers one tool per proposal type (goal, role, tool, personality, staff,
+ * Registers one tool per proposal type (goal, role, tool, staff,
  * setup, workflow, project). Each tool simply acknowledges the call — the real
  * processing happens on the UI side when it sees the tool_use block in the
  * assistant message.
@@ -61,21 +61,6 @@ export default function (pi: ExtensionAPI) {
 			tool: Type.String({ description: "Tool name" }),
 			action: Type.String({ description: "Action type (e.g. \"create\", \"update\")" }),
 			content: Type.String({ description: "Tool definition content (YAML)" }),
-		}),
-		async execute() { return ack(); },
-	});
-
-	// ── propose_personality ───────────────────────────────────────────
-	pi.registerTool({
-		name: "propose_personality",
-		label: "Propose Personality",
-		description: "Submit a personality proposal for user review. Call this when you have designed a custom personality.",
-		promptSnippet: "Propose a personality with name, label, description, and prompt fragment.",
-		parameters: Type.Object({
-			name: Type.String({ description: "Personality identifier (lowercase, hyphens)" }),
-			label: Type.String({ description: "Human-readable display name" }),
-			description: Type.Optional(Type.String({ description: "Short tooltip description" })),
-			prompt_fragment: Type.String({ description: "1-2 sentences injected into the agent's system prompt" }),
 		}),
 		async execute() { return ack(); },
 	});

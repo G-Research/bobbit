@@ -25,12 +25,6 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 		callbackName: "onToolProposal",
 	},
 	{
-		tag: "personality_proposal",
-		fields: ["name", "label", "description", "prompt_fragment"],
-		requiredFields: ["name", "label", "prompt_fragment"],
-		callbackName: "onPersonalityProposal",
-	},
-	{
 		tag: "staff_proposal",
 		fields: ["name", "description", "prompt", "triggers", "cwd"],
 		requiredFields: ["name", "prompt"],

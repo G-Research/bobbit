@@ -23,8 +23,6 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
-import { PersonalityStore } from "./agent/personality-store.js";
-import { PersonalityManager } from "./agent/personality-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -614,8 +612,6 @@ export function createGateway(config: GatewayConfig) {
 	if (savedCwd && typeof savedCwd === "string") {
 		config.defaultCwd = savedCwd;
 	}
-	const personalityStore = new PersonalityStore(configDir);
-	const personalityManager = new PersonalityManager(personalityStore);
 	const roleStore = new RoleStore(configDir);
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
@@ -627,7 +623,6 @@ export function createGateway(config: GatewayConfig) {
 		agentCliPath: config.agentCliPath,
 		systemPromptPath: config.systemPromptPath,
 		colorStore,
-		personalityManager,
 		roleManager,
 		toolManager,
 		workflowStore,
@@ -652,12 +647,10 @@ export function createGateway(config: GatewayConfig) {
 	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
 	// fall back to builtins, so no seeding to disk is needed.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
-	personalityStore.setBuiltins(builtinConfigProvider.getPersonalities());
 	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
-		getPersonalities: () => personalityStore.getAllLocal(),
 		getWorkflows: () => workflowStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
@@ -678,7 +671,6 @@ export function createGateway(config: GatewayConfig) {
 		colorStore,
 		taskManager: new TaskManager(taskStore),
 		roleStore,
-		personalityManager,
 		projectContextManager,
 		toolManager,
 	});
@@ -766,7 +758,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, personalityManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, personalityStore, workflowStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, workflowStore);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -933,7 +925,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager);
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -1398,7 +1390,6 @@ async function handleApiRoute(
 	roleManager: RoleManager,
 	toolManager: ToolManager,
 	projectContextManager: ProjectContextManager,
-	personalityManager: PersonalityManager,
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
 	workflowManager: WorkflowManager,
@@ -1416,13 +1407,11 @@ async function handleApiRoute(
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
-	personalityStore?: PersonalityStore,
 	workflowStore?: WorkflowStore,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
-	const serverPersonalityStore = personalityStore!;
 	const serverWorkflowStore = workflowStore!;
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
@@ -2282,7 +2271,6 @@ async function handleApiRoute(
 					staffId: archived.staffId,
 					colorIndex: colorStore.get(archived.id),
 					preview: archived.preview,
-					personalities: archived.personalities,
 					reattemptGoalId: archived.reattemptGoalId,
 					archived: true,
 					archivedAt: archived.archivedAt,
@@ -2319,7 +2307,6 @@ async function handleApiRoute(
 			staffId: session.staffId,
 			colorIndex: colorStore.get(session.id),
 			preview: session.preview,
-			personalities: session.personalities,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
 			restoreError: session.restoreError,
@@ -2400,7 +2387,7 @@ async function handleApiRoute(
 
 		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
 		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[] } | undefined;
+		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string } | undefined;
 
 		if (roleId && typeof roleId === "string") {
 			const role = roleManager.getRole(roleId);
@@ -2414,30 +2401,6 @@ async function handleApiRoute(
 				role: role.name,
 				accessory: role.accessory,
 			};
-		}
-
-		// Resolve personalities
-		const bodyPersonalities = Array.isArray(body?.personalities) ? body.personalities as string[] : undefined;
-		let personalityNames: string[] | undefined;
-		if (bodyPersonalities && bodyPersonalities.length > 0) {
-			// Validate personality names
-			const invalid = bodyPersonalities.filter(t => !personalityManager.getPersonality(t));
-			if (invalid.length > 0) {
-				json({ error: `Unknown personalities: ${invalid.join(", ")}` }, 400);
-				return;
-			}
-			personalityNames = bodyPersonalities;
-		} else if (createOpts?.roleName) {
-			// Use role's default personalities if no explicit personalities provided
-			const role = roleManager.getRole(createOpts.roleName);
-			if (role?.defaultPersonalities && role.defaultPersonalities.length > 0) {
-				personalityNames = role.defaultPersonalities;
-			}
-		}
-
-		if (personalityNames && personalityNames.length > 0) {
-			const resolved = personalityManager.resolvePersonalities(personalityNames);
-			createOpts = { ...createOpts, personalities: resolved, personalityNames };
 		}
 
 		// ── Worktree support ──
@@ -2568,7 +2531,6 @@ async function handleApiRoute(
 				toolAssistant: session.assistantType === "tool",
 				role: session.role,
 				accessory: session.accessory,
-				personalities: session.personalities,
 				reattemptGoalId,
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
@@ -3578,6 +3540,8 @@ async function handleApiRoute(
 					promptTemplate: body?.promptTemplate || "",
 					accessory: body?.accessory ?? "none",
 					toolPolicies: body?.toolPolicies,
+					model: typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined,
+					thinkingLevel: typeof body?.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined,
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -3593,6 +3557,8 @@ async function handleApiRoute(
 					promptTemplate: body?.promptTemplate || "",
 					accessory: body?.accessory,
 					toolPolicies: body?.toolPolicies,
+					model: typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined,
+					thinkingLevel: typeof body?.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined,
 				});
 				json(role, 201);
 			}
@@ -3694,18 +3660,49 @@ async function handleApiRoute(
 					}
 					toolPolicies = cleaned;
 				}
+				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
+				let model = existing.model;
+				if (body.model !== undefined) {
+					model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+				}
+				let thinkingLevel = existing.thinkingLevel;
+				if (body.thinkingLevel !== undefined) {
+					thinkingLevel = typeof body.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined;
+				}
 				const updated = {
 					...existing,
 					label: body.label ?? existing.label,
 					promptTemplate: body.promptTemplate ?? existing.promptTemplate,
 					accessory: body.accessory ?? existing.accessory,
 					toolPolicies,
+					model,
+					thinkingLevel,
 					name,
 					updatedAt: Date.now(),
 				};
 				ctx.roleStore.put(updated);
 				json({ ok: true });
 			} else {
+				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
+				const modelUpdate = body.model !== undefined
+					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
+					: undefined;
+				const thinkingUpdate = body.thinkingLevel !== undefined
+					? (typeof body.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : "")
+					: undefined;
+				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
+				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
+					const existing = roleManager.getRole(name);
+					if (existing) {
+						const patched = {
+							...existing,
+							model: modelUpdate !== undefined ? (modelUpdate || undefined) : existing.model,
+							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
+							updatedAt: Date.now(),
+						};
+						serverRoleStore.put(patched);
+					}
+				}
 				const ok = roleManager.updateRole(name, {
 					label: body.label,
 					promptTemplate: body.promptTemplate,
@@ -3737,170 +3734,6 @@ async function handleApiRoute(
 			} else {
 				const ok = roleManager.deleteRole(name);
 				if (!ok) { json({ error: "Role not found" }, 404); return; }
-				json({ ok: true });
-			}
-			return;
-		}
-	}
-
-	// ── Personality endpoints ──────────────────────────────────────
-
-	// GET /api/personalities (with cascade origin)
-	if (url.pathname === "/api/personalities" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolvePersonalities(projectId);
-		json({ personalities: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
-		return;
-	}
-
-	// POST /api/personalities (scope-aware)
-	if (url.pathname === "/api/personalities" && req.method === "POST") {
-		const body = await readBody(req);
-		const targetProjectId = body?.projectId;
-		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const now = Date.now();
-				const personality = {
-					name: body?.name,
-					label: body?.label ?? body?.name,
-					description: body?.description || "",
-					promptFragment: body?.promptFragment || "",
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!personality.name || typeof personality.name !== "string") throw new Error("Missing name");
-				ctx.personalityStore.put(personality);
-				json(personality, 201);
-			} else {
-				const personality = personalityManager.createPersonality({
-					name: body?.name,
-					label: body?.label,
-					description: body?.description || "",
-					promptFragment: body?.promptFragment || "",
-				});
-				json(personality, 201);
-			}
-		} catch (err: any) {
-			json({ error: err.message }, 400);
-		}
-		return;
-	}
-
-	// POST /api/personalities/:name/customize — copy resolved personality to a target scope
-	const personalityCustomizeMatch = url.pathname.match(/^\/api\/personalities\/([^/]+)\/customize$/);
-	if (personalityCustomizeMatch && req.method === "POST") {
-		const name = decodeURIComponent(personalityCustomizeMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
-
-		const resolved = configCascade.resolvePersonalities(projectId);
-		const source = resolved.find(r => r.item.name === name);
-		if (!source) { json({ error: "Personality not found" }, 404); return; }
-
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.personalityStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverPersonalityStore;
-		}
-
-		const now = Date.now();
-		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		targetStore.put(copy);
-		json(copy, 201);
-		return;
-	}
-
-	// DELETE /api/personalities/:name/override — remove override at a scope
-	const personalityOverrideMatch = url.pathname.match(/^\/api\/personalities\/([^/]+)\/override$/);
-	if (personalityOverrideMatch && req.method === "DELETE") {
-		const name = decodeURIComponent(personalityOverrideMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
-		const projectId = url.searchParams.get("projectId") || undefined;
-
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.personalityStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverPersonalityStore;
-		}
-
-		targetStore.remove(name);
-		json({ ok: true });
-		return;
-	}
-
-	// Routes with personality :name parameter
-	const personalityMatch = url.pathname.match(/^\/api\/personalities\/([^/]+)$/);
-	if (personalityMatch) {
-		const name = decodeURIComponent(personalityMatch[1]);
-
-		if (req.method === "GET") {
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const resolved = configCascade.resolvePersonalities(qProjectId);
-				const found = resolved.find(r => r.item.name === name);
-				if (!found) { json({ error: "Personality not found" }, 404); return; }
-				json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
-			} else {
-				const personality = personalityManager.getPersonality(name);
-				if (!personality) { json({ error: "Personality not found" }, 404); return; }
-				json(personality);
-			}
-			return;
-		}
-
-		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const existing = ctx.personalityStore.get(name);
-				if (!existing) { json({ error: "Personality not found in project" }, 404); return; }
-				const updated = {
-					...existing,
-					label: body.label ?? existing.label,
-					description: body.description ?? existing.description,
-					promptFragment: body.promptFragment ?? existing.promptFragment,
-					name,
-					updatedAt: Date.now(),
-				};
-				ctx.personalityStore.put(updated);
-				json({ ok: true });
-			} else {
-				const ok = personalityManager.updatePersonality(name, {
-					label: body.label,
-					description: body.description,
-					promptFragment: body.promptFragment,
-				});
-				if (!ok) { json({ error: "Personality not found" }, 404); return; }
-				json({ ok: true });
-			}
-			return;
-		}
-
-		if (req.method === "DELETE") {
-			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (qProjectId) {
-				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				ctx.personalityStore.remove(name);
-				json({ ok: true });
-			} else {
-				const ok = personalityManager.deletePersonality(name);
-				if (!ok) { json({ error: "Personality not found" }, 404); return; }
 				json({ ok: true });
 			}
 			return;
@@ -4568,8 +4401,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const spawnOpts: { personalities?: string[]; workflowGateId?: string; inputGateIds?: string[] } = {};
-			if (Array.isArray(body.personalities)) spawnOpts.personalities = body.personalities as string[];
+			const spawnOpts: { workflowGateId?: string; inputGateIds?: string[] } = {};
 			if (typeof body.workflowGateId === "string") spawnOpts.workflowGateId = body.workflowGateId;
 			if (Array.isArray(body.inputGateIds)) spawnOpts.inputGateIds = body.inputGateIds as string[];
 			const result = await teamManager.spawnRole(goalId, body.role, body.task, spawnOpts);
@@ -5129,10 +4961,6 @@ async function handleApiRoute(
 			createOpts.role = role.name;
 			createOpts.accessory = role.accessory;
 		}
-		if (ps.personalities?.length) {
-			createOpts.personalityNames = ps.personalities;
-			createOpts.personalities = personalityManager.resolvePersonalities(ps.personalities);
-		}
 
 		let newSession;
 		try {
@@ -5237,26 +5065,11 @@ async function handleApiRoute(
 			broadcastToAll({ type: "preview_changed", sessionId: id, preview: body.preview });
 		}
 
-		// Track whether roleId handling already took care of personalities
-		let roleHandledPersonalities = false;
-
 		if (typeof body.roleId === "string" && body.roleId !== "") {
 			const role = roleManager.getRole(body.roleId);
 			if (!role) { json({ error: `Role "${body.roleId}" not found` }, 404); return; }
-			// If personalities are also present, validate and pass them to assignRole to avoid double restart
-			let assignOpts: { personalities?: string[] } | undefined;
-			if (Array.isArray(body.personalities)) {
-				const newPersonalities = body.personalities as string[];
-				const invalid = newPersonalities.filter((t: string) => !personalityManager.getPersonality(t));
-				if (invalid.length > 0) {
-					json({ error: `Unknown personalities: ${invalid.join(", ")}` }, 400);
-					return;
-				}
-				assignOpts = { personalities: newPersonalities };
-				roleHandledPersonalities = true;
-			}
 			try {
-				const ok = await sessionManager.assignRole(id, role, assignOpts);
+				const ok = await sessionManager.assignRole(id, role);
 				if (!ok) { json({ error: "Session not found" }, 404); return; }
 			} catch (err) {
 				json({ error: String(err) }, 400);
@@ -5312,23 +5125,6 @@ async function handleApiRoute(
 				} else {
 					json({ error: "Session not found" }, 404); return;
 				}
-			}
-		}
-
-		if (Array.isArray(body.personalities) && !roleHandledPersonalities) {
-			const newPersonalities = body.personalities as string[];
-			// Validate personality names
-			const invalid = newPersonalities.filter((t: string) => !personalityManager.getPersonality(t));
-			if (invalid.length > 0) {
-				json({ error: `Unknown personalities: ${invalid.join(", ")}` }, 400);
-				return;
-			}
-			try {
-				const ok = await sessionManager.updatePersonalities(id, newPersonalities);
-				if (!ok) { json({ error: "Session not found" }, 404); return; }
-			} catch (err) {
-				json({ error: String(err) }, 400);
-				return;
 			}
 		}
 

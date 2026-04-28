@@ -30,7 +30,7 @@ import {
 	isPreImplementationGate,
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
-import { applyReviewModelOverrides } from "./review-model-override.js";
+import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -859,6 +859,8 @@ export class VerificationHarness {
 
 	private readonly _stateDir: string;
 
+	private configCascade?: import("./config-cascade.js").ConfigCascade;
+
 	constructor(
 		stateDir: string,
 		/** @deprecated Resolve per-goal via projectContextManager instead. */
@@ -870,7 +872,9 @@ export class VerificationHarness {
 		private teamManager?: import("./team-manager.js").TeamManager,
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
+		configCascade?: import("./config-cascade.js").ConfigCascade,
 	) {
+		this.configCascade = configCascade;
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
@@ -880,6 +884,27 @@ export class VerificationHarness {
 		for (const v of persisted) {
 			this.activeVerifications.set(v.signalId, v);
 		}
+	}
+
+	/**
+	 * Resolve a role from the cascade so project-level overrides apply, falling
+	 * back to the server-level role store when the cascade is unavailable
+	 * (e.g. unit tests). Returns undefined if the role does not exist.
+	 */
+	private resolveRoleForGoal(roleName: string, goalId?: string): { model?: string; thinkingLevel?: string } | undefined {
+		if (this.configCascade) {
+			const projectId = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.project?.id : undefined;
+			try {
+				const resolved = this.configCascade.resolveRoles(projectId);
+				const found = resolved.find(r => r.item.name === roleName);
+				if (found) return { model: found.item.model, thinkingLevel: found.item.thinkingLevel };
+			} catch (err) {
+				console.warn(`[verification] Failed to resolve role "${roleName}" via cascade:`, err);
+			}
+		}
+		const r = this.roleStore.get(roleName);
+		if (!r) return undefined;
+		return { model: r.model, thinkingLevel: r.thinkingLevel };
 	}
 
 	private resolveProjectConfigStore(goalId: string): ProjectConfigStore | undefined {
@@ -1635,7 +1660,7 @@ export class VerificationHarness {
 		}
 
 		// ── Legacy direct-RpcBridge path (fallback when SessionManager unavailable) ──
-		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs);
+		return this.runLlmReviewDirect(step, cwd, role, combinedPrompt, kickoff, timeoutMs, roleName);
 	}
 
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
@@ -1701,9 +1726,26 @@ export class VerificationHarness {
 				}
 			}
 
-			// Override model if default.reviewModel preference is set.
+			// Resolve role overrides so they win over default.reviewModel/Thinking.
+			const roleOverrides_r = this.resolveRoleForGoal(roleName, goalId);
+			const roleModel_r = roleOverrides_r?.model;
+			const roleThinking_r = roleOverrides_r?.thinkingLevel;
+
+			// Override model: role wins, else default.reviewModel preference.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (this.preferencesStore) {
+			if (roleModel_r) {
+				try {
+					await applyModelString(session.rpcClient, roleModel_r, {
+						sessionManager: this.sessionManager ?? null,
+						sessionId,
+						contextLabel: `role.${roleName}.model`,
+					});
+					console.log(`[verification] Set role-override model "${roleModel_r}" for reviewer ${sessionId} (role=${roleName})`);
+				} catch (err) {
+					console.error(`[verification] Role model "${roleModel_r}" failed for reviewer ${sessionId}:`, err);
+					throw err;
+				}
+			} else if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
@@ -1721,15 +1763,20 @@ export class VerificationHarness {
 				}
 			}
 
-			// Apply review thinking level (defaults to "off" when not configured,
-			// matching the Settings page display default for review agents)
+			// Apply thinking level: role wins; else default.reviewThinkingLevel pref;
+			// else "off" (matches Settings page default for review agents).
 			{
-				const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-				const level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
-					? reviewThinking : "off";
+				let level: string;
+				if (roleThinking_r) {
+					level = roleThinking_r;
+				} else {
+					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+						? reviewThinking : "off";
+				}
 				try {
 					await session.rpcClient.setThinkingLevel(level);
-					console.log(`[verification] Set review thinking level "${level}" for ${sessionId}`);
+					console.log(`[verification] Set review thinking level "${level}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
 				} catch (err) {
 					console.error(`[verification] Failed to set review thinking level:`, err);
 				}
@@ -1917,9 +1964,26 @@ export class VerificationHarness {
 				}
 			}
 
-			// Override model if default.reviewModel preference is set.
+			// Resolve role overrides for QA — role wins over default.reviewModel/Thinking.
+			const roleOverrides_q = this.resolveRoleForGoal(qaRoleName, goalId);
+			const roleModel_q = roleOverrides_q?.model;
+			const roleThinking_q = roleOverrides_q?.thinkingLevel;
+
+			// Override model: role wins, else default.reviewModel preference.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (this.preferencesStore) {
+			if (roleModel_q) {
+				try {
+					await applyModelString(session.rpcClient, roleModel_q, {
+						sessionManager: this.sessionManager ?? null,
+						sessionId: qaSessionId,
+						contextLabel: `role.${qaRoleName}.model`,
+					});
+					console.log(`[verification] Set role-override model "${roleModel_q}" for QA ${qaSessionId} (role=${qaRoleName})`);
+				} catch (err) {
+					console.error(`[verification] Role model "${roleModel_q}" failed for QA ${qaSessionId}:`, err);
+					throw err;
+				}
+			} else if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(session.rpcClient, {
@@ -1937,11 +2001,16 @@ export class VerificationHarness {
 				}
 			}
 
-			// Apply thinking level
+			// Apply thinking level: role wins; else default.reviewThinkingLevel pref; else "off".
 			{
-				const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-				const level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
-					? reviewThinking : "off";
+				let level: string;
+				if (roleThinking_q) {
+					level = roleThinking_q;
+				} else {
+					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+						? reviewThinking : "off";
+				}
 				try {
 					await session.rpcClient.setThinkingLevel(level);
 				} catch (err) {
@@ -2029,6 +2098,7 @@ export class VerificationHarness {
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
+		roleName?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const subSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 
@@ -2086,10 +2156,27 @@ export class VerificationHarness {
 				}
 			}
 
-			// Override model if default.reviewModel preference is set.
+			// Resolve role overrides (sub-session path: no goalId for project lookup).
+			const roleOverrides_s = roleName ? this.resolveRoleForGoal(roleName) : undefined;
+			const roleModel_s = roleOverrides_s?.model;
+			const roleThinking_s = roleOverrides_s?.thinkingLevel;
+
+			// Override model: role wins, else default.reviewModel preference.
 			// Sub-session path: no UI session, no persistence (sessionManager=null).
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
-			if (this.preferencesStore) {
+			if (roleModel_s) {
+				try {
+					await applyModelString(rpc, roleModel_s, {
+						sessionManager: null,
+						sessionId: null,
+						contextLabel: `role.${roleName}.model`,
+					});
+					console.log(`[verification] Set role-override model "${roleModel_s}" for sub-session ${subSessionId} (role=${roleName})`);
+				} catch (err) {
+					console.error(`[verification] Role model "${roleModel_s}" failed for sub-session ${subSessionId}:`, err);
+					throw err;
+				}
+			} else if (this.preferencesStore) {
 				const reviewModelPref = this.preferencesStore.get("default.reviewModel") as string | undefined;
 				try {
 					await applyReviewModelOverrides(rpc, {
@@ -2107,15 +2194,19 @@ export class VerificationHarness {
 				}
 			}
 
-			// Apply review thinking level (defaults to "off" when not configured,
-			// matching the Settings page display default for review agents)
+			// Apply thinking level: role wins; else default.reviewThinkingLevel pref; else "off".
 			{
-				const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-				const level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
-					? reviewThinking : "off";
+				let level: string;
+				if (roleThinking_s) {
+					level = roleThinking_s;
+				} else {
+					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+						? reviewThinking : "off";
+				}
 				try {
 					await rpc.setThinkingLevel(level);
-					console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}`);
+					console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}"${roleThinking_s ? " (role override)" : ""}`);
 				} catch (err) {
 					console.error(`[verification] Failed to set review thinking level:`, err);
 				}

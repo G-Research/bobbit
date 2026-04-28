@@ -8,12 +8,10 @@ const CONFIG_ROUTES = [
 	{ hash: "#/roles", view: "roles", label: "Roles" },
 	{ hash: "#/tools", view: "tools", label: "Tools" },
 	{ hash: "#/workflows", view: "workflows", label: "Workflows" },
-	{ hash: "#/personalities", view: "personalities", label: "Personalities" },
 	{ hash: "#/skills", view: "skills", label: "Skills" },
 	{ hash: "#/roles/coder", view: "role-edit", label: "Roles sub-route" },
 	{ hash: "#/tools/browser_click", view: "tool-edit", label: "Tools sub-route" },
 	{ hash: "#/workflows/bug-fix", view: "workflow-edit", label: "Workflows sub-route" },
-	{ hash: "#/personalities/friendly", view: "personality-edit", label: "Personalities sub-route" },
 ];
 
 test.describe("Config page toggle buttons — activeSessionId suppression", () => {

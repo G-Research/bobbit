@@ -22,7 +22,6 @@ export function isSandboxAllowed(
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.
 	if (pathname === "/api/preview" && m === "POST") return true;
-	if (pathname === "/api/personalities" && (m === "GET" || m === "POST")) return true;
 
 	// ── Session creation (delegates) ──────────────────────────────────
 	// POST /api/sessions — server.ts forces sandboxed:true for sandbox tokens

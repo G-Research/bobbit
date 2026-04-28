@@ -266,34 +266,6 @@ async function handleHashChange(): Promise<void> {
 			await loadStaffPageData();
 			navigateToStaffEdit(route.staffId);
 			await refreshSessions();
-		} else if (route.view === "personalities") {
-			clearDashboardState();
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.selectedSessionId = null;
-			state.goalDashboardId = null;
-			state.appView = "authenticated";
-			const { loadPersonalityPageData } = await import("./personality-manager-page.js");
-			loadPersonalityPageData();
-			renderApp();
-			await refreshSessions();
-		} else if (route.view === "personality-edit" && route.personalityName) {
-			clearDashboardState();
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.selectedSessionId = null;
-			state.goalDashboardId = null;
-			state.appView = "authenticated";
-			const { loadPersonalityPageData, navigateToPersonalityEdit } = await import("./personality-manager-page.js");
-			await loadPersonalityPageData();
-			navigateToPersonalityEdit(route.personalityName);
-			await refreshSessions();
 		} else {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -441,13 +413,6 @@ async function initApp() {
 				const { loadStaffPageData, navigateToStaffEdit } = await import("./staff-page.js");
 				await loadStaffPageData();
 				navigateToStaffEdit(route.staffId);
-			} else if (route.view === "personalities") {
-				const { loadPersonalityPageData } = await import("./personality-manager-page.js");
-				loadPersonalityPageData();
-			} else if (route.view === "personality-edit" && route.personalityName) {
-				const { loadPersonalityPageData, navigateToPersonalityEdit } = await import("./personality-manager-page.js");
-				await loadPersonalityPageData();
-				navigateToPersonalityEdit(route.personalityName);
 			}
 		} catch {
 			state.appView = "disconnected";

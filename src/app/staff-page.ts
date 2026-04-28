@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
 import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
-import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, fetchPersonalities, gatewayFetch, refreshSessions, type StaffAgent, type PersonalityData } from "./api.js";
+import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, gatewayFetch, refreshSessions, type StaffAgent } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
@@ -34,8 +34,6 @@ let editMemory = "";
 // Session appearance state
 let editColorIndex = -1;
 let editAccessory = "none";
-let editPersonalities: string[] = [];
-let availablePersonalities: PersonalityData[] = [];
 
 interface TriggerDef {
 	type: string;
@@ -119,8 +117,6 @@ async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
 		: undefined;
 	editColorIndex = session ? (sessionColorMap.get(session.id) ?? -1) : -1;
 	editAccessory = session?.accessory || "none";
-	editPersonalities = session?.personalities || [];
-	fetchPersonalities().then((p) => { availablePersonalities = p; renderApp(); });
 }
 
 // ============================================================================
@@ -139,19 +135,17 @@ async function handleSave(): Promise<void> {
 		triggers: editTriggers,
 		memory: editMemory,
 	});
-	// Save session appearance (color, accessory, personality)
+	// Save session appearance (color, accessory)
 	if (selectedStaff.currentSessionId) {
 		const sid = selectedStaff.currentSessionId;
 		const session = state.gatewaySessions.find((s) => s.id === sid);
 		const origColor = sessionColorMap.get(sid) ?? -1;
 		const origAccessory = session?.accessory || "none";
-		const origPersonalities = session?.personalities || [];
 		if (editColorIndex !== origColor && editColorIndex >= 0) {
 			setSessionColor(sid, editColorIndex);
 		}
 		const patchBody: Record<string, unknown> = {};
 		if (editAccessory !== origAccessory) patchBody.accessory = editAccessory;
-		if (JSON.stringify(editPersonalities) !== JSON.stringify(origPersonalities)) patchBody.personalities = editPersonalities;
 		if (Object.keys(patchBody).length > 0) {
 			await gatewayFetch(`/api/sessions/${sid}`, {
 				method: "PATCH",
@@ -614,31 +608,6 @@ function renderEditView(): TemplateResult {
 						})}
 					</div>
 				</div>
-				<!-- Personalities -->
-				${availablePersonalities.length > 0 ? html`
-					<div>
-						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Personalities</div>
-						<div class="flex flex-wrap gap-1">
-							${availablePersonalities.map((p: PersonalityData) => {
-								const selected = editPersonalities.includes(p.name);
-								return html`<button
-									class="px-2 py-0.5 text-[11px] rounded-xl border transition-colors cursor-pointer ${selected
-										? "bg-primary/15 text-primary border-primary/30"
-										: "bg-muted/60 text-foreground/70 border-border"}"
-									title=${p.description}
-									@click=${() => {
-										if (selected) {
-											editPersonalities = editPersonalities.filter((n: string) => n !== p.name);
-										} else {
-											editPersonalities = [...editPersonalities, p.name];
-										}
-										renderApp();
-									}}
-								>${p.label}</button>`;
-							})}
-						</div>
-					</div>
-				` : ""}
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>

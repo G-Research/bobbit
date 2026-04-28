@@ -44,14 +44,6 @@ Custom role definitions that control agent behaviour and tool access.
 - **Per-role configuration**: Each role has a name, label, prompt template, allowed tools list, accessory (for the mascot), and optional default traits.
 - **Storage**: Builtin roles ship in `defaults/roles/`; user overrides go in `.bobbit/config/roles/`.
 
-## Personalities
-
-Personality definitions that modify agent behaviour via prompt fragments.
-
-- Each personality has a name, label, description, and `promptFragment` that gets injected into the system prompt.
-- Sessions can have multiple personalities. Personalities can be set at creation time or updated via `PATCH /api/sessions/:id`.
-- Roles can define default personalities applied when no explicit personalities are provided.
-
 ## Skills
 
 Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
@@ -95,7 +87,6 @@ A unified registry (`assistant-registry.ts`) maps assistant types to their promp
 - `goal` — Goal creation assistant
 - `role` — Role creation assistant
 - `tool` — Tool management assistant
-- `personality` — Personality creation assistant
 - `staff` — Staff agent creation assistant
 - `setup` — Project setup wizard
 
