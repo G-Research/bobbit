@@ -252,8 +252,8 @@ async function handleSave(): Promise<void> {
 			promptTemplate: editPrompt,
 			accessory: editAccessory,
 			toolPolicies: Object.keys(editToolPolicies).length > 0 ? editToolPolicies : {},
-			model: editModelOverride || undefined,
-			thinkingLevel: editThinkingOverride || undefined,
+			model: editModelOverride,
+			thinkingLevel: editThinkingOverride,
 		}, projectId || undefined);
 
 		// Save dirty sub-prompts
@@ -345,13 +345,13 @@ function renderNavBar(): TemplateResult {
 						className: "text-destructive hover:text-destructive hover:bg-destructive/10",
 						children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "sm")} ${deleting ? "Deleting\u2026" : "Delete"}</span>`,
 					})}
-					${Button({
+					<span data-testid="role-save-btn">${Button({
 						variant: "default",
 						size: "sm",
 						onClick: handleSave,
 						disabled: saving || !hasChanges,
 						children: saving ? "Saving\u2026" : "Save",
-					})}
+					})}</span>
 				</div>
 			</div>
 		`;

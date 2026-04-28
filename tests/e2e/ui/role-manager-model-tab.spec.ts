@@ -92,7 +92,7 @@ test.describe("Role Manager — Model tab", () => {
 		await expect(clearBtn).toHaveCount(0, { timeout: 2_000 });
 
 		// Click Save in the nav bar.
-		const saveBtn = page.locator("button").filter({ hasText: /^Saving|^Save$/ }).first();
+		const saveBtn = page.locator('[data-testid="role-save-btn"] button').first();
 		await expect(saveBtn).toBeEnabled({ timeout: 2_000 });
 
 		// Wait for the PUT round-trip to complete.
