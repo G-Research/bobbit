@@ -60,11 +60,11 @@ function mockTwoStage(imageResponseBuilder: () => Response): void {
 			// Sanity: we are in the OpenAI Images endpoint.
 			assert.match(String(url), /\/images\/generations/);
 			return new Response(JSON.stringify({
-				data: [{ url: "https://example.test/large.png", revised_prompt: "x" }],
+				data: [{ url: "https://oaidalleapiprodscus.blob.core.windows.net/large.png", revised_prompt: "x" }],
 			}), { status: 200 });
 		}
 		// Stage 1: the imageFromUrl GET call.
-		assert.equal(String(url), "https://example.test/large.png");
+		assert.equal(String(url), "https://oaidalleapiprodscus.blob.core.windows.net/large.png");
 		void init;
 		return imageResponseBuilder();
 	}) as any;
