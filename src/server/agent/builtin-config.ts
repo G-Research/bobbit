@@ -16,7 +16,6 @@ import { parse } from "yaml";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy } from "./role-store.js";
-import type { Personality } from "./personality-store.js";
 import type { Workflow, WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 
@@ -25,7 +24,6 @@ export class BuiltinConfigProvider {
 
 	// Lazy caches — null means "not loaded yet"
 	private _roles: Role[] | null = null;
-	private _personalities: Personality[] | null = null;
 	private _workflows: Workflow[] | null = null;
 	private _tools: ToolInfo[] | null = null;
 	private _toolGroupPolicies: Record<string, GrantPolicy> | null = null;
@@ -40,11 +38,6 @@ export class BuiltinConfigProvider {
 	getRoles(): Role[] {
 		if (!this._roles) this._roles = this.loadRoles();
 		return this._roles;
-	}
-
-	getPersonalities(): Personality[] {
-		if (!this._personalities) this._personalities = this.loadPersonalities();
-		return this._personalities;
 	}
 
 	getWorkflows(): Workflow[] {
@@ -65,7 +58,6 @@ export class BuiltinConfigProvider {
 	/** Clear all caches so the next getter call re-reads from disk. */
 	reload(): void {
 		this._roles = null;
-		this._personalities = null;
 		this._workflows = null;
 		this._tools = null;
 		this._toolGroupPolicies = null;
@@ -95,7 +87,6 @@ export class BuiltinConfigProvider {
 					label: data.label ?? data.name,
 					promptTemplate: data.promptTemplate ?? "",
 					accessory: data.accessory ?? "none",
-					defaultPersonalities: Array.isArray(data.defaultPersonalities) ? data.defaultPersonalities : undefined,
 					toolPolicies,
 					createdAt: data.createdAt ?? 0,
 					updatedAt: data.updatedAt ?? 0,
@@ -105,28 +96,6 @@ export class BuiltinConfigProvider {
 			}
 		}
 		return roles;
-	}
-
-	private loadPersonalities(): Personality[] {
-		const dir = path.join(this.builtinsDir, "personalities");
-		const personalities: Personality[] = [];
-		for (const entry of this.readYamlDir(dir)) {
-			try {
-				const data = parse(entry.content);
-				if (!data?.name) continue;
-				personalities.push({
-					name: data.name,
-					label: data.label ?? data.name,
-					description: data.description ?? "",
-					promptFragment: data.promptFragment ?? "",
-					createdAt: data.createdAt ?? 0,
-					updatedAt: data.updatedAt ?? 0,
-				});
-			} catch (err) {
-				console.error(`[builtin-config] Failed to parse personality ${entry.file}:`, err);
-			}
-		}
-		return personalities;
 	}
 
 	private loadWorkflows(): Workflow[] {

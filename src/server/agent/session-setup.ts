@@ -24,7 +24,6 @@ import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
 import type { CostTracker } from "./cost-tracker.js";
-import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
@@ -79,7 +78,6 @@ export interface SessionSetupPlan {
 	repoPath?: string;
 	branch?: string;
 	sandboxed?: boolean;
-	personalities?: string[];
 	role?: string;
 	staffId?: string;
 	accessory?: string;
@@ -95,7 +93,6 @@ export interface SessionSetupPlan {
 	env?: Record<string, string>;
 	rolePrompt?: string;
 	roleName?: string;
-	personalityFragments?: Array<{ label: string; promptFragment: string }>;
 	workflowContext?: string;
 	reattemptGoalId?: string;
 
@@ -132,7 +129,6 @@ export interface PipelineContext {
 	mcpManager: McpManager | null;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
-	personalityManager: PersonalityManager | null;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
@@ -362,7 +358,6 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 			taskType,
 			taskSpec,
 			taskDependsOn,
-			personalities: plan.personalityFragments,
 			allowedTools: plan.effectiveAllowedTools,
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
@@ -444,7 +439,6 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		staffId: plan.staffId,
 		accessory: plan.accessory,
 		nonInteractive: plan.nonInteractive,
-		personalities: plan.personalities,
 		sandboxed: plan.sandboxed,
 		delegateOf: plan.delegateOf,
 		reattemptGoalId: plan.reattemptGoalId,
@@ -682,7 +676,6 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
 		delegateOf: plan.delegateOf,
-		personalities: plan.personalities,
 		allowedTools: plan.effectiveAllowedTools,
 		role: plan.role,
 		accessory: plan.accessory,

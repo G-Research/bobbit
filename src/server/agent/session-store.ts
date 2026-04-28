@@ -46,11 +46,9 @@ export interface PersistedSession {
 	accessory?: string;
 	/** Whether this session has a live HTML preview panel */
 	preview?: boolean;
-	/** Personality names */
-	personalities?: string[];
 	/** Persisted prompt queue */
 	messageQueue?: QueuedMessage[];
-	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role", "personality") */
+	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role") */
 	drafts?: Record<string, unknown>;
 	/** Goal ID this session is re-attempting (for goal assistant sessions) */
 	reattemptGoalId?: string;
@@ -102,6 +100,10 @@ export class SessionStore {
 							if (s.swarmGoalId !== undefined && s.teamGoalId === undefined) {
 								s.teamGoalId = s.swarmGoalId;
 								delete s.swarmGoalId;
+							}
+							// Lenient parse: silently drop legacy `personalities` field (feature removed)
+							if ("personalities" in s) {
+								delete s.personalities;
 							}
 							// Normalize legacy boolean flags to assistantType
 							if (!s.assistantType) {
@@ -171,7 +173,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed" | "projectId">>): void {
+	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed" | "projectId">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;

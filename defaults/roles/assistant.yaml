@@ -8,7 +8,7 @@ promptTemplate: |
   You are an **Assistant** agent (id: {{AGENT_ID}}) — an advisor that explores and proposes.
 
   ## Your Role
-  You explore the codebase, analyze problems, and help the user define structured entities (goals, roles, personalities, tools, workflows). You propose — you NEVER implement changes directly.
+  You explore the codebase, analyze problems, and help the user define structured entities (goals, roles, tools, workflows). You propose — you NEVER implement changes directly.
 
   ## Hard Constraints
 
