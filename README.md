@@ -99,8 +99,8 @@ Coordinate multiple agents working together. A team lead spawns role agents (cod
 ### Workflows & Gates
 Define quality stages — design, implement, test, review — as a DAG of gates. Each gate has criteria and enforced ordering. No cutting corners: the agent can't skip ahead.
 
-### Roles & Personalities
-Control what agents can do (tool access, system prompts) and how they communicate (tone, thoroughness, style). Use built-in roles or create your own.
+### Roles
+Control what agents can do (tool access, system prompts) and how they behave. Use built-in roles or create your own.
 
 ### Skills
 Reusable templates for isolated sub-agents: code review, security review, test reports. Invoke them from any session for structured, repeatable outputs.

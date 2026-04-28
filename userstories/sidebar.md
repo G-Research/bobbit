@@ -729,20 +729,6 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
 
 ---
 
-## SB-35: Session personality badges
-
-**Preconditions:** Sessions exist with one or more personalities assigned.
-
-**Steps and expectations:**
-1. Look at a session row that has personalities assigned.
-   - Tiny rounded pill badges appear below the session title, one per personality name.
-   - Badges are small (~9px text) and do not interfere with the session title or action buttons.
-2. A session with no personalities shows no badges.
-
-**Coverage:** none.
-
----
-
 ## SB-36: Sandbox indicator
 
 **Preconditions:** A project with Docker sandbox enabled. Sessions exist for that project.

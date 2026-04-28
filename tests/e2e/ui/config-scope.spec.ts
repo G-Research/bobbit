@@ -1,7 +1,7 @@
 /**
  * Config page scope navigation and origin badges — UI E2E tests.
  *
- * Validates that config pages (roles, tools, personalities, workflows)
+ * Validates that config pages (roles, tools, workflows)
  * show the project scope row and origin badges when multiple projects exist.
  */
 import { test, expect } from "../gateway-harness.js";
@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 function createProjectDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), `bobbit-scope-ui-${process.env.E2E_PORT}-`));
 	mkdirSync(join(dir, ".bobbit", "config", "roles"), { recursive: true });
-	mkdirSync(join(dir, ".bobbit", "config", "personalities"), { recursive: true });
 	mkdirSync(join(dir, ".bobbit", "config", "workflows"), { recursive: true });
 	mkdirSync(join(dir, ".bobbit", "config", "tools"), { recursive: true });
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
@@ -92,19 +91,6 @@ test.describe("Config page scope navigation", () => {
 		// Switch back to System
 		const systemTab = page.locator("button").filter({ hasText: "System" }).first();
 		await systemTab.click();
-
-		await expect(
-			page.locator(".config-origin-badge").first()
-		).toBeVisible({ timeout: 10_000 });
-	});
-
-	test("personalities page shows scope row and origin badges", async ({ page }) => {
-		await openApp(page);
-		await navigateToHash(page, "#/personalities");
-
-		await expect(
-			page.locator("button").filter({ hasText: "System" }).first()
-		).toBeVisible({ timeout: 10_000 });
 
 		await expect(
 			page.locator(".config-origin-badge").first()

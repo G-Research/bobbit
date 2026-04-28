@@ -236,60 +236,22 @@ test.describe("SB-05: getSessionIndicatorType", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SB-35: Personality badges
-// ---------------------------------------------------------------------------
-test.describe("SB-35: hasPersonalityBadges", () => {
-	test("returns true when personalities array has items", async ({ page }) => {
-		await page.goto(TEST_PAGE);
-		const r = await page.evaluate(() =>
-			(window as any).__sessionRendering.hasPersonalityBadges({ personalities: ["pirate", "formal"] })
-		);
-		expect(r).toBe(true);
-	});
-
-	test("returns false with empty array", async ({ page }) => {
-		await page.goto(TEST_PAGE);
-		const r = await page.evaluate(() =>
-			(window as any).__sessionRendering.hasPersonalityBadges({ personalities: [] })
-		);
-		expect(r).toBe(false);
-	});
-
-	test("returns false with undefined", async ({ page }) => {
-		await page.goto(TEST_PAGE);
-		const r = await page.evaluate(() =>
-			(window as any).__sessionRendering.hasPersonalityBadges({})
-		);
-		expect(r).toBe(false);
-	});
-});
-
-// ---------------------------------------------------------------------------
 // SB-15: Role picker dropdown
 // ---------------------------------------------------------------------------
 test.describe("SB-15: Role picker dropdown", () => {
 	test("returns role items from roles array", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 		const result = await page.evaluate(() =>
-			(window as any).__sessionRendering.getRolePickerItems([{ name: "coder" }, { name: "reviewer" }], [])
+			(window as any).__sessionRendering.getRolePickerItems([{ name: "coder" }, { name: "reviewer" }])
 		);
 		expect(result).toContainEqual({ type: "role", id: "coder" });
 		expect(result).toContainEqual({ type: "role", id: "reviewer" });
 	});
 
-	test("includes personalities before roles", async ({ page }) => {
-		await page.goto(TEST_PAGE);
-		const result = await page.evaluate(() =>
-			(window as any).__sessionRendering.getRolePickerItems([{ name: "coder" }], [{ name: "thorough" }])
-		);
-		expect(result[0]).toEqual({ type: "personality", id: "thorough" });
-		expect(result[1]).toEqual({ type: "role", id: "coder" });
-	});
-
 	test("always includes create button at end", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 		const result = await page.evaluate(() =>
-			(window as any).__sessionRendering.getRolePickerItems([], [])
+			(window as any).__sessionRendering.getRolePickerItems([])
 		);
 		expect(result[result.length - 1]).toEqual({ type: "create", id: "create" });
 	});
@@ -297,7 +259,7 @@ test.describe("SB-15: Role picker dropdown", () => {
 	test("empty roles returns only create button", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 		const result = await page.evaluate(() =>
-			(window as any).__sessionRendering.getRolePickerItems([], [])
+			(window as any).__sessionRendering.getRolePickerItems([])
 		);
 		expect(result).toHaveLength(1);
 		expect(result[0].type).toBe("create");

@@ -25,7 +25,6 @@ import { GateListRenderer, GateSignalRenderer, GateStatusRenderer } from "./rend
 import { GateInspectRenderer } from "./renderers/GateInspectRenderer.js";
 import "./renderers/GateVerificationLive.js"; // registers <gate-verification-live> custom element
 import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
-import { PersonalitiesListRenderer, PersonalitiesCreateRenderer } from "./renderers/PersonalityToolRenderers.js";
 import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
 import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
@@ -64,8 +63,6 @@ registerToolRenderer("task_list", new TaskListRenderer());
 registerToolRenderer("task_create", new TaskCreateRenderer());
 registerToolRenderer("task_update", new TaskUpdateRenderer());
 registerToolRenderer("bash_bg", new BgProcessRenderer());
-registerToolRenderer("personalities_list", new PersonalitiesListRenderer());
-registerToolRenderer("personalities_create", new PersonalitiesCreateRenderer());
 registerToolRenderer("gate_list", new GateListRenderer());
 registerToolRenderer("gate_signal", new GateSignalRenderer());
 registerToolRenderer("gate_status", new GateStatusRenderer());
@@ -79,7 +76,7 @@ registerToolRenderer("activate_skill", new ActivateSkillRenderer());
 
 // Proposal tools — one renderer per proposal type
 const PROPOSAL_TOOL_NAMES = [
-	"propose_goal", "propose_role", "propose_tool", "propose_personality",
+	"propose_goal", "propose_role", "propose_tool",
 	"propose_staff", "propose_setup", "propose_workflow", "propose_project",
 ] as const;
 for (const name of PROPOSAL_TOOL_NAMES) {

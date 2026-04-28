@@ -92,7 +92,7 @@ Rules:
 5. Pop culture references are great when the original is well-known and the pun is obvious. Obscure references don't land.
 6. Every name should make the reader smirk. If a name is just a random noun or a straight celebrity name with no twist, cut it.
 7. The role connection can be subtle or absent — a great name beats a forced pun. A forced pun where you have to squint to see the connection is worse than no pun at all.
-8. Mix: ~50% punny celebrity/character names with a tech twist, ~25% beloved fictional characters, ~25% short characterful nicknames (pet names, food names, fun single words with personality).
+8. Mix: ~50% punny celebrity/character names with a tech twist, ~25% beloved fictional characters, ~25% short characterful nicknames (pet names, food names, fun single words with character).
 9. No verbatim movie/show titles — the reference should be transformed, not copied.
 
 GOOD examples: "JSON Derulo", "Lint Eastwood", "Meryl Heap", "Boba Fetch", "Veto Corleone", "Null Jackman", "Señor Bugs", "Forky", "Pickle", "Phoebe Buffering"

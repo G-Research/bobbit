@@ -14,7 +14,7 @@ A specification of every user flow in Bobbit, written in plain language, that:
 
 1. **Stories mix user behavior with implementation details** — CSS classes, API calls, component internals leak into assertions
 2. **Cross-feature interactions are implicit** — nothing documents "draft must survive X, Y, Z" as a contract
-3. **Variation coverage is spotty** — PI-04 tests draft across session switch but not model/personality change
+3. **Variation coverage is spotty** — PI-04 tests draft across session switch but not model change
 
 ## The Transformation, By Example
 
@@ -76,7 +76,7 @@ What changed:
 
 ### Example 2: Writing a contract (CT-02)
 
-No contract exists for draft preservation. The stories cover session-switch, but an agent adding a new feature (say, a personality picker) has no way to know it could break drafts. This is the gap contracts fill.
+No contract exists for draft preservation. The stories cover session-switch, but an agent adding a new feature (say, a model picker) has no way to know it could break drafts. This is the gap contracts fill.
 
 ```markdown
 ## CT-02: Draft preservation across context changes
@@ -88,7 +88,6 @@ input area survives all of the following without loss:
 - Switching to another session and back (PI-04 steps 1-4)
 - Page reload (PI-04 steps 5-6)
 - Model selector change (PI-04d — to be written)
-- Personality change (PI-04e — to be written)
 - Sidebar collapse/expand
 - Agent finishing a response while user is in another session
 - WebSocket reconnection after brief disconnect
@@ -106,24 +105,24 @@ takes effect. If save is async/debounced, the switch must await it.
 Any feature that re-renders the input area, changes session state,
 or triggers navigation must verify drafts are preserved.
 
-**Stories:** PI-04, PI-04b, PI-04c, PI-04d, PI-04e
+**Stories:** PI-04, PI-04b, PI-04c, PI-04d
 **Tests:** draft-persistence.spec.ts, e2e/ui/draft-loss.spec.ts, e2e/ui/queue-ui.spec.ts
 ```
 
-Now when an agent builds the personality picker, it sees CT-02 in the feature matrix and knows: "I need to verify that changing personality doesn't clobber the draft." That produces a new sub-story:
+Now when an agent builds the model picker, it sees CT-02 in the feature matrix and knows: "I need to verify that changing the model doesn't clobber the draft." That produces a new sub-story:
 
 ```markdown
-## PI-04d: Draft preserved across personality change
+## PI-04d: Draft preserved across model change
 
-**Preconditions:** Active session with a personality assigned.
+**Preconditions:** Active session with a model assigned.
 
 **Steps:**
 1. Type "important text" without sending.
-2. Change the session's personality via the selector.
-   - The personality indicator updates.
+2. Change the session's model via the selector.
+   - The model indicator updates.
    - Input area still shows "important text".
 3. Send the message.
-   - Agent responds using the new personality's behavior.
+   - Agent responds using the new model.
 
 **Contracts:** CT-02
 **Coverage:** untested
@@ -132,14 +131,14 @@ Now when an agent builds the personality picker, it sees CT-02 in the feature ma
 That story immediately becomes a test:
 
 ```typescript
-test("PI-04d: draft preserved across personality change", async ({ page }) => {
+test("PI-04d: draft preserved across model change", async ({ page }) => {
   // setup: create session, navigate to it
   const textarea = page.locator("textarea").first();
   await textarea.fill("important text");
   
-  // change personality
-  await page.click('[data-testid="personality-selector"]');
-  await page.click('text=Concise');
+  // change model
+  await page.click('[data-testid="model-selector"]');
+  await page.click('text=Sonnet');
   
   // draft survives
   await expect(textarea).toHaveValue("important text");

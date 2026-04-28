@@ -128,16 +128,6 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `GET` | `/api/tool-group-policies` | Get all group default policies as `Record<string, GrantPolicy>` |
 | `PUT` | `/api/tool-group-policies/:group` | Set or clear a group default policy (`{ policy: GrantPolicy \| null }`). Valid values: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Pass `null` to clear. |
 
-### Personalities
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/personalities` | List all personalities |
-| `POST` | `/api/personalities` | Create a personality (`{ name, label, description, promptFragment }`) |
-| `GET` | `/api/personalities/:name` | Get a personality |
-| `PUT` | `/api/personalities/:name` | Update a personality |
-| `DELETE` | `/api/personalities/:name` | Delete a personality |
-
 ### Slash Skills
 
 | Method | Path | Description |
@@ -150,7 +140,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles/assistant/prompts` | List all assistant prompt definitions |
-| `PUT` | `/api/roles/assistant/prompts/:type` | Update an assistant prompt (goal, role, tool, personality, staff, setup) |
+| `PUT` | `/api/roles/assistant/prompts/:type` | Update an assistant prompt (goal, role, tool, staff, setup) |
 
 ### Staff Agents
 
@@ -556,7 +546,7 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 `POST /api/sessions/:archivedId/continue` creates a brand-new session that mirrors the settings of an archived, non-goal, non-delegate session and seeds the archived transcript into the new session's system prompt. Used by the "Continue in New Session" footer button on archived session transcripts.
 
-**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, personality, sandbox mode, worktree mode) while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships.
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships.
 
 **Request body**:
 

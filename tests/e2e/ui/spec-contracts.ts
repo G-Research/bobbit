@@ -40,7 +40,6 @@ export const CT_02 = defineContract({
 		"page-reload",
 		"goal-dashboard-detour",
 		"attachment-added",
-		"personality-change",
 		"reconnect-after-disconnect",
 	],
 	regions: ["editor", "context_bar"],
