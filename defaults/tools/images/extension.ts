@@ -2,30 +2,23 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
-
-function getGatewayUrl(): string {
-	if (process.env.BOBBIT_GATEWAY_URL) return process.env.BOBBIT_GATEWAY_URL.replace(/\/+$/, "");
-	const stateDir = process.env.BOBBIT_DIR
-		? path.join(process.env.BOBBIT_DIR, "state")
-		: path.join(process.env.HOME || ".", ".pi");
-	return fs.readFileSync(path.join(stateDir, "gateway-url"), "utf-8").trim().replace(/\/+$/, "");
-}
-
-function getGatewayToken(): string {
-	if (process.env.BOBBIT_TOKEN) return process.env.BOBBIT_TOKEN;
-	const stateDir = process.env.BOBBIT_DIR
-		? path.join(process.env.BOBBIT_DIR, "state")
-		: path.join(process.env.HOME || ".", ".pi");
-	const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-	return fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
-}
+import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";
 
 function outputPathFor(basePath: string, index: number, count: number, mimeType: string): string {
 	const extFromMime = mimeType.includes("jpeg") ? ".jpg" : mimeType.includes("webp") ? ".webp" : ".png";
 	const parsed = path.parse(basePath);
 	const ext = parsed.ext || extFromMime;
-	if (count <= 1) return path.resolve(process.cwd(), parsed.ext ? basePath : `${basePath}${ext}`);
-	return path.resolve(process.cwd(), path.join(parsed.dir, `${parsed.name}-${index + 1}${ext}`));
+	const rawTarget = count <= 1
+		? (parsed.ext ? basePath : `${basePath}${ext}`)
+		: path.join(parsed.dir, `${parsed.name}-${index + 1}${ext}`);
+	const resolved = path.resolve(process.cwd(), rawTarget);
+	// Containment: outputPath is model-controlled. Reject any path that escapes the
+	// session worktree (parent traversal or absolute path outside cwd).
+	const rel = path.relative(process.cwd(), resolved);
+	if (rel.startsWith("..") || path.isAbsolute(rel)) {
+		throw new Error("outputPath escapes worktree");
+	}
+	return resolved;
 }
 
 const extension: ExtensionFactory = (pi) => {
@@ -115,12 +108,21 @@ const extension: ExtensionFactory = (pi) => {
 			const images = Array.isArray(data.images) ? data.images : [];
 			const savedPaths: string[] = [];
 			if (params.outputPath) {
-				for (let i = 0; i < images.length; i++) {
-					const image = images[i];
-					const filePath = outputPathFor(params.outputPath, i, images.length, image.mimeType || "image/png");
+				if (images.length === 1) {
+					// Single-image fast path — resolve once and mkdir once.
+					const image = images[0];
+					const filePath = outputPathFor(params.outputPath, 0, 1, image.mimeType || "image/png");
 					fs.mkdirSync(path.dirname(filePath), { recursive: true });
 					fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
 					savedPaths.push(filePath);
+				} else {
+					for (let i = 0; i < images.length; i++) {
+						const image = images[i];
+						const filePath = outputPathFor(params.outputPath, i, images.length, image.mimeType || "image/png");
+						fs.mkdirSync(path.dirname(filePath), { recursive: true });
+						fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
+						savedPaths.push(filePath);
+					}
 				}
 			}
 

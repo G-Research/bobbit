@@ -193,10 +193,16 @@ export function getImageModelByPref(prefs: PreferencesStore, pref?: string | nul
 	return getAvailableImageModels(prefs).find((m) => m.provider === parsed.provider && m.id === parsed.id);
 }
 
+/**
+ * Normalize a user-facing image-model pref string (e.g. `google/nano-banana-2`) to its
+ * canonical `provider/modelId` form so downstream lookups in `getAvailableImageModels`
+ * succeed regardless of how the user typed the alias. Currently only Google aliases
+ * need rewriting; other providers pass through unchanged.
+ */
 export function canonicalImageModelPref(pref: string | undefined | null): string | undefined {
+	const fallback = pref || undefined;
 	const parsed = parseImageModelPref(pref);
-	if (!parsed) return pref || undefined;
-	if (parsed.provider !== "google") return pref || undefined;
+	if (!parsed || parsed.provider !== "google") return fallback;
 
 	const normalizedId = normalizeModelText(parsed.id);
 	if (["gemini31flashimage", "gemini31flashimagepreview", "gemini3flashimage"].includes(normalizedId)) {
@@ -217,7 +223,7 @@ export function canonicalImageModelPref(pref: string | undefined | null): string
 	if (["imagen4fast", "imagenfast", "imagen40fastgenerate001"].includes(normalizedId)) {
 		return "google/imagen-4.0-fast-generate-001";
 	}
-	return pref || undefined;
+	return fallback;
 }
 
 export function imageModelMentionedInText(prefs: PreferencesStore, pref: string | undefined | null, text: string | undefined | null): boolean {
@@ -296,7 +302,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 	});
 	const data: any = await resp.json().catch(() => ({}));
 	if (!resp.ok) {
-		throw new Error(data?.error?.message || data?.error || `OpenAI image request failed: ${resp.status}`);
+		throw new Error(`${resp.status} OpenAI image request failed: ${formatProviderErrorBody(data)}`);
 	}
 	const rows = Array.isArray(data?.data) ? data.data : [];
 	const images: GeneratedImage[] = [];
@@ -312,6 +318,10 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 }
 
 async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
+	const requestedN = Math.max(Math.floor(request.n || 1), 1);
+	if (requestedN > 1) {
+		throw new Error("openai-codex image driver supports n=1 only");
+	}
 	const accountId = getCodexAccountId(token);
 	const format = request.format || "png";
 	const imageTool: Record<string, unknown> = {
@@ -351,13 +361,13 @@ async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel
 	});
 	const text = await resp.text();
 	if (!resp.ok) {
-		throw new Error(parseCodexError(text) || `OpenAI Codex image request failed: ${resp.status}`);
+		throw new Error(`${resp.status} OpenAI Codex image request failed: ${parseCodexError(text) || "<no error body>"}`);
 	}
 	const images = parseCodexImageEvents(text, format);
 	if (images.length === 0) {
 		throw new Error(parseCodexError(text) || "OpenAI Codex image provider returned no image data");
 	}
-	return images.slice(0, Math.min(Math.max(request.n || 1, 1), 4));
+	return images.slice(0, 1);
 }
 
 async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
@@ -390,7 +400,7 @@ async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel
 	});
 	const data: any = await resp.json().catch(() => ({}));
 	if (!resp.ok) {
-		throw new Error(data?.error?.message || data?.error || `Gemini image request failed: ${resp.status}`);
+		throw new Error(`${resp.status} Gemini image request failed: ${formatProviderErrorBody(data)}`);
 	}
 	const parts = data?.candidates?.[0]?.content?.parts || data?.parts || [];
 	const images = parts
@@ -426,7 +436,7 @@ async function generateImagenImage(prefs: PreferencesStore, model: ApiImageModel
 	});
 	const data: any = await resp.json().catch(() => ({}));
 	if (!resp.ok) {
-		throw new Error(data?.error?.message || data?.error || `Imagen request failed: ${resp.status}`);
+		throw new Error(`${resp.status} Imagen request failed: ${formatProviderErrorBody(data)}`);
 	}
 	const rows = Array.isArray(data?.predictions) ? data.predictions : [];
 	const images = rows
@@ -519,12 +529,31 @@ function getCodexAccountId(token: string): string {
 		const payload = JSON.parse(Buffer.from(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8"));
 		const accountId = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
 		if (typeof accountId === "string" && accountId) return accountId;
-	} catch { /* fall through */ }
+	} catch (err) {
+		// Degrade gracefully — the throw below is what the caller surfaces, but log to aid debugging
+		// of malformed JWTs (e.g. truncated token files, base64url decode failures).
+		console.warn("[image-generation] getCodexAccountId: failed to parse Codex JWT payload:", err);
+	}
 	throw new Error("OpenAI Codex image generation failed: could not resolve ChatGPT account id from the saved OpenAI sign-in");
 }
 
+/**
+ * Choose the Responses-API "driver" model that hosts the image_generation tool call
+ * when generating via the Codex backend. Tiered fallback so a missing/retired model id
+ * does not hard-block image generation; mirrors {@link pickFallbackAigwNamingModel}.
+ * Order: explicit env override → gpt-5.5 → gpt-5 → gpt-4o.
+ */
 function getCodexImageDriverModel(): string {
-	return process.env.BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL || "gpt-5.5";
+	const candidates = [
+		process.env.BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL,
+		"gpt-5.5",
+		"gpt-5",
+		"gpt-4o",
+	];
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+	}
+	throw new Error("no codex image driver model available");
 }
 
 function parseCodexImageEvents(sseText: string, format: string): GeneratedImage[] {
@@ -539,6 +568,8 @@ function parseCodexImageEvents(sseText: string, format: string): GeneratedImage[
 			if (item?.type === "image_generation_call") {
 				const result = item.result || item.image || item.output;
 				if (typeof result === "string" && result) {
+					// Final completion event takes precedence — overwrites any earlier partial frame
+					// captured below. Caller treats `images[0]` as the canonical image.
 					images[0] = { data: stripDataUrlPrefix(result), mimeType: `image/${format}` };
 				}
 			}
@@ -612,12 +643,66 @@ function wellKnownModelAliases(provider: string, id: string): string[] {
 	return [];
 }
 
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
 async function imageFromUrl(url: string, revisedPrompt?: string): Promise<GeneratedImage> {
-	const resp = await fetch(url);
+	const controller = new AbortController();
+	const resp = await fetch(url, { signal: controller.signal });
 	if (!resp.ok) throw new Error(`Failed to download generated image: ${resp.status}`);
-	const arrayBuffer = await resp.arrayBuffer();
 	const mimeType = resp.headers.get("content-type")?.split(";")[0] || "image/png";
-	return { data: Buffer.from(arrayBuffer).toString("base64"), mimeType, revisedPrompt };
+
+	// Reject up-front if the server advertises a content-length over the cap.
+	const contentLength = Number(resp.headers.get("content-length") || "");
+	if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_BYTES) {
+		controller.abort();
+		throw new Error("remote image exceeds 25 MB cap");
+	}
+
+	if (!resp.body) {
+		const arrayBuffer = await resp.arrayBuffer();
+		if (arrayBuffer.byteLength > MAX_IMAGE_BYTES) {
+			throw new Error("remote image exceeds 25 MB cap");
+		}
+		return { data: Buffer.from(arrayBuffer).toString("base64"), mimeType, revisedPrompt };
+	}
+
+	const chunks: Buffer[] = [];
+	let total = 0;
+	const reader = resp.body.getReader();
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > MAX_IMAGE_BYTES) {
+				controller.abort();
+				try { await reader.cancel(); } catch { /* ignore */ }
+				throw new Error("remote image exceeds 25 MB cap");
+			}
+			chunks.push(Buffer.from(value));
+		}
+	} finally {
+		try { reader.releaseLock(); } catch { /* ignore */ }
+	}
+	return { data: Buffer.concat(chunks).toString("base64"), mimeType, revisedPrompt };
+}
+
+/**
+ * Format an upstream provider error body into a single-line human-readable string.
+ * Avoids `[object Object]` when the provider returns a structured error shape.
+ */
+function formatProviderErrorBody(data: any): string {
+	const message = data?.error?.message;
+	if (typeof message === "string" && message) return message;
+	if (data?.error) {
+		try {
+			return JSON.stringify(data.error);
+		} catch {
+			return String(data.error);
+		}
+	}
+	return "<no error body>";
 }
 
 function trimSlash(s: string): string {
