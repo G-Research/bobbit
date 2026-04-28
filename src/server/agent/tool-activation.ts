@@ -158,7 +158,13 @@ export function resolveGrantPolicy(
 	return 'allow';
 }
 
-function mcpPolicyPrefix(toolName: string): string | undefined {
+/**
+ * Extract the MCP server policy-key from a tool name. Tool names follow
+ * `mcp__<server>__<tool>` (with the server name potentially containing
+ * underscores). The leading `mcp__<server>` is the unit policies are keyed by.
+ * Exported so unit tests can lock the regex behaviour against drift.
+ */
+export function mcpPolicyPrefix(toolName: string): string | undefined {
 	const match = toolName.match(/^(mcp__.+?)__/);
 	return match?.[1];
 }

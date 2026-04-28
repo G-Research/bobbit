@@ -21,6 +21,13 @@ export class ToolGroupPolicyStore {
 		this.policyFile = path.join(configDir, "tool-group-policies.yaml");
 	}
 
+	/*
+	 * Builtin policies are immutable; user overrides land in <stateDir>/tool-group-policies.yaml.
+	 * `setBuiltins` is invoked once at boot from `defaults/tool-group-policies.yaml`
+	 * (or the cascade resolution thereof) and is the only way builtin defaults
+	 * are populated. Subsequent runtime calls to `setGroupPolicy` only mutate
+	 * the on-disk YAML override file, never these in-memory defaults.
+	 */
 	setBuiltins(policies: Record<string, GrantPolicy>): void {
 		this.builtinPolicies = { ...policies };
 	}

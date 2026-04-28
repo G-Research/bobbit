@@ -457,6 +457,13 @@ function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<
 
 // ── Model Recency Ranking ──────────────────────────────────────────
 
+// Re-export GPT_55_RECENCY_RANK from the shared module so server callers
+// who already pull from model-registry keep a stable import path. The
+// canonical declaration lives in `src/shared/model-ranks.ts` so the UI can
+// import it without crossing the server/web tsconfig boundary.
+import { GPT_55_RECENCY_RANK } from "../../shared/model-ranks.js";
+export { GPT_55_RECENCY_RANK };
+
 /**
  * Rank a model ID by recency/quality tier. Higher = newer/better.
  * Used to auto-select the best model when no preference is set.
@@ -474,7 +481,7 @@ export function modelRecencyRank(id: string): number {
 	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
 	if (s.includes("claude")) return 50;
 	// OpenAI
-	if (s.includes("gpt-5.5")) return 104;
+	if (s.includes("gpt-5.5")) return GPT_55_RECENCY_RANK;
 	if (s.includes("gpt-5.4")) return 100;
 	if (s.includes("gpt-5.3")) return 98;
 	if (s.includes("gpt-5.2")) return 96;

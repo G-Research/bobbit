@@ -426,13 +426,23 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
-				case "set_image_model":
-					sessionManager.persistSessionImageModel(session.id, msg.provider, msg.modelId);
+				case "set_image_model": {
+					const provider = typeof msg.provider === "string" ? msg.provider : "";
+					const modelId = typeof msg.modelId === "string" ? msg.modelId : "";
+					if (!provider || !modelId || !sessionManager.isKnownImageModel(provider, modelId)) {
+						// Defence-in-depth: reject unknown (provider, modelId) without
+						// mutating session state. UI should never reach this branch
+						// because picker only surfaces registry models.
+						send(ws, { type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" });
+						break;
+					}
+					sessionManager.persistSessionImageModel(session.id, provider, modelId);
 					broadcast(session.clients, {
 						type: "state",
-						data: { imageGenerationModel: { provider: msg.provider, id: msg.modelId } },
+						data: { imageGenerationModel: { provider, id: modelId } },
 					});
 					break;
+				}
 				case "set_thinking_level":
 					await session.rpcClient.setThinkingLevel(msg.level);
 					break;

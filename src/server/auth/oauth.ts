@@ -71,7 +71,9 @@ function normalizeProvider(provider?: string | null): OAuthProviderId {
 
 function cleanupExpiredFlows(): void {
 	const now = Date.now();
-	for (const [id, flow] of pendingFlows) {
+	// Snapshot entries before mutating the map to avoid mutation-during-iteration UB.
+	const entries = Array.from(pendingFlows.entries());
+	for (const [id, flow] of entries) {
 		if (now - flow.createdAt > FLOW_TTL_MS) {
 			if (flow.provider !== "anthropic") {
 				flow.rejectCode(new Error("OAuth flow expired"));
@@ -167,17 +169,10 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 		rejectStarted = reject;
 	});
 
-	const flow: PendingExternalOAuth = {
-		provider,
-		createdAt,
-		submitCode,
-		rejectCode,
-		loginPromise: Promise.resolve(),
-		completed: false,
-	};
-	pendingFlows.set(flowId, flow);
-
-	flow.loginPromise = oauthProvider.login({
+	// Construct the real loginPromise up-front so callers (e.g. oauthComplete)
+	// observing `flow.loginPromise` after `pendingFlows.set` always see the active
+	// provider login attempt — never an already-resolved placeholder.
+	const loginPromise = oauthProvider.login({
 		onAuth: (info) => resolveStarted(info),
 		onPrompt: async () => manualCodePromise,
 		onManualCodeInput: async () => manualCodePromise,
@@ -190,7 +185,17 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 		rejectStarted(err instanceof Error ? err : new Error(String(err)));
 		throw err;
 	});
-	void flow.loginPromise.catch(() => {});
+	void loginPromise.catch(() => {});
+
+	const flow: PendingExternalOAuth = {
+		provider,
+		createdAt,
+		submitCode,
+		rejectCode,
+		loginPromise,
+		completed: false,
+	};
+	pendingFlows.set(flowId, flow);
 
 	const info = await started;
 	return {
@@ -224,7 +229,10 @@ export async function oauthComplete(
 	}
 
 	if (flow.provider !== "anthropic") {
-		if (authCode.trim()) flow.submitCode(authCode.trim());
+		if (!authCode || !authCode.trim()) {
+			return { success: false, error: "code required" };
+		}
+		flow.submitCode(authCode.trim());
 		try {
 			await flow.loginPromise;
 			pendingFlows.delete(flowId);
@@ -233,6 +241,10 @@ export async function oauthComplete(
 			pendingFlows.delete(flowId);
 			return { success: false, error: err instanceof Error ? err.message : String(err) };
 		}
+	}
+
+	if (!authCode || !authCode.trim()) {
+		return { success: false, error: "code required" };
 	}
 
 	pendingFlows.delete(flowId);
@@ -299,6 +311,7 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; e
 
 		const expired = cred.expires && Date.now() > cred.expires;
 
+		// strict-OAuth contract: never echo bearer credentials in /status
 		return {
 			provider,
 			authenticated: !expired,
@@ -309,9 +322,24 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; e
 	}
 }
 
-export function oauthFlowStatus(flowId: string): { complete: boolean; error?: string } {
+export function oauthFlowStatus(
+	flowId: string,
+	providerInput?: string,
+): { complete: boolean; error?: string } {
 	const flow = pendingFlows.get(flowId);
-	if (!flow) return { complete: false, error: "Unknown or expired flow ID" };
+	if (!flow) return { complete: false, error: "flow not found" };
+	// Defence-in-depth: if a provider was supplied and disagrees with the stored
+	// flow, treat it as not-found to avoid leaking cross-provider status.
+	if (providerInput) {
+		try {
+			const expected = normalizeProvider(providerInput);
+			if (flow.provider !== expected) {
+				return { complete: false, error: "flow not found" };
+			}
+		} catch {
+			return { complete: false, error: "flow not found" };
+		}
+	}
 	if (flow.provider === "anthropic") return { complete: false };
 	if (flow.completed) {
 		pendingFlows.delete(flowId);
