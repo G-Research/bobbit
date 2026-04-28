@@ -70,20 +70,14 @@ test.describe("WS set_image_model", () => {
 				ws.close();
 			}
 
-			// Re-open WS: confirm imageGenerationModel was NOT set to the bogus pair.
-			const ws2 = await connectWs(sessionId);
-			try {
-				// Drain a short window for any state messages — none should match the bogus pair.
-				await new Promise((r) => setTimeout(r, 250));
-				const bogusState = ws2.messages.find(
-					(m: any) =>
-						m.type === "state" &&
-						m.data?.imageGenerationModel?.provider === "bogus-provider",
-				);
-				expect(bogusState).toBeUndefined();
-			} finally {
-				ws2.close();
-			}
+			// Confirm imageGenerationModel was NOT mutated. Re-fetch the session
+			// row via REST and assert the persisted image-model fields didn't
+			// change — deterministic, no sleep.
+			const sessResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(sessResp.ok).toBe(true);
+			const sess = await sessResp.json();
+			expect(sess.imageModelProvider ?? null).not.toBe("bogus-provider");
+			expect(sess.imageGenerationModel?.provider ?? null).not.toBe("bogus-provider");
 		} finally {
 			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}

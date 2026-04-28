@@ -2,20 +2,27 @@
  * API E2E for GET /api/oauth/flow-status.
  *
  * Coverage:
- *  - Missing flowId → 400 with `{ error: "Missing flowId" }`.
+ *  - Missing flowId → 400.
  *  - Unknown flowId → 404 with `{ error: "flow not found" }`.
- *  - Cross-provider isolation: starting an `openai-codex` flow then polling
- *    its flowId with `?provider=anthropic` must 404 (defence-in-depth).
- *  - Happy path: an `openai-codex` flow polled with the matching provider
- *    returns 200 with `{ complete: false, ... }` while the flow is in flight.
+ *  - Cross-provider isolation: starting an `anthropic` flow and polling
+ *    its flowId with `?provider=openai-codex` must 404 (defence-in-depth).
+ *  - Happy path: an in-flight flow polled with no provider returns
+ *    `{ complete: false, ... }`; with the matching provider also returns 200.
  *
- * Note: the `anthropic` start path requires real upstream OAuth metadata and
- * is intentionally avoided here — the cross-provider isolation test below
- * starts an `openai-codex` flow (which uses a local injected callback), which
- * is the isolation direction we actually need to lock.
+ * Note: external OAuth providers (openai-codex) require live upstream
+ * metadata in the in-process harness, which is brittle. We therefore drive
+ * the flow-status logic directly via `oauthStart` / `oauthFlowStatus` in
+ * `src/server/auth/oauth.ts`, exercising the real production code path
+ * without going through the network/provider boundary. The HTTP-surface
+ * 400/404 cases below still use the REST endpoint to lock the wire shape.
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base } from "./e2e-setup.js";
+// Import from dist/ so we share the same module instance (and therefore
+// the same `pendingFlows` Map) as the in-process gateway, which also imports
+// from dist/. Importing from src/ would yield a different module instance
+// under tsx and the REST cross-checks would never see our flows.
+import { oauthStart, oauthFlowStatus } from "../../dist/server/auth/oauth.js";
 
 const headers = () => ({
 	Authorization: `Bearer ${readE2EToken()}`,
@@ -41,64 +48,47 @@ test.describe("/api/oauth/flow-status", () => {
 		expect(body.error).toBe("flow not found");
 	});
 
-	test("happy path: poll an in-flight openai-codex flow", async () => {
-		const startResp = await api("/api/oauth/start", {
-			method: "POST",
-			body: JSON.stringify({ provider: "openai-codex" }),
-		});
-		// External providers may not always be wired up in the in-process
-		// harness; if start fails for any reason, skip this test rather than
-		// flake it.
-		if (!startResp.ok) {
-			test.skip(true, `oauth start unavailable for openai-codex (status ${startResp.status})`);
-			return;
-		}
-		const { flowId, provider } = await startResp.json();
-		expect(flowId).toBeTruthy();
-		expect(provider).toBe("openai-codex");
+	test("happy path (direct): an in-flight anthropic flow returns { complete: false }", async () => {
+		// `anthropic` flows are local: oauthStart only computes a PKCE pair and
+		// builds an authorize URL. No upstream call is made. We can therefore
+		// observe an in-flight flow deterministically.
+		const started = await oauthStart("anthropic");
+		expect(started.flowId).toBeTruthy();
+		expect(started.provider).toBe("anthropic");
 
-		try {
-			const resp = await api(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}&provider=openai-codex`);
-			expect(resp.status).toBe(200);
-			const body = await resp.json();
-			expect(body.complete).toBe(false);
-		} finally {
-			// Clean up by submitting a bogus code (will fail upstream but cleans pendingFlows).
-			await api("/api/oauth/complete", {
-				method: "POST",
-				body: JSON.stringify({ flowId, code: "" }),
-			}).catch(() => {});
-		}
+		// Poll directly — no provider arg.
+		const statusNoProv = oauthFlowStatus(started.flowId);
+		expect(statusNoProv).toEqual({ complete: false });
+
+		// Poll with matching provider.
+		const statusMatch = oauthFlowStatus(started.flowId, "anthropic");
+		expect(statusMatch).toEqual({ complete: false });
+
+		// And the REST surface confirms the same.
+		const resp = await api(`/api/oauth/flow-status?flowId=${encodeURIComponent(started.flowId)}&provider=anthropic`);
+		expect(resp.status).toBe(200);
+		const body = await resp.json();
+		expect(body.complete).toBe(false);
 	});
 
-	test("cross-provider isolation: openai-codex flow polled as anthropic → 404", async () => {
-		const startResp = await api("/api/oauth/start", {
-			method: "POST",
-			body: JSON.stringify({ provider: "openai-codex" }),
-		});
-		if (!startResp.ok) {
-			test.skip(true, `oauth start unavailable for openai-codex (status ${startResp.status})`);
-			return;
-		}
-		const { flowId } = await startResp.json();
-		expect(flowId).toBeTruthy();
+	test("cross-provider isolation (direct): anthropic flow polled as openai-codex → 404", async () => {
+		const started = await oauthStart("anthropic");
+		expect(started.flowId).toBeTruthy();
 
-		try {
-			const resp = await api(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}&provider=anthropic`);
-			expect(resp.status).toBe(404);
-			const body = await resp.json();
-			expect(body.error).toBe("flow not found");
+		// Direct call: cross-provider mismatch must read as 'flow not found'.
+		const mismatch = oauthFlowStatus(started.flowId, "openai-codex");
+		expect(mismatch).toEqual({ complete: false, error: "flow not found" });
 
-			// Sanity: same flow with the matching provider is still reachable
-			// (proves the 404 above is *only* the provider-mismatch branch,
-			// not a cleanup side-effect of the mismatched poll).
-			const ok = await api(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}&provider=openai-codex`);
-			expect(ok.status).toBe(200);
-		} finally {
-			await api("/api/oauth/complete", {
-				method: "POST",
-				body: JSON.stringify({ flowId, code: "" }),
-			}).catch(() => {});
-		}
+		// Matching-provider sanity: still reachable (proves the 404 above is
+		// only the provider-mismatch branch, not a cleanup side-effect of the
+		// mismatched poll).
+		const match = oauthFlowStatus(started.flowId, "anthropic");
+		expect(match).toEqual({ complete: false });
+
+		// REST surface mirrors the direct call.
+		const resp = await api(`/api/oauth/flow-status?flowId=${encodeURIComponent(started.flowId)}&provider=openai-codex`);
+		expect(resp.status).toBe(404);
+		const body = await resp.json();
+		expect(body.error).toBe("flow not found");
 	});
 });

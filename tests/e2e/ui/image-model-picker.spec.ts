@@ -103,6 +103,9 @@ test.describe("Image model picker (Settings → Models)", () => {
 		const badge = row.locator("[data-testid='image-model-unavailable-badge']");
 		await expect(badge).toBeVisible({ timeout: 10_000 });
 		await expect(badge).toContainText("Unavailable", { timeout: 5_000 });
+		// The model id must still be rendered alongside the badge so the user
+		// can see *which* stale id triggered the warning.
+		await expect(row).toContainText("this-model-does-not-exist", { timeout: 5_000 });
 	});
 
 	test("clear button resets to Auto", async ({ page }) => {
