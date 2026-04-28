@@ -60,8 +60,14 @@ describe("BgProcessManager.waitForExit — AbortSignal", () => {
 		const cmd = process.platform === "win32" ? "cmd /c exit 0" : "true";
 		const info = mgr.create(SESSION, cmd, os.tmpdir());
 
-		// Wait until it exits.
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		// Poll until the bg process is observed as exited (Windows cmd.exe spawn
+		// + exit handler can take longer than a fixed 100ms sleep under load).
+		const pollDeadline = Date.now() + 5000;
+		while (Date.now() < pollDeadline) {
+			const tracked = mgr.list(SESSION).find(p => p.id === info.id);
+			if (tracked?.status === "exited") break;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
 
 		const controller = new AbortController();
 		const result = await mgr.waitForExit(SESSION, info.id, 1000, controller.signal);
