@@ -9,6 +9,38 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import { getShellConfig } from "./shell-util.js";
 
+/**
+ * Function used to spawn the underlying child process. Injected via the
+ * constructor so unit tests can supply a fake EventEmitter-backed child
+ * without touching the OS. Production wiring uses {@link defaultSpawn}.
+ */
+export type SpawnFn = (command: string, cwd: string, containerId: string | undefined) => ChildProcess;
+
+function defaultSpawn(command: string, cwd: string, containerId: string | undefined): ChildProcess {
+	const { shell: hostShell, args: hostArgs } = getShellConfig();
+	// Inside the container: always /bin/sh, use the caller's cwd
+	// (which is the container-internal worktree path for sandboxed sessions)
+	const shell = containerId ? "/bin/sh" : hostShell;
+	const args = containerId ? ["-c"] : hostArgs;
+	const containerCwd = cwd;
+
+	if (containerId) {
+		console.log(`[bg-process] Docker exec in container ${containerId.substring(0, 12)}, cwd=${containerCwd}`);
+	}
+	return containerId
+		? spawn("docker", ["exec", "-w", containerCwd, containerId, shell, ...args, command], {
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: false, // docker exec manages the process
+			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+		})
+		: spawn(shell, [...args, command], {
+			cwd,
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: true,
+			env: process.env,
+		});
+}
+
 export interface LogEntry {
 	ts: number;
 	text: string;
@@ -31,6 +63,13 @@ export interface BgProcess {
 	cwd: string;
 	/** If set, process was spawned inside this Docker container */
 	containerId?: string;
+	/**
+	 * Resolves once the child has emitted `exit` AND `status`/`exitCode` have
+	 * been updated. Awaiters are guaranteed to observe the post-exit snapshot.
+	 * This eliminates the previous "50ms slack" between the exit event and
+	 * `status === 'exited'" — and removes a long-standing flake source.
+	 */
+	exited: Promise<void>;
 }
 
 export interface BgProcessInfo {
@@ -47,8 +86,6 @@ export interface BgProcessInfo {
 const MAX_LOG_LINES = 5000;
 const MAX_LOG_BYTES = 512 * 1024; // 512KB per process
 
-let nextId = 1;
-
 // Shell config is provided by the shared shell-util module
 
 export class BgProcessManager {
@@ -58,9 +95,17 @@ export class BgProcessManager {
 	private clientsProvider: (sessionId: string) => Set<WebSocket> | undefined;
 	/** sessionId → in-flight wait AbortControllers. Aborted when a steer arrives. */
 	private waits = new Map<string, Set<AbortController>>();
+	/** Per-instance id sequence — keeps test runs isolated from each other. */
+	private nextId = 1;
+	/** Spawner — overridable in tests so unit tests don't touch the OS. */
+	private spawnFn: SpawnFn;
 
-	constructor(clientsProvider: (sessionId: string) => Set<WebSocket> | undefined) {
+	constructor(
+		clientsProvider: (sessionId: string) => Set<WebSocket> | undefined,
+		spawnFn: SpawnFn = defaultSpawn,
+	) {
 		this.clientsProvider = clientsProvider;
+		this.spawnFn = spawnFn;
 	}
 
 	private broadcast(sessionId: string, msg: ServerMessage): void {
@@ -78,33 +123,14 @@ export class BgProcessManager {
 		if (sandboxed && !containerId) {
 			throw new Error("Sandboxed session without containerId — refusing host-side execution");
 		}
-		const id = `bg-${nextId++}`;
-		const { shell: hostShell, args: hostArgs } = getShellConfig();
-
-		// Inside the container: always /bin/sh, use the caller's cwd
-		// (which is the container-internal worktree path for sandboxed sessions)
-		const shell = containerId ? "/bin/sh" : hostShell;
-		const args = containerId ? ["-c"] : hostArgs;
-		const containerCwd = cwd;
-
-		if (containerId) {
-			console.log(`[bg-process] Docker exec in container ${containerId.substring(0, 12)}, cwd=${containerCwd}`);
-		}
-		const child = containerId
-			? spawn("docker", ["exec", "-w", containerCwd, containerId, shell, ...args, command], {
-				stdio: ["ignore", "pipe", "pipe"],
-				detached: false, // docker exec manages the process
-				env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-			})
-			: spawn(shell, [...args, command], {
-				cwd,
-				stdio: ["ignore", "pipe", "pipe"],
-				detached: true,
-				env: process.env,
-			});
+		const id = `bg-${this.nextId++}`;
+		const child = this.spawnFn(command, cwd, containerId);
 
 		// Unref so bg process doesn't prevent gateway from exiting (host spawns only)
-		if (!containerId) child.unref();
+		if (!containerId && typeof child.unref === "function") child.unref();
+
+		let resolveExited!: () => void;
+		const exited = new Promise<void>((res) => { resolveExited = res; });
 
 		const bg: BgProcess = {
 			id,
@@ -120,6 +146,7 @@ export class BgProcessManager {
 			startTime: Date.now(),
 			cwd,
 			containerId,
+			exited,
 		};
 
 		let logBytes = 0;
@@ -183,6 +210,9 @@ export class BgProcessManager {
 		child.on("exit", (code) => {
 			bg.status = "exited";
 			bg.exitCode = code;
+			// Resolve BEFORE broadcast/destroy so any awaiter on `bg.exited`
+			// observes status === 'exited' the moment they're scheduled.
+			resolveExited();
 			// Destroy pipes to avoid lingering from grandchild processes
 			child.stdout?.destroy();
 			child.stderr?.destroy();
@@ -360,42 +390,34 @@ export class BgProcessManager {
 		if (bg.status === "exited") return { info: this.toInfo(bg), timedOut: false, aborted: false };
 		if (signal?.aborted) return { info: this.toInfo(bg), timedOut: false, aborted: true };
 
-		return new Promise((resolve) => {
-			let settled = false;
-			let timer: ReturnType<typeof setTimeout> | null = null;
+		// Race exit / timeout / abort. We do NOT attach an "exit" listener to the
+		// child — instead we await `bg.exited`, which is resolved by the single
+		// listener installed in create() AFTER status/exitCode are updated. That
+		// removes both the "50 ms slack" hack and the per-call exit-listener leak.
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		let onAbort: (() => void) | null = null;
 
-			const cleanup = () => {
-				if (timer) { clearTimeout(timer); timer = null; }
-				bg.child.removeListener("exit", onExit);
-				if (signal) signal.removeEventListener("abort", onAbort);
-			};
-
-			const onExit = () => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				// Small delay to let the exit handler update status
-				setTimeout(() => resolve({ info: this.toInfo(bg), timedOut: false, aborted: false }), 50);
-			};
-
-			const onTimeout = () => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				resolve({ info: this.toInfo(bg), timedOut: true, aborted: false });
-			};
-
-			const onAbort = () => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				resolve({ info: this.toInfo(bg), timedOut: false, aborted: true });
-			};
-
-			timer = setTimeout(onTimeout, timeoutMs);
-			bg.child.once("exit", onExit);
-			if (signal) signal.addEventListener("abort", onAbort, { once: true });
+		const timeoutP = new Promise<"timeout">((res) => {
+			timer = setTimeout(() => res("timeout"), timeoutMs);
 		});
+		const abortP = new Promise<"abort">((res) => {
+			if (!signal) return; // never resolves — Promise.race ignores it
+			onAbort = () => res("abort");
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+		const exitP = bg.exited.then(() => "exit" as const);
+
+		try {
+			const winner = await Promise.race([exitP, timeoutP, abortP]);
+			return {
+				info: this.toInfo(bg),
+				timedOut: winner === "timeout",
+				aborted: winner === "abort",
+			};
+		} finally {
+			if (timer) clearTimeout(timer);
+			if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+		}
 	}
 
 	/** Remove exited processes from the map */
