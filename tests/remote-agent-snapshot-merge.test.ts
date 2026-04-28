@@ -37,7 +37,10 @@ import assert from "node:assert/strict";
 // import doesn't throw. We never connect a real socket in these tests —
 // we feed frames straight into `handleServerMessage` via reflection.
 const g = globalThis as any;
-if (typeof g.localStorage === "undefined") {
+// Node 22+ defines a built-in `localStorage` object that lacks `.getItem` until
+// `--experimental-webstorage` is enabled. Detect by checking for the method,
+// not just the binding, otherwise our shim is silently skipped.
+if (typeof g.localStorage === "undefined" || typeof g.localStorage?.getItem !== "function") {
 	const store = new Map<string, string>();
 	g.localStorage = {
 		getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
