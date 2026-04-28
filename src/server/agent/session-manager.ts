@@ -33,6 +33,7 @@ import { McpManager } from "../mcp/mcp-manager.js";
 import { isTransientReviewError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
+import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -961,7 +962,7 @@ export class SessionManager {
 
 	private buildToolActivationArgs(
 		sessionId: string,
-		allowedTools: string[],
+		allowedTools: string[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 	): string[] {
@@ -980,7 +981,7 @@ export class SessionManager {
 			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.toLowerCase()));
-		const sessionGrants = allowedTools.filter(t => !roleAllowed.has(t.toLowerCase()));
+		const sessionGrants = (allowedTools ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
@@ -991,6 +992,11 @@ export class SessionManager {
 		}
 
 		return args;
+	}
+
+	private resolveSessionRole(roleName?: string, assistantType?: string): import("./role-store.js").Role | undefined {
+		if (!this.roleManager) return undefined;
+		return this.roleManager.getRole(roleName || (assistantType ? "assistant" : "general"));
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
@@ -2261,43 +2267,14 @@ export class SessionManager {
 			}
 		}
 
-		// Restore tool activation from role's allowedTools
-		// Use overridden allowedTools if provided (session-only/one-time grants)
+		// Restore tool activation. Roleless normal sessions still use the general
+		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
-		if (ps.role && this.roleManager) {
-			const role = this.roleManager.getRole(ps.role);
-			let effectiveAllowed = overrideAllowedTools ?? this.resolveEffectiveAllowedTools(role);
-			// (bash_bg now supported in sandbox — spawns via docker exec)
-			if (effectiveAllowed.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(ps.id, effectiveAllowed, role, ps.cwd);
-				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
-			} else if (this.mcpManager) {
-				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
-				for (const extPath of mcpExtPaths) {
-					bridgeOptions.args.push("--extension", extPath);
-				}
-			}
-		} else if (!ps.role && this.mcpManager) {
-			// Roleless sessions still need MCP extensions (e.g. playwright tools)
-			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-			bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
-			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args.push("--extension", extPath);
-			}
-		}
-
-		// Derive allowedTools from role so restored prompts filter tool docs correctly
-		let restoredAllowedTools: string[] | undefined;
-		if (overrideAllowedTools) {
-			restoredAllowedTools = overrideAllowedTools;
-		} else if (ps.role && this.roleManager) {
-			const role = this.roleManager.getRole(ps.role);
-			if (role) {
-				const effective = this.resolveEffectiveAllowedTools(role);
-				if (effective.length > 0) restoredAllowedTools = effective;
-			}
-		}
+		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType);
+		const effectiveAllowed = overrideAllowedTools ?? this.resolveEffectiveAllowedTools(restoredRole);
+		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
+		const toolArgs = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
+		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -3368,17 +3345,9 @@ export class SessionManager {
 			}
 		}
 
-		// Apply tool activation args based on role's allowedTools
-		if (effectiveAllowed.length > 0) {
-			const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed, fullRole, session.cwd);
-			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
-		} else if (this.mcpManager) {
-			const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-			bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
-			for (const extPath of mcpExtPaths) {
-				bridgeOptions.args.push("--extension", extPath);
-			}
-		}
+		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
+		const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
+		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let switchingSession = true;
@@ -3524,6 +3493,44 @@ export class SessionManager {
 	/** Persist model provider/id so archived sessions can display model info. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
 		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
+	}
+
+	/** Persist per-session image generation model override. Validates against the
+	 * registered image-model registry first; mirrors the WS handler's defence-in-depth
+	 * check so any code path that lands here can't poison session state with an
+	 * unknown (provider, modelId). */
+	persistSessionImageModel(sessionId: string, provider: string, modelId: string): void {
+		if (!this.isKnownImageModel(provider, modelId)) {
+			throw new Error("unknown image model");
+		}
+		this.resolveStoreForSession(sessionId).update(sessionId, { imageModelProvider: provider, imageModelId: modelId });
+	}
+
+	/** True when (provider, modelId) is registered as an available image model. */
+	isKnownImageModel(provider: string, modelId: string): boolean {
+		if (!this.preferencesStore) return false;
+		const available = getAvailableImageModels(this.preferencesStore);
+		return available.some((m) => m.provider === provider && m.id === modelId);
+	}
+
+	/** Resolve the image generation model for a session, falling back to the system default. */
+	getImageModelForSession(sessionId: string): { provider: string; id: string } | undefined {
+		const persisted = this.resolveStoreForId(sessionId)?.get(sessionId);
+		if (persisted?.imageModelProvider && persisted?.imageModelId) {
+			return { provider: persisted.imageModelProvider, id: persisted.imageModelId };
+		}
+		// Coalesce to the system default first, then parse exactly once.
+		// `defaultImageModelPref()` always returns the parseable
+		// "openai/gpt-image-2", so the result is always defined — the previous
+		// `|| parseImageModelPref(defaultImageModelPref())` fallback chain was
+		// dead code (the first parse always succeeded once we coalesce upstream).
+		const pref = (this.preferencesStore?.get("default.imageModel") as string | undefined) || defaultImageModelPref();
+		return parseImageModelPref(pref);
+	}
+
+	/** Latest user turn text for request-scoped policy checks such as model override gating. */
+	getLastPromptText(sessionId: string): string | undefined {
+		return this.sessions.get(sessionId)?.lastPromptText;
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
@@ -4222,21 +4229,11 @@ export class SessionManager {
 				}
 			}
 
-			// Restore tool activation from role's allowedTools
-			if (session.role && this.roleManager) {
-				const role = this.roleManager.getRole(session.role);
-				const effective = this.resolveEffectiveAllowedTools(role);
-				if (effective.length > 0) {
-					const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd);
-					bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
-				} else if (this.mcpManager) {
-					const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-					bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
-					for (const extPath of mcpExtPaths) {
-						bridgeOptions.args.push("--extension", extPath);
-					}
-				}
-			}
+			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
+			const role = this.resolveSessionRole(session.role, session.assistantType);
+			const effective = this.resolveEffectiveAllowedTools(role);
+			const toolArgs = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
+			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;

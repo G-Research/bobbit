@@ -223,6 +223,7 @@ export class RemoteAgent {
 			systemPrompt: "",
 			model: { ...getModel("anthropic", "claude-opus-4-6"), contextWindow: 0 },
 			thinkingLevel: "medium",
+			imageGenerationModel: null as any,
 			tools: [],
 			messages: [] as any[],
 			isStreaming: false,
@@ -692,6 +693,12 @@ export class RemoteAgent {
 		state.chatPanel?.agentInterface?.requestUpdate();
 	}
 
+	setImageGenerationModel(model: any): void {
+		this._state.imageGenerationModel = model;
+		this.send({ type: "set_image_model", provider: model.provider, modelId: model.id });
+		state.chatPanel?.agentInterface?.requestUpdate();
+	}
+
 	setTools(_tools: any[]): void {
 		// no-op: tools are server-side for the coding agent
 	}
@@ -817,6 +824,9 @@ export class RemoteAgent {
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
+				}
+				if (msg.data?.imageGenerationModel) {
+					this._state.imageGenerationModel = msg.data.imageGenerationModel;
 				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;

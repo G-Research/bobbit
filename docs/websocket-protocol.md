@@ -16,6 +16,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
 | `set_model` | `provider`, `modelId` | Switch the AI model |
+| `set_image_model` | `provider`, `modelId` | Switch the per-session image generation model. Server validates `(provider, modelId)` against `getAvailableImageModels()`; on unknown the server replies with `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and does **not** mutate session state. On valid, persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state to all attached clients. |
 | `compact` | — | Trigger context compaction |
 | `get_state` | — | Request current agent state |
 | `get_messages` | — | Request full message history |

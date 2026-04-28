@@ -8,7 +8,10 @@ export type CustomProviderType =
 	| AutoDiscoveryProviderType // Auto-discovery - models fetched on-demand
 	| "openai-completions" // Manual models - stored in provider.models
 	| "openai-responses" // Manual models - stored in provider.models
-	| "anthropic-messages"; // Manual models - stored in provider.models
+	| "anthropic-messages" // Manual models - stored in provider.models
+	| "openai-images" // Manual image-generation models - stored in provider.models
+	| "gemini-images" // Manual Gemini image-generation models - stored in provider.models
+	| "google-imagen"; // Manual Imagen model providers - stored in provider.models
 
 export interface CustomProvider {
 	id: string; // UUID

@@ -44,6 +44,25 @@ test.describe("Settings (full-stack UI)", () => {
 		await expect(page).toHaveURL(/#\/settings\/system\/palette/, { timeout: 5_000 });
 	});
 
+	test("account tab shows Anthropic and OpenAI OAuth providers", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/account");
+
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByText("Anthropic OAuth")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("OpenAI OAuth")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("ChatGPT subscription GPT models")).toBeVisible({ timeout: 5_000 });
+
+		await expect(page.getByText("Authenticated", { exact: true })).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Not authenticated", { exact: true })).toBeVisible({ timeout: 5_000 });
+
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/account");
+		await expect(page.getByText("OpenAI OAuth")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Anthropic OAuth")).toBeVisible({ timeout: 5_000 });
+	});
+
 	test("setting persists after reload", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
@@ -135,6 +154,55 @@ test.describe("Settings (full-stack UI)", () => {
 		} finally {
 			// Clean up the project
 			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	// PR #369 review fix L1: Account-tab login buttons share a single
+	// `accountReauthing` state — when ANY provider's flow is in flight, every
+	// login button is disabled (prevents concurrent OAuth attempts from
+	// clobbering each other's pendingFlows entries).
+	//
+	// We verify:
+	//   (a) the Account tab renders with at least one provider login button,
+	//   (b) when no flow is in flight, login buttons are NOT disabled, and
+	//   (c) clicking a login button immediately disables every login button
+	//       on the page (the `accountReauthing !== null` branch). We do NOT
+	//       drive the OAuth flow to completion — the click is enough to flip
+	//       `accountReauthing` and re-render.
+	test("Account tab: clicking a login button disables every provider's login button", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/account");
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
+
+		// Locate every "Log in" / "Re-authenticate" / "Authenticating..." button.
+		// (Account tab renders one Anthropic + one OpenAI Codex provider row,
+		// each with a single login button.)
+		const loginButtons = page.locator("button").filter({
+			hasText: /Log in|Re-authenticate|Authenticating/,
+		});
+		await expect(loginButtons.first()).toBeVisible({ timeout: 10_000 });
+		const total = await loginButtons.count();
+		expect(total).toBeGreaterThanOrEqual(2);
+
+		// Pre-click: no flow in flight → buttons are enabled.
+		for (let i = 0; i < total; i++) {
+			await expect(loginButtons.nth(i)).toBeEnabled({ timeout: 5_000 });
+		}
+
+		// Click the first login button. Disabled-flip is synchronous: the click
+		// flips `accountReauthing` to a non-null provider id, the next render
+		// gates every login button on `disabled: accountReauthing !== null`,
+		// and the clicked button's label becomes "Authenticating...".
+		await loginButtons.first().click();
+
+		// Every login button should now report disabled.
+		const stillLogin = page.locator("button").filter({
+			hasText: /Log in|Re-authenticate|Authenticating/,
+		});
+		const countAfter = await stillLogin.count();
+		expect(countAfter).toBeGreaterThanOrEqual(2);
+		for (let i = 0; i < countAfter; i++) {
+			await expect(stillLogin.nth(i)).toBeDisabled({ timeout: 5_000 });
 		}
 	});
 });

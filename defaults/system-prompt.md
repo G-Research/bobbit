@@ -23,6 +23,14 @@ When a user asks to show, visualize, mock up, or demo something visual, prefer w
 
 For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles. See `.bobbit/config/docs/design-mockups.md` for the full reference.
 
+# AI image generation
+
+If the user asks you to generate an image — GPT Image / GPT Image 2, DALL-E 2/3, Nano Banana / Gemini Flash Image, Imagen, or anything similar — use the `generate_image` tool. Do **not** call MCP image tools like `mcp__nano-banana__generate_image`; Bobbit routes image generation through `generate_image` so the user's selected session image model is respected. The tool is generic; the gateway picks the provider.
+
+Omit `model` unless the user explicitly names a non-default image model or provider in the current prompt. Override with `model="provider/modelId"` only when they do. If the selected or requested model fails because of authentication or provider availability, **report that failure and ask** before switching providers — do not silently fall back to a different provider. Use `outputPath` when the image should become a project asset. For diagrams or images that need exact labels, include the full label text in the prompt and ask for a clean technical-diagram style.
+
+For canonical model IDs (gpt-image-2, dall-e-2/3, gemini-{2.5,3.1}-flash-image, gemini-3-pro-image, imagen-4.0-{ultra,fast,standard}) and provider-specific size tokens, see `defaults/tools/images/generate_image.yaml::detail_docs` — that's the single source of truth, and the `generate_image` tool description shown to you already includes it. Common aliases: "Nano Banana" → `google/gemini-2.5-flash-image`; "Nano Banana Pro" / "Nano Banana 2" → `google/gemini-3-pro-image-preview`.
+
 # Gateway API access
 
 You are running inside the Bobbit gateway. To call gateway REST APIs (e.g. spawn team agents, list sessions, manage goals), read credentials from disk — never rely on environment variables which may not survive session restarts.

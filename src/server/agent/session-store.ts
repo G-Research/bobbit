@@ -66,9 +66,55 @@ export interface PersistedSession {
 	modelProvider?: string;
 	/** Model ID (e.g. "claude-sonnet-4-20250514") — persisted so archived sessions can display model info */
 	modelId?: string;
+	/** Image generation model provider for this session, if overridden from the default. */
+	imageModelProvider?: string;
+	/** Image generation model ID for this session, if overridden from the default. */
+	imageModelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
 }
+
+/**
+ * Subset of `PersistedSession` fields that `SessionStore.update()` is
+ * permitted to mutate after creation. `id`, `createdAt`, `drafts`, and
+ * other identity-shaped fields are intentionally excluded.
+ */
+export type UpdatableSessionFields = Pick<
+	PersistedSession,
+	| "title"
+	| "lastActivity"
+	| "agentSessionFile"
+	| "goalId"
+	| "wasStreaming"
+	| "streamingStartedAt"
+	| "delegateOf"
+	| "role"
+	| "teamGoalId"
+	| "teamLeadSessionId"
+	| "worktreePath"
+	| "assistantType"
+	| "goalAssistant"
+	| "roleAssistant"
+	| "toolAssistant"
+	| "taskId"
+	| "staffId"
+	| "accessory"
+	| "preview"
+	| "messageQueue"
+	| "archived"
+	| "archivedAt"
+	| "repoPath"
+	| "branch"
+	| "nonInteractive"
+	| "cwd"
+	| "reattemptGoalId"
+	| "modelProvider"
+	| "modelId"
+	| "imageModelProvider"
+	| "imageModelId"
+	| "sandboxed"
+	| "projectId"
+>;
 
 /**
  * Simple JSON file store for gateway session metadata.
@@ -173,7 +219,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed" | "projectId">>): void {
+	update(id: string, updates: Partial<UpdatableSessionFields>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;
