@@ -156,11 +156,27 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		projectId = project.id;
 	});
 
-	// TODO(pr-369-rev): goal.cwd is not remapped into worktreePath after
-	// async worktree setup completes — it remains the originally-passed
-	// subdirectory path. The intended behaviour (cwd = worktreePath + offset)
-	// is not implemented in the current goal-manager. This is a real bug,
-	// not a flaky test. Tracked separately; see tests/e2e/README (Bug 2).
+	// TODO: subdirectory worktree CWD offset is not implemented.
+	//
+	// Symptom: when a project rootPath points at a sub-path of a git repo
+	// (e.g. a monorepo package like `<repo>/packages/my-app`), creating a
+	// goal with `cwd === <subdir>` leaves `goal.cwd` pointing at the
+	// originally-passed sub-path even after the async worktree setup
+	// completes. The intended behaviour is for goal-manager to detect the
+	// repo root, compute the offset (`packages/my-app`), and apply that
+	// offset to the worktree path so `goal.cwd === <worktreePath>/<offset>`.
+	//
+	// Why this is skipped, not removed: this is a real product bug, not a
+	// flaky test. Removing the spec would erase the contract; keeping it
+	// `test.skip` keeps the intended behaviour documented in code so a
+	// future fix has a ready-made check.
+	//
+	// Next steps to land this:
+	//   1. In `src/server/agent/goal-manager.ts`, after worktree setup
+	//      resolves, compute `offset = path.relative(repoRoot, originalCwd)`
+	//      and rewrite `goal.cwd = path.join(worktreePath, offset)`.
+	//   2. Persist the rewritten cwd via `goalStore.update`.
+	//   3. Remove the `.skip` below and run this spec to lock the behaviour.
 	test.skip("goal.cwd includes subdirectory offset within worktree", async () => {
 		// Create a goal with cwd pointing to the subdirectory.
 		// The goal-manager should detect the git repo root, compute the offset
