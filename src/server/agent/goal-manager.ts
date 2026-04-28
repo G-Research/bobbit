@@ -116,7 +116,15 @@ export class GoalManager {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
 		}
 
-		// Snapshot workflow onto goal if workflowId is provided
+		// Snapshot workflow onto goal. Resolution order:
+		//   1. Caller passed `resolvedWorkflow` (from config cascade) — use it.
+		//   2. Caller passed `workflowId` only — read from the inline workflow store.
+		//   3. Neither — fall back to "general".
+		// If we can't resolve a workflow at all, throw a clear error so
+		// `POST /api/goals` surfaces a 400 instead of silently creating a
+		// gateless goal. See docs/design/multi-repo-components.md §3.4.
+		const NO_WORKFLOWS_MSG =
+			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
 			// Use pre-resolved workflow (from config cascade)
 			goal.workflowId = workflowId;
@@ -124,16 +132,22 @@ export class GoalManager {
 		} else if (workflowId && workflowStore) {
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {
+				// If the store has nothing at all, surface the canonical message.
+				if (workflowStore.getAll().length === 0) {
+					throw new Error(NO_WORKFLOWS_MSG);
+				}
 				throw new Error(`Workflow not found: ${workflowId}`);
 			}
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(wf));
 		} else if (!workflowId && workflowStore) {
-			// Default to "general" workflow when none specified
+			// Default to "general" workflow when none specified.
 			const defaultWf = workflowStore.get("general");
 			if (defaultWf) {
 				goal.workflowId = "general";
 				goal.workflow = JSON.parse(JSON.stringify(defaultWf));
+			} else if (workflowStore.getAll().length === 0) {
+				throw new Error(NO_WORKFLOWS_MSG);
 			}
 		}
 

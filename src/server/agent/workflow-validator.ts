@@ -151,6 +151,22 @@ export function validateWorkflow(
 
 			const stepType = step.type ?? "command";
 
+			// Phase 2 (multi-repo): the {{project.X}} token namespace is removed.
+			// Structural { component, command } refs replace it. Free-form
+			// `run:` strings that still mention {{project.X}} are flagged as
+			// errors so the user converts them.  Other tokens (e.g. {{branch}},
+			// {{agent.X}}, {{<gate>.meta.X}}) pass through.
+			const projectTokenIn = (s?: string): string | null => {
+				if (!s) return null;
+				const m = /\{\{\s*project\.([^}\s]+)\s*\}\}/.exec(s);
+				return m ? m[1] : null;
+			};
+			const projectTok = projectTokenIn(step.run) ?? projectTokenIn(step.prompt);
+			if (projectTok !== null) {
+				fail(`uses removed token "{{project.${projectTok}}}". Replace command-shape steps with { component, command } structural refs (see docs/design/multi-repo-components.md §3.3).`);
+				continue;
+			}
+
 			if (stepType === "command") {
 				const hasComponent = typeof step.component === "string" && step.component.length > 0;
 				const hasCommand = typeof step.command === "string" && step.command.length > 0;
