@@ -21,7 +21,6 @@ import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purg
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
-import type { PersonalityManager } from "./personality-manager.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
@@ -122,8 +121,6 @@ export interface SessionInfo {
 	nonInteractive?: boolean;
 	/** Which project this session belongs to */
 	projectId?: string;
-	/** Personality names */
-	personalities?: string[];
 	/** Allowed tools for this session */
 	allowedTools?: string[];
 	/** Server-side prompt queue */
@@ -265,9 +262,7 @@ export interface SessionManagerOptions {
 	systemPromptPath?: string;
 	/** Color store for session color cleanup on terminate */
 	colorStore?: ColorStore;
-	/** Personality manager for resolving personality names to prompt fragments */
-	personalityManager?: PersonalityManager;
-	/** Role manager for looking up role definitions (needed by updatePersonalities) */
+	/** Role manager for looking up role definitions */
 	roleManager?: RoleManager;
 	/** Tool manager for generating tool documentation in system prompts */
 	toolManager?: ToolManager;
@@ -296,7 +291,6 @@ export class SessionManager {
 	/** @internal Test-only search index (used when no PCM is available). */
 	private _testSearchIndex: SearchService | null = null;
 	private colorStore?: ColorStore;
-	private personalityManager?: PersonalityManager;
 	private roleManager?: RoleManager;
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
@@ -476,7 +470,6 @@ export class SessionManager {
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
 		this.colorStore = options?.colorStore;
-		this.personalityManager = options?.personalityManager;
 		this.roleManager = options?.roleManager;
 		this.toolManager = options?.toolManager;
 		this.groupPolicyStore = options?.groupPolicyStore;
@@ -677,7 +670,6 @@ export class SessionManager {
 			mcpManager: this.mcpManager,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
-			personalityManager: this.personalityManager ?? null,
 			projectConfigStore: resolvedProjectConfigStore,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
@@ -1087,9 +1079,6 @@ export class SessionManager {
 			};
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
-			const resolvedPersonalities = (session.personalities && session.personalities.length > 0 && this.personalityManager)
-				? this.personalityManager.resolvePersonalities(session.personalities)
-				: undefined;
 
 			let rolePrompt: string | undefined;
 			let roleName: string | undefined;
@@ -1112,7 +1101,6 @@ export class SessionManager {
 				goalSpec: goal?.spec,
 				rolePrompt,
 				roleName,
-				personalities: resolvedPersonalities,
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
 			};
@@ -2344,10 +2332,6 @@ export class SessionManager {
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
-			// Resolve persisted personality names to prompt fragments
-			const resolvedPersonalities = (ps.personalities && ps.personalities.length > 0 && this.personalityManager)
-				? this.personalityManager.resolvePersonalities(ps.personalities)
-				: undefined;
 
 			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
 			const goalSpec = goal?.spec;
@@ -2372,7 +2356,6 @@ export class SessionManager {
 				goalSpec,
 				rolePrompt,
 				roleName,
-				personalities: resolvedPersonalities,
 				allowedTools: restoredAllowedTools,
 				projectConfigStore: this.projectConfigStore,
 			});
@@ -2405,7 +2388,6 @@ export class SessionManager {
 			staffId: ps.staffId,
 			accessory: ps.accessory,
 			preview: ps.preview,
-			personalities: ps.personalities,
 			allowedTools: restoredAllowedTools,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
@@ -2481,7 +2463,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; personalities?: Array<{ label: string; promptFragment: string }>; personalityNames?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -2514,7 +2496,6 @@ export class SessionManager {
 				goalId,
 				assistantType: undefined,
 				taskId: opts?.taskId,
-				personalities: opts?.personalityNames,
 				allowedTools: opts?.allowedTools,
 				role: opts?.role,
 				accessory: opts?.accessory,
@@ -2537,14 +2518,12 @@ export class SessionManager {
 				repoPath,
 				branch,
 				sandboxed: opts?.sandboxed,
-				personalities: opts?.personalityNames,
 				role: opts?.role,
 				accessory: opts?.accessory,
 				agentArgs,
 				env: opts?.env,
 				rolePrompt: opts?.rolePrompt,
 				roleName: opts?.roleName,
-				personalityFragments: opts?.personalities,
 				workflowContext: opts?.workflowContext,
 				effectiveAllowedTools: opts?.allowedTools,
 				projectId,
@@ -2595,14 +2574,12 @@ export class SessionManager {
 			assistantType,
 			taskId: opts?.taskId,
 			sandboxed: opts?.sandboxed,
-			personalities: opts?.personalityNames,
 			role: opts?.role,
 			accessory: opts?.accessory,
 			agentArgs,
 			env: opts?.env,
 			rolePrompt: opts?.rolePrompt,
 			roleName: opts?.roleName,
-			personalityFragments: opts?.personalities,
 			workflowContext: opts?.workflowContext,
 			reattemptGoalId: opts?.reattemptGoalId,
 			effectiveAllowedTools: opts?.allowedTools,
@@ -3097,7 +3074,6 @@ export class SessionManager {
 		accessory?: string;
 		nonInteractive?: boolean;
 		preview?: boolean;
-		personalities?: string[];
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		projectId?: string;
@@ -3134,7 +3110,6 @@ export class SessionManager {
 				accessory: s.accessory,
 				nonInteractive: s.nonInteractive,
 				preview: s.preview,
-				personalities: s.personalities,
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
@@ -3264,7 +3239,7 @@ export class SessionManager {
 	 * the system prompt with the role instructions, and respawning with
 	 * `switch_session` to preserve conversation history.
 	 */
-	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }, opts?: { personalities?: string[] }): Promise<boolean> {
+	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (session.status === "streaming") throw new Error("Cannot assign role while agent is streaming");
@@ -3290,12 +3265,6 @@ export class SessionManager {
 		const fullRole = this.roleManager?.getRole(role.name);
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
 
-		// Resolve personalities for system prompt
-		const personalityNames = opts?.personalities ?? session.personalities;
-		const resolvedPersonalities = (personalityNames && personalityNames.length > 0 && this.personalityManager)
-			? this.personalityManager.resolvePersonalities(personalityNames)
-			: undefined;
-
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
 			cwd: session.cwd,
@@ -3304,7 +3273,6 @@ export class SessionManager {
 			goalSpec,
 			rolePrompt: role.promptTemplate,
 			roleName: role.name,
-			personalities: resolvedPersonalities,
 			allowedTools: effectiveAllowed.length > 0 ? effectiveAllowed : undefined,
 			projectConfigStore: this.projectConfigStore,
 		});
@@ -3381,9 +3349,8 @@ export class SessionManager {
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowed;
-		if (opts?.personalities) session.personalities = opts.personalities;
 
-		roleStore.update(id, { role: role.name, accessory: role.accessory, personalities: opts?.personalities });
+		roleStore.update(id, { role: role.name, accessory: role.accessory });
 
 		broadcast(session.clients, { type: "session_status", status: "idle" } as any);
 
@@ -3396,156 +3363,6 @@ export class SessionManager {
 		} catch { /* best-effort */ }
 
 		console.log(`[session-manager] Assigned role "${role.name}" to session ${id}`);
-		return true;
-	}
-
-	/**
-	 * Update personalities for an existing session by killing the agent,
-	 * reassembling the system prompt with the new personalities, and respawning
-	 * with `switch_session` to preserve conversation history.
-	 */
-	async updatePersonalities(id: string, personalityNames: string[]): Promise<boolean> {
-		const session = this.sessions.get(id);
-		if (!session) return false;
-		if (session.status === "streaming") throw new Error("Cannot update personalities while agent is streaming");
-
-		// Get the agent session file so we can restore conversation
-		let agentSessionFile: string | undefined;
-		try {
-			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success) agentSessionFile = stateResp.data?.sessionFile;
-		} catch {
-			const persisted = this.resolveStoreForSession(id).get(id);
-			agentSessionFile = persisted?.agentSessionFile;
-		}
-
-		// Kill the current process
-		session.unsubscribe();
-		await session.rpcClient.stop();
-
-		// Reassemble system prompt with new personalities (preserving role prompt if assigned)
-		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
-		const goalSpec = goal?.spec;
-
-		// If the session has a role, include its prompt template as separate fields
-		let rolePrompt: string | undefined;
-		let roleName: string | undefined;
-		let roleAllowedTools: string[] | undefined;
-		if (session.role && this.roleManager) {
-			const role = this.roleManager.getRole(session.role);
-			if (role) {
-				rolePrompt = role.promptTemplate;
-				roleName = role.name;
-				const effective = this.resolveEffectiveAllowedTools(role);
-				if (effective.length > 0) {
-					roleAllowedTools = effective;
-				}
-			}
-		}
-
-		const resolvedPersonalities = (personalityNames.length > 0 && this.personalityManager)
-			? this.personalityManager.resolvePersonalities(personalityNames)
-			: undefined;
-
-		const promptPath = this.assemblePrompt(id, {
-			baseSystemPromptPath: this.systemPromptPath,
-			cwd: session.cwd,
-			goalTitle: goal?.title,
-			goalState: goal?.state,
-			goalSpec,
-			rolePrompt,
-			roleName,
-			personalities: resolvedPersonalities,
-			allowedTools: roleAllowedTools,
-			projectConfigStore: this.projectConfigStore,
-		});
-
-		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
-		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
-		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
-		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
-		if (session.goalId) {
-			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-			const isTeamLead2 = session.role === "team-lead";
-			if (isTeamLead2) {
-				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
-			} else if (!bridgeOptions.args?.includes("--extension")) {
-				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
-			}
-		}
-
-		// Re-attach proposal tools extension for assistant sessions
-		if (session.assistantType) {
-			bridgeOptions.args = bridgeOptions.args || [];
-			const proposalExtPath = this.getProposalToolsExtensionPath();
-			if (!bridgeOptions.args.includes(proposalExtPath)) {
-				bridgeOptions.args.push("--extension", proposalExtPath);
-			}
-		}
-
-		// Restore tool activation from role's allowedTools
-		if (session.role && this.roleManager) {
-			const role = this.roleManager.getRole(session.role);
-			const effective = this.resolveEffectiveAllowedTools(role);
-			if (effective.length > 0) {
-				const toolArgs = this.buildToolActivationArgs(id, effective, role, session.cwd);
-				bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
-			} else if (this.mcpManager) {
-				const mcpExtPaths = writeMcpProxyExtensions(this.mcpManager);
-				bridgeOptions.args = [...(bridgeOptions.args || []), "--no-extensions"];
-				for (const extPath of mcpExtPaths) {
-					bridgeOptions.args.push("--extension", extPath);
-				}
-			}
-		}
-
-		const rpcClient = new RpcBridge(bridgeOptions);
-		let switchingSession = true;
-		const persoStore = this.resolveStoreForSession(id);
-		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			persoStore.update(id, { lastActivity: session.lastActivity });
-			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
-			if (!switchingSession) this.trackCostFromEvent(session, event);
-		});
-
-		await rpcClient.start();
-
-		const persoFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
-		if (agentSessionFile && await sessionFileExists(persoFileCtx, agentSessionFile, this.sandboxManager)) {
-			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: agentSessionFile },
-				15_000,
-			);
-			if (!switchResp.success) {
-				console.error(`[session-manager] switch_session failed after personality update: ${switchResp.error}`);
-			}
-		}
-		switchingSession = false;
-
-		// Swap in the new bridge and update metadata
-		session.rpcClient = rpcClient;
-		session.unsubscribe = unsub;
-		session.status = "idle";
-		session.personalities = personalityNames;
-
-		persoStore.update(id, { personalities: personalityNames });
-
-		broadcast(session.clients, { type: "session_status", status: "idle" } as any);
-
-		// Refresh messages and state for connected clients
-		try {
-			const msgs = await rpcClient.getMessages();
-			if (msgs.success) broadcast(session.clients, { type: "messages", data: msgs.data });
-			const st = await rpcClient.getState();
-			if (st.success) broadcast(session.clients, { type: "state", data: st.data });
-		} catch { /* best-effort */ }
-
-		console.log(`[session-manager] Updated personalities for session ${id}: [${personalityNames.join(", ")}]`);
 		return true;
 	}
 
@@ -3838,7 +3655,6 @@ export class SessionManager {
 		staffId?: string;
 		accessory?: string;
 		preview?: boolean;
-		personalities?: string[];
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		archived: boolean;
@@ -3867,7 +3683,6 @@ export class SessionManager {
 			staffId: ps.staffId,
 			accessory: ps.accessory,
 			preview: ps.preview,
-			personalities: ps.personalities,
 			reattemptGoalId: ps.reattemptGoalId,
 			sandboxed: ps.sandboxed,
 			archived: true,

@@ -75,19 +75,17 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_spawn",
 		label: "Spawn Team Agent",
-		description: "Spawn a new role agent with its own git worktree. Returns the new session ID and worktree path. Optionally specify personalities to shape how the agent works. Returns 409 if workflowGateId is provided and its upstream dependency gates have not all passed.",
-		promptSnippet: "Spawn a coder, reviewer, or tester agent with a task description and optional personalities.",
+		description: "Spawn a new role agent with its own git worktree. Returns the new session ID and worktree path. Returns 409 if workflowGateId is provided and its upstream dependency gates have not all passed.",
+		promptSnippet: "Spawn a coder, reviewer, or tester agent with a task description.",
 		parameters: Type.Object({
 			role: Type.String({ description: "Agent role: 'coder', 'reviewer', or 'tester'" }),
 			task: Type.String({ description: "Task description sent as the agent's first prompt" }),
-			personalities: Type.Optional(Type.Array(Type.String(), { description: "Personality names (e.g. 'thorough', 'creative'). If omitted, uses the role's default personalities." })),
 			workflowGateId: Type.Optional(Type.String({ description: "Gate ID this agent is working toward. If inputGateIds is not set, content from upstream passed gates is auto-injected as context." })),
 			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Gate IDs whose passed content should be injected into the agent's context. Overrides automatic DAG resolution." })),
 		}),
 		async execute(_id, params) {
 			try {
 				const body: Record<string, unknown> = { role: params.role, task: params.task };
-				if (params.personalities && params.personalities.length > 0) body.personalities = params.personalities;
 				if (params.workflowGateId) body.workflowGateId = params.workflowGateId;
 				if (params.inputGateIds && params.inputGateIds.length > 0) body.inputGateIds = params.inputGateIds;
 				return ok(await api("POST", `/api/goals/${goalId}/team/spawn`, body));
@@ -188,41 +186,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
-		name: "personalities_list",
-		label: "List Personalities",
-		description: "List all available personalities that can be applied to spawned agents. Each personality modifies how the agent approaches its work.",
-		promptSnippet: "List all available personalities with descriptions.",
-		parameters: Type.Object({}),
-		async execute() {
-			try {
-				return ok(await api("GET", "/api/personalities"));
-			} catch (e: any) { return err(e.message); }
-		},
-	});
-
-	pi.registerTool({
-		name: "personalities_create",
-		label: "Create Personality",
-		description: "Define a new personality that can be applied to agents via team_spawn.",
-		promptSnippet: "Define a new personality for team agents.",
-		parameters: Type.Object({
-			name: Type.String({ description: "Lowercase alphanumeric + hyphens identifier" }),
-			label: Type.String({ description: "Human-readable display name" }),
-			description: Type.String({ description: "Short tooltip description" }),
-			prompt_fragment: Type.String({ description: "1-2 sentences injected into the agent's system prompt" }),
-		}),
-		async execute(_id, params) {
-			try {
-				return ok(await api("POST", "/api/personalities", {
-					name: params.name,
-					label: params.label,
-					description: params.description,
-					promptFragment: params.prompt_fragment,
-				}));
-			} catch (e: any) { return err(e.message); }
-		},
-	});
-
-	console.log(`[team-lead-tools] Registered 9 team tools for session ${sessionId}, goal ${goalId}`);
+	console.log(`[team-lead-tools] Registered 7 team tools for session ${sessionId}, goal ${goalId}`);
 }

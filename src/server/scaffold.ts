@@ -81,9 +81,6 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   fs.mkdirSync(path.join(dotBobbit, "config", "workflows"), {
     recursive: true,
   });
-  fs.mkdirSync(path.join(dotBobbit, "config", "personalities"), {
-    recursive: true,
-  });
   // Create empty tools directory — tool groups resolve via cascade from builtins
   fs.mkdirSync(path.join(dotBobbit, "config", "tools"), { recursive: true });
   fs.mkdirSync(path.join(dotBobbit, "extensions"), { recursive: true });
@@ -92,7 +89,7 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   });
   fs.mkdirSync(path.join(dotBobbit, "state", "tls"), { recursive: true });
 
-  // Roles, workflows, personalities, and tools are resolved at runtime via ConfigCascade
+  // Roles, workflows, and tools are resolved at runtime via ConfigCascade
   // (seeded from builtins on startup). Only create empty directories for them.
   const defaultsDir = path.join(__dirname, "defaults");
   if (fs.existsSync(defaultsDir)) {

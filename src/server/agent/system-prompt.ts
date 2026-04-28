@@ -185,8 +185,6 @@ export interface PromptParts {
 	taskSpec?: string;
 	/** Human-readable descriptions of dependency tasks */
 	taskDependsOn?: string[];
-	/** Personalities to inject into the system prompt */
-	personalities?: Array<{ label: string; promptFragment: string }>;
 	/** Pre-formatted tool documentation section to append */
 	toolDocs?: string;
 	/** Allowed tool names for this session — used to filter tool docs */
@@ -310,15 +308,6 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 				: "# Goal";
 			sections.push(header + "\n\n" + effectiveGoalSpec.trim());
 		}
-	}
-
-	// 3.5. Personalities
-	if (parts.personalities && parts.personalities.length > 0) {
-		const lines = ["## Personality\n", "You should embody these personalities in how you work:"];
-		for (const personality of parts.personalities) {
-			lines.push(`- **${personality.label}**: ${personality.promptFragment}`);
-		}
-		sections.push(lines.join("\n"));
 	}
 
 	// 4. Tool documentation
@@ -448,13 +437,6 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 4. Role prompt
 	if (parts.rolePrompt?.trim()) {
 		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
-	}
-
-	// 5. Personalities
-	if (parts.personalities && parts.personalities.length > 0) {
-		const lines = parts.personalities.map(p => `- **${p.label}**: ${p.promptFragment}`);
-		const personalityContent = lines.join("\n");
-		sections.push({ label: "Personality", source: "Personalities", content: personalityContent, tokens: estimateTokens(personalityContent) });
 	}
 
 	// 7. Tool docs
