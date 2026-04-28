@@ -9,6 +9,10 @@
  *   - Throw on malformed pref, setModel failure, or read-back mismatch.
  *   - Resolve silently when the pref is unset.
  *   - Persist via sessionManager when both sessionManager and sessionId are provided.
+ *
+ * applyModelString — sibling helper for binding a session to a literal
+ * "<provider>/<modelId>" string (e.g. sourced from a role override). Same
+ * hard-fail-on-mismatch contract as applyReviewModelOverrides.
  */
 
 interface ModelShape { id?: string; provider?: string }
@@ -47,26 +51,44 @@ export interface ApplyReviewModelOptions {
 	retryDelayMs?: number;
 }
 
+export interface ApplyModelStringOptions {
+	sessionManager?: ReviewModelPersister | null;
+	sessionId?: string | null;
+	/** Label used in error messages, e.g. "role.coder.model". */
+	contextLabel?: string;
+	/** Retry attempts for setModel. Defaults to 2. */
+	maxAttempts?: number;
+	/** Delay between retries in ms. Defaults to 250. */
+	retryDelayMs?: number;
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function applyReviewModelOverrides(
+/**
+ * Bind an RPC client to a literal `<provider>/<modelId>` model string.
+ *
+ * Hard-fail contract: throws on malformed input, setModel failure (after
+ * retries), or read-back mismatch. Caller is responsible for converting the
+ * thrown error into the appropriate user-visible failure (e.g. failed gate,
+ * red Unavailable badge).
+ */
+export async function applyModelString(
 	rpc: ReviewModelRpc,
-	opts: ApplyReviewModelOptions,
+	modelString: string,
+	opts: ApplyModelStringOptions = {},
 ): Promise<void> {
-	const prefKey = opts.prefKey ?? "default.reviewModel";
-	const pref = opts.prefs.get(prefKey);
-	if (!pref) return;
+	const label = opts.contextLabel ?? "model";
 
-	const slash = pref.indexOf("/");
-	if (slash <= 0 || slash >= pref.length - 1) {
+	const slash = modelString.indexOf("/");
+	if (slash <= 0 || slash >= modelString.length - 1) {
 		throw new Error(
-			`malformed ${prefKey} preference: "${pref}" (expected "<provider>/<modelId>")`,
+			`malformed ${label}: "${modelString}" (expected "<provider>/<modelId>")`,
 		);
 	}
-	const provider = pref.slice(0, slash);
-	const modelId = pref.slice(slash + 1);
+	const provider = modelString.slice(0, slash);
+	const modelId = modelString.slice(slash + 1);
 
 	const maxAttempts = Math.max(1, opts.maxAttempts ?? 2);
 	const retryDelayMs = Math.max(0, opts.retryDelayMs ?? 250);
@@ -88,7 +110,7 @@ export async function applyReviewModelOverrides(
 	if (!succeeded) {
 		const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
 		throw new Error(
-			`setModel failed for ${prefKey}="${pref}" after ${maxAttempts} attempt(s): ${msg}`,
+			`setModel failed for ${label}="${modelString}" after ${maxAttempts} attempt(s): ${msg}`,
 		);
 	}
 
@@ -98,7 +120,7 @@ export async function applyReviewModelOverrides(
 		stateRaw = await rpc.getState();
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		throw new Error(`setModel read-back failed (getState threw) for "${pref}": ${msg}`);
+		throw new Error(`setModel read-back failed (getState threw) for "${modelString}": ${msg}`);
 	}
 	// Accept both the real RpcBridge shape `{ success, data: { model } }` and
 	// the simpler `{ model }` shape used by unit-test mocks.
@@ -108,7 +130,7 @@ export async function applyReviewModelOverrides(
 	const boundProvider = boundModel?.provider;
 	if (boundId !== modelId || boundProvider !== provider) {
 		throw new Error(
-			`setModel read-back mismatch for "${pref}": expected ${provider}/${modelId}, ` +
+			`setModel read-back mismatch for "${modelString}": expected ${provider}/${modelId}, ` +
 				`agent reports ${boundProvider ?? "?"}/${boundId ?? "?"}`,
 		);
 	}
@@ -116,4 +138,21 @@ export async function applyReviewModelOverrides(
 	if (opts.sessionManager && opts.sessionId) {
 		opts.sessionManager.persistSessionModel(opts.sessionId, provider, modelId);
 	}
+}
+
+export async function applyReviewModelOverrides(
+	rpc: ReviewModelRpc,
+	opts: ApplyReviewModelOptions,
+): Promise<void> {
+	const prefKey = opts.prefKey ?? "default.reviewModel";
+	const pref = opts.prefs.get(prefKey);
+	if (!pref) return;
+
+	return applyModelString(rpc, pref, {
+		sessionManager: opts.sessionManager,
+		sessionId: opts.sessionId,
+		contextLabel: prefKey,
+		maxAttempts: opts.maxAttempts,
+		retryDelayMs: opts.retryDelayMs,
+	});
 }
