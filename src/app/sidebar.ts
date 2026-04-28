@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, Drama, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
@@ -28,7 +28,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchPersonalities, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, type PersonalityData } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -57,16 +57,11 @@ export function toggleProjectExpanded(projectId: string): void {
 }
 
 // ============================================================================
-// ROLE + PERSONALITY PICKER
+// ROLE PICKER
 // ============================================================================
 
-/** Cached personality definitions. */
-let _cachedPersonalities: PersonalityData[] = [];
-let _personalitiesLoaded = false;
 /** Currently selected role in the picker. */
 let _pickerRole = "";
-/** Currently selected personalities in the picker. */
-let _pickerPersonalities = new Set<string>();
 let _pickerCwd = "";
 let _pickerCwdDropdownOpen = false;
 let _pickerCwdHighlightIndex = -1;
@@ -83,13 +78,12 @@ let _pickerAnchorRect: { top: number; right: number; bottom: number } | null = n
 let _pickerFocusIndex = -1;
 
 /** Item types in the flat focus list. */
-type PickerItemType = "personality" | "role" | "cwd" | "worktree" | "create";
+type PickerItemType = "role" | "cwd" | "worktree" | "create";
 interface PickerItem { type: PickerItemType; id: string; }
 
 /** Build the flat ordered list of focusable items. */
 function _buildPickerItems(): PickerItem[] {
 	const items: PickerItem[] = [];
-	for (const p of _cachedPersonalities) items.push({ type: "personality", id: p.name });
 	for (const r of state.roles) items.push({ type: "role", id: r.name });
 	if (!_pickerProjectId) items.push({ type: "cwd", id: "cwd" });
 	items.push({ type: "worktree", id: "worktree" });
@@ -97,13 +91,7 @@ function _buildPickerItems(): PickerItem[] {
 	return items;
 }
 
-async function ensurePersonalitiesLoaded(): Promise<void> {
-	if (_personalitiesLoaded) return;
-	_personalitiesLoaded = true;
-	_cachedPersonalities = await fetchPersonalities();
-}
-
-/** Toggle role picker dropdown, fetching roles and personalities if needed. */
+/** Toggle role picker dropdown, fetching roles if needed. */
 export async function toggleRolePicker(e: Event, goalId?: string, opts?: { projectId?: string; projectName?: string; projectCwd?: string }): Promise<void> {
 	e.stopPropagation();
 	if (state.rolePickerOpen) {
@@ -111,7 +99,6 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 		renderApp();
 		return;
 	}
-	_pickerPersonalities = new Set();
 	_pickerCwd = opts?.projectCwd || "";
 	_pickerCwdDropdownOpen = false;
 	_pickerCwdHighlightIndex = -1;
@@ -126,7 +113,6 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 		_pickerAnchorRect = { top: r.top, right: r.right, bottom: r.bottom };
 	}
 	if (state.roles.length === 0) await fetchRoles();
-	await ensurePersonalitiesLoaded();
 	// Pre-select the "general" role (server default) if it exists
 	const generalRole = state.roles.find(r => r.name === "general");
 	_pickerRole = generalRole ? "general" : "";
@@ -138,9 +124,6 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 	renderApp();
 }
 
-/** Exported for use in edit-session dialog and other places. */
-export { _cachedPersonalities as cachedPersonalities, ensurePersonalitiesLoaded };
-
 export function renderRolePickerDropdown() {
 	if (!state.rolePickerOpen) return "";
 
@@ -148,14 +131,8 @@ export function renderRolePickerDropdown() {
 		_pickerRole = _pickerRole === roleName ? "" : roleName;
 		renderApp();
 	};
-	const togglePersonality = (personalityName: string) => {
-		if (_pickerPersonalities.has(personalityName)) _pickerPersonalities.delete(personalityName);
-		else _pickerPersonalities.add(personalityName);
-		renderApp();
-	};
 	const doCreate = () => {
 		state.rolePickerOpen = false;
-		const personalities = [..._pickerPersonalities];
 		const cwd = _pickerCwd || undefined;
 		const worktree = _pickerWorktree;
 		const sandboxed = _pickerSandbox || undefined;
@@ -165,7 +142,7 @@ export function renderRolePickerDropdown() {
 		_pickerSandbox = false;
 		_pickerProjectId = undefined;
 		_pickerProjectName = undefined;
-		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree, sandboxed, projectId);
+		createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree, sandboxed, projectId);
 	};
 
 	// All roles including general (the server default)
@@ -200,25 +177,8 @@ export function renderRolePickerDropdown() {
 				</button>
 			</div>
 			<div class="overflow-y-auto flex-1" style="min-height: 0;">
-			<!-- Personalities -->
-			${_cachedPersonalities.length > 0 ? html`
-				<div class="px-3 pt-1 pb-1.5 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Personalities</div>
-				<div class="px-3 pb-2 flex flex-wrap gap-1">
-					${_cachedPersonalities.map(personality => {
-						const selected = _pickerPersonalities.has(personality.name);
-						const focused = isFocused("personality", personality.name);
-						return html`<button
-							class="px-2 py-0.5 text-[11px] rounded-xl border transition-colors cursor-pointer ${selected
-								? "bg-primary/15 text-primary border-primary/30"
-								: "bg-muted/60 text-foreground/70 border-border"} ${focused ? "ring-2 ring-ring" : ""}"
-							title=${personality.description}
-							@click=${() => togglePersonality(personality.name)}
-						>${personality.label}</button>`;
-					})}
-				</div>
-			` : ""}
 			<!-- Roles (2-column grid) -->
-			<div class="${_cachedPersonalities.length > 0 ? "border-t border-border/50 mt-1 pt-1" : ""}">
+			<div>
 				<div class="px-3 pt-1 pb-1.5 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Role</div>
 				${allRoles.length === 0
 					? html`<div class="px-3 py-1 text-xs text-muted-foreground">No roles defined</div>`
@@ -369,11 +329,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
 		// If focused on a specific item, activate it; otherwise create session
-		if (focusedItem?.type === "personality") {
-			if (_pickerPersonalities.has(focusedItem.id)) _pickerPersonalities.delete(focusedItem.id);
-			else _pickerPersonalities.add(focusedItem.id);
-			renderApp();
-		} else if (focusedItem?.type === "role") {
+		if (focusedItem?.type === "role") {
 			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
 			renderApp();
 		} else if (focusedItem?.type === "worktree") {
@@ -382,12 +338,11 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		} else {
 			// create button or no focus — create session
 			state.rolePickerOpen = false;
-			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
 			const worktree = _pickerWorktree;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
-			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
+			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree);
 		}
 		return;
 	}
@@ -395,11 +350,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 	if (e.key === " " && focusedItem) {
 		e.preventDefault();
 		e.stopPropagation();
-		if (focusedItem.type === "personality") {
-			if (_pickerPersonalities.has(focusedItem.id)) _pickerPersonalities.delete(focusedItem.id);
-			else _pickerPersonalities.add(focusedItem.id);
-			renderApp();
-		} else if (focusedItem.type === "role") {
+		if (focusedItem.type === "role") {
 			_pickerRole = _pickerRole === focusedItem.id ? "" : focusedItem.id;
 			renderApp();
 		} else if (focusedItem.type === "worktree") {
@@ -407,12 +358,11 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 			renderApp();
 		} else if (focusedItem.type === "create") {
 			state.rolePickerOpen = false;
-			const personalities = [..._pickerPersonalities];
 			const cwd = _pickerCwd || undefined;
 			const worktree = _pickerWorktree;
 			_pickerCwd = "";
 			_pickerCwdDropdownOpen = false;
-			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, personalities.length > 0 ? personalities : undefined, cwd, worktree);
+			createAndConnectSession(_pickerGoalId, _pickerRole || undefined, cwd, worktree);
 		}
 		return;
 	}
@@ -858,7 +808,7 @@ function renderProjectContent(
 				<div class="flex items-center relative">
 					<button
 						class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${state.creatingSession ? "opacity-50 pointer-events-none" : ""}"
-						@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
+						@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 						title="New session in ${project.name}"
 						?disabled=${state.creatingSession}
 					>${icon(Plus, "xs")}</button>
@@ -890,7 +840,6 @@ export function renderSidebar() {
 	}
 
 	const isRolesActive = isRouteActive("roles", "role-edit");
-	const isPersonalitiesActive = isRouteActive("personalities", "personality-edit");
 	const isToolsActive = isRouteActive("tools", "tool-edit");
 	const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
 	const isSkillsActive = isRouteActive("skills");
@@ -907,14 +856,6 @@ export function renderSidebar() {
 					>
 						${icon(Users, "xs", "!w-3.5 !h-3.5")}
 						<span>Roles</span>
-					</button>
-					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isPersonalitiesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["personalities", "personality-edit"], () => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); import("./routing.js").then((m) => m.setHashRoute("personalities")); })}
-						title="Manage personalities"
-					>
-						${icon(Drama, "xs", "!w-3.5 !h-3.5")}
-						<span>Personalities</span>
 					</button>
 					<button
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"

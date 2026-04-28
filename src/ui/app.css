@@ -2211,7 +2211,7 @@ html {
 	18% {
 		transform: scale(4) translateY(-3px) scaleX(0.88) scaleY(1.18) rotate(-2deg);
 	}
-	/* Airborne peak — slow hang, slight tilt for personality */
+	/* Airborne peak — slow hang, slight tilt for character */
 	30% {
 		transform: scale(4) translateY(-5px) scaleX(0.95) scaleY(1.06) rotate(2deg);
 	}

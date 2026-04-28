@@ -152,7 +152,7 @@ interface DraftManager {
 
 /**
  * Generic draft persistence helper. Provides debounced save, restore, and delete
- * for any assistant draft type. Eliminates duplication across goal/role/personality.
+ * for any assistant draft type. Eliminates duplication across goal/role.
  */
 function createDraftManager<T>(config: {
 	type: string;
@@ -281,45 +281,6 @@ export function saveRoleDraft(sessionId: string): void { roleDraft.save(sessionI
 async function restoreRoleDraft(sessionId: string): Promise<boolean> { return roleDraft.restore(sessionId); }
 /** Delete role draft from the server. */
 export function deleteRoleDraft(sessionId: string): void { roleDraft.delete(sessionId); }
-
-// ============================================================================
-// PERSONALITY DRAFT
-// ============================================================================
-
-const personalityDraft = createDraftManager({
-	type: 'personality',
-	serialize: (sessionId) => ({
-		sessionId,
-		activePersonalityProposal: state.activePersonalityProposal ?? undefined,
-		previewName: state.personalityPreviewName,
-		previewLabel: state.personalityPreviewLabel,
-		previewDescription: state.personalityPreviewDescription,
-		previewPromptFragment: state.personalityPreviewPromptFragment,
-		previewNameEdited: state.personalityPreviewNameEdited,
-		previewLabelEdited: state.personalityPreviewLabelEdited,
-		previewDescriptionEdited: state.personalityPreviewDescriptionEdited,
-		previewPromptFragmentEdited: state.personalityPreviewPromptFragmentEdited,
-		hasReceivedPersonalityProposal: state.assistantHasProposal,
-		personalityAssistantTab: state.assistantTab,
-	}),
-	restore: (_sessionId, draft: any) => {
-		state.activePersonalityProposal = draft.activePersonalityProposal ?? null;
-		state.personalityPreviewName = draft.previewName ?? "";
-		state.personalityPreviewLabel = draft.previewLabel ?? "";
-		state.personalityPreviewDescription = draft.previewDescription ?? "";
-		state.personalityPreviewPromptFragment = draft.previewPromptFragment ?? "";
-		state.personalityPreviewNameEdited = draft.previewNameEdited ?? false;
-		state.personalityPreviewLabelEdited = draft.previewLabelEdited ?? false;
-		state.personalityPreviewDescriptionEdited = draft.previewDescriptionEdited ?? false;
-		state.personalityPreviewPromptFragmentEdited = draft.previewPromptFragmentEdited ?? false;
-		state.assistantHasProposal = draft.hasReceivedPersonalityProposal ?? false;
-		state.assistantTab = draft.personalityAssistantTab ?? "chat";
-	},
-});
-
-export function savePersonalityDraft(sessionId: string): void { personalityDraft.save(sessionId); }
-async function restorePersonalityDraft(sessionId: string): Promise<boolean> { return personalityDraft.restore(sessionId); }
-export function deletePersonalityDraft(sessionId: string): void { personalityDraft.delete(sessionId); }
 
 // ============================================================================
 // PROJECT DRAFT
@@ -838,7 +799,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			goal: "Start the goal creation session.",
 			role: "Start the role creation session.",
 			tool: "Start the tool assistant session. Help me document, improve, or create tools.",
-			personality: "Start the personality creation session.",
 			staff: "Start the staff agent creation session.",
 			setup: "Start the project setup session.",
 			workflow: "Start the workflow creation session. Help me design a new workflow with gates and verification.",
@@ -1090,21 +1050,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onPersonalityProposal = (proposal: { name: string; label: string; description: string; prompt_fragment: string }) => {
-			if (activeSessionId() !== sessionId) return;
-			state.activePersonalityProposal = proposal;
-			if (!state.personalityPreviewNameEdited) state.personalityPreviewName = proposal.name;
-			if (!state.personalityPreviewLabelEdited) state.personalityPreviewLabel = proposal.label;
-			if (!state.personalityPreviewDescriptionEdited) state.personalityPreviewDescription = proposal.description;
-			if (!state.personalityPreviewPromptFragmentEdited) state.personalityPreviewPromptFragment = proposal.prompt_fragment;
-			state.assistantHasProposal = true;
-			if (state.assistantTab === "chat" && !isDesktop()) {
-				state.assistantTab = "preview";
-			}
-			savePersonalityDraft(sessionId);
-			renderApp();
-		};
-
 		remote.onSetupProposal = (proposal) => {
 			if (activeSessionId() !== sessionId) return;
 			state.setupPreviewAction = proposal.action;
@@ -1224,7 +1169,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
 				tool: remote.onToolProposal,
-				personality: remote.onPersonalityProposal,
 				staff: remote.onStaffProposal,
 				setup: remote.onSetupProposal,
 				workflow: remote.onWorkflowProposal,
@@ -1488,7 +1432,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Clear stale proposals for non-matching assistant types
 			if (state.assistantType !== "goal") state.activeGoalProposal = null;
 			if (state.assistantType !== "role") state.activeRoleProposal = null;
-			if (state.assistantType !== "personality") state.activePersonalityProposal = null;
 			if (state.assistantType !== "staff") state.activeStaffProposal = null;
 			// Project proposals are valid for ANY session — leave state.activeProjectProposal alone.
 			// Draft restore below handles rehydration for project-assistant sessions.
@@ -1537,21 +1480,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.toolPreviewChecklist = { docs: "pending", renderer: "pending", tests: "pending", config: "pending" };
 				state.toolPreviewDocs = "";
 				state.toolPreviewRendererHtml = "";
-			} else if (state.assistantType === "personality") {
-				const restored = await restorePersonalityDraft(sessionId);
-				if (isStale()) return;
-				if (!restored) {
-					state.assistantTab = "chat";
-					state.personalityPreviewName = "";
-					state.personalityPreviewLabel = "";
-					state.personalityPreviewDescription = "";
-					state.personalityPreviewPromptFragment = "";
-					state.personalityPreviewNameEdited = false;
-					state.personalityPreviewLabelEdited = false;
-					state.personalityPreviewDescriptionEdited = false;
-					state.personalityPreviewPromptFragmentEdited = false;
-					state.assistantHasProposal = false;
-				}
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
 				state.staffPreviewName = "";
@@ -1671,7 +1599,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 // CREATE & CONNECT
 // ============================================================================
 
-export async function createAndConnectSession(goalId?: string, roleId?: string, personalities?: string[], cwd?: string, worktree?: boolean, sandboxed?: boolean, projectId?: string): Promise<void> {
+export async function createAndConnectSession(goalId?: string, roleId?: string, cwd?: string, worktree?: boolean, sandboxed?: boolean, projectId?: string): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
@@ -1680,7 +1608,6 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		const body: any = {};
 		if (goalId) body.goalId = goalId;
 		if (roleId) body.roleId = roleId;
-		if (personalities && personalities.length > 0) body.personalities = personalities;
 		if (cwd) body.cwd = cwd;
 		if (worktree !== undefined) body.worktree = worktree;
 		if (sandboxed) body.sandboxed = true;
@@ -1751,7 +1678,6 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	clearSessionModel(sessionId);
 	deleteGoalDraft(sessionId);
 	deleteRoleDraft(sessionId);
-	deletePersonalityDraft(sessionId);
 	deleteProjectDraft(sessionId);
 	clearDismissedProposal(sessionId);
 
@@ -1872,7 +1798,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 		// Clean up drafts and navigate away
 		deleteGoalDraft(propSessionId);
 		deleteRoleDraft(propSessionId);
-		deletePersonalityDraft(propSessionId);
 		deleteProjectDraft(propSessionId);
 		await refreshSessions();
 		setHashRoute("landing");

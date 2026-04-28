@@ -140,15 +140,6 @@ const TOOL_MOCK_DATA: Record<string, { params: any; result: any }> = {
 		params: { task_id: "task-002abcd", state: "complete", result_summary: "No issues found" },
 		result: mockResult('{"id":"task-002abcd","title":"Review auth module","type":"code-review","state":"complete"}'),
 	},
-	// Personalities
-	personalities_list: {
-		params: {},
-		result: mockResult('[{"name":"thorough","description":"Extremely careful and detailed"},{"name":"fast","description":"Prioritizes speed over perfection"}]'),
-	},
-	personalities_create: {
-		params: { name: "cautious", description: "Risk-averse, prefers safe approaches", prompt: "Always consider edge cases..." },
-		result: mockResult('{"name":"cautious","description":"Risk-averse, prefers safe approaches"}'),
-	},
 };
 
 function getMockData(toolName: string): { params: any; result: any } {
