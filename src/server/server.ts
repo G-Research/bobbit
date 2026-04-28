@@ -71,7 +71,6 @@ import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
-import type { PersistedTeamEntry } from "./agent/team-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
@@ -90,17 +89,16 @@ const execFileAsync = promisify(execFileCb);
  */
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
-	teamEntry: PersistedTeamEntry | undefined,
+	extraBranches: readonly string[],
 	repoPath: string,
 ): Promise<void> {
 	const branches = new Set<string>();
 	if (goal.branch) branches.add(goal.branch);
-	if (teamEntry?.agents) {
-		for (const agent of teamEntry.agents) {
-			if (agent.branch) branches.add(agent.branch);
-		}
+	for (const b of extraBranches) {
+		if (b) branches.add(b);
 	}
 	if (branches.size === 0) return;
+	if (shouldSkipRemotePush()) return;
 	for (const branch of branches) {
 		try {
 			await execFileAsync("git", ["push", "origin", "--delete", branch], {
@@ -2756,9 +2754,24 @@ async function handleApiRoute(
 					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
 				}
 			}
-			// Capture agent branches BEFORE teardown erases the team store entry
+			// Capture agent branches BEFORE teardown erases the team store entry.
+			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
+			// mutates teamEntry.agents in place via dismissRole(), so we must
+			// snapshot the branch names into a fresh string[] now — reading
+			// teamEntry.agents after teardown returns an empty array.
 			const goalProjectCtx = projectContextManager.getContextForGoal(id);
 			const teamEntry = goalProjectCtx?.teamStore.get(id);
+			const agentBranches: string[] = [];
+			if (teamEntry?.agents) {
+				for (const a of teamEntry.agents) {
+					if (a.branch) agentBranches.push(a.branch);
+				}
+			}
+			// Include the team-lead's own session branch if it differs from goal.branch.
+			if (teamEntry?.teamLeadSessionId) {
+				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+				if (tl?.branch) agentBranches.push(tl.branch);
+			}
 
 			// Tear down any active team first (dismisses agents, cleans up their worktrees)
 			const teamState = teamManager.getTeamState(id);
@@ -2776,7 +2789,7 @@ async function handleApiRoute(
 			// Fire-and-forget: clean up remote branches for this goal
 			const archivedGoal = deleteGoalMgr.getGoal(id);
 			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, teamEntry, archivedGoal.repoPath).catch(err => {
+				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
 					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
 				});
 			}

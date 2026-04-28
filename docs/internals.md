@@ -336,6 +336,25 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs the project's `worktree_setup_command` (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh — their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
 
+#### Remote branch cleanup
+
+Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.
+
+| Branch pattern | Created by | Deleted by | When |
+|---|---|---|---|
+| `session/*` | Auto worktree on session create | `eagerDeleteRemoteSessionBranch` (fire-and-forget from `session-manager.ts::terminateSession`) | On archive, iff non-delegate AND fully merged into `origin/<primary>`. Unmerged branches fall back to the 7-day `purgeOneSession` cleanup. |
+| `goal/<branch-name>` | Goal creation | `deleteRemoteGoalBranches` in `server.ts` (DELETE `/api/goals/:id` handler) | On goal archive. |
+| `goal-goal-<slug>-<id>-<role>-<short>` | Per-role team agent worktree | Same handler — agent branch names are **snapshotted into a `string[]` before `teamManager.teardownTeam` runs**, because teardown mutates `entry.agents` in place via `dismissRole`'s `splice`. | On goal archive. |
+| `staff-*` | Staff agent creation | `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` | On staff dismiss. |
+
+**Test-mode gate:** every push-delete call — existing (`cleanupWorktree`) and new (`deleteRemoteGoalBranches`, `eagerDeleteRemoteSessionBranch`) — short-circuits when `shouldSkipRemotePush()` returns true (`BOBBIT_TEST_NO_PUSH=1`). The eager session helper checks this flag *before* invoking `git merge-base --is-ancestor`, so test mode never touches git at all.
+
+**Merge check (sessions only):** `eagerDeleteRemoteSessionBranch` runs `git merge-base --is-ancestor <branch> origin/<primary>` and only push-deletes on exit 0. If `origin/<primary>` is stale locally the check is conservative (skip delete) and `purgeExpiredArchives` mops up after 7 days. Local worktree cleanup remains in `purgeOneSession` so the archived-session review experience is preserved.
+
+**Why the goal handler snapshots eagerly:** `teamStore.get(id)` returns the live `PersistedTeamEntry`; `teardownTeam → dismissRole` calls `entry.agents.splice(...)` on that same object. Reading `teamEntry.agents` *after* teardown sees an empty array and only the team-lead branch gets deleted — every per-role branch leaks. The fix copies branch names into a fresh `readonly string[]` before teardown.
+
+Full design + bug archaeology: [docs/design/orphan-remote-branch-cleanup.md](design/orphan-remote-branch-cleanup.md). Diagnosis steps: [docs/debugging.md — Leaked remote branches](debugging.md#leaked-remote-branches).
+
 ### Git status cache & client resilience
 
 The git-status widget (shown on every session with a worktree and on the goal dashboard) exposes branch / ahead / behind / dirty state. It must stay visible through transient server load, network drops, and container recycles — the user loses orientation if it flickers out. The widget only disappears when the server *explicitly* confirms the cwd is not a git repository.

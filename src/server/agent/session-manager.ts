@@ -25,6 +25,8 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
 import { discoverSlashSkills } from "../skills/slash-skills.js";
+import { shouldSkipRemotePush, detectPrimaryBranch } from "../skills/git.js";
+import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
@@ -3639,6 +3641,31 @@ export class SessionManager {
 		// (title, goal association, timestamps) is valuable and the search
 		// index may reference this session.  Purge will clean it up later.
 		terminateStore.archive(id);
+
+		// Bug 2 (docs/design/orphan-remote-branch-cleanup.md): eagerly push-delete
+		// the remote branch for non-delegate `session/*` sessions whose branch is
+		// fully merged into origin/<primary>. Local worktree cleanup stays in
+		// purgeOneSession at the 7-day mark. Fire-and-forget — never blocks.
+		// branch/repoPath live on PersistedSession (not SessionInfo), so we read
+		// the persisted record we just archived.
+		const persistedForBranchDelete = terminateStore.get(id);
+		const sessionBranch = persistedForBranchDelete?.branch;
+		eagerDeleteRemoteSessionBranch({
+			branch: sessionBranch,
+			repoPath: persistedForBranchDelete?.repoPath,
+			delegateOf: session.delegateOf,
+			skipPush: shouldSkipRemotePush(),
+			detectPrimary: detectPrimaryBranch,
+			runGit: async (args, cwd) => {
+				await execFileAsync("git", args, { cwd, timeout: 15_000 });
+			},
+		}).then(result => {
+			if (result.deleted) {
+				console.log(`[session-manager] Deleted merged remote session branch: ${sessionBranch}`);
+			}
+		}).catch(err => {
+			console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
+		});
 
 		// Notify termination listeners (e.g. user-question harness cleanup).
 		for (const listener of this._terminationListeners) {
