@@ -203,7 +203,8 @@ describe("computeToolActivationArgs", () => {
 
 		assert.ok(activation.args.includes("--no-extensions"));
 		const extensionPaths = activation.args.filter((_arg: string, i: number, args: string[]) => i > 0 && args[i - 1] === "--extension");
-		assert.ok(extensionPaths.some((p: string) => p.endsWith("/images/extension.ts")));
+		// Normalise path separators so this test passes on Windows (\) and POSIX (/).
+		assert.ok(extensionPaths.some((p: string) => p.replace(/\\/g, "/").endsWith("/images/extension.ts")));
 	});
 
 	it("restore-style roleless sessions load generate_image and exclude blocked Nano Banana MCP", () => {
@@ -265,8 +266,9 @@ describe("computeToolActivationArgs", () => {
 
 		const activation = computeToolActivationArgs(allowed, toolManager, process.cwd(), mcpExtensions);
 		const extensionPaths = activation.args.filter((_arg: string, i: number, args: string[]) => i > 0 && args[i - 1] === "--extension");
-		assert.ok(extensionPaths.some((p: string) => p.endsWith("/images/extension.ts")));
-		assert.ok(extensionPaths.some((p: string) => p.endsWith("/ask/extension.ts")));
+		// Normalise path separators so this test passes on Windows (\) and POSIX (/).
+		assert.ok(extensionPaths.some((p: string) => p.replace(/\\/g, "/").endsWith("/images/extension.ts")));
+		assert.ok(extensionPaths.some((p: string) => p.replace(/\\/g, "/").endsWith("/ask/extension.ts")));
 		assert.ok(!activation.args.some((arg: string) => arg.includes("mcp-extensions/nano-banana")));
 		assert.ok(activation.args.includes("--tools"));
 		assert.match(activation.args[activation.args.indexOf("--tools") + 1], /\bread\b/);
