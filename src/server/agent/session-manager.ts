@@ -177,6 +177,18 @@ export interface SessionInfo {
 		originalText: string;
 		skillExpansions: SkillExpansion[];
 	}>;
+	/**
+	 * Pool ID assigned when this session claimed a temporary worktree from the
+	 * worktree pool. Set on creation, cleared after the first-prompt rename.
+	 * Phase 3 multi-repo design §5.4.
+	 */
+	poolId?: string;
+	/** Repo path (cached from worktree provisioning) so the rename can run in the right cwd. */
+	repoPath?: string;
+	/** Active branch name. Mirrors persisted store; updated by the first-prompt rename. */
+	branch?: string;
+	/** True when on target branch but dir still at the pool path (degraded fallback). */
+	worktreeDegraded?: boolean;
 }
 
 /** Helper: extract the text body of a user message (string or block array). */
@@ -2410,6 +2422,10 @@ export class SessionManager {
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
+			poolId: ps.poolId,
+			repoPath: ps.repoPath,
+			branch: ps.branch,
+			worktreeDegraded: ps.worktreeDegraded,
 			sandboxed: ps.sandboxed,
 		};
 
@@ -2490,12 +2506,28 @@ export class SessionManager {
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
 			const repoPath = opts.worktreeOpts.repoPath;
-			const slug = "new-session";
 			const uuid8 = id.slice(0, 8);
-			const branch = `session/${slug}-${uuid8}`;
 			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
+
+			// Phase 3: try to claim a temporary pool worktree up-front. The branch
+			// stays as `pool/_pool-<id>` until the first prompt arrives, at which
+			// point we generate a real title and rename via `git branch -m` +
+			// `git worktree move`. This avoids persisting a `new-session-<id>`
+			// placeholder branch on disk that would never be cleaned up.
+			//
+			// Sandboxed sessions skip the pool path: they create their worktree
+			// inside the container via ProjectSandbox.createWorktree, and the
+			// host-side worktree pool isn't reachable from the container.
+			const poolForCreate = (!opts?.sandboxed && projectId) ? this.worktreePools.get(projectId) : undefined;
+			const unnamed = poolForCreate ? poolForCreate.claimUnnamed() : null;
+
+			// Fallback path (no pool warmth): synthesise a `session/new-session-<id>`
+			// branch up front. This matches pre-Phase-3 behaviour and is the only
+			// path the legacy createWorktree flow knows how to satisfy.
+			const fallbackSlug = `session/new-session-${uuid8}`;
+			const branch = unnamed ? unnamed.branchName : fallbackSlug;
 			const safeName = branch.replace(/\//g, "-");
-			const worktreePath = path.join(wtRoot, safeName);
+			const worktreePath = unnamed ? unnamed.worktreePath : path.join(wtRoot, safeName);
 
 			const now = Date.now();
 			const session: SessionInfo = {
@@ -2522,6 +2554,13 @@ export class SessionManager {
 				projectId,
 				promptQueue: new PromptQueue(),
 			};
+
+			// Phase 3: stash the pool ID and repo path for the first-prompt rename.
+			if (unnamed) {
+				session.poolId = unnamed.poolId;
+			}
+			session.repoPath = repoPath;
+			session.branch = branch;
 
 			this.sessions.set(id, session);
 
@@ -2559,21 +2598,13 @@ export class SessionManager {
 
 			// Persist immediately with all known structural fields
 			persistOnce(session, plan, ctx.store);
-
-			// Try to claim a pre-built worktree from the project's pool (instant)
-			const pool = projectId ? this.worktreePools.get(projectId) : undefined;
-			const poolClaim = pool
-				? await pool.claim(branch).catch(() => null)
-				: null;
-
-			if (poolClaim) {
-				// Update plan/session with the claimed worktree's actual path
-				plan.worktreePath = poolClaim.worktreePath;
-				session.worktreePath = poolClaim.worktreePath;
+			if (session.poolId) {
+				ctx.store.update(session.id, { poolId: session.poolId });
 			}
 
-			// Fire-and-forget: finish pipeline (skip createWorktree if pool provided one)
-			executeWorktreeAsync(plan, session, ctx, poolClaim?.worktreePath).then(() => {
+			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
+			// pass its path so executeWorktreeAsync skips createWorktree.
+			executeWorktreeAsync(plan, session, ctx, unnamed?.worktreePath).then(() => {
 				// Persist session metadata now that the agent is running (tracked for terminate)
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
@@ -3168,6 +3199,11 @@ export class SessionManager {
 		if (opts?.markGenerated) session.titleGenerated = true;
 		this.resolveStoreForSession(id).update(id, { title });
 		broadcast(session.clients, { type: "session_title", sessionId: id, title });
+		// Phase 3: explicit title-set is also a chance to flip a still-temporary
+		// pool worktree onto its real `session/<slug>-<id>` branch.
+		this.renameSessionFromPool(session, title).catch((err) => {
+			console.warn(`[session-manager] Pool rename failed for ${id}:`, err);
+		});
 		return true;
 	}
 
@@ -3584,6 +3620,104 @@ export class SessionManager {
 			session.title = title;
 			this.resolveStoreForSession(session.id).update(session.id, { title });
 			broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
+			// Phase 3: if we're still on a temporary pool branch, rename to the
+			// real `session/<slug>-<id>` now that we have a meaningful title.
+			this.renameSessionFromPool(session, title).catch((err) => {
+				console.warn(`[session-manager] Pool rename failed for ${session.id}:`, err);
+			});
+		}
+	}
+
+	/**
+	 * Phase 3 helper: rename a session that's still on a `pool/_pool-<id>`
+	 * branch onto its real `session/<slug>-<id>` branch + matching dir.
+	 *
+	 * No-op when:
+	 *   - session has no `poolId` (created via fallback createWorktree)
+	 *   - session is sandboxed (host has no on-disk worktree to rename)
+	 *   - session has no repoPath (couldn't run git there anyway)
+	 *
+	 * Failures are logged and the session continues on the pool branch —
+	 * the agent is fully usable either way.
+	 */
+	private async renameSessionFromPool(session: SessionInfo, title: string): Promise<void> {
+		if (!session.poolId) return;
+		if (session.sandboxed) return;
+		if (!session.repoPath) return;
+		if (!session.worktreePath) return;
+		if (!session.branch || !session.branch.startsWith("pool/")) return;
+
+		const { execFile: execFileCb } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const execFile = promisify(execFileCb);
+
+		// Sanitize title into a branch slug (matches goal-manager.toBranchName).
+		const slug = title
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-|-$/g, "")
+			.slice(0, 24) || "session";
+		const targetBranch = `session/${slug}-${session.id.slice(0, 8)}`;
+		const oldBranch = session.branch;
+		const oldPath = session.worktreePath;
+		const wtRoot = path.dirname(oldPath);
+		const newPath = path.join(wtRoot, targetBranch.replace(/\//g, "-"));
+
+		console.log(`[session-manager] Renaming pool worktree for session ${session.id}: ${oldBranch} → ${targetBranch}`);
+
+		// 1. Branch rename — fast, local ref op.
+		try {
+			await execFile("git", ["branch", "-m", oldBranch, targetBranch], { cwd: oldPath, timeout: 10_000 });
+		} catch (err) {
+			console.warn(`[session-manager] git branch -m failed for ${session.id}:`, err);
+			return;
+		}
+
+		let finalPath = oldPath;
+		let degraded = false;
+		if (newPath !== oldPath) {
+			try {
+				const { moveWorktree } = await import("../skills/git.js");
+				await moveWorktree(session.repoPath, oldPath, newPath);
+				finalPath = newPath;
+			} catch (err) {
+				degraded = true;
+				console.warn(`[session-manager] git worktree move failed for ${session.id}; staying at ${oldPath}:`, err instanceof Error ? err.message : err);
+			}
+		}
+
+		// Update in-memory + persisted state.
+		const oldCwd = session.cwd;
+		let newCwd = oldCwd;
+		if (finalPath !== oldPath && oldCwd && oldCwd.startsWith(oldPath)) {
+			newCwd = finalPath + oldCwd.slice(oldPath.length);
+		}
+		session.branch = targetBranch;
+		session.worktreePath = finalPath;
+		session.cwd = newCwd;
+		session.poolId = undefined;
+		session.worktreeDegraded = degraded;
+
+		// Refresh the RpcBridge cwd for sandboxless sessions; the bridge holds
+		// an absolute path and would otherwise keep using the stale one.
+		if (!session.sandboxed) {
+			try {
+				(session.rpcClient as any)?.setCwd?.(newCwd);
+			} catch { /* best-effort — the bridge may not expose setCwd */ }
+		}
+
+		const store = this.resolveStoreForSession(session.id);
+		store.update(session.id, {
+			branch: targetBranch,
+			worktreePath: finalPath,
+			cwd: newCwd,
+			poolId: undefined,
+			worktreeDegraded: degraded || undefined,
+		});
+
+		// Push the renamed branch in the background — same as pool.claim does.
+		if (process.env.BOBBIT_TEST_NO_PUSH !== "1") {
+			execFile("git", ["push", "-u", "origin", targetBranch], { cwd: finalPath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
 		}
 	}
 

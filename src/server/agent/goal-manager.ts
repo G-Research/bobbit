@@ -3,6 +3,7 @@ import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
+import type { WorktreePool } from "./worktree-pool.js";
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -22,12 +23,28 @@ export class GoalManager {
 	private workflowStore?: WorkflowStore;
 	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
 	private _setupsInFlight = new Set<string>();
+	/**
+	 * Resolver that looks up the worktree pool for this goal's project.
+	 * Wired by the server at startup once SessionManager owns the pools.
+	 * When set, `_doSetupWorktree` claims through the pool first and only
+	 * falls back to a fresh `createWorktree` if the pool is empty.
+	 */
+	private poolResolver?: () => WorktreePool | null | undefined;
 
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
 		this.store = goalStore;
 		this.workflowStore = workflowStore;
 		// Mark any goals stuck in "preparing" from a previous run as error
 		this._recoverStuckSetups();
+	}
+
+	/**
+	 * Wire a pool resolver. Phase 3: goal worktrees go through the pool first,
+	 * matching the session path so goals are observably as fast as sessions
+	 * when the pool is warm.
+	 */
+	setPoolResolver(resolver: () => WorktreePool | null | undefined): void {
+		this.poolResolver = resolver;
 	}
 
 	/**
@@ -151,6 +168,32 @@ export class GoalManager {
 		// Compute subdirectory offset: the difference between the preliminary
 		// worktreePath (repo root level) and goal.cwd (which may include offset).
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
+
+		// Pool-first (Phase 3): claim a pre-built worktree if one is available.
+		// On success this is observably as fast as session start (~tens of ms).
+		// On failure or empty pool we fall through to the legacy createWorktree path.
+		const pool = this.poolResolver?.();
+		if (pool) {
+			try {
+				const claim = await pool.claim(goal.branch!);
+				if (claim) {
+					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
+						? path.join(claim.worktreePath, preliminaryOffset)
+						: claim.worktreePath;
+					this.store.update(goal.id, {
+						worktreePath: claim.worktreePath,
+						cwd: offsetCwd,
+						setupStatus: "ready",
+						setupError: undefined,
+					});
+					console.log(`[goal-manager] Worktree claimed from pool for goal "${goal.title}": ${claim.worktreePath} (branch: ${goal.branch}${claim.degraded ? ", degraded" : ""})`);
+					return;
+				}
+			} catch (err) {
+				console.warn(`[goal-manager] Pool claim failed for goal "${goal.title}" — falling back to createWorktree:`, err);
+			}
+		}
+
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {

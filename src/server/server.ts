@@ -1101,6 +1101,40 @@ export function createGateway(config: GatewayConfig) {
 			// E2E / CI can skip this entirely via BOBBIT_SKIP_WORKTREE_POOL=1 — the
 			// pool fills worktrees aggressively at boot and replenishes on every
 			// claim, which costs real CPU on tests that don't need git at all.
+			// Boot sweeper (Phase 3): reconcile on-disk worktrees against persisted
+			// records before pool fill so renamed-but-orphaned worktrees from a
+			// crashed prior instance are reclaimed (or cleaned up) cleanly.
+			try {
+				const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+				const sweepProjects: Array<{ id: string; rootPath: string }> = [];
+				const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean }> = [];
+				const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean }> = [];
+				const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+				for (const ctx of projectContextManager.all()) {
+					sweepProjects.push({ id: ctx.project.id, rootPath: ctx.project.rootPath });
+					for (const g of ctx.goalStore.getAll()) {
+						sweepGoals.push({ id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived });
+					}
+					for (const s of ctx.sessionStore.getAll()) {
+						sweepSessions.push({ id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived });
+					}
+					for (const st of ctx.staffStore.getAll()) {
+						sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+					}
+				}
+				const result = await sweepOrphanedWorktrees({
+					projects: sweepProjects,
+					goals: sweepGoals,
+					sessions: sweepSessions,
+					staff: sweepStaff,
+				});
+				if (result.reclaimed || result.cleaned || result.repaired) {
+					console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
+				}
+			} catch (err) {
+				console.warn("[server] Worktree sweeper failed (non-fatal):", err);
+			}
+
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
 				for (const ctx of projectContextManager.all()) {
 					try {
@@ -1112,6 +1146,13 @@ export function createGateway(config: GatewayConfig) {
 						}
 					} catch { /* best-effort */ }
 				}
+			}
+
+			// Wire goal-manager pool resolvers so goals claim through the pool first
+			// (Phase 3 — fixes the bug where goals always called createWorktree).
+			for (const ctx of projectContextManager.all()) {
+				const projectId = ctx.project.id;
+				ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(projectId));
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -1782,6 +1823,7 @@ async function handleApiRoute(
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
 						};
+						ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(existing.id));
 					}
 					json(existing, 200);
 					return;
@@ -1806,6 +1848,10 @@ async function handleApiRoute(
 						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize);
 					}
 				} catch { /* best-effort */ }
+			}
+			// Wire the goal-manager pool resolver for the new project (Phase 3 — goals via pool).
+			if (newCtx) {
+				newCtx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(project.id));
 			}
 			json(project, 201);
 		} catch (err: any) {
@@ -2268,6 +2314,7 @@ async function handleApiRoute(
 			teamGoalId: session.teamGoalId,
 			teamLeadSessionId: session.teamLeadSessionId,
 			worktreePath: session.worktreePath,
+			branch: session.branch ?? sessionPs?.branch,
 			taskId: session.taskId,
 			staffId: session.staffId,
 			colorIndex: colorStore.get(session.id),

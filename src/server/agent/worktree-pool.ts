@@ -1,12 +1,26 @@
 /**
- * Pre-creates git worktrees so new sessions can claim one instantly
- * instead of waiting 10-30s for `git worktree add` + `npm ci` + `git push`.
+ * Pre-creates git worktrees so new sessions / goals can claim one instantly
+ * instead of waiting 10-30s for `git worktree add` + setup + `git push`.
  *
  * On startup, the pool fills to `targetSize` (default 2) in the background.
- * When a session claims a worktree, the pool renames the branch
- * and starts replenishing immediately.
+ * When a session or goal claims a worktree, the pool renames the branch,
+ * moves the directory to its conventional path, and starts replenishing.
  *
  * If the pool is empty, callers fall back to the normal `createWorktree()` path.
+ *
+ * Phase 3 changes (multi-repo):
+ *   - Pool branch naming changed from `session/_pool-<id>` → `pool/_pool-<id>`
+ *     so the orphan-cleanup logic in session-manager (which scans
+ *     `session/*` branches) doesn't trip on pool entries.
+ *   - `claim()` uses `git worktree move` after the branch rename so the
+ *     directory matches the new branch slug. On move failure (typically
+ *     Windows file locks) we record a degraded entry and continue —
+ *     the branch rename succeeded so the agent is fully usable.
+ *   - The fetch + reset + push that used to block claim now run in the
+ *     background after returning the worktree to the caller — claim is
+ *     now O(1) git ops + a few hundred ms of disk move.
+ *   - `setComponents()` is a no-op stub reserved for Phase 4 multi-repo
+ *     pool sets.
  */
 
 import { randomUUID } from "node:crypto";
@@ -14,14 +28,55 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePush, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, moveWorktree, type WorktreeResult } from "../skills/git.js";
 
 const execFile = promisify(execFileCb);
 
 interface PoolEntry {
-	branchName: string;
+	branchName: string;       // e.g. "pool/_pool-<8hex>" — git ref after fill
 	worktreePath: string;
 	createdAt: number;
+}
+
+/** Result of a pool claim — extends the legacy WorktreeResult with degraded-mode info. */
+export interface PoolClaimResult extends WorktreeResult {
+	/**
+	 * True when the branch was renamed but the directory could not be moved
+	 * (typically Windows file locks on `git worktree move`). The worktree is
+	 * fully usable; callers may choose to surface this to the UI.
+	 */
+	degraded?: boolean;
+}
+
+/** Result of an unnamed claim — the pool entry handed to the caller as-is. */
+export interface UnnamedClaim {
+	/** The opaque pool ID embedded in branch + path (`_pool-<8hex>`). */
+	poolId: string;
+	/** Current branch name (`pool/_pool-<id>`). */
+	branchName: string;
+	/** Current worktree path (under `<repo>-wt/pool-_pool-<id>/`). */
+	worktreePath: string;
+}
+
+/** Component descriptor reserved for Phase 4 multi-repo pool sets. */
+export interface PoolComponent {
+	name: string;
+	repo: string;
+	relativePath?: string;
+	worktreeSetupCommand?: string;
+}
+
+const POOL_BRANCH_PREFIX = "pool/_pool-";
+const LEGACY_POOL_BRANCH_PREFIX = "session/_pool-";
+
+/** Whether a branch name belongs to a pool entry (current or legacy form). */
+export function isPoolBranch(branch: string): boolean {
+	return branch.startsWith(POOL_BRANCH_PREFIX) || branch.startsWith(LEGACY_POOL_BRANCH_PREFIX);
+}
+
+/** Flatten a branch name into a directory-safe slug (matches createWorktree's convention). */
+function branchToSlug(branch: string): string {
+	return branch.replace(/\//g, "-");
 }
 
 export class WorktreePool {
@@ -31,10 +86,14 @@ export class WorktreePool {
 	private targetSize: number;
 	private setupCommand?: string;
 
-	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string }) {
+	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string; components?: PoolComponent[] }) {
 		this.repoPath = opts.repoPath;
 		this.targetSize = opts.targetSize ?? 2;
 		this.setupCommand = opts.setupCommand;
+		// `components` is accepted (and stored on a future field) so Phase 4
+		// can flip the pool entry into a multi-repo set without breaking
+		// existing call sites. Today it has no behavioural effect.
+		void opts.components;
 	}
 
 	/** Number of ready worktrees available. */
@@ -64,10 +123,6 @@ export class WorktreePool {
 	 *   a session's working directory on restart.
 	 */
 	startFilling(activeWorktreePaths?: Set<string>): void {
-		// First, reclaim any orphaned pool worktrees from a previous server instance.
-		// These are directories matching the _pool-* naming convention with valid .git files
-		// that no active session owns. Reclaiming avoids creating unnecessary new worktrees
-		// and prevents the old entries from being pruned by git (which would break them).
 		this.reclaimOrphaned(activeWorktreePaths).then(() => this.replenish()).catch(() => this.replenish());
 	}
 
@@ -80,23 +135,35 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Claim a pre-built worktree for a session.
-	 *
-	 * Renames the temporary branch to `targetBranch`, moves the directory
-	 * to the conventional path, and pushes the branch to origin.
-	 *
-	 * Returns null if the pool is empty (caller should fall back to createWorktree).
+	 * Phase 4 stub: replace the component set used for future pool fills.
+	 * Existing entries stay in the pool until claimed. No-op today —
+	 * single-repo only.
 	 */
-	async claim(targetBranch: string): Promise<WorktreeResult | null> {
+	setComponents(_components: PoolComponent[]): void {
+		// Phase 4: invalidate-on-divergence + multi-repo entry rebuild.
+	}
+
+	/**
+	 * Claim a pre-built worktree and rename it for a target branch.
+	 *
+	 * Steps performed synchronously (the caller awaits the rename):
+	 *   1. `git branch -m pool/_pool-<id> <targetBranch>`
+	 *   2. `git worktree move <oldPath> <newPath>` — degraded fallback if it fails
+	 *
+	 * Steps performed in the background (caller does NOT await):
+	 *   3. `git fetch origin` + `git reset --hard <remote-primary>`
+	 *   4. `git push -u origin <targetBranch>` (skipped under BOBBIT_TEST_NO_PUSH=1)
+	 *
+	 * Returns null if the pool is empty (caller falls back to createWorktree).
+	 */
+	async claim(targetBranch: string): Promise<PoolClaimResult | null> {
 		const entry = this.pool.shift();
 		if (!entry) return null;
 
 		// Kick off background replenishment immediately
 		this.replenish();
 
-		// Rename the git branch (needed for push / upstream tracking).
-		// The directory stays at its pool path — renaming directories causes
-		// git worktree tracking mismatches that break sessions on restart.
+		// 1. Rename branch (fast — local ref op).
 		try {
 			await execFile("git", ["branch", "-m", entry.branchName, targetBranch], {
 				cwd: entry.worktreePath,
@@ -108,36 +175,54 @@ export class WorktreePool {
 			return null;
 		}
 
-		// Reset worktree to latest origin/master so it isn't stale.
-		// The pool entry was created at some point in the past — master may have
-		// moved forward since then. Fetch + reset ensures we start from HEAD.
-		try {
-			await execFile("git", ["fetch", "origin"], {
-				cwd: entry.worktreePath,
-				timeout: 30_000,
-			});
-			const remotePrimary = await this.resolveRemotePrimary();
-			await execFile("git", ["reset", "--hard", remotePrimary], {
-				cwd: entry.worktreePath,
-				timeout: 10_000,
-			});
-		} catch (err) {
-			// Non-fatal — worktree is still usable, just possibly stale
-			console.warn(`[worktree-pool] Reset to origin failed for ${targetBranch}:`, err);
+		// 2. Move worktree directory to match the new branch slug. Degraded fallback
+		//    on failure — the branch rename succeeded so the agent can still work;
+		//    only the dir name is stale. The boot sweeper will reclaim it later.
+		const targetSlug = branchToSlug(targetBranch);
+		const wtRoot = path.dirname(entry.worktreePath);
+		const newPath = path.join(wtRoot, targetSlug);
+		let finalPath = entry.worktreePath;
+		let degraded = false;
+		if (newPath !== entry.worktreePath) {
+			try {
+				await moveWorktree(this.repoPath, entry.worktreePath, newPath);
+				finalPath = newPath;
+			} catch (err) {
+				degraded = true;
+				console.warn(`[worktree-pool] degraded: dir kept at ${entry.worktreePath} (move to ${newPath} failed: ${err instanceof Error ? err.message : err})`);
+			}
 		}
 
-		// Push the renamed branch to origin (fire-and-forget, non-blocking)
-		if (!shouldSkipRemotePush()) {
-			execFile("git", ["push", "-u", "origin", targetBranch], {
-				cwd: entry.worktreePath,
-				timeout: 30_000,
-			}).catch(() => {
-				// Push failure is non-fatal (offline, auth issues, etc.)
-			});
-		}
+		// 3 + 4. Background freshen + push. Don't await — caller gets the worktree now.
+		this.freshenInBackground(finalPath, targetBranch);
 
-		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
-		return { worktreePath: entry.worktreePath, branchName: targetBranch };
+		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${finalPath}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
+		return { worktreePath: finalPath, branchName: targetBranch, degraded };
+	}
+
+	/**
+	 * Take a pool entry as-is, without renaming branch or directory.
+	 *
+	 * Used by the session creation path: the session lives on the temporary
+	 * `pool/_pool-<id>` branch until the user sends their first prompt, at
+	 * which point session-manager calls a separate rename helper.
+	 *
+	 * Returns null if the pool is empty.
+	 */
+	claimUnnamed(): UnnamedClaim | null {
+		const entry = this.pool.shift();
+		if (!entry) return null;
+		this.replenish();
+		// Strip prefix to get the opaque pool id (`_pool-<8hex>`).
+		// Strip the leading `pool/` (or legacy `session/`) ref-namespace, keeping the
+		// `_pool-<8hex>` opaque id that callers thread through session metadata.
+		const poolId = entry.branchName.startsWith("pool/")
+			? entry.branchName.slice("pool/".length)
+			: entry.branchName.startsWith("session/")
+				? entry.branchName.slice("session/".length)
+				: entry.branchName;
+		console.log(`[worktree-pool] Claimed (unnamed): ${entry.branchName} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
+		return { poolId, branchName: entry.branchName, worktreePath: entry.worktreePath };
 	}
 
 	/** Resolve the remote primary branch (e.g. origin/master). */
@@ -156,14 +241,38 @@ export class WorktreePool {
 	}
 
 	/**
+	 * Background freshen: fetch origin + reset --hard <primary> + push -u.
+	 * Errors are non-fatal and logged — the worktree is still usable.
+	 */
+	private freshenInBackground(worktreePath: string, branch: string): void {
+		(async () => {
+			try {
+				await execFile("git", ["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
+				const remotePrimary = await this.resolveRemotePrimary();
+				await execFile("git", ["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
+			} catch (err) {
+				console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
+			}
+			if (!shouldSkipRemotePush()) {
+				try {
+					await execFile("git", ["push", "-u", "origin", branch], { cwd: worktreePath, timeout: 30_000 });
+				} catch {
+					// Push failure is non-fatal (offline, auth issues, etc.)
+				}
+			}
+		})().catch(() => { /* swallow — already logged */ });
+	}
+
+	/**
 	 * Scan for orphaned pool worktrees from a previous server instance and reclaim them.
-	 * An orphaned pool worktree is a directory matching `session-_pool-*` in the worktree
-	 * root with a valid `.git` file, whose branch is still a `session/_pool-*` branch
-	 * (i.e. it was never claimed by a session).
+	 * An orphaned pool worktree is a directory under `<repo>-wt/` whose branch is still
+	 * a pool branch (i.e. it was never claimed by a session/goal).
+	 *
+	 * Accepts both the new `pool/_pool-*` and legacy `session/_pool-*` prefixes.
 	 *
 	 * @param activeWorktreePaths — Paths owned by live sessions; skip these even if
-	 *   the branch name looks like a pool branch (the session may not have renamed it yet,
-	 *   or recovery may have restored the original pool branch name).
+	 *   the branch name looks like a pool branch (the session may not have renamed it
+	 *   yet, or recovery may have restored the original pool branch name).
 	 */
 	private async reclaimOrphaned(activeWorktreePaths?: Set<string>): Promise<void> {
 		try {
@@ -173,35 +282,27 @@ export class WorktreePool {
 			const entries = fs.readdirSync(wtRoot, { withFileTypes: true });
 			for (const entry of entries) {
 				if (this.pool.length >= this.targetSize) break;
-				if (!entry.isDirectory() || !entry.name.startsWith("session-_pool-")) continue;
+				if (!entry.isDirectory()) continue;
+				// Match new (`pool-_pool-*`) and legacy (`session-_pool-*`) flattened slugs.
+				if (!entry.name.startsWith("pool-_pool-") && !entry.name.startsWith("session-_pool-")) continue;
 
 				const wtPath = path.join(wtRoot, entry.name);
-
-				// Skip worktrees owned by active sessions — even if the branch
-				// still looks like a pool branch (claim may not have renamed it
-				// before the previous shutdown).
 				if (activeWorktreePaths?.has(wtPath)) continue;
 
 				const gitFile = path.join(wtPath, ".git");
 				if (!fs.existsSync(gitFile)) continue;
 
-				// Check the branch — only reclaim if it's still a pool branch (unclaimed)
 				try {
 					const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
 						cwd: wtPath,
 						timeout: 5_000,
 					});
 					const branch = stdout.trim();
-					if (!branch.startsWith("session/_pool-")) continue;
+					if (!isPoolBranch(branch)) continue;
 
-					this.pool.push({
-						branchName: branch,
-						worktreePath: wtPath,
-						createdAt: Date.now(),
-					});
+					this.pool.push({ branchName: branch, worktreePath: wtPath, createdAt: Date.now() });
 					console.log(`[worktree-pool] Reclaimed orphaned: ${branch} at ${wtPath} (pool: ${this.pool.length}/${this.targetSize})`);
 				} catch {
-					// Can't read branch — skip, don't break
 					continue;
 				}
 			}
@@ -214,7 +315,6 @@ export class WorktreePool {
 	private replenish(): void {
 		if (this.filling || this.pool.length >= this.targetSize) return;
 		this.filling = true;
-
 		this._fill().catch((err) => {
 			console.error("[worktree-pool] Fill error:", err);
 		}).finally(() => {
@@ -225,11 +325,11 @@ export class WorktreePool {
 	private async _fill(): Promise<void> {
 		while (this.pool.length < this.targetSize) {
 			const uuid8 = randomUUID().slice(0, 8);
-			const branchName = `session/_pool-${uuid8}`;
+			const branchName = `${POOL_BRANCH_PREFIX}${uuid8}`;
 			try {
 				const result = await createWorktree(this.repoPath, branchName, {
 					setupCommand: this.setupCommand,
-					skipPush: true, // don't push pool branches — waste of time
+					skipPush: true,
 				});
 				this.pool.push({
 					branchName: result.branchName,
@@ -239,9 +339,17 @@ export class WorktreePool {
 				console.log(`[worktree-pool] Ready: ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
 			} catch (err) {
 				console.error(`[worktree-pool] Failed to pre-build ${branchName}:`, err);
-				break; // Don't loop on persistent errors
+				break;
 			}
 		}
+	}
+
+	/** Push a pre-existing pool entry into the in-memory pool. Used by the boot sweeper. */
+	registerExternalEntry(branchName: string, worktreePath: string): void {
+		if (!isPoolBranch(branchName)) return;
+		// Avoid duplicates
+		if (this.pool.some(e => e.worktreePath === worktreePath)) return;
+		this.pool.push({ branchName, worktreePath, createdAt: Date.now() });
 	}
 
 	/** Clean up all pool entries. Call on shutdown. */

@@ -70,6 +70,14 @@ export interface PersistedSession {
 	modelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
+	/**
+	 * Opaque pool ID set when the session claimed a temporary worktree from the
+	 * pool but has not yet been renamed onto a `session/<slug>-<id>` branch.
+	 * Cleared when the rename succeeds (Phase 3, multi-repo design).
+	 */
+	poolId?: string;
+	/** True when the session is on its target branch but the worktree dir is still at the pool path. */
+	worktreeDegraded?: boolean;
 }
 
 /**
@@ -171,7 +179,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed" | "projectId">>): void {
+	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "sandboxed" | "projectId" | "poolId" | "worktreeDegraded">>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;
