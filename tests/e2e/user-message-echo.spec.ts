@@ -6,6 +6,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { createSession, connectWs, messageEndPredicate, agentEndPredicate } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 test.describe("User message echo", () => {
 	test.describe.configure({ mode: "parallel" });
@@ -54,21 +55,21 @@ test.describe("User message echo", () => {
 			await conn1.waitFor(messageEndPredicate("user"));
 			conn1.close();
 
-			await new Promise((r) => setTimeout(r, 200));
-
 			const conn2 = await connectWs(sessionId);
 			try {
-				conn2.send({ type: "get_messages" });
-				const messagesResponse = await conn2.waitFor((m) => m.type === "messages");
-
-				const msgs = Array.isArray(messagesResponse.data)
-					? messagesResponse.data
-					: messagesResponse.data?.messages;
-
-				const userMsg = msgs.find((m: any) =>
-					m.role === "user" && Array.isArray(m.content) &&
-					m.content.some((c: any) => c.type === "text" && c.text?.includes("Message before disconnect"))
-				);
+				// Poll get_messages until the persisted user message is visible (replaces a 200ms sleep).
+				const userMsg = await pollUntil(async () => {
+					const beforeIdx = conn2.messageCount();
+					conn2.send({ type: "get_messages" });
+					const messagesResponse = await conn2.waitForFrom(beforeIdx, (m) => m.type === "messages");
+					const msgs = Array.isArray(messagesResponse.data)
+						? messagesResponse.data
+						: messagesResponse.data?.messages;
+					return msgs?.find((m: any) =>
+						m.role === "user" && Array.isArray(m.content) &&
+						m.content.some((c: any) => c.type === "text" && c.text?.includes("Message before disconnect"))
+					) ?? null;
+				}, { timeoutMs: 5000, intervalMs: 100, label: "persisted user message visible after reconnect" });
 				expect(userMsg).toBeTruthy();
 			} finally {
 				conn2.close();

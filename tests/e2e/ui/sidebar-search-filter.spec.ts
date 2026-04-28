@@ -55,16 +55,12 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await searchInput.click();
 		await searchInput.fill("AlphaUnique");
 
-		// Wait for debounce (200ms + buffer)
-		await page.waitForTimeout(400);
-
-		// Alpha should be visible, Bravo should be hidden
+		// Debounce (200ms) is absorbed by the auto-retrying assertions below.
 		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("BravoUniqueSearch")).not.toBeVisible({ timeout: 3_000 });
 
 		// Clear the input — all should reappear
 		await searchInput.fill("");
-		await page.waitForTimeout(400);
 
 		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("BravoUniqueSearch")).toBeVisible({ timeout: 5_000 });
@@ -114,7 +110,6 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			const searchInput = page.locator("input[data-search]");
 			await searchInput.click();
 			await searchInput.fill("DeltaGoalChild");
-			await page.waitForTimeout(400);
 
 			// The goal should remain visible because its child matches
 			await expect(page.getByText("CharlieUniqueGoal")).toBeVisible({ timeout: 5_000 });
@@ -132,7 +127,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
 		await searchInput.fill("AlphaUnique");
-		await page.waitForTimeout(400);
+		await expect(searchInput).toHaveValue("AlphaUnique");
 
 		// Press Escape
 		await searchInput.press("Escape");
@@ -164,16 +159,15 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
 		await searchInput.fill("EchoArchived");
-		await page.waitForTimeout(600); // debounce + fetch time
 
 		// The archived section should auto-open — look for the archived toggle showing expanded state
-		// The "▾" chevron next to "Archived" indicates it's open
+		// The "▾" chevron next to "Archived" indicates it's open. Auto-retry covers
+		// the 200ms debounce + archived-fetch time.
 		const archivedHeader = page.getByText("Archived").first();
-		await expect(archivedHeader).toBeVisible({ timeout: 5_000 });
+		await expect(archivedHeader).toBeVisible({ timeout: 8_000 });
 
 		// Clear search — archived section should revert (auto-close)
 		await searchInput.fill("");
-		await page.waitForTimeout(400);
 
 		// After clearing a search-opened archived section, it should close
 		// Verify the archived section is no longer showing expanded content
@@ -187,9 +181,8 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
 		await searchInput.fill("TestQuery");
-		await page.waitForTimeout(400);
 
-		// Click "Full Search" link
+		// Click "Full Search" link (auto-retry covers the 200ms debounce)
 		const fullSearchLink = page.getByText("Full Search");
 		await expect(fullSearchLink).toBeVisible({ timeout: 5_000 });
 		await fullSearchLink.click();

@@ -148,7 +148,11 @@ test.describe("Review annotation persistence", () => {
 			// Navigate back to the session
 			await goToSession(page, sessionId);
 
-			// Wait for message replay to complete
+			// Wait for message replay to complete. This sleep deliberately checks that
+			// the Review tab does NOT auto-open during replay — there is no positive
+			// "replay finished" event we can latch onto, so we let the system run for
+			// 3s then assert non-appearance.
+			// TODO(phase-2): needs a "messages-replayed" signal from the agent harness
 			await page.waitForTimeout(3_000);
 
 			// The review tab should NOT appear because submitted=true

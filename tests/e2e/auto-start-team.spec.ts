@@ -7,6 +7,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, gitCwd, deleteGoal } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 /** Poll a goal until a predicate is met or timeout. */
 async function pollGoal(
@@ -14,32 +15,27 @@ async function pollGoal(
 	predicate: (g: any) => boolean,
 	timeoutMs = 30_000,
 ): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}`);
-		const goal = await res.json();
-		if (predicate(goal)) return goal;
-		await new Promise(r => setTimeout(r, 100));
-	}
-	const res = await apiFetch(`/api/goals/${goalId}`);
-	const goal = await res.json();
-	throw new Error(
-		`Poll timeout after ${timeoutMs}ms. setupStatus=${goal.setupStatus}, autoStartTeam=${goal.autoStartTeam}`,
+	return pollUntil(
+		async () => {
+			const res = await apiFetch(`/api/goals/${goalId}`);
+			const goal = await res.json();
+			return predicate(goal) ? goal : null;
+		},
+		{ timeoutMs, intervalMs: 100, label: `goal ${goalId} predicate` },
 	);
 }
 
 /** Poll until the team is started for a goal (team endpoint returns 200). */
 async function pollTeamStarted(goalId: string, timeoutMs = 30_000): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/team`);
-		if (res.status === 200) {
+	return pollUntil(
+		async () => {
+			const res = await apiFetch(`/api/goals/${goalId}/team`);
+			if (res.status !== 200) return null;
 			const team = await res.json();
-			if (team.teamLeadSessionId) return team;
-		}
-		await new Promise(r => setTimeout(r, 100));
-	}
-	throw new Error(`Team not started for goal ${goalId} within ${timeoutMs}ms`);
+			return team.teamLeadSessionId ? team : null;
+		},
+		{ timeoutMs, intervalMs: 100, label: `team started for ${goalId}` },
+	);
 }
 
 /** Create a goal with gitCwd so worktree setup can succeed. */

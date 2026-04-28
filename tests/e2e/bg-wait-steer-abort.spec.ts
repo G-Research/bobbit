@@ -8,6 +8,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 async function adminFetch(baseURL: string, path: string, opts: RequestInit = {}) {
 	const method = (opts.method || "GET").toUpperCase();
@@ -55,8 +56,11 @@ test.describe("bash_bg wait — steer abort", () => {
 			`/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=60`,
 		).then(async (r) => ({ status: r.status, body: await r.json() }));
 
-		// Give the long poll a moment to begin so the AbortController is registered.
-		await new Promise((r) => setTimeout(r, 100));
+		// Wait until the long poll has registered its AbortController.
+		await pollUntil(
+			() => ((gateway.bgProcessManager as any).waits as Map<string, Set<unknown>>).get(sessionId)?.size ? true : false,
+			{ timeoutMs: 5_000, intervalMs: 25, label: "bg wait registered" },
+		);
 
 		// Trigger abort via the bg manager (same call the live-steer code path uses).
 		gateway.bgProcessManager.abortAllWaits(sessionId);
@@ -103,7 +107,11 @@ test.describe("bash_bg wait — steer abort", () => {
 			`/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=60`,
 		);
 
-		await new Promise((r) => setTimeout(r, 100));
+		// Wait until the long poll has registered its AbortController.
+		await pollUntil(
+			() => ((gateway.bgProcessManager as any).waits as Map<string, Set<unknown>>).get(sessionId)?.size ? true : false,
+			{ timeoutMs: 5_000, intervalMs: 25, label: "bg wait registered" },
+		);
 
 		// Terminate — must abort the in-flight wait so the handler resolves.
 		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });

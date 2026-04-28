@@ -10,6 +10,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, nonGitCwd, readE2EToken, createSession, connectWs } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 const TEST_WORKFLOW_ID = `test-optional-${Date.now()}`;
 
@@ -80,17 +81,13 @@ async function waitForGateStatus(
 	targetStatus: string,
 	timeoutMs = 30_000,
 ): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const data = await res.json();
-		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 50));
-	}
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const data = await res.json();
-	throw new Error(
-		`Gate ${gateId} did not reach "${targetStatus}" within ${timeoutMs}ms. Current: "${data.status}"`,
+	return pollUntil(
+		async () => {
+			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+			const data = await res.json();
+			return data.status === targetStatus ? data : null;
+		},
+		{ timeoutMs, intervalMs: 50, label: `gate ${gateId} -> ${targetStatus}` },
 	);
 }
 

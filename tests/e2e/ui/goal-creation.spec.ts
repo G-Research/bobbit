@@ -178,8 +178,8 @@ test.describe("Goal creation (full-stack UI)", () => {
 			el.checked = true;
 			el.dispatchEvent(new Event("change", { bubbles: true }));
 		});
-		// Allow lit re-render to settle
-		await page.waitForTimeout(300);
+		// Allow lit re-render to settle: wait until the checkbox state stabilizes as checked.
+		await expect(qaCheckbox).toBeChecked({ timeout: 5_000 });
 
 		// Create the goal
 		const createGoalBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();

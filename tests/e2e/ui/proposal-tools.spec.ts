@@ -68,9 +68,8 @@ test.describe("Proposal tool blocks", () => {
 		await navigateToHash(page, "#/settings");
 		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 5_000 });
 
-		// Navigate back using browser back
+		// Navigate back using browser back; the next visibility assertion auto-retries.
 		await page.goBack();
-		await page.waitForTimeout(1000);
 
 		// The tool block should still be visible with the "Open proposal" button
 		const openBtnAfter = page.getByText("Open proposal").first();
@@ -91,9 +90,8 @@ test.describe("Proposal tool blocks", () => {
 		await navigateToHash(page, "#/settings");
 		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 5_000 });
 
-		// Navigate back
+		// Navigate back; the next visibility assertion auto-retries.
 		await page.goBack();
-		await page.waitForTimeout(1000);
 
 		// Click the "Open proposal" button
 		const reopenBtn = page.getByText("Open proposal").first();
