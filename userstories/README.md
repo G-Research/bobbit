@@ -23,7 +23,6 @@ Each file covers a feature area. Stories are numbered within each file (e.g. `S-
 | Team | [team.md](team.md) | 8 | Minimal | Most interactions untested |
 | Dashboard | [dashboard.md](dashboard.md) | 10 | Minimal | Gate interaction, verification |
 | Roles | [roles.md](roles.md) | 8 | API only | No UI CRUD tests |
-| Personalities | [personalities.md](personalities.md) | 6 | API only | No UI CRUD tests |
 | Tools | [tools.md](tools.md) | 7 | API only | No UI edit/policy tests |
 | Workflows | [workflows.md](workflows.md) | 8 | Partial | Editor phases only |
 | Staff | [staff.md](staff.md) | 6 | None | Completely untested |

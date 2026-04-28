@@ -65,7 +65,7 @@ This means removing a project cleanly removes its state, and pointing a differen
 `ProjectContext` (`project-context.ts`) holds a complete set of stores scoped to one project. Every store constructor accepts a directory parameter (`stateDir` or `configDir`) instead of using module-level globals:
 
 - **State stores** (stateDir): GoalStore, SessionStore, GateStore, TaskStore, TeamStore, StaffStore, ColorStore, SearchService, CostTracker
-- **Config stores** (configDir): RoleStore, PersonalityStore, WorkflowStore, ToolManager, ProjectConfigStore, ToolGroupPolicyStore
+- **Config stores** (configDir): RoleStore, WorkflowStore, ToolManager, ProjectConfigStore, ToolGroupPolicyStore
 - **Managers**: GoalManager (wraps GoalStore)
 
 Directories derive from the project's `rootPath`:
@@ -152,13 +152,13 @@ The verification system is split into two modules:
 
 Two resolution modes:
 
-**Entity resolution** (`resolveEntities`): For named entities (roles, personalities, tools, workflows), merge by name across tiers. A project-level entity with the same name fully overrides the server/global version — no field-level merge. Entities that only exist at a higher tier remain available in all projects.
+**Entity resolution** (`resolveEntities`): For named entities (roles, tools, workflows), merge by name across tiers. A project-level entity with the same name fully overrides the server/global version — no field-level merge. Entities that only exist at a higher tier remain available in all projects.
 
 **Scalar resolution** (`resolveScalarConfig`): For `project.yaml` keys (build_command, test_command, default models, etc.), first defined value wins: project → server → global → built-in default. Returns both the resolved value and its source scope.
 
 ### Config cascade
 
-The config cascade handles resolution of named config entities (roles, tools, personalities, workflows, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+The config cascade handles resolution of named config entities (roles, tools, workflows, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
 
 #### Why a cascade?
 
@@ -173,9 +173,9 @@ builtin (dist/server/defaults/)  →  server (<server-cwd>/.bobbit/config/)  →
 
 Two modules implement this:
 
-- **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, PersonalityStore, etc.).
+- **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, etc.).
 
-- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolvePersonalities()`, `resolveWorkflows()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`.
+- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveWorkflows()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`.
 
 Each returned item is a `ResolvedItem<T>` with:
 - `item: T` — the config object
@@ -186,7 +186,7 @@ Each returned item is a `ResolvedItem<T>` with:
 
 For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top. Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
 
-**System-scope writes** (role / personality / workflow customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `personalityStore`, `workflowStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles, personalities, and workflows because the server stores are independent of `ProjectContextManager`.
+**System-scope writes** (role / workflow customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `workflowStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles and workflows because the server stores are independent of `ProjectContextManager`.
 
 #### Server stores decoupling
 
@@ -198,7 +198,7 @@ On server startup, standalone stores are seeded with builtins that aren't alread
 
 #### Scaffolding
 
-`scaffoldBobbitDir()` creates empty `config/roles/`, `config/workflows/`, `config/personalities/` directories. These config types resolve at runtime via the cascade — no files are copied. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+`scaffoldBobbitDir()` creates empty `config/roles/`, `config/workflows/` directories. These config types resolve at runtime via the cascade — no files are copied. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
 
 #### Session setup integration
 
@@ -211,17 +211,16 @@ Config list endpoints accept `?projectId=` for project-scoped resolution:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles?projectId=X` | Resolved roles with `origin` and `overrides` fields |
-| `GET` | `/api/personalities?projectId=X` | Resolved personalities |
 | `GET` | `/api/workflows?projectId=X` | Resolved workflows |
 | `GET` | `/api/tools?projectId=X` | Resolved tools |
 | `POST` | `/api/roles/:name/customize?scope=project&projectId=X` | Copy resolved item to target scope for editing |
 | `DELETE` | `/api/roles/:name/override?scope=project&projectId=X` | Remove override, revert to inherited |
 
-The customize/override endpoints follow the same pattern for personalities (`:name`) and workflows (`:id`). CRUD endpoints (`POST`, `PUT`, `DELETE`) accept optional `projectId` for scope-aware operations.
+The customize/override endpoints follow the same pattern for workflows (`:id`). CRUD endpoints (`POST`, `PUT`, `DELETE`) accept optional `projectId` for scope-aware operations.
 
 #### UI
 
-All five config pages (Roles, Tools, Skills, Personalities, Workflows) display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`.
+The four config pages (Roles, Tools, Skills, Workflows) display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`.
 
 ### Project assistant
 
@@ -365,14 +364,13 @@ Test-only hooks — `__setGitStatusFake` / `__clearGitStatusFake` / `__getGitSta
 
 Archived, non-goal, non-delegate sessions render a "Continue in New Session" button below their transcript. Clicking it creates a brand-new session that inherits the archived session's **settings** but none of its **runtime state**.
 
-**Why split settings from runtime state**: Users reopening an archived session usually want to resume the task, not resurrect the exact environment. The old worktree may be gone, the sandbox container may have been pruned, and the branch may be merged or abandoned. Continue-Archived gives them the same tools (model, role, personality, sandbox/worktree flags) in a fresh runtime, with the prior conversation available as context only.
+**Why split settings from runtime state**: Users reopening an archived session usually want to resume the task, not resurrect the exact environment. The old worktree may be gone, the sandbox container may have been pruned, and the branch may be merged or abandoned. Continue-Archived gives them the same tools (model, role, sandbox/worktree flags) in a fresh runtime, with the prior conversation available as context only.
 
 **What is copied:**
 
 - `projectId`
 - `modelProvider`, `modelId` (applied post-create via `setModel` + persisted immediately; worktree sessions set the model once the agent is ready)
 - `role` (resolved via `roleManager.getRole()`, so prompt/accessory/tool policies are re-applied fresh)
-- `personalities` (re-resolved through `personalityManager`)
 - `sandboxed` flag (new container state per normal per-project sandbox rules)
 - `worktreePath` presence — if the source had a worktree, the new session gets one via the standard pipeline (pool claim or `git worktree add`)
 
@@ -942,7 +940,7 @@ Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with 
 
 Each sandboxed project gets a single 256-bit token shared by all sessions in that project. Generated via `SandboxTokenStore.register(projectId)`, in-memory only (regenerated on restart). Sessions are added to the scope via `addSession(projectId, sessionId)`. Auth tries admin token first, then `SandboxTokenStore`.
 
-**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`, `/api/personalities`. Everything else blocked. `bash_bg` blocked at tool and API level.
+**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
@@ -1452,7 +1450,6 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
 | `workflows/*.yaml` | `WorkflowStore` | Built-in workflow templates |
-| `personalities/*.yaml` | `PersonalityStore` | Built-in personality definitions |
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 
@@ -1465,7 +1462,6 @@ Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs`. 
 | `project.yaml` | `ProjectConfigStore` | Project settings |
 | `roles/*.yaml` | `RoleStore` | Server/project role overrides |
 | `workflows/*.yaml` | `WorkflowStore` | Server/project workflow overrides |
-| `personalities/*.yaml` | `PersonalityStore` | Server/project personality overrides |
 | `tools/<group>/*.yaml` | `ToolManager` | Server/project tool overrides |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Server/project policy overrides |
 | `mcp.json` | `McpManager` | MCP server overrides |
