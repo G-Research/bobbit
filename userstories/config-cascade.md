@@ -1,8 +1,8 @@
 # Config Cascade — User Stories
 
-The config cascade resolves configuration items (roles, personalities, workflows, tools) across three layers: builtin → server → project. Most-specific wins. These stories cover scope switching, origin badges, inherited-item dimming, customize/revert flows, and downstream effects on sessions and goals.
+The config cascade resolves configuration items (roles, workflows, tools) across three layers: builtin → server → project. Most-specific wins. These stories cover scope switching, origin badges, inherited-item dimming, customize/revert flows, and downstream effects on sessions and goals.
 
-**Config pages using cascade:** Roles (`#/roles`), Personalities (`#/personalities`), Workflows (`#/workflows`), Tools (`#/tools`).
+**Config pages using cascade:** Roles (`#/roles`), Workflows (`#/workflows`), Tools (`#/tools`).
 
 **Key source files:** `src/app/config-scope.ts` (scope row, origin badges, customize/revert API helpers), `src/server/config-cascade.ts` (resolution logic), `src/server/builtin-config.ts` (builtin layer).
 
@@ -34,21 +34,21 @@ The config cascade resolves configuration items (roles, personalities, workflows
 
 ## CC-02: Scope switching shows correct items per scope
 
-**Preconditions:** Two projects registered (Project A and Project B). Project A has a custom personality "formal". Project B does not.
+**Preconditions:** Two projects registered (Project A and Project B). Project A has a custom role "alpha-coder". Project B does not.
 
 **Steps and expectations:**
-1. Navigate to `#/personalities`. The scope row appears (because projects exist).
+1. Navigate to `#/roles`. The scope row appears (because projects exist).
    - Scope row is a horizontal bar with "System" button + one button per project, each with a colored dot (`w-2 h-2 rounded-full`).
    - Buttons overflow horizontally with `overflow-x: auto; scrollbar-width: thin`.
 2. Click the Project A scope button.
-   - "formal" personality appears with a green badge (`config-origin-project`). It is not dimmed.
-   - Builtin personalities appear dimmed (inherited — `isInherited()` returns `true` for origin `"builtin"` or `"server"` in project scope).
+   - "alpha-coder" role appears with a green badge (`config-origin-project`). It is not dimmed.
+   - Builtin roles appear dimmed (inherited — `isInherited()` returns `true` for origin `"builtin"` or `"server"` in project scope).
 3. Click the Project B scope button.
-   - "formal" personality does NOT appear (it is not defined at builtin, server, or Project B level).
-   - No stale "formal" row lingers from Project A's view.
-   - Builtin personalities still appear, dimmed, with grey badges (`bg-muted text-muted-foreground`).
+   - "alpha-coder" role does NOT appear (it is not defined at builtin, server, or Project B level).
+   - No stale "alpha-coder" row lingers from Project A's view.
+   - Builtin roles still appear, dimmed, with grey badges (`bg-muted text-muted-foreground`).
 4. Click "System" scope button.
-   - Only builtin and server-level personalities appear.
+   - Only builtin and server-level roles appear.
    - No project-specific items from either project are shown.
 5. Rapidly click between Project A → System → Project B.
    - Each click fully replaces the item list. No flicker of stale data between transitions.
@@ -84,23 +84,23 @@ The config cascade resolves configuration items (roles, personalities, workflows
 
 ## CC-04: Customize an inherited item
 
-**Preconditions:** Project scope selected. A builtin personality "concise" is visible, dimmed, with a grey "builtin" badge. A "Customize" button is available on the row.
+**Preconditions:** Project scope selected. A builtin role "reviewer" is visible, dimmed, with a grey "builtin" badge. A "Customize" button is available on the row.
 
 **Steps and expectations:**
-1. Click "Customize" on the "concise" personality row.
-   - A `POST /api/personalities/concise/customize?scope=project&projectId=<id>` request fires.
+1. Click "Customize" on the "reviewer" role row.
+   - A `POST /api/roles/reviewer/customize?scope=project&projectId=<id>` request fires.
    - The item list reloads.
 2. After reload:
-   - "concise" row is no longer dimmed — it is now a local project override.
+   - "reviewer" row is no longer dimmed — it is now a local project override.
    - Origin badge changes from grey "builtin" (`bg-muted text-muted-foreground`) to green "project" (`config-origin-project`).
    - "overrides builtin" text appears next to the badge.
    - A "Revert" button (or equivalent undo action) appears on the row.
 3. Open the item for editing.
    - Form fields are pre-populated with the inherited values (copied from builtin).
-   - User can modify the prompt fragment, label, or other fields.
+   - User can modify the prompt template, label, or other fields.
 4. Save changes.
    - Green badge persists. Item remains non-dimmed.
-   - The modified values are served when this project's sessions resolve the "concise" personality.
+   - The modified values are served when this project's sessions resolve the "reviewer" role.
 
 **Coverage:** partial (config-cascade-api.spec.ts covers API; config-scope.spec.ts covers badge update)
 
@@ -108,20 +108,20 @@ The config cascade resolves configuration items (roles, personalities, workflows
 
 ## CC-05: Revert a project override
 
-**Preconditions:** Project scope selected. A project-level override of "concise" personality exists (green badge, not dimmed, "Revert" button visible).
+**Preconditions:** Project scope selected. A project-level override of "reviewer" role exists (green badge, not dimmed, "Revert" button visible).
 
 **Steps and expectations:**
-1. Click "Revert" on the "concise" personality row.
-   - A `DELETE /api/personalities/concise/override?scope=project&projectId=<id>` request fires.
+1. Click "Revert" on the "reviewer" role row.
+   - A `DELETE /api/roles/reviewer/override?scope=project&projectId=<id>` request fires.
    - The item list reloads.
 2. After reload:
-   - "concise" row reverts to dimmed (inherited) appearance.
+   - "reviewer" row reverts to dimmed (inherited) appearance.
    - Origin badge changes from green "project" (`config-origin-project`) back to grey "builtin" (`bg-muted text-muted-foreground`).
    - "overrides builtin" text disappears.
    - "Revert" button is gone. "Customize" button reappears.
 3. Switch to System scope and back to the project scope.
-   - "concise" still shows as inherited/dimmed — the revert persisted, it is not just a UI state change.
-4. The project-level override file on disk is deleted (`.bobbit/config/personalities/concise.yaml` is removed for this project).
+   - "reviewer" still shows as inherited/dimmed — the revert persisted, it is not just a UI state change.
+4. The project-level override file on disk is deleted (`.bobbit/config/roles/reviewer.yaml` is removed for this project).
 
 **Coverage:** partial (config-cascade-api.spec.ts covers API; config-scope.spec.ts covers badge revert)
 

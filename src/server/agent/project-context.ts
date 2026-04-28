@@ -7,7 +7,6 @@ import { TaskStore } from "./task-store.js";
 import { TeamStore } from "./team-store.js";
 import { StaffStore } from "./staff-store.js";
 import { RoleStore } from "./role-store.js";
-import { PersonalityStore } from "./personality-store.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { ToolManager } from "./tool-manager.js";
 import { ProjectConfigStore } from "./project-config-store.js";
@@ -49,7 +48,6 @@ export class ProjectContext {
 
   // Config stores
   readonly roleStore: RoleStore;
-  readonly personalityStore: PersonalityStore;
   readonly workflowStore: WorkflowStore;
   readonly toolManager: ToolManager;
   readonly projectConfigStore: ProjectConfigStore;
@@ -76,7 +74,6 @@ export class ProjectContext {
 
     // Instantiate config stores with project-scoped config directory
     this.roleStore = new RoleStore(this.configDir);
-    this.personalityStore = new PersonalityStore(this.configDir);
     this.workflowStore = new WorkflowStore(this.configDir);
     this.toolManager = new ToolManager(this.configDir);
     this.projectConfigStore = new ProjectConfigStore(this.configDir);

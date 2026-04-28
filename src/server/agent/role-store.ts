@@ -46,8 +46,6 @@ export interface Role {
 	promptTemplate: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory: string;
-	/** Default personalities applied when no explicit personalities are specified */
-	defaultPersonalities?: string[];
 	/** Per-tool or per-group grant policy overrides (tool name or MCP server prefix → policy) */
 	toolPolicies?: Record<string, GrantPolicy>;
 	createdAt: number;
@@ -61,7 +59,6 @@ function parseRole(data: Record<string, unknown>): Role | null {
 		label: (data.label as string) ?? (data.name as string),
 		promptTemplate: (data.promptTemplate as string) ?? "",
 		accessory: (data.accessory as string) ?? "none",
-		defaultPersonalities: Array.isArray(data.defaultPersonalities) ? data.defaultPersonalities : undefined,
 		toolPolicies: normalizeToolPolicies(data.toolPolicies as Record<string, unknown> | undefined),
 		createdAt: (data.createdAt as number) ?? 0,
 		updatedAt: (data.updatedAt as number) ?? 0,
@@ -74,9 +71,6 @@ function serializeRole(role: Role): Record<string, unknown> {
 		label: role.label,
 		accessory: role.accessory,
 	};
-	if (role.defaultPersonalities && role.defaultPersonalities.length > 0) {
-		obj.defaultPersonalities = role.defaultPersonalities;
-	}
 	if (role.toolPolicies && Object.keys(role.toolPolicies).length > 0) {
 		obj.toolPolicies = role.toolPolicies;
 	}

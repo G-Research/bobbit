@@ -6,8 +6,8 @@ Per-area notes on what user stories and contracts are covered by which test file
 
 User stories PI-01 through PI-25 (+ sub-stories) are defined in `userstories/prompt-interactions.md`.
 
-- **Unit fixture tests** — isolated component behavior: file attachments, drag-drop, voice input, model/thinking selectors, context bar, cost display, git status widget, background process pills, abort/focus management, personality selector. Pattern reference: `tests/message-editor-attach.spec.ts`.
-- **Browser E2E** — multi-component flows needing a real server: model persistence, context stats, personality selection. Pattern reference: `tests/e2e/ui/prompt-stats-e2e.spec.ts`.
+- **Unit fixture tests** — isolated component behavior: file attachments, drag-drop, voice input, model/thinking selectors, context bar, cost display, git status widget, background process pills, abort/focus management. Pattern reference: `tests/message-editor-attach.spec.ts`.
+- **Browser E2E** — multi-component flows needing a real server: model persistence, context stats. Pattern reference: `tests/e2e/ui/prompt-stats-e2e.spec.ts`.
 - **Spec-framework stories**:
   - `tests/e2e/ui/stories-streaming.spec.ts` — contracts CT-01 (streaming lifecycle) and CT-06 (focus follows intent), including ST-DEDUP-01 (reconnect-mid-stream dedup).
   - `tests/e2e/ui/stories-drafts.spec.ts` — contract CT-02 (draft preservation), 7 stories spanning all 8 contract variations, plus spec graph analysis tests.
@@ -17,7 +17,7 @@ User stories PI-01 through PI-25 (+ sub-stories) are defined in `userstories/pro
 
 User stories SB-00 through SB-37 (+ SB-00b) are defined in `userstories/sidebar.md`.
 
-- **Unit fixture tests** — rendering logic: session hierarchy, time formatting, unseen activity, goal badges, PR status, setup indicators, empty states, personality badges, sandbox indicators, role picker, staff rendering, mobile behavior, keyboard shortcuts.
+- **Unit fixture tests** — rendering logic: session hierarchy, time formatting, unseen activity, goal badges, PR status, setup indicators, empty states, sandbox indicators, role picker, staff rendering, mobile behavior, keyboard shortcuts.
 - **Browser E2E** — multi-component flows: project collapse, goal team navigation, session switching, session create/rename/terminate, search filtering, archived toggle, sidebar collapse, goal actions.
 - **Per-project Archived subsections** — `tests/e2e/ui/sidebar-archived-per-project.spec.ts` (4 tests): per-project rendering with no global block; per-project collapse state persists across reload; search surfaces archived items in the correct project subsection; global See Archived toggle hides all per-project subsections at once. Uses per-test isolation — `beforeEach`/`afterEach` spin up fresh projects + archived goals with unique suffixes; `localStorage` (`bobbit-show-archived`, `bobbit-archived-collapsed-projects`) is cleared via `addInitScript` before each `openApp` so retries pass `--repeat-each=5` cleanly.
 - **Mobile archived filtering + matched-term highlighting** — `tests/e2e/ui/sidebar-mobile-archived-search.spec.ts` (filter at 375×667, `<strong>` wrapper for matches) and `tests/render-highlighted-text.spec.ts` (empty query, single/multiple matches, case-insensitive, regex-special chars).

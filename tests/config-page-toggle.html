@@ -31,9 +31,6 @@ function getRouteFromHash() {
   if (staffEditMatch) return { view: "staff-edit", staffId: staffEditMatch[1] };
   if (hash === "#/staff") return { view: "staff" };
   if (hash === "#/skills") return { view: "skills" };
-  const personalityEditMatch = hash.match(/^#\/personalities\/([a-zA-Z0-9_-]+)$/);
-  if (personalityEditMatch) return { view: "personality-edit", personalityName: personalityEditMatch[1] };
-  if (hash === "#/personalities") return { view: "personalities" };
   if (hash === "#/settings") return { view: "settings" };
   return { view: "landing" };
 }
@@ -41,7 +38,7 @@ function getRouteFromHash() {
 // --- isConfigPageRoute() from src/app/routing.ts (fixed version) ---
 const CONFIG_VIEWS = new Set([
   "roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
-  "personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+  "skills", "settings", "staff", "staff-edit",
 ]);
 
 function isConfigPageRoute() {

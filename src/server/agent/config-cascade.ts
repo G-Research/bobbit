@@ -8,7 +8,6 @@
  */
 
 import type { Role, GrantPolicy } from "./role-store.js";
-import type { Personality } from "./personality-store.js";
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import type { BuiltinConfigProvider } from "./builtin-config.js";
@@ -38,7 +37,6 @@ export interface ResolvedPolicy {
  */
 export interface ServerStores {
 	getRoles(): Role[];
-	getPersonalities(): Personality[];
 	getWorkflows(): Workflow[];
 	getTools(): ToolInfo[];
 	getToolGroupPolicies(): Record<string, GrantPolicy>;
@@ -60,18 +58,6 @@ export class ConfigCascade {
 			projectId,
 			this.serverStores.getRoles(),
 			ctx => ctx.roleStore.getAllLocal(),
-		);
-	}
-
-	// ── Personalities ────────────────────────────────────────────
-
-	resolvePersonalities(projectId?: string): ResolvedItem<Personality>[] {
-		return this.resolve<Personality>(
-			this.builtins.getPersonalities(),
-			p => p.name,
-			projectId,
-			this.serverStores.getPersonalities(),
-			ctx => ctx.personalityStore.getAllLocal(),
 		);
 	}
 

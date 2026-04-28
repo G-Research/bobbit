@@ -197,15 +197,6 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await expect(s.page.getByText("Staff").first())
 			.toBeVisible({ timeout: 10_000 });
 
-		// Deep link: personalities
-		s.act();
-		await navigateToHash(s.page, "#/personalities");
-		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/personalities"), { timeout: 5_000 });
-		await expect(s.page.getByText("Personalities").first())
-			.toBeVisible({ timeout: 10_000 });
-
 		// Deep link: search
 		s.act();
 		await navigateToHash(s.page, "#/search?q=hello");

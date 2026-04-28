@@ -14,7 +14,6 @@ const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField:
 	propose_goal: { label: "Goal Proposal", type: "goal", titleField: "title", previewField: "spec" },
 	propose_role: { label: "Role Proposal", type: "role", titleField: "name", previewField: "prompt" },
 	propose_tool: { label: "Tool Proposal", type: "tool", titleField: "tool", previewField: "content" },
-	propose_personality: { label: "Personality Proposal", type: "personality", titleField: "name", previewField: "prompt_fragment" },
 	propose_staff: { label: "Staff Proposal", type: "staff", titleField: "name", previewField: "prompt" },
 	propose_setup: { label: "Setup Proposal", type: "setup", titleField: "action", previewField: "content" },
 	propose_workflow: { label: "Workflow Proposal", type: "workflow", titleField: "name", previewField: "description" },

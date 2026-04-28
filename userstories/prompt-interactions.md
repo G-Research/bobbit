@@ -551,26 +551,6 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 
 ---
 
-## PI-22: Personality selector
-
-**Preconditions:** Active session, at least one personality configured.
-
-**Steps and expectations:**
-1. Locate the personality selector in the context bar.
-   - Shows the current personality name or a default label.
-2. Click the personality selector.
-   - A dropdown or popover shows available personalities with names and descriptions.
-   - Current personality is highlighted or checked.
-3. Select a different personality.
-   - Selector updates to show the new personality.
-   - Next message sent uses the new personality's prompt fragment.
-4. Personality choice persists for the session (survives page reload).
-5. Selecting "None" or the default removes any personality override.
-
-**Coverage:** covered (personality-selector.spec.ts — chip toggle, multi-select, visual state)
-
----
-
 ## PI-23: Context bar stats overview
 
 **Preconditions:** Active session with messages exchanged.

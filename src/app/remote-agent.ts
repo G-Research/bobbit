@@ -12,7 +12,6 @@ const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	goal: "onGoalProposal",
 	role: "onRoleProposal",
 	tool: "onToolProposal",
-	personality: "onPersonalityProposal",
 	staff: "onStaffProposal",
 	setup: "onSetupProposal",
 	workflow: "onWorkflowProposal",
@@ -195,7 +194,6 @@ export class RemoteAgent {
 	onRoleProposal?: (proposal: { name: string; label: string; prompt: string; tools: string; accessory: string }) => void;
 	/** Callback fired when a tool proposal is detected in an assistant message. */
 	onToolProposal?: (proposal: { tool: string; action: string; content: string }) => void;
-	onPersonalityProposal?: (proposal: { name: string; label: string; description: string; prompt_fragment: string }) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }) => void;
 	/** Callback fired when a setup proposal is detected in an assistant message. */

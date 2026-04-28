@@ -20,7 +20,6 @@ function getConfigDir(): string {
 import { GOAL_ASSISTANT_PROMPT } from "./goal-assistant.js";
 import { ROLE_ASSISTANT_PROMPT } from "./role-assistant.js";
 import { TOOL_ASSISTANT_PROMPT } from "./tool-assistant.js";
-import { PERSONALITY_ASSISTANT_PROMPT } from "./personality-assistant.js";
 import { STAFF_ASSISTANT_PROMPT } from "./staff-assistant.js";
 import { SETUP_ASSISTANT_PROMPT } from "./setup-assistant.js";
 import { WORKFLOW_ASSISTANT_PROMPT } from "./workflow-assistant.js";
@@ -52,12 +51,6 @@ const FALLBACK_DEFAULTS: Record<string, AssistantDef> = {
 		title: "Tool Assistant",
 		promptTitle: "Tool Management Assistant",
 		prompt: TOOL_ASSISTANT_PROMPT,
-	},
-	personality: {
-		type: "personality",
-		title: "Personality Assistant",
-		promptTitle: "Personality Creation Assistant",
-		prompt: PERSONALITY_ASSISTANT_PROMPT,
 	},
 	staff: {
 		type: "staff",
