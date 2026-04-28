@@ -79,7 +79,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 8. Navigate directly to `#/search?q=hello`.
    - Search view loads with "hello" pre-filled as the search query.
 9. Navigate to an invalid hash (e.g. `#/nonexistent/route`).
-    - App falls through to the landing view. No crash, no blank screen.
+   - App falls through to the landing view. No crash, no blank screen.
 10. Navigate to `#/` or empty hash.
     - Landing view is shown (no session selected, no config page).
 

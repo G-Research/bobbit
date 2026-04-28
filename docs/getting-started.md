@@ -58,7 +58,6 @@ Here's a quick overview of the main ideas in Bobbit. Don't worry about memorisin
 
 - **Roles** — Roles define what an agent can do — its system prompt and which tools it has access to. Bobbit includes built-in roles like coder, reviewer, and tester. You can create custom ones too.
 
-
 - **Workflows** — Workflows define the stages a goal goes through, like design → implement → test → review. They enforce order and quality by requiring each stage to pass before the next begins. See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full details.
 
 - **Tools** — These are the capabilities available to agents — file editing, shell commands, web search, browser automation, and more. You can view and configure them in the Tools page.
