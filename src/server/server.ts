@@ -247,6 +247,19 @@ export function invalidateGitStatusCache(cwd: string, containerId?: string): voi
 	gitStatusCache.delete(gitStatusCacheKey(cwd, containerId, false));
 }
 
+/** Test-only: mark all cache entries for a cwd as TTL-expired without
+ *  sleeping. Used by `tests/e2e/git-status-caching.spec.ts` to deterministically
+ *  exercise the TTL re-run path without inflating wall-clock time. Sets
+ *  `resolvedAt` to a timestamp older than `GIT_STATUS_TTL_MS` so the next
+ *  call falls through to a fresh invocation. */
+export function __forceGitStatusCacheExpiry(cwd: string, containerId?: string): void {
+	const staleAt = Date.now() - GIT_STATUS_TTL_MS - 1000;
+	for (const untracked of [true, false]) {
+		const entry = gitStatusCache.get(gitStatusCacheKey(cwd, containerId, untracked));
+		if (entry && entry.result !== undefined) entry.resolvedAt = staleAt;
+	}
+}
+
 function evictExpired(now: number): void {
 	if (gitStatusCache.size <= 200) return;
 	for (const [k, v] of gitStatusCache) {

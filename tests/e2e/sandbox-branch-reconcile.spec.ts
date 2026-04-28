@@ -16,6 +16,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, gitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 let _tok: string;
 function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
@@ -49,13 +50,11 @@ test.describe("Sandbox branch reconciliation", () => {
 
 		try {
 			// Wait for the session to be ready (worktree sessions start as "preparing")
-			let session: any;
-			for (let i = 0; i < 20; i++) {
+			await pollUntil(async () => {
 				const res = await apiFetch(gateway.baseURL, `/api/sessions/${id}`);
-				session = await res.json();
-				if (session.status !== "preparing") break;
-				await new Promise(r => setTimeout(r, 500));
-			}
+				const s = await res.json();
+				return s.status !== "preparing" ? s : null;
+			}, { timeoutMs: 10_000, intervalMs: 500, label: `session ${id} leaves preparing` });
 
 			// GET /api/sessions/:id doesn't include branch — use sessionManager to read persisted data
 			const persisted = gateway.sessionManager.getPersistedSession(id);
@@ -98,13 +97,11 @@ test.describe("Sandbox branch reconciliation", () => {
 				const { id } = await createRes.json() as any;
 				try {
 					// Wait for session to finish setup
-					let session: any;
-					for (let i = 0; i < 30; i++) {
+					const session = await pollUntil(async () => {
 						const res = await apiFetch(gateway.baseURL, `/api/sessions/${id}`);
-						session = await res.json();
-						if (session.status !== "preparing") break;
-						await new Promise(r => setTimeout(r, 500));
-					}
+						const s = await res.json();
+						return s.status !== "preparing" ? s : null;
+					}, { timeoutMs: 15_000, intervalMs: 500, label: `sandbox session ${id} leaves preparing` });
 
 					// If the session finished successfully, branch should be reconciled
 					// to the sandboxBranch value
@@ -142,13 +139,11 @@ test.describe("Sandbox branch reconciliation", () => {
 
 		try {
 			// Wait for session to be ready
-			let session: any;
-			for (let i = 0; i < 20; i++) {
+			const session = await pollUntil(async () => {
 				const res = await apiFetch(gateway.baseURL, `/api/sessions/${id}`);
-				session = await res.json();
-				if (session.status !== "preparing") break;
-				await new Promise(r => setTimeout(r, 500));
-			}
+				const s = await res.json();
+				return s.status !== "preparing" ? s : null;
+			}, { timeoutMs: 10_000, intervalMs: 500, label: `session ${id} leaves preparing` });
 
 			// Branch should be the auto-generated one (not reconciled to anything else)
 			const persisted = gateway.sessionManager.getPersistedSession(id);

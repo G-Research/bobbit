@@ -1,10 +1,7 @@
 {
 	"continue-archived.spec.ts": 1,
-	"git-status-caching.spec.ts": 3,
-	"goal-archive-branch-cleanup.spec.ts": 3,
+	"git-status-caching.spec.ts": 1,
 	"mcp-tool-permission.spec.ts": 1,
-	"sandbox-branch-reconcile.spec.ts": 3,
-	"sandbox-delegate.spec.ts": 3,
 	"thinking-level.spec.ts": 1,
 	"ui/review-annotations-persistence.spec.ts": 1
 }

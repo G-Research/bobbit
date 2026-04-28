@@ -13,6 +13,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { nonGitCwd, apiFetch } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 test.describe("Sandbox Delegate", () => {
 	async function setSandboxMode(mode: "docker" | "none") {
@@ -71,12 +72,13 @@ test.describe("Sandbox Delegate", () => {
 			const delegateId = delegateData.id;
 
 			try {
-				await new Promise(r => setTimeout(r, 500));
-				const meta = await getSessionMeta(delegateId);
-				expect(meta).toBeDefined();
-				expect(meta!.cwd).toBe(hostCwd);
+				const meta = await pollUntil(async () => {
+					const m = await getSessionMeta(delegateId);
+					return m ?? null;
+				}, { timeoutMs: 5_000, intervalMs: 100, label: `delegate ${delegateId} meta available` });
+				expect(meta.cwd).toBe(hostCwd);
 				// Non-sandboxed parent → delegate should not be sandboxed
-				expect(meta!.sandboxed).toBeFalsy();
+				expect(meta.sandboxed).toBeFalsy();
 			} finally {
 				await deleteSession(delegateId);
 			}
@@ -109,12 +111,13 @@ test.describe("Sandbox Delegate", () => {
 			const delegateId = delegateData.id;
 
 			try {
-				await new Promise(r => setTimeout(r, 500));
-				const meta = await getSessionMeta(delegateId);
-				expect(meta).toBeDefined();
-				expect(meta!.cwd).toBe(hostCwd);
+				const meta = await pollUntil(async () => {
+					const m = await getSessionMeta(delegateId);
+					return m ?? null;
+				}, { timeoutMs: 5_000, intervalMs: 100, label: `delegate ${delegateId} meta available` });
+				expect(meta.cwd).toBe(hostCwd);
 				// Parent is NOT sandboxed, so delegate should not be sandboxed either
-				expect(meta!.sandboxed).toBeFalsy();
+				expect(meta.sandboxed).toBeFalsy();
 			} finally {
 				await deleteSession(delegateId);
 			}
@@ -142,10 +145,11 @@ test.describe("Sandbox Delegate", () => {
 
 			const delegateId = delegateData.id;
 			try {
-				await new Promise(r => setTimeout(r, 500));
-				const meta = await getSessionMeta(delegateId);
-				expect(meta).toBeDefined();
-				expect(meta!.delegateOf).toBe(parentId);
+				const meta = await pollUntil(async () => {
+					const m = await getSessionMeta(delegateId);
+					return m ?? null;
+				}, { timeoutMs: 5_000, intervalMs: 100, label: `delegate ${delegateId} meta available` });
+				expect(meta.delegateOf).toBe(parentId);
 			} finally {
 				await deleteSession(delegateId);
 			}
