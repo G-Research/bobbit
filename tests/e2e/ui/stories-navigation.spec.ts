@@ -360,9 +360,12 @@ test.describe("CT-13: URL routing and navigation", () => {
 			{ timeout: 15_000 },
 		).toBe(true);
 
+		// Set both ctrlKey and metaKey for ctrlOrMeta shortcuts so the
+		// platform-aware match in shortcut-registry works on macOS (metaKey)
+		// and Linux/Windows (ctrlKey).
 		const dispatchKey = async (key: string, code: string, ctrlKey = true) => {
 			await s.page.evaluate(({ key, code, ctrlKey }) => {
-				const event = new KeyboardEvent("keydown", { key, code, ctrlKey, bubbles: true, cancelable: true });
+				const event = new KeyboardEvent("keydown", { key, code, ctrlKey, metaKey: ctrlKey, bubbles: true, cancelable: true });
 				window.dispatchEvent(event);
 			}, { key, code, ctrlKey });
 		};

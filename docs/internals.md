@@ -577,6 +577,55 @@ This happens transparently in `normalizeGrantPolicy()` — existing role YAML an
 
 ---
 
+## Per-role model & thinking-level overrides
+
+Roles can pin a specific model and reasoning level for any session that runs under them, independent of the global defaults. This solves the common case of "my `code-reviewer` role should always run on opus, but my `coder` role can stay on the cheaper default" — without forcing users to change `default.sessionModel` or remember to override the model manually each time a verification step spawns.
+
+This is the third role-level override, alongside `toolPolicies` (which tools the role can use) and `defaultPersonalities` (how the role communicates). All three cascade the same way and are edited from the same role-manager page.
+
+> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) — file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`.
+
+### Role fields
+
+Two optional fields on the `Role` interface in `role-store.ts`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `model` | `"<provider>/<modelId>"` | Same shape as `default.sessionModel` (e.g. `anthropic/claude-opus-4-1`). Empty/missing = inherit. |
+| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` | Same value space as the global thinking selector. Empty/missing = inherit. |
+
+`parseRole` and `serializeRole` round-trip both fields and omit them from YAML when unset ("absent" and "empty string" are equivalent on the wire). Malformed values (e.g. `model: "no-slash"`, `thinkingLevel: "weird"`) are silently dropped at parse time so a typo never breaks role loading; the API layer rejects them with 400 so the UI surfaces the error.
+
+### Cascade
+
+The generic `resolve<T>()` machinery in `config-cascade.ts` handles these fields automatically — no changes were needed in the cascade itself. Project-level role YAML > server-level > builtin, by whole-record replacement (not field-level merge). This is the same precedence as `toolPolicies` and is the documented contract: a project role with `model` set replaces the entire server role record, including its `thinkingLevel` if any.
+
+### Precedence at session start
+
+When a session starts, the model and thinking level are resolved in this order (highest wins):
+
+1. **Explicit per-session override** — the user picking a model in the composer mid-run, or callers passing `skipAutoModel: true` after pre-binding (e.g. delegate sessions with an explicit model arg).
+2. **Role override** — `role.model` / `role.thinkingLevel` from the resolved cascade.
+3. **Global defaults** — `default.sessionModel` / `default.sessionThinkingLevel` (or the AI-Gateway best-ranked fallback when no pref is set).
+
+Layers 2 and 3 live in `tryAutoSelectModel` and `tryApplyDefaultThinkingLevel` in `session-manager.ts`. The role layer was added as a new step 0 inside both functions and binds via the `applyModelString` helper exported from `review-model-override.ts` — the same retry-and-verify path `applyReviewModelOverrides` uses, but reading a literal `<provider>/<modelId>` string instead of a prefs key.
+
+**Failure handling.** Model binding failures throw — the session start fails loudly with the same red "Unavailable" pattern you see in Settings → Models. Thinking-level failures only `console.warn` and fall through to the global default, matching the existing tolerance for level mismatches.
+
+### Verification harness integration
+
+The verification harness spawns reviewer, QA, and sub-session agents for gate steps, each tied to a specific role. At all three call sites in `verification-harness.ts`, the harness now resolves the role through the cascade and prefers `role.model` / `role.thinkingLevel` over `default.reviewModel` / `default.reviewThinkingLevel`. When the role has no override, the existing `applyReviewModelOverrides` path runs unchanged.
+
+This is what makes "my `code-reviewer` role always runs on opus" work without changing `default.reviewModel` and without leaking that choice to every other reviewer step.
+
+**Naming model is explicitly unaffected** — `default.namingModel` and `pickFallbackAigwNamingModel` still drive title generation regardless of role.
+
+### UI
+
+The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to **Prompt** and **Tool Access**, labelled **Model**. It reuses the model picker and thinking dropdown components from the settings page, with a leading "(use default)" option that maps to the empty string → omitted from YAML. The standard origin badge / Customize / Revert flow operates on the whole role record, so touching either field flips builtin→overridden and Revert clears them along with any other overrides.
+
+---
+
 ## Semantic search
 
 Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
@@ -822,6 +871,93 @@ curl -sk -H "Authorization: Bearer $TOKEN" \
   -X POST "$GW/api/sessions/$SID/activate-skill" \
   -d '{"name":"compact"}' | jq -r .expanded | head -10
 ```
+
+---
+
+## Image generation routing
+
+Bobbit ships a `generate_image` tool that fans out to multiple image providers (OpenAI Images / DALL-E, Google Gemini Flash Image, Google Imagen 4, OpenAI-Codex driver models) behind a single contract. The selected model is **per-session, not per-call** — the agent only specifies `model=...` when the user explicitly names a non-default provider; otherwise the gateway resolves to whatever the user picked in the footer image-model picker. This mirrors how the chat session model works and avoids the agent guessing at provider availability on every call.
+
+### Per-session state
+
+`SessionStore` rows carry the selected image model as **two separate optional fields**: `imageModelProvider` (e.g. `"openai"`) and `imageModelId` (e.g. `"gpt-image-2"`). They are set by the user via the footer picker (see `set_image_model` below) and read by the gateway when the agent calls `generate_image` without an explicit `model` argument. Splitting provider and id avoids parsing a `provider/id` string at every read — the WS handler validated both halves against the registry once on write, and downstream code consumes the parsed pair directly.
+
+Key resolver: `SessionManager.getImageModelForSession(sessionId)` — returns `{ provider, id }` for the session if both fields are set, otherwise falls back to the system-default preference at key **`default.imageModel`** (full `provider/id` string, e.g. `"openai/gpt-image-2"`). If the preference is unset, `defaultImageModelPref()` returns the built-in default. There is no 503 "image generation unavailable" path on `POST /api/image-generation/generate` — if the resolved model has no credentials, the provider helper throws and the endpoint returns `500 { error: "<provider message>" }`.
+
+### WebSocket: `set_image_model`
+
+The footer picker mutates session state via the WS message:
+
+```json
+{ "type": "set_image_model", "provider": "openai", "modelId": "gpt-image-2" }
+```
+
+Handled in `src/server/ws/handler.ts`. The session ID is connection-derived — the server reads it from the WS connection context, not from the message payload — so the client never sends it. The handler validates `provider`/`modelId` against `getAvailableImageModels()` (registry + credential check). Unknown values reply with an error envelope `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and **do not** mutate session state — invalid values cannot wedge a session into an unrenderable picker state. On a valid value, the handler persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state.
+
+A confirmation snapshot is broadcast back as a normal session-update so all attached clients re-render the footer in sync.
+
+### Tool resolution & routing
+
+1. Agent calls `generate_image` (built-in tool, `defaults/tools/images/generate_image.yaml`).
+2. Tool extension (`defaults/tools/images/extension.ts`) reads `.bobbit/state/gateway-url` + `.bobbit/state/token` and POSTs to `/api/image-generation/generate` with the prompt, optional `model` override, `n`, `imageSize`, and the session ID.
+3. Server endpoint (`src/server/server.ts::handleApiRoute` for `POST /api/image-generation/generate`):
+   - Validates `prompt` length (≤8192 chars) and `n` range (`[1, 4]`).
+   - If `model` is omitted, looks up `getImageModelForSession(sessionId)`.
+   - Canonicalises both the request `model` and the session model through the same helper before comparing — prevents `OpenAI/GPT-Image-2` from being treated as a different model than `openai/gpt-image-2`.
+   - **Override resolution.** A request `model` is honoured when (a) it canonicalises equal to the session's selected model, (b) there is no `sessionId`, **or** (c) `imageModelMentionedInText` finds the request model id in the user's most-recent prompt text. Otherwise the request `model` is silently ignored and the session's selected model is used. This last-prompt check is why an explicit override sometimes "works" and sometimes doesn't — it must be named in the user's text, not just sent in the API body.
+   - If a request `model` is supplied that doesn't match any registered image model, the canonical helper returns `undefined` and the request silently falls back to the session's selected model. There is no 4xx response for unknown image models on this endpoint.
+   - Dispatches to one of `generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, or `generateOpenAICodexImage` in `src/server/agent/image-generation.ts`.
+4. The provider helper makes the upstream HTTP call and returns `{ images, format }`. Any error thrown from a helper is caught by the endpoint and surfaced as `500 { error: err?.message || "Image generation failed" }`. Helpers throw arbitrary `new Error(...)` strings (missing credentials, upstream HTTP failures, the Codex `n=1` clamp, the 25 MB remote-image cap, etc.) — there is no required prefix format, and the API surface never emits `502` or `503`.
+
+### OpenAI-Codex driver model fallback chain
+
+`generateOpenAICodexImage` runs through the AI Gateway and needs a chat-completion-capable model to drive image-tool calls. To avoid hard-coding a single model id (which goes stale every time OpenAI ships a new tier), `getCodexImageDriverModel()` walks a fallback chain mirroring `pickFallbackAigwNamingModel`:
+
+1. Environment variable `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` (explicit override — deliberately env-only, not a stored preference, so an operator can swap the driver without touching prefs).
+2. `gpt-5.5`
+3. `gpt-5`
+4. `gpt-4o`
+
+First non-empty entry wins; if none are set, the function throws `Error("no codex image driver model available")` which surfaces as a `500` to the agent rather than a confusing upstream `404`.
+
+The driver also clamps `n` to `1` — multi-image requests reject up-front with `Error("openai-codex image driver supports n=1 only")` instead of silently returning one image, since the upstream API does not support batch generation through this path.
+
+### Remote image size cap
+
+`imageFromUrl()` (used when prompts reference an existing image URL) streams the response with a hard cap of 25 MiB (`MAX_IMAGE_BYTES`). Crossing the cap aborts the controller and throws `Error("remote image exceeds 25 MB cap")` — a memory-exhaustion guard that prevents a malicious prompt from forcing the gateway to buffer an arbitrarily large remote payload.
+
+### `outputPath` containment
+
+When the agent passes `outputPath` to `generate_image`, the tool extension resolves it relative to the session worktree and rejects any path that escapes the worktree:
+
+```ts
+const resolved = path.resolve(process.cwd(), basePath);
+const rel = path.relative(process.cwd(), resolved);
+if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  throw new Error("outputPath escapes worktree");
+}
+```
+
+This is a hard security check — `outputPath` is model-controlled, and without containment a prompt-injection could write files outside the worktree (or to absolute paths like `/etc/…`).
+
+### Restoring image tools on dormant sessions
+
+The image tool group is included in `session-setup.ts::resolveToolActivation` for sessions that had it active when archived. `restoreSession()` round-trips the same activation list, so a session created before image tools existed never grows the tool group implicitly, and a session that did have it keeps it across restart.
+
+Round-tripping the same activation list is the user-friendly default — at session-creation the user explicitly enabled/disabled tool groups, and we grandfather that choice rather than re-deriving from the latest tool-group policy (which may have changed between then and the restore). See [docs/debugging.md — Image generation failure](debugging.md) when the tool is missing on a session that should have it.
+
+### Key files
+
+- `src/server/agent/image-generation.ts` — provider helpers (`generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, `generateOpenAICodexImage`), `imageFromUrl`, `getCodexImageDriverModel`, `getAvailableImageModels`.
+- `src/server/agent/session-manager.ts::getImageModelForSession` — per-session resolver.
+- `src/server/ws/handler.ts` — `set_image_model` handler.
+- `src/server/server.ts` — `GET /api/image-models`, `POST /api/image-generation/generate` routes.
+- `defaults/tools/images/{generate_image.yaml,extension.ts}` — tool surface.
+- `src/ui/dialogs/ImageModelSelector.ts` — footer picker.
+- `src/app/settings-page.ts::renderImageModelRow` — Settings → Models → Image row + Test button.
+- `defaults/system-prompt.md` — agent-facing routing rules (DALL-E vs `openai/gpt-image-2`, Google ID table).
+
+See also: [docs/rest-api.md — Image generation](rest-api.md#image-generation) for the wire-level contract; AGENTS.md debugging index for symptom-based pointers.
 
 ---
 

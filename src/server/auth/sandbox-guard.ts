@@ -22,6 +22,9 @@ export function isSandboxAllowed(
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.
 	if (pathname === "/api/preview" && m === "POST") return true;
+	// Image generation: handler enforces session-scope ownership against sandboxScope
+	// (rejects with 403 if body.sessionId is missing or outside scope).
+	if (pathname === "/api/image-generation/generate" && m === "POST") return true;
 
 	// ── Session creation (delegates) ──────────────────────────────────
 	// POST /api/sessions — server.ts forces sandboxed:true for sandbox tokens

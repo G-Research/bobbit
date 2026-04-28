@@ -14,8 +14,10 @@ export class RoleManager {
 		promptTemplate: string;
 		toolPolicies?: Record<string, import("./role-store.js").GrantPolicy>;
 		accessory?: string;
+		model?: string;
+		thinkingLevel?: string;
 	}): Role {
-		const { name, label, promptTemplate, toolPolicies, accessory = "none" } = opts;
+		const { name, label, promptTemplate, toolPolicies, accessory = "none", model, thinkingLevel } = opts;
 
 		if (!name || typeof name !== "string") {
 			throw new Error("Missing role name");
@@ -38,6 +40,8 @@ export class RoleManager {
 			promptTemplate: promptTemplate || "",
 			accessory,
 			toolPolicies,
+			model,
+			thinkingLevel,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -64,6 +68,8 @@ export class RoleManager {
 		promptTemplate?: string;
 		accessory?: string;
 		toolPolicies?: Record<string, import("./role-store.js").GrantPolicy>;
+		model?: string;
+		thinkingLevel?: string;
 	}): boolean {
 		return this.store.update(name, updates);
 	}
