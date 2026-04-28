@@ -14,7 +14,6 @@ import { generateTeamName } from "./team-names.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
-import type { PersonalityManager } from "./personality-manager.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
@@ -115,8 +114,6 @@ export interface TeamManagerConfig {
 	roleStore?: RoleStore;
 	/** @deprecated Gate store — resolve per-goal via projectContextManager instead. */
 	gateStore?: GateStore;
-	/** Personality manager for resolving personality names to prompt fragments */
-	personalityManager?: PersonalityManager;
 	/** Broadcast a WS event to all clients viewing a goal */
 	broadcastToGoal?: (goalId: string, event: any) => void;
 	/** Project context manager for per-project store resolution */
@@ -796,7 +793,7 @@ export class TeamManager {
 		goalId: string,
 		role: string,
 		task: string,
-		opts?: { personalities?: string[]; workflowGateId?: string; inputGateIds?: string[] },
+		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
 		const roleStore = this.config.roleStore;
 		const storedRoleDef = roleStore?.get(role);
@@ -888,13 +885,6 @@ export class TeamManager {
 				.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
 				.replace(/\{\{AGENT_ID\}\}/g, agentId);
 
-			// Resolve personalities: explicit > role defaults
-			const personalityNames = opts?.personalities ?? storedRoleDef.defaultPersonalities;
-			let resolvedPersonalities: Array<{ label: string; promptFragment: string }> | undefined;
-			if (personalityNames && personalityNames.length > 0 && this.config.personalityManager) {
-				resolvedPersonalities = this.config.personalityManager.resolvePersonalities(personalityNames);
-			}
-
 			// Build workflow dependency context for the system prompt
 			let workflowContext: string | undefined;
 			const wfGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
@@ -912,7 +902,7 @@ export class TeamManager {
 				goalId,
 				undefined,
 				{
-					rolePrompt, roleName: role, personalities: resolvedPersonalities, personalityNames, workflowContext, sandboxed: memberSandboxed,
+					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
 					// Pass branch info so applySandboxWiring creates the worktree inside the container
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName && goal.branch ? `origin/${goal.branch}` : undefined,

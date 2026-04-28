@@ -12,7 +12,7 @@ import path from "node:path";
 import { stringify, parse } from "yaml";
 
 export interface YamlStoreOptions<T> {
-	/** Subdirectory name under configDir (e.g. "roles", "personalities") */
+	/** Subdirectory name under configDir (e.g. "roles", "workflows") */
 	subdir: string;
 	/** Extract the unique key from an item */
 	keyFn: (item: T) => string;

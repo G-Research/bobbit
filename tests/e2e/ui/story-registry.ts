@@ -43,13 +43,6 @@ export const STORY_CT02_E = defineStory({
 	covers: ["goal-dashboard-detour"],
 });
 
-export const STORY_CT02_F = defineStory({
-	id: "CT-02-f",
-	title: "Draft survives personality change",
-	contracts: [CT_02],
-	covers: ["personality-change"],
-});
-
 export const STORY_CT02_G = defineStory({
 	id: "CT-02-g",
 	title: "Draft survives reconnect after disconnect",

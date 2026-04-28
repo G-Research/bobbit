@@ -2,13 +2,13 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "personalities" | "personality-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
 
 export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
 
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; personalityName?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
+export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
@@ -54,13 +54,6 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (hash === "#/skills") {
 		return { view: "skills" };
 	}
-	const personalityEditMatch = hash.match(/^#\/personalities\/([a-zA-Z0-9_-]+)$/);
-	if (personalityEditMatch) {
-		return { view: "personality-edit", personalityName: personalityEditMatch[1] };
-	}
-	if (hash === "#/personalities") {
-		return { view: "personalities" };
-	}
 	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z0-9-]+))?(?:\/([a-z]+))?$/);
 	if (settingsMatch) {
 		const first = settingsMatch[1] as string | undefined;
@@ -104,10 +97,6 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = "#/staff";
 	} else if (view === "skills") {
 		newHash = "#/skills";
-	} else if (view === "personality-edit" && id) {
-		newHash = `#/personalities/${id}`;
-	} else if (view === "personalities") {
-		newHash = "#/personalities";
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
 	} else if (view === "settings") {
@@ -139,7 +128,7 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 /** Config page route views (not landing, session, or goal-dashboard). */
 const CONFIG_VIEWS: Set<RouteView> = new Set([
 	"roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
-	"personalities", "personality-edit", "skills", "settings", "staff", "staff-edit",
+	"skills", "settings", "staff", "staff-edit",
 	"search",
 ]);
 

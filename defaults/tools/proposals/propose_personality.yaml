@@ -1,9 +1,0 @@
-name: propose_personality
-description: "Submit a personality proposal for user review"
-summary: "Propose a custom personality with name, label, and prompt fragment."
-provider:
-  type: bobbit-extension
-  extension: extension.ts
-group: Proposals
-docs: >-
-  Parameters: name (required), label (required), prompt_fragment (required), description.

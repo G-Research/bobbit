@@ -80,7 +80,7 @@ describe("Spec graph analysis (CT-02 drafts)", () => {
 			survives: [
 				"rapid-session-switch", "settings-detour", "model-change",
 				"page-reload", "goal-dashboard-detour", "attachment-added",
-				"personality-change", "reconnect-after-disconnect",
+				"reconnect-after-disconnect",
 			],
 			regions: ["editor", "context_bar"],
 			depends_on: ["CT-05"],
@@ -98,11 +98,10 @@ describe("Spec graph analysis (CT-02 drafts)", () => {
 		const covered = ct02Report.variations.filter(v => v.coveredBy !== null);
 		assert.equal(covered.length, 5);
 
-		// 3 gaps
+		// 2 gaps
 		const gaps = ct02Report.variations.filter(v => v.coveredBy === null);
 		assert.deepEqual(gaps.map(g => g.name).sort(), [
 			"goal-dashboard-detour",
-			"personality-change",
 			"reconnect-after-disconnect",
 		]);
 	});

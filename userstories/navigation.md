@@ -76,13 +76,11 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
    - Workflows list page loads.
 7. Navigate directly to `#/staff`.
    - Staff list page loads.
-8. Navigate directly to `#/personalities`.
-   - Personalities list page loads.
-9. Navigate directly to `#/search?q=hello`.
+8. Navigate directly to `#/search?q=hello`.
    - Search view loads with "hello" pre-filled as the search query.
-10. Navigate to an invalid hash (e.g. `#/nonexistent/route`).
-    - App falls through to the landing view. No crash, no blank screen.
-11. Navigate to `#/` or empty hash.
+9. Navigate to an invalid hash (e.g. `#/nonexistent/route`).
+   - App falls through to the landing view. No crash, no blank screen.
+10. Navigate to `#/` or empty hash.
     - Landing view is shown (no session selected, no config page).
 
 **Coverage:** covered (navigation.spec.ts — deep-link to session view, navigate to goal dashboard via deep link; page-title.spec.ts)

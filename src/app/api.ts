@@ -1255,83 +1255,6 @@ export async function wakeStaffAgent(id: string, prompt?: string): Promise<{ ses
 
 
 // ============================================================================
-// PERSONALITY API
-// ============================================================================
-
-export interface PersonalityData {
-	name: string;
-	label: string;
-	description: string;
-	promptFragment: string;
-	createdAt: number;
-	updatedAt: number;
-}
-
-export async function fetchPersonalities(): Promise<PersonalityData[]> {
-	try {
-		const res = await gatewayFetch("/api/personalities");
-		if (!res.ok) throw new Error(`Failed to fetch personalities: ${res.status}`);
-		const data = await res.json();
-		return data.personalities || [];
-	} catch (err) {
-		console.error("[personality-api] fetchPersonalities failed:", err);
-		return [];
-	}
-}
-
-export async function createPersonality(data: { name: string; label: string; description?: string; promptFragment: string }): Promise<PersonalityData | null> {
-	try {
-		const res = await gatewayFetch("/api/personalities", {
-			method: "POST",
-			body: JSON.stringify(data),
-		});
-		if (!res.ok) {
-			const resp = await res.json().catch(() => ({}));
-			throw new Error(resp.error || `Failed: ${res.status}`);
-		}
-		return await res.json();
-	} catch (err) {
-		showConnectionError("Failed to create personality", err instanceof Error ? err.message : String(err));
-		return null;
-	}
-}
-
-export async function updatePersonality(name: string, updates: Partial<Pick<PersonalityData, "label" | "description" | "promptFragment">>, projectId?: string): Promise<boolean> {
-	try {
-		const url = projectId ? `/api/personalities/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/personalities/${encodeURIComponent(name)}`;
-		const res = await gatewayFetch(url, {
-			method: "PUT",
-			body: JSON.stringify(updates),
-		});
-		if (!res.ok) {
-			const resp = await res.json().catch(() => ({}));
-			throw new Error(resp.error || `Failed: ${res.status}`);
-		}
-		return true;
-	} catch (err) {
-		showConnectionError("Failed to update personality", err instanceof Error ? err.message : String(err));
-		return false;
-	}
-}
-
-export async function deletePersonality(name: string, projectId?: string): Promise<boolean> {
-	try {
-		const url = projectId ? `/api/personalities/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/personalities/${encodeURIComponent(name)}`;
-		const res = await gatewayFetch(url, {
-			method: "DELETE",
-		});
-		if (!res.ok) {
-			const resp = await res.json().catch(() => ({}));
-			throw new Error(resp.error || `Failed: ${res.status}`);
-		}
-		return true;
-	} catch (err) {
-		showConnectionError("Failed to delete personality", err instanceof Error ? err.message : String(err));
-		return false;
-	}
-}
-
-// ============================================================================
 // ROLE API
 // ============================================================================
 
@@ -1341,6 +1264,10 @@ export interface RoleData {
 	promptTemplate: string;
 	toolPolicies?: Record<string, string>;
 	accessory: string;
+	/** "<provider>/<modelId>" — overrides default.sessionModel / default.reviewModel for sessions running as this role. */
+	model?: string;
+	/** "off" | "minimal" | "low" | "medium" | "high" — overrides default.sessionThinkingLevel / default.reviewThinkingLevel. */
+	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -1502,7 +1429,7 @@ export async function createRole(role: {
 	}
 }
 
-export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory">>, projectId?: string): Promise<boolean> {
+export async function updateRole(name: string, updates: Partial<Pick<RoleData, "label" | "promptTemplate" | "toolPolicies" | "accessory" | "model" | "thinkingLevel">>, projectId?: string): Promise<boolean> {
 	try {
 		const url = projectId ? `/api/roles/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}` : `/api/roles/${encodeURIComponent(name)}`;
 		const res = await gatewayFetch(url, {

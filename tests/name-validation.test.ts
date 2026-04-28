@@ -1,5 +1,5 @@
 /**
- * Unit tests for RoleManager and PersonalityManager name validation,
+ * Unit tests for RoleManager name validation,
  * duplicate detection, missing fields, and defaults.
  * Uses in-memory mock stores — no disk I/O.
  *
@@ -12,9 +12,7 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { RoleManager } from "../src/server/agent/role-manager.ts";
-import { PersonalityManager } from "../src/server/agent/personality-manager.ts";
 import type { Role } from "../src/server/agent/role-store.ts";
-import type { Personality } from "../src/server/agent/personality-store.ts";
 
 // Patch createRole to wrap the original but suppress the generateRoleNames call.
 // We save the original, then replace it with a version that does validation + store.put()
@@ -42,22 +40,6 @@ class MockRoleStore {
 	reload(): void { /* no-op */ }
 	update(name: string, updates: Partial<Omit<Role, "name" | "createdAt">>): boolean {
 		const existing = this.roles.get(name);
-		if (!existing) return false;
-		Object.assign(existing, updates, { updatedAt: Date.now() });
-		return true;
-	}
-}
-
-class MockPersonalityStore {
-	private personalities = new Map<string, Personality>();
-	put(p: Personality): void { this.personalities.set(p.name, p); }
-	get(name: string): Personality | undefined { return this.personalities.get(name); }
-	getLocal(name: string): Personality | undefined { return this.personalities.get(name); }
-	remove(name: string): void { this.personalities.delete(name); }
-	getAll(): Personality[] { return Array.from(this.personalities.values()); }
-	reload(): void { /* no-op */ }
-	update(name: string, updates: Partial<Omit<Personality, "name" | "createdAt">>): boolean {
-		const existing = this.personalities.get(name);
 		if (!existing) return false;
 		Object.assign(existing, updates, { updatedAt: Date.now() });
 		return true;
@@ -184,125 +166,6 @@ describe("RoleManager", () => {
 
 		it("updateRole returns false for nonexistent", () => {
 			assert.equal(mgr.updateRole("nope", { label: "X" }), false);
-		});
-	});
-});
-
-// ---------------------------------------------------------------------------
-// PersonalityManager tests
-// ---------------------------------------------------------------------------
-
-describe("PersonalityManager", () => {
-	let store: MockPersonalityStore;
-	let mgr: PersonalityManager;
-
-	beforeEach(() => {
-		store = new MockPersonalityStore();
-		mgr = new PersonalityManager(store as any);
-	});
-
-	describe("name validation", () => {
-		it("accepts single-character name 'a'", () => {
-			const p = mgr.createPersonality({ name: "a", label: "A", description: "", promptFragment: "" });
-			assert.equal(p.name, "a");
-		});
-
-		it("accepts alphanumeric-hyphens 'my-personality-123'", () => {
-			const p = mgr.createPersonality({ name: "my-personality-123", label: "My P", description: "", promptFragment: "" });
-			assert.equal(p.name, "my-personality-123");
-		});
-
-		it("rejects uppercase 'TestPersonality'", () => {
-			assert.throws(() => {
-				mgr.createPersonality({ name: "TestPersonality", label: "Test", description: "", promptFragment: "" });
-			}, /lowercase/);
-		});
-
-		it("rejects spaces 'test personality'", () => {
-			assert.throws(() => {
-				mgr.createPersonality({ name: "test personality", label: "Test", description: "", promptFragment: "" });
-			}, /lowercase/);
-		});
-
-		it("rejects empty string", () => {
-			assert.throws(() => {
-				mgr.createPersonality({ name: "", label: "Test", description: "", promptFragment: "" });
-			}, /Missing personality name/);
-		});
-	});
-
-	describe("duplicate detection", () => {
-		it("rejects duplicate personality name", () => {
-			mgr.createPersonality({ name: "test", label: "First", description: "", promptFragment: "" });
-			assert.throws(() => {
-				mgr.createPersonality({ name: "test", label: "Second", description: "", promptFragment: "" });
-			}, /already exists/);
-		});
-	});
-
-	describe("missing fields", () => {
-		it("rejects missing label", () => {
-			assert.throws(() => {
-				mgr.createPersonality({ name: "test", label: "", description: "", promptFragment: "" });
-			}, /Missing personality label/);
-		});
-	});
-
-	describe("defaults", () => {
-		it("defaults description to empty string", () => {
-			const p = mgr.createPersonality({ name: "test", label: "Test", description: "", promptFragment: "frag" });
-			assert.equal(p.description, "");
-		});
-
-		it("defaults promptFragment to empty string", () => {
-			const p = mgr.createPersonality({ name: "test", label: "Test", description: "desc", promptFragment: "" });
-			assert.equal(p.promptFragment, "");
-		});
-	});
-
-	describe("CRUD", () => {
-		it("getPersonality returns created personality", () => {
-			mgr.createPersonality({ name: "test", label: "Test", description: "d", promptFragment: "f" });
-			const p = mgr.getPersonality("test");
-			assert.ok(p);
-			assert.equal(p.label, "Test");
-		});
-
-		it("deletePersonality removes it", () => {
-			mgr.createPersonality({ name: "test", label: "Test", description: "", promptFragment: "" });
-			assert.equal(mgr.deletePersonality("test"), true);
-			assert.equal(mgr.getPersonality("test"), undefined);
-		});
-
-		it("deletePersonality returns false for nonexistent", () => {
-			assert.equal(mgr.deletePersonality("nope"), false);
-		});
-
-		it("updatePersonality changes fields", () => {
-			mgr.createPersonality({ name: "test", label: "Old", description: "", promptFragment: "" });
-			mgr.updatePersonality("test", { label: "New" });
-			assert.equal(mgr.getPersonality("test")!.label, "New");
-		});
-	});
-
-	describe("resolvePersonalities", () => {
-		it("returns matching personalities", () => {
-			mgr.createPersonality({ name: "a", label: "A", description: "d", promptFragment: "frag-a" });
-			mgr.createPersonality({ name: "b", label: "B", description: "d", promptFragment: "frag-b" });
-			const resolved = mgr.resolvePersonalities(["a", "b"]);
-			assert.equal(resolved.length, 2);
-			assert.equal(resolved[0].promptFragment, "frag-a");
-		});
-
-		it("skips unknown names silently", () => {
-			mgr.createPersonality({ name: "a", label: "A", description: "", promptFragment: "f" });
-			const resolved = mgr.resolvePersonalities(["a", "unknown"]);
-			assert.equal(resolved.length, 1);
-		});
-
-		it("returns empty for all unknown", () => {
-			const resolved = mgr.resolvePersonalities(["x", "y"]);
-			assert.deepEqual(resolved, []);
 		});
 	});
 });

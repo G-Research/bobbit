@@ -4,7 +4,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
-import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Drama, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -64,8 +64,6 @@ import { renderToolManagerPage } from "./tool-manager-page.js";
 import "./tool-manager.css";
 import { renderWorkflowPage } from "./workflow-page.js";
 import "./workflow-page.css";
-import { renderPersonalityManagerPage } from "./personality-manager-page.js";
-import "./personality-manager.css";
 import "./config-scope.css";
 import { renderStaffPage } from "./staff-page.js";
 import { renderSkillsPage } from "./skills-page.js";
@@ -113,7 +111,6 @@ function renderMobileLanding() {
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					${(() => {
 						const isRolesActive = isRouteActive("roles", "role-edit");
-						const isPersonalitiesActive = isRouteActive("personalities", "personality-edit");
 						const isToolsActive = isRouteActive("tools", "tool-edit");
 						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
 						const isSkillsActive = isRouteActive("skills");
@@ -123,11 +120,6 @@ function renderMobileLanding() {
 							title="Manage roles"
 							@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}>
 							${icon(Users, "xs")} Roles
-						</button>
-						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isPersonalitiesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
-							title="Manage personalities"
-							@click=${() => toggleConfigPage(["personalities", "personality-edit"], () => { import("./personality-manager-page.js").then((m) => m.loadPersonalityPageData()); setHashRoute("personalities"); })}>
-							${icon(Drama, "xs")} Personalities
 						</button>
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage tools"
@@ -284,7 +276,7 @@ function renderMobileLanding() {
 															<div class="flex items-center relative">
 																<button
 																	class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
-																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
+																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
 																>${icon(Plus, "sm")}</button>
 																<button
@@ -1411,129 +1403,6 @@ function staffPreviewPanel() {
 // ASSISTANT PREVIEW DISPATCH
 // ============================================================================
 
-function personalityPreviewPanel() {
-	const handleCreatePersonality = async () => {
-		const trimmedName = state.personalityPreviewName.trim();
-		const trimmedLabel = state.personalityPreviewLabel.trim();
-		if (!trimmedName || !trimmedLabel) return;
-		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-		state.assistantType = null;
-		state.activePersonalityProposal = null;
-		if (sessionId) {
-			const { deletePersonalityDraft } = await import("./session-manager.js");
-			deletePersonalityDraft(sessionId);
-		}
-		localStorage.removeItem("gateway.sessionId");
-
-		const { createPersonality } = await import("./api.js");
-		await createPersonality({
-			name: trimmedName,
-			label: trimmedLabel,
-			description: state.personalityPreviewDescription,
-			promptFragment: state.personalityPreviewPromptFragment,
-		});
-
-		if (sessionId) {
-			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-			clearSessionModel(sessionId);
-		}
-
-		const { loadPersonalityPageData } = await import("./personality-manager-page.js");
-		await loadPersonalityPageData();
-		setHashRoute("personalities");
-		renderApp();
-	};
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
-					${Input({
-						type: "text",
-						value: state.personalityPreviewName,
-						placeholder: "personality-name (lowercase, hyphens)",
-						onInput: (e: Event) => {
-							state.personalityPreviewName = (e.target as HTMLInputElement).value;
-							state.personalityPreviewNameEdited = true;
-							const sid = activeSessionId();
-							if (sid) { import("./session-manager.js").then((m) => m.savePersonalityDraft(sid)); }
-						},
-					})}
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Label</label>
-					${Input({
-						type: "text",
-						value: state.personalityPreviewLabel,
-						placeholder: "Display Label",
-						onInput: (e: Event) => {
-							state.personalityPreviewLabel = (e.target as HTMLInputElement).value;
-							state.personalityPreviewLabelEdited = true;
-							const sid = activeSessionId();
-							if (sid) { import("./session-manager.js").then((m) => m.savePersonalityDraft(sid)); }
-						},
-					})}
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Description</label>
-					${Input({
-						type: "text",
-						value: state.personalityPreviewDescription,
-						placeholder: "One-line tooltip description",
-						onInput: (e: Event) => {
-							state.personalityPreviewDescription = (e.target as HTMLInputElement).value;
-							state.personalityPreviewDescriptionEdited = true;
-							const sid = activeSessionId();
-							if (sid) { import("./session-manager.js").then((m) => m.savePersonalityDraft(sid)); }
-						},
-					})}
-				</div>
-				<div class="flex-1 flex flex-col min-h-0">
-					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">Prompt Fragment</label>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Toggle edit/preview mode"
-							@click=${() => { state.personalityPreviewPromptFragmentEditMode = !state.personalityPreviewPromptFragmentEditMode; renderApp(); }}
-						>
-							${state.personalityPreviewPromptFragmentEditMode ? "Preview" : "Edit"}
-						</button>
-					</div>
-					${state.personalityPreviewPromptFragmentEditMode
-						? html`<textarea
-								class="flex-1 min-h-[120px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-								.value=${state.personalityPreviewPromptFragment}
-								@input=${(e: Event) => {
-									state.personalityPreviewPromptFragment = (e.target as HTMLTextAreaElement).value;
-									state.personalityPreviewPromptFragmentEdited = true;
-									const sid = activeSessionId();
-									if (sid) { import("./session-manager.js").then((m) => m.savePersonalityDraft(sid)); }
-								}}
-							></textarea>`
-						: html`<div class="flex-1 min-h-[120px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
-								<markdown-block .content=${state.personalityPreviewPromptFragment || "_No prompt fragment yet_"}></markdown-block>
-							</div>`
-					}
-				</div>
-			</div>
-			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({
-					variant: "default",
-					onClick: handleCreatePersonality,
-					disabled: !state.personalityPreviewName.trim() || !state.personalityPreviewLabel.trim(),
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Drama, "sm")} Create Personality</span>`,
-				})}
-			</div>
-		</div>
-	`;
-}
-
 // ============================================================================
 // SETUP PREVIEW PANEL (setup wizard split-screen)
 // ============================================================================
@@ -1960,7 +1829,6 @@ function getAssistantPreviewPanel(type: string) {
 		case "goal": return goalPreviewPanel();
 		case "role": return rolePreviewPanel();
 		case "tool": return toolPreviewPanel();
-		case "personality": return personalityPreviewPanel();
 		case "staff": return staffPreviewPanel();
 		case "setup": return setupPreviewPanel();
 		case "workflow": return workflowPreviewPanel();
@@ -2349,7 +2217,7 @@ function setupPreviewSwipe(): void {
 }
 
 // ============================================================================
-// ASSISTANT SWIPE (mobile) — goal / role / tool / personality assistants
+// ASSISTANT SWIPE (mobile) — goal / role / tool assistants
 // ============================================================================
 
 /** Touch-swipe between the assistant chat pane and its preview pane.
@@ -2902,10 +2770,6 @@ export function doRenderApp(): void {
 		if (route.view === "workflows" || route.view === "workflow-edit") {
 			return renderWorkflowPage();
 		}
-		if (route.view === "personalities" || route.view === "personality-edit") {
-			return renderPersonalityManagerPage();
-		}
-
 		if (route.view === "staff" || route.view === "staff-edit") {
 			return renderStaffPage();
 		}
