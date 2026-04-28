@@ -240,16 +240,23 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		// keystroke can be dropped when focus hasn't settled. The app's
 		// shortcut registry listens on `window`, so dispatching there
 		// reaches it reliably.
+		// Set BOTH ctrlKey and metaKey so the dispatched event matches
+		// the registry's platform-aware ctrlOrMeta check on macOS (metaKey)
+		// and Linux/Windows (ctrlKey) without per-platform branching.
 		const pressCtrlBracket = () => page.evaluate(() => {
 			window.dispatchEvent(new KeyboardEvent("keydown", {
-				key: "[", code: "BracketLeft", ctrlKey: true, bubbles: true, cancelable: true,
+				key: "[", code: "BracketLeft", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
 			}));
 		});
 
 		await pressCtrlBracket();
 
-		// Sidebar should be collapsed — search input no longer visible
-		await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
+		// Sidebar should be collapsed — poll for state change rather than
+		// rely on a single not-visible assertion that races against re-render.
+		await expect.poll(
+			() => page.evaluate(() => !!document.querySelector("[data-testid='sidebar-collapsed']")),
+			{ timeout: 5_000 },
+		).toBe(true);
 
 		await pressCtrlBracket();
 
