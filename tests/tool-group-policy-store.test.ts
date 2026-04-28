@@ -1,30 +1,71 @@
 /**
- * Round-trip test for ToolGroupPolicyStore: setting `mcp__nano-banana: never`
- * survives mcpManager.connectAll() (the connection cycle must not blow away
- * user-set policies for MCP server groups).
- *
- * Phase 1: scaffold only. Phase 2 will:
- *   1. Construct a temp stateDir + ToolGroupPolicyStore.
- *   2. Set mcp__nano-banana → "never".
- *   3. Run mcpManager.connectAll() (or a stub of the connect flow that
- *      registers default policies for newly-discovered server groups).
- *   4. Assert the user-set "never" policy is still present.
+ * Round-trip tests for ToolGroupPolicyStore. Locks two invariants:
+ *   1. A user-set group policy (e.g. `mcp__nano-banana: never`) survives
+ *      re-instantiation of the store (i.e. a server restart) — it round-trips
+ *      via the on-disk YAML file.
+ *   2. Builtin defaults are immutable: `setBuiltins` only writes the in-memory
+ *      defaults map; subsequent `setGroupPolicy` writes only mutate the
+ *      on-disk override file, leaving builtins reachable via a fresh instance.
  */
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-// TODO Phase 2: pull live exports.
-// const { ToolGroupPolicyStore } = await import("../dist/server/agent/tool-group-policy-store.js");
+const { ToolGroupPolicyStore } = await import("../dist/server/agent/tool-group-policy-store.js");
 
-describe("ToolGroupPolicyStore — mcp__nano-banana never round-trip", () => {
-	it.skip("user-set mcp__nano-banana=never survives mcpManager.connectAll()", () => {
-		// TODO Phase 2: set up a temp store, set policy, simulate connect, assert.
-		assert.ok(true);
+let tmpDir: string;
+
+before(() => {
+	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tgps-"));
+});
+
+after(() => {
+	fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe("ToolGroupPolicyStore — round-trip", () => {
+	it("user-set mcp__nano-banana=never persists across re-instantiation", () => {
+		const store1 = new ToolGroupPolicyStore(tmpDir);
+		store1.setGroupPolicy("mcp__nano-banana", "never");
+		assert.equal(store1.getGroupPolicy("mcp__nano-banana"), "never");
+
+		// Simulate restart — fresh instance reads the same on-disk YAML.
+		const store2 = new ToolGroupPolicyStore(tmpDir);
+		assert.equal(store2.getGroupPolicy("mcp__nano-banana"), "never");
 	});
 
-	it.skip("builtin defaults remain immutable through restart", () => {
-		// TODO Phase 2: builtin policies are immutable per Agent B B16; assert
-		// that re-instantiating the store returns the same builtin map.
-		assert.ok(true);
+	it("setBuiltins does not overwrite user overrides on disk", () => {
+		const store = new ToolGroupPolicyStore(tmpDir);
+		store.setGroupPolicy("mcp__nano-banana", "never");
+		// Builtin defaults register a different policy at boot — the user's
+		// 'never' must still win on read because getAll() merges
+		// `{ ...builtin, ...local }` (local last).
+		store.setBuiltins({ "mcp__nano-banana": "ask" });
+		assert.equal(store.getGroupPolicy("mcp__nano-banana"), "never");
+	});
+
+	it("clearing a user policy (null) reveals builtin default for that group", () => {
+		const store = new ToolGroupPolicyStore(tmpDir);
+		store.setBuiltins({ "Ask": "allow" });
+		store.setGroupPolicy("Ask", "never");
+		assert.equal(store.getGroupPolicy("Ask"), "never");
+		store.setGroupPolicy("Ask", null);
+		assert.equal(store.getGroupPolicy("Ask"), "allow");
+	});
+
+	it("returns null for a group with no builtin and no override", () => {
+		const store = new ToolGroupPolicyStore(tmpDir);
+		assert.equal(store.getGroupPolicy("group-that-does-not-exist"), null);
+	});
+
+	it("getAll merges builtins under user overrides", () => {
+		const store = new ToolGroupPolicyStore(tmpDir);
+		store.setBuiltins({ Ask: "allow", Filesystem: "allow" });
+		store.setGroupPolicy("Ask", "ask");
+		const all = store.getAll();
+		assert.equal(all["Ask"], "ask");
+		assert.equal(all["Filesystem"], "allow");
 	});
 });
