@@ -560,6 +560,55 @@ This happens transparently in `normalizeGrantPolicy()` — existing role YAML an
 
 ---
 
+## Per-role model & thinking-level overrides
+
+Roles can pin a specific model and reasoning level for any session that runs under them, independent of the global defaults. This solves the common case of "my `code-reviewer` role should always run on opus, but my `coder` role can stay on the cheaper default" — without forcing users to change `default.sessionModel` or remember to override the model manually each time a verification step spawns.
+
+This is the third role-level override, alongside `toolPolicies` (which tools the role can use) and `defaultPersonalities` (how the role communicates). All three cascade the same way and are edited from the same role-manager page.
+
+> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) — file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`.
+
+### Role fields
+
+Two optional fields on the `Role` interface in `role-store.ts`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `model` | `"<provider>/<modelId>"` | Same shape as `default.sessionModel` (e.g. `anthropic/claude-opus-4-1`). Empty/missing = inherit. |
+| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` | Same value space as the global thinking selector. Empty/missing = inherit. |
+
+`parseRole` and `serializeRole` round-trip both fields and omit them from YAML when unset ("absent" and "empty string" are equivalent on the wire). Malformed values (e.g. `model: "no-slash"`, `thinkingLevel: "weird"`) are silently dropped at parse time so a typo never breaks role loading; the API layer rejects them with 400 so the UI surfaces the error.
+
+### Cascade
+
+The generic `resolve<T>()` machinery in `config-cascade.ts` handles these fields automatically — no changes were needed in the cascade itself. Project-level role YAML > server-level > builtin, by whole-record replacement (not field-level merge). This is the same precedence as `toolPolicies` and is the documented contract: a project role with `model` set replaces the entire server role record, including its `thinkingLevel` if any.
+
+### Precedence at session start
+
+When a session starts, the model and thinking level are resolved in this order (highest wins):
+
+1. **Explicit per-session override** — the user picking a model in the composer mid-run, or callers passing `skipAutoModel: true` after pre-binding (e.g. delegate sessions with an explicit model arg).
+2. **Role override** — `role.model` / `role.thinkingLevel` from the resolved cascade.
+3. **Global defaults** — `default.sessionModel` / `default.sessionThinkingLevel` (or the AI-Gateway best-ranked fallback when no pref is set).
+
+Layers 2 and 3 live in `tryAutoSelectModel` and `tryApplyDefaultThinkingLevel` in `session-manager.ts`. The role layer was added as a new step 0 inside both functions and binds via the `applyModelString` helper exported from `review-model-override.ts` — the same retry-and-verify path `applyReviewModelOverrides` uses, but reading a literal `<provider>/<modelId>` string instead of a prefs key.
+
+**Failure handling.** Model binding failures throw — the session start fails loudly with the same red "Unavailable" pattern you see in Settings → Models. Thinking-level failures only `console.warn` and fall through to the global default, matching the existing tolerance for level mismatches.
+
+### Verification harness integration
+
+The verification harness spawns reviewer, QA, and sub-session agents for gate steps, each tied to a specific role. At all three call sites in `verification-harness.ts`, the harness now resolves the role through the cascade and prefers `role.model` / `role.thinkingLevel` over `default.reviewModel` / `default.reviewThinkingLevel`. When the role has no override, the existing `applyReviewModelOverrides` path runs unchanged.
+
+This is what makes "my `code-reviewer` role always runs on opus" work without changing `default.reviewModel` and without leaking that choice to every other reviewer step.
+
+**Naming model is explicitly unaffected** — `default.namingModel` and `pickFallbackAigwNamingModel` still drive title generation regardless of role.
+
+### UI
+
+The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to **Prompt** and **Tool Access**, labelled **Model**. It reuses the model picker and thinking dropdown components from the settings page, with a leading "(use default)" option that maps to the empty string → omitted from YAML. The standard origin badge / Customize / Revert flow operates on the whole role record, so touching either field flips builtin→overridden and Revert clears them along with any other overrides.
+
+---
+
 ## Semantic search
 
 Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
