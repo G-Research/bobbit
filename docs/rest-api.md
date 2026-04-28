@@ -291,20 +291,20 @@ Provider-aware. Bobbit can hold OAuth credentials for several providers concurre
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, hasToken, expiresAt? }`. |
-| `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, authUrl, expiresAt }`. |
-| `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ provider, flowId, code }`. Returns `{ provider, ok: true }`. |
-| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error?, expiresAt }`. |
+| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires? }`. |
+| `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, url, callbackServer?, instructions? }`. |
+| `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ flowId, code }`. Returns `{ success: true }` (200) or `{ success: false, error }` (400). |
+| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error? }`. |
 
-**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token) and `openai-codex` (ChatGPT subscription → bearer token). Unknown values reject with `400 { error: "unknown provider" }`.
+**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token) and `openai-codex` (ChatGPT subscription → bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; an unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider".
 
 **Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for both at once. Keying every operation by `provider` (alongside `flowId`) keeps state strictly partitioned and lets the UI render Settings → Account as parallel rows that can be (re-)authed independently.
 
 **`GET /api/oauth/status?provider=<id>`** responses:
 
-- `200 { provider: "anthropic", hasToken: true, expiresAt: 1775812345000 }` — credential present.
-- `200 { provider: "anthropic", hasToken: false }` — no stored credential.
-- `400 { error: "unknown provider" }` — `provider` missing or unrecognised.
+- `200 { provider: "anthropic", authenticated: true, expires: 1775812345000 }` — credential present and not expired.
+- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or the stored credential is expired.
+- `400 { error: "<message>" }` — provider value rejected by `normalizeProvider`.
 
 The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
 
@@ -314,42 +314,48 @@ The response intentionally does **not** echo the bearer token / API key — stri
 {
   "provider": "openai-codex",
   "flowId": "f_8c2…",
-  "authUrl": "https://auth.openai.com/…",
-  "expiresAt": 1775812945000
+  "url": "https://auth.openai.com/…",
+  "callbackServer": true,
+  "instructions": "Open the URL above and authorize Bobbit."
 }
 ```
 
-The caller opens `authUrl` in a system browser; the browser-redirect handler completes the flow via `POST /api/oauth/complete` once the provider returns a `code`.
+- `url`: opens in a system browser; the provider's redirect lands on Bobbit's callback handler.
+- `callbackServer`: `true` for OAuth providers that complete via the embedded callback server (e.g. `openai-codex`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`).
+- `instructions`: optional human-readable string the UI may render alongside the URL.
 
-**`POST /api/oauth/complete`** body: `{ provider, flowId, code }`. Returns:
+**`POST /api/oauth/complete`** body: `{ flowId, code }` (the stored flow already knows its provider, so the body does not repeat it). Returns:
 
-- `200 { provider, ok: true }` — token stored.
-- `400 { error: "code required" }` — `code` missing or empty.
-- `400 { error: "unknown provider" }` — `provider` missing or unrecognised.
-- `404 { error: "flow not found" }` — `flowId` is unknown, expired, **or** the stored flow's `provider` does not match the body. The provider mismatch is treated as "not found" rather than "forbidden" so cross-provider polling cannot be used to enumerate live flow IDs.
+- `200 { success: true }` — token stored.
+- `400 { error: "Missing flowId or code" }` — either field missing or empty.
+- `400 { success: false, error: "code required" }` — `code` empty / whitespace-only after the trim check.
+- `400 { success: false, error: "Unknown or expired flow ID" }` — the `flowId` was never created or has been garbage-collected.
+- `400 { success: false, error: "OAuth flow expired" }` — the flow exceeded its TTL.
+- `400 { success: false, error: "<provider message>" }` — token-exchange or login-promise rejection. Body always includes `success: false` for non-200 responses from `oauthComplete`; raw thrown exceptions are surfaced as `500 { error: "<message>" }` with no `success` field.
 
 **`GET /api/oauth/flow-status?flowId=<id>&provider=<id>`** is the polling endpoint used by the Settings → Account UI while the user is in the browser. Returns:
 
 ```json
-{ "complete": false, "expiresAt": 1775812945000 }
+{ "complete": false }
 ```
 
 or on success / failure:
 
 ```json
-{ "complete": true, "expiresAt": 1775812945000 }
-{ "complete": true, "error": "user denied access", "expiresAt": 1775812945000 }
+{ "complete": true }
+{ "complete": true, "error": "user denied access" }
 ```
 
 Response contract:
 
-- `complete: boolean` — `false` while the flow is still pending, `true` once `/api/oauth/complete` has run for that `flowId` (regardless of success).
-- `error?: string` — present only when `complete: true` and the flow failed.
-- `expiresAt: number` — epoch-ms after which the flow will be garbage-collected.
+- `complete: boolean` — `false` while the flow is still pending, `true` once the provider's callback has resolved (regardless of success).
+- `error?: string` — present only when the flow failed (or when the `flowId` is unknown / cross-provider mismatched, in which case the body is `{ complete: false, error: "flow not found" }` with HTTP 404).
+- HTTP 400 `{ error: "Missing flowId" }` if `flowId` query param is absent.
+- HTTP 404 `{ complete: false, error: "flow not found" }` if the `flowId` is unknown, expired, **or** belongs to a different provider than the supplied `provider` query param.
 
-`provider` is **required** as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
+`provider` is recommended as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
 
-See [AGENTS.md — Add / debug per-provider OAuth](../AGENTS.md) for the file map and the Settings → Account UI walkthrough.
+See [AGENTS.md — Add / debug per-provider OAuth](../AGENTS.md#add--debug-per-provider-oauth) for the file map and the Settings → Account UI walkthrough.
 
 ### Image generation
 

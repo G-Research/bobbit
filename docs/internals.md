@@ -838,6 +838,8 @@ A confirmation snapshot is broadcast back as a normal session-update so all atta
    - Validates `prompt` length (≤8192 chars) and `n` range (`[1, 4]`).
    - If `model` is omitted, looks up `getImageModelForSession(sessionId)`.
    - Canonicalises both the request `model` and the session model through the same helper before comparing — prevents `OpenAI/GPT-Image-2` from being treated as a different model than `openai/gpt-image-2`.
+   - **Override resolution.** A request `model` is honoured when (a) it canonicalises equal to the session's selected model, (b) there is no `sessionId`, **or** (c) `imageModelMentionedInText` finds the request model id in the user's most-recent prompt text. Otherwise the request `model` is silently ignored and the session's selected model is used. This last-prompt check is why an explicit override sometimes "works" and sometimes doesn't — it must be named in the user's text, not just sent in the API body.
+   - If a request `model` is supplied that doesn't match any registered image model, the canonical helper returns `undefined` and the request silently falls back to the session's selected model. There is no 4xx response for unknown image models on this endpoint.
    - Dispatches to one of `generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, or `generateOpenAICodexImage` in `src/server/agent/image-generation.ts`.
 4. The provider helper makes the upstream HTTP call and returns `{ images, format }`. Errors thrown from the helpers start with the upstream HTTP status code so the API surface can pass them through as `502 { error: "<status>: <message>" }`.
 
