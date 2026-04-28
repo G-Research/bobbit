@@ -1,16 +1,59 @@
 import { WorkflowStore, type Workflow, type WorkflowGate } from "./workflow-store.js";
+import type { ProjectConfigStore } from "./project-config-store.js";
+import { validateAllWorkflows, validateWorkflow, type ValidatorWorkflow, type WorkflowComponentRef } from "./workflow-validator.js";
 
-/** Valid workflow ID pattern: lowercase alphanumeric + hyphens */
 /** Lowercase alphanumeric + hyphens only. Dots are banned to avoid collisions
  *  with the namespaced template variable syntax ({{gate_id.meta.key}}). */
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
+/**
+ * Workflow manager — wraps the inline `InlineWorkflowStore` and runs the
+ * structural validator on load + every mutation.
+ *
+ * Source of truth: `project.yaml::workflows`. Mutations go through
+ * `ProjectConfigStore::setWorkflows()` via the inline store.
+ *
+ * The validator needs the project's components[] to resolve structural
+ * `(component, command)` references; we pull that from `ProjectConfigStore`
+ * lazily on each call so component edits are picked up without restart.
+ */
 export class WorkflowManager {
 	/** Exposed for passing to createGoal for workflow snapshotting */
 	public readonly store: WorkflowStore;
+	private readonly cfg?: ProjectConfigStore;
 
-	constructor(store: WorkflowStore) {
+	constructor(store: WorkflowStore, cfg?: ProjectConfigStore) {
 		this.store = store;
+		this.cfg = cfg;
+		// Validate at boot — surface structural mistakes in project.yaml
+		// without aborting startup. Errors are logged; affected workflows
+		// will fail at goal creation time when the validator runs again.
+		this._logBootValidation();
+	}
+
+	private getComponentRefs(): WorkflowComponentRef[] {
+		if (!this.cfg) return [];
+		return this.cfg.getComponents().map(c => ({
+			name: c.name,
+			commands: c.commands,
+		}));
+	}
+
+	private _logBootValidation(): void {
+		// Tolerate mock stores in tests that don't implement getAllLocal().
+		if (typeof (this.store as any)?.getAllLocal !== "function") return;
+		try {
+			const map: Record<string, ValidatorWorkflow> = {};
+			for (const wf of this.store.getAllLocal()) {
+				map[wf.id] = wf as unknown as ValidatorWorkflow;
+			}
+			const errors = validateAllWorkflows(map, this.getComponentRefs());
+			for (const err of errors) {
+				console.warn(`[workflow-manager] ${err.message}`);
+			}
+		} catch (err) {
+			console.warn(`[workflow-manager] Boot validation skipped:`, err);
+		}
 	}
 
 	createWorkflow(opts: {
@@ -45,6 +88,7 @@ export class WorkflowManager {
 			createdAt: now,
 			updatedAt: now,
 		};
+		this.runStructuralValidation(workflow);
 		this.store.put(workflow);
 		return workflow;
 	}
@@ -73,6 +117,11 @@ export class WorkflowManager {
 		if (updates.name !== undefined) cleaned.name = updates.name;
 		if (updates.description !== undefined) cleaned.description = updates.description;
 		if (updates.gates !== undefined) cleaned.gates = updates.gates;
+
+		// Run structural validation against the merged shape before persisting.
+		const candidate: Workflow = { ...existing, ...cleaned } as Workflow;
+		this.runStructuralValidation(candidate);
+
 		return this.store.update(id, cleaned);
 	}
 
@@ -83,7 +132,17 @@ export class WorkflowManager {
 		return true;
 	}
 
-
+	/**
+	 * Run the structural validator (component/command refs, step shape rules)
+	 * against a single workflow. Throws on the first error so the API surface
+	 * propagates a 400 with a clean message.
+	 */
+	private runStructuralValidation(wf: Workflow): void {
+		const errors = validateWorkflow(wf as unknown as ValidatorWorkflow, this.getComponentRefs());
+		if (errors.length > 0) {
+			throw new Error(errors[0].message);
+		}
+	}
 
 	/**
 	 * Validate workflow gates:

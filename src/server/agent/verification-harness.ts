@@ -9,7 +9,8 @@ import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
-import type { ProjectConfigStore } from "./project-config-store.js";
+import type { ProjectConfigStore, Component } from "./project-config-store.js";
+import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
@@ -30,6 +31,85 @@ import {
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides } from "./review-model-override.js";
+
+/**
+ * Compute the absolute working directory for a component, given a per-branch
+ * container root. For single-repo projects, components have `repo: "."` and
+ * (typically) no `relativePath`, collapsing to `branchContainer`. For
+ * multi-repo / monorepo cases, this is `<branchContainer>/<repo>/<relativePath>`.
+ *
+ * Phase 2 only exercises the single-repo collapse; multi-repo plumbing lives
+ * in Phase 4. The helper is written for both so verification doesn't need to
+ * change again when Phase 4 lands.
+ */
+function componentRoot(c: Component, branchContainer: string): string {
+	let p = branchContainer;
+	if (c.repo && c.repo !== ".") p = path.join(p, c.repo);
+	if (c.relativePath) p = path.join(p, c.relativePath);
+	return p;
+}
+
+/**
+ * Structural step resolution — see docs/design/multi-repo-components.md §3.3.
+ *
+ * Given a workflow step, the project's components[] (from project.yaml), and
+ * the per-branch container root, return:
+ *   - `cwd`: where the step should run
+ *   - `runString`: the literal shell command, or `undefined` for non-command
+ *     step types (callers handle those separately).
+ *
+ * Three command shapes are supported:
+ *   { component, command }  → lookup `components[name].commands[name]`
+ *   { component, run }      → literal `run`, cwd at component root
+ *   { run }                 → literal `run`, cwd at branchContainer
+ *
+ * Throws `WorkflowResolveError` on unknown component / unknown command pairs
+ * — the validator catches these at load-time, but runtime resolution still
+ * defends in case the workflow snapshot was created before component edits.
+ */
+export function resolveStep(
+	step: VerifyStep,
+	components: Component[],
+	branchContainer: string,
+	ctx?: { workflow?: string; gate?: string; stepIndex?: number },
+): { cwd: string; runString?: string } {
+	if (step.type !== "command") {
+		return { cwd: branchContainer };
+	}
+	const hasComponent = typeof step.component === "string" && step.component.length > 0;
+	const hasCommand = typeof step.command === "string" && step.command.length > 0;
+
+	if (hasComponent) {
+		const c = components.find(x => x.name === step.component);
+		if (!c) {
+			throw new WorkflowResolveError({
+				workflow: ctx?.workflow ?? "(unknown)",
+				gate: ctx?.gate ?? "(unknown)",
+				stepIndex: ctx?.stepIndex ?? 0,
+				stepName: step.name,
+				reason: `component "${step.component}" not found in components[].`,
+			});
+		}
+		const cwd = componentRoot(c, branchContainer);
+		if (hasCommand) {
+			const run = c.commands?.[step.command as string];
+			if (!run) {
+				const available = c.commands ? Object.keys(c.commands).join(", ") : "(none)";
+				throw new WorkflowResolveError({
+					workflow: ctx?.workflow ?? "(unknown)",
+					gate: ctx?.gate ?? "(unknown)",
+					stepIndex: ctx?.stepIndex ?? 0,
+					stepName: step.name,
+					reason: `component "${c.name}" has no command "${step.command}". Available: ${available}.`,
+				});
+			}
+			return { cwd, runString: run };
+		}
+		return { cwd, runString: step.run };
+	}
+	// Free-form pure { run } at the per-branch container root.
+	return { cwd: branchContainer, runString: step.run };
+}
 
 /** Create a deferred promise with exposed resolve/reject. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
@@ -1216,7 +1296,29 @@ export class VerificationHarness {
 								startedAt: active.steps[index].startedAt,
 								phase,
 							});
-							const cmd = this.substituteVars(step.run || "", builtinVars, projectVars, agentVars, allGateStates);
+							// Structural step resolution — see resolveStep() above.
+							// Component-linked steps run from the component's root path
+							// and resolve their shell command via components[name].commands.
+							// Free-form { run } steps run at the branch-container root (cwd).
+							let resolvedRun: string;
+							let resolvedCwd = cwd;
+							try {
+								const components = projectConfigStore?.getComponents() ?? [];
+								const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+								const r = resolveStep(step, components, cwd, {
+									workflow: goalForCtx?.workflowId ?? signal.goalId,
+									gate: signal.gateId,
+									stepIndex: index,
+								});
+								resolvedRun = r.runString ?? "";
+								resolvedCwd = r.cwd;
+							} catch (resolveErr) {
+								const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+								result = { passed: false, output: msg };
+								const duration_ms = Date.now() - startTime;
+								return { index, stepResult: { name: step.name, type: step.type, passed: false, output: msg, duration_ms, expect: step.expect } };
+							}
+							const cmd = this.substituteVars(resolvedRun, builtinVars, projectVars, agentVars, allGateStates);
 							// Auto-skip command steps whose run string is empty or contains
 							// unresolved template vars (e.g. {{project.build_command}} when the
 							// project has no build_command configured). Skipped-as-passed so
@@ -1252,7 +1354,7 @@ export class VerificationHarness {
 							// Also resolve the container-internal worktree path so the command
 							// runs on the goal's branch, not /workspace (the main branch).
 							let commandContainerId: string | undefined;
-							let commandCwd = cwd;
+							let commandCwd = resolvedCwd;
 							const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
 							const isSandboxedGoal = sandboxedGoal?.sandboxed;
 							if (isSandboxedGoal && this.sessionManager) {

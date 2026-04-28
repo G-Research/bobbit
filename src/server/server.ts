@@ -621,7 +621,7 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const workflowStore = new WorkflowStore(configDir);
+	const workflowStore = new WorkflowStore(projectConfigStore);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
@@ -664,7 +664,7 @@ export function createGateway(config: GatewayConfig) {
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
-	const workflowManager = new WorkflowManager(workflowStore);
+	const workflowManager = new WorkflowManager(workflowStore, projectConfigStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();

@@ -74,12 +74,14 @@ export class ProjectContext {
     this.goalManager = new GoalManager(this.goalStore);
     this.secretsStore = new SecretsStore(this.stateDir);
 
-    // Instantiate config stores with project-scoped config directory
+    // Instantiate config stores with project-scoped config directory.
+    // ProjectConfigStore must come before WorkflowStore — the inline
+    // workflow store reads workflows from project.yaml.
     this.roleStore = new RoleStore(this.configDir);
     this.personalityStore = new PersonalityStore(this.configDir);
-    this.workflowStore = new WorkflowStore(this.configDir);
-    this.toolManager = new ToolManager(this.configDir);
     this.projectConfigStore = new ProjectConfigStore(this.configDir);
+    this.workflowStore = new WorkflowStore(this.projectConfigStore);
+    this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
   }
 
