@@ -2269,6 +2269,12 @@ async function handleApiRoute(
 			preview: session.preview,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
+			// Persisted model selection (provider+id). Surfaces the result of
+			// the WS `set_model` handler's `persistSessionModel` call so clients
+			// (and tests) can verify the selection round-tripped to disk without
+			// reaching into the WS state stream.
+			modelProvider: sessionPs?.modelProvider,
+			modelId: sessionPs?.modelId,
 			restoreError: session.restoreError,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
