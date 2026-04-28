@@ -360,68 +360,69 @@ Bobbit routes image generation through the gateway so the agent's `generate_imag
 | `GET` | `/api/image-models` | List currently-available image models — array of `ApiImageModel`. |
 | `POST` | `/api/image-generation/generate` | Generate one or more images via the configured provider. |
 
-**`GET /api/image-models`** returns the registry filtered by configured providers (e.g. an entry is omitted when its provider has no credential). Each item is an `ApiImageModel` (TypeScript type defined in `src/server/agent/image-generation.ts`):
+**`GET /api/image-models`** returns the array directly (not wrapped) from `getAvailableImageModels(preferencesStore)`. Each item is an `ApiImageModel` (TypeScript type exported from `src/server/agent/image-generation.ts`):
 
-```json
-[
-  {
-    "id": "openai/gpt-image-2",
-    "provider": "openai",
-    "modelId": "gpt-image-2",
-    "label": "GPT Image 2",
-    "available": true,
-    "reason": null,
-    "sizes": ["1024x1024", "1536x1024", "1024x1536"]
-  },
-  {
-    "id": "google/gemini-2.5-flash-image",
-    "provider": "google",
-    "modelId": "gemini-2.5-flash-image",
-    "label": "Nano Banana (Gemini 2.5 Flash Image)",
-    "available": false,
-    "reason": "missing-credentials"
-  }
-]
+```ts
+interface ApiImageModel {
+  id: string;            // e.g. "gpt-image-2"
+  name: string;          // human-readable label
+  provider: string;      // e.g. "openai", "google", "openai-codex"
+  api: "openai-images" | "gemini-images" | "google-imagen";
+  baseUrl: string;
+  authenticated: boolean;
+  sizes?: string[];
+  qualities?: string[];
+  aspectRatios?: string[];
+  formats?: string[];
+}
 ```
 
-Unavailable rows still appear so the Settings → Models → Image picker can render a red "Unavailable" badge with a tooltip pointing at the missing credential. See [docs/internals.md — Image generation routing](internals.md#image-generation-routing) for the full data flow.
+Unauthenticated rows (`authenticated: false`) still appear so the Settings → Models → Image picker can render a red "Unavailable" badge with a tooltip pointing at the missing credential. On internal failure the endpoint returns `500 { error: "Failed to load image models: <msg>" }`. See [docs/internals.md — Image generation routing](internals.md#image-generation-routing) for the full data flow.
 
 **`POST /api/image-generation/generate`** is the back-end called by the `generate_image` tool extension. Request body:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `prompt` | `string` | yes | Free-form prompt. **Capped at 8192 chars** — longer payloads reject with `400`. |
-| `n` | `integer` | no | Number of images. Clamped to `[1, 4]`; out-of-range values reject with `400`. Defaults to `1`. |
-| `model` | `string` | no | Override id in `provider/modelId` form. Must match an entry in `/api/image-models`. Defaults to the session's selected image model. |
-| `imageSize` | `string` | no | Provider-specific size token (e.g. `1024x1024`, `1536x1024`). Validated against the registry entry's `sizes`. |
+| `prompt` | `string` | yes | Free-form prompt. Capped at 8192 chars. |
+| `n` | `integer` | no | Number of images. Must be an integer in `[1, 4]`. Defaults to `1`. |
+| `model` | `string` | no | Override id in `provider/modelId` form. Both sides are canonicalised before comparison. If unrecognised, the request silently falls back to the session's selected image model rather than rejecting. |
+| `size` | `string` | no | Provider-specific size token (e.g. `1024x1024`). |
+| `quality` | `string` | no | Provider-specific quality token (e.g. `auto`, `hd`). |
+| `background` | `string` | no | One of `transparent`, `opaque`, `auto` (OpenAI-only). |
+| `format` | `string` | no | One of `png`, `jpeg`, `webp`. |
+| `aspectRatio` | `string` | no | Gemini/Imagen aspect ratio (e.g. `16:9`). |
+| `imageSize` | `string` | no | Alternative size token validated against the registry entry's `sizes`. |
 | `sessionId` | `string` | no | Used to resolve the session's selected image model when `model` is omitted. |
 
-Response on success:
+Response on success (HTTP `200`):
 
 ```json
 {
-  "model": "openai/gpt-image-2",
+  "model": {
+    "provider": "openai",
+    "id": "gpt-image-2",
+    "name": "GPT Image 2",
+    "api": "openai-images"
+  },
   "images": [
-    { "url": "https://…", "format": "png" },
-    { "base64": "iVBORw0KG…", "format": "png" }
+    { "data": "iVBORw0KG…", "mimeType": "image/png" },
+    { "data": "iVBORw0KG…", "mimeType": "image/png", "revisedPrompt": "…" }
   ]
 }
 ```
 
-Each image carries either `url` or `base64` (some providers return only one), plus a `format` (`png` / `jpeg` / `webp`). The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
+The `model` object echoes the resolved provider/id/name/api so the caller can confirm which model actually served the request (the request `model` may have been canonicalised or fallen back to the session default). Each image carries `data` (base64-encoded bytes) and `mimeType`; some OpenAI calls also include a `revisedPrompt` when the provider rewrote the prompt. The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
 
 Error responses:
 
+- `400 { error: "Missing prompt" }` — `prompt` missing or non-string. Note the capital `M`.
 - `400 { error: "prompt exceeds 8192 chars" }` — prompt over the cap.
-- `400 { error: "n must be 1..4" }` — `n` outside the `[1, 4]` range or non-integer.
-- `400 { error: "openai-codex image driver supports n=1 only" }` — the OpenAI-Codex driver hard-clamps to `n=1`; requesting more is rejected up-front instead of silently returning a single image.
-- `400 { error: "unknown image model" }` — `model` does not appear in `/api/image-models` (or canonicalises to a different id than the registry entry — both sides are canonicalised before comparison).
-- `400 { error: "missing prompt" }` — `prompt` missing or non-string.
-- `502 { error: "<provider HTTP status>: <provider message>" }` — upstream provider rejected the call. The message starts with the upstream HTTP status code; `<provider message>` is `data?.error?.message` falling back to `JSON.stringify(data?.error)` so it never reads `[object Object]`.
-- `502 { error: "remote image exceeds 25 MB cap" }` — Bobbit refused to download a remote image referenced in the prompt because it crossed the 25 MB streaming cap (memory-exhaustion guard).
-- `503 { error: "image generation unavailable" }` — no provider credentials configured for any registered image model.
+- `400 { error: "n must be 1..4" }` — `n` is not an integer or is outside `[1, 4]`.
+- `500 { error: "<provider message>" }` — provider helper threw. The message comes straight from `err.message` (typically prefixed with the upstream HTTP status, never `[object Object]`). Provider-specific failure modes (Codex `n=1` clamp, `remote image exceeds 25 MB cap`, missing credentials) all surface here as `500`.
 
-Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (configured pref → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
+The gateway does **not** return `502` or `503` from this endpoint, and there is no separate `400 { error: "unknown image model" }` path — unknown `model` values silently fall back to the session default (the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md)).
+
+Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
 
 ### MCP Servers
 
