@@ -9,6 +9,7 @@
  */
 import { test, expect } from "./gateway-harness.js";
 import { readE2EToken, apiFetch } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 import type { Page } from "@playwright/test";
 
 const SCREENSHOT = process.env.SCREENSHOT === "1";
@@ -21,19 +22,6 @@ async function openApp(page: Page): Promise<void> {
 	await expect(
 		page.locator("button[title^='New session']").first(),
 	).toBeVisible({ timeout: 15_000 });
-}
-
-/** Poll until a condition is met. */
-async function pollUntil(
-	fn: () => Promise<boolean>,
-	{ timeout = 15_000, interval = 100 } = {},
-): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeout) {
-		if (await fn()) return;
-		await new Promise(r => setTimeout(r, interval));
-	}
-	throw new Error(`pollUntil timed out after ${timeout}ms`);
 }
 
 test.describe("Session lifecycle (full-stack UI)", () => {
@@ -63,7 +51,7 @@ test.describe("Session lifecycle (full-stack UI)", () => {
 		await pollUntil(async () => {
 			const resp = await apiFetch(`/api/sessions/${sessionId}`);
 			return (await resp.json()).status === "idle";
-		});
+		}, { timeoutMs: 15_000, intervalMs: 100, label: "session idle" });
 
 		// Optional screenshot
 		if (SCREENSHOT) {
@@ -84,7 +72,7 @@ test.describe("Session lifecycle (full-stack UI)", () => {
 				(s: { id: string }) => s.id === sessionId,
 			);
 			return remaining.length === 0;
-		});
+		}, { timeoutMs: 15_000, intervalMs: 100, label: "session deleted" });
 
 		// The session was deleted server-side. The UI may still be showing
 		// the chat panel (WebSocket reconnect loop). Reload at the landing

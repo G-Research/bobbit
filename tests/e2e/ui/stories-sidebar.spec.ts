@@ -264,16 +264,14 @@ test.describe("CT-03 & CT-04: Sidebar stories @quarantine", () => {
 		const searchInput = s.sidebar.search_input();
 		await searchInput.is_visible();
 		await page.locator("input[data-search]").fill("AlphaSB");
-		await page.waitForTimeout(400);
 
-		// assert — Alpha visible, Bravo hidden
+		// assert — Alpha visible, Bravo hidden (filter debounce settles via auto-retry)
 		s.assert();
 		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("BravoSBTest")).not.toBeVisible({ timeout: 3_000 });
+		await expect(page.getByText("BravoSBTest")).not.toBeVisible({ timeout: 5_000 });
 
 		// Clear search — both should reappear
 		await page.locator("input[data-search]").fill("");
-		await page.waitForTimeout(400);
 		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("BravoSBTest")).toBeVisible({ timeout: 5_000 });
 
@@ -418,9 +416,8 @@ test.describe("CT-03 & CT-04: Sidebar stories @quarantine", () => {
 
 		// Press back — should return to session A
 		await s.navigate_back();
-		await page.waitForTimeout(500);
 
-		// assert — A should be highlighted again
+		// assert — A should be highlighted again (url_contains polls)
 		s.assert();
 		await s.url_contains(idA);
 		await s.sidebar.session_row().is_visible();

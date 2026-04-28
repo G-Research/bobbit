@@ -100,24 +100,19 @@ test.describe("Mobile sidebar archived search filtering", () => {
 		await expect(searchInput).toBeVisible({ timeout: 5_000 });
 		await searchInput.click();
 		await searchInput.fill("story");
-		// debounce + re-render
-		await page.waitForTimeout(500);
 
-		// Matching goal still visible
+		// Matching goal still visible (auto-retry absorbs debounce)
 		await expect(page.getByText(matchingTitle, { exact: false }).first()).toBeVisible({
 			timeout: 5_000,
 		});
 
 		// Non-matching goal must be hidden. On current master this FAILS because
-		// renderMobileLanding() renders archivedGoals unfiltered.
-		const nonMatchingCount = await page
-			.getByText(nonMatchingTitle, { exact: false })
-			.count();
-		if (nonMatchingCount > 0) {
-			throw new Error(
-				`Mobile archived search did not filter: non-matching goal "${nonMatchingTitle}" still visible (count=${nonMatchingCount}) after typing query "story"`,
-			);
-		}
+		// renderMobileLanding() renders archivedGoals unfiltered. Use toHaveCount(0)
+		// to wait for debounce + re-render rather than a hardcoded sleep.
+		await expect(
+			page.getByText(nonMatchingTitle, { exact: false }),
+			`Mobile archived search did not filter: non-matching goal "${nonMatchingTitle}" still visible after typing query "story"`,
+		).toHaveCount(0, { timeout: 5_000 });
 	});
 
 	test("matching substring is wrapped in a <strong class='font-semibold'> span", async ({ page }) => {
@@ -135,7 +130,6 @@ test.describe("Mobile sidebar archived search filtering", () => {
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.click();
 		await searchInput.fill("story");
-		await page.waitForTimeout(500);
 
 		// At least one <strong class="font-semibold"> should exist wrapping the
 		// matched "story" substring inside the matching goal title.

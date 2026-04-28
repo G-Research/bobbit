@@ -262,20 +262,28 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(replayBody.replayed).toBeGreaterThan(0);
 
 		// Give the client a short window to process replayed frames, then poll
-		// until DOM counts stabilise (either because dedup worked, or because the
-		// bug finished appending duplicate messages).
-		let last = baseline;
-		let stableTicks = 0;
-		const deadline = Date.now() + 3_000;
-		while (Date.now() < deadline) {
-			await s.page.waitForTimeout(100);
-			const cur = await snapshot();
-			if (cur.user === last.user && cur.assistant === last.assistant
-				&& cur.tool === last.tool && cur.bashOutputs === last.bashOutputs) {
-				stableTicks++;
-			} else { stableTicks = 0; last = cur; }
-			if (stableTicks >= 5) break;
-		}
+		// in-page until DOM counts stabilise for ~500ms (5 ticks × 100ms).
+		// This runs entirely inside `page.waitForFunction` so no host-side
+		// `waitForTimeout` is needed; the polling delay is the page poll
+		// interval (100ms) baked into Playwright's waitForFunction.
+		await s.page.waitForFunction(() => {
+			const w = window as unknown as { __streamingStability?: { last: number; ticks: number } };
+			const snap = {
+				user: document.querySelectorAll("user-message").length,
+				assistant: document.querySelectorAll("assistant-message").length,
+				tool: document.querySelectorAll("tool-message").length,
+				bash: Array.from(document.querySelectorAll("tool-message"))
+					.filter(el => (el.textContent || "").includes("BOBBIT_TOOL_TEST_OK_12345")).length,
+			};
+			const hash = `${snap.user}|${snap.assistant}|${snap.tool}|${snap.bash}`;
+			const hashHash = hash.split("").reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0);
+			if (!w.__streamingStability || w.__streamingStability.last !== hashHash) {
+				w.__streamingStability = { last: hashHash, ticks: 1 };
+				return false;
+			}
+			w.__streamingStability.ticks++;
+			return w.__streamingStability.ticks >= 5;
+		}, null, { timeout: 5_000, polling: 100 });
 
 		// assert — the replayed buffered events must not produce any extra
 		// rendered messages. Pre-fix the assistant turn (toolCall + toolResult)

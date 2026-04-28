@@ -199,7 +199,6 @@ test.describe("Per-project Archived subsections (mobile)", () => {
 		await expect(searchInput).toBeVisible({ timeout: 5_000 });
 		await searchInput.click();
 		await searchInput.fill(goalATitle);
-		await page.waitForTimeout(500);
 
 		// Only project A's archived subsection should render when searching for
 		// goal A's unique title.
@@ -245,7 +244,6 @@ test.describe("Per-project Archived subsections (mobile)", () => {
 		).toBe(true);
 
 		await searchInput.fill("");
-		await page.waitForTimeout(300);
 	});
 
 	test("toggling See Archived off hides all per-project Archived subsections on mobile", async ({ page }) => {

@@ -7,6 +7,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal, nonGitCwd, waitForHealth } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import { openApp } from "./ui-helpers.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -44,19 +45,13 @@ async function createArchivedGoal(projectId: string, title: string): Promise<str
  * overwrites `state.goals` with live-only goals mid-flight.
  */
 async function waitForArchivedGoalVisible(projectId: string, goalId: string, timeoutMs = 15_000): Promise<void> {
-	const start = Date.now();
-	let lastStatus = 0;
-	while (Date.now() - start < timeoutMs) {
+	await pollUntil(async () => {
 		const resp = await apiFetch(`/api/goals?archived=true&projectId=${projectId}&limit=200`);
-		lastStatus = resp.status;
-		if (resp.ok) {
-			const data = await resp.json();
-			const goals: Array<{ id: string }> = data.goals || [];
-			if (goals.some(g => g.id === goalId)) return;
-		}
-		await new Promise(r => setTimeout(r, 50));
-	}
-	throw new Error(`Archived goal ${goalId} not visible via REST within ${timeoutMs}ms (last status ${lastStatus})`);
+		if (!resp.ok) return false;
+		const data = await resp.json();
+		const goals: Array<{ id: string }> = data.goals || [];
+		return goals.some(g => g.id === goalId);
+	}, { timeoutMs, intervalMs: 50, label: `archived goal ${goalId} visible` });
 }
 
 function uniqueSuffix(label: string): string {
@@ -233,7 +228,6 @@ test.describe("Per-project Archived subsections", () => {
 
 		// Clear search for good hygiene.
 		await searchInput.fill("");
-		await page.waitForTimeout(300);
 	});
 
 	test("toggling See Archived off hides all per-project Archived subsections", async ({ page }) => {

@@ -226,7 +226,7 @@ test.describe("CT-13: URL routing and navigation @quarantine", () => {
 
 		// setup — start at landing
 		await navigateToHash(s.page, "#/");
-		await s.page.waitForTimeout(300);
+		await s.page.waitForFunction(() => window.location.hash === "" || window.location.hash === "#/", null, { timeout: 5_000 });
 
 		// act — build history: landing → session → settings
 		s.act();
@@ -274,7 +274,7 @@ test.describe("CT-13: URL routing and navigation @quarantine", () => {
 		const collapseBtn = s.page.locator("button[title='Collapse sidebar (Ctrl+[)']").first();
 		await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
 		await collapseBtn.click();
-		await s.page.waitForTimeout(300);
+		await s.page.waitForFunction(() => localStorage.getItem("bobbit-sidebar-collapsed") === "true", null, { timeout: 5_000 });
 
 		// assert — localStorage records collapsed state
 		s.assert();
@@ -303,7 +303,7 @@ test.describe("CT-13: URL routing and navigation @quarantine", () => {
 		const expandAfterReload = s.page.locator("button[title='Expand sidebar (Ctrl+[)']").first();
 		await expect(expandAfterReload).toBeVisible({ timeout: 5_000 });
 		await expandAfterReload.click();
-		await s.page.waitForTimeout(300);
+		await s.page.waitForFunction(() => localStorage.getItem("bobbit-sidebar-collapsed") !== "true", null, { timeout: 5_000 });
 
 		// act — reload again
 		await s.reload();
@@ -521,7 +521,7 @@ test.describe("CT-13: URL routing and navigation @quarantine", () => {
 		const modelTab = s.page.getByText("Models").first();
 		if (await modelTab.isVisible({ timeout: 3_000 }).catch(() => false)) {
 			await modelTab.click();
-			await s.page.waitForTimeout(300);
+			await s.page.waitForFunction(() => window.location.hash.includes("/settings"), null, { timeout: 5_000 });
 
 			s.assert();
 			const hash = await s.page.evaluate(() => window.location.hash);
