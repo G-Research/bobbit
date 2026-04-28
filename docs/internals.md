@@ -870,10 +870,10 @@ Key resolver: `SessionManager.getImageModelForSession(sessionId)` — returns `{
 The footer picker mutates session state via the WS message:
 
 ```json
-{ "type": "set_image_model", "sessionId": "…", "provider": "openai", "modelId": "gpt-image-2" }
+{ "type": "set_image_model", "provider": "openai", "modelId": "gpt-image-2" }
 ```
 
-Handled in `src/server/ws/handler.ts`. The handler validates `provider`/`modelId` against `getAvailableImageModels()` (registry + credential check). Unknown values reply with an error envelope `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and **do not** mutate session state — invalid values cannot wedge a session into an unrenderable picker state. On a valid value, the handler persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state.
+Handled in `src/server/ws/handler.ts`. The session ID is connection-derived — the server reads it from the WS connection context, not from the message payload — so the client never sends it. The handler validates `provider`/`modelId` against `getAvailableImageModels()` (registry + credential check). Unknown values reply with an error envelope `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and **do not** mutate session state — invalid values cannot wedge a session into an unrenderable picker state. On a valid value, the handler persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state.
 
 A confirmation snapshot is broadcast back as a normal session-update so all attached clients re-render the footer in sync.
 
@@ -888,7 +888,7 @@ A confirmation snapshot is broadcast back as a normal session-update so all atta
    - **Override resolution.** A request `model` is honoured when (a) it canonicalises equal to the session's selected model, (b) there is no `sessionId`, **or** (c) `imageModelMentionedInText` finds the request model id in the user's most-recent prompt text. Otherwise the request `model` is silently ignored and the session's selected model is used. This last-prompt check is why an explicit override sometimes "works" and sometimes doesn't — it must be named in the user's text, not just sent in the API body.
    - If a request `model` is supplied that doesn't match any registered image model, the canonical helper returns `undefined` and the request silently falls back to the session's selected model. There is no 4xx response for unknown image models on this endpoint.
    - Dispatches to one of `generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, or `generateOpenAICodexImage` in `src/server/agent/image-generation.ts`.
-4. The provider helper makes the upstream HTTP call and returns `{ images, format }`. Errors thrown from the helpers start with the upstream HTTP status code so the API surface can pass them through as `502 { error: "<status>: <message>" }`.
+4. The provider helper makes the upstream HTTP call and returns `{ images, format }`. Any error thrown from a helper is caught by the endpoint and surfaced as `500 { error: err?.message || "Image generation failed" }`. Helpers throw arbitrary `new Error(...)` strings (missing credentials, upstream HTTP failures, the Codex `n=1` clamp, the 25 MB remote-image cap, etc.) — there is no required prefix format, and the API surface never emits `502` or `503`.
 
 ### OpenAI-Codex driver model fallback chain
 
