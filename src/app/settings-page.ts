@@ -1132,10 +1132,11 @@ function loadModelsState(): void {
 	_modelsLoaded = true;
 	(async () => {
 		try {
-			const [statusRes, prefsRes, modelsRes] = await Promise.all([
+			const [statusRes, prefsRes, modelsRes, imageModelsRes] = await Promise.all([
 				gatewayFetch("/api/aigw/status"),
 				gatewayFetch("/api/preferences"),
 				gatewayFetch("/api/models"),
+				gatewayFetch("/api/image-models"),
 			]);
 			if (statusRes.ok) {
 				const data = await statusRes.json();
@@ -1163,7 +1164,6 @@ function loadModelsState(): void {
 					allModels = models;
 				}
 			}
-			const imageModelsRes = await gatewayFetch("/api/image-models");
 			if (imageModelsRes.ok) {
 				const imageModels = await imageModelsRes.json();
 				if (Array.isArray(imageModels)) allImageModels = imageModels;
@@ -2196,6 +2196,9 @@ function renderAccountTab() {
 							${Button({
 								variant: authenticated ? "outline" : "default",
 								size: "sm",
+								// Disable every provider's auth button while ANY provider is mid-flow
+								// to prevent concurrent OAuth attempts from clobbering each other's
+								// pendingFlows entries. Cleared in handleReauthenticate's finally block.
 								disabled: accountReauthing !== null,
 								onClick: () => handleReauthenticate(provider.id),
 								children: isReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",

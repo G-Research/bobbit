@@ -373,7 +373,27 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 	}
 }
 
-/** Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension. */
+/**
+ * Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension.
+ *
+ * Tool surface is selected by three intersecting paths, all funneled through
+ * `effectiveRole` and the policy cascade in `tool-activation.ts`:
+ *
+ *   1. **Role-with-policy**: `plan.roleName` resolves to a registered role;
+ *      its `toolPolicies` (allow/ask/never per group) override builtin
+ *      defaults. MCP proxy + guard extensions are emitted as needed.
+ *   2. **Team-lead / role-less**: `plan.roleName` is unset (regular sessions,
+ *      goal team-lead, goal/project/tool assistants). `effectiveRole` is
+ *      `undefined` and the cascade falls back to `groupPolicyStore` defaults
+ *      (which themselves fall back to builtin defaults). The full tool
+ *      surface allowed for the user is exposed.
+ *   3. **MCP-only**: when `mcpManager` is present, MCP-proxy extensions are
+ *      written regardless of role so MCP servers stay reachable; per-server
+ *      policies still apply.
+ *
+ * The guard extension is emitted whenever any tool resolves to `ask` or
+ * `never` so the agent can't bypass the policy by calling the tool directly.
+ */
 export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
 	const mcpExtPaths = ctx.mcpManager

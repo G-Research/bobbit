@@ -77,6 +77,49 @@ export interface PersistedSession {
 }
 
 /**
+ * Subset of `PersistedSession` fields that `SessionStore.update()` is
+ * permitted to mutate after creation. `id`, `createdAt`, `drafts`, and
+ * other identity-shaped fields are intentionally excluded.
+ */
+export type UpdatableSessionFields = Pick<
+	PersistedSession,
+	| "title"
+	| "lastActivity"
+	| "agentSessionFile"
+	| "goalId"
+	| "wasStreaming"
+	| "streamingStartedAt"
+	| "delegateOf"
+	| "role"
+	| "teamGoalId"
+	| "teamLeadSessionId"
+	| "worktreePath"
+	| "assistantType"
+	| "goalAssistant"
+	| "roleAssistant"
+	| "toolAssistant"
+	| "taskId"
+	| "staffId"
+	| "accessory"
+	| "preview"
+	| "personalities"
+	| "messageQueue"
+	| "archived"
+	| "archivedAt"
+	| "repoPath"
+	| "branch"
+	| "nonInteractive"
+	| "cwd"
+	| "reattemptGoalId"
+	| "modelProvider"
+	| "modelId"
+	| "imageModelProvider"
+	| "imageModelId"
+	| "sandboxed"
+	| "projectId"
+>;
+
+/**
  * Simple JSON file store for gateway session metadata.
  * Allows sessions to survive server restarts.
  */
@@ -175,7 +218,7 @@ export class SessionStore {
 	}
 
 	/** Update a subset of fields for an existing session */
-	update(id: string, updates: Partial<Pick<PersistedSession, "title" | "lastActivity" | "agentSessionFile" | "goalId" | "wasStreaming" | "streamingStartedAt" | "delegateOf" | "role" | "teamGoalId" | "teamLeadSessionId" | "worktreePath" | "assistantType" | "goalAssistant" | "roleAssistant" | "toolAssistant" | "taskId" | "staffId" | "accessory" | "preview" | "personalities" | "messageQueue" | "archived" | "archivedAt" | "repoPath" | "branch" | "nonInteractive" | "cwd" | "reattemptGoalId" | "modelProvider" | "modelId" | "imageModelProvider" | "imageModelId" | "sandboxed" | "projectId">>): void {
+	update(id: string, updates: Partial<UpdatableSessionFields>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;

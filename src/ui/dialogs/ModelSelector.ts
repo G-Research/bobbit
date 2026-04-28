@@ -9,6 +9,7 @@ import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Brain, Image as ImageIcon, KeyRound } from "lucide";
 import { gatewayFetch } from "../../app/api.js";
+import { GPT_55_RECENCY_RANK } from "../../shared/model-ranks.js";
 import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
@@ -37,7 +38,7 @@ function modelRecencyRank(id: string): number {
 	if (s.includes("claude")) return 50;
 
 	// ── OpenAI ──
-	if (s.includes("gpt-5.5")) return 104;
+	if (s.includes("gpt-5.5")) return GPT_55_RECENCY_RANK;
 	if (s.includes("gpt-5.4")) return 100;
 	if (s.includes("gpt-5.3")) return 98;
 	if (s.includes("gpt-5.2")) return 96;

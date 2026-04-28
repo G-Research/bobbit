@@ -33,7 +33,7 @@ import { McpManager } from "../mcp/mcp-manager.js";
 import { isTransientReviewError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
-import { defaultImageModelPref, parseImageModelPref } from "./image-generation.js";
+import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -3608,14 +3608,26 @@ export class SessionManager {
 		this.resolveStoreForSession(sessionId).update(sessionId, { imageModelProvider: provider, imageModelId: modelId });
 	}
 
+	/** True when (provider, modelId) is registered as an available image model. */
+	isKnownImageModel(provider: string, modelId: string): boolean {
+		if (!this.preferencesStore) return false;
+		const available = getAvailableImageModels(this.preferencesStore);
+		return available.some((m) => m.provider === provider && m.id === modelId);
+	}
+
 	/** Resolve the image generation model for a session, falling back to the system default. */
 	getImageModelForSession(sessionId: string): { provider: string; id: string } | undefined {
 		const persisted = this.resolveStoreForId(sessionId)?.get(sessionId);
 		if (persisted?.imageModelProvider && persisted?.imageModelId) {
 			return { provider: persisted.imageModelProvider, id: persisted.imageModelId };
 		}
-		const pref = this.preferencesStore?.get("default.imageModel") as string | undefined;
-		return parseImageModelPref(pref) || parseImageModelPref(defaultImageModelPref());
+		// Coalesce to the system default first, then parse exactly once.
+		// `defaultImageModelPref()` always returns the parseable
+		// "openai/gpt-image-2", so the result is always defined — the previous
+		// `|| parseImageModelPref(defaultImageModelPref())` fallback chain was
+		// dead code (the first parse always succeeded once we coalesce upstream).
+		const pref = (this.preferencesStore?.get("default.imageModel") as string | undefined) || defaultImageModelPref();
+		return parseImageModelPref(pref);
 	}
 
 	/** Latest user turn text for request-scoped policy checks such as model override gating. */

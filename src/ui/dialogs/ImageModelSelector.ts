@@ -22,21 +22,17 @@ export interface ImageGenerationModel {
 	formats?: string[];
 }
 
-function imageModelRank(model: ImageGenerationModel): number {
-	const s = `${model.provider}/${model.id}`.toLowerCase();
-	if (s.includes("gpt-image-2")) return 100;
-	if (s.includes("gemini-3.1")) return 98;
-	if (s.includes("imagen-4.0-ultra")) return 97;
-	if (s.includes("gemini-3-pro") || s.includes("nano-banana-pro")) return 96;
-	if (s.includes("imagen-4.0-generate")) return 95;
-	if (s.includes("imagen-4.0-fast")) return 94;
-	if (s.includes("gpt-image-1.5")) return 94;
-	if (s.includes("gpt-image-1-mini")) return 91;
-	if (s.includes("gpt-image-1")) return 90;
-	if (s.includes("gemini-2.5") || s.includes("nano-banana")) return 88;
-	if (s.includes("dall-e-3")) return 70;
-	if (s.includes("dall-e-2")) return 60;
-	return 0;
+/**
+ * Assign a recency rank to an image model. Models are surfaced by the server
+ * in `getAvailableImageModels` order (see `src/server/agent/image-generation.ts`)
+ * so we use that fetched list as the source of truth: models earlier in the
+ * registry rank higher. Models not in `registry` (e.g. transient mock entries
+ * in tests) sort below known ones.
+ */
+function imageModelRank(model: ImageGenerationModel, registry: readonly ImageGenerationModel[]): number {
+	const idx = registry.findIndex((m) => m.provider === model.provider && m.id === model.id);
+	if (idx < 0) return -1;
+	return registry.length - idx;
 }
 
 function sameModel(a: ImageGenerationModel | null, b: ImageGenerationModel): boolean {
@@ -105,6 +101,7 @@ export class ImageModelSelector extends DialogBase {
 			const tokens = q.split(/\s+/).filter(Boolean);
 			models = models.filter((m) => tokens.every((t) => `${m.provider} ${m.id} ${m.name}`.toLowerCase().includes(t)));
 		}
+		const registry = this.serverModels;
 		return [...models].sort((a, b) => {
 			const aCurrent = sameModel(this.currentModel, a);
 			const bCurrent = sameModel(this.currentModel, b);
@@ -112,7 +109,7 @@ export class ImageModelSelector extends DialogBase {
 			if (!aCurrent && bCurrent) return 1;
 			if (!!a.authenticated && !b.authenticated) return -1;
 			if (!a.authenticated && !!b.authenticated) return 1;
-			const rankDiff = imageModelRank(b) - imageModelRank(a);
+			const rankDiff = imageModelRank(b, registry) - imageModelRank(a, registry);
 			if (rankDiff) return rankDiff;
 			return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
 		});

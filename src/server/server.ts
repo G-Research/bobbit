@@ -3185,10 +3185,27 @@ async function handleApiRoute(
 			json({ error: "Missing prompt" }, 400);
 			return;
 		}
+		const MAX_PROMPT_CHARS = 8192;
+		if (body.prompt.length > MAX_PROMPT_CHARS) {
+			json({ error: "prompt exceeds 8192 chars" }, 400);
+			return;
+		}
+		// Clamp `n` to integer in [1,4]; reject non-integers / out-of-range.
+		let n: number | undefined;
+		if (body.n !== undefined && body.n !== null) {
+			if (typeof body.n !== "number" || !Number.isInteger(body.n) || body.n < 1 || body.n > 4) {
+				json({ error: "n must be 1..4" }, 400);
+				return;
+			}
+			n = body.n;
+		}
 		const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
 		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
 		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
-		const selectedModel = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
+		// Canonicalise both sides so equality compares apples-to-apples (e.g. user
+		// pref "google/nano-banana" vs requested "google/gemini-2.5-flash-image").
+		const selectedModelRaw = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
+		const selectedModel = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
 		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
 		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
 		const model = requestedModel
@@ -3209,7 +3226,7 @@ async function handleApiRoute(
 				format: typeof body.format === "string" ? body.format : undefined,
 				aspectRatio: typeof body.aspectRatio === "string" ? body.aspectRatio : undefined,
 				imageSize: typeof body.imageSize === "string" ? body.imageSize : undefined,
-				n: typeof body.n === "number" ? body.n : undefined,
+				n,
 			});
 			json({
 				model: { provider: result.model.provider, id: result.model.id, name: result.model.name, api: result.model.api },
@@ -5395,14 +5412,20 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/oauth/flow-status?flowId=<id> — callback-based OAuth progress
+	// GET /api/oauth/flow-status?flowId=<id>[&provider=…] — callback-based OAuth progress
 	if (url.pathname === "/api/oauth/flow-status" && req.method === "GET") {
 		const flowId = url.searchParams.get("flowId");
 		if (!flowId) {
 			json({ error: "Missing flowId" }, 400);
 			return;
 		}
-		json(oauthFlowStatus(flowId));
+		const provider = url.searchParams.get("provider") || undefined;
+		const status = oauthFlowStatus(flowId, provider);
+		if (status.error === "flow not found") {
+			json(status, 404);
+			return;
+		}
+		json(status);
 		return;
 	}
 
