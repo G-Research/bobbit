@@ -49,6 +49,8 @@ export interface PersistedGoal {
 	autoStartTeam?: boolean;
 	/** Names of optional verification steps enabled for this goal */
 	enabledOptionalSteps?: string[];
+	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
+	repoWorktrees?: Record<string, string>;
 }
 
 /**

@@ -140,6 +140,15 @@ export default function (pi: ExtensionAPI) {
 			session_model: Type.Optional(Type.String({ description: "Default session model (provider/model-id)" })),
 			review_model: Type.Optional(Type.String({ description: "Reviewer model (provider/model-id)" })),
 			naming_model: Type.Optional(Type.String({ description: "Naming model (provider/model-id)" })),
+			worktree_root: Type.Optional(Type.String({ description: "Custom parent dir for worktrees (absolute or relative to root_path). Default: <rootPath>-wt/" })),
+			components: Type.Optional(Type.Array(Type.Object({
+				name: Type.String({ description: "Component name (unique within project)" }),
+				repo: Type.String({ description: "\".\" for single-repo, else a subfolder of rootPath" }),
+				relative_path: Type.Optional(Type.String({ description: "Optional sub-path inside the repo" })),
+				worktree_setup_command: Type.Optional(Type.String({ description: "Per-component setup hook" })),
+				commands: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Flat name → shell. Absent ⇒ data-only." })),
+			}), { description: "Project components. Single-repo: one component with repo='.'." })),
+			workflows: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Inline workflows keyed by id; structurally validated server-side." })),
 		}),
 		async execute() { return ack(); },
 	});

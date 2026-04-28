@@ -55,6 +55,24 @@ export class GitStatusWidget extends LitElement {
         }
     };
 
+    /**
+     * Multi-repo aware envelope (Phase 4). When set, `repos` carries per-repo
+     * status entries from `GET /api/goals/:id/git-status`. Today the widget
+     * still renders the flat aggregate fields above; per-repo collapsible
+     * sections are a follow-up.
+     *
+     * TODO Phase 4 follow-up: render per-repo collapsible sections with
+     * aggregated header counts when `Object.keys(repos).length > 1`. The
+     * single-key (`"."`) case continues to use the flat render.
+     */
+    @property({ type: Object }) repos?: Record<string, { summary?: string; clean?: boolean; statusFiles?: Array<{ file: string; status: string }> }>;
+
+    /** Helper: how many distinct repos this widget has data for. */
+    getRepoCount(): number {
+        if (!this.repos) return 1;
+        return Object.keys(this.repos).length;
+    }
+
     @state() private expanded = false;
     @state() private merging = false;
     @state() private mergeError = '';

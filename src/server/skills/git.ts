@@ -5,6 +5,8 @@ import path from "node:path";
 import yaml from "yaml";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 import { resolveShell } from "../agent/shell-util.js";
+import type { Component } from "../agent/project-config-store.js";
+import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
 const execFile = promisify(execFileCb);
 
@@ -263,6 +265,86 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	}
 
 	return { worktreePath, branchName };
+}
+
+/**
+ * Create a coordinated set of worktrees — one per distinct repo declared in
+ * `components`. Single-repo (one component, repo===".") collapses to today's
+ * `createWorktree` behavior identically; multi-repo creates a per-repo worktree
+ * under `<wtRoot>/<branchSlug>/<repo>/` from each repo's source at
+ * `<rootPath>/<repo>/`.
+ *
+ * Does NOT run per-component setup commands — caller is responsible for
+ * invoking `runComponentSetups()` afterward.
+ *
+ * See docs/design/multi-repo-components.md §4 + §5.
+ */
+export async function createWorktreeSet(
+	rootPath: string,
+	components: Component[],
+	branchName: string,
+	baseBranch?: string,
+): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
+	// Distinct repos in declared order.
+	const seen = new Set<string>();
+	const repos: string[] = [];
+	for (const c of components) {
+		if (!seen.has(c.repo)) { seen.add(c.repo); repos.push(c.repo); }
+	}
+	if (repos.length === 0) repos.push(".");  // defensive — empty components → single-repo
+
+	const slug = branchToSlug(branchName);
+
+	// Single-repo path collapses to existing behavior.
+	if (repos.length === 1 && repos[0] === ".") {
+		const result = await createWorktree(rootPath, branchName, { startPoint: baseBranch, skipPush: true });
+		return {
+			container: result.worktreePath,
+			worktrees: [{ repo: ".", repoPath: rootPath, worktreePath: result.worktreePath }],
+		};
+	}
+
+	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.
+	// TODO Phase 4 follow-up: thread project.worktree_root through here. Today
+	// callers don't expose project metadata to git.ts so we use the default
+	// `<rootPath>-wt` layout; project-level override is applied by the
+	// goal-manager / session-manager wiring before calling us.
+	const wtRoot = wtRootHelper({ rootPath });
+	const container = path.join(wtRoot, slug);
+	if (!fs.existsSync(container)) {
+		fs.mkdirSync(container, { recursive: true });
+	}
+
+	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
+	for (const repo of repos) {
+		const repoSrc = path.join(rootPath, repo);
+		const wtPath = path.join(container, repo);
+		if (!fs.existsSync(repoSrc)) {
+			throw new Error(`createWorktreeSet: source repo not found: ${repoSrc}`);
+		}
+		const startPoint = baseBranch ?? await resolveRemotePrimary(repoSrc);
+
+		// Branch may already exist from a prior partial attempt.
+		let branchExists = false;
+		try {
+			await execFile("git", ["rev-parse", "--verify", branchName], { cwd: repoSrc });
+			branchExists = true;
+		} catch { /* not present */ }
+
+		try {
+			if (branchExists) {
+				await execFile("git", ["worktree", "add", wtPath, branchName], { cwd: repoSrc });
+			} else {
+				await execFile("git", ["worktree", "add", "-b", branchName, wtPath, startPoint], { cwd: repoSrc });
+			}
+		} catch (err) {
+			throw new Error(`createWorktreeSet: git worktree add failed for repo "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
+		}
+
+		out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
+	}
+
+	return { container, worktrees: out };
 }
 
 /**

@@ -1429,6 +1429,11 @@
       this.squashPushing = false;
       this.squashPushError = "";
     }
+    /** Helper: how many distinct repos this widget has data for. */
+    getRepoCount() {
+      if (!this.repos) return 1;
+      return Object.keys(this.repos).length;
+    }
     _closeDropdown() {
       if (this._closing || !this._dropdownEl) return;
       this._closing = true;
@@ -2358,6 +2363,9 @@
   __decorateClass([
     r5()
   ], GitStatusWidget.prototype, "_commitsVs", 2);
+  __decorateClass([
+    n4({ type: Object })
+  ], GitStatusWidget.prototype, "repos", 2);
   __decorateClass([
     r5()
   ], GitStatusWidget.prototype, "expanded", 2);

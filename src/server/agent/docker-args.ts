@@ -4,6 +4,17 @@
  * Builds `docker run -d ... sleep infinity` args for detached containers
  * managed by the sandbox pool. All sandbox sessions use pool containers
  * (pre-warmed or created on-demand).
+ *
+ * TODO Phase 4 follow-up: multi-repo mount layout. Today single-repo mounts
+ * a single `bobbit-workspace-<projectId>` named volume at `/workspace`. For
+ * multi-repo we need:
+ *   - `bobbit-workspace-<projectId>` at `/workspace` containing one subdir
+ *     per declared repo (`/workspace/<repo>/`).
+ *   - `bobbit-worktrees-<projectId>` at `/workspace-wt/` containing
+ *     `<branchSlug>/<repo>/` worktrees side-by-side.
+ * Until then, multi-repo projects throw on sandbox creation (see
+ * `ProjectSandbox.createWorktreeSet` stub) and callers must fall back to
+ * non-sandboxed mode. See docs/design/multi-repo-components.md §7.2.
  */
 
 import { execFileSync } from "node:child_process";

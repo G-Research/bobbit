@@ -21,6 +21,7 @@ import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush } from "../skills/git.js";
+import type { Component } from "./project-config-store.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -235,6 +236,36 @@ export class ProjectSandbox {
 
 		console.log(`[project-sandbox] Created worktree ${name} (branch: ${branch}) at ${worktreePath}`);
 		return worktreePath;
+	}
+
+	/**
+	 * Multi-repo aware worktree creation — single-repo collapses to today's
+	 * `createWorktree(name, branch, baseBranch)`. Multi-repo is a TODO stub:
+	 * the mount layout requires `/workspace/<repo>` named volumes and per-repo
+	 * worktrees under `/workspace-wt/<branchSlug>/<repo>` which `docker-args.ts`
+	 * does not yet emit. Callers should fall back to non-sandboxed mode for
+	 * multi-repo until that lands.
+	 *
+	 * See docs/design/multi-repo-components.md §7.2.
+	 */
+	async createWorktreeSet(
+		name: string,
+		branch: string,
+		components: Component[],
+		baseBranch?: string,
+	): Promise<{ container: string; worktrees: Array<{ repo: string; worktreePath: string }> }> {
+		const seen = new Set<string>();
+		const repos: string[] = [];
+		for (const c of components) {
+			if (!seen.has(c.repo)) { seen.add(c.repo); repos.push(c.repo); }
+		}
+		if (repos.length === 1 && repos[0] === ".") {
+			const container = await this.createWorktree(name, branch, baseBranch);
+			return { container, worktrees: [{ repo: ".", worktreePath: container }] };
+		}
+		throw new Error(
+			"multi-repo sandbox createWorktreeSet not yet implemented (Phase 4 follow-up); use non-sandboxed mode for multi-repo until then",
+		);
 	}
 
 	/** Remove a git worktree inside the container. */

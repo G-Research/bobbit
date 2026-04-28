@@ -37,6 +37,8 @@ export interface SweepRecord {
 	branch?: string;
 	worktreePath?: string;
 	archived?: boolean;
+	/** Per-repo worktree paths (multi-repo). Each is treated as separately owned. */
+	repoWorktrees?: Record<string, string>;
 }
 
 export interface SweepResult {
@@ -96,6 +98,14 @@ export async function sweepOrphanedWorktrees(opts: {
 		const np = normalize(rec.worktreePath);
 		if (np) ownedPaths.add(np);
 		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		// Multi-repo: each per-repo worktree is separately owned. The branch is
+		// shared across repos so we only add to ownedPaths.
+		if (rec.repoWorktrees) {
+			for (const wp of Object.values(rec.repoWorktrees)) {
+				const n = normalize(wp);
+				if (n) ownedPaths.add(n);
+			}
+		}
 	}
 
 	for (const project of opts.projects) {
@@ -195,6 +205,12 @@ export function classifyWorktrees(opts: {
 		const np = normalize(rec.worktreePath);
 		if (np) ownedPaths.add(np);
 		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		if (rec.repoWorktrees) {
+			for (const wp of Object.values(rec.repoWorktrees)) {
+				const n = normalize(wp);
+				if (n) ownedPaths.add(n);
+			}
+		}
 	}
 	const pool: ParsedWorktree[] = [];
 	const active: ParsedWorktree[] = [];
