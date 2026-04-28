@@ -156,4 +156,20 @@ test.describe("Settings (full-stack UI)", () => {
 			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
+
+	// Phase-1 scaffold (PR #369 review fix L1):
+	// Account-tab login buttons disable themselves when *another* provider's
+	// re-auth flow is in flight (`disabled: accountReauthing !== null`). The
+	// Phase-2 fleshout will start an `anthropic` flow and assert the
+	// `openai-codex` login button (and vice-versa) becomes disabled until the
+	// in-flight flow completes or is cancelled.
+	test.skip("Account tab: login buttons disable while another provider's flow is in flight", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/account");
+		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
+		// TODO Phase 2 (Agent B B1/B5):
+		//   1. Click "Sign in with Anthropic" button.
+		//   2. Assert the OpenAI Codex login button transitions to disabled.
+		//   3. Cancel/complete the flow → assert it re-enables.
+	});
 });
