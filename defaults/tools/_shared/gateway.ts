@@ -11,7 +11,10 @@ import path from "node:path";
 
 function stateDir(): string {
 	if (process.env.BOBBIT_DIR) return path.join(process.env.BOBBIT_DIR, "state");
-	return path.join(process.env.HOME || ".", ".pi");
+	// No silent fallback to ~/.pi: tool extensions run inside an agent process
+	// whose env is set up by the gateway. If BOBBIT_DIR is missing, the caller
+	// is mis-configured and we want a loud error rather than guessing a path.
+	throw new Error("BOBBIT_DIR not set; cannot resolve gateway");
 }
 
 export function getGatewayUrl(): string {
@@ -23,6 +26,5 @@ export function getGatewayUrl(): string {
 
 export function getGatewayToken(): string {
 	if (process.env.BOBBIT_TOKEN) return process.env.BOBBIT_TOKEN;
-	const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-	return fs.readFileSync(path.join(stateDir(), tokenFile), "utf-8").trim();
+	return fs.readFileSync(path.join(stateDir(), "token"), "utf-8").trim();
 }

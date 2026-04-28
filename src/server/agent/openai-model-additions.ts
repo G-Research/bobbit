@@ -119,7 +119,9 @@ function writeModelsJson(data: Record<string, any>): void {
 	const tmp = `${p}.tmp`;
 	fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
 	fs.renameSync(tmp, p);
-	console.log(`[openai-model-additions] Wrote models.json to ${p}`);
+	if (process.env.BOBBIT_DEBUG) {
+		console.log(`[openai-model-additions] Wrote models.json to ${p}`);
+	}
 }
 
 function valuesEqual(a: unknown, b: unknown): boolean {
@@ -144,16 +146,21 @@ function isBobbitOwned(provider: string, id: string, field: string, currentValue
 	return prior.some((v) => valuesEqual(currentValue, v));
 }
 
-const ADDITION_FIELDS: Array<keyof OpenAIAddition> = [
-	"name",
-	"api",
-	"baseUrl",
-	"reasoning",
-	"input",
-	"cost",
-	"contextWindow",
-	"maxTokens",
-];
+// Derive the field list from the type rather than hand-listing literals — prevents
+// drift between OpenAIAddition's shape and what the merger considers "owned". The
+// sample object lives only in the type system; `keyof OpenAIAddition` produces a
+// union of property names which `Object.keys` of a typed sample materialises.
+const ADDITION_FIELD_SAMPLE: Record<keyof Omit<OpenAIAddition, "id" | "provider">, true> = {
+	name: true,
+	api: true,
+	baseUrl: true,
+	reasoning: true,
+	input: true,
+	cost: true,
+	contextWindow: true,
+	maxTokens: true,
+};
+const ADDITION_FIELDS: Array<keyof OpenAIAddition> = Object.keys(ADDITION_FIELD_SAMPLE) as Array<keyof OpenAIAddition>;
 
 export function writeOpenAIModelAdditions(): void {
 	const data = readModelsJson();

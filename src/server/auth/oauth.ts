@@ -46,6 +46,42 @@ type PendingOAuth = PendingAnthropicOAuth | PendingExternalOAuth;
 // In-memory store for pending OAuth flows (verifier keyed by a flow ID)
 const pendingFlows = new Map<string, PendingOAuth>();
 const FLOW_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const FLOW_CLEANUP_INTERVAL_MS = 60 * 1000; // sweep expired flows every 60s
+let flowCleanupTimer: ReturnType<typeof setInterval> | undefined;
+
+function ensureFlowCleanupTimer(): void {
+	if (flowCleanupTimer) return;
+	flowCleanupTimer = setInterval(() => {
+		try { cleanupExpiredFlows(); } catch (err) {
+			console.warn("[oauth] cleanup sweep failed:", err);
+		}
+	}, FLOW_CLEANUP_INTERVAL_MS);
+	// Don't keep the event loop alive solely for the cleanup sweep.
+	if (typeof flowCleanupTimer.unref === "function") flowCleanupTimer.unref();
+}
+
+/** Stop the periodic cleanup timer (test-only). */
+export function stopFlowCleanup(): void {
+	if (flowCleanupTimer) {
+		clearInterval(flowCleanupTimer);
+		flowCleanupTimer = undefined;
+	}
+}
+
+/**
+ * Mask anything that looks like a JWT (three dot-separated base64url segments)
+ * or a long bearer-shaped token in a free-form log/error string. Best-effort:
+ * we redact aggressively rather than risk leaking access tokens via stderr.
+ */
+function redactSensitive(s: string): string {
+	if (typeof s !== "string" || !s) return s;
+	let out = s;
+	// JWT-ish: aaa.bbb.ccc with base64url segments.
+	out = out.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "<redacted-jwt>");
+	// Long bearer-shaped tokens (32+ url-safe chars).
+	out = out.replace(/[A-Za-z0-9_-]{32,}/g, "<redacted-token>");
+	return out;
+}
 
 function getAuthJsonPath(): string {
 	return globalAuthPath();
@@ -119,6 +155,7 @@ function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCred
  */
 export async function oauthStart(providerInput?: string): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
 	cleanupExpiredFlows();
+	ensureFlowCleanupTimer();
 
 	const provider = normalizeProvider(providerInput);
 	if (provider !== "anthropic") {
@@ -169,33 +206,38 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 		rejectStarted = reject;
 	});
 
-	// Construct the real loginPromise up-front so callers (e.g. oauthComplete)
-	// observing `flow.loginPromise` after `pendingFlows.set` always see the active
-	// provider login attempt — never an already-resolved placeholder.
-	const loginPromise = oauthProvider.login({
-		onAuth: (info) => resolveStarted(info),
-		onPrompt: async () => manualCodePromise,
-		onManualCodeInput: async () => manualCodePromise,
-		onProgress: (message) => console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${message}`),
-	}).then((credentials) => {
-		storeOAuthCredentials(provider, credentials);
-		flow.completed = true;
-	}).catch((err) => {
-		flow.error = err instanceof Error ? err.message : String(err);
-		rejectStarted(err instanceof Error ? err : new Error(String(err)));
-		throw err;
-	});
-	void loginPromise.catch(() => {});
-
+	// Initialise the flow record up-front so the `loginPromise.then/catch`
+	// callbacks below always see a fully-constructed `flow` reference — even if
+	// pi-ai resolves synchronously before this scope finishes evaluating.
 	const flow: PendingExternalOAuth = {
 		provider,
 		createdAt,
 		submitCode,
 		rejectCode,
-		loginPromise,
+		loginPromise: Promise.resolve(), // overwritten below
 		completed: false,
 	};
+
+	// Construct the real loginPromise; the .then/.catch callbacks reference
+	// `flow` (already in scope above) without TDZ risk.
+	const loginPromise = oauthProvider.login({
+		onAuth: (info) => resolveStarted(info),
+		onPrompt: async () => manualCodePromise,
+		onManualCodeInput: async () => manualCodePromise,
+		onProgress: (message) => console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(message)}`),
+	}).then((credentials) => {
+		storeOAuthCredentials(provider, credentials);
+		flow.completed = true;
+	}).catch((err) => {
+		const raw = err instanceof Error ? err.message : String(err);
+		flow.error = redactSensitive(raw);
+		rejectStarted(err instanceof Error ? err : new Error(String(err)));
+		throw err;
+	});
+	void loginPromise.catch(() => {});
+	flow.loginPromise = loginPromise;
 	pendingFlows.set(flowId, flow);
+	ensureFlowCleanupTimer();
 
 	const info = await started;
 	return {
@@ -270,7 +312,13 @@ export async function oauthComplete(
 
 		if (!tokenResponse.ok) {
 			const errorText = await tokenResponse.text();
-			return { success: false, error: `Token exchange failed: ${errorText}` };
+			// Truncate provider-supplied error bodies so we never echo a multi-KB
+			// HTML/JSON page back through the API surface or the UI dialog.
+			const MAX_ERR_CHARS = 256;
+			const truncated = errorText.length > MAX_ERR_CHARS
+				? `${errorText.slice(0, MAX_ERR_CHARS)}…`
+				: errorText;
+			return { success: false, error: `Token exchange failed: ${truncated}` };
 		}
 
 		const tokenData = (await tokenResponse.json()) as {

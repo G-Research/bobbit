@@ -142,6 +142,10 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		let step: "loading" | "waiting" | "exchanging" | "done" | "error" = "loading";
 		let error = "";
 		let pollTimer: number | undefined;
+		let pollStartMs = 0;
+		let pollDelayMs = 1000;
+		const POLL_MAX_DELAY_MS = 8000;
+		const POLL_MAX_TOTAL_MS = 5 * 60 * 1000;
 
 		const providerName = provider === "openai-codex" || provider === "openai" ? "OpenAI" : "Anthropic";
 
@@ -154,8 +158,15 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 
 		const pollFlowStatus = async () => {
 			if (!flowId || step !== "waiting") return;
+			if (pollStartMs === 0) pollStartMs = Date.now();
+			if (Date.now() - pollStartMs > POLL_MAX_TOTAL_MS) {
+				error = "OAuth flow timed out after 5 minutes";
+				step = "error";
+				renderOAuthDialog();
+				return;
+			}
 			try {
-				const res = await gatewayFetch(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}`);
+				const res = await gatewayFetch(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}&provider=${encodeURIComponent(provider)}`);
 				if (res.ok) {
 					const data = await res.json();
 					if (data.complete) {
@@ -174,7 +185,9 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			} catch {
 				// Keep polling; the manual paste path remains available.
 			}
-			pollTimer = window.setTimeout(pollFlowStatus, 1000);
+			// Exponential backoff: 1s → 2s → 4s → 8s (cap), capped at 5min total wait.
+			pollTimer = window.setTimeout(pollFlowStatus, pollDelayMs);
+			pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_DELAY_MS);
 		};
 
 		const startFlow = async () => {
