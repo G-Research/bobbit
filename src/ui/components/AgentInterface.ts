@@ -5,8 +5,9 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import { streamSimple, type ToolResultMessage, type Usage } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query } from "lit/decorators.js";
-import { Brain, Sparkles } from "lucide";
+import { Brain, Image as ImageIcon, Sparkles } from "lucide";
 import { ModelSelector } from "../dialogs/ModelSelector.js";
+import { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 import type { MessageEditor } from "./MessageEditor.js";
 import "./MessageEditor.js";
 import "./MessageList.js";
@@ -871,6 +872,28 @@ export class AgentInterface extends LitElement {
 			})
 			: "";
 
+		const imageModel = (state as any).imageGenerationModel;
+		const imageModelButton = this.enableModelSelector && imageModel
+			? Button({
+				variant: "ghost",
+				size: "sm",
+				onClick: () => {
+					ImageModelSelector.open(imageModel, (m) => {
+						if (typeof (session as any).setImageGenerationModel === "function") {
+							(session as any).setImageGenerationModel(m);
+						} else {
+							(session.state as any).imageGenerationModel = m;
+						}
+					});
+				},
+				children: html`
+					${icon(ImageIcon, "sm")}
+					<span class="ml-1">${imageModel.id}</span>
+				`,
+				className: "h-6 text-xs truncate",
+			})
+			: "";
+
 		const cwdHtml = this.cwd ? (() => {
 			const parts = this.cwd!.split(/[/\\]/).filter(Boolean);
 			const short = parts.length <= 2 ? parts.join("/") : "…/" + parts.slice(-2).join("/");
@@ -980,6 +1003,7 @@ export class AgentInterface extends LitElement {
 					${this.showThemeToggle ? html`<theme-toggle></theme-toggle>` : html``}
 					${thinkingSelect}
 					${modelButton}
+					${imageModelButton}
 				</div>
 				${cwdHtml ? html`<div class="hidden sm:flex items-center pl-4">${cwdHtml}</div>` : ""}
 				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">

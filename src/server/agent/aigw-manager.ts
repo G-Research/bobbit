@@ -94,6 +94,12 @@ export function inferMeta(modelId: string): ModelMeta {
 	}
 
 	// OpenAI models
+	if (id.includes("gpt-5.5-pro")) {
+		return { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], compat: GATEWAY_COMPAT };
+	}
+	if (id.includes("gpt-5.5")) {
+		return { contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], compat: GATEWAY_COMPAT };
+	}
 	if (id.includes("gpt-5")) {
 		return { contextWindow: 400_000, maxTokens: 32_768, reasoning: false, input: ["text", "image"], compat: GATEWAY_COMPAT };
 	}

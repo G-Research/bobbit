@@ -13,3 +13,7 @@ Skills: allow
 # browser can override this in `.bobbit/config/tool-group-policies.yaml`
 # (`mcp__playwright: allow`) and/or drop `--headless` in their own `.mcp.json`.
 mcp__playwright: never
+# Bobbit owns image model routing through `generate_image`, including Nano
+# Banana/Gemini. The external nano-banana MCP hard-codes provider behavior and
+# can drift from the configured session image model.
+mcp__nano-banana: never
