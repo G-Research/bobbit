@@ -1128,7 +1128,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onProjectProposal = async (fields: Record<string, string>) => {
+		remote.onProjectProposal = async (fields: Record<string, unknown>) => {
 			if (activeSessionId() !== sessionId) return;
 			const session = state.gatewaySessions.find(s => s.id === sessionId);
 			const project = state.projects.find(p => p.id === session?.projectId);
@@ -1753,7 +1753,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const { promoteProject, fetchProjects, gatewayFetch } = await import("./api.js");
 
 	// Promote the provisional project
-	const promoted = await promoteProject(projectId, fields.name);
+	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
 	if (!promoted) return;
 
 	// Write config fields
@@ -1762,7 +1762,8 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 		'test_unit_command', 'test_e2e_command', 'worktree_setup_command',
 		'qa_start_command', 'sandbox'];
 	for (const key of CONFIG_KEYS) {
-		if (fields[key]) configFields[key] = fields[key];
+		const v = fields[key];
+		if (typeof v === "string" && v) configFields[key] = v;
 	}
 	if (Object.keys(configFields).length > 0) {
 		try {
@@ -1807,6 +1808,12 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	renderApp();
 }
 
+/** Best-effort JSON.parse used by registered-proposal acceptance to coerce
+ *  string-shaped `components`/`workflows` fields back into structured form. */
+function safeParseJson(text: string): unknown {
+	try { return JSON.parse(text); } catch { return undefined; }
+}
+
 /** Registered-mode accept: apply diffed config fields to the live project
  *  without terminating or navigating away. */
 async function acceptRegisteredProjectProposal(): Promise<void> {
@@ -1820,13 +1827,14 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	const { gatewayFetch, fetchProjects } = await import("./api.js");
 	const currentName = currentConfig?.name ?? "";
 	const currentCfg = currentConfig?.config ?? {};
+	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 
 	// 1. Rename via PUT /api/projects/:id if name changed.
-	if (fields.name && fields.name !== currentName) {
+	if (fieldNameStr && fieldNameStr !== currentName) {
 		try {
 			await gatewayFetch(`/api/projects/${projectId}`, {
 				method: "PUT",
-				body: JSON.stringify({ name: fields.name }),
+				body: JSON.stringify({ name: fieldNameStr }),
 			});
 		} catch (err) {
 			console.error('[project-proposal] Rename failed:', err);
@@ -1834,18 +1842,41 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	}
 
 	// 2. Compute config diff — only fields that differ from currentConfig.config.
-	//    root_path never sent. name handled above.
-	const diff: Record<string, string> = {};
+	//    root_path never sent. name handled above. `components` and `workflows`
+	//    flow through as structured (non-string) fields when the proposal
+	//    carries them (Phase 4b — multi-repo proposals).
+	const diff: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(fields)) {
 		if (k === "name" || k === "root_path") continue;
-		if ((currentCfg[k] ?? "") !== v) diff[k] = v;
+		if (k === "components" || k === "workflows") {
+			// Always re-send structured fields when present — server diffs
+			// against persisted state, and we don't currently snapshot the
+			// structured side-tables in `currentConfig.config`.
+			if (v !== undefined && v !== null && v !== "") {
+				diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
+			}
+			continue;
+		}
+		if ((currentCfg[k as string] ?? "") !== v) diff[k] = v;
 	}
 	if (Object.keys(diff).length > 0) {
 		try {
-			await gatewayFetch(`/api/projects/${projectId}/config`, {
+			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 				method: 'PUT',
 				body: JSON.stringify(diff),
 			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				const details = Array.isArray(data?.details) && data.details.length > 0
+					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+					: "";
+				const { showConnectionError } = await import("./dialogs.js");
+				showConnectionError(
+					data?.error || `Config write failed (${res.status})`,
+					details || (data?.error ?? ""),
+				);
+				return;
+			}
 		} catch (err) {
 			console.error('[project-proposal] Config write error:', err);
 		}

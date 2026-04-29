@@ -373,6 +373,35 @@ function ensureWorkflowsLoaded(): void {
 
 let _sandboxStatusFetching = false;
 
+/** Cached `repoCount` per project for the goal-creation multi-repo indicator.
+ *  Phase 4b. Counts distinct `repo` values across configured components. */
+const _projectComponentsCache = new Map<string, { repoCount: number; componentCount: number; multiRepo: boolean }>();
+const _projectComponentsFetching = new Set<string>();
+function ensureProjectComponentsLoaded(projectId: string): void {
+	if (_projectComponentsCache.has(projectId) || _projectComponentsFetching.has(projectId)) return;
+	_projectComponentsFetching.add(projectId);
+	gatewayFetch(`/api/projects/${projectId}/structured`)
+		.then(r => r.json())
+		.then(data => {
+			const components: Array<{ repo?: string }> = Array.isArray(data?.components) ? data.components : [];
+			const repos = new Set<string>();
+			for (const c of components) repos.add(c.repo || ".");
+			const summary = {
+				repoCount: repos.size,
+				componentCount: components.length,
+				multiRepo: components.some(c => (c.repo || ".") !== "."),
+			};
+			_projectComponentsCache.set(projectId, summary);
+			_projectComponentsFetching.delete(projectId);
+			renderApp();
+		})
+		.catch(() => {
+			_projectComponentsCache.set(projectId, { repoCount: 1, componentCount: 0, multiRepo: false });
+			_projectComponentsFetching.delete(projectId);
+			renderApp();
+		});
+}
+
 const _qaConfigCache = new Map<string, boolean>();
 let _qaConfigFetching = false;
 function ensureQaConfigLoaded(projectId: string): void {
@@ -446,6 +475,8 @@ function renderGoalForm(config: GoalFormConfig) {
 		: worktreePreviewPath(config.cwd, config.title);
 	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
 	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
+	if (config.linkedProjectId) ensureProjectComponentsLoaded(config.linkedProjectId);
+	const componentSummary = config.linkedProjectId ? _projectComponentsCache.get(config.linkedProjectId) : undefined;
 	const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
 	if (wf) {
 		for (const gate of wf.gates) {
@@ -499,6 +530,15 @@ function renderGoalForm(config: GoalFormConfig) {
 						<code class="text-[10px] font-mono opacity-80 ml-1">${worktreePath}</code>
 					</span>
 				</div>
+				${componentSummary?.multiRepo ? html`
+					<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0" data-testid="multi-repo-indicator">
+						<span class="${lblCls} w-20 md:w-16"></span>
+						<span class="truncate flex-1 min-w-0 text-amber-600 dark:text-amber-400">
+							Will create ${componentSummary.componentCount} worktree${componentSummary.componentCount === 1 ? "" : "s"}
+							across ${componentSummary.repoCount} repo${componentSummary.repoCount === 1 ? "" : "s"}.
+						</span>
+					</div>
+				` : ""}
 			` : html`
 				<div class="flex items-start gap-2">
 					<label class="${lblCls} w-20 md:w-16 mt-2">Directory</label>
@@ -1680,7 +1720,19 @@ function projectProposalPanel() {
 		`;
 	}
 
-	const fields = { ...proposal.fields };
+	// `fields` may now contain structured `components` / `workflows` blocks
+	// (Phase 4b). The diff partitioning logic below expects flat strings, so
+	// we coerce any non-string value into a JSON string for display purposes
+	// only — the original structured value is preserved on `proposal.fields`.
+	const rawFields = proposal.fields as Record<string, unknown>;
+	const fields: Record<string, string> = {};
+	for (const [k, v] of Object.entries(rawFields)) {
+		if (typeof v === "string") fields[k] = v;
+		else if (v == null) fields[k] = "";
+		else {
+			try { fields[k] = JSON.stringify(v); } catch { fields[k] = String(v); }
+		}
+	}
 	const mode = proposal.mode ?? "provisional";
 	const current = proposal.currentConfig;
 	const isRegistered = mode === "registered";
@@ -1720,7 +1772,7 @@ function projectProposalPanel() {
 
 	const onFieldInput = (key: string, value: string) => {
 		if (!state.activeProjectProposal) return;
-		state.activeProjectProposal.fields[key] = value;
+		(state.activeProjectProposal.fields as Record<string, unknown>)[key] = value;
 		saveProjectDraft(state.activeProjectProposal.sessionId);
 		renderApp();
 	};
