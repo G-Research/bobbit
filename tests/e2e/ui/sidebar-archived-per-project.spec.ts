@@ -193,14 +193,14 @@ test.describe("Per-project Archived subsections", () => {
 		await expect(page.getByText(goalBTitle, { exact: false })).toHaveCount(0, { timeout: 3_000 });
 	});
 
-	// @quarantine — archived-goal text doesn't render in sidebar within 25s
-	// timeout under heavy parallel browser load. Passes 3/3 in isolation. The
-	// sibling test `archived items appear under correct project subsection`
-	// stays green; only the search variant times out, suggesting search-index
-	// /archived-list join under contention is the real bottleneck. Needs root
-	// cause investigation, not a 25–40s timeout bump.
-	// Expiry: 2026-06-30.
-	test("search surfaces archived items in the correct project subsection @quarantine", async ({ page }) => {
+	// Root cause fix landed: `_ensureArchivedForSearch` in src/app/sidebar.ts
+	// gated the archived-goals fetch on `state.archivedSessions.length === 0`.
+	// Under load, `refreshSessions` could populate `archivedSessions` from its
+	// `archivedDelegates` field BEFORE the search input fires, skipping the
+	// dedicated archived-goals page fetch entirely — the sidebar then had no
+	// goal entries to filter against. Now gates each fetch on its own
+	// dedicated `archived{Sessions,Goals}Loaded()` flag.
+	test("search surfaces archived items in the correct project subsection", async ({ page }) => {
 		// Per-test budget bump: under heavy parallel browser load this whole
 		// flow (resetSidebarState + reload + initial refresh + lazy archived
 		// fetch + render) can take 25–40 s. Default 30 s test timeout is too

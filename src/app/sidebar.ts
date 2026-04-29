@@ -28,7 +28,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -693,14 +693,24 @@ export function renderSetupBanner(mobile = false) {
 /** Tracks whether archived section was auto-opened by search (vs manual toggle). */
 let _archivedBySearch = false;
 
-/** Ensure archived data is loaded and the section is visible for search filtering. */
+/** Ensure archived data is loaded and the section is visible for search filtering.
+ *
+ *  Sessions and goals are gated independently: archived sessions can land in
+ *  `state.archivedSessions` via `refreshSessions`' `archivedDelegates` field
+ *  without the dedicated archived endpoints having been hit. Gating the goals
+ *  fetch on `archivedSessions.length === 0` therefore caused a real bug — if
+ *  any archived delegate session preceded the search, the goals fetch would be
+ *  skipped and search inside an Archived subsection would surface nothing. */
 function _ensureArchivedForSearch(): void {
 	if (!state.showArchived) {
 		state.showArchived = true;
 		_archivedBySearch = true;
 	}
-	if (state.archivedSessions.length === 0) {
-		import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
+	if (!archivedSessionsLoaded()) {
+		import("./api.js").then(m => m.fetchArchivedSessions());
+	}
+	if (!archivedGoalsLoaded()) {
+		import("./api.js").then(m => m.fetchArchivedGoalsPaginated());
 	}
 }
 

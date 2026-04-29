@@ -272,15 +272,28 @@ export async function refreshSessions(): Promise<void> {
 
 /** Whether archived sessions have been fetched at least once. */
 let _archivedSessionsLoaded = false;
+let _archivedGoalsLoaded = false;
 
 /** Check whether archived sessions have been loaded. */
 export function archivedSessionsLoaded(): boolean {
 	return _archivedSessionsLoaded;
 }
 
+/** Check whether archived goals have been loaded via the dedicated paginated
+ *  fetch. NOT the same as `state.goals.some(g => g.archived)` — archived goal
+ *  entries can also arrive piggy-backed on `refreshSessions`' `archivedDelegates`
+ *  field, which leaves the dedicated archived-goals page unfetched. The search
+ *  auto-fetch path uses this flag to decide whether to kick the dedicated
+ *  endpoint, so a search inside the sidebar reliably surfaces archived goals
+ *  even if some archived sessions were already merged in via the live poll. */
+export function archivedGoalsLoaded(): boolean {
+	return _archivedGoalsLoaded;
+}
+
 /** Reset the archived sessions state (flag + data). Called on toggle-off. */
 export function clearArchivedSessionsState(): void {
 	_archivedSessionsLoaded = false;
+	_archivedGoalsLoaded = false;
 	state.archivedSessions = [];
 	clearGoalChildrenFetchedCache();
 }
@@ -542,6 +555,9 @@ export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: numb
 		if (afterCursor !== undefined) params.set("after", String(afterCursor));
 		const res = await gatewayFetch(`/api/goals?${params}`);
 		if (!res.ok) return;
+		// Mark the dedicated archived-goals page as fetched. Used by the sidebar
+		// search auto-fetch gate (see archivedGoalsLoaded() above).
+		_archivedGoalsLoaded = true;
 		const data = await res.json();
 		const goals: Goal[] = data.goals || [];
 		if (afterCursor !== undefined) {

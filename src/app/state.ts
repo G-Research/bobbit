@@ -345,6 +345,15 @@ export const state = {
 	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
 };
 
+// Expose state on window for E2E test diagnostics. The bundle is identical for
+// dev and tests — attaching a reference (not a copy) is cheap and read-only
+// from the test side. Used by tests/e2e/ui/sidebar-archived-per-project.spec.ts
+// and others to dump state on assertion failure for fast diagnosis instead of
+// guessing what's wrong from a DOM snapshot.
+try {
+	(window as any).bobbitState = state;
+} catch { /* ignore in non-window environments */ }
+
 // ============================================================================
 // EXPANDED GOALS PERSISTENCE
 // ============================================================================
