@@ -663,16 +663,37 @@ export interface SidebarData {
 let _sidebarDataCache: SidebarData | null = null;
 let _sidebarCacheKey: string = "";
 
+/**
+ * Returns true if the session belongs to a mission, transitively.
+ * - Direct: `session.missionId` is set (e.g. Commander session, mission-gate reviewer).
+ * - Indirect: `session.goalId` or `session.teamGoalId` resolves to a goal whose
+ *   `missionId` is set (child-goal team-lead and team-member sessions).
+ */
+function isMissionOwnedSession(s: GatewaySession, goalsById: Map<string, Goal>): boolean {
+	if (s.missionId) return true;
+	const gid = s.goalId || s.teamGoalId;
+	if (gid) {
+		const g = goalsById.get(gid);
+		if (g?.missionId) return true;
+	}
+	return false;
+}
+
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.missions.length}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}:${state.missions.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.projectId || "") + (m.title || "") + (m.commanderSessionId || "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.missions.length}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "") + (g.missionId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "") + (s.missionId || "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.archived ? "A" : "") + (s.missionId || "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}:${state.missions.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.projectId || "") + (m.title || "") + (m.commanderSessionId || "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
+	// Mission-owned sessions and goals belong only under their mission row.
+	// Filter them out of the project-level Sessions and Goals lists.
+	const goalsById = new Map<string, Goal>(state.goals.map((g) => [g.id, g]));
+	const ungroupedSessions = state.gatewaySessions
+		.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id) && !isMissionOwnedSession(s, goalsById))
+		.sort((a, b) => a.createdAt - b.createdAt);
 	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
-	const liveGoals = sortedGoals.filter(g => !g.archived);
-	const archivedGoals = sortedGoals.filter(g => g.archived);
+	const liveGoals = sortedGoals.filter(g => !g.archived && !g.missionId);
+	const archivedGoals = sortedGoals.filter(g => g.archived && !g.missionId);
 
 	const liveMissions = state.missions.filter(m => !m.archived);
 	_sidebarDataCache = { staffSessionIds, ungroupedSessions, liveGoals, archivedGoals, projects: state.projects, liveMissions };
