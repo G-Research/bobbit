@@ -1113,6 +1113,30 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		remote.onMissionProposal = (proposal) => {
+			if (activeSessionId() !== sessionId) return;
+			state.activeMissionProposal = proposal;
+			if (!state.missionPreviewTitleEdited) state.missionPreviewTitle = proposal.title;
+			if (!state.missionPreviewSpecEdited) state.missionPreviewSpec = proposal.spec;
+			if (proposal.divergencePolicy === "strict" || proposal.divergencePolicy === "balanced" || proposal.divergencePolicy === "autonomous") {
+				state.missionPreviewPolicy = proposal.divergencePolicy;
+			}
+			if (typeof proposal.maxConcurrentGoals === "number" && proposal.maxConcurrentGoals >= 1 && proposal.maxConcurrentGoals <= 8) {
+				state.missionPreviewMaxConcurrent = proposal.maxConcurrentGoals;
+			}
+			if (typeof proposal.sandboxed === "boolean") {
+				state.missionPreviewSandboxed = proposal.sandboxed;
+			}
+			// Use the current session's project as the mission's project.
+			const sess = state.gatewaySessions.find(s => s.id === sessionId);
+			if (sess?.projectId) state.missionPreviewProjectId = sess.projectId;
+			state.assistantHasProposal = true;
+			if (state.assistantTab === "chat" && !isDesktop()) {
+				state.assistantTab = "preview";
+			}
+			renderApp();
+		};
+
 		remote.onStaffProposal = (proposal) => {
 			if (activeSessionId() !== sessionId) return;
 			state.activeStaffProposal = proposal;
@@ -1173,6 +1197,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				setup: remote.onSetupProposal,
 				workflow: remote.onWorkflowProposal,
 				project: remote.onProjectProposal,
+				mission: remote.onMissionProposal,
 			};
 			const cb = callbackMap[type];
 			if (cb) cb(fields);

@@ -1,6 +1,7 @@
 id: test-fast
 name: Test Fast
 description: Lightweight workflow for E2E testing with fast verification steps.
+category: goal
 hidden: true
 gates:
   - id: design-doc

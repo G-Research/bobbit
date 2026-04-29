@@ -691,7 +691,7 @@ export class SessionManager {
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
-			buildWorkflowList: () => this._buildWorkflowList(),
+			buildWorkflowList: (category) => this._buildWorkflowList(category),
 		};
 	}
 
@@ -932,10 +932,18 @@ export class SessionManager {
 	}
 
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
-	private _buildWorkflowList(): string {
-		const workflows = this.workflowStore?.getAll();
-		if (!workflows || workflows.length === 0) {
-			return 'Use **general** as a safe default.';
+	private _buildWorkflowList(category: "goal" | "mission" = "goal"): string {
+		const all = this.workflowStore?.getAll();
+		const workflows = (all ?? []).filter(w => {
+			const c = (w as { category?: string }).category;
+			// Backward-compat: missing category defaults to "goal".
+			if (!c) return category === "goal";
+			return c === category;
+		});
+		if (workflows.length === 0) {
+			return category === "mission"
+				? 'Use **mission** as the workflow.'
+				: 'Use **general** as a safe default.';
 		}
 		return workflows.map(w => {
 			const gateNames = w.gates.map(g => g.name).join(', ');
@@ -1067,7 +1075,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList("goal"));
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.resolveStoreForSession(session.id).get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
@@ -1076,6 +1084,8 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
 				}
+			} else if (session.assistantType === "mission") {
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList("mission"));
 			}
 			parts = {
 				baseSystemPromptPath: undefined,
@@ -2290,7 +2300,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList("goal"));
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
 					const origGoal = this.resolveGoal(ps.reattemptGoalId);
@@ -2298,6 +2308,8 @@ export class SessionManager {
 						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 					}
 				}
+			} else if (ps.assistantType === "mission") {
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList("mission"));
 			}
 
 			const promptPath = this.assemblePrompt(ps.id, {

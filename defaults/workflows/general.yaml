@@ -1,6 +1,7 @@
 id: general
 name: General
 description: Lightweight workflow for general-purpose goals
+category: goal
 
 gates:
   - id: design-doc

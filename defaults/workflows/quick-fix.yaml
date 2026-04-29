@@ -1,6 +1,7 @@
 id: quick-fix
 name: Quick Fix
 description: Fast workflow for small changes — skip design, go straight to implementation and merge
+category: goal
 gates:
   - id: implementation
     name: Implementation

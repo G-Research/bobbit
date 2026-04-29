@@ -25,6 +25,8 @@ export interface WorkflowGate {
 	verify?: VerifyStep[];
 }
 
+export type WorkflowCategory = "goal" | "mission";
+
 export interface Workflow {
 	id: string;
 	name: string;
@@ -34,6 +36,9 @@ export interface Workflow {
 	updatedAt: number;
 	/** If true, workflow is hidden from the UI (e.g. test-only workflows) */
 	hidden?: boolean;
+	/** Workflow taxonomy: "goal" (default) or "mission". Missing values are
+	 *  treated as "goal" for backward-compat. */
+	category?: WorkflowCategory;
 }
 
 // ── Normalization helpers ────────────────────────────────────────
@@ -87,6 +92,9 @@ function parseWorkflow(data: Record<string, unknown>): Workflow | null {
 		updatedAt: (data.updatedAt as number) ?? 0,
 	};
 	if (data.hidden === true) wf.hidden = true;
+	if (data.category === "mission" || data.category === "goal") {
+		wf.category = data.category;
+	}
 	return wf;
 }
 
@@ -95,6 +103,7 @@ function serializeWorkflow(workflow: Workflow): Record<string, unknown> {
 		id: workflow.id,
 		name: workflow.name,
 		description: workflow.description,
+		...(workflow.category ? { category: workflow.category } : {}),
 		...(workflow.hidden ? { hidden: true } : {}),
 		gates: workflow.gates.map((g) => {
 			const out: Record<string, unknown> = { id: g.id, name: g.name };

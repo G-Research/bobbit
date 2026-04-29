@@ -1,0 +1,13 @@
+name: propose_mission
+description: "Submit a mission proposal for user review"
+summary: "Propose a mission with title, spec, and policy knobs."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Proposals
+docs: >-
+  Parameters: title (required), spec (required), divergencePolicy (optional —
+  "strict"|"balanced"|"autonomous", default "strict"), maxConcurrentGoals
+  (optional 1–8, default 3), sandboxed (optional boolean, default false),
+  enabledOptionalSteps (optional, reserved), cwd (optional working-dir
+  override).

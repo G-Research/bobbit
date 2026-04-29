@@ -1030,6 +1030,11 @@ function renderWorkflowRow(wf: Workflow): TemplateResult {
 	`;
 }
 
+function getWorkflowCategory(wf: Workflow): "goal" | "mission" {
+	const c = (wf as { category?: string }).category;
+	return c === "mission" ? "mission" : "goal";
+}
+
 function renderListView(): TemplateResult {
 	if (loading) {
 		return html`
@@ -1056,10 +1061,22 @@ function renderListView(): TemplateResult {
 		`;
 	}
 
+	const goalWorkflows = workflows.filter(w => getWorkflowCategory(w) === "goal");
+	const missionWorkflows = workflows.filter(w => getWorkflowCategory(w) === "mission");
+
 	return html`
 		<p class="text-sm text-muted-foreground mb-6" style="max-width: 600px; margin-inline: auto;">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
-		<div class="wf-list">
-			${workflows.map((wf) => renderWorkflowRow(wf))}
+		<div class="wf-section" data-testid="wf-section-goal">
+			<h2 class="wf-section-title" data-testid="wf-section-title-goal">Goal workflows</h2>
+			${goalWorkflows.length === 0
+				? html`<p class="wf-section-empty">No goal workflows.</p>`
+				: html`<div class="wf-list">${goalWorkflows.map((wf) => renderWorkflowRow(wf))}</div>`}
+		</div>
+		<div class="wf-section" data-testid="wf-section-mission">
+			<h2 class="wf-section-title" data-testid="wf-section-title-mission">Mission workflows</h2>
+			${missionWorkflows.length === 0
+				? html`<p class="wf-section-empty">No mission workflows.</p>`
+				: html`<div class="wf-list">${missionWorkflows.map((wf) => renderWorkflowRow(wf))}</div>`}
 		</div>
 	`;
 }

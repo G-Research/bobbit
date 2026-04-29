@@ -48,4 +48,10 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 		requiredFields: ["name", "root_path"],
 		callbackName: "onProjectProposal",
 	},
+	{
+		tag: "mission_proposal",
+		fields: ["title", "spec", "divergencePolicy", "maxConcurrentGoals", "sandboxed", "cwd"],
+		requiredFields: ["title", "spec"],
+		callbackName: "onMissionProposal",
+	},
 ];

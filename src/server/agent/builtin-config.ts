@@ -218,6 +218,9 @@ export class BuiltinConfigProvider {
 			updatedAt: (data.updatedAt as number) ?? 0,
 		};
 		if (data.hidden === true) wf.hidden = true;
+		if (data.category === "mission" || data.category === "goal") {
+			wf.category = data.category;
+		}
 		return wf;
 	}
 

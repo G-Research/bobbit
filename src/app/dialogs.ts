@@ -1494,7 +1494,7 @@ async function createProjectAssistantSession(dirPath: string, scaffolding: boole
 }
 
 // ============================================================================
-// MISSION DIALOG
+// MISSION DIALOG — routes to a Mission Assistant session (parallel to goals)
 // ============================================================================
 
 export function showMissionDialog(projectId?: string): void {
@@ -1502,163 +1502,47 @@ export function showMissionDialog(projectId?: string): void {
 		showProjectDialog();
 		return;
 	}
-	const container = document.createElement("div");
-	document.body.appendChild(container);
-
-	let titleValue = "";
-	let specValue = "";
-	let projectIdValue = projectId || state.activeProjectId || state.projects[0]?.id || "";
-	let policy: "strict" | "balanced" | "autonomous" = "strict";
-	let maxConcurrent = 3;
-	let sandboxed = false;
-	let saving = false;
-	let errMsg = "";
-
-	const cleanup = () => {
-		render(html``, container);
-		container.remove();
-	};
-
-	const doCreate = async () => {
-		const trimmed = titleValue.trim();
-		if (!trimmed || !specValue.trim() || !projectIdValue) {
-			errMsg = "Title, project and spec are required.";
-			renderDialog();
-			return;
-		}
-		saving = true;
-		errMsg = "";
-		renderDialog();
-		try {
-			const { createMission } = await import("./api.js");
-			const created = await createMission({
-				projectId: projectIdValue,
-				title: trimmed,
-				spec: specValue,
-				divergencePolicy: policy,
-				maxConcurrentGoals: maxConcurrent,
-				sandboxed,
-			});
-			if (!created) {
-				errMsg = "Failed to create mission. The mission API may not be enabled on the server yet.";
-				saving = false;
-				renderDialog();
-				return;
-			}
-			const { setHashRoute } = await import("./routing.js");
-			cleanup();
-			setHashRoute("mission-dashboard", created.id);
-		} catch (err) {
-			errMsg = err instanceof Error ? err.message : String(err);
-			saving = false;
-			renderDialog();
-		}
-	};
-
-	const renderDialog = () => {
-		render(
-			Dialog({
-				isOpen: true,
-				onClose: cleanup,
-				width: "min(620px, 92vw)",
-				height: "auto",
-				className: "max-h-[90vh]",
-				backdropClassName: "bg-black/50 backdrop-blur-sm",
-				children: html`
-					${DialogContent({
-						className: "overflow-y-auto",
-						children: html`
-							${DialogHeader({ title: "New Mission" })}
-							<div class="mt-4 flex flex-col gap-4">
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Title</label>
-									${Input({
-										type: "text",
-										value: titleValue,
-										onInput: (e: Event) => { titleValue = (e.target as HTMLInputElement).value; renderDialog(); },
-										onKeyDown: (e: KeyboardEvent) => { if (e.key === "Escape") cleanup(); },
-									})}
-								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Project</label>
-									<select
-										class="w-full px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-										data-testid="mission-dialog-project"
-										@change=${(e: Event) => { projectIdValue = (e.target as HTMLSelectElement).value; renderDialog(); }}
-									>
-										${state.projects.map(p => html`
-											<option value=${p.id} ?selected=${p.id === projectIdValue}>${p.name}</option>
-										`)}
-									</select>
-								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Spec (Markdown)</label>
-									<textarea
-										class="w-full min-h-[180px] max-h-[360px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-										placeholder="Paste the source spec markdown here..."
-										data-testid="mission-dialog-spec"
-										.value=${specValue}
-										@input=${(e: Event) => { specValue = (e.target as HTMLTextAreaElement).value; }}
-									></textarea>
-									<p class="text-[10px] text-muted-foreground mt-1">The Commander will produce a charter and a DAG of goals from this spec.</p>
-								</div>
-								<div class="flex gap-4">
-									<div class="flex-1">
-										<label class="text-xs text-muted-foreground mb-1 block">Divergence policy</label>
-										<div class="flex gap-1.5">
-											${(["strict", "balanced", "autonomous"] as const).map(p => html`
-												<button
-													type="button"
-													data-testid=${`mission-policy-${p}`}
-													class="px-3 py-1.5 text-xs rounded-md border transition-colors
-														${policy === p ? "border-primary bg-primary/10 text-primary font-medium" : "border-border text-muted-foreground hover:bg-secondary"}"
-													@click=${() => { policy = p; renderDialog(); }}
-												>${p}</button>
-											`)}
-										</div>
-									</div>
-									<div style="width:160px;">
-										<label class="text-xs text-muted-foreground mb-1 block">Max concurrent (1–8)</label>
-										<input
-											type="number" min="1" max="8" .value=${String(maxConcurrent)}
-											class="w-full px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-											data-testid="mission-max-concurrent"
-											@input=${(e: Event) => { const v = parseInt((e.target as HTMLInputElement).value, 10); maxConcurrent = Math.max(1, Math.min(8, isNaN(v) ? 3 : v)); }}
-										/>
-									</div>
-								</div>
-								<label class="flex items-center gap-2 text-xs text-muted-foreground">
-									<input type="checkbox" .checked=${sandboxed} @change=${(e: Event) => { sandboxed = (e.target as HTMLInputElement).checked; }} />
-									<span>Run child agents in Docker sandbox</span>
-								</label>
-								${errMsg ? html`<p class="text-xs text-red-500" data-testid="mission-dialog-error">${errMsg}</p>` : ""}
-							</div>
-						`,
-					})}
-					${DialogFooter({
-						className: "px-6 pb-4",
-						children: html`
-							<div class="flex gap-2 justify-end">
-								${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
-								${Button({
-									variant: "default",
-									onClick: doCreate,
-									disabled: !titleValue.trim() || !specValue.trim() || !projectIdValue || saving,
-									children: saving ? "Creating…" : "Create mission",
-								})}
-							</div>
-						`,
-					})}
-				`,
-			}),
-			container,
-		);
-
-		requestAnimationFrame(() => {
-			const input = container.querySelector("input[type='text']") as HTMLInputElement | null;
-			if (input) input.focus();
-		});
-	};
-
-	renderDialog();
+	createMissionAssistantSession(projectId);
 }
+
+async function createMissionAssistantSession(projectId?: string): Promise<void> {
+	const pid = projectId || state.activeProjectId || state.projects[0]?.id;
+	if (!pid) {
+		showConnectionError("No project for mission", "Add a project before creating a mission.");
+		return;
+	}
+	const project = state.projects.find(p => p.id === pid);
+	if (!project) {
+		showConnectionError("Project not found", `Project ${pid} is not registered.`);
+		return;
+	}
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	renderApp();
+	try {
+		const bodyObj: Record<string, any> = {
+			assistantType: "mission",
+			projectId: pid,
+			cwd: project.rootPath,
+		};
+		const res = await gatewayFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify(bodyObj),
+		});
+		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		const { id } = await res.json();
+		// Pre-fill mission preview state for the proposal panel.
+		state.previewProjectId = pid;
+		state.missionPreviewProjectId = pid;
+		if (!state.previewCwdEdited) state.previewCwd = project.rootPath;
+		const { connectToSession } = await import("./session-manager.js");
+		await connectToSession(id, false, { assistantType: "mission" });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		showConnectionError("Failed to create mission assistant", msg);
+	} finally {
+		state.creatingSession = false;
+		renderApp();
+	}
+}
+

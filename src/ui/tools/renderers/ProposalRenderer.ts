@@ -18,6 +18,7 @@ const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField:
 	propose_setup: { label: "Setup Proposal", type: "setup", titleField: "action", previewField: "content" },
 	propose_workflow: { label: "Workflow Proposal", type: "workflow", titleField: "name", previewField: "description" },
 	propose_project: { label: "Project Proposal", type: "project", titleField: "name", previewField: "root_path" },
+	propose_mission: { label: "Mission Proposal", type: "mission", titleField: "title", previewField: "spec" },
 };
 
 function truncate(s: string, max = 150): string {

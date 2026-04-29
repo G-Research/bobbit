@@ -1,6 +1,7 @@
 id: mission
 name: Mission
 description: Multi-goal mission with planning, parallel execution, and integration.
+category: mission
 
 gates:
   - id: charter

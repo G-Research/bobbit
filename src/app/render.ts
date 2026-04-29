@@ -1833,11 +1833,151 @@ function getAssistantPreviewPanel(type: string) {
 		case "staff": return staffPreviewPanel();
 		case "setup": return setupPreviewPanel();
 		case "workflow": return workflowPreviewPanel();
+		case "mission": return missionPreviewPanel();
 		case "project":
 		case "project-scaffolding":
 			return projectProposalPanel();
 		default: return "";
 	}
+}
+
+// ============================================================================
+// MISSION PROPOSAL PANEL (assistant preview)
+// ============================================================================
+
+function missionPreviewPanel() {
+	const hasProposal = state.activeMissionProposal != null;
+	const handleCreate = async () => {
+		const title = state.missionPreviewTitle.trim();
+		const spec = state.missionPreviewSpec.trim();
+		if (!title || !spec) {
+			state.missionPreviewError = "Title and spec are required.";
+			renderApp();
+			return;
+		}
+		const projectId = state.missionPreviewProjectId || state.previewProjectId;
+		if (!projectId) {
+			state.missionPreviewError = "No project selected for this mission.";
+			renderApp();
+			return;
+		}
+		state.missionPreviewCreating = true;
+		state.missionPreviewError = "";
+		renderApp();
+		try {
+			const { createMission } = await import("./api.js");
+			const created = await createMission({
+				projectId,
+				title,
+				spec,
+				divergencePolicy: state.missionPreviewPolicy,
+				maxConcurrentGoals: state.missionPreviewMaxConcurrent,
+				sandboxed: state.missionPreviewSandboxed,
+			});
+			if (!created) {
+				state.missionPreviewError = "Failed to create mission.";
+				state.missionPreviewCreating = false;
+				renderApp();
+				return;
+			}
+			const sessionId = activeSessionId();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.assistantType = null;
+			state.activeMissionProposal = null;
+			state.missionPreviewTitleEdited = false;
+			state.missionPreviewSpecEdited = false;
+			if (sessionId) {
+				await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+				clearSessionModel(sessionId);
+			}
+			await refreshSessions();
+			setHashRoute("mission-dashboard", created.id, true);
+		} catch (err) {
+			state.missionPreviewError = err instanceof Error ? err.message : String(err);
+		} finally {
+			state.missionPreviewCreating = false;
+			renderApp();
+		}
+	};
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-testid="mission-preview-panel">
+			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+				${!hasProposal ? html`
+					<div class="text-xs text-muted-foreground" data-testid="mission-preview-empty">
+						The Mission Assistant will draft a proposal here once you describe the work.
+					</div>
+				` : ""}
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Title</label>
+					${Input({
+						type: "text",
+						value: state.missionPreviewTitle,
+						placeholder: "Mission title",
+						onInput: (e: Event) => {
+							state.missionPreviewTitle = (e.target as HTMLInputElement).value;
+							state.missionPreviewTitleEdited = true;
+						},
+					})}
+				</div>
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Spec (markdown)</label>
+					<textarea
+						class="w-full min-h-[180px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+						placeholder="The Commander will plan from this spec..."
+						data-testid="mission-preview-spec"
+						.value=${state.missionPreviewSpec}
+						@input=${(e: Event) => { state.missionPreviewSpec = (e.target as HTMLTextAreaElement).value; state.missionPreviewSpecEdited = true; }}
+					></textarea>
+				</div>
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Divergence policy</label>
+					<div class="flex gap-1.5">
+						${(["strict", "balanced", "autonomous"] as const).map(p => html`
+							<button
+								type="button"
+								data-testid=${`mission-preview-policy-${p}`}
+								class="px-3 py-1.5 text-xs rounded-md border transition-colors
+									${state.missionPreviewPolicy === p ? "border-primary bg-primary/10 text-primary font-medium" : "border-border text-muted-foreground hover:bg-secondary"}"
+								@click=${() => { state.missionPreviewPolicy = p; renderApp(); }}
+							>${p}</button>
+						`)}
+					</div>
+				</div>
+				<div>
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Max concurrent (1–8)</label>
+					<input
+						type="number" min="1" max="8"
+						.value=${String(state.missionPreviewMaxConcurrent)}
+						class="w-32 px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+						data-testid="mission-preview-max-concurrent"
+						@input=${(e: Event) => {
+							const v = parseInt((e.target as HTMLInputElement).value, 10);
+							state.missionPreviewMaxConcurrent = Math.max(1, Math.min(8, isNaN(v) ? 3 : v));
+						}}
+					/>
+				</div>
+				<label class="flex items-center gap-2 text-xs text-muted-foreground">
+					<input type="checkbox" .checked=${state.missionPreviewSandboxed}
+						@change=${(e: Event) => { state.missionPreviewSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
+					<span>Run child agents in Docker sandbox</span>
+				</label>
+				${state.missionPreviewError ? html`<p class="text-xs text-red-500" data-testid="mission-preview-error">${state.missionPreviewError}</p>` : ""}
+			</div>
+			<div class="shrink-0 px-5 py-3 border-t border-border flex justify-end gap-2">
+				${Button({
+					variant: "default",
+					onClick: handleCreate,
+					disabled: state.missionPreviewCreating || !state.missionPreviewTitle.trim() || !state.missionPreviewSpec.trim() || !hasProposal,
+					children: state.missionPreviewCreating ? "Creating…" : "Create Mission",
+				})}
+			</div>
+		</div>
+	`;
 }
 
 // ============================================================================

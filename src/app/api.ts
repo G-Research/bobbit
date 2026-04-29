@@ -1004,6 +1004,8 @@ export interface WorkflowGate {
 /** @deprecated Use WorkflowGate instead */
 export type WorkflowArtifact = WorkflowGate;
 
+export type WorkflowCategory = "goal" | "mission";
+
 export interface Workflow {
 	id: string;
 	name: string;
@@ -1011,6 +1013,8 @@ export interface Workflow {
 	gates: WorkflowGate[];
 	createdAt: number;
 	updatedAt: number;
+	/** Workflow taxonomy. Missing values default to "goal". */
+	category?: WorkflowCategory;
 }
 
 export async function fetchWorkflows(): Promise<Workflow[]> {

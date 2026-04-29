@@ -120,6 +120,24 @@ export default function (pi: ExtensionAPI) {
 		async execute() { return ack(); },
 	});
 
+	// ── propose_mission ───────────────────────────────────────────────
+	pi.registerTool({
+		name: "propose_mission",
+		label: "Propose Mission",
+		description: "Submit a mission proposal for user review. Call this when you have gathered enough information to propose a mission.",
+		promptSnippet: "Propose a mission with title, spec, and policy knobs.",
+		parameters: Type.Object({
+			title: Type.String({ description: "Short 3-6 word title used as mission title and slug" }),
+			spec: Type.String({ description: "Markdown spec content — the source request the Commander will plan from" }),
+			divergencePolicy: Type.Optional(Type.String({ description: "Plan-mutation policy: strict | balanced | autonomous (default strict)" })),
+			maxConcurrentGoals: Type.Optional(Type.Number({ description: "Max child goals running in parallel (1–8, default 3)" })),
+			sandboxed: Type.Optional(Type.Boolean({ description: "Run child agents in Docker sandbox (default false)" })),
+			enabledOptionalSteps: Type.Optional(Type.Array(Type.String(), { description: "Mission-level optional workflow steps (reserved)" })),
+			cwd: Type.Optional(Type.String({ description: "Working directory override path" })),
+		}),
+		async execute() { return ack(); },
+	});
+
 	// ── propose_project ───────────────────────────────────────────────
 	pi.registerTool({
 		name: "propose_project",
@@ -144,5 +162,5 @@ export default function (pi: ExtensionAPI) {
 		async execute() { return ack(); },
 	});
 
-	console.log("[proposal-tools] Registered 8 proposal tools");
+	console.log("[proposal-tools] Registered 9 proposal tools");
 }

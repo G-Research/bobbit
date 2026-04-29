@@ -146,7 +146,7 @@ export interface PipelineContext {
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
-	buildWorkflowList: () => string;
+	buildWorkflowList: (category?: "goal" | "mission") => string;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -274,13 +274,15 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 		}
 		assistantGoalSpec += assistantDef.prompt;
 		if (plan.assistantType === "goal") {
-			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList());
+			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList("goal"));
 			if (plan.reattemptGoalId) {
 				const origGoal = ctx.goalManager.getGoal(plan.reattemptGoalId);
 				if (origGoal) {
 					assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
 				}
 			}
+		} else if (plan.assistantType === "mission") {
+			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList("mission"));
 		}
 
 		// Use assistant role's tool restrictions

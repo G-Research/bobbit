@@ -14,7 +14,11 @@
  * tests should pass against the live server with the route handlers removed.
  */
 import { test, expect } from "../gateway-harness.js";
+import { apiFetch, waitForHealth } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const MISSION_ID = "11111111-1111-1111-1111-111111111111";
 
@@ -297,6 +301,72 @@ test.describe("Mission UI (mocked backend)", () => {
 		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByTestId("mission-commander-placeholder")).toBeVisible();
 		await expect(page.getByTestId("mission-commander-embed")).toHaveCount(0);
+	});
+
+	test("new mission button creates a mission-assistant session @smoke", async ({ page }) => {
+		await waitForHealth();
+		// Register a project so the per-project Missions subgroup renders with a + button.
+		const rootPath = join(tmpdir(), `bobbit-mission-asst-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(rootPath, { recursive: true });
+		const projResp = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `mission-asst-proj`, rootPath }),
+		});
+		expect(projResp.status).toBe(201);
+		const proj = await projResp.json();
+
+		// Stub mission detail/list so the dashboard mocks earlier tests don't matter.
+		// We only assert the assistant session creation here, not the dashboard.
+		try {
+			// Capture the POST /api/sessions request body so we can assert
+			// it carries `assistantType: "mission"`. We don't intercept the
+			// response — the live server should accept it and create a session.
+			const seenBodies: string[] = [];
+			await page.route("**/api/sessions", async (route, request) => {
+				if (request.method() === "POST") {
+					const body = request.postData() || "";
+					seenBodies.push(body);
+				}
+				await route.continue();
+			});
+
+			await openApp(page);
+
+			// Wait for the per-project + mission button. There is one per project that has a Missions subgroup.
+			// At this point no missions exist, so the subgroup may be hidden — use the project-row in sidebar.
+			// Force the missions subgroup to appear by creating one mission first via API.
+			const createResp = await apiFetch("/api/missions", {
+				method: "POST",
+				body: JSON.stringify({
+					projectId: proj.id,
+					title: "Seed mission",
+					spec: "Seed.",
+				}),
+			});
+			expect([200, 201]).toContain(createResp.status);
+
+			await page.reload();
+			await expect(
+				page.locator("button").filter({ hasText: "Settings" }).first(),
+			).toBeVisible({ timeout: 20_000 });
+
+			// Click the + button for missions in this project.
+			const btn = page.locator(`[data-testid="new-mission-btn"]`).first();
+			await expect(btn).toBeVisible({ timeout: 15_000 });
+			await btn.click();
+
+			// Wait for a POST /api/sessions to fire with assistantType: "mission".
+			await expect.poll(() => seenBodies.some(b => {
+				try { return JSON.parse(b)?.assistantType === "mission"; } catch { return false; }
+			}), { timeout: 10_000 }).toBeTruthy();
+
+			const missionBody = seenBodies.map(b => { try { return JSON.parse(b); } catch { return {}; } }).find(b => b.assistantType === "mission");
+			expect(missionBody.assistantType).toBe("mission");
+			expect(missionBody.projectId).toBe(proj.id);
+			expect(typeof missionBody.cwd).toBe("string");
+		} finally {
+			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 
 	test("renders error state for unknown mission id", async ({ page }) => {

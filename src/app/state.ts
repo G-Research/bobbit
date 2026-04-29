@@ -238,6 +238,28 @@ export const state = {
 	/** Active goal proposal from a goal-assistant session */
 	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string; options?: string } | null,
 
+	/** Active mission proposal from a mission-assistant session */
+	activeMissionProposal: null as {
+		title: string;
+		spec: string;
+		divergencePolicy?: string;
+		maxConcurrentGoals?: number;
+		sandboxed?: boolean;
+		cwd?: string;
+	} | null,
+
+	// Mission assistant split-screen state
+	missionPreviewTitle: "",
+	missionPreviewSpec: "",
+	missionPreviewTitleEdited: false,
+	missionPreviewSpecEdited: false,
+	missionPreviewPolicy: "strict" as "strict" | "balanced" | "autonomous",
+	missionPreviewMaxConcurrent: 3,
+	missionPreviewSandboxed: false,
+	missionPreviewProjectId: "" as string,
+	missionPreviewError: "" as string,
+	missionPreviewCreating: false,
+
 	// Unified assistant state
 	assistantType: null as string | null,
 	assistantTab: "chat" as "chat" | "preview",

@@ -1,6 +1,7 @@
 id: feature
 name: Feature
 description: Implement a new feature with design, implementation, and review
+category: goal
 
 gates:
   - id: design-doc

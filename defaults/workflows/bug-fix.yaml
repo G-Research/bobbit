@@ -1,6 +1,7 @@
 id: bug-fix
 name: Bug Fix
 description: Fix a reported bug with TDD verification
+category: goal
 
 gates:
   - id: issue-analysis
