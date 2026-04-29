@@ -2381,8 +2381,14 @@ export class SessionManager {
 
 		const restoreStore = this.getSessionStore(ps.projectId);
 		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			restoreStore.update(ps.id, { lastActivity: session.lastActivity });
+			// During restore, switch_session replays every persisted message as an
+			// rpc event. Bumping lastActivity here would clobber the pre-restart
+			// timestamp with Date.now(). Gate on the restoring flag so only
+			// genuine post-restore activity bumps it.
+			if (!restoring) {
+				session.lastActivity = Date.now();
+				restoreStore.update(ps.id, { lastActivity: session.lastActivity });
+			}
 
 			this.handleAgentLifecycle(session, event);
 
@@ -3101,6 +3107,7 @@ export class SessionManager {
 		status: string;
 		createdAt: number;
 		lastActivity: number;
+		lastReadAt?: number;
 		clientCount: number;
 		isCompacting: boolean;
 		goalId?: string;
@@ -3136,6 +3143,7 @@ export class SessionManager {
 				status: s.status,
 				createdAt: s.createdAt,
 				lastActivity: s.lastActivity,
+				lastReadAt: ps?.lastReadAt,
 				clientCount: s.clients.size,
 				isCompacting: s.isCompacting,
 				goalId: s.goalId,
@@ -3178,6 +3186,14 @@ export class SessionManager {
 			if (ps.goalId === goalId) ids.add(ps.id);
 		}
 		return [...ids];
+	}
+
+	/** Record that the user viewed this session. Updates lastReadAt only — never lastActivity. */
+	markSessionRead(id: string): boolean {
+		const store = this.resolveStoreForId(id);
+		if (!store?.get(id)) return false;
+		store.update(id, { lastReadAt: Date.now() });
+		return true;
 	}
 
 	setTitle(id: string, title: string, opts?: { markGenerated?: boolean }): boolean {
@@ -3741,6 +3757,7 @@ export class SessionManager {
 		status: string;
 		createdAt: number;
 		lastActivity: number;
+		lastReadAt?: number;
 		clientCount: number;
 		isCompacting: boolean;
 		goalId?: string;
@@ -3769,6 +3786,7 @@ export class SessionManager {
 			status: "archived",
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
+			lastReadAt: ps.lastReadAt,
 			clientCount: 0,
 			isCompacting: false,
 			goalId: ps.goalId,
