@@ -61,6 +61,32 @@ test.describe("Missions API", () => {
 		expect(session.role).toBe("commander");
 	});
 
+	test("Commander session has missionId persisted and BOBBIT_MISSION_ID in agent env", async ({ gateway }) => {
+		// Regression: defaults/tools/mission/extension.ts only registers the
+		// mission_* tools when BOBBIT_MISSION_ID is set on the agent process env.
+		// The env var must be threaded all the way from the spawn-time
+		// createSession opts through SessionSetupPlan into RpcBridge.options.env,
+		// AND persisted on the session record so restart paths can rehydrate it.
+		const created = await createMission();
+		expect(created.commanderSessionId).toBeTruthy();
+
+		// Persisted record carries missionId so restoreSession() can rehydrate
+		// BOBBIT_MISSION_ID across server restarts.
+		const sessionDetail = await (await apiFetch(`/api/sessions/${created.commanderSessionId}`)).json();
+		expect(sessionDetail.missionId).toBe(created.id);
+
+		// Live in-memory bridgeOptions.env contains BOBBIT_MISSION_ID — this is
+		// what the agent extension reads at module-init time to decide whether
+		// to register the mission_* tools.
+		const sm = (gateway as any).sessionManager;
+		const live = sm.getSession(created.commanderSessionId);
+		expect(live).toBeTruthy();
+		const bridgeEnv = (live.rpcClient as any).options?.env;
+		expect(bridgeEnv).toBeTruthy();
+		expect(bridgeEnv.BOBBIT_MISSION_ID).toBe(created.id);
+		expect(bridgeEnv.BOBBIT_SESSION_ID).toBe(created.commanderSessionId);
+	});
+
 	test("create + get + list + update + archive @smoke", async () => {
 		const created = await createMission({ maxConcurrentGoals: 4, divergencePolicy: "balanced" });
 		expect(created.id).toBeTruthy();
