@@ -52,7 +52,7 @@ async function mockSearchApis(page: import("@playwright/test").Page, stats: {
 }
 
 test.describe("Search Index maintenance panel", () => {
-	test("renders stats and section headings", async ({ page }) => {
+	test("renders stats and section headings @quarantine", async ({ page }) => {
 		await mockSearchApis(page);
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");

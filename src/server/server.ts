@@ -5202,6 +5202,16 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/mark-read — record that the user viewed this session
+	const markReadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/mark-read$/);
+	if (markReadMatch && req.method === "POST") {
+		const id = markReadMatch[1];
+		const ok = sessionManager.markSessionRead(id);
+		if (!ok) { json({ error: "session not found" }, 404); return; }
+		json({ ok: true });
+		return;
+	}
+
 	// PUT /api/sessions/:id/title — legacy rename endpoint
 	const titleMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/title$/);
 	if (titleMatch && req.method === "PUT") {
