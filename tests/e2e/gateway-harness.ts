@@ -143,6 +143,28 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();
 
+		// Seed inline test workflows BEFORE the gateway boots — direct file
+		// write avoids the HTTP round-trip that previously widened a race
+		// window where parallel workers' token files weren't yet readable.
+		// Builtin workflow YAMLs were removed (follow-up A); tests that
+		// reference workflowId: "general" / "feature" / "bug-fix" / "quick-fix"
+		// / "test-fast" rely on this seed to make those IDs resolvable.
+		try {
+			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+			const { mkdirSync: mkSync, writeFileSync: wrSync } = await import("node:fs");
+			const yaml = await import("yaml");
+			const configDir = join(bobbitDir, "config");
+			mkSync(configDir, { recursive: true });
+			wrSync(
+				join(configDir, "project.yaml"),
+				yaml.stringify({
+					name: "default",
+					components: [TEST_DEFAULT_COMPONENT],
+					workflows: testWorkflows(),
+				}),
+			);
+		} catch { /* best-effort */ }
+
 		const gw = createGateway({
 			host: "127.0.0.1",
 			port: 0,             // OS-assigned port
@@ -167,12 +189,9 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 
 		// Register the server CWD as a default project via REST. The server no
 		// longer does this implicitly — see "eliminate default project" refactor.
-		// Also seed inline test workflows: builtin workflow YAMLs were removed
-		// (follow-up A of the multi-repo & components goal), so every test that
-		// references workflowId: "general" / "feature" / "bug-fix" / "quick-fix"
-		// / "test-fast" relies on this seed to make those IDs resolvable.
+		// Workflows already seeded above via direct project.yaml write.
 		try {
-			const createRes = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -180,21 +199,6 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 				},
 				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
 			});
-			if (createRes.ok) {
-				const project = await createRes.json() as { id?: string };
-				if (project?.id) {
-					const { seedTestWorkflows } = await import("./seed-workflows.js");
-					await seedTestWorkflows({
-						baseURL: `http://127.0.0.1:${port}`,
-						token,
-						projectId: project.id,
-						// Also seed server-level workflow store at <bobbitDir>/config
-						// so cascade-API tests that query /api/workflows without a
-						// projectId see them.
-						serverConfigDir: join(bobbitDir, "config"),
-					});
-				}
-			}
 		} catch { /* best-effort */ }
 
 		const info: GatewayInfo = {
