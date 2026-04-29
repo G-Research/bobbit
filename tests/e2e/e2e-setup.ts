@@ -98,32 +98,32 @@ export function gitCwd(): string {
 /**
  * Read the auth token that the test server auto-created on startup.
  *
- * Retries briefly on ENOENT because Windows filesystem under heavy parallel
- * load occasionally returns ENOENT for files that exist — the token is
- * written once per worker by the gateway fixture and then never removed
- * until worker teardown, so any ENOENT mid-run is spurious.
+ * The token is written once per worker by the gateway fixture (sync
+ * `loadOrCreateToken()` during setup) and lives for the worker's lifetime.
+ * In practice, by the time any test code calls this, the file exists.
+ *
+ * History note: a previous version had a 10×50ms BUSY-WAIT spin loop on
+ * ENOENT under the theory that Windows FS occasionally returned ENOENT for
+ * files that existed. A sync busy-wait in a worker process **blocks the
+ * entire event loop**, which paradoxically made cross-test contention
+ * worse — every concurrent fetch in the worker parked behind the spin.
+ * This version reads once and surfaces a precise error if the file is
+ * truly missing.
  */
 export function readE2EToken(): string {
 	const p = join(bobbitDir(), "state", "token");
-	let lastErr: unknown;
-	// Up to 5s of retries with linearly increasing backoff to absorb Windows
-	// AV/indexer locks and deferred writes under heavy parallel load.
-	// 30 attempts × ~17ms avg = ~500ms; total budget bounded at 5s.
-	const startedAt = Date.now();
-	while (Date.now() - startedAt < 5000) {
-		try {
-			const content = readFileSync(p, "utf-8").trim();
-			if (content.length >= 32) return content;
-			lastErr = new Error(`token file too short: ${content.length} chars`);
-		} catch (err: any) {
-			lastErr = err;
-			if (err?.code !== "ENOENT" && err?.code !== "EBUSY" && err?.code !== "EPERM") throw err;
+	try {
+		return readFileSync(p, "utf-8").trim();
+	} catch (err: any) {
+		if (err?.code === "ENOENT") {
+			throw new Error(
+				`E2E token missing at ${p}. ` +
+				`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
+				`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
+			);
 		}
-		const sleepMs = 25;
-		const until = Date.now() + sleepMs;
-		while (Date.now() < until) { /* spin */ }
+		throw err;
 	}
-	throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 // ---------------------------------------------------------------------------

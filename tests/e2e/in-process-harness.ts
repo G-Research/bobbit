@@ -21,10 +21,19 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
+
+// Per-worker V8 compile cache. See gateway-harness.ts for rationale.
+{
+	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT || join(tmpdir(), "bobbit-e2e-v8cache");
+	const workerCacheDir = join(cacheRoot, `w-${process.pid}`);
+	try { mkdirSync(workerCacheDir, { recursive: true }); } catch { /* best-effort */ }
+	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
+}
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
