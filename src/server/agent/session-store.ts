@@ -44,6 +44,8 @@ export interface PersistedSession {
 	taskId?: string;
 	/** Staff agent ID this session belongs to */
 	staffId?: string;
+	/** Mission this session is the Commander for (only set on commander sessions). */
+	missionId?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
 	/** Whether this session has a live HTML preview panel */
@@ -101,6 +103,7 @@ export type UpdatableSessionFields = Pick<
 	| "toolAssistant"
 	| "taskId"
 	| "staffId"
+	| "missionId"
 	| "accessory"
 	| "preview"
 	| "messageQueue"
