@@ -19,8 +19,10 @@
  *   - The fetch + reset + push that used to block claim now run in the
  *     background after returning the worktree to the caller — claim is
  *     now O(1) git ops + a few hundred ms of disk move.
- *   - `setComponents()` is a no-op stub reserved for Phase 4 multi-repo
- *     pool sets.
+ *   - `setComponents()` accepts the project's component list. When the
+ *     components imply multi-repo, `_fill()` builds multi-repo pool sets
+ *     via `createWorktreeSet` and `claim()` parallelises rename + move
+ *     across repos.
  */
 
 import { randomUUID } from "node:crypto";
@@ -62,8 +64,10 @@ export interface UnnamedClaim {
 	poolId: string;
 	/** Current branch name (`pool/_pool-<id>`). */
 	branchName: string;
-	/** Current worktree path (under `<repo>-wt/pool-_pool-<id>/`). */
+	/** Current worktree path (under `<repo>-wt/pool-_pool-<id>/`). For multi-repo this is the per-branch container. */
 	worktreePath: string;
+	/** Multi-repo: per-repo entries (absent for single-repo). */
+	worktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 }
 
 /** Component descriptor reserved for Phase 4 multi-repo pool sets. */
@@ -175,6 +179,14 @@ export class WorktreePool {
 		// Kick off background replenishment immediately
 		this.replenish();
 
+		// Multi-repo path: parallel per-repo branch rename + worktree move. The
+		// container directory itself is renamed first because per-repo worktrees
+		// live inside it; `git worktree move` then updates each repo's admin
+		// pointer to the new container path.
+		if (entry.worktrees && entry.worktrees.length > 0) {
+			return this._claimMultiRepo(entry, targetBranch);
+		}
+
 		// 1. Rename branch (fast — local ref op).
 		try {
 			await execFile("git", ["branch", "-m", entry.branchName, targetBranch], {
@@ -210,16 +222,81 @@ export class WorktreePool {
 
 		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${finalPath}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
 		const result: PoolClaimResult = { worktreePath: finalPath, branchName: targetBranch, degraded };
-		if (entry.worktrees && entry.worktrees.length > 0) {
-			// TODO Phase 4 follow-up: claim() does not yet rename per-repo
-			// worktrees in parallel for multi-repo entries. Today the pool
-			// fills single-repo only (see `_fill`). When multi-repo prebuild
-			// lands, this block must `Promise.all(entry.worktrees.map(...))` the
-			// rename + move per repo.
-			result.worktrees = entry.worktrees.map(w => ({ repo: w.repo, worktreePath: w.worktreePath }));
-			result.container = finalPath;
-		}
 		return result;
+	}
+
+	/**
+	 * Multi-repo claim: rename the container dir then `Promise.all` per-repo
+	 * `git branch -m` + `git worktree move` so each repo's admin pointer
+	 * tracks the new path. Per-repo failures are independent — a repo where
+	 * the move fails ends up degraded for that repo only.
+	 */
+	private async _claimMultiRepo(entry: PoolEntry, targetBranch: string): Promise<PoolClaimResult> {
+		const targetSlug = branchToSlug(targetBranch);
+		const wtRoot = path.dirname(entry.worktreePath);
+		const newContainer = path.join(wtRoot, targetSlug);
+		const worktrees = entry.worktrees!;
+
+		// 1. Rename the container dir on the host (single fs.rename — fast and
+		//    atomic on the same filesystem). Each repo's admin entry inside the
+		//    parent repo's `.git/worktrees/<slug>/gitdir` still points at the old
+		//    path; we fix that with `git worktree repair` after the move.
+		let containerDegraded = false;
+		let finalContainer = entry.worktreePath;
+		if (newContainer !== entry.worktreePath) {
+			try {
+				fs.renameSync(entry.worktreePath, newContainer);
+				finalContainer = newContainer;
+			} catch (err) {
+				containerDegraded = true;
+				console.warn(`[worktree-pool] multi-repo: container rename failed; staying at ${entry.worktreePath}: ${err instanceof Error ? err.message : err}`);
+			}
+		}
+
+		// 2. Per-repo: rename the branch and repair worktree pointers in parallel.
+		const perRepo = await Promise.all(worktrees.map(async (w) => {
+			const oldWtPath = w.worktreePath;
+			const newWtPath = finalContainer === entry.worktreePath
+				? oldWtPath
+				: path.join(finalContainer, path.relative(entry.worktreePath, oldWtPath));
+			let renamed = false;
+			try {
+				await execFile("git", ["branch", "-m", entry.branchName, targetBranch], {
+					cwd: newWtPath,
+					timeout: 10_000,
+				});
+				renamed = true;
+			} catch (err) {
+				console.warn(`[worktree-pool] multi-repo: git branch -m failed for ${w.repo}: ${err instanceof Error ? err.message : err}`);
+			}
+			// Repair admin entry so `git worktree list` / future ops see the new path.
+			if (finalContainer !== entry.worktreePath) {
+				try {
+					await execFile("git", ["worktree", "repair", newWtPath], {
+						cwd: w.repoPath,
+						timeout: 15_000,
+					});
+				} catch (err) {
+					console.warn(`[worktree-pool] multi-repo: git worktree repair failed for ${w.repo}: ${err instanceof Error ? err.message : err}`);
+				}
+			}
+			return { repo: w.repo, worktreePath: newWtPath, renamed };
+		}));
+
+		// Background freshen for each repo (independent).
+		for (const r of perRepo) {
+			this.freshenInBackground(r.worktreePath, targetBranch);
+		}
+
+		const degraded = containerDegraded || perRepo.some(r => !r.renamed);
+		console.log(`[worktree-pool] Claimed multi-repo worktree set: ${targetBranch} at ${finalContainer}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
+		return {
+			worktreePath: finalContainer,
+			branchName: targetBranch,
+			degraded,
+			worktrees: perRepo.map(r => ({ repo: r.repo, worktreePath: r.worktreePath })),
+			container: finalContainer,
+		};
 	}
 
 	/**
@@ -235,7 +312,6 @@ export class WorktreePool {
 		const entry = this.pool.shift();
 		if (!entry) return null;
 		this.replenish();
-		// Strip prefix to get the opaque pool id (`_pool-<8hex>`).
 		// Strip the leading `pool/` (or legacy `session/`) ref-namespace, keeping the
 		// `_pool-<8hex>` opaque id that callers thread through session metadata.
 		const poolId = entry.branchName.startsWith("pool/")
@@ -244,7 +320,11 @@ export class WorktreePool {
 				? entry.branchName.slice("session/".length)
 				: entry.branchName;
 		console.log(`[worktree-pool] Claimed (unnamed): ${entry.branchName} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
-		return { poolId, branchName: entry.branchName, worktreePath: entry.worktreePath };
+		const result: UnnamedClaim = { poolId, branchName: entry.branchName, worktreePath: entry.worktreePath };
+		if (entry.worktrees && entry.worktrees.length > 0) {
+			result.worktrees = entry.worktrees.map(w => ({ ...w }));
+		}
+		return result;
 	}
 
 	/** Resolve the remote primary branch (e.g. origin/master). */

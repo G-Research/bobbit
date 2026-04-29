@@ -38,6 +38,13 @@ export class GoalManager {
 	 * fallback. Single-repo behavior is unchanged.
 	 */
 	private componentsResolver?: (projectId: string) => Component[];
+	/**
+	 * Resolve the project's `rootPath` for multi-repo goal creation. When set
+	 * and the project is multi-repo, `createGoal` overrides the detected
+	 * `repoPath` (which would otherwise point at one of the sibling repos) to
+	 * the project's container directory. Single-repo behavior is unchanged.
+	 */
+	private projectRootResolver?: (projectId: string) => string | undefined;
 
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
 		this.store = goalStore;
@@ -63,6 +70,11 @@ export class GoalManager {
 		this.componentsResolver = resolver;
 	}
 
+	/** Wire a project-rootPath resolver (Phase 4a multi-repo goal creation). */
+	setProjectRootResolver(resolver: (projectId: string) => string | undefined): void {
+		this.projectRootResolver = resolver;
+	}
+
 	/**
 	 * On startup, scan for goals stuck in setupStatus === "preparing"
 	 * and mark them as "error" (setup was interrupted by server restart).
@@ -83,8 +95,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[] }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -96,8 +108,15 @@ export class GoalManager {
 		let goalCwd = cwd;
 		let setupStatus: "ready" | "preparing" = "ready";
 
-		// Detect git repo root — needed for team operations even without a worktree
-		if (await isGitRepo(cwd)) {
+		// Detect git repo root — needed for team operations even without a worktree.
+		// Multi-repo: override `repoPath` with the project's container root so the
+		// per-repo worktrees land beneath one shared `<rootPath>-wt/<branch>/`.
+		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
+		const isMulti = !!components && components.some(c => c.repo !== ".");
+		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
+		if (isMulti && projectRoot) {
+			repoPath = projectRoot;
+		} else if (await isGitRepo(cwd)) {
 			repoPath = await getRepoRoot(cwd);
 		}
 
@@ -317,7 +336,20 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		return this.store.archive(id);
+		const archived = this.store.archive(id);
+		// Phase 4a multi-repo cleanup: best-effort, fire-and-forget per-repo
+		// worktree removal + remote branch deletion in parallel. Single-repo
+		// goal cleanup remains owned by session purge (worktree shared with the
+		// team-lead session) so we only fan out when repoWorktrees is set.
+		if (archived && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
+			const { cleanupWorktree } = await import("../skills/git.js");
+			const entries = Object.entries(goal.repoWorktrees);
+			Promise.allSettled(entries.map(([repo, wt]) => {
+				const repoPath = repo === "." ? goal.repoPath! : path.join(goal.repoPath!, repo);
+				return cleanupWorktree(repoPath, wt, goal.branch, true);
+			})).catch(() => { /* swallow — best-effort */ });
+		}
+		return archived;
 	}
 
 	listLiveGoals(): PersistedGoal[] {

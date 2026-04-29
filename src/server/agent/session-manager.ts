@@ -188,6 +188,8 @@ export interface SessionInfo {
 	branch?: string;
 	/** True when on target branch but dir still at the pool path (degraded fallback). */
 	worktreeDegraded?: boolean;
+	/** Multi-repo: per-repo worktree paths from the pool claim. Updated by first-prompt rename. */
+	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 }
 
 /** Helper: extract the text body of a user message (string or block array). */
@@ -861,9 +863,9 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2, components?: import("./project-config-store.js").Component[]): void {
 		if (this.worktreePools.has(projectId)) return;
-		const pool = new WorktreePool({ repoPath, targetSize, setupCommand });
+		const pool = new WorktreePool({ repoPath, targetSize, setupCommand, components });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -2386,6 +2388,13 @@ export class SessionManager {
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			worktreeDegraded: ps.worktreeDegraded,
+			repoWorktrees: ps.repoWorktrees && ps.repoPath
+				? Object.entries(ps.repoWorktrees).map(([repo, worktreePath]) => ({
+					repo,
+					repoPath: repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo),
+					worktreePath,
+				}))
+				: undefined,
 			sandboxed: ps.sandboxed,
 		};
 
@@ -2517,6 +2526,9 @@ export class SessionManager {
 			// Phase 3: stash the pool ID and repo path for the first-prompt rename.
 			if (unnamed) {
 				session.poolId = unnamed.poolId;
+				if (unnamed.worktrees && unnamed.worktrees.length > 0) {
+					session.repoWorktrees = unnamed.worktrees.map(w => ({ ...w }));
+				}
 			}
 			session.repoPath = repoPath;
 			session.branch = branch;
@@ -2556,7 +2568,11 @@ export class SessionManager {
 			// Persist immediately with all known structural fields
 			persistOnce(session, plan, ctx.store);
 			if (session.poolId) {
-				ctx.store.update(session.id, { poolId: session.poolId });
+				const patch: { poolId?: string; repoWorktrees?: Record<string, string> } = { poolId: session.poolId };
+				if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+					patch.repoWorktrees = Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath]));
+				}
+				ctx.store.update(session.id, patch);
 			}
 
 			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
@@ -3492,13 +3508,6 @@ export class SessionManager {
 	 * the agent is fully usable either way.
 	 */
 	private async renameSessionFromPool(session: SessionInfo, title: string): Promise<void> {
-		// TODO Phase 4 follow-up: multi-repo rename. When the session was claimed
-		// from a multi-repo pool entry (`session.repoWorktrees` populated), the
-		// rename below must run in parallel per repo:
-		//   await Promise.all(repos.map(r => renameOne(r.repoPath, oldBranch, ...)))
-		// followed by per-repo `git worktree move`. For now the single-repo path
-		// runs and any per-repo entries on the session record stay pointing at
-		// the pool path — sweeper will reclaim if the session is archived.
 		if (!session.poolId) return;
 		if (session.sandboxed) return;
 		if (!session.repoPath) return;
@@ -3522,6 +3531,12 @@ export class SessionManager {
 		const newPath = path.join(wtRoot, targetBranch.replace(/\//g, "-"));
 
 		console.log(`[session-manager] Renaming pool worktree for session ${session.id}: ${oldBranch} → ${targetBranch}`);
+
+		// Multi-repo: per-repo branch rename + container dir rename + worktree repair, all parallel.
+		if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+			await this._renameSessionFromPoolMultiRepo(session, targetBranch, newPath);
+			return;
+		}
 
 		// 1. Branch rename — fast, local ref op.
 		try {
@@ -3576,6 +3591,91 @@ export class SessionManager {
 		// Push the renamed branch in the background — same as pool.claim does.
 		if (process.env.BOBBIT_TEST_NO_PUSH !== "1") {
 			execFile("git", ["push", "-u", "origin", targetBranch], { cwd: finalPath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
+		}
+	}
+
+	/**
+	 * Multi-repo session rename: rename the container dir, then `Promise.all`
+	 * per-repo branch-rename + worktree-repair so each repo's admin pointer
+	 * tracks the new path. Per-repo failures are independent (degraded mode
+	 * for that repo only).
+	 */
+	private async _renameSessionFromPoolMultiRepo(session: SessionInfo, targetBranch: string, newContainer: string): Promise<void> {
+		const { execFile: execFileCb } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const execFile = promisify(execFileCb);
+		const fsm = await import("node:fs");
+
+		const oldBranch = session.branch!;
+		const oldContainer = session.worktreePath!;
+		const worktrees = session.repoWorktrees!;
+
+		let containerDegraded = false;
+		let finalContainer = oldContainer;
+		if (newContainer !== oldContainer) {
+			try {
+				fsm.renameSync(oldContainer, newContainer);
+				finalContainer = newContainer;
+			} catch (err) {
+				containerDegraded = true;
+				console.warn(`[session-manager] multi-repo container rename failed for ${session.id}; staying at ${oldContainer}: ${err instanceof Error ? err.message : err}`);
+			}
+		}
+
+		const perRepo = await Promise.all(worktrees.map(async (w) => {
+			const newWtPath = finalContainer === oldContainer
+				? w.worktreePath
+				: path.join(finalContainer, path.relative(oldContainer, w.worktreePath));
+			let renamed = false;
+			try {
+				await execFile("git", ["branch", "-m", oldBranch, targetBranch], { cwd: newWtPath, timeout: 10_000 });
+				renamed = true;
+			} catch (err) {
+				console.warn(`[session-manager] multi-repo git branch -m failed for ${session.id} repo ${w.repo}:`, err instanceof Error ? err.message : err);
+			}
+			if (finalContainer !== oldContainer) {
+				try {
+					await execFile("git", ["worktree", "repair", newWtPath], { cwd: w.repoPath, timeout: 15_000 });
+				} catch (err) {
+					console.warn(`[session-manager] multi-repo git worktree repair failed for ${session.id} repo ${w.repo}:`, err instanceof Error ? err.message : err);
+				}
+			}
+			return { repo: w.repo, repoPath: w.repoPath, worktreePath: newWtPath, renamed };
+		}));
+
+		const degraded = containerDegraded || perRepo.some(r => !r.renamed);
+
+		const oldCwd = session.cwd;
+		let newCwd = oldCwd;
+		if (finalContainer !== oldContainer && oldCwd && oldCwd.startsWith(oldContainer)) {
+			newCwd = finalContainer + oldCwd.slice(oldContainer.length);
+		}
+
+		session.branch = targetBranch;
+		session.worktreePath = finalContainer;
+		session.cwd = newCwd;
+		session.poolId = undefined;
+		session.worktreeDegraded = degraded;
+		session.repoWorktrees = perRepo.map(r => ({ repo: r.repo, repoPath: r.repoPath, worktreePath: r.worktreePath }));
+
+		if (!session.sandboxed) {
+			try { (session.rpcClient as any)?.setCwd?.(newCwd); } catch { /* best-effort */ }
+		}
+
+		const store = this.resolveStoreForSession(session.id);
+		store.update(session.id, {
+			branch: targetBranch,
+			worktreePath: finalContainer,
+			cwd: newCwd,
+			poolId: undefined,
+			worktreeDegraded: degraded || undefined,
+			repoWorktrees: Object.fromEntries(perRepo.map(r => [r.repo, r.worktreePath])),
+		});
+
+		if (process.env.BOBBIT_TEST_NO_PUSH !== "1") {
+			for (const r of perRepo) {
+				execFile("git", ["push", "-u", "origin", targetBranch], { cwd: r.worktreePath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
+			}
 		}
 	}
 
@@ -3960,7 +4060,16 @@ export class SessionManager {
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf) {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
-				await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+				// Multi-repo: clean each repo's worktree in parallel + delete the
+				// shared branch from each repo's remote (Phase 4a).
+				if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
+					await Promise.allSettled(Object.entries(ps.repoWorktrees).map(([repo, wt]) => {
+						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
+						return cleanupWorktree(repoPath, wt, ps.branch, true);
+					}));
+				} else {
+					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+				}
 			} catch (err) {
 				console.error(`[session-manager] Failed to cleanup worktree for ${ps.id}:`, err);
 			}

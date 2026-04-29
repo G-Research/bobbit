@@ -126,6 +126,7 @@ export type UpdatableSessionFields = Pick<
 	| "projectId"
 	| "poolId"
 	| "worktreeDegraded"
+	| "repoWorktrees"
 >;
 
 /**
