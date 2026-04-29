@@ -101,11 +101,15 @@ export class WorktreePool {
 	/** Components driving multi-repo fill. Undefined or single (repo===".") behaves as today. */
 	private components?: Component[];
 
-	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string; components?: PoolComponent[] | Component[] }) {
+	/** Project-level worktree_root override (sibling of <rootPath>-wt by default). */
+	private worktreeRoot?: string;
+
+	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string; components?: PoolComponent[] | Component[]; worktreeRoot?: string }) {
 		this.repoPath = opts.repoPath;
 		this.targetSize = opts.targetSize ?? 2;
 		this.setupCommand = opts.setupCommand;
 		this.components = opts.components as Component[] | undefined;
+		this.worktreeRoot = opts.worktreeRoot;
 	}
 
 	/** Whether the pool's stored components imply multi-repo fill. */
@@ -431,7 +435,7 @@ export class WorktreePool {
 			try {
 				if (this.isMultiRepo() && this.components) {
 					// Multi-repo prebuild via createWorktreeSet — entry carries per-repo paths.
-					const set = await createWorktreeSet(this.repoPath, this.components, branchName);
+					const set = await createWorktreeSet(this.repoPath, this.components, branchName, undefined, { worktreeRoot: this.worktreeRoot });
 					this.pool.push({
 						branchName,
 						worktreePath: set.container,
@@ -444,6 +448,7 @@ export class WorktreePool {
 				const result = await createWorktree(this.repoPath, branchName, {
 					setupCommand: this.setupCommand,
 					skipPush: true,
+					worktreeRoot: this.worktreeRoot,
 				});
 				this.pool.push({
 					branchName: result.branchName,

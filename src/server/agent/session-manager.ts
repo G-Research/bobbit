@@ -865,9 +865,9 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2, components?: import("./project-config-store.js").Component[]): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2, components?: import("./project-config-store.js").Component[], worktreeRoot?: string): void {
 		if (this.worktreePools.has(projectId)) return;
-		const pool = new WorktreePool({ repoPath, targetSize, setupCommand, components });
+		const pool = new WorktreePool({ repoPath, targetSize, setupCommand, components, worktreeRoot });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't

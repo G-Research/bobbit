@@ -172,15 +172,16 @@ export interface WorktreeResult {
  * @param opts.startPoint — git ref to base the new branch on (default `"HEAD"`).
  *   Pass e.g. `origin/my-branch` to start from a remote tracking branch.
  */
-export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string; skipPush?: boolean }): Promise<WorktreeResult> {
+export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string; skipPush?: boolean; worktreeRoot?: string }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
 		throw new Error(`Cannot create worktree: repoPath does not exist: ${repoPath}`);
 	}
 
-	// Place all worktrees under a single sibling directory: <repo>-wt/
-	const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
+	// Place all worktrees under a single sibling directory: <repo>-wt/ by default,
+	// or under the project-level `worktree_root` override when provided.
+	const wtRoot = wtRootHelper({ rootPath: repoPath, worktreeRoot: opts?.worktreeRoot });
 	// branchName may contain slashes (e.g. "goal/slug-id"), flatten to a safe dirname
 	const safeName = branchName.replace(/\//g, "-");
 	const worktreePath = path.join(wtRoot, safeName);
@@ -284,6 +285,7 @@ export async function createWorktreeSet(
 	components: Component[],
 	branchName: string,
 	baseBranch?: string,
+	opts?: { worktreeRoot?: string },
 ): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
 	// Distinct repos in declared order.
 	const seen = new Set<string>();
@@ -297,7 +299,7 @@ export async function createWorktreeSet(
 
 	// Single-repo path collapses to existing behavior.
 	if (repos.length === 1 && repos[0] === ".") {
-		const result = await createWorktree(rootPath, branchName, { startPoint: baseBranch, skipPush: true });
+		const result = await createWorktree(rootPath, branchName, { startPoint: baseBranch, skipPush: true, worktreeRoot: opts?.worktreeRoot });
 		return {
 			container: result.worktreePath,
 			worktrees: [{ repo: ".", repoPath: rootPath, worktreePath: result.worktreePath }],
@@ -305,11 +307,9 @@ export async function createWorktreeSet(
 	}
 
 	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.
-	// TODO Phase 4 follow-up: thread project.worktree_root through here. Today
-	// callers don't expose project metadata to git.ts so we use the default
-	// `<rootPath>-wt` layout; project-level override is applied by the
-	// goal-manager / session-manager wiring before calling us.
-	const wtRoot = wtRootHelper({ rootPath });
+	// `worktreeRoot` honors the project-level `worktree_root` override; falls back
+	// to `<rootPath>-wt/` when unset.
+	const wtRoot = wtRootHelper({ rootPath, worktreeRoot: opts?.worktreeRoot });
 	const container = path.join(wtRoot, slug);
 	if (!fs.existsSync(container)) {
 		fs.mkdirSync(container, { recursive: true });

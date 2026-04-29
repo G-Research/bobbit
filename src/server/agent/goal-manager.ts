@@ -75,6 +75,12 @@ export class GoalManager {
 		this.projectRootResolver = resolver;
 	}
 
+	/** Wire a project worktree_root resolver (project-level override of <rootPath>-wt/). */
+	private worktreeRootResolver?: (projectId: string) => string | undefined;
+	setWorktreeRootResolver(resolver: (projectId: string) => string | undefined): void {
+		this.worktreeRootResolver = resolver;
+	}
+
 	/**
 	 * On startup, scan for goals stuck in setupStatus === "preparing"
 	 * and mark them as "error" (setup was interrupted by server restart).
@@ -258,8 +264,28 @@ export class GoalManager {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
+				const worktreeRootOverride = goal.projectId && this.worktreeRootResolver
+					? this.worktreeRootResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
-					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!);
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride });
+					// Per-component setup commands run after the worktree set lands.
+					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
+					try {
+						const { runComponentSetups } = await import("../skills/worktree-setup.js");
+						const { execFile } = await import("node:child_process");
+						const { promisify } = await import("node:util");
+						const pExecFile = promisify(execFile);
+						await runComponentSetups({
+							components,
+							branchContainer: set.container,
+							primaryWorktreeRoot: goal.repoPath!,
+							exec: async (cmd, cwd, env) => {
+								await pExecFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+							},
+						});
+					} catch (err) {
+						console.warn(`[goal-manager] runComponentSetups failed for goal "${goal.title}" (non-fatal):`, err);
+					}
 					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 						? path.join(set.container, preliminaryOffset)
 						: set.container;
@@ -276,7 +302,7 @@ export class GoalManager {
 					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
 					return;
 				}
-				const result = await createWorktree(goal.repoPath!, goal.branch!);
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride });
 				// Apply the subdirectory offset to the actual worktree path
 				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 					? path.join(result.worktreePath, preliminaryOffset)
