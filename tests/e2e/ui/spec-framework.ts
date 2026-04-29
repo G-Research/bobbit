@@ -1117,14 +1117,25 @@ export class SpecContext {
 
 	async navigate_back(): Promise<void> {
 		trackIntent(this._activeStory, this._phase, "navigate_back");
+		const before = await this._page.evaluate(() => window.location.hash);
 		await this._page.goBack();
-		await this._page.waitForTimeout(300);
+		// Wait for the hash to actually change (or the page to be ready again).
+		await this._page.waitForFunction(
+			(b) => window.location.hash !== b || document.readyState === "complete",
+			before,
+			{ timeout: 5_000 },
+		).catch(() => { /* if the hash didn't change at all, that's fine */ });
 	}
 
 	async navigate_forward(): Promise<void> {
 		trackIntent(this._activeStory, this._phase, "navigate_forward");
+		const before = await this._page.evaluate(() => window.location.hash);
 		await this._page.goForward();
-		await this._page.waitForTimeout(300);
+		await this._page.waitForFunction(
+			(b) => window.location.hash !== b || document.readyState === "complete",
+			before,
+			{ timeout: 5_000 },
+		).catch(() => { /* if the hash didn't change at all, that's fine */ });
 	}
 
 	async url_contains(fragment: string): Promise<void> {

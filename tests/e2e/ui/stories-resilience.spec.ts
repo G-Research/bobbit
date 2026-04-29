@@ -226,10 +226,12 @@ test.describe("CT-05: Resilience", () => {
 		await s.send_message("hello before disconnect");
 		await s.event.agent_finish("A");
 
-		// act — disconnect WebSocket, then reload the page
+		// act — disconnect WebSocket, then reload the page.
+		// The reload tears down the page entirely, so we don't need to wait
+		// for the WS close to settle on the old context — the new page will
+		// reconnect fresh.
 		s.act();
 		await s.event.disconnect();
-		await s.page.waitForTimeout(1_000);
 		await s.reload();
 
 		// assert — session appears in sidebar, messages intact

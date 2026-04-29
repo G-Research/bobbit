@@ -37,17 +37,16 @@ test.beforeAll(async () => {
 async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").Page) {
 	await openApp(page);
 
-	// Open the goal assistant
+	// Open the goal assistant. NOTE: this only works if the worker has exactly
+	// ONE registered project — with multiple, `startNewGoalFlow` opens a
+	// picker popover instead. The per-project-config-dirs spec used to leak a
+	// second project, breaking this; that's now cleaned up in its afterAll.
 	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
 	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
 	await newGoalBtn.click();
 
-	// Goal assistant session creation can be slow under parallel load —
-	// extend the textarea-visible timeout accordingly. The full suite has
-	// observed 30s+ cold-starts when many browser workers race to spin up
-	// goal-assistant sessions concurrently.
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 45_000 });
+	await expect(textarea).toBeVisible({ timeout: 30_000 });
 
 	// Send GOAL_PROPOSAL — mock agent responds with a proposal (workflow=general)
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");

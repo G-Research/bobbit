@@ -81,8 +81,12 @@ export async function navigateToHash(page: Page, hash: string): Promise<void> {
 			return;
 		} catch (err) {
 			if (attempt === 2) throw err;
-			// brief pause before retry
-			await page.waitForTimeout(100);
+			// Yield to let any pending hashchange/route handlers settle before
+			// reassigning. Two rAFs is roughly one paint frame — enough to drain
+			// pending microtasks without pinning a wall-clock budget.
+			await page.evaluate(() => new Promise<void>((resolve) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+			}));
 		}
 	}
 }

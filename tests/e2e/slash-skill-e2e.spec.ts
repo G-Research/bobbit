@@ -9,22 +9,26 @@ import {
 	createSession,
 	connectWs,
 	waitForHealth,
-	nonGitCwd,
 	apiFetch,
 	agentEndPredicate,
 	type WsMsg,
 } from "./e2e-setup.js";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Create a dedicated cwd with a slash skill for these tests
+// Use a DEDICATED, unique cwd per worker (NOT the shared nonGitCwd) so the
+// slash-skill discovery cache cannot return a previously-cached empty skill
+// list for this directory. discoverSlashSkills() in src/server/skills/
+// slash-skills.ts caches results for 5s keyed on cwd; if any earlier test in
+// the same worker triggered discovery against nonGitCwd() before this
+// beforeAll wrote SKILL.md, the cache would mask our skill until it expires.
 let skillCwd: string;
 
 test.beforeAll(async () => {
 	await waitForHealth();
 
-	// Create skill in the nonGitCwd's .claude/skills/e2e-test-skill/ directory
-	skillCwd = nonGitCwd();
+	skillCwd = join(tmpdir(), `bobbit-e2e-slash-skill-${process.pid}-${Date.now()}`);
 	const skillDir = join(skillCwd, ".claude", "skills", "e2e-test-skill");
 	mkdirSync(skillDir, { recursive: true });
 	writeFileSync(

@@ -15,6 +15,7 @@ import {
 	teardownTeam,
 	waitForSessionStatus,
 } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 test.setTimeout(30_000);
 
@@ -151,15 +152,20 @@ test.describe("team steer — agent must be streaming", () => {
 			// for a short debounce window, avoids catching the brief idle gap
 			// between prompts.
 			await waitForSessionStatus(agentId, "idle");
-			for (let i = 0; i < 5; i++) {
-				await new Promise(r => setTimeout(r, 100));
+			// Stable-idle debounce: require N consecutive idle reads (re-arms on any
+			// non-idle observation) so we don't catch the brief gap between the two
+			// back-to-back prompts the spawn flow dispatches.
+			let consecutive = 0;
+			await pollUntil(async () => {
 				const resp = await apiFetch(`/api/sessions/${agentId}`);
 				const data = await resp.json();
-				if (data.status !== "idle") {
-					await waitForSessionStatus(agentId, "idle");
-					i = -1; // restart debounce
+				if (data.status === "idle") {
+					consecutive++;
+					return consecutive >= 5;
 				}
-			}
+				consecutive = 0;
+				return false;
+			}, { timeoutMs: 15_000, intervalMs: 100, label: "agent stably idle" });
 
 			const steerResp = await apiFetch(`/api/goals/${goalId}/team/steer`, {
 				method: "POST",

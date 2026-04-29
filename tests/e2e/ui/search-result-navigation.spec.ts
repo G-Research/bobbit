@@ -34,6 +34,7 @@ import {
 	gitCwd,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,20 +50,23 @@ async function waitForSearchHit(
 	predicate: (results: any[]) => boolean,
 	timeoutMs = 15_000,
 ): Promise<any[]> {
-	const start = Date.now();
 	let lastResults: any[] = [];
-	while (Date.now() - start < timeoutMs) {
-		const resp = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=50`);
-		if (resp.ok) {
-			const body = await resp.json();
-			lastResults = body.results || [];
-			if (predicate(lastResults)) return lastResults;
-		}
-		await new Promise((r) => setTimeout(r, 150));
+	try {
+		return await pollUntil(
+			async () => {
+				const resp = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=50`);
+				if (!resp.ok) return null;
+				const body = await resp.json();
+				lastResults = body.results || [];
+				return predicate(lastResults) ? lastResults : null;
+			},
+			{ timeoutMs, intervalMs: 150, label: `search hit for "${query}"` },
+		);
+	} catch (err) {
+		throw new Error(
+			`waitForSearchHit timed out for "${query}" after ${timeoutMs}ms; last results: ${JSON.stringify(lastResults.map((r) => ({ type: r.type, id: r.id, title: r.title })))} (${(err as Error).message})`,
+		);
 	}
-	throw new Error(
-		`waitForSearchHit timed out for "${query}" after ${timeoutMs}ms; last results: ${JSON.stringify(lastResults.map((r) => ({ type: r.type, id: r.id, title: r.title })))}`,
-	);
 }
 
 /** Navigate directly to the search page with a prefilled query. */

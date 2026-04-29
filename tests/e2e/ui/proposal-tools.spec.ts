@@ -12,18 +12,24 @@ import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
 
-/** Helper: open goal assistant, send GOAL_PROPOSAL, wait for proposal panel. */
+/** Helper: open goal assistant, send GOAL_PROPOSAL, wait for proposal panel.
+ *
+ * Goal-assistant cold-start does sync FS work (config dirs, prompt assembly,
+ * mock-agent registry) which contends with concurrent goal-assistant creations
+ * across the 3 browser workers. Each step's timeout is set to absorb the
+ * worst-case wait we've measured under full-suite parallel load (≈30s for
+ * textarea visibility on the slowest worker). */
 async function triggerGoalProposal(page: import("@playwright/test").Page) {
 	await openApp(page);
 	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
 	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
 	await newGoalBtn.click();
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 15_000 });
+	await expect(textarea).toBeVisible({ timeout: 30_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 	// Wait for the proposal panel to render with the title populated
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
-	await expect(titleInput).toBeVisible({ timeout: 15_000 });
+	await expect(titleInput).toBeVisible({ timeout: 20_000 });
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 }
 
@@ -68,9 +74,8 @@ test.describe("Proposal tool blocks", () => {
 		await navigateToHash(page, "#/settings");
 		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 5_000 });
 
-		// Navigate back using browser back
+		// Navigate back using browser back; the next visibility assertion auto-retries.
 		await page.goBack();
-		await page.waitForTimeout(1000);
 
 		// The tool block should still be visible with the "Open proposal" button
 		const openBtnAfter = page.getByText("Open proposal").first();
@@ -91,9 +96,8 @@ test.describe("Proposal tool blocks", () => {
 		await navigateToHash(page, "#/settings");
 		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 5_000 });
 
-		// Navigate back
+		// Navigate back; the next visibility assertion auto-retries.
 		await page.goBack();
-		await page.waitForTimeout(1000);
 
 		// Click the "Open proposal" button
 		const reopenBtn = page.getByText("Open proposal").first();

@@ -9,11 +9,13 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import {
+	apiFetch,
 	createSession,
 	connectWs,
 	agentEndPredicate,
 	type WsMsg,
 } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 test.describe("context bar after reconnect", () => {
 	let sessionId: string;
@@ -31,12 +33,19 @@ test.describe("context bar after reconnect", () => {
 		ws1.send({ type: "prompt", text: "hello" });
 		await ws1.waitFor(agentEndPredicate(), 10_000);
 
-		// Brief pause to let model persist to disk
-		await new Promise(r => setTimeout(r, 500));
+		// Wait for the model selection to be persisted to disk (visible via REST).
+		await pollUntil(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}`);
+			if (!resp.ok) return false;
+			const data = await resp.json();
+			return data.modelProvider === "anthropic" && data.modelId === "claude-sonnet-4-20250514";
+		}, { timeoutMs: 5_000, intervalMs: 50, label: "model persisted" });
 
-		// 3. Disconnect
+		// 3. Disconnect — wait for the underlying socket to actually close so the
+		// server has fully torn down the prior subscription before we reconnect.
+		const closed = new Promise<void>(r => ws1.ws.once("close", () => r()));
 		ws1.close();
-		await new Promise(r => setTimeout(r, 300));
+		await closed;
 
 		// 4. Reconnect with a new WebSocket
 		const ws2 = await connectWs(sessionId);

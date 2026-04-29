@@ -11,6 +11,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
+import { pollUntil as pollUntilCleanup } from "./test-utils/cleanup.js";
 
 const SLOW_WORKFLOW_ID = `test-cancel-verif-${Date.now()}`;
 
@@ -62,22 +63,19 @@ async function getGateStatus(goalId: string, gateId: string): Promise<any> {
 	return res.json();
 }
 
-/** Poll until a condition is met. */
+/** Poll until a predicate is satisfied — adapter over the shared pollUntil. */
 async function pollUntil<T>(
 	fn: () => Promise<T>,
 	pred: (val: T) => boolean,
 	timeoutMs = 15000,
 	intervalMs = 100,
 ): Promise<T> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const val = await fn();
-		if (pred(val)) return val;
-		await new Promise(r => setTimeout(r, intervalMs));
-	}
-	const lastVal = await fn();
-	if (pred(lastVal)) return lastVal;
-	throw new Error(`pollUntil timed out after ${timeoutMs}ms`);
+	let captured: T;
+	await pollUntilCleanup(async () => {
+		captured = await fn();
+		return pred(captured);
+	}, { timeoutMs, intervalMs, label: "cancel-verif predicate" });
+	return captured!;
 }
 
 test.describe("Cancel Verification API", () => {

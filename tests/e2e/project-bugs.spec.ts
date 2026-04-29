@@ -10,6 +10,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, apiFetch, nonGitCwd } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -214,14 +215,12 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		// the worktree once async worktree setup completes. So we wait for
 		// setupStatus=ready before asserting cwd is rooted in worktreePath.
 		const goalId = goal.id;
-		const start = Date.now();
 		let readyGoal: any;
-		while (Date.now() - start < 30_000) {
+		await pollUntil(async () => {
 			const getResp = await apiFetch(`/api/goals/${goalId}`);
 			readyGoal = await getResp.json();
-			if (readyGoal.setupStatus === "ready" || readyGoal.setupStatus === "error") break;
-			await new Promise(r => setTimeout(r, 500));
-		}
+			return readyGoal.setupStatus === "ready" || readyGoal.setupStatus === "error";
+		}, { timeoutMs: 30_000, intervalMs: 500, label: "goal setupStatus settled" });
 
 		expect(readyGoal.setupStatus).toBe("ready");
 		expect(readyGoal.cwd).toMatch(/packages[/\\]my-app$/);

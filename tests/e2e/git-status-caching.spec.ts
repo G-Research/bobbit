@@ -94,6 +94,8 @@ test.describe("git-status server cache + single-flight", () => {
 		sessionId = s.id;
 		sessionCwd = s.cwd;
 		serverModule.__setGitStatusFake(async (_cwd: string, _cid: string | undefined, opts?: { untracked?: boolean }) => {
+			// Fake-producer artificial latency — NOT a flakiness sleep. Used to test
+			// single-flight coalescing under simulated slow git-status.
 			if (fakeDelayMs > 0) await new Promise((r) => setTimeout(r, fakeDelayMs));
 			if (fakeShouldThrow) throw new Error("fake git error");
 			if (fakeReturnsNull) return null;
@@ -110,8 +112,6 @@ test.describe("git-status server cache + single-flight", () => {
 		fakeDelayMs = 0;
 		fakeShouldThrow = false;
 		fakeReturnsNull = false;
-		serverModule.invalidateGitStatusCache(sessionCwd);
-		await new Promise((r) => setTimeout(r, 800));
 		serverModule.invalidateGitStatusCache(sessionCwd);
 		serverModule.__resetGitStatusInvocationCount();
 	});
@@ -153,7 +153,7 @@ test.describe("git-status server cache + single-flight", () => {
 		expect(r1.status).toBe(200);
 		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(1);
 
-		await new Promise((res) => setTimeout(res, 1200));
+		serverModule.__forceGitStatusCacheExpiry(sessionCwd);
 
 		const r2 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r2.status).toBe(200);

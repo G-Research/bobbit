@@ -1,5 +1,6 @@
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
 
@@ -52,19 +53,19 @@ async function waitForGateStatus(
 	targetStatus: string,
 	timeoutMs = 15000,
 ): Promise<any> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
+	try {
+		return await pollUntil(async () => {
+			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
+			const data = await res.json();
+			return data.status === targetStatus ? data : null;
+		}, { timeoutMs, intervalMs: 50, label: `gate ${gateId} status=${targetStatus}` });
+	} catch (err) {
 		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
 		const data = await res.json();
-		if (data.status === targetStatus) return data;
-		await new Promise(r => setTimeout(r, 50));
+		throw new Error(
+			`Gate ${gateId} did not reach status "${targetStatus}" within ${timeoutMs}ms. Current status: "${data.status}"`,
+		);
 	}
-	// One last check with detail for error message
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-	const data = await res.json();
-	throw new Error(
-		`Gate ${gateId} did not reach status "${targetStatus}" within ${timeoutMs}ms. Current status: "${data.status}"`,
-	);
 }
 
 test.beforeAll(() => {

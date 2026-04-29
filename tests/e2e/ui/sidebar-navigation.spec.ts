@@ -20,7 +20,6 @@ import {
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Sidebar navigation", () => {
-	test.describe.configure({ retries: 2 });
 	const sessionIds: string[] = [];
 	const goalIds: string[] = [];
 
@@ -173,8 +172,12 @@ test.describe("Sidebar navigation", () => {
 
 		await openApp(page);
 
-		// Wait for all sessions to appear in sidebar
-		await page.waitForTimeout(1000);
+		// Event-driven settle: navigate to session A first so the sidebar finishes
+		// its initial WS hydration / refreshSessions roundtrip and renders an
+		// active row. This replaces a flat 1s sleep that was the dominant SB-04
+		// flake source under load.
+		await navigateToHash(page, `#/session/${idA}`);
+		await expect(page.locator(".sidebar-session-active")).toBeVisible({ timeout: 15_000 });
 
 		// Rapidly switch sessions via hash — no awaits between
 		await page.evaluate(

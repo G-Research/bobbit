@@ -27,7 +27,8 @@ test.describe("Thinking Level", () => {
 			// The server should NOT respond with an error.
 			// On the broken codebase, it responds with:
 			//   { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" }
-			// Wait a moment for any error to arrive
+			// negative-window assertion (intentional sleep): we want to verify no
+			// error frame arrives within a bounded window.
 			await new Promise((r) => setTimeout(r, 500));
 
 			const errors = conn.messages.filter(

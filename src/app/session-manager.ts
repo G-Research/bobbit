@@ -1796,6 +1796,15 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 		if (!termRes.ok && termRes.status !== 404) {
 			console.warn(`[project-proposal] Terminate returned ${termRes.status}`);
 		}
+		// Optimistically remove the assistant session from local state so the
+		// sidebar updates immediately, before the round-trip refreshSessions()
+		// completes. The server is now the source of truth for the next refresh,
+		// but under heavy parallel load that round-trip can take 5–10 s and the
+		// sidebar shouldn't show 'Project Assistant (setting up)' that whole
+		// time after the user clicked Accept. Idempotent if the session is
+		// already absent.
+		state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== propSessionId);
+		renderApp();
 		// Clean up drafts and navigate away
 		deleteGoalDraft(propSessionId);
 		deleteRoleDraft(propSessionId);
