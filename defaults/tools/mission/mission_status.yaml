@@ -1,0 +1,9 @@
+name: mission_status
+description: "Full mission summary — mission record, plan, child goals, gates, integration branch."
+summary: "Full mission summary."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Mission
+docs: |-
+  No params. Backend: GET /api/missions/:id. Returns the mission detail object.

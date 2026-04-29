@@ -49,6 +49,10 @@ export interface PersistedGoal {
 	autoStartTeam?: boolean;
 	/** Names of optional verification steps enabled for this goal */
 	enabledOptionalSteps?: string[];
+	/** If this goal is a child of a mission, the mission's id. */
+	missionId?: string;
+	/** The PlannedGoal.planId in the owning mission's plan. */
+	missionPlanId?: string;
 }
 
 /**

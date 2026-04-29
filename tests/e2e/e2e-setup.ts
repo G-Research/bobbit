@@ -140,7 +140,7 @@ function token(): string {
  * the underlying server requirement. Tests that deliberately exercise the
  * 400-path bypass this helper by calling `fetch(...)` directly.
  */
-const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$|\/)/;
+const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff|missions)(\?|$|\/)/;
 
 /**
  * Parse a JSON body (string or already-object), inject projectId when missing,

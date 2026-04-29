@@ -1,0 +1,9 @@
+name: mission_goal_status
+description: "List child goal states for the mission, optionally filtered to one plan node."
+summary: "Status of child goals in the mission."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Mission
+docs: |-
+  Params: `planId` (optional). Backend: GET /api/missions/:id. Returns array of `{ planId, title, state, goalId, lastActivity }`.

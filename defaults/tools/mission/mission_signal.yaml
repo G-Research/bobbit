@@ -1,0 +1,9 @@
+name: mission_signal
+description: "Signal a mission-level workflow gate (charter, plan-review, goal-plan, execution, integration, mission-pr)."
+summary: "Signal a mission gate."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Mission
+docs: |-
+  Params: `gate_id` (required), `content` (optional markdown), `metadata` (optional record). Thin wrapper over gate_signal scoped to the current mission via ownerKind=mission.

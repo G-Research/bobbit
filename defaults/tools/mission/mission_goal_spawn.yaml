@@ -1,0 +1,9 @@
+name: mission_goal_spawn
+description: "Spawn a child goal for a plan node. Idempotent on (missionId, planId). Server enforces goal-plan gate passed and deps complete."
+summary: "Spawn a child goal for a plan node."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Mission
+docs: |-
+  Params: `planId`. Backend: POST /api/missions/:id/spawn-child/:planId. Returns `{ goalId, branch, alreadySpawned }`. 409 if plan not approved or deps incomplete.

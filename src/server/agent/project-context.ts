@@ -16,6 +16,8 @@ import { SearchService } from "../search/search-service.js";
 import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
+import { MissionStore } from "./mission-store.js";
+import { MissionManager } from "./mission-manager.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -45,6 +47,8 @@ export class ProjectContext {
   readonly costTracker: CostTracker;
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
+  readonly missionStore: MissionStore;
+  readonly missionManager: MissionManager;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -78,6 +82,19 @@ export class ProjectContext {
     this.toolManager = new ToolManager(this.configDir);
     this.projectConfigStore = new ProjectConfigStore(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
+
+    // Mission state — depends on workflowStore + goalManager.
+    this.missionStore = new MissionStore(this.stateDir);
+    this.missionManager = new MissionManager(this.missionStore, {
+      goalManager: this.goalManager,
+      goalStore: this.goalStore,
+      workflowStore: this.workflowStore,
+      projectId: project.id,
+      // TODO(mission-scheduler-owner): pass `createIntegrationBranch` once
+      // mission-git.ts lands. For phase 1 the integration branch field is
+      // left undefined and child goals branch off origin/master like normal
+      // standalone goals.
+    });
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */
