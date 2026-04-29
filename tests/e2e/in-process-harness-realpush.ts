@@ -1,0 +1,200 @@
+/**
+ * In-process gateway fixture VARIANT — "realpush" — mirror of
+ * `in-process-harness.ts` minus the `BOBBIT_TEST_NO_PUSH=1` env line so that
+ * `git push --delete` actually executes against the test's local bare-repo
+ * origin. Used only by tests that assert real remote-branch lifecycle
+ * (e.g. `goal-archive-branch-cleanup.spec.ts`). Registered as its own
+ * Playwright project in `playwright-e2e.config.ts` for env isolation.
+ *
+ * KEEP IN SYNC with `in-process-harness.ts` — the only intentional delta is
+ * the missing BOBBIT_TEST_NO_PUSH line.
+ *
+ * In-process gateway fixture for E2E API tests.
+ *
+ * Unlike gateway-harness.ts which spawns a child process, this fixture
+ * imports the server directly and starts it in the same Node process.
+ * This eliminates ~5-8s of process spawn + health-check overhead per worker.
+ *
+ * Each Playwright worker gets its own isolated gateway with:
+ *   - A unique OS-assigned port (port 0)
+ *   - A unique BOBBIT_DIR (ephemeral, cleaned up after)
+ *   - The mock agent (no API key needed)
+ *
+ * The fixture sets process.env.E2E_PORT before any test files import
+ * e2e-setup.ts, so helpers automatically target the right server.
+ *
+ * IMPORTANT: This fixture MUST remain worker-scoped (not test-scoped).
+ * Node's module cache means server singletons (caches, stores, prompt dirs)
+ * persist for the worker's lifetime. createGateway() creates fresh store
+ * instances each call, but module-level state in server.ts is shared.
+ * Making this test-scoped would cause silent cross-test contamination.
+ */
+import { test as base } from "@playwright/test";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { rm as rmAsync } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const PROJECT_ROOT = resolve(__dirname, "..", "..");
+const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
+
+// Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
+// (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
+// local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
+// is outside the git repo — otherwise isGitRepo() returns true for the project
+// rootPath and sessions auto-create worktrees (slow, conflicts with git state).
+const E2E_TEMP_ROOT = existsSync("/.dockerenv")
+	? "/tmp"
+	: process.platform === "win32"
+		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
+		: join(tmpdir(), "bobbit-e2e");
+
+export interface GatewayInfo {
+	port: number;
+	baseURL: string;
+	wsBase: string;
+	bobbitDir: string;
+	sessionManager: any;  // Exposed for sandbox security tests
+	bgProcessManager: any;  // Exposed for bg-wait abort tests
+}
+
+/**
+ * Extended test fixture that provides a per-worker in-process gateway.
+ *
+ * Usage in test files:
+ *   import { test, expect } from "./in-process-harness.js";
+ *   // e2e-setup helpers automatically target this worker's gateway
+ */
+export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: GatewayInfo }>({
+	// Worker-scoped option. Default false (pool pre-fill skipped for CPU).
+	// Opt in with `test.use({ enableWorktreePool: true })` in specs that
+	// actually exercise the pool endpoints.
+	enableWorktreePool: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableWorktreePool }, use, workerInfo) => {
+		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
+		// Include pid + a per-worker counter so retries don't collide with a
+		// previous worker's teardown that still holds file handles on Windows.
+		const bobbitDir = join(
+			E2E_TEMP_ROOT,
+			`.e2e-inproc-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
+		);
+
+		// Clean slate (usually a no-op since the dir name is fresh)
+		rmSync(bobbitDir, { recursive: true, force: true });
+		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Seed projects.json. The server no longer auto-registers a default project,
+		// so we register one explicitly via the API after startup (see below) to
+		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
+		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
+		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+
+		// Set BOBBIT_DIR env BEFORE importing server modules.
+		// Playwright workers are separate Node processes, so module singletons
+		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
+		process.env.BOBBIT_DIR = bobbitDir;
+		process.env.BOBBIT_SKIP_MCP = "1";
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+		// (realpush variant) BOBBIT_TEST_NO_PUSH intentionally NOT set so push-delete actually runs.
+		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
+		process.env.BOBBIT_NO_OPEN = "1";
+		// Skip outbound network probes and per-prompt title-generation calls.
+		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+		process.env.BOBBIT_SKIP_TITLE_GEN = "1";
+		// Skip worktree pool pre-fill by default — git worktree + setup commands
+		// are expensive and most tests don't exercise the pool path. Specs that
+		// exercise the pool opt in with `test.use({ enableWorktreePool: true })`.
+		if (enableWorktreePool) {
+			delete process.env.BOBBIT_SKIP_WORKTREE_POOL;
+		} else {
+			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
+		}
+
+		// Pre-create subdirectories that the server writes into. Under heavy
+		// parallel load on Windows, concurrent first-use of these dirs races
+		// with scaffolding and produces spurious ENOENT.
+		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
+
+		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
+		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
+		const { createGateway } = await import("../../dist/server/server.js");
+		// Register the in-process mock bridge factory before any sessions are
+		// created. The factory intercepts RpcBridge constructions whose cliPath
+		// points at our mock-agent.mjs and returns a drop-in class that skips
+		// the Node subprocess + JSONL serialization entirely.
+		const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
+		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+		registerRpcBridgeFactory((opts: any) => {
+			if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
+			return null;
+		});
+
+		setProjectRoot(bobbitDir);
+		scaffoldBobbitDir(bobbitDir);
+		const token = loadOrCreateToken();
+
+		const gw = createGateway({
+			host: "127.0.0.1",
+			port: 0,             // OS-assigned port
+			portExplicit: true,  // Skip auto-increment loop
+			authToken: token,
+			defaultCwd: bobbitDir,
+			forceAuth: true,
+			agentCliPath: MOCK_AGENT,
+		});
+
+		const port = await gw.start();
+
+		// Register the server CWD as a project via REST so existing tests that
+		// rely on a pre-existing "default" project at projects[0] keep working.
+		// The server no longer auto-registers one — see server.ts startup block.
+		try {
+			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Authorization": `Bearer ${token}`,
+				},
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+			});
+		} catch { /* best-effort */ }
+
+		// Write gateway-url so agent subprocesses (including the mock agent) can
+		// read it for callbacks to internal endpoints.
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`, "utf-8");
+
+		// Set env so e2e-setup.ts helpers target this worker's server
+		process.env.E2E_PORT = String(port);
+
+		// cli.ts normally writes .bobbit/state/gateway-url so agent subprocesses
+		// can discover the gateway. When running in-process we must do that
+		// ourselves — tests that exercise tool-grant-request rely on it.
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`);
+
+		const info: GatewayInfo = {
+			port,
+			baseURL: `http://127.0.0.1:${port}`,
+			wsBase: `ws://127.0.0.1:${port}`,
+			bobbitDir,
+			sessionManager: gw.sessionManager,
+			bgProcessManager: gw.bgProcessManager,
+		};
+
+		await use(info);
+
+		// Teardown — use existing shutdown() for proper cleanup
+		await gw.shutdown();
+		// Fire-and-forget async cleanup — synchronous rmSync of the entire
+		// bobbitDir tree serializes under Windows Defender and starves other
+		// workers mid-teardown. The global teardown sweeps E2E_TEMP_ROOT at
+		// end-of-suite anyway, so dropped failures here are benign.
+		void rmAsync(bobbitDir, { recursive: true, force: true }).catch(() => {
+			// Best-effort cleanup
+		});
+	}, { scope: "worker", auto: true, timeout: 30_000 }],
+});
+
+export { expect } from "@playwright/test";

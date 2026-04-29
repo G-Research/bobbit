@@ -58,8 +58,20 @@ export default defineConfig({
 				"**/port-auto-increment*",
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
+				// Owned by the api-realpush project (different env).
+				"**/goal-archive-branch-cleanup*",
 			],
 			workers: 4,
+		},
+		{
+			// Real-push variant of the in-process harness — isolated project so it
+			// doesn't share env (BOBBIT_TEST_NO_PUSH) with the main API project.
+			// See tests/e2e/in-process-harness-realpush.ts.
+			name: "api-realpush",
+			testDir: "./tests/e2e",
+			testMatch: ["**/goal-archive-branch-cleanup.spec.ts"],
+			workers: 1,
+			fullyParallel: false,
 		},
 		{
 			name: "browser",

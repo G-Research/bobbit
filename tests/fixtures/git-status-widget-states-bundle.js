@@ -2046,11 +2046,44 @@
       if (days < 30) return `${days}d ago`;
       return new Date(timestamp).toLocaleDateString();
     }
+    _renderMultiRepoSections() {
+      if (!this.repos) return null;
+      const entries = Object.entries(this.repos);
+      if (entries.length <= 1) return null;
+      return b2`
+            <div class="border-t border-border pt-2 mt-2 flex flex-col gap-1.5" data-testid="multi-repo-sections">
+                <div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium" data-testid="multi-repo-header">${entries.length} repos</div>
+                ${entries.map(([repoName, info]) => {
+        const files = info.statusFiles ?? [];
+        const summary = info.summary ?? (info.clean ? "clean" : `${files.length} change${files.length === 1 ? "" : "s"}`);
+        return b2`
+                        <details class="border border-border rounded-md" data-testid="multi-repo-entry" data-repo-name=${repoName}>
+                            <summary class="text-xs font-medium text-foreground cursor-pointer py-1 px-2 flex items-center gap-2">
+                                <code class="text-[10px] font-mono">${repoName === "." ? "(root)" : repoName}</code>
+                                <span class="text-muted-foreground text-[11px]">${summary}</span>
+                                ${info.clean === false || files.length > 0 ? b2`<span class="text-amber-600 dark:text-amber-400 text-[10px]" data-testid="repo-dirty-dot">●</span>` : info.clean === true ? b2`<span class="text-green-600 dark:text-green-400 text-[10px]">○</span>` : ""}
+                            </summary>
+                            ${files.length > 0 ? b2`<div class="flex flex-col gap-0.5 px-2 pb-2 pt-1">
+                                    ${files.map((f4) => b2`
+                                        <div class="flex items-center gap-2 py-0.5 min-w-0">
+                                            <span class="${this._statusColor(f4.status)} font-mono w-[60px] shrink-0 text-right text-[10px]" title=${this._statusLabel(f4.status)}>${this._statusLabel(f4.status)}</span>
+                                            <span class="text-foreground truncate text-[11px]" title=${f4.file}>${f4.file}</span>
+                                        </div>
+                                    `)}
+                                </div>` : b2`<div class="text-[11px] text-muted-foreground italic px-2 pb-2">Working tree clean</div>`}
+                        </details>
+                    `;
+      })}
+            </div>
+        `;
+    }
     _renderDropdownContent() {
+      const multiRepoSections = this._renderMultiRepoSections();
       return b2`
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
                 <span class="break-all">${this.branch}</span>
+                ${multiRepoSections ? b2`<span class="ml-auto text-[10px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos).length} repos</span>` : ""}
             </div>
 
             <div class="flex flex-col gap-1 mb-2">
@@ -2059,6 +2092,8 @@
             </div>
 
             ${this._renderPrSection()}
+
+            ${multiRepoSections}
 
             ${this.statusFiles.length > 0 ? b2`
                       <div class="border-t border-border pt-2 mt-2">
