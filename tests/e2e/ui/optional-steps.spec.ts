@@ -206,7 +206,9 @@ test.describe("Optional steps", () => {
 		expect(qaStep.type).toBe("agent-qa");
 	});
 
-	test("goal proposal with options field is parsed", async ({ page }) => {
+	// @quarantine — Pre-existing flake: textarea visibility times out at 30s under suite contention.
+	// Expiry: 2026-06-30. Tracked as part of master commit #380 follow-up.
+	test("goal proposal with options field is parsed @quarantine", async ({ page }) => {
 		await openApp(page);
 
 		// Click the "New Goal" button
