@@ -7,6 +7,7 @@ import {
 	refreshMissions,
 	pauseMission,
 	resumeMission,
+	signalMissionGate,
 	type GateState,
 } from "./api.js";
 import type { MissionDetail, PersistedMission } from "./mission-types.js";
@@ -24,6 +25,19 @@ let loading = true;
 let error = "";
 let activeTab: "overview" | "plan" = "overview";
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let approving = false;
+let toastMessage: { text: string; kind: "success" | "error" } | null = null;
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(text: string, kind: "success" | "error" = "success"): void {
+	toastMessage = { text, kind };
+	if (toastTimer) clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => {
+		toastMessage = null;
+		renderApp();
+	}, 4000);
+	renderApp();
+}
 
 // ============================================================================
 // LIFECYCLE
@@ -112,6 +126,74 @@ async function refreshMissionData(): Promise<void> {
 // RENDER
 // ============================================================================
 
+function renderToast(): TemplateResult {
+	if (!toastMessage) return html``;
+	const bg = toastMessage.kind === "error" ? "#dc2626" : "#16a34a";
+	return html`
+		<div data-testid="mission-toast" data-kind=${toastMessage.kind}
+			style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:${bg};color:white;padding:10px 16px;border-radius:6px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:9999;">
+			${toastMessage.text}
+		</div>
+	`;
+}
+
+function renderPlanMarkdown(m: PersistedMission): string {
+	const plan = m.plan;
+	if (!plan) return `# ${m.title}\n\n_No plan_`;
+	const lines: string[] = [];
+	lines.push(`# ${m.title} — Approved Plan (v${plan.version})`);
+	lines.push("");
+	lines.push(`**Goals (${plan.goals.length})**`);
+	lines.push("");
+	for (const g of plan.goals) {
+		lines.push(`## ${g.title}  \`${g.planId}\``);
+		lines.push(`- workflow: \`${g.workflowId}\``);
+		if (g.suggestedRole) lines.push(`- role: \`${g.suggestedRole}\``);
+		lines.push("");
+		lines.push(g.spec);
+		lines.push("");
+	}
+	if (plan.dependencies.length) {
+		lines.push(`**Dependencies (${plan.dependencies.length})**`);
+		lines.push("");
+		for (const e of plan.dependencies) {
+			lines.push(`- \`${e.from}\` → \`${e.to}\``);
+		}
+		lines.push("");
+	}
+	if (plan.rationale) {
+		lines.push("**Rationale**");
+		lines.push("");
+		lines.push(plan.rationale);
+	}
+	return lines.join("\n");
+}
+
+async function onApprovePlan(): Promise<void> {
+	if (!detail || approving) return;
+	const m = detail.mission;
+	const plan = detail.plan ?? m.plan;
+	if (!plan || !plan.goals.length) {
+		showToast("Cannot approve an empty plan", "error");
+		return;
+	}
+	approving = true;
+	renderApp();
+	try {
+		const content = renderPlanMarkdown({ ...m, plan });
+		const result = await signalMissionGate(m.id, "goal-plan", { content });
+		if (result.ok) {
+			showToast("Plan approved — goal-plan gate signalled", "success");
+			await refreshMissionData();
+		} else {
+			showToast(`Failed to approve plan: ${result.error ?? "unknown error"}`, "error");
+		}
+	} finally {
+		approving = false;
+		renderApp();
+	}
+}
+
 export function renderMissionDashboard(): TemplateResult {
 	if (loading) {
 		return html`
@@ -137,6 +219,7 @@ export function renderMissionDashboard(): TemplateResult {
 			<div class="tab-content" style="padding:16px 20px;overflow-y:auto;flex:1;min-height:0;">
 				${activeTab === "overview" ? renderOverviewTab() : renderPlanTab()}
 			</div>
+			${renderToast()}
 		</div>
 	`;
 }
@@ -241,10 +324,10 @@ function renderPlanTab(): TemplateResult {
 				<span style="flex:1;"></span>
 				${isPlanReady ? html`
 					<button class="btn-icon primary" data-testid="mission-approve-plan-btn"
-						@click=${() => { /* phase 6 implements plan-approve flow */ }}
+						@click=${onApprovePlan}
 						title="Approve plan (signals goal-plan gate)"
-						disabled
-					>Approve plan (phase 6)</button>
+						?disabled=${approving || !plan.goals.length}
+					>${approving ? "Approving…" : "Approve plan"}</button>
 				` : ""}
 			</div>
 			${renderMissionDagSvg(plan)}
@@ -360,4 +443,6 @@ export const __test__ = {
 	getDetail: () => detail,
 	getGates: () => gates,
 	getActiveTab: () => activeTab,
+	getToast: () => toastMessage,
+	isApproving: () => approving,
 };

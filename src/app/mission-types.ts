@@ -89,6 +89,13 @@ export interface MissionDetail {
 	commanderSessionId?: string;
 }
 
+export interface MissionGate {
+	gateId: string;
+	name: string;
+	status: "pending" | "passed" | "failed" | "verifying";
+	updatedAt?: number;
+}
+
 export const MISSION_STATE_LABELS: Record<MissionState, string> = {
 	planning: "Planning",
 	"in-progress": "In Progress",
