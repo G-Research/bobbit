@@ -294,10 +294,18 @@ export async function buildReviewPrompt(
 	if (signalContent) {
 		contextLines.push(`\n### Signal Content\n${signalContent}`);
 	}
-	if (signalMetadata && Object.keys(signalMetadata).length > 0) {
-		contextLines.push("\n### Signal Metadata");
-		for (const [k, v] of Object.entries(signalMetadata)) {
-			contextLines.push(`- **${k}**: ${v}`);
+	// Defensively type-guard `signalMetadata`: a misbehaving caller (or a model
+	// that serialises an object to a JSON string) can pass a string here, which
+	// would make `Object.entries(...)` produce per-character bullets. The schema
+	// for mission_signal is now Record<string,string> and the server endpoints
+	// validate, but the prompt builder still defends in depth.
+	if (signalMetadata && typeof signalMetadata === "object" && !Array.isArray(signalMetadata)) {
+		const entries = Object.entries(signalMetadata as Record<string, unknown>).filter(([, v]) => v !== undefined);
+		if (entries.length > 0) {
+			contextLines.push("\n### Signal Metadata");
+			for (const [k, v] of entries) {
+				contextLines.push(`- **${k}**: ${typeof v === "string" ? v : JSON.stringify(v)}`);
+			}
 		}
 	}
 	sections.push(contextLines.join("\n"));
