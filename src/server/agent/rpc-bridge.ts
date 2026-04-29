@@ -20,6 +20,33 @@ function redactDockerArgs(args: string[]): string {
 	}).join(" ");
 }
 
+/**
+ * Resolve the absolute path to the shell tool group's `extension.ts`, used by
+ * sub-agents that don't go through tool-activation (i.e. callers that don't
+ * pass `--no-extensions`). Mirrors `ToolManager.getToolGroupBaseDir()`'s
+ * cascade order: project/user overlay (TOOLS_DIR) first, then the read-only
+ * builtin shipped with Bobbit (BUILTIN_TOOLS_DIR).
+ *
+ * Exported for tests — production callers should use `RpcBridge` directly.
+ *
+ * @param toolManager When provided, delegate to its canonical resolver.
+ * @param exists File-existence probe (override in tests).
+ * @returns Absolute path or `undefined` if neither candidate exists.
+ */
+export function resolveBashExtensionPath(
+	toolManager: ToolManager | undefined,
+	exists: (p: string) => boolean = fs.existsSync,
+): string | undefined {
+	if (toolManager) {
+		return toolManager.getExtensionPath("shell", "extension.ts");
+	}
+	const candidates = [
+		path.join(TOOLS_DIR, "shell", "extension.ts"),
+		path.join(BUILTIN_TOOLS_DIR, "shell", "extension.ts"),
+	];
+	return candidates.find(exists);
+}
+
 /** Container home directory for the Docker sandbox (node:20-slim, USER node) */
 export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
@@ -134,19 +161,7 @@ export class RpcBridge {
 		// For sessions that don't go through tool activation (no role, fallback path),
 		// force-load shell/extension.ts so bash/bash_bg remain available.
 		if (!args.includes("--no-extensions")) {
-			let bashExtPath: string | undefined;
-			if (this.options.toolManager) {
-				bashExtPath = this.options.toolManager.getExtensionPath("shell", "extension.ts");
-			} else {
-				// Manual cascade: TOOLS_DIR (config overlay) → BUILTIN_TOOLS_DIR (defaults).
-				// Mirrors ToolManager.getToolGroupBaseDir(); needed for sub-agents that
-				// construct an RpcBridge without a ToolManager (e.g. mission-gate llm-review).
-				const candidates = [
-					path.join(TOOLS_DIR, "shell", "extension.ts"),
-					path.join(BUILTIN_TOOLS_DIR, "shell", "extension.ts"),
-				];
-				bashExtPath = candidates.find(p => fs.existsSync(p));
-			}
+			const bashExtPath = resolveBashExtensionPath(this.options.toolManager);
 			if (bashExtPath && !args.includes(bashExtPath)) {
 				args.push("--extension", bashExtPath);
 			} else if (!bashExtPath) {

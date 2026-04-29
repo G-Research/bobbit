@@ -1131,6 +1131,16 @@ export class VerificationHarness {
 						output = "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).";
 					} else {
 						const prompt = _substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+						// TODO(mission-llm-review-session-path): pass missionId as goalId so the
+						// session-based path is reachable for mission gates. Today we fall through
+						// to runLlmReviewDirect (the legacy direct-RpcBridge path), which means
+						// charter / plan-review / integration LLM reviews are invisible in the
+						// mission dashboard UI. The crash that this used to trigger is fixed by
+						// rpc-bridge.ts cascading to BUILTIN_TOOLS_DIR + VerificationHarness
+						// threading its ToolManager into the bridge — so this is purely a UX gap,
+						// not a correctness bug. Wiring the session path requires teaching
+						// runLlmReviewViaSession + SessionManager.createSession to accept a
+						// missionId (project lookup currently goes through getContextForGoal).
 						const r = await this.runLlmReviewStep(
 							{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 							cwd, builtinVars,
