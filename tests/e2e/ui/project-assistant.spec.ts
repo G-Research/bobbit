@@ -86,14 +86,7 @@ async function findProvisionalProject(dir: string): Promise<any | undefined> {
 	return projects.find((p: any) => p.rootPath === dir && p.provisional);
 }
 
-// @quarantine — "happy path" test: "Project Assistant" sidebar entry sometimes
-// lingers >10s after Accept under heavy parallel browser load. Real product
-// race between DELETE /api/sessions/:id, refreshSessions(), and the WS
-// session-removed broadcast — not a test-side timing issue. Passes in isolation;
-// fails ~25% of full-browser-project runs. Needs root-cause fix in the
-// session-removal broadcast ordering, not a timeout bump.
-// Expiry: 2026-06-30.
-test.describe("Project assistant UX (consolidated) @quarantine", () => {
+test.describe("Project assistant UX (consolidated)", () => {
 	test("happy path — create provisional, accept proposal, project promoted with config", async ({ page }) => {
 		await openApp(page);
 

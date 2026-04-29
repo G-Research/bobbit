@@ -80,14 +80,7 @@ test.beforeAll(async () => {
 });
 
 test.describe("Goal creation (full-stack UI)", () => {
-	// @quarantine — POST /api/sessions for goal-assistant exceeds 15s under heavy
-	// parallel browser load. Same root cause as goal-form-tooltips: goal-assistant
-	// session cold-start contention across browser workers (mock-agent registry
-	// scan + role/workflow YAML scan + session-prompts dir creation all happen
-	// concurrently). Passes in isolation. Needs phase-4 worker-isolated
-	// workspace, not a timeout bump.
-	// Expiry: 2026-06-30.
-	test("create goal via assistant flow @quarantine", async ({ page }) => {
+	test("create goal via assistant flow", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 
 		// Now the Create Goal button should be enabled

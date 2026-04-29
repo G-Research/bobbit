@@ -37,17 +37,16 @@ test.beforeAll(async () => {
 async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").Page) {
 	await openApp(page);
 
-	// Open the goal assistant
+	// Open the goal assistant. NOTE: this only works if the worker has exactly
+	// ONE registered project — with multiple, `startNewGoalFlow` opens a
+	// picker popover instead. The per-project-config-dirs spec used to leak a
+	// second project, breaking this; that's now cleaned up in its afterAll.
 	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
 	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
 	await newGoalBtn.click();
 
-	// Goal assistant session creation can be slow under parallel load —
-	// extend the textarea-visible timeout accordingly. The full suite has
-	// observed 30s+ cold-starts when many browser workers race to spin up
-	// goal-assistant sessions concurrently.
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 45_000 });
+	await expect(textarea).toBeVisible({ timeout: 30_000 });
 
 	// Send GOAL_PROPOSAL — mock agent responds with a proposal (workflow=general)
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
@@ -75,15 +74,7 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	).toBeVisible({ timeout: 5_000 });
 }
 
-// @quarantine — Goal-assistant cold-start times out (>45s textarea wait) under
-// heavy parallel browser load. Repro requires running the full browser project
-// in parallel; passes 3/3 in isolation. Symptom: `expect(textarea).toBeVisible({
-// timeout: 45_000 })` exceeds budget. Root cause is contention between concurrent
-// goal-assistant session creations across browser workers — needs structural fix
-// (worker-isolated workspaces / serialised assistant-session creation), not
-// timeout bumps. Tracked under phase-4 of E2E flakiness fix.
-// Expiry: 2026-06-30.
-test.describe("Step description tooltips @quarantine", () => {
+test.describe("Step description tooltips", () => {
 	test("optional step shows ⓘ tooltip when description is set", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 

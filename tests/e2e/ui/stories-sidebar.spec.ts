@@ -40,9 +40,7 @@ import {
 } from "../e2e-setup.js";
 import { navigateToHash, openApp } from "./ui-helpers.js";
 
-// @quarantine — Phase 1 of E2E flakiness fix. Sidebar story races.
-// Expiry: 2026-06-30.
-test.describe("CT-03 & CT-04: Sidebar stories @quarantine", () => {
+test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	let s: SpecContext;
 	const goalIds: string[] = [];
 	const sessionIds: string[] = [];

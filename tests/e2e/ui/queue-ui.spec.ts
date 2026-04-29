@@ -17,9 +17,7 @@ import {
 } from "../e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
-// @quarantine — Phase 1 of E2E flakiness fix. Browser + WS + queue races.
-// Expiry: 2026-06-30 — must be retired or root-caused by then.
-test.describe("Queue UI E2E @quarantine", () => {
+test.describe("Queue UI E2E", () => {
 	test.beforeAll(async () => {
 		await waitForHealth();
 	});
