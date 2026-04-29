@@ -221,6 +221,84 @@ test.describe("Mission UI (mocked backend)", () => {
 		expect(parsed.content).toContain("Schema migration");
 	});
 
+	test("Commander session embedded in dashboard @smoke", async ({ page }) => {
+		const COMMANDER_ID = "abc-session";
+		const missionWithCommander = { ...FAKE_MISSION, commanderSessionId: COMMANDER_ID };
+
+		const handler = async (
+			route: import("@playwright/test").Route,
+			request: import("@playwright/test").Request,
+		) => {
+			const url = new URL(request.url());
+			const path = url.pathname;
+			const method = request.method();
+
+			if (path === "/api/missions" && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ missions: [missionWithCommander] }),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({
+						mission: missionWithCommander,
+						plan: missionWithCommander.plan,
+						children: [],
+						gates: [],
+						commanderSessionId: COMMANDER_ID,
+					}),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}/gates` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ gates: [] }),
+				});
+				return;
+			}
+			await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+		};
+		await page.route("**/api/missions", handler);
+		await page.route("**/api/missions?**", handler);
+		await page.route("**/api/missions/**", handler);
+
+		await openApp(page);
+		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
+
+		// Embed wrapper present and tagged with the session id.
+		const embed = page.getByTestId("mission-commander-embed");
+		await expect(embed).toBeVisible();
+		await expect(embed).toHaveAttribute("data-session-id", COMMANDER_ID);
+
+		// The actual <agent-interface> custom element is mounted inside the
+		// embed wrapper and carries the session id as a stable attribute.
+		const ai = page.locator(`agent-interface[data-session-id="${COMMANDER_ID}"]`);
+		await expect(ai).toHaveCount(1);
+
+		// The legacy navigate-away link is replaced by the embed; the
+		// "Open full →" affordance remains available alongside it.
+		await expect(page.getByTestId("mission-commander-link")).toHaveCount(0);
+		await expect(page.getByTestId("mission-commander-open-link")).toBeVisible();
+
+		// Placeholder is hidden when the session id is set.
+		await expect(page.getByTestId("mission-commander-placeholder")).toHaveCount(0);
+	});
+
+	test("Commander placeholder shown when session not yet created", async ({ page }) => {
+		// commanderSessionId omitted — mission still being created.
+		await mockMissions(page, FAKE_MISSION);
+		await openApp(page);
+		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByTestId("mission-commander-placeholder")).toBeVisible();
+		await expect(page.getByTestId("mission-commander-embed")).toHaveCount(0);
+	});
+
 	test("renders error state for unknown mission id", async ({ page }) => {
 		// Route returns 404 for the detail endpoint, mission not in list.
 		const handler = async (route: import("@playwright/test").Route) => {
