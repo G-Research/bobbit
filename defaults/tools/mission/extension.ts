@@ -19,7 +19,19 @@ import { homedir } from "node:os";
 export default function (pi: ExtensionAPI) {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const missionId = process.env.BOBBIT_MISSION_ID;
+	const sessionRole = process.env.BOBBIT_SESSION_ROLE;
 	if (!sessionId || !missionId) {
+		return;
+	}
+	// Mission-mutating tools are commander-only. Reviewer sub-sessions for
+	// mission gates inherit BOBBIT_MISSION_ID (so the gateway can correlate
+	// their work back to the mission) but must not be able to mutate plan
+	// state, spawn child goals, or merge branches.
+	if (sessionRole !== "commander") {
+		console.error(
+			`[mission-tools] Skipping registration for session ${sessionId} ` +
+			`(role=${sessionRole ?? "<unset>"}); mission tools are commander-only`,
+		);
 		return;
 	}
 
