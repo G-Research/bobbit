@@ -14,7 +14,10 @@ design-doc → implementation → documentation → ready-to-merge
 
 ## Project configuration
 
-Add `qa_*` keys to `.bobbit/config/project.yaml`. Only `qa_start_command` is required — the rest have sensible defaults or can be omitted.
+Add `qa_*` keys at the **top level** of `.bobbit/config/project.yaml`. Only `qa_start_command` is required — the rest have sensible defaults or can be omitted.
+
+**Why project-level (not per-component).** `qa_*` fields describe a single ephemeral testbed for the whole project, not a per-component build. They sit alongside `name`, `rootPath`, and `sandbox` at the project root — not inside any `components[]` entry. The `agent-qa` workflow step type implicitly references them (no explicit `qa-build`/`qa-start` command names on a component).
+
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|

@@ -301,6 +301,108 @@ Selecting a palette seeds the color fields from `PALETTE_PRIMARY_COLORS`; the us
 - Worktrees for goals are created relative to the project's `rootPath`, not the server CWD.
 - Session CWD defaults to the project's `rootPath`.
 
+### Multi-repo & components
+
+A project can contain one or more **components** (apps, libraries, services, docs, infra) that each point at a single repo (or sub-path within one). The component is the unit that gets a worktree and that workflow steps reference for `(component, command)` lookups. Single-repo projects keep working unchanged — they simply have one component whose `repo: "."`. Full design: [design/multi-repo-components.md](design/multi-repo-components.md).
+
+**Why this shape.** The earlier model special-cased command keys at the top level of `project.yaml` (`build_command`, `test_command`, …) and assumed a single repo at `rootPath`. That made multi-repo and monorepo projects awkward and forced workflow steps to interpolate literal shell strings. Promoting components to first-class lets the runtime hold a single uniform collection (`components: []`), and lets workflow steps resolve a `(component, command)` pair structurally so renaming a command updates every workflow that uses it.
+
+**Project model.**
+
+```yaml
+name: myapp
+rootPath: /home/me/w/myapp
+worktree_root: /home/me/wt    # optional override
+sandbox: docker               # project-level
+qa_start_command: …           # project-level (testbed, not a component build)
+config_directories: […]       # project-level
+
+components:                   # the only collection in project.yaml
+  - name: myapp               # default component is named after the project
+    repo: "."                 # "." for single-repo; subfolder name for multi-repo
+    relative_path: ""         # optional sub-path within the repo (monorepos)
+    worktree_setup_command: npm ci --prefer-offline
+    commands:                 # opaque flat map — no fixed schema
+      build: npm run build
+      check: npm run check
+      unit:  npx playwright test ...
+      e2e:   npx playwright test ...
+
+workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
+  general: { name: General, gates: [...] }
+  feature: { ... }
+```
+
+- `components: []` is the only collection. There is no separate `repos:` field — the set of distinct `repo:` values across components determines worktree planning.
+- Mode is **inferred**, not declared: any `component.repo !== "."` makes the project multi-repo. In multi-repo mode, `rootPath` is a container directory holding sibling git repos; in single-repo mode, `rootPath` is the repo itself.
+- The default component's `name` matches the project's `name` (e.g. `bobbit` → `components[0].name == "bobbit"`). This keeps gate output, branch names, and UI labels meaningful from day one. `migrate-project-yaml.ts` enforces this on first boot for legacy single-repo projects.
+- `commands` is an **opaque `{ name: shell }` map** with no fixed schema. The project assistant tends to use names like `build`/`test`/`check`/`e2e`/`lint` because those are the typical gate verb categories, but any name is allowed (`migrate`, `seed`, `bench`, `gen-types`, …).
+- `qa_*` fields stay project-level because they describe an ephemeral testbed for the whole project, not a per-component build. The `agent-qa` step type implicitly references them.
+
+**Component schema** (`Component` in `project-config-store.ts`):
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | Unique within the project. Default component named after project. |
+| `repo` | yes | `"."` for single-repo; subfolder of `rootPath` for multi-repo. |
+| `relative_path` | no | Sub-path within the repo. Default `""` (component at repo root). |
+| `worktree_setup_command` | no | Per-component runtime hook (see below). |
+| `commands` | no | Flat `{name: shell}` map. **Absent ⇒ data-only component.** |
+
+**Data-only components** (a component with no `commands`) declare a repo as part of the project so it gets provisioned on every goal/session worktree set, even though it contributes no workflow steps. Use cases:
+
+- An e2e harness that needs sibling repos (`api/`, `web/`, `shared/`) checked out at the same revision. The harness component owns the commands and shells into siblings via relative paths; the siblings can be data-only.
+- Vendor data / fixtures repos pulled in for tests but never built or tested.
+- Cross-repo build artifacts assembled from multiple repos.
+
+The **multi-repo invariant** — every configured repo is checked out as a sibling worktree on the same branch (see [Session worktrees](#session-worktrees)) — is the contract that makes data-only components work. There is no special schema for cross-repo dependencies; a multi-repo-spanning component just owns the commands and uses relative paths.
+
+| | has `commands` | no `commands` |
+|---|---|---|
+| **unique repo** | normal component (api, web) | data-only repo declaration (shared-fixtures, vendor data) |
+| **shared repo (relative_path set)** | monorepo subdir (packages/api) | rare — usually a no-op |
+
+**Workflow step references — structural, not literal shell.** Workflows live inline in `project.yaml::workflows` (no longer in `.bobbit/config/workflows/`). For `type: command` steps, three shapes are accepted; there is **no `cwd:` field** on any step:
+
+| Step shape | Working directory | Command source |
+|---|---|---|
+| `{ component, command }` | `<branch-container>/<component.repo>/<component.relative_path>` | resolved from `components[name].commands[name]` |
+| `{ component, run }` | same as above | literal `run` string |
+| `{ run }` | `<branch-container>` (per-branch worktree set root) | literal `run` string |
+
+Free-form `{ run }` steps that need a different working directory use `cd ... && ...` inside the `run` string. This keeps the schema small and the working-dir rule unambiguous: it is structurally derived from the component, or it is the per-branch container root.
+
+`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution.
+
+The workflow validator (`workflow-validator.ts`) rejects, at load time:
+
+- `type: command` with `command:` but no `component:`
+- `type: command` with both `command:` and `run:`
+- a `component:` referencing an unknown component name
+- a `(component, command)` pair where the component has no such command name
+
+It does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens are required for workflows to function; any other tokens fail at shell time as ordinary typos.
+
+**Helpers on `ProjectConfigStore`:**
+
+- `getComponents()` — components in declared order.
+- `getComponent(name)` — single component by name.
+- `componentsByRepo()` — `Map<repoName, Component[]>` for worktree planning.
+- `repoNames()` — distinct repo names; size > 1 ⇒ multi-repo project.
+- `isMultiRepo()` — convenience boolean.
+- `setComponents(components)` — replace the array, persists to `project.yaml`.
+
+**Inline workflow store** (`InlineWorkflowStore` in `workflow-store.ts`): a thin facade over `ProjectConfigStore` that exposes the same `get / getAll / put / remove / update` API the legacy disk-backed `WorkflowStore` did, but reads from `project.yaml::workflows`. Builtins are layered in-memory underneath. The class is exported under both names (`WorkflowStore` and `InlineWorkflowStore`) for back-compat with existing imports.
+
+If the `workflows:` block is empty or missing, goal creation surfaces a clear error rather than silently falling back — "This project has no workflows configured — run project setup or generate workflows from Settings."
+
+**Project assistant context.** The assistant generates the inline `workflows:` block from a single Markdown reference, [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD guide is the source of truth for the project model, component schema, gate semantics (depends_on, optional, manual, content/signal contracts, phases, runtime context tokens), the full step grammar, and worked examples. The runtime never reads the MD guide; it is pure assistant context.
+
+**Removed runtime concepts:**
+
+- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant now generates a bespoke inline `workflows:` block per project from the MD authoring guide. The legacy YAML files are scheduled for deletion (see follow-up note at the bottom of this doc); while they remain on disk during the migration window, `BuiltinConfigProvider.loadWorkflows()` keeps reading them so existing tests that reference workflow IDs by name (`general`, `feature`, `bug-fix`, `quick-fix`, `test-fast`) keep working. New projects do not depend on these IDs being shipped.
+- **`.bobbit/config/workflows/`** is no longer a runtime concept. `InlineWorkflowStore` reads only from `project.yaml::workflows`. The `migrate-project-yaml.ts` step folds any pre-existing per-project workflow files into the inline block on first boot and removes the directory.
+
 ### Session worktrees
 
 Every non-goal, non-assistant session automatically gets its own git worktree branch. This eliminates conflicts between concurrent sessions that would otherwise all work on the same branch (usually master).
@@ -309,15 +411,57 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 
 | Session type | Worktree? | Branch pattern |
 |---|---|---|
-| Regular (host) | Yes | `session/new-session-{uuid8}` |
+| Pool pre-build (any session type) | Yes | `pool/_pool-{uuid8}` (temp; renamed on claim) |
+| Regular (host, after pool claim) | Yes | `session/<slug>-{uuid8}` after first prompt |
 | Regular (sandbox) | Yes | `session/s-{uuid8}` |
-| Goal sessions | Yes (existing behavior) | `goal/<branch-name>` |
-| Team agent sessions | Yes (existing behavior) | Per-agent branch within goal |
+| Goal sessions | Yes | `goal/<branch-name>` |
+| Team agent sessions | Yes | Per-agent branch within goal |
 | Assistant sessions (goal, project, tool) | No | N/A — conversational only, no code edits |
+
+**Pool branch namespace.** Pool entries pre-create worktrees under the `pool/_pool-<id>` branch prefix (was `session/_pool-*` pre-Phase 3). The `pool/` namespace lets the boot sweeper distinguish pool entries from session worktrees by branch prefix alone, and prevents pool entries from polluting the user's session branch list. Both prefixes (`pool/_pool-*` and the legacy `session/_pool-*`) are recognised on startup so sweeping is idempotent across version upgrades.
+
+**Multi-repo worktree set.** In multi-repo projects every configured component repo (including data-only ones) gets a sibling worktree on the same branch. Layout under the default worktree parent (`<rootPath>-wt/` unless `worktree_root` is set):
+
+```
+# Single-repo project (today, unchanged)
+<rootPath>/                      # primary worktree
+<rootPath>-wt/<branch>/          # session/goal/staff worktree
+
+# Multi-repo project
+<rootPath>/                      # container holding sibling repos
+  api/  web/  shared/            # repos in primary
+<rootPath>-wt/<branch>/          # per-branch container = agent's cwd
+  api/  web/  shared/            # per-repo worktrees, all on the same branch
+```
+
+The agent's cwd in multi-repo mode is the per-branch container, mirroring the primary `rootPath` structure. Components with `relative_path:` resolve relative to their repo's worktree (e.g. monorepo `packages/api` is at `<branch>/<repo>/packages/api`). One branch name spans all repos in the set — there is no per-repo branch divergence.
+
+**`worktree_root` override.** Optional project field, absolute path or relative to `rootPath`. When set, single-repo layout becomes `<worktree_root>/<branch>/` and multi-repo becomes `<worktree_root>/<branch>/<repo>/`. Same semantics, only the parent dir moves.
+
+**Pool claim sequence (sessions and goals).** Both flows route through `WorktreePool.claim()`:
+
+1. `git branch -m pool/_pool-<id> <target>` — atomic, ~10ms.
+2. `git worktree move <pool-path> <target-path>` — atomic, updates both gitdir pointers (git ≥ 2.17). Falls back to a branch-rename-only **degraded mode** (logged) when the move fails (e.g. Windows file lock); in that case the directory stays at the pool path.
+3. `git fetch origin` + `git reset --hard <remote-primary>` — backgrounded after handoff, so claim itself is fast.
+4. `git push -u origin <target>` — fire-and-forget, non-blocking.
+
+Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per configured repo, including data-only-component repos) sharing a `pool/_pool-<id>` branch name across repos. Claim fans out steps 1–4 in parallel across all repos in the entry. Pool target size is configurable via `worktree_pool_size`.
+
+**Goal flow (Phase 3 fix).** `goal-manager.setupWorktree()` calls `pool.claim(goal.branch)` first and falls back to `createWorktree` only if the pool is empty. Multi-repo goals get the worktree set in one claim. Previously goals bypassed the pool entirely and were observably slower than session start — they now share the same warm-pool benefit.
+
+**Session flow (Phase 3 fix).** Sessions are provisioned eagerly with the temp `pool/_pool-<id>` branch and **renamed on first prompt** to `session/<slug>-<id>` (or `goal/<slug>` for goal sessions promoted from a regular session). The rename uses the same branch+worktree-move sequence as pool claim. If the session is archived without ever sending a prompt, cleanup uses the temp branch name (no rename needed). This keeps the warm-pool benefit (instant session start) while ending up with meaningful branch and directory names. Pre-Phase 3 sessions wasted pool slots on a `"new-session"` placeholder branch.
+
+**Boot sweeper (Phase 3).** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
+
+- Renamed-but-orphaned worktrees (server died between rename and persist) — cleaned up.
+- `pool/_pool-<id>` worktrees not in the in-memory pool — reclaimed.
+- Legacy `session/_pool-*` entries (pre-Phase 3) — also recognised.
+
+This means crash recovery doesn't require the user to manually clean up pool detritus.
 
 **Lifecycle:**
 
-1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, `git worktree add` creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
+1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
 2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
@@ -334,7 +478,9 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
-**Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs the project's `worktree_setup_command` (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh — their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
+**Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs **per-component** `worktree_setup_command` hooks (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh — their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
+
+**Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or session-first-prompt rename), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
 ### Git status cache & client resilience
 
@@ -1122,12 +1268,14 @@ Sandboxed agents use standard git worktrees inside the project container — the
 2. Installs a post-commit hook that pushes to the remote after every commit (durability — ensures commits survive container loss)
 3. Called during agent spawn via `applySandboxWiring()`
 
+**Multi-repo containers.** Multi-repo projects mount `rootPath` (the container of sibling repos) at `/workspace`; each repo lives at `/workspace/<repo>/`. `docker-args.ts` host-path rewriting understands the new layout. `ProjectSandbox.createWorktree()` returns a worktree set in multi-repo mode. Per-component `worktree_setup_command` runs inside the container at the component's path. The pool prebuild also works inside the sandbox.
+
 **Worktree removal** (`ProjectSandbox.removeWorktree()`):
 
 1. Removes the worktree via `git worktree remove --force`
 2. Called during session termination
 
-**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions start faster. Pools are **per-project** — `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` — sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
+**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 — it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence and rename-on-first-prompt mechanics. Pools are **per-project** — `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` — sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
 
 **Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the remote primary branch before being assigned to a session. This prevents stale worktrees when the primary branch has advanced since the pool entry was created. The remote primary branch is resolved dynamically via `git symbolic-ref refs/remotes/origin/HEAD` (falls back to `origin/master` if the ref is not set). The fetch+reset is non-fatal — if it fails, the worktree is still usable but may be behind.
 
