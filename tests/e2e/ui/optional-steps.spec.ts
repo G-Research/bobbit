@@ -214,9 +214,11 @@ test.describe("Optional steps", () => {
 		await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
 		await newGoalBtn.click();
 
-		// Wait for textarea
+		// Wait for textarea — 30s budget absorbs goal-assistant cold-start under
+		// 3-worker browser parallelism (sync FS work for config / prompt assembly
+		// contends across workers).
 		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 15_000 });
+		await expect(textarea).toBeVisible({ timeout: 30_000 });
 
 		// Send GOAL_PROPOSAL keyword — mock agent emits propose_goal tool call
 		// with options: "QA testing"
