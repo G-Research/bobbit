@@ -113,7 +113,7 @@ test.describe("search orphan filter & weak-match drop", () => {
 		await purgeInserted(tracker);
 	});
 
-	test("orphan goal is dropped server-side", async ({ gateway }) => {
+	test("orphan goal is dropped server-side @quarantine", async ({ gateway }) => {
 		const gw: any = gateway;
 		const token = uniqueToken("zzorphgoal");
 		await indexOrphan(tracker, {

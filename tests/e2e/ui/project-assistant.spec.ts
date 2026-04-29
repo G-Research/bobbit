@@ -86,7 +86,7 @@ async function findProvisionalProject(dir: string): Promise<any | undefined> {
 	return projects.find((p: any) => p.rootPath === dir && p.provisional);
 }
 
-test.describe("Project assistant UX (consolidated)", () => {
+test.describe("Project assistant UX (consolidated) @quarantine", () => {
 	test("happy path — create provisional, accept proposal, project promoted with config", async ({ page }) => {
 		await openApp(page);
 

@@ -639,6 +639,56 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ---
 
+## Read/unread state
+
+The sidebar shows an "unseen activity" dot on sessions that have new activity since the user last looked. Read state is **server-side**: a `lastReadAt` timestamp on each `PersistedSession`, mutated only by the user navigating to a session.
+
+### Why server-side
+
+Read state used to live in `localStorage` (key `bobbit-session-visited`). That broke down in three ways: a fresh browser showed every session as unread; a different device had no idea what the first device had already seen; and clearing site data wiped the entire history. Moving the timestamp into `sessions.json` makes it shared across browsers/devices and survives server restarts — the same durability guarantee as every other piece of session metadata.
+
+The trade-off is that there is no real-time push of read-state changes between open tabs — a second tab learns about the read state on its next refresh of the session list. This is acceptable because read state is per-user, low-stakes, and Bobbit is single-user (one server = one read state).
+
+### Data flow
+
+1. **Server stores** `lastReadAt?: number` on `PersistedSession` (see `src/server/agent/session-store.ts`). It is included in `UpdatableSessionFields` so writes go through the normal `SessionStore.update()` path with disk persistence.
+2. **Server exposes** `lastReadAt` in session-list payloads — `GET /api/sessions` (via `listSessions()`) and the archived-sessions list (via `listArchivedSessions()`). The field is threaded through both the live and archived `SessionSummary` shapes in `session-manager.ts`. The single-session `GET /api/sessions/:id` endpoint and the WS `messages` frame (which carries chat transcript, not session metadata) do not include `lastReadAt` — the client only needs it for the sidebar list, which is hydrated from the list endpoint.
+3. **Client computes unseen-ness locally** in `src/app/render-helpers.ts::hasUnseenActivity` by comparing `session.lastActivity > (session.lastReadAt ?? 0)`. No round-trip is needed to render the dot.
+4. **On navigation**, the sidebar calls `markSessionVisited(sessionId)` which (a) updates an in-memory mirror so the dot disappears on the very next render, and (b) fires `POST /api/sessions/:id/mark-read` so other browsers learn on their next refresh. The endpoint is backed by `SessionManager.markSessionRead`, which uses `resolveStoreForId` so live, dormant, and archived sessions are all markable.
+
+### Display rules
+
+Two invariants live in `hasUnseenActivity` and must be preserved by any future refactor:
+
+- **The active session is never "unseen".** Otherwise the user would see a dot on the very session they are looking at.
+- **Team-agent sessions are suppressed unless the goal is complete.** Mid-goal chatter from delegate/reviewer/QA agents would otherwise flood the sidebar with dots the user can't act on. Once the goal completes, normal unread semantics resume.
+
+### Legacy localStorage migration
+
+Existing users have a `bobbit-session-visited` map in `localStorage` from before the server-side feature. `migrateLegacyVisitedMap` in `src/app/render-helpers.ts` is invoked once post-auth from `src/app/main.ts`: it POSTs `mark-read` for each entry, then deletes the localStorage key. The migration is idempotent — re-running it is a no-op once the key is gone — and non-fatal: a network error leaves the legacy key intact for a retry on the next load. New users never have the key and skip the migration entirely.
+
+### `lastActivity` preservation across restart
+
+`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but `restoreSession()` re-issues every historical rpc event into the session as part of replay. Without a guard, every replayed event would call `session.lastActivity = Date.now()` and clobber the persisted value with restore time — making every session look like it was just active.
+
+`restoreSession()` already keeps a `restoring` flag (used to suppress cost tracking during replay). The `lastActivity` bump is gated on the same flag — replay-phase rpc events are observed for transcript reconstruction but do not update the timestamp. The first event after `restoring` flips to `false` is the first one that bumps `lastActivity`, so the persisted timestamp survives intact until genuine new activity occurs. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+
+### Key files
+
+| File | Role |
+|---|---|
+| `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
+| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `restoring`-flag gate on `lastActivity` |
+| `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
+| `src/app/state.ts` | `GatewaySession.lastReadAt` |
+| `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
+| `src/app/main.ts` | One-shot migration trigger post-auth |
+| `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
+| `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
+| `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
+
+---
+
 ## Tool access policies
 
 All tool access uses a **grant policy** system enforced by a single `tool_call` guard extension. Every tool resolves to one of three policy values:
