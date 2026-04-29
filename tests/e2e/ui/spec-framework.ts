@@ -1094,7 +1094,7 @@ export class SpecContext {
 					return true;
 				}
 				return false;
-			}, { timeoutMs: 10_000, intervalMs: 30, label: `send_message ack ${activeId}` });
+			}, { timeoutMs: 10_000, intervalMs: 100, label: `send_message ack ${activeId}` });
 		}
 	}
 
