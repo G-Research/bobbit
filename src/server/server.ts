@@ -1206,7 +1206,8 @@ export function createGateway(config: GatewayConfig) {
 						if (poolReady) {
 							const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
 							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize, components);
+							const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
+							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize, components, wtRoot);
 						}
 					} catch { /* best-effort */ }
 				}
@@ -1223,6 +1224,10 @@ export function createGateway(config: GatewayConfig) {
 				});
 				ctx.goalManager.setProjectRootResolver((pid: string) => {
 					return projectRegistry.get(pid)?.rootPath;
+				});
+				ctx.goalManager.setWorktreeRootResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("worktree_root") || undefined;
 				});
 			}
 
@@ -1948,6 +1953,10 @@ async function handleApiRoute(
 							return c ? c.projectConfigStore.getComponents() : [];
 						});
 						ctx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
+						ctx.goalManager.setWorktreeRootResolver((pid: string) => {
+							const c = projectContextManager.getOrCreate(pid);
+							return c?.projectConfigStore.get("worktree_root") || undefined;
+						});
 					}
 					json(existing, 200);
 					return;
@@ -2025,7 +2034,8 @@ async function handleApiRoute(
 					if (poolReady) {
 						const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize, components);
+						const wtRoot = newCtx?.projectConfigStore.get("worktree_root") || undefined;
+						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize, components, wtRoot);
 					}
 				} catch { /* best-effort */ }
 			}
@@ -2037,6 +2047,10 @@ async function handleApiRoute(
 					return c ? c.projectConfigStore.getComponents() : [];
 				});
 				newCtx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
+				newCtx.goalManager.setWorktreeRootResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("worktree_root") || undefined;
+				});
 			}
 			json(project, 201);
 		} catch (err: any) {
