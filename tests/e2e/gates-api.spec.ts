@@ -208,4 +208,45 @@ test.describe("Gates API", () => {
 			await deleteGoal(goalId);
 		}
 	});
+
+	test("signal rejects metadata that is not an object map", async () => {
+		// Regression: a misbehaving caller (or a model serialising an object to
+		// JSON) used to be able to pass `metadata: "stringy"` straight through
+		// to the verification harness, where Object.entries(string) yielded
+		// per-character bullets and corrupted the reviewer's prompt.
+		const goalId = await createGoalWithWorkflow("general");
+		try {
+			// String metadata — rejected.
+			const stringResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "# Doc", metadata: "stringy" }),
+			});
+			expect(stringResp.status).toBe(400);
+			const stringBody = await stringResp.json();
+			expect(stringBody.error).toMatch(/metadata must be an object/);
+
+			// Array metadata — rejected.
+			const arrayResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "# Doc", metadata: ["a", "b"] }),
+			});
+			expect(arrayResp.status).toBe(400);
+
+			// Number metadata — rejected.
+			const numResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "# Doc", metadata: 42 }),
+			});
+			expect(numResp.status).toBe(400);
+
+			// Proper object — accepted (and 201 on signal creation).
+			const okResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "# Doc", metadata: { foo: "bar" } }),
+			});
+			expect(okResp.status).toBe(201);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
 });

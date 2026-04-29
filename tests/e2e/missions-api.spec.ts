@@ -416,6 +416,39 @@ test.describe("Missions API", () => {
 		expect(restart.status).toBe(404);
 	});
 
+	test("mission gate signal rejects metadata that is not an object map", async () => {
+		// Regression: previously `body.metadata` was passed straight through to the
+		// verification harness; a string here would corrupt the reviewer prompt.
+		const m = await createMission();
+
+		const stringResp = await apiFetch(`/api/missions/${m.id}/gates/charter/signal`, {
+			method: "POST",
+			body: JSON.stringify({ content: "# Charter", metadata: "stringy" }),
+		});
+		expect(stringResp.status).toBe(400);
+		const stringBody = await stringResp.json();
+		expect(stringBody.error).toMatch(/metadata must be an object/);
+
+		const arrayResp = await apiFetch(`/api/missions/${m.id}/gates/charter/signal`, {
+			method: "POST",
+			body: JSON.stringify({ content: "# Charter", metadata: ["a", "b"] }),
+		});
+		expect(arrayResp.status).toBe(400);
+
+		const numResp = await apiFetch(`/api/missions/${m.id}/gates/charter/signal`, {
+			method: "POST",
+			body: JSON.stringify({ content: "# Charter", metadata: 42 }),
+		});
+		expect(numResp.status).toBe(400);
+
+		// Proper object — accepted (201 on signal creation).
+		const okResp = await apiFetch(`/api/missions/${m.id}/gates/charter/signal`, {
+			method: "POST",
+			body: JSON.stringify({ content: "# Charter", metadata: { foo: "bar" } }),
+		});
+		expect(okResp.status).toBe(201);
+	});
+
 	test("pause + resume lifecycle", async () => {
 		const m = await createMission();
 		const pause = await apiFetch(`/api/missions/${m.id}/pause`, {

@@ -1488,6 +1488,29 @@ async function handleApiRoute(
 		return ctx?.goalStore.get(goalId);
 	}
 
+	/**
+	 * Validate and coerce a gate-signal `metadata` payload to a flat
+	 * `Record<string,string>`. Rejects strings, arrays, and primitives so a
+	 * misbehaving caller can't smuggle a JSON-stringified object through to
+	 * the verification harness (where it would be iterated per-character).
+	 */
+	function validateAndCleanMetadata(
+		metadata: unknown,
+	):
+		| { ok: true; metadata: Record<string, string> | undefined }
+		| { ok: false; error: string } {
+		if (metadata === undefined) return { ok: true, metadata: undefined };
+		if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+			return { ok: false, error: "metadata must be an object map of string->string" };
+		}
+		const cleaned: Record<string, string> = {};
+		for (const [k, v] of Object.entries(metadata as Record<string, unknown>)) {
+			if (v == null) continue;
+			cleaned[k] = typeof v === "string" ? v : JSON.stringify(v);
+		}
+		return { ok: true, metadata: cleaned };
+	}
+
 	/** List live goals across all projects, optionally filtered by projectId. */
 	function listGoalsAcrossProjects(opts?: { projectId?: string }): PersistedGoal[] {
 		if (opts?.projectId) {
@@ -3254,6 +3277,14 @@ async function handleApiRoute(
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 		const body = await readBody(req);
 
+		// Defensive metadata validation — reject strings, arrays, and primitives.
+		const missionMetaCheck = validateAndCleanMetadata(body?.metadata);
+		if (!missionMetaCheck.ok) {
+			json({ error: missionMetaCheck.error, retryable: false }, 400);
+			return;
+		}
+		if (body) body.metadata = missionMetaCheck.metadata;
+
 		// Init gate states if not yet (idempotent).
 		ctx.gateStore.initGatesFor("mission", missionId, mission.workflow.gates.map(g => g.id));
 
@@ -4531,6 +4562,15 @@ async function handleApiRoute(
 
 		const body = await readBody(req);
 		const signalSessionId = body?.sessionId || "unknown";
+
+		// Defensive metadata validation — reject strings, arrays, and primitives
+		// before the schema-required-keys check below.
+		const goalMetaCheck = validateAndCleanMetadata(body?.metadata);
+		if (!goalMetaCheck.ok) {
+			json({ error: goalMetaCheck.error, retryable: false }, 400);
+			return;
+		}
+		if (body) body.metadata = goalMetaCheck.metadata;
 
 		// Validate dependencies are met
 		for (const depId of gateDef.dependsOn) {
