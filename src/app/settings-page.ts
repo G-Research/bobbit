@@ -1,9 +1,7 @@
-// TODO Phase 4 follow-up: add a "Components" section to the per-project settings
-// tab — read-only listing of components from `/api/projects/:id/config` with
-// a "(legacy single-repo)" hint when components is empty, plus a `worktree_root`
-// text input and "Re-scan repos" / "Regenerate workflows" buttons. The editable
-// per-component editor (rename / add / remove / commands map) lands in the same
-// follow-up. See docs/design/multi-repo-components.md §8.2.
+// Phase 4b: per-project Components tab — see docs/design/multi-repo-components.md §8.2.
+// `renderProjectComponentsTab()` below covers components, worktree_root, and an
+// expandable workflows panel; "Re-scan repos" calls `POST /api/projects/:id/rescan-repos`
+// and "Regenerate workflows" routes through the project assistant.
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
@@ -30,6 +28,7 @@ import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchS
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
+import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
@@ -50,6 +49,7 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "general", label: "General" },
 	{ id: "project", label: "Commands" },
+	{ id: "components", label: "Components" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
 	{ id: "appearance", label: "Appearance" },
@@ -2486,6 +2486,392 @@ function renderProjectGeneralTab(projectId: string) {
 	`;
 }
 
+// ── Per-project Components tab (Phase 4b) ─────────────────────────────
+//
+// Editable list of `components[]` plus the optional `worktree_root` parent
+// directory. Below the list is a read-only "Workflows" disclosure that
+// shows each gate's resolved (component, command) pairs and a button to
+// regenerate workflows via the project assistant. Single-repo projects
+// still see a single component with `repo: "."` — nothing is hidden.
+
+interface ComponentsTabState {
+	loaded: boolean;
+	components: ComponentEditState[];
+	workflows: Record<string, unknown>;
+	worktreeRoot: string;
+	dirty: boolean;
+	saving: "" | "saving" | "saved" | "error";
+	errorMessage: string;
+	workflowsExpanded: boolean;
+	rescanResult: Array<{ folder: string; hasGit: boolean; detectedCommands: Record<string, string> }> | null;
+	rescanLoading: boolean;
+}
+
+const _componentsTabState = new Map<string, ComponentsTabState>();
+
+function emptyComponentsTabState(): ComponentsTabState {
+	return {
+		loaded: false,
+		components: [],
+		workflows: {},
+		worktreeRoot: "",
+		dirty: false,
+		saving: "",
+		errorMessage: "",
+		workflowsExpanded: false,
+		rescanResult: null,
+		rescanLoading: false,
+	};
+}
+
+function loadComponentsTab(projectId: string): void {
+	const existing = _componentsTabState.get(projectId);
+	if (existing?.loaded || existing?.dirty) return;
+	if (!existing) _componentsTabState.set(projectId, emptyComponentsTabState());
+	(async () => {
+		try {
+			const res = await gatewayFetch(`/api/projects/${projectId}/structured`);
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				const s = _componentsTabState.get(projectId)!;
+				s.loaded = true;
+				s.errorMessage = data?.error || `Load failed (${res.status})`;
+				renderApp();
+				return;
+			}
+			const data = await res.json();
+			const s = _componentsTabState.get(projectId)!;
+			s.components = (data.components || []).map(componentToEditState);
+			s.workflows = data.workflows || {};
+			s.worktreeRoot = data.worktree_root || "";
+			s.loaded = true;
+			renderApp();
+		} catch (err: any) {
+			const s = _componentsTabState.get(projectId)!;
+			s.loaded = true;
+			s.errorMessage = err?.message || String(err);
+			renderApp();
+		}
+	})();
+}
+
+function markComponentsDirty(projectId: string): void {
+	const s = _componentsTabState.get(projectId);
+	if (s) { s.dirty = true; s.saving = ""; }
+}
+
+async function saveComponentsTab(projectId: string): Promise<void> {
+	const s = _componentsTabState.get(projectId);
+	if (!s) return;
+	s.saving = "saving";
+	s.errorMessage = "";
+	renderApp();
+	try {
+		const body = buildSavePayload(s.components, s.workflows, s.worktreeRoot);
+		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			const details = Array.isArray(data?.details) && data.details.length > 0
+				? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+				: "";
+			s.saving = "error";
+			s.errorMessage = details ? `${data?.error || "Validation failed"}\n${details}` : (data?.error || `Save failed (${res.status})`);
+		} else {
+			s.saving = "saved";
+			s.dirty = false;
+			setTimeout(() => { const cur = _componentsTabState.get(projectId); if (cur) { cur.saving = ""; renderApp(); } }, 2000);
+		}
+	} catch (err: any) {
+		s.saving = "error";
+		s.errorMessage = err?.message || String(err);
+	}
+	renderApp();
+}
+
+async function rescanRepos(projectId: string): Promise<void> {
+	const s = _componentsTabState.get(projectId);
+	if (!s) return;
+	s.rescanLoading = true;
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/projects/${projectId}/rescan-repos`, { method: "POST" });
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			s.errorMessage = data?.error || `Rescan failed (${res.status})`;
+		} else {
+			const data = await res.json();
+			s.rescanResult = data.repos || [];
+			s.errorMessage = "";
+		}
+	} catch (err: any) {
+		s.errorMessage = err?.message || String(err);
+	}
+	s.rescanLoading = false;
+	renderApp();
+}
+
+function renderProjectComponentsTab(projectId: string) {
+	loadComponentsTab(projectId);
+	const s = _componentsTabState.get(projectId);
+	if (!s || !s.loaded) {
+		return html`<div class="text-sm text-muted-foreground">Loading components…</div>`;
+	}
+
+	const inputClass = `w-full min-w-0 px-2.5 py-1.5 rounded-md border border-input bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
+
+	const renderComponentCard = (c: ComponentEditState, index: number) => html`
+		<div class="border border-border rounded-md p-3 flex flex-col gap-2 bg-secondary/20" data-testid="component-card" data-component-name=${c.name}>
+			<div class="flex items-center gap-2">
+				<input
+					type="text"
+					class="${inputClass} flex-1"
+					placeholder="Component name"
+					.value=${c.name}
+					data-testid="component-name"
+					@input=${(e: Event) => { c.name = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}
+				/>
+				<button
+					class="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+					title="Delete component"
+					data-testid="delete-component"
+					@click=${() => {
+						if (!confirm(`Delete component "${c.name}"?`)) return;
+						s.components.splice(index, 1);
+						markComponentsDirty(projectId);
+						renderApp();
+					}}
+				>${icon(X, "sm")}</button>
+			</div>
+			<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+				<label class="flex flex-col gap-1">
+					<span class="text-[11px] text-muted-foreground">Repo ("." for single-repo)</span>
+					<input type="text" class="${inputClass}" .value=${c.repo} placeholder="."
+						@input=${(e: Event) => { c.repo = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+				</label>
+				<label class="flex flex-col gap-1">
+					<span class="text-[11px] text-muted-foreground">Relative path (optional)</span>
+					<input type="text" class="${inputClass}" .value=${c.relative_path ?? ""} placeholder=""
+						@input=${(e: Event) => { c.relative_path = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+				</label>
+			</div>
+			<label class="flex flex-col gap-1">
+				<span class="text-[11px] text-muted-foreground">Worktree setup command (optional)</span>
+				<input type="text" class="${inputClass}" .value=${c.worktree_setup_command ?? ""} placeholder="e.g. npm ci --prefer-offline"
+					@input=${(e: Event) => { c.worktree_setup_command = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+			</label>
+			<label class="flex items-center gap-2 mt-1">
+				<input type="checkbox" class="toggle-switch" .checked=${c.dataOnly}
+					data-testid="data-only-toggle"
+					@change=${(e: Event) => { c.dataOnly = (e.target as HTMLInputElement).checked; markComponentsDirty(projectId); renderApp(); }}/>
+				<span class="text-xs text-muted-foreground font-medium">Data-only (no commands)</span>
+			</label>
+			${c.dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1" data-testid="data-only-hint">no commands</div>` : html`
+				<div class="flex flex-col gap-1.5" data-testid="commands-list">
+					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
+					${c.commands.map((cmd, ci) => html`
+						<div class="flex items-center gap-2" data-testid="command-row">
+							<input type="text" class="${inputClass} flex-1 max-w-[140px]" .value=${cmd.key} placeholder="name"
+								data-testid="command-key"
+								@input=${(e: Event) => { cmd.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+							<input type="text" class="${inputClass} flex-1" .value=${cmd.value} placeholder="shell command"
+								data-testid="command-value"
+								@input=${(e: Event) => { cmd.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+							<button
+								class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+								title="Remove command"
+								@click=${() => { c.commands.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
+							>${icon(X, "xs")}</button>
+						</div>
+					`)}
+					<button
+						class="text-xs text-primary hover:underline self-start mt-1 inline-flex items-center gap-1"
+						data-testid="add-command"
+						@click=${() => { c.commands.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
+					>${icon(Plus, "xs")} Add command</button>
+				</div>
+			`}
+		</div>
+	`;
+
+	const renderWorkflowsPanel = () => {
+		const entries = Object.entries(s.workflows || {});
+		if (entries.length === 0) return html`<div class="text-xs text-muted-foreground">No workflows configured.</div>`;
+		return html`<div class="flex flex-col gap-2" data-testid="workflows-panel">
+			${entries.map(([wfId, wf]: [string, any]) => html`
+				<div class="border border-border rounded-md p-2 bg-background" data-workflow-id=${wfId}>
+					<div class="text-sm font-medium text-foreground mb-1">${wf?.name || wfId}</div>
+					${(wf?.gates || []).map((gate: any) => html`
+						<div class="ml-2 mb-1.5" data-gate-id=${gate?.id || ""}>
+							<div class="text-xs font-medium text-foreground">${gate?.name || gate?.id || "(unnamed gate)"}</div>
+							${(gate?.verify || []).map((step: any, idx: number) => {
+								const component = s.components.find(comp => comp.name === step?.component);
+								const resolvedShell = step?.command && component
+									? component.commands.find(cmd => cmd.key === step.command)?.value || `(no command "${step.command}")`
+									: step?.run || "(free-form)";
+								const label = step?.component && step?.command
+									? `(${step.component}, ${step.command})`
+									: step?.component
+										? `(${step.component}, run)`
+										: "(free-form)";
+								return html`
+									<details class="ml-2" data-testid="workflow-step" data-step-index=${idx}>
+										<summary class="text-[11px] text-muted-foreground cursor-pointer py-0.5">
+											${step?.name || `Step ${idx + 1}`}
+											<span class="text-[10px] opacity-70 ml-1" data-testid="step-resolution">${label}</span>
+										</summary>
+										<pre class="text-[10px] font-mono ml-3 p-1.5 bg-secondary/40 rounded overflow-x-auto" data-testid="step-shell">${resolvedShell}</pre>
+									</details>
+								`;
+							})}
+						</div>
+					`)}
+				</div>
+			`)}
+		</div>`;
+	};
+
+	const renderRescanResults = () => {
+		if (!s.rescanResult) return "";
+		if (s.rescanResult.length === 0) {
+			return html`<div class="text-xs text-muted-foreground italic mt-1" data-testid="rescan-empty">No repos detected.</div>`;
+		}
+		return html`
+			<div class="flex flex-col gap-1 mt-1 p-2 border border-border rounded-md bg-secondary/30" data-testid="rescan-results">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Detected repos</div>
+				${s.rescanResult.map(r => {
+					const already = s.components.some(c => c.repo === r.folder);
+					const cmdCount = Object.keys(r.detectedCommands || {}).length;
+					return html`
+						<div class="flex items-center gap-2 text-xs" data-testid="rescan-repo-row" data-repo-folder=${r.folder}>
+							<code class="font-mono text-foreground">${r.folder}</code>
+							<span class="text-muted-foreground">${r.hasGit ? ".git" : "manifest"} · ${cmdCount} cmd${cmdCount === 1 ? "" : "s"}</span>
+							${already
+								? html`<span class="text-[10px] text-muted-foreground italic">already a component</span>`
+								: html`<button class="text-[10px] text-primary hover:underline"
+									data-testid="rescan-add-component"
+									@click=${() => {
+										const name = r.folder === "." ? "main" : r.folder;
+										s.components.push({
+											name,
+											repo: r.folder,
+											relative_path: "",
+											worktree_setup_command: "",
+											commands: Object.entries(r.detectedCommands || {}).map(([k, v]) => ({ key: k, value: v as string })),
+											dataOnly: cmdCount === 0,
+										});
+										markComponentsDirty(projectId);
+										renderApp();
+									}}
+								>+ Add as component</button>`}
+						</div>
+					`;
+				})}
+			</div>
+		`;
+	};
+
+	return html`
+		<div class="flex flex-col gap-5" data-testid="components-tab">
+			${s.errorMessage ? html`<div class="text-sm text-destructive whitespace-pre-wrap" data-testid="components-error">${s.errorMessage}</div>` : ""}
+
+			<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree root (optional)</div>
+				<input type="text" class="${inputClass}" .value=${s.worktreeRoot} placeholder="<rootPath>-wt/ (default)"
+					data-testid="worktree-root-input"
+					@input=${(e: Event) => { s.worktreeRoot = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+				<p class="text-[11px] text-muted-foreground">Custom parent directory for goal/session worktrees. Absolute or relative to rootPath.</p>
+			</div>
+
+			<hr class="border-border"/>
+
+			<div class="flex items-center justify-between gap-3">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Components (${s.components.length})</div>
+				<div class="flex items-center gap-2">
+					<button
+						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary"
+						?disabled=${s.rescanLoading}
+						data-testid="rescan-repos"
+						@click=${() => rescanRepos(projectId)}
+					>${s.rescanLoading ? "Scanning…" : "Re-scan repos"}</button>
+					<button
+						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary inline-flex items-center gap-1"
+						data-testid="add-component"
+						@click=${() => {
+							s.components.push({
+								name: `component-${s.components.length + 1}`,
+								repo: ".",
+								relative_path: "",
+								worktree_setup_command: "",
+								commands: [],
+								dataOnly: true,
+							});
+							markComponentsDirty(projectId);
+							renderApp();
+						}}
+					>${icon(Plus, "xs")} Add component</button>
+				</div>
+			</div>
+			${renderRescanResults()}
+
+			<div class="flex flex-col gap-3">
+				${s.components.length === 0
+					? html`<div class="text-sm text-muted-foreground italic">No components defined. Use "Re-scan repos" or "Add component" to get started.</div>`
+					: s.components.map((c, i) => renderComponentCard(c, i))}
+			</div>
+
+			<hr class="border-border"/>
+
+			<details ?open=${s.workflowsExpanded} @toggle=${(e: Event) => { s.workflowsExpanded = (e.currentTarget as HTMLDetailsElement).open; }} data-testid="workflows-disclosure">
+				<summary class="text-sm font-medium text-foreground cursor-pointer py-1">Workflows (${Object.keys(s.workflows || {}).length})</summary>
+				<div class="mt-2">${renderWorkflowsPanel()}</div>
+				<div class="mt-3">
+					<button
+						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary"
+						data-testid="regenerate-workflows"
+						@click=${async () => {
+							const { gatewayFetch } = await import("./api.js");
+							const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
+							if (!project) return;
+							// Best-effort: open a project-assistant session at the project's rootPath.
+							try {
+								const res = await gatewayFetch("/api/sessions", {
+									method: "POST",
+									body: JSON.stringify({
+										cwd: project.rootPath,
+										projectId,
+										assistantType: "project",
+										initialPrompt: "Regenerate the inline workflows: block in project.yaml using the components currently configured. Propose only the workflows: edits.",
+									}),
+								});
+								if (res.ok) {
+									const session = await res.json();
+									setHashRoute("session", session.id, true);
+									renderApp();
+								}
+							} catch { /* best-effort */ }
+						}}
+					>Regenerate workflows…</button>
+					<span class="text-[11px] text-muted-foreground ml-2">Opens a project assistant session.</span>
+				</div>
+			</details>
+
+			<div class="flex items-center gap-3 pt-2 border-t border-border">
+				<button
+					class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+					?disabled=${!s.dirty || s.saving === "saving"}
+					data-testid="save-components"
+					@click=${() => saveComponentsTab(projectId)}
+				>${s.saving === "saving" ? "Saving…" : "Save"}</button>
+				${s.saving === "saved" ? html`<span class="text-xs text-green-600" data-testid="save-status">Saved.</span>` : ""}
+				${s.saving === "error" ? html`<span class="text-xs text-destructive" data-testid="save-status">Failed.</span>` : ""}
+			</div>
+		</div>
+	`;
+}
+
 function renderProjectScopeModelsTab(_projectId: string) {
 	// For now, show a simplified models view indicating inheritance from system
 	return html`
@@ -3104,6 +3490,7 @@ export function renderSettingsPage() {
 						${currentTab === "general" ? renderProjectGeneralTab(currentScope) : ""}
 						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
 						${currentTab === "project" ? renderProjectScopeTab(currentScope) : ""}
+						${currentTab === "components" ? renderProjectComponentsTab(currentScope) : ""}
 						${currentTab === "models" ? renderProjectScopeModelsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
 					` : html`

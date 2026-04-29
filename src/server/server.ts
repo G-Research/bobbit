@@ -1733,6 +1733,57 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/projects/scan?path=...  → run repo-scan on a folder.
+	// Returns { repos: DetectedRepo[] }. Used by the Add-Project flow and
+	// Settings → "Re-scan repos". Phase 4b — see docs/design/multi-repo-components.md §8.1.
+	if (url.pathname === "/api/projects/scan" && req.method === "POST") {
+		const body = await readBody(req).catch(() => ({}));
+		const rawPath = url.searchParams.get("path") ?? (body && typeof body.path === "string" ? body.path : "");
+		if (!rawPath) { json({ error: "Missing path" }, 400); return; }
+		const dirPath = path.resolve(rawPath);
+		if (!fs.existsSync(dirPath)) { json({ error: "Path not found" }, 404); return; }
+		try {
+			const { scanRepos } = await import("./agent/repo-scan.js");
+			const repos = await scanRepos(dirPath);
+			json({ repos });
+		} catch (err: any) {
+			json({ error: err?.message || String(err) }, 500);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/structured  → returns { components, workflows,
+	// worktree_root } in their structured (non-string) shape. Used by the
+	// Settings → Components tab so the UI doesn't have to parse YAML.
+	// Phase 4b.
+	const projectStructuredMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/structured$/);
+	if (projectStructuredMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(projectStructuredMatch[1]);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		const components = ctx.projectConfigStore.getComponents();
+		const workflows = ctx.projectConfigStore.getWorkflows() ?? {};
+		const worktreeRoot = ctx.projectConfigStore.get("worktree_root") ?? "";
+		json({ components, workflows, worktree_root: worktreeRoot });
+		return;
+	}
+
+	// POST /api/projects/:id/rescan-repos  → re-run repo-scan on the
+	// project's rootPath; returns the same shape as /api/projects/scan.
+	// Settings "Re-scan repos" button. Phase 4b.
+	const projectRescanMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/rescan-repos$/);
+	if (projectRescanMatch && req.method === "POST") {
+		const project = projectRegistry.get(projectRescanMatch[1]);
+		if (!project) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const { scanRepos } = await import("./agent/repo-scan.js");
+			const repos = await scanRepos(project.rootPath);
+			json({ repos, rootPath: project.rootPath });
+		} catch (err: any) {
+			json({ error: err?.message || String(err) }, 500);
+		}
+		return;
+	}
+
 	// GET /api/browse-directory
 	if (url.pathname === "/api/browse-directory" && req.method === "GET") {
 		const rawPath = url.searchParams.get("path");

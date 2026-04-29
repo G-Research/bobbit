@@ -11,6 +11,7 @@
  * See docs/design/multi-repo-components.md §7.1.
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import { componentRoot } from "./worktree-paths.js";
 import type { Component } from "../agent/project-config-store.js";
@@ -48,6 +49,18 @@ export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<
 			c.relativePath ?? "",
 		);
 		const env: NodeJS.ProcessEnv = { ...process.env, SOURCE_REPO: sourceRepo };
+
+		// Test hook: when BOBBIT_TEST_RECORD_SETUP is set, append an audit
+		// line to the file pointed at by the env var. The browser E2E for
+		// multi-repo flows uses this to assert per-component invocation
+		// without standing up a real npm/dependency install.
+		const recordPath = process.env.BOBBIT_TEST_RECORD_SETUP;
+		if (recordPath) {
+			try {
+				fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+				fs.appendFileSync(recordPath, `${c.name}\t${cwd}\t${sourceRepo}\t${c.worktreeSetupCommand}\n`);
+			} catch { /* test-only — don't fail the worktree on audit IO errors */ }
+		}
 
 		try {
 			await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), TIMEOUT_MS, `[worktree-setup] ${c.name}`);
