@@ -123,6 +123,12 @@ export async function sweepOrphanedWorktrees(opts: {
 		const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
 		for (const repoPath of repoList) {
 			if (!fs.existsSync(repoPath)) continue;
+			// Only sweep if THIS directory is itself a git repo (has its own .git).
+			// Without this check, `git worktree list` walks upward to find a parent
+			// repo and returns the parent's worktrees — which the sweeper would
+			// then try to clean. Catastrophic if rootPath is, say, a test fixture
+			// nested inside a real bobbit checkout.
+			if (!fs.existsSync(path.join(repoPath, ".git"))) continue;
 			try {
 				const { stdout } = await execFile("git", ["worktree", "list", "--porcelain"], {
 					cwd: repoPath,
