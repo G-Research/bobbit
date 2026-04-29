@@ -340,7 +340,7 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 
 	state.appView = "authenticated";
 	const route = getRouteFromHash();
-	if (route.view !== "session" && route.view !== "goal-dashboard" && !isConfigPageRoute()) {
+	if (route.view !== "session" && route.view !== "goal-dashboard" && route.view !== "mission-dashboard" && !isConfigPageRoute()) {
 		setHashRoute("landing");
 	}
 	renderApp();

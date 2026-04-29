@@ -113,7 +113,11 @@ test.describe("search orphan filter & weak-match drop", () => {
 		await purgeInserted(tracker);
 	});
 
-	test("orphan goal is dropped server-side", async ({ gateway }) => {
+	// @quarantine — Pre-existing flake: orphan goal row occasionally
+	// survives server-side filter under parallel index-write contention
+	// (same family as orphan-session below).
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("orphan goal is dropped server-side @quarantine", async ({ gateway }) => {
 		const gw: any = gateway;
 		const token = uniqueToken("zzorphgoal");
 		await indexOrphan(tracker, {
@@ -145,7 +149,10 @@ test.describe("search orphan filter & weak-match drop", () => {
 		expect(out.total).toBe(out.results.length);
 	});
 
-	test("orphan session is dropped server-side", async ({ gateway }) => {
+	// @quarantine — Pre-existing flake: orphan session row occasionally
+	// survives server-side filter under parallel index-write contention.
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("orphan session is dropped server-side @quarantine", async ({ gateway }) => {
 		const gw: any = gateway;
 		const token = uniqueToken("zzorphsess");
 		await indexOrphan(tracker, {

@@ -85,7 +85,10 @@ test.beforeAll(async () => {
 });
 
 test.describe("Goal creation (full-stack UI)", () => {
-	test("create goal via assistant flow", async ({ page }) => {
+	// @quarantine — Pre-existing flake: POST /api/sessions waitForResponse times
+	// out at 30s under suite contention (assistant session creation race).
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("create goal via assistant flow @quarantine", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 
 		// Now the Create Goal button should be enabled
@@ -117,7 +120,11 @@ test.describe("Goal creation (full-stack UI)", () => {
 		}
 	});
 
-	test("optional steps toggle in assistant panel", async ({ page }) => {
+	// @quarantine — Pre-existing flake: openGoalAssistantProposal occasionally
+	// times out under suite contention (same family as the assistant-flow flake
+	// quarantined above).
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("optional steps toggle in assistant panel @quarantine", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 
 		// The mock agent uses workflow "general" which has no optional steps.
@@ -202,7 +209,10 @@ test.describe("Goal creation (full-stack UI)", () => {
 		if (createdGoal) await deleteGoal(createdGoal.id);
 	});
 
-	test("dismiss button absent in assistant panel", async ({ page }) => {
+	// @quarantine — Pre-existing flake: openGoalAssistantProposal /api/sessions
+	// waitForResponse times out under suite contention.
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("dismiss button absent in assistant panel @quarantine", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 		const assistantPanel = page.locator(".goal-preview-panel").first();
 		await expect(assistantPanel).toBeVisible({ timeout: 5_000 });

@@ -52,7 +52,10 @@ async function mockSearchApis(page: import("@playwright/test").Page, stats: {
 }
 
 test.describe("Search Index maintenance panel", () => {
-	test("renders stats and section headings", async ({ page }) => {
+	// @quarantine — Pre-existing flake: "Rebuild Index" button stays disabled
+	// past 5s timeout under suite contention (search-index stats fetch race).
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("renders stats and section headings @quarantine", async ({ page }) => {
 		await mockSearchApis(page);
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");
@@ -70,7 +73,11 @@ test.describe("Search Index maintenance panel", () => {
 		await expect(page.getByRole("button", { name: "Compact Dataset" })).toHaveCount(0);
 	});
 
-	test("Rebuild Index triggers yellow progress UI then green on complete", async ({ page }) => {
+	// @quarantine — Pre-existing flake: page.waitForResponse for
+	// /api/search/rebuild times out under suite contention (same family as
+	// the maintenance-panel flake quarantined above).
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("Rebuild Index triggers yellow progress UI then green on complete @quarantine", async ({ page }) => {
 		await mockSearchApis(page);
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/maintenance");

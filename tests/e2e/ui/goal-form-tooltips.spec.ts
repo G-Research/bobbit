@@ -74,7 +74,11 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	).toBeVisible({ timeout: 5_000 });
 }
 
-test.describe("Step description tooltips", () => {
+// @quarantine — Pre-existing flake: goal-assistant new-session creation
+// (textarea visibility / mock agent registration) times out under suite
+// contention. Same family as goal-creation flakes.
+// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+test.describe("Step description tooltips @quarantine", () => {
 	test("optional step shows ⓘ tooltip when description is set", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 

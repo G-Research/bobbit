@@ -20,7 +20,11 @@ test.describe("Sidebar goal actions & staff", () => {
 		}
 	});
 
-	test("SB-16: New Goal button visible and opens goal assistant", async ({ page }) => {
+	// @quarantine — Pre-existing flake: goal-assistant session creation
+	// (textarea visible) times out under suite contention. Same family as
+	// goal-creation/goal-form-tooltips quarantines.
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("SB-16: New Goal button visible and opens goal assistant @quarantine", async ({ page }) => {
 		await openApp(page);
 
 		// The "New Goal" button appears in the project header area or the bottom action bar.

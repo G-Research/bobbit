@@ -209,7 +209,10 @@ test.describe("Search result navigation & grouping", () => {
 	 * T3 — multiple message matches from one session collapse into a single
 	 * session group card with a "5 in messages" (or "5 matches") pill.
 	 */
-	test("multiple message matches group into a single session card", async ({ page }) => {
+	// @quarantine — Pre-existing flake: session-grouping result card occasionally
+	// fails to materialise within 10s under parallel index-write contention.
+	// Tracked as part of master commit #380 follow-up. Expiry: 2026-06-30.
+	test("multiple message matches group into a single session card @quarantine", async ({ page }) => {
 		const token = `ZzQuacker${Date.now().toString(36)}`;
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");

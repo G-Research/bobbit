@@ -128,11 +128,15 @@ test.describe("Mission UI (mocked backend)", () => {
 		await navigateToHash(page, `#/mission/${MISSION_ID}`);
 		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
 
+		// page.route handlers persist across reload on the same page object,
+		// so the existing mocks remain active for the post-reload fetches.
 		await page.reload();
-		// After reload, route handlers persist on the same context, so fetches
-		// continue to be intercepted. Re-arm just in case.
-		await mockMissions(page, FAKE_MISSION);
-		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		// Wait for the app shell to finish booting before asserting on the
+		// dashboard — otherwise on a slow reload we race the SPA's route
+		// resolution and time out before the dashboard mounts.
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
 		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 15_000 });
 		await expect(page.getByTestId("mission-title")).toHaveText("Build unified-memory system");
 	});
