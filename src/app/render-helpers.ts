@@ -915,7 +915,7 @@ import { expandedMissions, toggleMissionExpanded } from "./state.js";
 import type { PersistedMission } from "./mission-types.js";
 import { MISSION_STATE_LABELS } from "./mission-types.js";
 
-/** Render a mission row with its child goals nested below. */
+/** Render a mission row with its Commander session + child goals nested below. */
 export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]): TemplateResult {
 	const isExpanded = expandedMissions.has(mission.id);
 	const stateLabel = MISSION_STATE_LABELS[mission.state] ?? mission.state;
@@ -928,6 +928,12 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 		e.stopPropagation();
 		setHashRoute("mission-dashboard", mission.id);
 	};
+
+	// Find the Commander session, if any, so it can render nested under the
+	// mission row — mirrors the team-lead session under a goal.
+	const commanderSession = mission.commanderSessionId
+		? state.gatewaySessions.find(s => s.id === mission.commanderSessionId)
+		: undefined;
 
 	return html`
 		<div class="flex flex-col gap-0.5" data-testid="mission-group" data-mission-id=${mission.id}>
@@ -946,12 +952,17 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 				<span class="flex-1 text-xs truncate" title=${mission.title}>${mission.title}</span>
 				<span class="text-[10px] text-muted-foreground" title="Mission state">${stateLabel}</span>
 			</div>
+			${isExpanded && commanderSession ? html`
+				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;" data-testid="mission-commander-row">
+					${renderSessionRow(commanderSession)}
+				</div>
+			` : ""}
 			${isExpanded && childGoals.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${childGoals.map(g => renderGoalGroup(g))}
 				</div>
 			` : ""}
-			${isExpanded && childGoals.length === 0 ? html`
+			${isExpanded && childGoals.length === 0 && !commanderSession ? html`
 				<div class="text-[10px] text-muted-foreground" style="padding-left:${INDENT + HEADER_CHEVRON_W}px;">
 					No child goals yet.
 				</div>

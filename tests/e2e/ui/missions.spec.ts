@@ -367,6 +367,134 @@ test.describe("Mission UI (mocked backend)", () => {
 		} finally {
 			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
 		}
+	test("Restart planning button POSTs /plan/restart and reloads detail @smoke", async ({ page }) => {
+		let restartCount = 0;
+		const mission = FAKE_MISSION;
+
+		const handler = async (
+			route: import("@playwright/test").Route,
+			request: import("@playwright/test").Request,
+		) => {
+			const url = new URL(request.url());
+			const path = url.pathname;
+			const method = request.method();
+
+			if (path === `/api/missions/${MISSION_ID}/plan/restart` && method === "POST") {
+				restartCount++;
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ ok: true }),
+				});
+				return;
+			}
+			if (path === "/api/missions" && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ missions: [mission] }),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ mission, plan: mission.plan, children: [], gates: [] }),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}/gates` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ gates: [] }),
+				});
+				return;
+			}
+			await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+		};
+		await page.route("**/api/missions", handler);
+		await page.route("**/api/missions?**", handler);
+		await page.route("**/api/missions/**", handler);
+
+		// Auto-confirm the native confirm() dialog raised by onRestartPlanning.
+		page.on("dialog", d => d.accept());
+
+		await openApp(page);
+		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
+
+		const btn = page.getByTestId("mission-restart-planning-btn");
+		await expect(btn).toBeVisible();
+		await btn.click();
+
+		const toast = page.getByTestId("mission-toast");
+		await expect(toast).toBeVisible({ timeout: 5_000 });
+		await expect(toast).toHaveAttribute("data-kind", "success");
+		expect(restartCount).toBeGreaterThanOrEqual(1);
+	});
+
+	test("sidebar renders Commander session row nested under mission @smoke", async ({ page }) => {
+		const COMMANDER_ID = "sidebar-commander-id";
+
+		await openApp(page);
+
+		// Mutate the in-memory app state directly to inject a mission + its
+		// Commander session against the active project. Done this way (rather
+		// than mocking GET /api/missions) so the mission's `projectId` lines
+		// up with the real bucket the sidebar projects renderer uses.
+		await page.evaluate(({ missionId, cmdId }) => {
+			const w = window as any;
+			if (!w.bobbitState) throw new Error("bobbitState not exposed");
+			const projectId = w.bobbitState.projects[0]?.id;
+			if (!projectId) throw new Error("no project loaded");
+			w.bobbitState.gatewaySessions.push({
+				id: cmdId,
+				title: "Commander",
+				role: "commander",
+				accessory: "flag",
+				status: "idle",
+				createdAt: Date.now(),
+				lastActivity: Date.now(),
+				projectId,
+			});
+			w.bobbitState.missions.push({
+				id: missionId,
+				projectId,
+				projects: [projectId],
+				title: "Sidebar Mission",
+				spec: "",
+				state: "planning",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				workflowId: "mission",
+				divergencePolicy: "strict",
+				maxConcurrentGoals: 3,
+				commanderSessionId: cmdId,
+			});
+		}, { missionId: MISSION_ID, cmdId: COMMANDER_ID });
+
+		// Trigger a re-render so the mission appears in the sidebar. We do
+		// this by toggling the hash (forcing the router to re-resolve); a
+		// no-op hashchange triggers renderApp().
+		await navigateToHash(page, "#/");
+
+		// Force a render cycle by dispatching a custom event the app listens
+		// to on hashchange. Simplest: trigger window-level event dispatch via
+		// the sidebar's known re-render path — click the project header.
+		await page.evaluate(() => { (window as any).bobbitRenderApp?.(); });
+
+		const missionGroup = page.locator(`[data-testid="mission-group"][data-mission-id="${MISSION_ID}"]`);
+		await expect(missionGroup).toBeVisible({ timeout: 10_000 });
+
+		// Expand if not already.
+		const expandSpan = missionGroup.locator("span").filter({ hasText: /▸|▾/ }).first();
+		const content = await expandSpan.textContent();
+		if (content?.includes("▸")) {
+			await expandSpan.click();
+		}
+
+		// Commander row appears under the mission.
+		const commanderRow = missionGroup.locator(`[data-testid="mission-commander-row"]`);
+		await expect(commanderRow).toBeVisible({ timeout: 5_000 });
+		await expect(commanderRow.locator(`[data-session-id="${COMMANDER_ID}"]`)).toBeVisible();
 	});
 
 	test("renders error state for unknown mission id", async ({ page }) => {

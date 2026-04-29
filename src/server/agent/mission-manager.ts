@@ -244,6 +244,48 @@ export class MissionManager {
 		return { ok: true, version: next.version };
 	}
 
+	/**
+	 * Restart the mission's planning cycle. Cascade-resets `charter`,
+	 * `plan-review`, and `goal-plan` gates to pending; clears the frozen
+	 * plan, replan counter, and any paused state; and drives the mission
+	 * back into the `planning` state. Refuses on a completed mission.
+	 *
+	 * The Commander still owns the session; the caller is responsible for
+	 * waking it (see server.ts `/api/missions/:id/plan/restart` route).
+	 */
+	async restartPlanning(
+		id: string,
+	): Promise<{ ok: true } | { ok: false; status: number; reason: string }> {
+		const m = this.store.get(id);
+		if (!m) return { ok: false, status: 404, reason: "Mission not found" };
+		if (m.archived) return { ok: false, status: 409, reason: "Mission is archived" };
+		if (m.state === "complete") return { ok: false, status: 409, reason: "Cannot restart planning on a completed mission" };
+
+		// Cascade-reset the planning gates so the Commander must re-signal
+		// charter → plan-review → goal-plan from scratch.
+		if (this.deps.gateStore) {
+			for (const gateId of ["charter", "plan-review", "goal-plan"]) {
+				const gs = this.deps.gateStore.getGateFor("mission", id, gateId);
+				if (gs && gs.status !== "pending") {
+					this.deps.gateStore.updateGateStatusFor("mission", id, gateId, "pending");
+				}
+			}
+		}
+
+		// Clear plan-related fields and reset state. `null` deletes the field
+		// in MissionStore.update.
+		this.store.update(id, {
+			plan: null,
+			planFrozenAt: null,
+			replanCount: 0,
+			state: "planning",
+			pausedAt: null,
+			pausedReason: null,
+		} as any);
+
+		return { ok: true };
+	}
+
 	freezePlan(id: string): boolean {
 		const m = this.store.get(id);
 		if (!m || !m.plan) return false;

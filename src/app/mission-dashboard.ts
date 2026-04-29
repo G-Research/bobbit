@@ -7,6 +7,7 @@ import {
 	refreshMissions,
 	pauseMission,
 	resumeMission,
+	restartMissionPlanning,
 	signalMissionGate,
 	type GateState,
 } from "./api.js";
@@ -346,6 +347,12 @@ function renderHeader(m: PersistedMission): TemplateResult {
 			<span style="flex:1;"></span>
 			<span style="font-size:11px;color:var(--muted-foreground);">policy: <b>${m.divergencePolicy}</b></span>
 			<span style="font-size:11px;color:var(--muted-foreground);">max: <b>${m.maxConcurrentGoals}</b></span>
+			<button class="btn-icon"
+				@click=${() => onRestartPlanning(m.id)}
+				title="Reset charter + plan-review + goal-plan gates and let the Commander re-propose"
+				data-testid="mission-restart-planning-btn"
+				?disabled=${m.state === "complete"}
+			>Restart planning</button>
 			${isPaused
 				? html`<button class="btn-icon" @click=${() => onResume(m.id)} title="Resume mission" data-testid="mission-resume-btn">Resume</button>`
 				: html`<button class="btn-icon" @click=${() => onPause(m.id)} title="Pause mission" data-testid="mission-pause-btn">Pause</button>`}
@@ -531,6 +538,20 @@ async function onPause(id: string): Promise<void> {
 async function onResume(id: string): Promise<void> {
 	if (await resumeMission(id)) {
 		await refreshMissionDashboard();
+	}
+}
+
+async function onRestartPlanning(id: string): Promise<void> {
+	const confirmed = confirm(
+		"Reset the charter and plan? Any frozen plan will be discarded. The Commander will need to re-propose.",
+	);
+	if (!confirmed) return;
+	const result = await restartMissionPlanning(id);
+	if (result.ok) {
+		showToast("Planning reset", "success");
+		await refreshMissionDashboard();
+	} else {
+		showToast(`Failed to reset planning: ${result.error ?? "unknown error"}`, "error");
 	}
 }
 

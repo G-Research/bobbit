@@ -134,6 +134,88 @@ describe("MissionManager — replan loop cap", () => {
 	});
 });
 
+describe("MissionManager — restartPlanning", () => {
+	it("resets gates, clears plan + freeze + replanCount, drives state to planning", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const gateStore = new GateStore(dir);
+		const mgr = new MissionManager(store, {
+			goalManager: noopGoalManager(), goalStore: noopGoalStore(),
+			projectId: "p",
+			gateStore,
+		});
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+
+		// Set up: plan, frozen, gates passed, replanCount > 0, paused.
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+		gateStore.initGatesFor("mission", m.id, ["charter", "plan-review", "goal-plan"]);
+		gateStore.updateGateStatusFor("mission", m.id, "charter", "passed");
+		gateStore.updateGateStatusFor("mission", m.id, "plan-review", "passed");
+		gateStore.updateGateStatusFor("mission", m.id, "goal-plan", "passed");
+		store.incrementReplanCount(m.id);
+		await mgr.pauseMission(m.id, "reason");
+
+		const result = await mgr.restartPlanning(m.id);
+		assert.equal(result.ok, true);
+
+		const fresh = new MissionStore(dir).get(m.id)!;
+		assert.equal(fresh.plan, undefined, "plan cleared");
+		assert.equal(fresh.planFrozenAt, undefined, "planFrozenAt cleared");
+		assert.equal(fresh.replanCount, 0, "replanCount reset");
+		assert.equal(fresh.state, "planning", "state reset to planning");
+		assert.equal(fresh.pausedAt, undefined, "pausedAt cleared");
+		assert.equal(fresh.pausedReason, undefined, "pausedReason cleared");
+		for (const gid of ["charter", "plan-review", "goal-plan"]) {
+			assert.equal(
+				gateStore.getGateFor("mission", m.id, gid)?.status,
+				"pending",
+				`${gid} reset to pending`,
+			);
+		}
+	});
+
+	it("refuses when mission is complete (409)", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const mgr = new MissionManager(store, {
+			goalManager: noopGoalManager(), goalStore: noopGoalStore(), projectId: "p",
+		});
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		store.update(m.id, { state: "complete" });
+		const result = await mgr.restartPlanning(m.id);
+		assert.equal(result.ok, false);
+		if (!result.ok) {
+			assert.equal(result.status, 409);
+			assert.match(result.reason, /complete/i);
+		}
+	});
+
+	it("refuses when mission archived (409)", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const mgr = new MissionManager(store, {
+			goalManager: noopGoalManager(), goalStore: noopGoalStore(), projectId: "p",
+		});
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		store.archive(m.id);
+		const result = await mgr.restartPlanning(m.id);
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 409);
+	});
+
+	it("returns 404 for unknown mission", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const mgr = new MissionManager(store, {
+			goalManager: noopGoalManager(), goalStore: noopGoalStore(), projectId: "p",
+		});
+		const result = await mgr.restartPlanning("does-not-exist");
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.status, 404);
+	});
+});
+
 describe("MissionManager — spawnChild base branch", () => {
 	it("freezePlan after createMission unblocks spawnChild", async () => {
 		const dir = tmpDir();

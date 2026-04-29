@@ -3161,6 +3161,26 @@ async function handleApiRoute(
 		return;
 	}
 
+	const missionPlanRestartMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/plan\/restart$/);
+	if (missionPlanRestartMatch && req.method === "POST") {
+		const missionId = missionPlanRestartMatch[1];
+		const manager = getMissionManagerForMission(missionId);
+		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+		const result = await manager.restartPlanning(missionId);
+		if (!result.ok) { json({ error: result.reason }, result.status); return; }
+		json({ ok: true });
+		broadcastToAll({ type: "mission_plan_reset", missionId });
+
+		// Wake the Commander so it re-reads the spec and proposes a fresh charter.
+		const mission = manager.getMission(missionId);
+		if (mission?.commanderSessionId) {
+			const nudge = `[SYSTEM] The user has requested a fresh planning cycle. The mission's charter, plan-review, and goal-plan gates have been reset and the previous plan has been discarded. Please re-read the mission spec and propose a new charter via mission_signal('charter', ...).`;
+			sessionManager.enqueuePrompt(mission.commanderSessionId, nudge, { isSteered: true })
+				.catch(err => console.error("[mission] failed to nudge commander after plan restart:", err));
+		}
+		return;
+	}
+
 	const missionPauseMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/(pause|resume)$/);
 	if (missionPauseMatch && req.method === "POST") {
 		const [, missionId, action] = missionPauseMatch;
