@@ -1,0 +1,9 @@
+name: mission_plan_propose
+description: "Propose or update the mission plan (DAG of child goals). Server validates DAG, rejects if frozen unless mission paused with replan_reason."
+summary: "Write or update the mission plan."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Mission
+docs: |-
+  Params: `plan` (required, MissionPlan), `replan_reason` (optional, required when plan was previously frozen). Backend: PATCH /api/missions/:id/plan. 400 on cycle / dangling deps. 403 if frozen and not paused.

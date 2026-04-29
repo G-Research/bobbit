@@ -2,6 +2,7 @@ import { ProjectContext } from "./project-context.js";
 import { ProjectRegistry } from "./project-registry.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
+import type { PersistedMission } from "./mission-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
 
 /**
@@ -62,6 +63,41 @@ export class ProjectContextManager {
   /** Get the underlying project registry. */
   getRegistry(): ProjectRegistry {
     return this.registry;
+  }
+
+  /** Resolve which project a mission belongs to by scanning all contexts. */
+  getContextForMission(missionId: string): ProjectContext | null {
+    for (const ctx of this.contexts.values()) {
+      if (ctx.missionStore.get(missionId)) return ctx;
+    }
+    return null;
+  }
+
+  /** Look up a mission across all projects. */
+  getMissionById(missionId: string): PersistedMission | undefined {
+    for (const ctx of this.contexts.values()) {
+      const m = ctx.missionStore.get(missionId);
+      if (m) return m;
+    }
+    return undefined;
+  }
+
+  /** All live (non-archived) missions across all projects. */
+  getAllLiveMissions(): PersistedMission[] {
+    const missions: PersistedMission[] = [];
+    for (const ctx of this.contexts.values()) {
+      missions.push(...ctx.missionStore.getLive());
+    }
+    return missions.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  /** Sum of all mission store generations — change-detection counter. */
+  getMissionGeneration(): number {
+    let gen = 0;
+    for (const ctx of this.contexts.values()) {
+      gen += ctx.missionStore.getGeneration();
+    }
+    return gen;
   }
 
   /** Resolve which project a goal belongs to by scanning all contexts. */

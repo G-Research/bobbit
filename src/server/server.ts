@@ -71,6 +71,8 @@ import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
+import type { PersistedMission, MissionPlan, DivergencePolicy } from "./agent/mission-store.js";
+import type { MissionManager } from "./agent/mission-manager.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
@@ -1428,6 +1430,25 @@ async function handleApiRoute(
 		const ctx = projectContextManager.getContextForGoal(goalId);
 		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
 		return ctx.goalManager;
+	}
+
+	/** Get a MissionManager for the project that owns the given mission. */
+	function getMissionManagerForMission(missionId: string): MissionManager | undefined {
+		const ctx = projectContextManager.getContextForMission(missionId);
+		if (!ctx) return undefined;
+		const manager = ctx.missionManager;
+		// Wire cascade-aware resolvers lazily — ProjectContext can't import
+		// configCascade without creating a cycle, so we set them every time we
+		// reach for the manager. Cheap and idempotent.
+		const projectId = ctx.project.id;
+		(manager as any).deps.resolveWorkflow = (id: string) =>
+			configCascade.resolveWorkflows(projectId).find(r => r.item.id === id)?.item;
+		return manager;
+	}
+
+	/** Look up a mission across all projects. */
+	function getMissionAcrossProjects(missionId: string): PersistedMission | undefined {
+		return projectContextManager.getMissionById(missionId);
 	}
 
 	/** Get a TaskManager for the project that owns the given goal. Throws if not found. */
@@ -2817,6 +2838,237 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// ── Mission endpoints (Phase 1: CRUD + plan + spawn-child stub) ────
+	//
+	// All routes here are additive. The mission workflow itself, gate-store
+	// owner-kind generalisation, and the integration-branch git plumbing land
+	// in later phases (Coder B + Coder C). Until those land:
+	//   - mission gate routes (/api/missions/:id/gates/...) return 501
+	//     (TODO(mission-gate-owner)).
+	//   - integrate-child returns 501 (TODO(mission-scheduler-owner)).
+	// All non-stub routes are exercised by tests/e2e/missions-api.spec.ts.
+
+	if (url.pathname === "/api/missions" && req.method === "GET") {
+		const filterProjectId = url.searchParams.get("projectId") || undefined;
+		let missions: PersistedMission[];
+		if (filterProjectId) {
+			const ctx = projectContextManager.getOrCreate(filterProjectId);
+			missions = ctx ? ctx.missionStore.getLive() : [];
+		} else {
+			missions = projectContextManager.getAllLiveMissions();
+		}
+		const generation = projectContextManager.getMissionGeneration();
+		json({ generation, missions });
+		return;
+	}
+
+	if (url.pathname === "/api/missions" && req.method === "POST") {
+		const body = await readBody(req);
+		const title = body?.title;
+		if (!title || typeof title !== "string") {
+			json({ error: "Missing title" }, 400);
+			return;
+		}
+		const spec = typeof body?.spec === "string" ? body.spec : "";
+		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd: body?.cwd });
+		if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+		const targetCtx = projectContextManager.getOrCreate(resolved.projectId);
+		if (!targetCtx) { json({ error: "Invalid project" }, 400); return; }
+
+		// Resolve the "mission" workflow through the cascade if available — the
+		// workflow itself is shipped by Coder C in defaults/workflows/mission.yaml.
+		// Until that file lands the mission record will simply have workflow=undefined
+		// and mission gate routes return 501.
+		const cascadeWorkflows = configCascade.resolveWorkflows(resolved.projectId);
+		const resolvedMissionWorkflow = cascadeWorkflows.find(r => r.item.id === "mission")?.item;
+		// MissionManager was constructed without `resolvedMissionWorkflow` in
+		// project-context — patch the workflow snapshot in here instead so the
+		// per-project store doesn't need to subscribe to cascade changes.
+		const manager = targetCtx.missionManager;
+		(manager as any).deps.resolvedMissionWorkflow = resolvedMissionWorkflow;
+		// Wire the cascade-aware workflow resolver so child-goal spawns pick up
+		// builtin workflows ("feature", "general", ...) the same way POST /api/goals does.
+		(manager as any).deps.resolveWorkflow = (id: string) => configCascade.resolveWorkflows(resolved.projectId).find(r => r.item.id === id)?.item;
+
+		try {
+			const mission = await manager.createMission({
+				title,
+				projectId: resolved.projectId,
+				spec,
+				divergencePolicy: body?.divergencePolicy as DivergencePolicy | undefined,
+				maxConcurrentGoals: typeof body?.maxConcurrentGoals === "number" ? body.maxConcurrentGoals : undefined,
+				sandboxed: body?.sandboxed === true,
+				enabledOptionalSteps: Array.isArray(body?.enabledOptionalSteps) ? body.enabledOptionalSteps.filter((s: unknown) => typeof s === "string") : undefined,
+			});
+			json(mission, 201);
+			broadcastToAll({ type: "mission_created", mission });
+		} catch (err) {
+			json({ error: String((err as Error).message ?? err) }, 400);
+		}
+		return;
+	}
+
+	const missionDetailMatch = url.pathname.match(/^\/api\/missions\/([^/]+)$/);
+	if (missionDetailMatch) {
+		const missionId = missionDetailMatch[1];
+		const mission = getMissionAcrossProjects(missionId);
+
+		if (req.method === "GET") {
+			if (!mission) { json({ error: "Mission not found" }, 404); return; }
+			const ctx = projectContextManager.getContextForMission(missionId);
+			const children = (mission.plan?.goals ?? []).map(node => ({
+				planId: node.planId,
+				goalId: node.goalId ?? null,
+				title: node.title,
+				state: node.state ?? null,
+				spawnedAt: node.spawnedAt ?? null,
+				completedAt: node.completedAt ?? null,
+				mergedAt: node.mergedAt ?? null,
+				goal: node.goalId ? (ctx?.goalStore.get(node.goalId) ?? null) : null,
+			}));
+			json({
+				mission,
+				plan: mission.plan ?? null,
+				children,
+				integrationBranch: mission.integrationBranch ?? null,
+				commanderSessionId: mission.commanderSessionId ?? null,
+				// TODO(mission-gate-owner): surface gates once gate-store accepts
+				// (ownerKind="mission", ownerId=missionId).
+				gates: [],
+			});
+			return;
+		}
+
+		if (req.method === "PUT") {
+			if (!mission) { json({ error: "Mission not found" }, 404); return; }
+			const body = await readBody(req);
+			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const ctx = projectContextManager.getContextForMission(missionId);
+			if (!ctx) { json({ error: "Mission context lost" }, 500); return; }
+			const updates: Partial<PersistedMission> = {};
+			if (typeof body.title === "string" && body.title.trim()) updates.title = body.title.trim();
+			if (typeof body.divergencePolicy === "string") updates.divergencePolicy = body.divergencePolicy as DivergencePolicy;
+			if (typeof body.maxConcurrentGoals === "number") {
+				const v = Math.floor(body.maxConcurrentGoals);
+				if (v >= 1 && v <= 8) updates.maxConcurrentGoals = v;
+			}
+			if (typeof body.archived === "boolean") updates.archived = body.archived;
+			if (typeof body.spec === "string") updates.spec = body.spec;
+			const ok = ctx.missionStore.update(missionId, updates);
+			if (!ok) { json({ error: "Mission not found" }, 404); return; }
+			const patch = ctx.missionStore.get(missionId);
+			json({ ok: true, mission: patch });
+			broadcastToAll({ type: "mission_updated", missionId, patch: updates });
+			return;
+		}
+
+		if (req.method === "DELETE") {
+			if (!mission) { json({ error: "Mission not found" }, 404); return; }
+			const ctx = projectContextManager.getContextForMission(missionId);
+			if (!ctx) { json({ error: "Mission context lost" }, 500); return; }
+			ctx.missionStore.archive(missionId);
+			json({ ok: true });
+			broadcastToAll({ type: "mission_deleted", missionId });
+			return;
+		}
+	}
+
+	const missionPlanMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/plan$/);
+	if (missionPlanMatch) {
+		const missionId = missionPlanMatch[1];
+		const manager = getMissionManagerForMission(missionId);
+		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+
+		if (req.method === "GET") {
+			const m = manager.getMission(missionId)!;
+			if (!m.plan) { json({ error: "No plan yet" }, 404); return; }
+			json(m.plan);
+			return;
+		}
+		if (req.method === "PATCH") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") { json({ error: "Missing plan body" }, 400); return; }
+			const plan = body.plan ?? body;
+			const force = url.searchParams.get("force") === "1";
+			const replanReason = typeof body.replan_reason === "string" ? body.replan_reason : (typeof body.replanReason === "string" ? body.replanReason : undefined);
+			const result = await manager.proposePlan(missionId, plan as MissionPlan, { replanReason, force });
+			if (!result.ok) { json({ error: result.reason }, result.status); return; }
+			json({ ok: true, version: result.version });
+			broadcastToAll({ type: "mission_plan_proposed", missionId, planVersion: result.version });
+			return;
+		}
+	}
+
+	const missionFreezeMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/plan\/freeze$/);
+	if (missionFreezeMatch && req.method === "POST") {
+		const missionId = missionFreezeMatch[1];
+		const manager = getMissionManagerForMission(missionId);
+		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+		const ok = manager.freezePlan(missionId);
+		if (!ok) { json({ error: "Cannot freeze: no plan" }, 409); return; }
+		const m = manager.getMission(missionId)!;
+		json({ ok: true, frozenAt: m.planFrozenAt });
+		broadcastToAll({ type: "mission_plan_frozen", missionId, planVersion: m.plan?.version ?? 0, frozenAt: m.planFrozenAt });
+		return;
+	}
+
+	const missionSpawnMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/spawn-child\/([^/]+)$/);
+	if (missionSpawnMatch && req.method === "POST") {
+		const [, missionId, planId] = missionSpawnMatch;
+		const manager = getMissionManagerForMission(missionId);
+		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+		const result = await manager.spawnChild(missionId, planId);
+		if (!result.ok) { json({ error: result.reason }, result.status); return; }
+		json({ goalId: result.goal.id, branch: result.goal.branch, alreadySpawned: result.alreadySpawned });
+		if (!result.alreadySpawned) {
+			broadcastToAll({ type: "mission_child_spawned", missionId, planId, goalId: result.goal.id });
+		}
+		return;
+	}
+
+	const missionIntegrateMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/integrate-child\/([^/]+)$/);
+	if (missionIntegrateMatch && req.method === "POST") {
+		const [, missionId, planId] = missionIntegrateMatch;
+		const manager = getMissionManagerForMission(missionId);
+		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+		const result = await manager.integrateChild(missionId, planId);
+		// Phase 1: always returns 501 until mission-git.ts merges.
+		json({ error: result.reason }, result.status);
+		return;
+	}
+
+	const missionPauseMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/(pause|resume)$/);
+	if (missionPauseMatch && req.method === "POST") {
+		const [, missionId, action] = missionPauseMatch;
+		const manager = getMissionManagerForMission(missionId);
+		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+		if (action === "pause") {
+			const body = await readBody(req).catch(() => null);
+			const reason = (body && typeof body.reason === "string") ? body.reason : "";
+			const ok = await manager.pauseMission(missionId, reason);
+			if (!ok) { json({ error: "Cannot pause mission in its current state" }, 409); return; }
+			json({ ok: true });
+			broadcastToAll({ type: "mission_paused", missionId, reason });
+		} else {
+			const ok = await manager.resumeMission(missionId);
+			if (!ok) { json({ error: "Mission not paused" }, 409); return; }
+			json({ ok: true });
+			broadcastToAll({ type: "mission_resumed", missionId });
+		}
+		return;
+	}
+
+	// Mission gate routes — placeholder. Real implementation requires gate-store
+	// generalisation (Coder B). Until then return 501 so callers fail loudly
+	// rather than silently treating mission gates as goal gates.
+	// TODO(mission-gate-owner): replace with real handlers that dispatch to
+	// gateStore.{init,signal,getGate}For("mission", missionId, ...).
+	const missionGateMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/gates(?:\/.*)?$/);
+	if (missionGateMatch) {
+		json({ error: "Mission gates not yet wired (phase 2)" }, 501);
+		return;
 	}
 
 	// ── Role endpoints ─────────────────────────────────────────────

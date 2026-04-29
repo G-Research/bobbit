@@ -1,0 +1,9 @@
+name: mission_merge_child
+description: "Merge a completed child goal's branch into the mission integration branch. Detects already-merged; reports conflicts."
+summary: "Merge a child goal into the integration branch."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Mission
+docs: |-
+  Params: `planId`. Backend: POST /api/missions/:id/integrate-child/:planId. Returns merge result (merged / conflict / already-merged). On conflict, escalate via ask_user_choices — never auto-resolve.
