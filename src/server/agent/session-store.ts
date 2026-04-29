@@ -11,6 +11,8 @@ export interface PersistedSession {
 	agentSessionFile: string;
 	createdAt: number;
 	lastActivity: number;
+	/** Epoch ms when the user last viewed this session. 0 / undefined = never read. */
+	lastReadAt?: number;
 	/** Optional goal this session belongs to */
 	goalId?: string;
 	/** Whether the agent was actively streaming when the server last knew about it */
@@ -83,6 +85,7 @@ export type UpdatableSessionFields = Pick<
 	PersistedSession,
 	| "title"
 	| "lastActivity"
+	| "lastReadAt"
 	| "agentSessionFile"
 	| "goalId"
 	| "wasStreaming"

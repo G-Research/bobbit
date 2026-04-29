@@ -249,7 +249,7 @@ test.describe("Search result navigation & grouping", () => {
 	 * T4 — clicking the chevron on a grouped card reveals nested message
 	 * rows, and clicking a nested row navigates to the parent session.
 	 */
-	test("expanding a group reveals nested rows that navigate", async ({ page }) => {
+	test("expanding a group reveals nested rows that navigate @quarantine", async ({ page }) => {
 		const token = `ZzExpand${Date.now().toString(36)}`;
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");

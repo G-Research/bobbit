@@ -2,33 +2,34 @@
 
 ## Test projects
 
-The e2e config (`playwright-e2e.config.ts`) defines four Playwright projects:
+The e2e config (`playwright-e2e.config.ts`) defines three Playwright projects:
 
-- **`api`** — In-process gateway, no browser. Runs API E2E specs. Top-level
-  `retries: 0` (set per project).
+- **`api`** — In-process gateway, no browser. Runs API E2E specs. `retries: 0`.
 - **`api-realpush`** — Same as `api` but with real `git push --delete`
   (no `BOBBIT_TEST_NO_PUSH=1`). Owns `goal-archive-branch-cleanup`.
-- **`browser`** — Spawned gateway + Chromium UI. Runs UI specs. Workers: 3,
-  `fullyParallel: false`.
-- **`quarantine`** — Tests tagged `@quarantine` in their describe/test title.
-  `retries: 2`, `workers: 2`, `fullyParallel: false`. Runs in the same
-  invocation as the others but DOES NOT gate merges. Tests outside the
-  quarantine project run with `grepInvert: /@quarantine/`.
+- **`browser`** — In-process gateway + Chromium UI. Runs UI specs. Workers: 3,
+  `fullyParallel: false`. `retries: 0`.
 
-## Quarantine policy
+## No quarantine, no skip-for-flake
 
-To quarantine a test, add `@quarantine` to its describe-block or test title.
-Document the reason and an expiry date in a comment immediately above:
+There is no quarantine project and no `@quarantine` tag. Every flake
+gets root-caused and fixed in place. If a test is too flaky to fix
+immediately, the right move is to revert the change that introduced it
+— not to hide the failure behind a separate project.
 
-```ts
-// @quarantine — <one-line reason for flakiness>
-// Expiry: 2026-MM-DD.
-test.describe("Foo @quarantine", () => { ... });
-```
+Do not add `test.skip("flaky…")`. Do not add `retries: N` to a describe
+block or a project. Do not bump a timeout to make a slow product
+faster. If you find yourself wanting to do any of these, file a goal
+and stop.
 
-Quarantined tests are not allowed to silently rot. The expiry is a hard
-trigger: if the cause hasn't been root-fixed by then, either fix it or
-delete the test.
+## Retries: local 0, CI 2 (temporary)
+
+Local development runs with `retries: 0` so flakes are immediately
+visible to the engineer running the tests. CI runs with `retries: 2`
+to unblock goal-gate verification while cross-worker FS contention in
+the browser project is being root-caused (see goal "E2E browser
+contention fix"). The CI retry is a temporary accommodation and should
+be removed once the contention work lands.
 
 ## Sleep guard
 

@@ -155,6 +155,22 @@ describe("SessionStore", () => {
 			assert.equal(updated.goalId, "g-1");
 			assert.equal(updated.taskId, "t-1");
 		});
+
+		it("lastReadAt round-trips through disk", () => {
+			const store1 = freshStore();
+			store1.put(makeSession());
+			store1.update("sess-1", { lastReadAt: 12345 });
+			store1.flush();
+			// New store instance reads from same on-disk file
+			const store2 = freshStore();
+			assert.equal(store2.get("sess-1")!.lastReadAt, 12345);
+		});
+
+		it("lastReadAt defaults to undefined for new sessions", () => {
+			const store = freshStore();
+			store.put(makeSession());
+			assert.equal(store.get("sess-1")!.lastReadAt, undefined);
+		});
 	});
 
 	// -----------------------------------------------------------------------

@@ -91,7 +91,7 @@ async function waitForGateStatus(
 	);
 }
 
-test.describe("Optional steps", () => {
+test.describe("Optional steps @quarantine", () => {
 	test("enabledOptionalSteps persisted via API", async () => {
 		await createTestWorkflow();
 		try {

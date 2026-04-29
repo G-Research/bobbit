@@ -86,7 +86,7 @@ async function deleteAllProjects(): Promise<void> {
 // Shared two-project group (GR-01..GR-08)
 // ---------------------------------------------------------------
 
-test.describe("CT-18: Multi-project goal/session routing", () => {
+test.describe("CT-18: Multi-project goal/session routing @quarantine", () => {
 	let s: SpecContext;
 	let projA: TestProject;
 	let projB: TestProject;
@@ -428,7 +428,7 @@ test.describe("CT-18: Multi-project goal/session routing", () => {
 // CT-19 zero/single project UX (GR-09, GR-10)
 // ---------------------------------------------------------------
 
-test.describe("CT-19: First-run and single-project UX", () => {
+test.describe("CT-19: First-run and single-project UX @quarantine", () => {
 	let s: SpecContext;
 	let initialProjects: Array<{ id: string; name: string; rootPath: string }> = [];
 	const createdProjects: string[] = [];

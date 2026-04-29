@@ -173,34 +173,31 @@ export function terseRelativeTime(timestamp: number): string {
 }
 
 // ============================================================================
-// SESSION VISIT TRACKING
+// SESSION VISIT TRACKING — server-backed
 // ============================================================================
 
-const VISITED_KEY = "bobbit-session-visited";
+const LEGACY_VISITED_KEY = "bobbit-session-visited";
 
-/** In-memory cache of session visit timestamps. */
-let _visitedMap: Record<string, number> | null = null;
+/** In-memory mirror of server-side lastReadAt for instant UI feedback. */
+const _readMirror: Map<string, number> = new Map();
 
-function loadVisitedMap(): Record<string, number> {
-	if (!_visitedMap) {
-		try {
-			_visitedMap = JSON.parse(localStorage.getItem(VISITED_KEY) || "{}");
-		} catch {
-			_visitedMap = {};
-		}
-	}
-	return _visitedMap!;
-}
-
-/** Record that the user visited a session right now. */
+/** Record that the user visited a session right now. Optimistic: updates UI
+ *  immediately, then POSTs to server. POST failure is non-fatal — the next
+ *  sessions-list refresh will reconcile. */
 export function markSessionVisited(sessionId: string): void {
-	const map = loadVisitedMap();
-	map[sessionId] = Date.now();
-	localStorage.setItem(VISITED_KEY, JSON.stringify(map));
+	const now = Date.now();
+	_readMirror.set(sessionId, now);
+	// Optimistic mirror — also patch the in-memory GatewaySession so
+	// hasUnseenActivity returns false on the very next render.
+	const s = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	if (s) s.lastReadAt = now;
+	gatewayFetch(`/api/sessions/${sessionId}/mark-read`, { method: "POST" })
+		.catch(() => { /* non-fatal */ });
 }
 
 /** Returns true if the session has activity the user hasn't seen yet.
- *  "Unseen" means: session is idle/terminated AND lastActivity > last visit time.
+ *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt.
  *  For team agents (team leads and members), the dot only shows when the
  *  associated goal is complete — humans don't need to check on agents mid-work. */
 export function hasUnseenActivity(session: GatewaySession): boolean {
@@ -216,9 +213,31 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 		if (!goal || goal.state !== "complete") return false;
 	}
 
-	const map = loadVisitedMap();
-	const lastVisit = map[session.id] || 0;
-	return session.lastActivity > lastVisit;
+	const mirror = _readMirror.get(session.id) ?? 0;
+	const lastRead = Math.max(session.lastReadAt ?? 0, mirror);
+	return session.lastActivity > lastRead;
+}
+
+/** One-shot migration: read the legacy localStorage map, POST mark-read for
+ *  each entry to seed lastReadAt server-side, then delete the key.
+ *  Idempotent — guarded by key existence. Call once at app boot. */
+export async function migrateLegacyVisitedMap(): Promise<void> {
+	let raw: string | null;
+	try { raw = localStorage.getItem(LEGACY_VISITED_KEY); } catch { return; }
+	if (!raw) return;
+	let map: Record<string, number>;
+	try { map = JSON.parse(raw); } catch {
+		try { localStorage.removeItem(LEGACY_VISITED_KEY); } catch { /* noop */ }
+		return;
+	}
+	const entries = Object.entries(map).filter(([, ts]) => typeof ts === "number" && ts > 0);
+	await Promise.allSettled(
+		entries.map(([id, ts]) => {
+			_readMirror.set(id, ts);
+			return gatewayFetch(`/api/sessions/${id}/mark-read`, { method: "POST" });
+		}),
+	);
+	try { localStorage.removeItem(LEGACY_VISITED_KEY); } catch { /* noop */ }
 }
 
 // ============================================================================
@@ -287,7 +306,7 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 		class="shrink-0 inline-flex items-center gap-0.5 text-[11px] tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
 		style="vertical-align:middle;"
 		title="${formatSessionAge(session.lastActivity)}"
-	>${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
+	>${time}${unseen ? html`<span class="unseen-dot text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
 }
 
 /**
@@ -431,6 +450,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 	return html`
 		<div
+			data-session-id="${session.id}"
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
@@ -491,6 +511,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	return html`
 		<div
+			data-session-id="${session.id}"
 			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors text-sm
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px; filter:grayscale(1); opacity:0.75;"

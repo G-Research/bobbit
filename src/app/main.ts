@@ -12,6 +12,7 @@ import {
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
+import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
 import { loadMissionDashboard, clearMissionDashboardState } from "./mission-dashboard.js";
@@ -397,6 +398,10 @@ async function initApp() {
 					}
 				}
 			} catch {}
+
+			// Fire-and-forget one-shot migration of legacy localStorage read state
+			// to the server. Idempotent — guarded by the localStorage key.
+			migrateLegacyVisitedMap().catch(() => { /* non-fatal */ });
 
 			const route = getRouteFromHash();
 			if (route.view === "goal" && route.goalId) {
