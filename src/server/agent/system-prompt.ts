@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
+import { profile, bumpCount } from "./profiling.js";
 
 /** Module-level cache of the prompts directory. Set once by ensurePromptsDir(). */
 let _promptsDir: string | undefined;
@@ -135,27 +136,30 @@ export function readAgentsMd(cwd: string): string {
  * Falls back to readAgentsMd() if no projectConfigStore is provided.
  */
 export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfigReader): string {
-	if (!projectConfigStore) {
-		return readAgentsMd(cwd);
-	}
-
-	const dirs = getAllConfigDirectories(cwd, projectConfigStore);
-	const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
-
-	const parts: string[] = [];
-	for (const entry of agentEntries) {
-		try {
-			const content = fs.readFileSync(entry.path, "utf-8");
-			const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
-			if (resolved.trim()) {
-				parts.push(resolved.trim());
-			}
-		} catch (err) {
-			console.warn(`[system-prompt] Failed to read agent file ${entry.path}, skipping:`, err);
+	return profile("readAllAgentFiles", () => {
+		if (!projectConfigStore) {
+			return readAgentsMd(cwd);
 		}
-	}
 
-	return parts.join("\n\n");
+		const dirs = getAllConfigDirectories(cwd, projectConfigStore);
+		const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
+		bumpCount("readAllAgentFiles.files", agentEntries.length);
+
+		const parts: string[] = [];
+		for (const entry of agentEntries) {
+			try {
+				const content = fs.readFileSync(entry.path, "utf-8");
+				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
+				if (resolved.trim()) {
+					parts.push(resolved.trim());
+				}
+			} catch (err) {
+				console.warn(`[system-prompt] Failed to read agent file ${entry.path}, skipping:`, err);
+			}
+		}
+
+		return parts.join("\n\n");
+	});
 }
 
 export interface PromptParts {
@@ -265,6 +269,10 @@ export interface PromptSection {
  * are empty (in which case no --system-prompt should be passed to the agent).
  */
 export function assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
+	return profile("assembleSystemPrompt", () => _assembleSystemPrompt(sessionId, parts));
+}
+
+function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
 	const sections: string[] = [];
 
 	// 1. Global system prompt (resolve @refs relative to its directory)
@@ -359,6 +367,7 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 	if (sections.length === 0) return undefined;
 
 	const combined = sections.join("\n\n---\n\n") + "\n";
+	bumpCount("assembleSystemPrompt.bytes", combined.length);
 
 	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
 	fs.writeFileSync(promptPath, combined, "utf-8");
