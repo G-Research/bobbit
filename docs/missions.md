@@ -32,7 +32,7 @@ Every mission has a **Commander** (role: `commander`). Unlike a team-lead, the C
 - Phase 2 (execution): monitors child goals, merges completed children into the integration branch.
 - Phase 3 (integration): runs cross-goal verification, raises the mission PR.
 
-Commander runs against the **integration worktree** — a real Bobbit-managed worktree at `<repo>-wt/mission-<slug>-<id8>/`. It inherits the project's `worktree_setup_command`, sandbox config, and the standard 7-day purge path.
+Commander runs against the **integration worktree** — a real Bobbit-managed worktree (see the canonical path in [Storage paths](#storage-paths) below). It inherits the project's `worktree_setup_command`, sandbox config, and the standard 7-day purge path.
 
 The Commander has bounded autonomy. It cannot push to master, cannot raise PRs to master from child branches, and cannot mutate the plan after the human has approved it (without an explicit pause + replan reason). The server enforces these constraints at the tool/REST layer; the system prompt is informational only.
 
@@ -241,7 +241,7 @@ Only this PR exists for the mission. Child goals never PR to master.
 1. Gate-status changes — wired via `gateStore.onStatusChange(ownerKind, ownerId, gateId)` in `project-context.ts`. Both goal-side gates (a child's `ready-to-merge` passing) and mission-side gates (`goal-plan` passing) wake the scheduler.
 2. Goal state changes — `goalStore.onIndexUpdate` mirrors child `state` into the plan node.
 3. Mission resume / plan freeze events.
-4. **60-second safety-net poll** via `tickAll()` — catches any event the listeners miss.
+4. **Periodic safety-net poll** via `tickAll()` — catches any event the listeners miss. Interval is the current default `tickIntervalMs` on `MissionScheduler` (60_000 ms unless overridden); the value is wired in `project-context.ts` and may be reconfigured per-deployment.
 
 ### Per-mission lock
 
@@ -407,7 +407,7 @@ All additive — existing event names unchanged.
 Symptom: a mission is `in-progress`, child goals are merged, but no further progress. Commander session is idle.
 
 1. Check the scheduler's listener wiring — `gateStore.onStatusChange` must fire `tickMission` for `(ownerKind, ownerId, gateId)` triples that belong to this mission's children. The hook lives in `project-context.ts`.
-2. Confirm the 60-second safety-net poll is running — look for `[scheduler] tickAll` in logs or call `tickMission(missionId)` manually via tests.
+2. Confirm the safety-net poll is running — look for `[scheduler] tickAll` in logs (default cadence `tickIntervalMs` on `MissionScheduler`, currently 60_000 ms) or call `tickMission(missionId)` manually via tests.
 3. Inspect `replanCount` — at `MAX_REPLANS = 3` the mission auto-pauses and Commander stays idle until the user resumes.
 4. Inspect `failedAttempts` on plan nodes — at `>= 2` the mission auto-pauses (constant `maxFailedAttempts` in `MissionScheduler`).
 

@@ -8,6 +8,8 @@ This document explains how Bobbit's goal orchestration system works — how goal
 
 A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Every goal is scoped to a registered project via its `projectId` field (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Worktrees are created relative to that project's `rootPath`.
 
+Goals also carry optional `missionId` and `missionPlanId` fields linking them to a parent mission and a specific node in that mission's plan; standalone goals leave both undefined. See [missions.md](missions.md) for how children are spawned, branched, and merged.
+
 `POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` matching a registered project's `rootPath`. There is no default-project fallback — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). When enabled, the server automatically calls `teamManager.startTeam()` after worktree setup completes — no manual "Start Team" click needed. If auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable; the user can start the team manually. The retry-setup handler also respects this flag.
@@ -449,6 +451,20 @@ The gate list, gate detail, and task list endpoints support `?view=summary` for 
 |---|---|---|
 | `POST` | `/api/goals/:id/team/spawn` | Spawn agent — `workflowGateId` + `inputGateIds` for context injection |
 | `POST` | `/api/goals/:id/team/prompt` | Prompt agent — `workflowGateId` + `inputGateIds` prepended to message |
+
+## Owner-kind generalisation (goals + missions)
+
+`gate-store.ts` is keyed on `(ownerKind, ownerId)` rather than just `goalId`. `GateState` and `GateSignal` carry `ownerKind: "goal" | "mission"` and `ownerId: string`. The legacy `goalId` field is retained as a backward-compat alias for `ownerKind="goal"` records, and the goal-keyed methods (`initGates`, `getGatesFor(goalId)`, `recordSignal({ goalId })`, etc.) are preserved as thin wrappers that hard-code `ownerKind="goal"`. Records on disk without `ownerKind` are normalised to `("goal", goalId)` on read; writes upgrade to the new shape.
+
+The verification harness exposes `verifyForOwner(kind, id, signal, gateDef, cwd, branch, primary, gateStates, spec)` in `verification-harness.ts` — the goal-only entry point delegates to it. For missions, `cwd` is the integration worktree and `branch` is the integration branch, so existing `git diff origin/{{master}}...{{branch}}` substitutions in shared review prompts continue working unchanged.
+
+`verification-logic.ts` recognises three additional template variables when substituting verify-step `run` strings and prompts:
+
+- `{{mission_id}}` — the owner id when `ownerKind="mission"`; empty string for goals.
+- `{{integration_branch}}` (alias `{{mission_branch}}`) — the mission's integration branch; empty string for goals.
+- `{{bobbit_helpers}}` — absolute path to `defaults/helpers/`, where mission-level verification scripts (e.g. `check-mission-execution.mjs`, `forward-merge-master.mjs`) live.
+
+See [missions.md — Gate-store generalisation](missions.md#gate-store-generalisation) for the surrounding operational picture.
 
 ## Storage
 

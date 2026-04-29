@@ -92,6 +92,29 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead) |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
+### Missions
+
+Missions coordinate multiple child goals through a single planning surface, integration branch, and PR. See [docs/missions.md](missions.md) for the operational reference.
+
+All mission endpoints follow the [Project resolution contract](#project-resolution-contract): `POST /api/missions` requires either `projectId` or a `cwd` matching a registered project's `rootPath`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/missions` | List missions. `?projectId=` filters to one project. Returns `{ generation, missions }`. |
+| `POST` | `/api/missions` | Create a mission and spawn the Commander session. Body: `{ projectId?, cwd?, title, spec?, divergencePolicy?, maxConcurrentGoals?, sandboxed?, enabledOptionalSteps? }`. `divergencePolicy` is one of `"strict" \| "balanced" \| "autonomous"` (default `"strict"`). `maxConcurrentGoals` is clamped to `1..8` (default `3`). Returns 201 with the full `PersistedMission`. |
+| `GET` | `/api/missions/:id` | Mission detail — `{ mission, plan, children, integrationBranch, commanderSessionId, gates }`. |
+| `PUT` | `/api/missions/:id` | Update mutable fields (`title`, `divergencePolicy`, `maxConcurrentGoals`, `archived`, `spec`). |
+| `DELETE` | `/api/missions/:id` | Archive (soft-delete). Children stay with `missionId` retained for history. |
+| `GET` | `/api/missions/:id/plan` | Latest plan, or 404 when none has been proposed. |
+| `PATCH` | `/api/missions/:id/plan` | Replace plan. Body: `MissionPlan` or `{ plan, replan_reason? }`. Validates DAG (acyclic, refs in-plan), bumps `version`. 409 if frozen and not paused with reason. `?force=1` allowed only under `BOBBIT_E2E=1`. |
+| `POST` | `/api/missions/:id/plan/freeze` | Freeze the plan. 409 unless the `goal-plan` gate is passed (or `?force=1` under `BOBBIT_E2E=1`). Normally fired by the `goal-plan` verifier's post-pass hook, not by clients. |
+| `POST` | `/api/missions/:id/spawn-child/:planId` | Spawn a child goal for a plan node. Idempotent — returns `{ alreadySpawned: true }` when the goal already exists. 409 if `goal-plan` not passed or upstream deps not merged. Returns `{ goalId, branch, alreadySpawned }`. |
+| `POST` | `/api/missions/:id/integrate-child/:planId` | Merge a completed child branch into the integration branch (`--no-ff`). Returns `{ ok, status: "merged" \| "already-merged", mergeSha? }` on success, or 409 with `{ error, conflictFiles }` on merge conflict. |
+| `POST` | `/api/missions/:id/pause` | Body: `{ reason?: string }`. 409 if not in a pausable state. |
+| `POST` | `/api/missions/:id/resume` | 409 if not paused. |
+| `GET` | `/api/missions/:id/gates` | List mission gates. Backed by the same `gate-store` as goal gates, keyed on `ownerKind="mission"`. |
+| `POST` | `/api/missions/:id/gates/:gateId/signal` | Signal a mission gate. Body: `{ content?, metadata?, sessionId? }`. Triggers async verification via `verifyForOwner("mission", id, ...)`. 409 if upstream gates have not passed. |
+
 ### Tasks
 
 | Method | Path | Description |

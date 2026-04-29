@@ -67,6 +67,20 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
 | `pr_status_changed` | `goalId?`, `sessionId?`, `status` | PR status changed for a goal or session |
+| `mission_created` | `mission` | Mission was created (full `PersistedMission`) |
+| `mission_updated` | `missionId`, `patch` | Mutable mission fields changed (`patch: Partial<PersistedMission>`) |
+| `mission_deleted` | `missionId` | Mission was archived (soft-delete) |
+| `mission_plan_proposed` | `missionId`, `planVersion` | A new plan version was accepted by the server |
+| `mission_plan_frozen` | `missionId`, `planVersion`, `frozenAt` | Plan frozen — child goals may now be spawned |
+| `mission_child_spawned` | `missionId`, `planId`, `goalId` | A child goal was created for a plan node |
+| `mission_child_state_changed` | `missionId`, `planId`, `goalId`, `state` | Child `GoalState` mirrored into the plan node by the scheduler |
+| `mission_child_merged` | `missionId`, `planId`, `status`, `mergeSha` | Child branch merged into integration branch (`status: "merged" \| "already-merged"`) |
+| `mission_child_merge_conflict` | `missionId`, `planId`, `goalId`, `conflictFiles` | Integration merge produced conflicts; mission auto-pauses |
+| `mission_paused` | `missionId`, `reason` | Mission moved to paused state (manual or autonomous) |
+| `mission_resumed` | `missionId` | Mission resumed from paused |
+| `mission_execution_ready` | `missionId` | Scheduler has noticed all child goals are merged — the `execution` gate is ready to be signalled |
+
+Mission gate events reuse the existing `gate_*` types; payloads carry `ownerKind`/`ownerId` (with `goalId` mirroring `ownerId` for legacy clients) so dashboards can route them. See [docs/missions.md](missions.md) for the surrounding orchestration model.
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
 | `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |

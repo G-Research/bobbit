@@ -19,6 +19,19 @@ Goals are a task-tracking layer on top of sessions. A goal has a title, spec (ma
 - **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
 - **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager.
 - **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.
+- **Missions**: Goals can also be children of a mission — carrying a `missionId` and branching off the mission's integration branch instead of `master`. See [missions.md](missions.md).
+
+## Missions
+
+A **mission** coordinates a group of related goals through a single planning surface, integration branch, and PR. Use a mission when one spec naturally decomposes into 5–20 interconnected goals — some independent and parallelisable, others gated by upstream work.
+
+- **Commander agent**: A long-lived agent that owns the mission. It drafts a charter, proposes a plan (a DAG of child goals), schedules ready nodes in parallel up to `maxConcurrentGoals`, merges completed children back into the integration branch, and raises the final PR to master.
+- **Integration branch**: A single `mission/<slug>-<id8>` branch is created off `origin/master` in a managed worktree at mission creation. Child goals branch off the integration branch (not master) and merge back into it via `--no-ff`. Only the mission branch raises a PR to master.
+- **Mission workflow**: `charter` → `plan-review` (LLM) → `goal-plan` (human approval, freezes the plan) → `execution` (auto, contains the child goals) → `integration` (cross-goal review on the integration branch) → `mission-pr` → `complete`.
+- **Bounded autonomy**: Configurable `divergencePolicy` (`strict` | `balanced` | `autonomous`) governs how the Commander reacts to failures. Strict default — plan structure changes always require human re-approval; merge conflicts pause the mission rather than auto-resolving.
+- **Standalone goals unchanged**: Goals without a `missionId` continue to work exactly as before.
+
+See [missions.md](missions.md) for the full operational reference (data model, gate-store generalisation, scheduler, recovery scenarios).
 
 ## Teams
 

@@ -99,6 +99,9 @@ Coordinate multiple agents working together. A team lead spawns role agents (cod
 ### Workflows & Gates
 Define quality stages — design, implement, test, review — as a DAG of gates. Each gate has criteria and enforced ordering. No cutting corners: the agent can't skip ahead.
 
+### Missions
+Long-running bodies of work that span multiple goals. A Commander agent plans a DAG of child goals, runs the independent ones in parallel against a shared integration branch, and raises a single PR to master once the whole mission is green. Use a mission when one spec naturally decomposes into 5–20 interconnected goals. See [docs/missions.md](docs/missions.md).
+
 ### Roles
 Control what agents can do (tool access, system prompts) and how they behave. Use built-in roles or create your own.
 
@@ -126,6 +129,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
+| [Missions](docs/missions.md) | Multi-goal orchestration, integration branch, Commander agent |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 
 **Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md)
