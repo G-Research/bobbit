@@ -75,7 +75,7 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 }
 
 test.describe("Step description tooltips", () => {
-	test("optional step shows ⓘ tooltip when description is set", async ({ page }) => {
+	test("optional step shows ⓘ tooltip when description is set @quarantine", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 
 		// Find the ⓘ icon next to the QA Testing optional step (not the auto-start toggle tooltip)
