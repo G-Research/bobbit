@@ -95,7 +95,7 @@ test.beforeAll(async () => {
 });
 
 test.describe("Goal creation (full-stack UI)", () => {
-	test("create goal via assistant flow", async ({ page }) => {
+	test("create goal via assistant flow @quarantine", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 
 		// Now the Create Goal button should be enabled

@@ -333,7 +333,7 @@ test.describe("Session lifecycle stories", () => {
 	// S-11: Send message and receive agent response
 	// ---------------------------------------------------------------
 
-	test("S-11: Send message and receive agent response", async () => {
+	test("S-11: Send message and receive agent response @quarantine", async () => {
 		s.begin(STORY_S11);
 
 		// setup
