@@ -153,16 +153,19 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
 			const { mkdirSync: mkSync, writeFileSync: wrSync } = await import("node:fs");
 			const yaml = await import("yaml");
-			const configDir = join(bobbitDir, "config");
-			mkSync(configDir, { recursive: true });
-			wrSync(
-				join(configDir, "project.yaml"),
-				yaml.stringify({
-					name: "default",
-					components: [TEST_DEFAULT_COMPONENT],
-					workflows: testWorkflows(),
-				}),
-			);
+			const yamlContent = yaml.stringify({
+				name: "default",
+				components: [TEST_DEFAULT_COMPONENT],
+				workflows: testWorkflows(),
+			});
+			// Server-level config (cascade): <bobbitDir>/config/project.yaml
+			const serverConfigDir = join(bobbitDir, "config");
+			mkSync(serverConfigDir, { recursive: true });
+			wrSync(join(serverConfigDir, "project.yaml"), yamlContent);
+			// Per-project config (project-context): <bobbitDir>/.bobbit/config/project.yaml
+			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			mkSync(projectConfigDir, { recursive: true });
+			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
 		} catch { /* best-effort */ }
 
 		const gw = createGateway({
