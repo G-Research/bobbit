@@ -935,6 +935,30 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 		? state.gatewaySessions.find(s => s.id === mission.commanderSessionId)
 		: undefined;
 
+	// Mission-direct sessions: reviewer sub-sessions (spec-auditor, architect,
+	// code-reviewer, …) spawned for mission-gate verification. They carry
+	// `missionId` set to the current mission but no `teamGoalId` (those render
+	// under their child goal). Without re-injection here they would be
+	// invisible — the project Sessions list filters them out via
+	// `isMissionOwnedSession`.
+	const otherMissionSessions = state.gatewaySessions
+		.filter(s =>
+			s.missionId === mission.id
+			&& s.id !== mission.commanderSessionId
+			&& !s.archived
+			&& !s.teamGoalId,
+		)
+		.sort((a, b) => {
+			// Streaming first, then idle, then lastActivity desc — mirrors the
+			// project Sessions list ordering heuristic.
+			const aActive = a.status === "streaming" || a.status === "busy" || a.isCompacting;
+			const bActive = b.status === "streaming" || b.status === "busy" || b.isCompacting;
+			if (aActive !== bActive) return aActive ? -1 : 1;
+			return (b.lastActivity ?? 0) - (a.lastActivity ?? 0);
+		});
+
+	const hasDirectSessions = !!commanderSession || otherMissionSessions.length > 0;
+
 	return html`
 		<div class="flex flex-col gap-0.5" data-testid="mission-group" data-mission-id=${mission.id}>
 			<div
@@ -957,12 +981,17 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 					${renderSessionRow(commanderSession)}
 				</div>
 			` : ""}
+			${isExpanded && otherMissionSessions.length > 0 ? html`
+				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;" data-testid="mission-direct-sessions">
+					${otherMissionSessions.map(s => renderSessionRow(s))}
+				</div>
+			` : ""}
 			${isExpanded && childGoals.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${childGoals.map(g => renderGoalGroup(g))}
 				</div>
 			` : ""}
-			${isExpanded && childGoals.length === 0 && !commanderSession ? html`
+			${isExpanded && childGoals.length === 0 && !hasDirectSessions ? html`
 				<div class="text-[10px] text-muted-foreground" style="padding-left:${INDENT + HEADER_CHEVRON_W}px;">
 					No child goals yet.
 				</div>

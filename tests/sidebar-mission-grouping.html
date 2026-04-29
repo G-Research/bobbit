@@ -46,7 +46,35 @@
       return { ungroupedSessions, liveGoals, archivedGoals, liveMissions };
     }
 
-    window.__missionGrouping = { isMissionOwnedSession, buildSidebar };
+    /**
+     * Mirror of renderMissionGroup()'s computation of the rows that belong
+     * directly under a mission: the Commander session + any other
+     * mission-direct sessions (e.g. mission-gate reviewer sub-sessions). Used
+     * by the sidebar test to assert reviewer rows are re-injected under the
+     * mission after the project-level Sessions filter excludes them.
+     */
+    function missionDirectSessions(state, mission) {
+      const sessions = state.gatewaySessions || [];
+      const commander = mission.commanderSessionId
+        ? sessions.find(s => s.id === mission.commanderSessionId)
+        : undefined;
+      const others = sessions
+        .filter(s =>
+          s.missionId === mission.id
+          && s.id !== mission.commanderSessionId
+          && !s.archived
+          && !s.teamGoalId
+        )
+        .sort((a, b) => {
+          const aActive = a.status === "streaming" || a.status === "busy" || a.isCompacting;
+          const bActive = b.status === "streaming" || b.status === "busy" || b.isCompacting;
+          if (aActive !== bActive) return aActive ? -1 : 1;
+          return (b.lastActivity ?? 0) - (a.lastActivity ?? 0);
+        });
+      return { commander, otherMissionSessions: others };
+    }
+
+    window.__missionGrouping = { isMissionOwnedSession, buildSidebar, missionDirectSessions };
   </script>
 </head>
 <body>

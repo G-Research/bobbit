@@ -147,6 +147,100 @@ test.describe("Sidebar mission grouping", () => {
 		expect(result).toBe(false);
 	});
 
+	test("Reviewer sub-session for mission gate is excluded from project Sessions list AND injected under the mission", async ({ page }) => {
+		// Bug A regression: the Commander session was rendered under the mission
+		// row, but reviewer sub-sessions (spec-auditor, architect, code-reviewer)
+		// spawned for mission-gate verification were filtered out of the project
+		// Sessions list AND not re-injected under the mission row — invisible.
+		const result = await page.evaluate(() => {
+			const state = {
+				gatewaySessions: [
+					// Commander — mission-direct, exposed under the mission.
+					{ id: "commander-1", missionId: "m1", role: "commander", createdAt: 1, lastActivity: 100, status: "idle" },
+					// Reviewer sub-session for a mission gate (no teamGoalId).
+					{ id: "reviewer-1", missionId: "m1", role: "spec-auditor", createdAt: 2, lastActivity: 200, status: "idle" },
+					// Plain session under the same project — must remain in ungrouped.
+					{ id: "plain-1", createdAt: 3, lastActivity: 300, status: "idle" },
+				],
+				goals: [],
+				missions: [{ id: "m1", state: "in-progress", archived: false, projectId: "p1", commanderSessionId: "commander-1" }],
+				staffList: [],
+			};
+			const sidebar = (window as any).__missionGrouping.buildSidebar(state);
+			const direct = (window as any).__missionGrouping.missionDirectSessions(state, state.missions[0]);
+			return {
+				ungroupedIds: sidebar.ungroupedSessions.map((s: any) => s.id),
+				commanderId: direct.commander?.id ?? null,
+				otherIds: direct.otherMissionSessions.map((s: any) => s.id),
+			};
+		});
+
+		// Reviewer is filtered OUT of the project Sessions list (transitively
+		// via missionId, see isMissionOwnedSession).
+		expect(result.ungroupedIds).toContain("plain-1");
+		expect(result.ungroupedIds).not.toContain("reviewer-1");
+		expect(result.ungroupedIds).not.toContain("commander-1");
+
+		// Both Commander AND reviewer are surfaced under the mission row.
+		expect(result.commanderId).toBe("commander-1");
+		expect(result.otherIds).toContain("reviewer-1");
+	});
+
+	test("Mission-direct sessions sort: streaming first, then by lastActivity desc", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			const state = {
+				gatewaySessions: [
+					// commander stays separate; we only assert on otherMissionSessions ordering.
+					{ id: "old-idle", missionId: "m1", createdAt: 1, lastActivity: 100, status: "idle" },
+					{ id: "streaming-now", missionId: "m1", createdAt: 2, lastActivity: 50, status: "streaming" },
+					{ id: "recent-idle", missionId: "m1", createdAt: 3, lastActivity: 500, status: "idle" },
+				],
+				goals: [],
+				missions: [{ id: "m1", state: "in-progress", archived: false, projectId: "p1", commanderSessionId: undefined }],
+				staffList: [],
+			};
+			const direct = (window as any).__missionGrouping.missionDirectSessions(state, state.missions[0]);
+			return direct.otherMissionSessions.map((s: any) => s.id);
+		});
+		// Streaming first, then idle by lastActivity desc.
+		expect(result).toEqual(["streaming-now", "recent-idle", "old-idle"]);
+	});
+
+	test("Reviewer for a child goal (teamGoalId set) is NOT in mission-direct sessions", async ({ page }) => {
+		// Reviewers for child-goal gates render under their goal subtree, not
+		// under the mission row. The teamGoalId guard ensures that.
+		const result = await page.evaluate(() => {
+			const state = {
+				gatewaySessions: [
+					{ id: "reviewer-of-child", missionId: "m1", teamGoalId: "child-goal", createdAt: 1, lastActivity: 100, status: "idle" },
+				],
+				goals: [{ id: "child-goal", missionId: "m1", archived: false, createdAt: 1 }],
+				missions: [{ id: "m1", state: "in-progress", archived: false, projectId: "p1" }],
+				staffList: [],
+			};
+			const direct = (window as any).__missionGrouping.missionDirectSessions(state, state.missions[0]);
+			return direct.otherMissionSessions.map((s: any) => s.id);
+		});
+		expect(result).toEqual([]);
+	});
+
+	test("Archived mission-direct sessions are excluded", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			const state = {
+				gatewaySessions: [
+					{ id: "archived-rev", missionId: "m1", archived: true, createdAt: 1, lastActivity: 100, status: "terminated" },
+					{ id: "live-rev", missionId: "m1", createdAt: 2, lastActivity: 200, status: "idle" },
+				],
+				goals: [],
+				missions: [{ id: "m1", state: "in-progress", archived: false, projectId: "p1" }],
+				staffList: [],
+			};
+			const direct = (window as any).__missionGrouping.missionDirectSessions(state, state.missions[0]);
+			return direct.otherMissionSessions.map((s: any) => s.id);
+		});
+		expect(result).toEqual(["live-rev"]);
+	});
+
 	test("isMissionOwnedSession: plain session with no goalId/missionId returns false", async ({ page }) => {
 		const result = await page.evaluate(() => {
 			const goalsById = new Map();
