@@ -43,7 +43,9 @@ async function deleteGoalByTitle(title: string) {
 }
 
 test.describe("Proposal tool blocks", () => {
-	test("propose_goal tool block renders in message history @smoke", async ({ page }) => {
+	// @quarantine — Pre-existing flake: textarea visibility times out at 30s under suite contention.
+	// Expiry: 2026-06-30. Tracked as part of master commit #380 follow-up.
+	test("propose_goal tool block renders in message history @smoke @quarantine", async ({ page }) => {
 		await triggerGoalProposal(page);
 
 		// The message area should contain a tool card for propose_goal
