@@ -110,6 +110,12 @@ export function gitCwd(): string {
  * This version reads once and surfaces a precise error if the file is
  * truly missing.
  */
+/**
+ * Synchronous token read. Kept for callers that build headers in expression
+ * position (e.g. inside an object literal). Throws ENOENT immediately —
+ * does NOT retry. Use `readE2ETokenAsync()` from new code; over time we'd
+ * like every caller to be async so we can retry transient FS errors.
+ */
 export function readE2EToken(): string {
 	const p = join(bobbitDir(), "state", "token");
 	try {
@@ -124,6 +130,40 @@ export function readE2EToken(): string {
 		}
 		throw err;
 	}
+}
+
+/**
+ * Async token read with bounded retry. Retries ENOENT/EBUSY/EPERM/EACCES
+ * for ~150ms total — covers Windows Defender lock windows on freshly-
+ * written files without masking real configuration mistakes.
+ *
+ * Prefer this over `readE2EToken()` from any code path that already runs
+ * inside an `async` function (which is essentially every test).
+ */
+export async function readE2ETokenAsync(): Promise<string> {
+	const p = join(bobbitDir(), "state", "token");
+	let lastErr: any;
+	for (let attempt = 0; attempt < 6; attempt++) {
+		try {
+			return readFileSync(p, "utf-8").trim();
+		} catch (err: any) {
+			lastErr = err;
+			const code = err?.code;
+			if (code === "ENOENT" || code === "EBUSY" || code === "EPERM" || code === "EACCES") {
+				if (attempt < 5) await new Promise(r => setTimeout(r, 30));
+				continue;
+			}
+			throw err;
+		}
+	}
+	if (lastErr?.code === "ENOENT") {
+		throw new Error(
+			`E2E token missing at ${p} (after 6 retries). ` +
+			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
+			`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
+		);
+	}
+	throw lastErr;
 }
 
 // ---------------------------------------------------------------------------

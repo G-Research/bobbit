@@ -18,6 +18,7 @@ import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
+import { profile } from "./profiling.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -147,6 +148,11 @@ export interface SessionInfo {
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
 	streamingStartedAt?: number;
+	/** Number of agent turns that have completed (agent_end fired). Used by
+	 * tests to detect that a prompt has actually been processed end-to-end
+	 * — polling for `status==idle` alone races with the pre-prompt idle
+	 * state, so observability of “a turn finished” needs its own counter. */
+	completedTurnCount?: number;
 	/** Last user prompt text, for retry on fresh-response errors */
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
@@ -1017,6 +1023,10 @@ export class SessionManager {
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
 	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		return profile("sessionManager.assemblePrompt", () => this._assemblePrompt(sessionId, parts));
+	}
+
+	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
@@ -1536,6 +1546,7 @@ export class SessionManager {
 
 			session.status = "idle";
 			session.streamingStartedAt = undefined;
+			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcast(session.clients, { type: "session_status", status: "idle" });
 			// Don't drain the queue if the turn ended with a model error —

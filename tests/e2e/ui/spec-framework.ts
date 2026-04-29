@@ -13,6 +13,7 @@
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 // ============================================================
@@ -328,6 +329,12 @@ export class SessionHandle {
 
 	set sessionId(id: string) { this._sessionId = id; }
 	set ctx(c: SpecContext) { this._ctx = c; }
+
+	/** Server-side completedTurnCount captured immediately before the most
+	 * recent send_message() / steer dispatched on this session. agent_finish()
+	 * waits for the count to exceed this baseline before returning, so it
+	 * cannot observe the pre-prompt idle state of a freshly-created session. */
+	pendingTurnBaseline: number | undefined = undefined;
 
 	private get story() { return this._ctx?._activeStory; }
 	private get phase() { return this._ctx?._phase ?? "setup"; }
@@ -971,10 +978,28 @@ export class SpecContext {
 		},
 		agent_finish: async (sessionName?: string) => {
 			trackIntent(this._activeStory, this._phase, "agent_finish");
-			if (sessionName) {
-				const handle = this.sessions.get(sessionName);
-				if (handle) await waitForSessionStatus(handle.sessionId, "idle");
-			}
+			if (!sessionName) return;
+			const handle = this.sessions.get(sessionName);
+			if (!handle) return;
+			// Wait for the server-side completedTurnCount to advance past the
+			// baseline captured by send_message(). This is the only reliable
+			// signal that the prompt was actually processed end-to-end —
+			// polling for status==idle alone races with the pre-prompt idle
+			// state (RE-07 root cause).
+			const sessionId = handle.sessionId;
+			const baseline = handle.pendingTurnBaseline ?? 0;
+			const observed = await pollUntil(async () => {
+				const resp = await apiFetch(`/api/sessions/${sessionId}`);
+				if (!resp.ok) return null;
+				const data = await resp.json();
+				if (typeof data.completedTurnCount === "number"
+					&& data.completedTurnCount > baseline
+					&& data.status === "idle") {
+					return data.completedTurnCount as number;
+				}
+				return null;
+			}, { timeoutMs: 15_000, intervalMs: 50, label: `agent_finish ${sessionName} > ${baseline}` });
+			handle.pendingTurnBaseline = observed;
 		},
 	};
 
@@ -1024,7 +1049,53 @@ export class SpecContext {
 		trackRegion(this._activeStory, this._phase, "editor");
 		const textarea = this._page.locator("message-editor textarea").first();
 		if (text) await textarea.fill(text);
+		// Capture per-session completedTurnCount baseline and current status
+		// BEFORE pressing Enter. We then await server-side confirmation that
+		// the prompt was actually received — either status flipped to
+		// "streaming", or completedTurnCount advanced (mock-agent finished
+		// the whole turn faster than we polled). Without this confirmation,
+		// any test that follows up with wait_for_streaming(), agent_finish(),
+		// or message-list assertions can race the prompt's WS round-trip and
+		// observe the pre-prompt state. This is the structural cause of RE-07
+		// and the CT-01-b “wait_for_streaming timed out” cluster.
+		let activeId: string | undefined;
+		try {
+			const hash = await this._page.evaluate(() => window.location.hash);
+			const m = hash.match(/#\/session\/([a-f0-9-]+)/i);
+			if (m) activeId = m[1];
+		} catch { /* best-effort */ }
+		let baseline = 0;
+		let matchHandle: SessionHandle | undefined;
+		if (activeId) {
+			try {
+				const resp = await apiFetch(`/api/sessions/${activeId}`);
+				if (resp.ok) {
+					const data = await resp.json();
+					baseline = typeof data.completedTurnCount === "number" ? data.completedTurnCount : 0;
+				}
+			} catch { /* best-effort */ }
+			for (const [, h] of this.sessions) {
+				if (h.sessionId === activeId) { matchHandle = h; matchHandle.pendingTurnBaseline = baseline; break; }
+			}
+		}
 		await textarea.press("Enter");
+		if (activeId) {
+			// Confirm the server saw the prompt. Either status==streaming OR
+			// the turn already finished (count advanced) is sufficient.
+			await pollUntil(async () => {
+				const resp = await apiFetch(`/api/sessions/${activeId}`);
+				if (!resp.ok) return false;
+				const data = await resp.json();
+				if (data.status === "streaming" || data.status === "aborting") return true;
+				if (typeof data.completedTurnCount === "number" && data.completedTurnCount > baseline) {
+					// Turn already finished — update baseline so a subsequent
+					// agent_finish() doesn’t hang on a count that already moved.
+					if (matchHandle) matchHandle.pendingTurnBaseline = baseline;
+					return true;
+				}
+				return false;
+			}, { timeoutMs: 10_000, intervalMs: 30, label: `send_message ack ${activeId}` });
+		}
 	}
 
 	async stop_streaming() {
