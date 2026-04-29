@@ -1,5 +1,5 @@
 import { html, type TemplateResult } from "lit";
-import { state, renderApp } from "./state.js";
+import { state, renderApp, GW_URL_KEY, GW_TOKEN_KEY } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import {
 	fetchMissionDetail,
@@ -13,6 +13,10 @@ import {
 import type { MissionDetail, PersistedMission } from "./mission-types.js";
 import { MISSION_STATE_LABELS } from "./mission-types.js";
 import { renderMissionDagSvg } from "../ui/components/MissionDagSvg.js";
+import { RemoteAgent } from "./remote-agent.js";
+// Side-effect import to register the <agent-interface> custom element.
+import "../ui/components/AgentInterface.js";
+import type { AgentInterface } from "../ui/components/AgentInterface.js";
 
 // ============================================================================
 // MODULE STATE
@@ -28,6 +32,108 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let approving = false;
 let toastMessage: { text: string; kind: "success" | "error" } | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ── Embedded Commander session (long-lived; mirrors team-lead embed pattern) ──
+// We hold a single RemoteAgent + <agent-interface> for the current mission's
+// Commander session.  When the mission's commanderSessionId changes (or we
+// leave the dashboard) we disconnect and tear it down.  Lit accepts the raw
+// element instance in templates, so the SAME DOM node is reused across
+// re-renders — preserving scroll position and live subscriptions.
+let commanderSessionId: string | null = null;
+let commanderAgent: RemoteAgent | null = null;
+let commanderInterface: AgentInterface | null = null;
+
+function teardownCommanderEmbed(): void {
+	if (commanderAgent) {
+		try { commanderAgent.disconnect(); } catch { /* ignore */ }
+	}
+	commanderAgent = null;
+	if (commanderInterface) {
+		try { commanderInterface.session = undefined; } catch { /* ignore */ }
+		if (commanderInterface.parentElement) {
+			commanderInterface.parentElement.removeChild(commanderInterface);
+		}
+	}
+	commanderInterface = null;
+	commanderSessionId = null;
+}
+
+function ensureCommanderEmbed(sessionId: string): AgentInterface {
+	if (commanderSessionId === sessionId && commanderInterface) {
+		return commanderInterface;
+	}
+	teardownCommanderEmbed();
+	commanderSessionId = sessionId;
+
+	const el = document.createElement("agent-interface") as AgentInterface;
+	el.dataset.sessionId = sessionId;
+	el.setAttribute("data-session-id", sessionId);
+	el.enableAttachments = true;
+	el.enableModelSelector = true;
+	el.enableThinkingSelector = true;
+	el.showThemeToggle = false;
+	el.style.minHeight = "320px";
+	el.style.height = "480px";
+	commanderInterface = el;
+
+	// Connect a RemoteAgent to the gateway and wire it into the element.
+	// Failures (auth missing, gateway unreachable) leave the element in its
+	// natural "No session set" state — the dashboard remains usable.
+	const url = (() => { try { return localStorage.getItem(GW_URL_KEY); } catch { return null; } })();
+	const token = (() => { try { return localStorage.getItem(GW_TOKEN_KEY); } catch { return null; } })();
+	if (url && token) {
+		const remote = new RemoteAgent();
+		commanderAgent = remote;
+		remote.connect(url, token, sessionId).then(() => {
+			if (commanderAgent !== remote || commanderInterface !== el) {
+				try { remote.disconnect(); } catch { /* ignore */ }
+				return;
+			}
+			el.session = remote as any;
+			renderApp();
+		}).catch(() => { /* leave unbound */ });
+	}
+	return el;
+}
+
+function renderCommanderSection(m: PersistedMission): TemplateResult {
+	const sid = detail?.commanderSessionId ?? m.commanderSessionId;
+	if (!sid) {
+		return html`
+			<section data-testid="mission-section-commander">
+				<h3 style="margin:0 0 8px;font-size:13px;text-transform:uppercase;color:var(--muted-foreground);letter-spacing:0.06em;">Commander</h3>
+				<div data-testid="mission-commander-placeholder"
+					style="padding:24px;border:1px dashed var(--border);border-radius:6px;color:var(--muted-foreground);font-size:13px;text-align:center;">
+					Commander session initialising…
+				</div>
+			</section>
+		`;
+	}
+	// On unload, ensure stale element is dropped if mission swapped.
+	if (commanderSessionId && commanderSessionId !== sid) {
+		teardownCommanderEmbed();
+	}
+	const el = ensureCommanderEmbed(sid);
+	return html`
+		<section data-testid="mission-section-commander">
+			<div style="display:flex;align-items:center;gap:8px;margin:0 0 8px;">
+				<h3 style="margin:0;font-size:13px;text-transform:uppercase;color:var(--muted-foreground);letter-spacing:0.06em;flex:1;">Commander</h3>
+				<button class="btn-icon"
+					style="font-size:11px;"
+					@click=${() => setHashRoute("session", sid)}
+					data-testid="mission-commander-open-link"
+					title="Open in dedicated session view">
+					Open full →
+				</button>
+			</div>
+			<div data-testid="mission-commander-embed"
+				data-session-id=${sid}
+				style="border:1px solid var(--border);border-radius:6px;overflow:hidden;display:flex;flex-direction:column;min-height:320px;height:480px;">
+				${el}
+			</div>
+		</section>
+	`;
+}
 
 function showToast(text: string, kind: "success" | "error" = "success"): void {
 	toastMessage = { text, kind };
@@ -101,6 +207,7 @@ export function clearMissionDashboardState(): void {
 	error = "";
 	state.missionDashboardId = null;
 	stopPolling();
+	teardownCommanderEmbed();
 }
 
 function stopPolling(): void {
@@ -298,15 +405,7 @@ function renderOverviewTab(): TemplateResult {
 				<pre style="white-space:pre-wrap;font-size:12px;line-height:1.5;color:var(--foreground);background:var(--muted);padding:12px;border-radius:6px;max-height:280px;overflow-y:auto;">${m.spec}</pre>
 			</section>
 
-			${detail.commanderSessionId ? html`
-				<section data-testid="mission-section-commander">
-					<h3 style="margin:0 0 8px;font-size:13px;text-transform:uppercase;color:var(--muted-foreground);letter-spacing:0.06em;">Commander</h3>
-					<button class="btn-icon" @click=${() => setHashRoute("session", detail!.commanderSessionId!)}
-						data-testid="mission-commander-link">
-						Open Commander session →
-					</button>
-				</section>
-			` : ""}
+			${renderCommanderSection(m)}
 		</div>
 	`;
 }
