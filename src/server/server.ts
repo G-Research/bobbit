@@ -2310,6 +2310,7 @@ async function handleApiRoute(
 					worktreePath: archived.worktreePath,
 					taskId: archived.taskId,
 					staffId: archived.staffId,
+					missionId: archived.missionId,
 					colorIndex: colorStore.get(archived.id),
 					preview: archived.preview,
 					reattemptGoalId: archived.reattemptGoalId,
@@ -2346,6 +2347,7 @@ async function handleApiRoute(
 			worktreePath: session.worktreePath,
 			taskId: session.taskId,
 			staffId: session.staffId,
+			missionId: session.missionId,
 			colorIndex: colorStore.get(session.id),
 			preview: session.preview,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
@@ -2989,6 +2991,7 @@ async function handleApiRoute(
 						rolePrompt: commanderPrompt,
 						roleName: "commander",
 						sandboxed: !!mission.sandboxed,
+						missionId: mission.id,
 					});
 					sessionManager.updateSessionMeta(commanderSession.id, {
 						role: "commander",
