@@ -40,6 +40,27 @@ async function createMission(extra: Record<string, unknown> = {}): Promise<any> 
 test.beforeAll(() => { token = readE2EToken(); });
 
 test.describe("Missions API", () => {
+	test("create spawns Commander session bound to mission's project", async () => {
+		// Regression: previously the POST /api/missions handler called createSession
+		// without `projectId` in createOpts, which threw
+		// "Cannot resolve session store: projectId is required" inside
+		// SessionManager.buildPipelineContext and left commanderSessionId unset.
+		const created = await createMission();
+		expect(created.commanderSessionId).toBeTruthy();
+		expect(typeof created.commanderSessionId).toBe("string");
+
+		// The Commander session must actually exist (proves createSession
+		// succeeded, not just that we wrote an id into the mission record).
+		const sessionResp = await apiFetch(`/api/sessions/${created.commanderSessionId}`);
+		expect(sessionResp.status).toBe(200);
+		const session = await sessionResp.json();
+		expect(session.id).toBe(created.commanderSessionId);
+		// And the session must be bound to the mission's project so its store,
+		// gates, and sidebar grouping resolve correctly.
+		expect(session.projectId).toBe(created.projectId);
+		expect(session.role).toBe("commander");
+	});
+
 	test("create + get + list + update + archive @smoke", async () => {
 		const created = await createMission({ maxConcurrentGoals: 4, divergencePolicy: "balanced" });
 		expect(created.id).toBeTruthy();

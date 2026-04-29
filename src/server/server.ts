@@ -2985,6 +2985,7 @@ async function handleApiRoute(
 						.replace(/\{\{AGENT_ID\}\}/g, `commander-${mission.id.slice(0, 8)}`)
 						.replace(/\{\{REVIEW_CONTEXT\}\}/g, "");
 					const commanderSession = await sessionManager.createSession(commanderCwd, undefined, undefined, undefined, {
+						projectId: resolved.projectId,
 						rolePrompt: commanderPrompt,
 						roleName: "commander",
 						sandboxed: !!mission.sandboxed,
