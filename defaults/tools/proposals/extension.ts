@@ -12,6 +12,33 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
+	// Proposal tools are intended for assistant-type sessions (goal/role/tool/
+	// project/staff/mission assistants) and the Commander, which all surface
+	// proposals to the user via the chat UI. Reviewer sub-sessions for gate
+	// verification (spec-auditor, architect, code-reviewer, …) must not be
+	// able to file proposals.
+	//
+	// We gate on BOBBIT_SESSION_ROLE: register only when the role is unset
+	// (catch-all for assistant-type sessions where role is left as the default
+	// `assistant`/`general`), starts with `assistant`, equals `commander`, or
+	// equals `general` (regular non-team sessions). Reviewer/QA roles are
+	// excluded by name. If a legitimate role gets cut off, broaden this list.
+	const sessionRole = process.env.BOBBIT_SESSION_ROLE;
+	const proposalRoles = (
+		!sessionRole ||
+		sessionRole === "general" ||
+		sessionRole === "commander" ||
+		sessionRole.startsWith("assistant") ||
+		sessionRole.endsWith("-assistant")
+	);
+	if (!proposalRoles) {
+		console.error(
+			`[proposal-tools] Skipping registration for role=${sessionRole}; ` +
+			`proposal tools are restricted to assistant/commander/general sessions`,
+		);
+		return;
+	}
+
 	function ack() {
 		return {
 			content: [{ type: "text" as const, text: "Proposal submitted. Waiting for user response." }],
