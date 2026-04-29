@@ -347,6 +347,49 @@ test.describe("Missions API", () => {
 		expect(spawnBody.goalId).toBeTruthy();
 	});
 
+	test("plan/restart cascades reset of charter+plan-review+goal-plan and clears plan", async () => {
+		const m = await createMission();
+
+		// Set a plan + freeze (test-mode bypass).
+		await apiFetch(`/api/missions/${m.id}/plan`, {
+			method: "PATCH",
+			body: JSON.stringify({
+				plan: {
+					goals: [{ planId: "a", title: "A", spec: "spec a", workflowId: "feature" }],
+					dependencies: [],
+					rationale: "",
+					estimatedConcurrency: 1,
+					version: 1,
+				},
+			}),
+		});
+		await apiFetch(`/api/missions/${m.id}/plan/freeze?force=1`, { method: "POST" });
+
+		const beforeRestart = await (await apiFetch(`/api/missions/${m.id}`)).json();
+		expect(beforeRestart.mission.planFrozenAt).toBeTruthy();
+		expect(beforeRestart.plan).toBeTruthy();
+
+		const restart = await apiFetch(`/api/missions/${m.id}/plan/restart`, { method: "POST" });
+		expect(restart.status).toBe(200);
+		const body = await restart.json();
+		expect(body.ok).toBe(true);
+
+		const afterRestart = await (await apiFetch(`/api/missions/${m.id}`)).json();
+		expect(afterRestart.mission.planFrozenAt).toBeFalsy();
+		expect(afterRestart.mission.plan).toBeFalsy();
+		expect(afterRestart.plan).toBeNull();
+		expect(afterRestart.mission.state).toBe("planning");
+
+		// spawn-child must now be blocked because the plan is gone.
+		const spawn = await apiFetch(`/api/missions/${m.id}/spawn-child/a`, { method: "POST" });
+		expect(spawn.status).toBe(409);
+	});
+
+	test("plan/restart returns 404 on unknown mission", async () => {
+		const restart = await apiFetch(`/api/missions/00000000-0000-0000-0000-000000000000/plan/restart`, { method: "POST" });
+		expect(restart.status).toBe(404);
+	});
+
 	test("pause + resume lifecycle", async () => {
 		const m = await createMission();
 		const pause = await apiFetch(`/api/missions/${m.id}/pause`, {

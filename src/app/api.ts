@@ -1618,8 +1618,8 @@ export async function refreshMissions(): Promise<void> {
 		const data = await res.json();
 		const incoming: PersistedMission[] = data.missions ?? data ?? [];
 		if (!Array.isArray(incoming)) return;
-		const prevKey = state.missions.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.title || "")).join(",");
-		const nextKey = incoming.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.title || "")).join(",");
+		const prevKey = state.missions.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.title || "") + (m.commanderSessionId || "")).join(",");
+		const nextKey = incoming.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.title || "") + (m.commanderSessionId || "")).join(",");
 		if (prevKey !== nextKey) {
 			state.missions = incoming;
 			renderApp();
@@ -1667,6 +1667,23 @@ export async function patchMissionPlan(id: string, plan: MissionPlan, opts?: { f
 		});
 		return res.ok;
 	} catch { return false; }
+}
+
+export async function restartMissionPlanning(id: string): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}/plan/restart`, { method: "POST" });
+		if (!res.ok) {
+			let errMsg = `HTTP ${res.status}`;
+			try {
+				const data = await res.json();
+				if (data && typeof data.error === "string") errMsg = data.error;
+			} catch { /* ignore */ }
+			return { ok: false, error: errMsg };
+		}
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
 }
 
 export async function pauseMission(id: string, reason?: string): Promise<boolean> {
