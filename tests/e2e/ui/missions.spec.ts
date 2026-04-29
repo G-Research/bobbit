@@ -367,6 +367,8 @@ test.describe("Mission UI (mocked backend)", () => {
 		} finally {
 			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
 		}
+	});
+
 	test("Restart planning button POSTs /plan/restart and reloads detail @smoke", async ({ page }) => {
 		let restartCount = 0;
 		const mission = FAKE_MISSION;
