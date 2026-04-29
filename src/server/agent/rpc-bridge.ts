@@ -134,11 +134,23 @@ export class RpcBridge {
 		// For sessions that don't go through tool activation (no role, fallback path),
 		// force-load shell/extension.ts so bash/bash_bg remain available.
 		if (!args.includes("--no-extensions")) {
-			const bashExtPath = this.options.toolManager
-				? this.options.toolManager.getExtensionPath("shell", "extension.ts")
-				: path.join(TOOLS_DIR, "shell", "extension.ts");
-			if (!args.includes(bashExtPath)) {
+			let bashExtPath: string | undefined;
+			if (this.options.toolManager) {
+				bashExtPath = this.options.toolManager.getExtensionPath("shell", "extension.ts");
+			} else {
+				// Manual cascade: TOOLS_DIR (config overlay) → BUILTIN_TOOLS_DIR (defaults).
+				// Mirrors ToolManager.getToolGroupBaseDir(); needed for sub-agents that
+				// construct an RpcBridge without a ToolManager (e.g. mission-gate llm-review).
+				const candidates = [
+					path.join(TOOLS_DIR, "shell", "extension.ts"),
+					path.join(BUILTIN_TOOLS_DIR, "shell", "extension.ts"),
+				];
+				bashExtPath = candidates.find(p => fs.existsSync(p));
+			}
+			if (bashExtPath && !args.includes(bashExtPath)) {
 				args.push("--extension", bashExtPath);
+			} else if (!bashExtPath) {
+				console.warn("[rpc-bridge] shell/extension.ts not found in TOOLS_DIR or BUILTIN_TOOLS_DIR — bash/bash_bg unavailable in this sub-agent");
 			}
 		}
 
