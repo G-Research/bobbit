@@ -402,6 +402,63 @@ Troubleshooting checklist:
 4. If Test passes but reviewers still abort: check the goal dashboard gate verification output — `applyReviewModelOverrides` (`src/server/agent/review-model-override.ts`) logs at `console.error` with the pref, normalized id, and the mismatched model id the agent actually reports.
 5. For naming-model issues under an AI Gateway: confirm the gateway exposes at least one Claude model (any tier); otherwise title generation falls back to direct `api.anthropic.com` (see `pickFallbackAigwNamingModel` in `title-generator.ts`).
 
+## Mission orchestration
+
+Diagnostic checklists for the mission orchestration feature. Architecture summary in [docs/internals.md — Mission orchestration](internals.md#mission-orchestration); operational reference in [docs/missions.md](missions.md).
+
+### Stuck mission scheduler
+
+Symptom: a mission is `in-progress` and child goals are merging, but no further progress — the next ready node never spawns, or the Commander stays idle past the `execution` gate.
+
+1. **Verify scheduler listeners are wired.** `gateStore.onStatusChange(ownerKind, ownerId, gateId)` and `goalStore.onIndexUpdate` must call `MissionScheduler.tickMission(missionId)` for any change touching this mission's children. The hook lives in `src/server/agent/project-context.ts`. If a child's `ready-to-merge` gate transitions to `passed` but `mission_child_merged` never broadcasts, the listener is broken.
+2. **Confirm the 60-second safety net is running.** `MissionScheduler.start()` schedules `tickAll()` every 60s as a backstop for missed events. If you suspect a missed event, call `tickMission(missionId)` directly via a test or admin endpoint.
+3. **Check `mission.replanCount`.** At `MAX_REPLANS = 3` (constant in `mission-store.ts`), the mission auto-pauses and Commander goes idle. `GET /api/missions/:id` shows the count.
+4. **Check `failedAttempts` per plan node.** At `>= 2` (`maxFailedAttempts` in `MissionScheduler`), the mission auto-pauses with `pausedReason` set. Resume requires user action.
+5. **Check `mission.state`.** `paused`, `complete`, `shelved`, `failed` all skip the tick body. Only `in-progress` ticks actually do work.
+
+### Mission integration branch falls behind master
+
+Symptom: `mission-pr` verification fails on `git merge-base --is-ancestor origin/master <integration_branch>`.
+
+1. **Try forward-merge.** `MissionGit.forwardMergeMaster` is invoked unconditionally by `mission-pr`'s first verify step and periodically from `MissionScheduler.tickMission`. If both keep failing, there's a conflict.
+2. **On conflict, the scheduler soft-fails and continues.** No auto-resolution. Resolve manually in the integration worktree:
+   ```bash
+   cd <integration_worktree>
+   git fetch origin master
+   git merge origin/master   # resolve conflicts, commit
+   ```
+   Then re-signal `mission-pr`.
+3. **Watch for `[scheduler] forwardMergeMaster conflict for mission ...`** log lines — these confirm the periodic forward-merge is running but blocked.
+
+### Child goal branched off master instead of integration branch
+
+Symptom: a child's branch history doesn't include the integration branch tip. Detect with:
+
+```bash
+git log <child-branch> --oneline | grep <integration-branch-tip>
+```
+
+Returning empty means the spawn was rooted incorrectly.
+
+1. **`MissionManager.spawnChild` must resolve `MissionGit.childStartPoint(integrationWorktree)`** (HEAD SHA of integration branch right now) and pass it as `baseBranch` to `GoalManager.createGoal`. SHA pinning prevents races between parallel spawns.
+2. **Watch for `[mission-manager] childStartPoint failed; falling back to integration branch name`** in logs. The fallback uses the branch name instead of the SHA — it's safe when the branch exists locally but breaks if the resolution path differs.
+3. **`GoalManager.createGoal` must thread `baseBranch` to `createWorktree(repoPath, branch, { startPoint: baseBranch })`.** If the option is ignored, the worktree branches from `origin/master` regardless. Verify the `_doSetupWorktree` call site forwards the option.
+4. The misbranched child cannot be "rebased back" cleanly while preserving its goal id — archive it and let the scheduler respawn the plan node.
+
+### Plan won't freeze after `goal-plan` passes
+
+Symptom: user approves the plan in the dashboard, the `goal-plan` gate transitions to `passed`, but `mission.planFrozenAt` is still undefined and the next `mission_goal_spawn` returns `409 "Plan not approved"`.
+
+1. **The verification harness has a post-pass hook** that calls `MissionManager.freezePlan(missionId)` when a passing signal lands on `gateId === "goal-plan"` for a mission owner. If the hook is missing or short-circuits, the freeze flag never sets.
+2. **Inspect `mission.planFrozenAt`** via `GET /api/missions/:id`. If `null` despite a passed `goal-plan` gate, this is the bug.
+3. **Manual recovery:**
+   ```bash
+   TOKEN=$(cat .bobbit/state/token); GW=$(cat .bobbit/state/gateway-url)
+   curl -sk -X POST "$GW/api/missions/<id>/plan/freeze" -H "Authorization: Bearer $TOKEN"
+   ```
+   The endpoint refuses unless `goal-plan` is actually `passed` (or `?force=1` and `BOBBIT_E2E=1`).
+4. **Don't lean on `?force=1`** — it's gated to test mode. Production deployments must fix the harness wiring.
+
 ## Role model override not applied
 
 Symptom: a role has been customized with a `model` (and/or `thinkingLevel`) on the **Model** tab, but sessions running under that role still bind to `default.sessionModel` (or, for verification reviewers, to `default.reviewModel`).

@@ -1584,6 +1584,81 @@ The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionI
 
 See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.
 
+## Mission orchestration
+
+Missions are a top-level entity that coordinates 5–20 interconnected child goals through a long-lived **Commander** agent. Each mission owns a markdown spec, a DAG plan, and an integration git branch into which child goals merge — the only PR a mission raises is the integration branch → master, never per-child PRs.
+
+Full operational reference: [docs/missions.md](missions.md). Design rationale and phased delivery plan: [docs/design/mission-orchestration.md](design/mission-orchestration.md).
+
+### Where missions sit
+
+```
+Project
+  └─ Mission (PersistedMission, project-scoped)
+      ├─ MissionPlan (DAG of PlannedGoal nodes)
+      ├─ Integration branch  (mission/<slug>-<id8>) + worktree
+      ├─ Commander session   (long-lived; owns plan & merges)
+      └─ Child goals         (real PersistedGoal entries with missionId set)
+           └─ each runs its own workflow, team, gates
+```
+
+Standalone goals (no `missionId`) continue to work unchanged. The mission feature is purely additive.
+
+### Data model
+
+- `PersistedMission` lives in `<project>/.bobbit/state/missions.json`. Owns lifecycle state, divergence policy, concurrency cap, integration branch metadata, and the snapshotted workflow.
+- `MissionPlan` (embedded in the mission record) carries `goals: PlannedGoal[]` (nodes) and `dependencies: PlanEdge[]` (edges). Each `PlannedGoal.planId` is a ULID so plans render deterministically across re-plans.
+- `PersistedGoal` gains optional `missionId` and `missionPlanId`. Existing goals load with both `undefined` (lazy-compatible).
+
+### Gate-store generalisation
+
+`gate-store.ts` is keyed by `(ownerKind: "goal" | "mission", ownerId)` rather than just `goalId`. Records on disk without `ownerKind` are normalised to `("goal", goalId)` on read; writes upgrade lazily. The legacy `goalId` field is retained as a backward-compat alias for goal owners. The verification harness routes verify steps to the right cwd/branch/spec via `verifyForOwner(kind, id, ...)` — for missions, the cwd is the integration worktree and `{{branch}}` resolves to the integration branch. New template variables: `{{mission_id}}`, `{{integration_branch}}`.
+
+### Scheduler
+
+`MissionScheduler` (`src/server/agent/mission-scheduler.ts`) is event-driven with a 60-second polling safety net. It subscribes to `gateStore.onStatusChange` and `goalStore.onIndexUpdate` (wired in `project-context.ts`) and reacts by:
+
+1. mirroring child goal `state` into plan nodes,
+2. auto-merging children whose `ready-to-merge` gate has passed,
+3. spawning ready nodes up to `maxConcurrentGoals - inFlight` (default 3, max 8),
+4. forward-merging master into the integration branch periodically (best-effort, soft-fails on conflict),
+5. waking Commander when `execution` is unsigned but every plan node is merged.
+
+A per-mission async lock (`Map<missionId, Promise<void>>`) serialises ticks per mission while allowing different missions to tick in parallel. All actions are idempotent — spawn keyed on `(missionId, planId)`, merge detected via `git merge-base --is-ancestor`.
+
+### Branching strategy
+
+The integration branch (`mission/<slug>-<id8>`) is created off `origin/<master>` at mission creation. Child goals branch off the **HEAD SHA of the integration branch at spawn time** (`MissionGit.childStartPoint`), not the branch name — SHA pinning prevents races between concurrent spawns. Children merge back via `git merge --no-ff` so each child is a discrete merge commit. The integration branch is **not pushed to origin** until the `mission-pr` gate runs, keeping planning iterations local.
+
+### Bounded autonomy
+
+The Commander is heavily constrained by server-enforced rules, not by system-prompt politeness:
+
+- **Plan freeze.** After `goal-plan` passes, `MissionManager.freezePlan` sets `mission.planFrozenAt`. `mission_plan_propose` and `PATCH /api/missions/:id/plan` reject further edits with 409 unless the mission is paused AND a `replanReason` is supplied.
+- **Replan cap.** `mission.replanCount` increments on every successful post-freeze re-plan; at `MAX_REPLANS = 3` (`mission-store.ts`), the mission auto-pauses.
+- **Concurrency cap.** Server-enforced; `mission_goal_spawn` is a no-op past the cap.
+- **No master pushes.** The Commander role's tool policies prohibit it; the mission-pr gate is the only path that writes to origin.
+
+Merge conflicts auto-pause via the `failedAttempts` mechanism (`maxFailedAttempts = 2` in `MissionScheduler`) rather than auto-resolving — honouring the strict-default divergence policy.
+
+### Key modules
+
+| Module | Responsibility |
+|---|---|
+| `mission-store.ts` | JSON persistence, `MAX_REPLANS`, plan validation, `ulid()` |
+| `mission-manager.ts` | Lifecycle, `proposePlan` (with freeze gating), `freezePlan`, `spawnChild`, `integrateChild`, `forwardMergeMaster` |
+| `mission-scheduler.ts` | Event-driven tick loop, ready-set computation, concurrency cap, auto-retry, auto-pause |
+| `mission-git.ts` | Integration branch creation, `childStartPoint` SHA pinning, `mergeChild` (`--no-ff`), `forwardMergeMaster`, `pushIntegration` |
+| `gate-store.ts` | Owner-kind generalisation — used by both goal and mission gates |
+| `verification-harness.ts` / `verification-logic.ts` | Owner-aware verify dispatch + new template variables |
+| `defaults/workflows/mission.yaml` | Six-gate workflow: charter → plan-review → goal-plan → execution → integration → mission-pr |
+| `defaults/roles/commander.yaml` | Commander role + system prompt template (phase-aware) |
+| `defaults/tools/mission/` | `mission_plan_propose`, `mission_goal_spawn`, `mission_merge_child`, `mission_goal_status`, `mission_status`, `mission_signal` |
+| `defaults/helpers/check-mission-execution.mjs` | `execution` gate verifier |
+| `src/app/mission-dashboard.ts` | `#/mission/:id` route — header, DAG SVG, gates panel, child grid, embedded Commander chat |
+
+Debugging checklists for stuck schedulers, branch hygiene, and freeze hooks live in [docs/debugging.md — Mission orchestration](debugging.md#mission-orchestration).
+
 ### Goal re-attempt flow
 
 1. User clicks "Re-attempt" in goal dashboard or sidebar
