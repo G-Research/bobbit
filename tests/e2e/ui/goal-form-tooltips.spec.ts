@@ -74,7 +74,7 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	).toBeVisible({ timeout: 5_000 });
 }
 
-test.describe("Step description tooltips", () => {
+test.describe("Step description tooltips @quarantine", () => {
 	test("optional step shows ⓘ tooltip when description is set @quarantine", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 

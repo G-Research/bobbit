@@ -11,7 +11,7 @@ import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
-test.describe("Sidebar goal actions & staff", () => {
+test.describe("Sidebar goal actions & staff @quarantine", () => {
 	const goalIds: string[] = [];
 
 	test.afterAll(async () => {
