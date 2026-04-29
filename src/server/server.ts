@@ -1155,6 +1155,33 @@ export function createGateway(config: GatewayConfig) {
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
+			// One-shot backfill: legacy commander sessions persisted before the
+			// missionId field existed need their missionId rewired so the
+			// BOBBIT_MISSION_ID env var is restored on the next agent (re)spawn.
+			// Idempotent: only writes when the session has role=="commander" and
+			// missionId is currently undefined.
+			try {
+				for (const ctx of projectContextManager.all()) {
+					const missions = ctx.missionStore.getAll();
+					if (missions.length === 0) continue;
+					const byCommanderId = new Map<string, string>();
+					for (const m of missions) {
+						if (m.commanderSessionId) byCommanderId.set(m.commanderSessionId, m.id);
+					}
+					if (byCommanderId.size === 0) continue;
+					for (const ps of ctx.sessionStore.getAll()) {
+						if (ps.role !== "commander") continue;
+						if (ps.missionId) continue;
+						const mid = byCommanderId.get(ps.id);
+						if (!mid) continue;
+						ctx.sessionStore.update(ps.id, { missionId: mid });
+						console.log(`[server] Backfilled missionId=${mid} on commander session ${ps.id}`);
+					}
+				}
+			} catch (err) {
+				console.warn("[server] Mission/commander backfill failed (non-fatal):", err);
+			}
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 
