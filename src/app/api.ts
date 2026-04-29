@@ -1695,6 +1695,34 @@ export async function fetchMissionGates(id: string): Promise<GateState[]> {
 	} catch { return []; }
 }
 
+export async function signalMissionGate(
+	missionId: string,
+	gateId: string,
+	body?: { content?: string; metadata?: Record<string, string> },
+): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await gatewayFetch(
+			`/api/missions/${missionId}/gates/${gateId}/signal`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body ?? {}),
+			},
+		);
+		if (!res.ok) {
+			let errMsg = `HTTP ${res.status}`;
+			try {
+				const data = await res.json();
+				if (data && typeof data.error === "string") errMsg = data.error;
+			} catch { /* ignore */ }
+			return { ok: false, error: errMsg };
+		}
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
 export async function spawnMissionChild(missionId: string, planId: string): Promise<{ goalId: string; branch?: string; alreadySpawned?: boolean } | null> {
 	try {
 		const res = await gatewayFetch(`/api/missions/${missionId}/spawn-child/${planId}`, {

@@ -141,6 +141,86 @@ test.describe("Mission UI (mocked backend)", () => {
 		await expect(page.getByTestId("mission-title")).toHaveText("Build unified-memory system");
 	});
 
+	test("plan approval signals goal-plan gate @smoke", async ({ page }) => {
+		let signalRequestBody: string | null = null;
+		let signalRequestCount = 0;
+		const mission = FAKE_MISSION;
+
+		const handler = async (
+			route: import("@playwright/test").Route,
+			request: import("@playwright/test").Request,
+		) => {
+			const url = new URL(request.url());
+			const path = url.pathname;
+			const method = request.method();
+
+			if (path === `/api/missions/${MISSION_ID}/gates/goal-plan/signal` && method === "POST") {
+				signalRequestCount++;
+				signalRequestBody = request.postData();
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ ok: true }),
+				});
+				return;
+			}
+			if (path === "/api/missions" && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({ missions: [mission] }),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({
+						mission, plan: mission.plan, children: [], gates: [],
+					}),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}/gates` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({
+						gates: [
+							{ gateId: "charter", name: "Mission Charter", status: "passed" },
+							{ gateId: "plan-review", name: "Plan Review", status: "passed" },
+							{ gateId: "goal-plan", name: "Goal Plan Approval", status: "pending" },
+						],
+					}),
+				});
+				return;
+			}
+			await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+		};
+		await page.route("**/api/missions", handler);
+		await page.route("**/api/missions?**", handler);
+		await page.route("**/api/missions/**", handler);
+
+		await openApp(page);
+		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
+
+		await page.getByTestId("mission-tab-plan").click();
+		const btn = page.getByTestId("mission-approve-plan-btn");
+		await expect(btn).toBeVisible();
+		await expect(btn).toBeEnabled();
+		await btn.click();
+
+		const toast = page.getByTestId("mission-toast");
+		await expect(toast).toBeVisible({ timeout: 5_000 });
+		await expect(toast).toHaveAttribute("data-kind", "success");
+
+		expect(signalRequestCount).toBeGreaterThanOrEqual(1);
+		expect(signalRequestBody).not.toBeNull();
+		const parsed = JSON.parse(signalRequestBody!);
+		expect(typeof parsed.content).toBe("string");
+		expect(parsed.content).toContain("Approved Plan");
+		expect(parsed.content).toContain("Schema migration");
+	});
+
 	test("renders error state for unknown mission id", async ({ page }) => {
 		// Route returns 404 for the detail endpoint, mission not in list.
 		const handler = async (route: import("@playwright/test").Route) => {
