@@ -37,6 +37,7 @@ import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
+import type { ToolManager } from "./tool-manager.js";
 import { getVerificationShell } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
@@ -809,6 +810,14 @@ export class VerificationHarness {
 
 	private configCascade?: import("./config-cascade.js").ConfigCascade;
 
+	/**
+	 * Optional ToolManager used to resolve extension paths via the canonical
+	 * config-cascade order when this harness spawns sub-agent RpcBridges (e.g.
+	 * the legacy direct llm-review path). When unset, RpcBridge falls back to
+	 * its own TOOLS_DIR → BUILTIN_TOOLS_DIR cascade.
+	 */
+	private toolManager?: ToolManager;
+
 	constructor(
 		stateDir: string,
 		/** @deprecated Resolve per-goal via projectContextManager instead. */
@@ -821,11 +830,17 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
+		/**
+		 * Optional ToolManager. Threaded into RpcBridge sub-agents so they
+		 * resolve extension paths via the same cascade as the main session.
+		 */
+		toolManager?: ToolManager,
 	) {
 		this.configCascade = configCascade;
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
+		this.toolManager = toolManager;
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
 		const persisted = this._loadActive();
@@ -2241,6 +2256,7 @@ export class VerificationHarness {
 			],
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
+		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
 		const rpc = new RpcBridge(bridgeOptions);
 		let unregisterSession: (() => void) | undefined;
