@@ -106,16 +106,22 @@ export function gitCwd(): string {
 export function readE2EToken(): string {
 	const p = join(bobbitDir(), "state", "token");
 	let lastErr: unknown;
-	for (let attempt = 0; attempt < 10; attempt++) {
+	// Up to 5s of retries with linearly increasing backoff to absorb Windows
+	// AV/indexer locks and deferred writes under heavy parallel load.
+	// 30 attempts × ~17ms avg = ~500ms; total budget bounded at 5s.
+	const startedAt = Date.now();
+	while (Date.now() - startedAt < 5000) {
 		try {
-			return readFileSync(p, "utf-8").trim();
+			const content = readFileSync(p, "utf-8").trim();
+			if (content.length >= 32) return content;
+			lastErr = new Error(`token file too short: ${content.length} chars`);
 		} catch (err: any) {
 			lastErr = err;
-			if (err?.code !== "ENOENT") throw err;
-			// Busy-wait briefly — 10×50ms = 500ms worst case.
-			const until = Date.now() + 50;
-			while (Date.now() < until) { /* spin */ }
+			if (err?.code !== "ENOENT" && err?.code !== "EBUSY" && err?.code !== "EPERM") throw err;
 		}
+		const sleepMs = 25;
+		const until = Date.now() + sleepMs;
+		while (Date.now() < until) { /* spin */ }
 	}
 	throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
