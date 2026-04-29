@@ -6,7 +6,10 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyWorktrees } from "../src/server/agent/worktree-sweeper.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { classifyWorktrees, sweepOrphanedWorktrees } from "../src/server/agent/worktree-sweeper.ts";
 
 const REPO = "/tmp/repo";
 
@@ -99,5 +102,27 @@ describe("worktree-sweeper.classifyWorktrees", () => {
 		});
 		assert.equal(out.orphan.length, 1);
 		assert.equal(out.active.length, 0);
+	});
+});
+
+describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
+	it("skips a project whose rootPath has no .git (does not walk upward)", async () => {
+		// Regression: when rootPath is a directory inside another git repo,
+		// `git worktree list` walks upward and returns the parent's worktrees.
+		// The sweeper would then try to clean unrelated worktrees — catastrophic.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sweeper-no-git-"));
+		try {
+			const result = await sweepOrphanedWorktrees({
+				projects: [{ id: "p1", rootPath: tmp }],
+				goals: [],
+				sessions: [],
+				staff: [],
+			});
+			assert.equal(result.cleaned, 0, "must not clean any worktrees from a non-repo rootPath");
+			assert.equal(result.repaired, 0);
+			assert.equal(result.reclaimed, 0);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 });
