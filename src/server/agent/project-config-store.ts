@@ -3,18 +3,40 @@ import path from "node:path";
 import yaml from "yaml";
 
 // ── Component yaml normalization ────────────────────────────
+// SECURITY: `component.repo` and `component.relativePath` are joined onto
+// `project.rootPath` to compute on-disk locations. Reject `..` segments and
+// absolute paths to prevent path traversal that would let an authenticated
+// caller create or clobber files outside the project's declared rootPath.
+export function isSafeRelPath(p: string): boolean {
+	if (path.isAbsolute(p)) return false;
+	if (p.includes("\0")) return false;
+	const parts = p.split(/[\\/]+/).filter(s => s.length > 0);
+	return !parts.some(seg => seg === "..");
+}
+
 function normalizeComponents(arr: unknown[]): Component[] {
 	const out: Component[] = [];
 	for (const raw of arr) {
 		if (!raw || typeof raw !== "object") continue;
 		const r = raw as Record<string, unknown>;
 		if (typeof r.name !== "string" || !r.name) continue;
+		const rawRepo = typeof r.repo === "string" && r.repo ? r.repo : ".";
+		if (rawRepo !== "." && !isSafeRelPath(rawRepo)) {
+			console.warn(`[project-config-store] Rejecting component "${r.name}": unsafe repo path "${rawRepo}"`);
+			continue;
+		}
 		const c: Component = {
 			name: r.name,
-			repo: typeof r.repo === "string" && r.repo ? r.repo : ".",
+			repo: rawRepo,
 		};
 		const rel = r.relative_path ?? r.relativePath;
-		if (typeof rel === "string" && rel) c.relativePath = rel;
+		if (typeof rel === "string" && rel) {
+			if (!isSafeRelPath(rel)) {
+				console.warn(`[project-config-store] Rejecting component "${r.name}": unsafe relative_path "${rel}"`);
+				continue;
+			}
+			c.relativePath = rel;
+		}
 		const hook = r.worktree_setup_command ?? r.worktreeSetupCommand;
 		if (typeof hook === "string" && hook) c.worktreeSetupCommand = hook;
 		if (r.commands && typeof r.commands === "object" && !Array.isArray(r.commands)) {
