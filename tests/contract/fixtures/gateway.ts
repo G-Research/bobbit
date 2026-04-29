@@ -129,6 +129,27 @@ export async function createTestGateway(opts?: {
 		const port = await gw.start();
 		baseURL = `http://127.0.0.1:${port}`;
 		wsBase = `ws://127.0.0.1:${port}`;
+		// Register a default project and seed inline test workflows so
+		// `createGoal({ workflowId: "test-fast" | "bug-fix" | ... })`
+		// resolves. Builtin workflow YAMLs no longer exist (follow-up A
+		// of the multi-repo & components goal).
+		try {
+			const createRes = await fetch(`${baseURL}/api/projects`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+				},
+				body: JSON.stringify({ name: "default", rootPath: dir, upsert: true }),
+			});
+			if (createRes.ok) {
+				const project = await createRes.json() as { id?: string };
+				if (project?.id) {
+					const { seedTestWorkflows } = await import("../../e2e/seed-workflows.js");
+					await seedTestWorkflows({ baseURL, token, projectId: project.id });
+				}
+			}
+		} catch { /* best-effort */ }
 	}
 
 	async function doFetch(path: string, opts: { method?: string; body?: any } = {}): Promise<{ status: number; body: any }> {

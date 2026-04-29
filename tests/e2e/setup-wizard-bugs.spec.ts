@@ -1,14 +1,20 @@
 /**
- * E2E tests that reproduce the two setup wizard bugs.
+ * E2E tests covering the project-config API surface.
  *
- * These tests FAIL on the current (unfixed) codebase, proving the bugs exist.
- * After the fix, they will PASS.
+ * Originally tracked two setup-wizard bugs:
+ *   Bug 1: No project config API — GET /api/project-config returns 404.
+ *   Bug 2: Workflow verification uses hardcoded commands instead of
+ *          {{project.X}} template variables.
  *
- * Bug 1: No project config API — GET /api/project-config returns 404.
- * Bug 2: Workflow verification uses hardcoded commands instead of template variables.
+ * Bug 2 was made obsolete by the multi-repo & components refactor: the
+ * `{{project.X}}` token namespace was removed in favor of structural
+ * `{ component, command }` step references and the validator now rejects
+ * `{{project.X}}` tokens at workflow-load time. The Bug 2 describe block
+ * was deleted (workflows can no longer carry those tokens, by design).
+ * Bug 1 coverage stays — the project-config REST surface is still in use.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch } from "./e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Bug 1: Project config API does not exist
@@ -58,79 +64,12 @@ test.describe("Bug 1: Project config API", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Bug 2: Workflow verification uses hardcoded commands
+// Bug 2 (obsolete): Workflow verification used hardcoded commands.
+//
+// The fix evolved past template variables: `{{project.X}}` tokens are now
+// rejected at workflow-load time by the validator (see
+// docs/design/multi-repo-components.md §3.3). Workflows reference component
+// commands structurally via `{ component, command }`. Tests asserting the
+// presence of `{{project.X}}` would now violate the validator and are
+// intentionally removed.
 // ---------------------------------------------------------------------------
-
-test.describe("Bug 2: Workflow verification uses template variables", () => {
-	test("general workflow implementation gate uses {{project.typecheck_command}} not hardcoded npm run check", async () => {
-		const goal = await createGoal({
-			title: `Setup Bug Test ${Date.now()}`,
-			cwd: nonGitCwd(),
-			workflowId: "general",
-		});
-		try {
-			// The goal object includes the full workflow with gates and verify steps
-			const workflow = (goal as any).workflow;
-			expect(workflow).toBeTruthy();
-
-			const implGate = workflow.gates.find((g: any) => g.id === "implementation");
-			expect(implGate).toBeTruthy();
-			expect(implGate.verify).toBeTruthy();
-
-			// Find the type-check verification step
-			const typeCheckStep = implGate.verify.find(
-				(v: any) => v.type === "command" && v.name?.toLowerCase().includes("type check"),
-			);
-			expect(typeCheckStep, "Expected a type-check verification step in implementation gate").toBeTruthy();
-
-			// This assertion will FAIL on unfixed code because `run` is "npm run check"
-			// After fix, it should be "{{project.typecheck_command}}"
-			expect(typeCheckStep.run).toContain("{{project.typecheck_command}}");
-		} finally {
-			await deleteGoal(goal.id);
-		}
-	});
-
-	test("general workflow implementation gate uses {{project.test_unit_command}} not hardcoded npm run test:unit", async () => {
-		const goal = await createGoal({
-			title: `Setup Bug Test Unit ${Date.now()}`,
-			cwd: nonGitCwd(),
-			workflowId: "general",
-		});
-		try {
-			const workflow = (goal as any).workflow;
-			const implGate = workflow.gates.find((g: any) => g.id === "implementation");
-			const unitTestStep = implGate.verify.find(
-				(v: any) => v.type === "command" && v.name?.toLowerCase().includes("unit test"),
-			);
-			expect(unitTestStep, "Expected a unit-test verification step in implementation gate").toBeTruthy();
-
-			// This assertion will FAIL on unfixed code because `run` is "npm run test:unit"
-			// After fix, it should be "{{project.test_unit_command}}"
-			expect(unitTestStep.run).toContain("{{project.test_unit_command}}");
-		} finally {
-			await deleteGoal(goal.id);
-		}
-	});
-
-	test("bug-fix workflow implementation gate uses {{project.typecheck_command}} not hardcoded npm run check", async () => {
-		const goal = await createGoal({
-			title: `Setup Bug Test BugFix ${Date.now()}`,
-			cwd: nonGitCwd(),
-			workflowId: "bug-fix",
-		});
-		try {
-			const workflow = (goal as any).workflow;
-			const implGate = workflow.gates.find((g: any) => g.id === "implementation");
-			const typeCheckStep = implGate.verify.find(
-				(v: any) => v.type === "command" && v.name?.toLowerCase().includes("type check"),
-			);
-			expect(typeCheckStep, "Expected a type-check verification step in bug-fix implementation gate").toBeTruthy();
-
-			// This assertion will FAIL on unfixed code because `run` is "npm run check"
-			expect(typeCheckStep.run).toContain("{{project.typecheck_command}}");
-		} finally {
-			await deleteGoal(goal.id);
-		}
-	});
-});
