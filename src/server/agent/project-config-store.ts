@@ -350,7 +350,7 @@ export class ProjectConfigStore {
 		const all = this.getWithDefaults();
 		if (!all.qa_start_command) return null;
 		return {
-			buildCommand: all.qa_build_command || all.build_command || "npm run build",
+			buildCommand: all.qa_build_command || this.firstComponentBuildCommand() || all.build_command || "npm run build",
 			startCommand: all.qa_start_command,
 			healthCheck: all.qa_health_check || "",
 			browserEntry: all.qa_browser_entry || "",
@@ -358,5 +358,17 @@ export class ProjectConfigStore {
 			maxDurationMinutes: parseInt(all.qa_max_duration_minutes || "10", 10),
 			maxScenarios: parseInt(all.qa_max_scenarios || "5", 10),
 		};
+	}
+
+	/** First component-defined `build` command, falling back across components in
+	 *  declared order. Returns undefined if no component declares a build command.
+	 *  Used as the modern fallback for QA `buildCommand` after Follow-up A moved
+	 *  legacy top-level `build_command` into components. */
+	private firstComponentBuildCommand(): string | undefined {
+		for (const c of this.components) {
+			const v = c.commands?.build;
+			if (typeof v === "string" && v.length > 0) return v;
+		}
+		return undefined;
 	}
 }

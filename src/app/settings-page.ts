@@ -2264,12 +2264,19 @@ function renderProjectScopeTab(projectId: string) {
 	const resolved = cached.resolved;
 	const raw = cached.raw;
 
-	// Keys to show in the Commands & Sandbox tab
+	// Keys to show in the Commands & Sandbox tab.
+	// Legacy top-level *_command keys (build_command, test_command, etc.) are deliberately
+	// hidden after the multi-repo migration — the per-project Components tab is the
+	// canonical editor for component build/test commands. Showing them here would create
+	// two competing UIs. Migration auto-folds them into components[0].commands.{build,test,...}.
 	const HIDDEN_KEYS = new Set([
 		"default_thinking_level", "sandbox", "sandbox_image",
 		"sandbox_tokens", "sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts",
 		"worktree_pool_size",
 		"config_directories", "skill_directories",
+		// Legacy command keys — use the Components tab instead
+		"build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command",
+		"worktree_setup_command",
 		// Rendered in dedicated sections below
 		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
 		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
@@ -2288,8 +2295,9 @@ function renderProjectScopeTab(projectId: string) {
 
 	return html`
 		<div class="flex flex-col gap-4">
-			<div class="flex flex-col gap-2">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
+			${commandKeys.length > 0 ? html`<div class="flex flex-col gap-2">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Other Commands</div>
+				<div class="text-xs text-muted-foreground">Build, test, and lint commands now live on each component — see the <strong>Components</strong> tab.</div>
 				${commandKeys.map((key) => {
 					const entry = resolved[key];
 					if (!entry) return "";
@@ -2320,7 +2328,7 @@ function renderProjectScopeTab(projectId: string) {
 						</div>
 					`;
 				})}
-			</div>
+			</div>` : ""}
 
 
 

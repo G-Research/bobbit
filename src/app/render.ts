@@ -1691,15 +1691,18 @@ function workflowPreviewPanel() {
 	`;
 }
 
-/** Editable field set rendered by projectProposalPanel's diff view. */
+/** Editable field set rendered by projectProposalPanel's diff view.
+ *  Legacy *_command keys remain in the list because back-compat proposal payloads
+ *  still emit them; the server folds them into the default component on accept.
+ *  The Components tab is the canonical editor for ongoing edits. */
 const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 	{ key: "name", label: "Project Name" },
-	{ key: "build_command", label: "Build Command" },
-	{ key: "test_command", label: "Test Command" },
-	{ key: "typecheck_command", label: "Type Check Command" },
-	{ key: "test_unit_command", label: "Unit Test Command" },
-	{ key: "test_e2e_command", label: "E2E Test Command" },
-	{ key: "worktree_setup_command", label: "Worktree Setup Command" },
+	{ key: "build_command", label: "Build Command (legacy)" },
+	{ key: "test_command", label: "Test Command (legacy)" },
+	{ key: "typecheck_command", label: "Type Check Command (legacy)" },
+	{ key: "test_unit_command", label: "Unit Test Command (legacy)" },
+	{ key: "test_e2e_command", label: "E2E Test Command (legacy)" },
+	{ key: "worktree_setup_command", label: "Worktree Setup Command (legacy)" },
 	{ key: "qa_start_command", label: "QA Start Command" },
 	{ key: "sandbox", label: "Sandbox" },
 	{ key: "session_model", label: "Session Model" },

@@ -2190,10 +2190,63 @@ async function handleApiRoute(
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 
 			// Extract structured fields (components / workflows) before flat-key validation.
-			const components = (body as Record<string, unknown>).components;
+			let components = (body as Record<string, unknown>).components;
 			const workflows = (body as Record<string, unknown>).workflows;
 			delete (body as Record<string, unknown>).components;
 			delete (body as Record<string, unknown>).workflows;
+
+			// Back-compat: legacy top-level *_command fields (build_command, test_command, etc.)
+			// are folded into components[0].commands when no `components` field was supplied.
+			// This keeps the propose_project tool, the project assistant, and the provisional
+			// promotion path working after Follow-up A removed the legacy schema. Existing
+			// components stored on disk are not modified — callers who want to update components
+			// must pass a fresh `components` array. See multi-repo follow-up Issue 2 / Issue 5.
+			if (!Array.isArray(components)) {
+				const LEGACY_KEY_MAP: Record<string, string> = {
+					build_command: "build",
+					test_command: "test",
+					typecheck_command: "check",
+					test_unit_command: "unit",
+					test_e2e_command: "e2e",
+				};
+				const legacyCmds: Record<string, string> = {};
+				for (const [legacyKey, newKey] of Object.entries(LEGACY_KEY_MAP)) {
+					const v = (body as Record<string, unknown>)[legacyKey];
+					if (typeof v === "string" && v.trim().length > 0) legacyCmds[newKey] = v.trim();
+				}
+				const legacyHook = (body as Record<string, unknown>).worktree_setup_command;
+				const hasAnyLegacy = Object.keys(legacyCmds).length > 0
+					|| (typeof legacyHook === "string" && legacyHook.trim().length > 0);
+				if (hasAnyLegacy) {
+					const existing = ctx.projectConfigStore.getComponents();
+					const defaultName = existing[0]?.name || ctx.project.name || "default";
+					const defaultRepo = existing[0]?.repo || ".";
+					const mergedCommands = { ...(existing[0]?.commands ?? {}), ...legacyCmds };
+					const defaultComponent: Record<string, unknown> = {
+						name: defaultName,
+						repo: defaultRepo,
+						commands: mergedCommands,
+					};
+					if (existing[0]?.relativePath) defaultComponent.relative_path = existing[0].relativePath;
+					const hookValue = (typeof legacyHook === "string" && legacyHook.trim().length > 0)
+						? legacyHook.trim()
+						: existing[0]?.worktreeSetupCommand;
+					if (hookValue) defaultComponent.worktree_setup_command = hookValue;
+					// Replace the first component but preserve any additional components on disk.
+					const remaining = existing.slice(1).map(c => {
+						const entry: Record<string, unknown> = { name: c.name, repo: c.repo };
+						if (c.relativePath) entry.relative_path = c.relativePath;
+						if (c.worktreeSetupCommand) entry.worktree_setup_command = c.worktreeSetupCommand;
+						if (c.commands) entry.commands = c.commands;
+						return entry;
+					});
+					components = [defaultComponent, ...remaining];
+				}
+				// Legacy flat keys remain in `body` so they are ALSO written as legacy
+				// flat-config entries (preserves GET round-trip for existing API clients
+				// that only know the legacy schema). The structural components mirror is
+				// the source of truth for workflow steps and the Components UI.
+			}
 
 			// Validate ALL flat keys before writing ANY (atomic: all-or-nothing)
 			for (const [key] of Object.entries(body)) {
