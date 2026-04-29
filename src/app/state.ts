@@ -25,6 +25,8 @@ export interface GatewaySession {
 	status: string;
 	createdAt: number;
 	lastActivity: number;
+	/** Epoch ms when the user last viewed this session. Server-side, shared across browsers. */
+	lastReadAt?: number;
 	clientCount: number;
 	isCompacting?: boolean;
 	isAborting?: boolean;
