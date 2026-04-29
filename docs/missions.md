@@ -366,17 +366,12 @@ All routes follow the standard project-resolution contract — `400 "projectId r
 
 ### Mission gates
 
-Reuse the same handlers as goal gates after resolving `ownerKind = "mission"`:
+Mission gates are stored in the same gate-store as goal gates (rekeyed by `ownerKind = "mission"`) and verified through `verifyForOwner`. The two REST surfaces below are the live mission-gate endpoints; richer inspection (single-gate detail, signal history, content fetch, cancel-verification) goes through `gate_inspect` / `gate_status` from agent tooling rather than direct REST.
 
-| Method | Path |
-|---|---|
-| `GET` | `/api/missions/:id/gates` |
-| `GET` | `/api/missions/:id/gates/:gateId` |
-| `POST` | `/api/missions/:id/gates/:gateId/signal` |
-| `GET` | `/api/missions/:id/gates/:gateId/signals` |
-| `GET` | `/api/missions/:id/gates/:gateId/inspect` |
-| `GET` | `/api/missions/:id/gates/:gateId/content` |
-| `POST` | `/api/missions/:id/gates/:gateId/cancel-verification` |
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/missions/:id/gates` | List all gates with status. |
+| `POST` | `/api/missions/:id/gates/:gateId/signal` | Body: `{ content?, metadata? }`. Auto-freezes plan when `goal-plan` transitions to `passed`. |
 
 ## WebSocket events
 
@@ -395,8 +390,7 @@ All additive — existing event names unchanged.
 | `mission_child_merge_conflict` | `{ missionId, planId, goalId, conflictFiles: string[] }` |
 | `mission_paused` | `{ missionId, reason }` |
 | `mission_resumed` | `{ missionId }` |
-| `mission_setup_complete` | `{ missionId, integrationBranch, integrationWorktree }` |
-| `mission_setup_error` | `{ missionId, error }` |
+| `mission_execution_ready` | `{ missionId }` (scheduler observed all children merged — `execution` gate is ready to signal) |
 
 `gate_*` events fire as today; their payloads carry `ownerKind` + `ownerId` so dashboards can route them.
 

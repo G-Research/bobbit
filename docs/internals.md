@@ -1616,7 +1616,7 @@ Standalone goals (no `missionId`) continue to work unchanged. The mission featur
 
 ### Scheduler
 
-`MissionScheduler` (`src/server/agent/mission-scheduler.ts`) is event-driven with a 60-second polling safety net. It subscribes to `gateStore.onStatusChange` and `goalStore.onIndexUpdate` (wired in `project-context.ts`) and reacts by:
+`MissionScheduler` (`src/server/agent/mission-scheduler.ts`) is event-driven with a periodic safety-net poll (default `tickIntervalMs = 60_000` ms in `MissionScheduler`). It subscribes to `gateStore.onStatusChange` and `goalStore.onIndexUpdate` (wired in `project-context.ts`) and reacts by:
 
 1. mirroring child goal `state` into plan nodes,
 2. auto-merging children whose `ready-to-merge` gate has passed,
