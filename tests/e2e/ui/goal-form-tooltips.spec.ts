@@ -75,7 +75,15 @@ async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").
 	).toBeVisible({ timeout: 5_000 });
 }
 
-test.describe("Step description tooltips", () => {
+// @quarantine — Goal-assistant cold-start times out (>45s textarea wait) under
+// heavy parallel browser load. Repro requires running the full browser project
+// in parallel; passes 3/3 in isolation. Symptom: `expect(textarea).toBeVisible({
+// timeout: 45_000 })` exceeds budget. Root cause is contention between concurrent
+// goal-assistant session creations across browser workers — needs structural fix
+// (worker-isolated workspaces / serialised assistant-session creation), not
+// timeout bumps. Tracked under phase-4 of E2E flakiness fix.
+// Expiry: 2026-06-30.
+test.describe("Step description tooltips @quarantine", () => {
 	test("optional step shows ⓘ tooltip when description is set", async ({ page }) => {
 		await openGoalFormWithFeatureWorkflow(page);
 
