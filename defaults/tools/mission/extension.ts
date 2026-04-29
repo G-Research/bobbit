@@ -155,7 +155,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			gate_id: Type.String({ description: "Mission gate id (e.g. charter, plan-review, goal-plan, execution, integration, mission-pr)" }),
 			content: Type.Optional(Type.String({ description: "Markdown content for content gates" })),
-			metadata: Type.Optional(Type.Any({ description: "Key-value metadata for the gate signal" })),
+			metadata: Type.Optional(Type.Record(Type.String(), Type.String(), {
+				description: "Flat key-value metadata for the gate signal (string \u2192 string). Pass an object literal, never a JSON string.",
+			})),
 		}),
 		async execute(_id, params) {
 			// TODO(mission-gate-owner): rewire to gateStore.signal({
