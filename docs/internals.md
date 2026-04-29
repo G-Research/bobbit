@@ -506,7 +506,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 ### Data flow
 
 1. **Server stores** `lastReadAt?: number` on `PersistedSession` (see `src/server/agent/session-store.ts`). It is included in `UpdatableSessionFields` so writes go through the normal `SessionStore.update()` path with disk persistence.
-2. **Server exposes** `lastReadAt` in every session payload — REST `GET /api/sessions`, `GET /api/sessions/:id`, the WS `messages` snapshot, and the archived-sessions list. The field is threaded through both the live and archived `SessionSummary` shapes in `session-manager.ts`.
+2. **Server exposes** `lastReadAt` in session-list payloads — `GET /api/sessions` (via `listSessions()`) and the archived-sessions list (via `listArchivedSessions()`). The field is threaded through both the live and archived `SessionSummary` shapes in `session-manager.ts`. The single-session `GET /api/sessions/:id` endpoint and the WS `messages` frame (which carries chat transcript, not session metadata) do not include `lastReadAt` — the client only needs it for the sidebar list, which is hydrated from the list endpoint.
 3. **Client computes unseen-ness locally** in `src/app/render-helpers.ts::hasUnseenActivity` by comparing `session.lastActivity > (session.lastReadAt ?? 0)`. No round-trip is needed to render the dot.
 4. **On navigation**, the sidebar calls `markSessionVisited(sessionId)` which (a) updates an in-memory mirror so the dot disappears on the very next render, and (b) fires `POST /api/sessions/:id/mark-read` so other browsers learn on their next refresh. The endpoint is backed by `SessionManager.markSessionRead`, which uses `resolveStoreForId` so live, dormant, and archived sessions are all markable.
 
