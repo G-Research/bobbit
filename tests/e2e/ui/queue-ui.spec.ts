@@ -18,7 +18,6 @@ import {
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
 test.describe("Queue UI E2E", () => {
-	test.describe.configure({ retries: 2 });
 	test.beforeAll(async () => {
 		await waitForHealth();
 	});

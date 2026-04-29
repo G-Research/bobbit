@@ -7,6 +7,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, base } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 // Clean up any test roles after each test
 test.afterEach(async () => {
@@ -19,17 +20,15 @@ test.describe("GET /api/roles — default roles", () => {
 	test("returns seeded default roles on fresh start @smoke", async () => {
 		// Default roles are seeded during scaffold — poll briefly in case the
 		// in-process gateway is still initializing when the test fires.
-		let names: string[] = [];
-		for (let attempt = 0; attempt < 5; attempt++) {
+		const names = await pollUntil(async () => {
 			const resp = await apiFetch("/api/roles");
 			expect(resp.status).toBe(200);
 			const data = await resp.json();
 			expect(data.roles).toBeDefined();
 			expect(Array.isArray(data.roles)).toBe(true);
-			names = data.roles.map((r: any) => r.name);
-			if (names.length > 0) break;
-			await new Promise(r => setTimeout(r, 200));
-		}
+			const ns: string[] = data.roles.map((r: any) => r.name);
+			return ns.length > 0 ? ns : null;
+		}, { timeoutMs: 5000, intervalMs: 100, label: "seeded roles available" });
 
 		expect(names).toContain("team-lead");
 		expect(names).toContain("coder");

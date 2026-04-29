@@ -247,6 +247,19 @@ export function invalidateGitStatusCache(cwd: string, containerId?: string): voi
 	gitStatusCache.delete(gitStatusCacheKey(cwd, containerId, false));
 }
 
+/** Test-only: mark all cache entries for a cwd as TTL-expired without
+ *  sleeping. Used by `tests/e2e/git-status-caching.spec.ts` to deterministically
+ *  exercise the TTL re-run path without inflating wall-clock time. Sets
+ *  `resolvedAt` to a timestamp older than `GIT_STATUS_TTL_MS` so the next
+ *  call falls through to a fresh invocation. */
+export function __forceGitStatusCacheExpiry(cwd: string, containerId?: string): void {
+	const staleAt = Date.now() - GIT_STATUS_TTL_MS - 1000;
+	for (const untracked of [true, false]) {
+		const entry = gitStatusCache.get(gitStatusCacheKey(cwd, containerId, untracked));
+		if (entry && entry.result !== undefined) entry.resolvedAt = staleAt;
+	}
+}
+
 function evictExpired(now: number): void {
 	if (gitStatusCache.size <= 200) return;
 	for (const [k, v] of gitStatusCache) {
@@ -2256,6 +2269,12 @@ async function handleApiRoute(
 			preview: session.preview,
 			reattemptGoalId: sessionPs?.reattemptGoalId,
 			projectId: sessionPs?.projectId || session.projectId,
+			// Persisted model selection (provider+id). Surfaces the result of
+			// the WS `set_model` handler's `persistSessionModel` call so clients
+			// (and tests) can verify the selection round-tripped to disk without
+			// reaching into the WS state stream.
+			modelProvider: sessionPs?.modelProvider,
+			modelId: sessionPs?.modelId,
 			restoreError: session.restoreError,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,

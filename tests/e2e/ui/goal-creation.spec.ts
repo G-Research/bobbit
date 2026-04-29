@@ -21,9 +21,14 @@ async function openGoalAssistantProposal(page: import("@playwright/test").Page) 
 	// Arm the response listener *before* clicking so a fast session-create
 	// response can't slip past; then wait for the hash route to flip to
 	// #/session/<id> which only happens after connectToSession() resolves.
+	//
+	// 30s timeout absorbs goal-assistant cold-start under 3-worker browser
+	// parallelism. Server-side session creation does sync FS work (config dir
+	// scan, prompt assembly, mock-agent registry warm-up) which contends
+	// across concurrent goal-assistant creations.
 	const sessionCreated = page.waitForResponse(
 		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
-		{ timeout: 15_000 },
+		{ timeout: 30_000 },
 	);
 	await newGoalBtn.click();
 	await sessionCreated;
@@ -178,8 +183,8 @@ test.describe("Goal creation (full-stack UI)", () => {
 			el.checked = true;
 			el.dispatchEvent(new Event("change", { bubbles: true }));
 		});
-		// Allow lit re-render to settle
-		await page.waitForTimeout(300);
+		// Allow lit re-render to settle: wait until the checkbox state stabilizes as checked.
+		await expect(qaCheckbox).toBeChecked({ timeout: 5_000 });
 
 		// Create the goal
 		const createGoalBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();

@@ -1,5 +1,6 @@
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 let token: string;
 
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
@@ -45,16 +46,13 @@ test.beforeAll(async () => {
 test.describe("Workflow CRUD API", () => {
 	test("GET /api/workflows returns seeded bug-fix workflow @smoke", async () => {
 		// Poll briefly — seeded workflows may not be ready immediately after gateway init
-		let bugFix: any;
-		for (let attempt = 0; attempt < 5; attempt++) {
+		const bugFix = await pollUntil(async () => {
 			const resp = await apiFetch("/api/workflows");
 			expect(resp.status).toBe(200);
 			const { workflows } = await resp.json();
 			expect(Array.isArray(workflows)).toBe(true);
-			bugFix = workflows.find((w: any) => w.id === "bug-fix");
-			if (bugFix) break;
-			await new Promise(r => setTimeout(r, 200));
-		}
+			return workflows.find((w: any) => w.id === "bug-fix") ?? null;
+		}, { timeoutMs: 5000, intervalMs: 100, label: "bug-fix workflow seeded" });
 		expect(bugFix).toBeTruthy();
 		expect(bugFix.name).toBe("Bug Fix");
 		expect(bugFix.gates).toBeTruthy();

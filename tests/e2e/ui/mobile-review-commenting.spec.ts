@@ -95,12 +95,10 @@ test.describe("Mobile review commenting", () => {
 		// Select text in the review document
 		await selectReviewText(page);
 
-		// Wait for debounce (300ms) + buffer
-		await page.waitForTimeout(500);
-
-		// Floating "Add Comment" button should appear
+		// Floating "Add Comment" button should appear (auto-retry absorbs the
+		// 300ms selectionchange debounce — no hardcoded sleep needed).
 		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
+		await expect(floatingBtn).toBeVisible({ timeout: 5_000 });
 
 		// Click the floating button
 		await floatingBtn.click();
@@ -153,10 +151,9 @@ test.describe("Mobile review commenting", () => {
 
 		// Create annotation via mobile flow
 		await selectReviewText(page);
-		await page.waitForTimeout(500);
 
 		const floatingBtn = page.locator(".review-floating-btn");
-		await expect(floatingBtn).toBeVisible({ timeout: 3_000 });
+		await expect(floatingBtn).toBeVisible({ timeout: 5_000 });
 		await floatingBtn.click();
 
 		// Use Playwright's shadow-piercing locators instead of manual shadowRoot access

@@ -55,6 +55,19 @@ test.describe("Per-project Config Directories", () => {
 		projectId = project.id;
 	});
 
+	// Project cleanup is REQUIRED. Without this, the registered project leaks
+	// across the worker for the rest of the run, polluting downstream tests
+	// that assume a single-project state (e.g. the goal-form-tooltips spec
+	// reads `projects[0]` and the `startNewGoalFlow` button switches from
+	// auto-open to picker-popover when there's >1 project, breaking tests
+	// that don't handle the picker). Use `?force=1` because the test gateway
+	// runs with BOBBIT_E2E=1 which permits removing the last project.
+	test.afterAll(async () => {
+		if (projectId) {
+			await apiFetch(`/api/projects/${projectId}?force=1`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("project settings shows directory editor, not placeholder", async ({ page }) => {
 		await openApp(page, `/settings/${projectId}/directories`);
 

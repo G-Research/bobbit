@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { apiFetch } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -83,18 +84,15 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		const goalId: string = goal.id;
 
 		// Wait for goal setup (worktree create + push) to complete.
-		const setupDeadline = Date.now() + 60_000;
-		while (Date.now() < setupDeadline) {
+		await pollUntil(async () => {
 			const r = await apiFetch(`/api/goals/${goalId}`);
-			if (r.ok) {
-				const g = await r.json();
-				if (g.setupStatus === "ready") break;
-				if (g.setupStatus === "error") {
-					throw new Error(`Goal setup errored: ${JSON.stringify(g)}`);
-				}
+			if (!r.ok) return null;
+			const g = await r.json();
+			if (g.setupStatus === "error") {
+				throw new Error(`Goal setup errored: ${JSON.stringify(g)}`);
 			}
-			await new Promise(r => setTimeout(r, 250));
-		}
+			return g.setupStatus === "ready" ? g : null;
+		}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready` });
 
 		// Spawn two role agents.
 		for (const role of ["coder", "reviewer"]) {
@@ -117,17 +115,13 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 
 		// Sanity: branches were pushed to origin during worktree creation.
 		// Poll briefly — push happens async during spawn in some paths.
-		const pushDeadline = Date.now() + 30_000;
-		let lsBefore = "";
-		while (Date.now() < pushDeadline) {
+		const lsBefore = await pollUntil(async () => {
 			const { stdout } = await execFileAsync(
 				"git", ["ls-remote", "--heads", bareRepo],
 				{ encoding: "utf-8" },
 			);
-			lsBefore = stdout;
-			if (expectedBranches.every(b => lsBefore.includes(b))) break;
-			await new Promise(r => setTimeout(r, 500));
-		}
+			return expectedBranches.every(b => stdout.includes(b)) ? stdout : null;
+		}, { timeoutMs: 30_000, intervalMs: 500, label: "all per-role branches pushed to origin" });
 		for (const b of expectedBranches) {
 			expect(lsBefore, `branch ${b} should have been pushed`).toContain(b);
 		}
@@ -138,16 +132,22 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		expect(del.status).toBe(200);
 
 		// Poll ls-remote until every per-role branch is gone (≤55s).
-		const cleanupDeadline = Date.now() + 55_000;
 		let lsAfter = "";
-		while (Date.now() < cleanupDeadline) {
+		try {
+			lsAfter = await pollUntil(async () => {
+				const { stdout } = await execFileAsync(
+					"git", ["ls-remote", "--heads", bareRepo],
+					{ encoding: "utf-8" },
+				);
+				return expectedBranches.every(b => !stdout.includes(b)) ? stdout : null;
+			}, { timeoutMs: 55_000, intervalMs: 500, label: "all per-role branches deleted from origin" });
+		} catch {
+			// Fall through to the per-branch expect() below for a clearer diff.
 			const { stdout } = await execFileAsync(
 				"git", ["ls-remote", "--heads", bareRepo],
 				{ encoding: "utf-8" },
 			);
 			lsAfter = stdout;
-			if (expectedBranches.every(b => !lsAfter.includes(b))) break;
-			await new Promise(r => setTimeout(r, 500));
 		}
 		for (const b of expectedBranches) {
 			expect(lsAfter, `branch ${b} should have been deleted from origin`).not.toContain(b);

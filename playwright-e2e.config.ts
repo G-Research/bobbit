@@ -11,9 +11,15 @@
  */
 import { defineConfig } from "@playwright/test";
 
+// Phase 1 of E2E flakiness fix: top-level `retries: 0` is the new default.
+// Specs that are still flaky must be tagged `@quarantine` (in their
+// describe/test title) — they run in a separate project with retries
+// enabled and DO NOT gate the main green suite. The `quarantine` project
+// runs in the same invocation so visibility is preserved; merge gating
+// is decided by the green projects only.
 export default defineConfig({
 	timeout: 30_000,
-	retries: 2,
+	retries: 0,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain
@@ -62,6 +68,7 @@ export default defineConfig({
 				"**/goal-archive-branch-cleanup*",
 			],
 			workers: 4,
+			grepInvert: /@quarantine/,
 		},
 		{
 			// Real-push variant of the in-process harness — isolated project so it
@@ -97,6 +104,23 @@ export default defineConfig({
 			// eliminates the remaining flake cluster. API project stays
 			// fullyParallel: true (inherited from top-level).
 			fullyParallel: false,
+			grepInvert: /@quarantine/,
+		},
+		{
+			// Quarantine project: any test whose describe/test title contains
+			// `@quarantine` runs here with retries enabled. Failures here are
+			// reported but do NOT gate merges. New entries require a tracking
+			// comment with an expiry date — see tests/e2e/README.md.
+			name: "quarantine",
+			testDir: "./tests/e2e",
+			testIgnore: [
+				// Docker-dependent tests stay out of the in-process matrix.
+				"**/sandbox-recovery-docker*",
+			],
+			workers: 2,
+			fullyParallel: false,
+			retries: 2,
+			grep: /@quarantine/,
 		},
 	],
 });

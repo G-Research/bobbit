@@ -5,6 +5,7 @@
  * port allocation. They do NOT use the shared webServer gateway.
  */
 import { test, expect } from "./gateway-harness.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 import { createServer as createTcpServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, mkdirSync } from "node:fs";
@@ -81,18 +82,20 @@ function startHelper(env: Record<string, string>): { child: ChildProcess; output
 
 /** Wait for the gateway to respond on the given port (any HTTP response means it's up). */
 async function waitForGateway(port: number, timeoutMs = 15_000): Promise<boolean> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		try {
-			await fetch(`http://127.0.0.1:${port}/api/health`);
-			// Any response (even 401) means the server is listening
-			return true;
-		} catch {
-			// not ready yet — connection refused
-		}
-		await new Promise(r => setTimeout(r, 100));
+	try {
+		await pollUntil(async () => {
+			try {
+				await fetch(`http://127.0.0.1:${port}/api/health`);
+				// Any response (even 401) means the server is listening
+				return true;
+			} catch {
+				return false;
+			}
+		}, { timeoutMs, intervalMs: 100, label: `gateway up on :${port}` });
+		return true;
+	} catch {
+		return false;
 	}
-	return false;
 }
 
 /** Kill a child process and wait for it to exit. */

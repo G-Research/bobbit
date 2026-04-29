@@ -307,8 +307,15 @@ test.describe("SB-37: Sidebar state survives reload", () => {
 		// Goal 1 should now be expanded (has a ▾ chevron)
 		// Goal 2 should remain collapsed by default
 
-		// Wait a moment for localStorage to persist
-		await page.waitForTimeout(500);
+		// localStorage write is synchronous in the click handler; poll until it's visible.
+		await page.waitForFunction(
+			() => {
+				const raw = localStorage.getItem("bobbit-expanded-goals");
+				if (!raw) return false;
+				try { return (JSON.parse(raw) as string[]).length > 0; } catch { return false; }
+			},
+			{ timeout: 5_000 },
+		);
 
 		// Reload the page
 		await page.reload();

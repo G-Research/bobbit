@@ -134,10 +134,8 @@ test.describe("Session lifecycle stories", () => {
 		s.act();
 		await deleteSession(sessionId);
 		await s.navigate_to("landing");
-		// Give sidebar time to update
-		await s.page.waitForTimeout(1_000);
 
-		// assert
+		// assert — sidebar updates and the deleted session disappears
 		s.assert();
 		await s.sidebar.is_hidden(sessionId.slice(0, 8));
 	});

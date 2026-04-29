@@ -9,6 +9,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -239,19 +240,12 @@ test.describe("Project isolation — no default fallback", () => {
 			});
 			expect(signalResp.status).toBe(201);
 
-			// Wait for gate to process
-			const start = Date.now();
-			let gateStatus = "pending";
-			while (Date.now() - start < 15_000 && gateStatus === "pending") {
+			// Wait for gate to process (passed or failed — the point is it resolved)
+			const gateStatus = await pollUntil(async () => {
 				const resp = await apiFetch(`/api/goals/${goalId}/gates/design-doc`);
 				const data = await resp.json();
-				gateStatus = data.status;
-				if (gateStatus === "pending") {
-					await new Promise(r => setTimeout(r, 500));
-				}
-			}
-
-			// Gate should have been processed (passed or failed — the point is it resolved)
+				return data.status !== "pending" ? data.status : null;
+			}, { timeoutMs: 15_000, intervalMs: 200, label: "design-doc gate resolved" });
 			expect(gateStatus).not.toBe("pending");
 
 			// Verify the goal is still scoped to project B
