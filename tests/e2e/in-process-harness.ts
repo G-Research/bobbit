@@ -89,6 +89,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
+		process.env.BOBBIT_E2E = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 		// Skip outbound network probes and per-prompt title-generation calls.
 		process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";

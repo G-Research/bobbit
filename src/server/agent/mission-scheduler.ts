@@ -100,7 +100,7 @@ export interface SchedulerMissionManager {
 	/** Idempotent on (missionId, planId). May throw. */
 	spawnChild(missionId: string, planId: string): Promise<PersistedGoal>;
 	/** Drives MissionGit.mergeChild and writes mergedAt on success. */
-	integrateChild(missionId: string, planId: string): Promise<MergeResult>;
+	integrateChildForScheduler(missionId: string, planId: string): Promise<MergeResult>;
 }
 
 /** Subset of `GoalStore` (existing) used by the scheduler. */
@@ -348,7 +348,7 @@ export class MissionScheduler {
 
 			let result: MergeResult;
 			try {
-				result = await this.deps.missionManager.integrateChild(m.id, node.planId);
+				result = await this.deps.missionManager.integrateChildForScheduler(m.id, node.planId);
 			} catch (err) {
 				this.logger.warn(`[scheduler] integrateChild failed for plan ${node.planId}`, err);
 				continue;

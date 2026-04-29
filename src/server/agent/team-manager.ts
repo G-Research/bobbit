@@ -636,10 +636,24 @@ export class TeamManager {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
 		const teamLeadPromptTemplate = storedRole.promptTemplate;
-		const teamLeadPrompt = teamLeadPromptTemplate
+		let teamLeadPrompt = teamLeadPromptTemplate
 			.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
 			.replace(/\{\{AGENT_ID\}\}/g, `team-lead-${goalId.slice(0, 8)}`)
 			.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(roleStore));
+
+		// Mission-aware: prepend a stanza when this goal belongs to a mission so
+		// the team lead pushes its branch and signals `ready-to-merge` instead of
+		// raising its own PR to master.
+		if (goal.missionId && this.config.projectContextManager) {
+			const mission = this.config.projectContextManager.getMissionById(goal.missionId);
+			if (mission) {
+				const stanza = `## Mission Context\n\nThis goal is part of mission **${mission.title}**. ` +
+					"Do NOT raise your own PR to master. When ready, push your branch to origin and " +
+					"signal `ready-to-merge` so the mission Commander can integrate. " +
+					`The integration branch is \`${mission.integrationBranch ?? ""}\`.\n\n---\n\n`;
+				teamLeadPrompt = stanza + teamLeadPrompt;
+			}
+		}
 
 		// Create the team lead session with the team tools extension.
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.

@@ -2887,10 +2887,16 @@ async function handleApiRoute(
 		// project-context — patch the workflow snapshot in here instead so the
 		// per-project store doesn't need to subscribe to cascade changes.
 		const manager = targetCtx.missionManager;
-		(manager as any).deps.resolvedMissionWorkflow = resolvedMissionWorkflow;
+		manager.setResolvedMissionWorkflow(resolvedMissionWorkflow);
 		// Wire the cascade-aware workflow resolver so child-goal spawns pick up
 		// builtin workflows ("feature", "general", ...) the same way POST /api/goals does.
-		(manager as any).deps.resolveWorkflow = (id: string) => configCascade.resolveWorkflows(resolved.projectId).find(r => r.item.id === id)?.item;
+		manager.setResolveWorkflow((id: string) => configCascade.resolveWorkflows(resolved.projectId).find(r => r.item.id === id)?.item);
+
+		// Validate divergencePolicy if provided.
+		if (body?.divergencePolicy !== undefined && !["strict", "balanced", "autonomous"].includes(body.divergencePolicy)) {
+			json({ error: "Invalid divergencePolicy — must be one of strict|balanced|autonomous" }, 400);
+			return;
+		}
 
 		try {
 			const mission = await manager.createMission({
@@ -2902,6 +2908,43 @@ async function handleApiRoute(
 				sandboxed: body?.sandboxed === true,
 				enabledOptionalSteps: Array.isArray(body?.enabledOptionalSteps) ? body.enabledOptionalSteps.filter((s: unknown) => typeof s === "string") : undefined,
 			});
+
+			// Initialize mission gates so the gate-list endpoint returns the workflow's
+			// gates as pending immediately.
+			if (mission.workflow?.gates?.length) {
+				targetCtx.gateStore.initGatesFor("mission", mission.id, mission.workflow.gates.map(g => g.id));
+			}
+
+			// Spawn the long-lived Commander session.
+			try {
+				const commanderRoleDef = configCascade.resolveRoles(resolved.projectId).find(r => r.item.name === "commander")?.item;
+				if (commanderRoleDef) {
+					const commanderCwd = mission.integrationWorktree || targetCtx.project.rootPath;
+					const promptTemplate = commanderRoleDef.promptTemplate || "";
+					const commanderPrompt = promptTemplate
+						.replace(/\{\{INTEGRATION_BRANCH\}\}/g, mission.integrationBranch || "")
+						.replace(/\{\{MISSION_TITLE\}\}/g, mission.title)
+						.replace(/\{\{MAX_CONCURRENT_GOALS\}\}/g, String(mission.maxConcurrentGoals))
+						.replace(/\{\{MISSION_ID\}\}/g, mission.id)
+						.replace(/\{\{AGENT_ID\}\}/g, `commander-${mission.id.slice(0, 8)}`)
+						.replace(/\{\{REVIEW_CONTEXT\}\}/g, "");
+					const commanderSession = await sessionManager.createSession(commanderCwd, undefined, undefined, undefined, {
+						rolePrompt: commanderPrompt,
+						roleName: "commander",
+						sandboxed: !!mission.sandboxed,
+					});
+					sessionManager.updateSessionMeta(commanderSession.id, {
+						role: "commander",
+						accessory: commanderRoleDef.accessory || "flag",
+					});
+					targetCtx.missionStore.update(mission.id, { commanderSessionId: commanderSession.id });
+					mission.commanderSessionId = commanderSession.id;
+				}
+			} catch (err) {
+				console.error("[server] Failed to spawn commander session:", err);
+				// Non-fatal — mission is created; user can re-attach later.
+			}
+
 			json(mission, 201);
 			broadcastToAll({ type: "mission_created", mission });
 		} catch (err) {
@@ -2934,9 +2977,7 @@ async function handleApiRoute(
 				children,
 				integrationBranch: mission.integrationBranch ?? null,
 				commanderSessionId: mission.commanderSessionId ?? null,
-				// TODO(mission-gate-owner): surface gates once gate-store accepts
-				// (ownerKind="mission", ownerId=missionId).
-				gates: [],
+				gates: ctx ? ctx.gateStore.getGatesFor("mission", missionId) : [],
 			});
 			return;
 		}
@@ -2949,7 +2990,13 @@ async function handleApiRoute(
 			if (!ctx) { json({ error: "Mission context lost" }, 500); return; }
 			const updates: Partial<PersistedMission> = {};
 			if (typeof body.title === "string" && body.title.trim()) updates.title = body.title.trim();
-			if (typeof body.divergencePolicy === "string") updates.divergencePolicy = body.divergencePolicy as DivergencePolicy;
+			if (typeof body.divergencePolicy === "string") {
+				if (!["strict", "balanced", "autonomous"].includes(body.divergencePolicy)) {
+					json({ error: "Invalid divergencePolicy — must be one of strict|balanced|autonomous" }, 400);
+					return;
+				}
+				updates.divergencePolicy = body.divergencePolicy as DivergencePolicy;
+			}
 			if (typeof body.maxConcurrentGoals === "number") {
 				const v = Math.floor(body.maxConcurrentGoals);
 				if (v >= 1 && v <= 8) updates.maxConcurrentGoals = v;
@@ -2991,7 +3038,7 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing plan body" }, 400); return; }
 			const plan = body.plan ?? body;
-			const force = url.searchParams.get("force") === "1";
+			const force = url.searchParams.get("force") === "1" && process.env.BOBBIT_E2E === "1";
 			const replanReason = typeof body.replan_reason === "string" ? body.replan_reason : (typeof body.replanReason === "string" ? body.replanReason : undefined);
 			const result = await manager.proposePlan(missionId, plan as MissionPlan, { replanReason, force });
 			if (!result.ok) { json({ error: result.reason }, result.status); return; }
@@ -3006,6 +3053,16 @@ async function handleApiRoute(
 		const missionId = missionFreezeMatch[1];
 		const manager = getMissionManagerForMission(missionId);
 		if (!manager) { json({ error: "Mission not found" }, 404); return; }
+		// Pre-condition: goal-plan gate must be passed unless ?force=1 in test mode.
+		const freezeForce = url.searchParams.get("force") === "1" && process.env.BOBBIT_E2E === "1";
+		const ctxForFreeze = projectContextManager.getContextForMission(missionId);
+		if (!freezeForce) {
+			const goalPlanGate = ctxForFreeze?.gateStore.getGateFor("mission", missionId, "goal-plan");
+			if (!goalPlanGate || goalPlanGate.status !== "passed") {
+				json({ error: "goal-plan gate must pass before freezing the plan" }, 409);
+				return;
+			}
+		}
 		const ok = manager.freezePlan(missionId);
 		if (!ok) { json({ error: "Cannot freeze: no plan" }, 409); return; }
 		const m = manager.getMission(missionId)!;
@@ -3034,8 +3091,16 @@ async function handleApiRoute(
 		const manager = getMissionManagerForMission(missionId);
 		if (!manager) { json({ error: "Mission not found" }, 404); return; }
 		const result = await manager.integrateChild(missionId, planId);
-		// Phase 1: always returns 501 until mission-git.ts merges.
-		json({ error: result.reason }, result.status);
+		if (!result.ok) {
+			if (result.conflictFiles) {
+				json({ error: result.reason, conflictFiles: result.conflictFiles }, result.status);
+			} else {
+				json({ error: result.reason }, result.status);
+			}
+			return;
+		}
+		json({ ok: true, status: result.status, mergeSha: result.mergeSha ?? null });
+		broadcastToAll({ type: "mission_child_merged", missionId, planId, status: result.status, mergeSha: result.mergeSha ?? null });
 		return;
 	}
 
@@ -3060,14 +3125,77 @@ async function handleApiRoute(
 		return;
 	}
 
-	// Mission gate routes — placeholder. Real implementation requires gate-store
-	// generalisation (Coder B). Until then return 501 so callers fail loudly
-	// rather than silently treating mission gates as goal gates.
-	// TODO(mission-gate-owner): replace with real handlers that dispatch to
-	// gateStore.{init,signal,getGate}For("mission", missionId, ...).
-	const missionGateMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/gates(?:\/.*)?$/);
-	if (missionGateMatch) {
-		json({ error: "Mission gates not yet wired (phase 2)" }, 501);
+	// Mission gate routes — list + signal.
+	const missionGatesListMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/gates$/);
+	if (missionGatesListMatch && req.method === "GET") {
+		const missionId = missionGatesListMatch[1];
+		const ctx = projectContextManager.getContextForMission(missionId);
+		if (!ctx) { json({ error: "Mission not found" }, 404); return; }
+		json({ gates: ctx.gateStore.getGatesFor("mission", missionId) });
+		return;
+	}
+
+	const missionGateSignalMatch = url.pathname.match(/^\/api\/missions\/([^/]+)\/gates\/([^/]+)\/signal$/);
+	if (missionGateSignalMatch && req.method === "POST") {
+		const [, missionId, gateId] = missionGateSignalMatch;
+		const ctx = projectContextManager.getContextForMission(missionId);
+		if (!ctx) { json({ error: "Mission not found" }, 404); return; }
+		const mission = ctx.missionStore.get(missionId);
+		if (!mission) { json({ error: "Mission not found" }, 404); return; }
+		if (!mission.workflow) { json({ error: "Mission has no workflow snapshot" }, 400); return; }
+		const gateDef = mission.workflow.gates.find(g => g.id === gateId);
+		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+		const body = await readBody(req);
+
+		// Init gate states if not yet (idempotent).
+		ctx.gateStore.initGatesFor("mission", missionId, mission.workflow.gates.map(g => g.id));
+
+		// Validate dependency gates passed.
+		for (const depId of (gateDef.dependsOn || [])) {
+			const dep = ctx.gateStore.getGateFor("mission", missionId, depId);
+			if (!dep || dep.status !== "passed") {
+				json({ error: `Upstream gate "${depId}" has not passed` }, 409);
+				return;
+			}
+		}
+
+		const existingGate = ctx.gateStore.getGateFor("mission", missionId, gateId);
+		const contentVersion = body?.content ? ((existingGate?.currentContentVersion || 0) + 1) : undefined;
+		const signal = {
+			id: randomUUID(),
+			gateId,
+			ownerKind: "mission" as const,
+			ownerId: missionId,
+			goalId: missionId, // legacy mirror
+			sessionId: body?.sessionId || "unknown",
+			timestamp: Date.now(),
+			commitSha: "mission",
+			metadata: body?.metadata,
+			content: body?.content,
+			contentVersion,
+			verification: { status: "running" as const, steps: [] },
+		};
+		ctx.gateStore.recordSignal(signal);
+		if (body?.content && contentVersion) ctx.gateStore.updateGateContentFor("mission", missionId, gateId, body.content, contentVersion);
+		if (body?.metadata) ctx.gateStore.updateGateMetadataFor("mission", missionId, gateId, body.metadata);
+
+		broadcastToAll({ type: "gate_signal_received", goalId: missionId, gateId, signalId: signal.id });
+
+		const cwd = mission.integrationWorktree || ctx.project.rootPath;
+		const allGateStates = new Map<string, { metadata?: Record<string,string>; content?: string; status?: string; injectDownstream?: boolean }>();
+		for (const gs of ctx.gateStore.getGatesFor("mission", missionId)) {
+			const def = mission.workflow.gates.find(g => g.id === gs.gateId);
+			allGateStates.set(gs.gateId, {
+				metadata: gs.currentMetadata, content: gs.currentContent,
+				status: gs.status, injectDownstream: def?.injectDownstream,
+			});
+		}
+		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
+		verificationHarness.verifyForOwner("mission", missionId, signal, gateDef, cwd, mission.integrationBranch, primary, allGateStates, mission.spec)
+			.catch(err => console.error("[verification] mission gate signal error:", err));
+
+		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+		json({ signal: { id: signal.id, gateId, missionId, status: "running", steps: verifySteps } }, 201);
 		return;
 	}
 

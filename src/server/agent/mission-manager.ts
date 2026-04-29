@@ -9,6 +9,8 @@ import {
 import { GoalManager } from "./goal-manager.js";
 import type { GoalStore, PersistedGoal } from "./goal-store.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
+import type { GateStore } from "./gate-store.js";
+import type { MissionGit, MergeResult } from "./mission-git.js";
 
 export interface CreateMissionInput {
 	title: string;
@@ -43,6 +45,10 @@ export interface MissionManagerDeps {
 		integrationWorktree?: string;
 		baseRef?: string;
 	}>;
+	/** Optional gate store for cascade-reset on replan. */
+	gateStore?: GateStore;
+	/** Optional MissionGit for child integration. */
+	missionGit?: MissionGit;
 }
 
 const DEFAULT_MAX_CONCURRENT = 3;
@@ -67,6 +73,16 @@ export class MissionManager {
 
 	getStore(): MissionStore {
 		return this.store;
+	}
+
+	/** Wire/replace the cascade-aware workflow resolver post-construction. */
+	setResolveWorkflow(fn: (workflowId: string) => Workflow | undefined): void {
+		this.deps.resolveWorkflow = fn;
+	}
+
+	/** Wire/replace the resolved mission workflow snapshot post-construction. */
+	setResolvedMissionWorkflow(wf: Workflow | undefined): void {
+		this.deps.resolvedMissionWorkflow = wf;
 	}
 
 	getMission(id: string): PersistedMission | undefined {
@@ -115,6 +131,10 @@ export class MissionManager {
 		};
 
 		// Phase-4 hook — provision integration branch + worktree if available.
+		// Failures here are non-fatal: the mission stays in `planning`, callers can
+		// retry integration setup later. Setting state="failed" here would lock
+		// out CRUD/plan flows that don't need a real git worktree (e.g. tests, or
+		// purely-planning missions before any execution).
 		if (this.deps.createIntegrationBranch) {
 			try {
 				const updates = await this.deps.createIntegrationBranch(mission);
@@ -122,8 +142,7 @@ export class MissionManager {
 				if (updates.integrationWorktree) mission.integrationWorktree = updates.integrationWorktree;
 				if (updates.baseRef) mission.baseRef = updates.baseRef;
 			} catch (err) {
-				console.error("[mission-manager] Integration branch setup failed:", err);
-				mission.state = "failed";
+				console.warn("[mission-manager] Integration branch setup failed (non-fatal):", err);
 				mission.setupError = (err as Error).message ?? String(err);
 			}
 		}
@@ -153,8 +172,8 @@ export class MissionManager {
 		if (m.state !== "paused") return false;
 		return this.store.update(id, {
 			state: m.planFrozenAt ? "in-progress" : "planning",
-			pausedAt: undefined,
-			pausedReason: undefined,
+			pausedAt: null,
+			pausedReason: null,
 		});
 	}
 
@@ -183,11 +202,16 @@ export class MissionManager {
 			if (!opts?.replanReason?.trim()) {
 				return { ok: false, status: 403, reason: "replan_reason required when plan is frozen" };
 			}
-			// TODO(mission-gate-owner): cascade-reset `charter` and `plan-review` gates
-			// for ownerKind="mission", ownerId=id once gateStore.cascadeReset accepts
-			// (ownerKind, ownerId). Today gate-store is goal-only, so re-planning
-			// after freeze leaves stale gate verdicts on disk until Coder B's branch
-			// merges. Until then proposePlan only updates the plan record itself.
+			// Cascade-reset upstream content gates so the user must re-signal them
+			// after a structural replan.
+			if (this.deps.gateStore) {
+				for (const gateId of ["charter", "plan-review", "goal-plan"]) {
+					const gs = this.deps.gateStore.getGateFor("mission", id, gateId);
+					if (gs && gs.status !== "pending") {
+						this.deps.gateStore.updateGateStatusFor("mission", id, gateId, "pending");
+					}
+				}
+			}
 		}
 
 		const previousVersion = m.plan?.version ?? 0;
@@ -199,7 +223,7 @@ export class MissionManager {
 		// If we re-planned a frozen plan, clear the freeze marker — it must be
 		// re-signalled through goal-plan. (Strict mode: state already paused.)
 		if (m.planFrozenAt && opts?.replanReason) {
-			this.store.update(id, { planFrozenAt: undefined });
+			this.store.update(id, { planFrozenAt: null });
 		}
 		return { ok: true, version: next.version };
 	}
@@ -288,16 +312,71 @@ export class MissionManager {
 	}
 
 	/**
-	 * Phase 1 stub for child-goal merge into integration branch. Returns
-	 * not-implemented until Coder C's mission-git.ts lands.
+	 * Merge a child goal's branch into the integration branch.
+	 * REST-shaped result (ok/status/reason). Scheduler uses
+	 * `integrateChildForScheduler` for the MergeResult shape.
 	 */
-	async integrateChild(_missionId: string, _planId: string): Promise<
-		{ ok: false; status: number; reason: string }
+	async integrateChild(missionId: string, planId: string): Promise<
+		| { ok: true; status: "merged" | "already-merged"; mergeSha?: string; planId: string }
+		| { ok: false; status: number; reason: string; conflictFiles?: string[] }
 	> {
-		// TODO(mission-scheduler-owner): wire this to MissionGit.mergeChild
-		// once mission-git.ts merges. For now the endpoint returns 501 so
-		// callers fail fast and don't assume a merge happened.
-		return { ok: false, status: 501, reason: "Child integration not yet wired (phase 4)" };
+		const m = this.store.get(missionId);
+		if (!m) return { ok: false, status: 404, reason: "Mission not found" };
+		if (!m.plan) return { ok: false, status: 409, reason: "Mission has no plan" };
+		const node = m.plan.goals.find(g => g.planId === planId);
+		if (!node) return { ok: false, status: 404, reason: `Plan node not found: ${planId}` };
+		if (!node.goalId) return { ok: false, status: 409, reason: "Child not yet spawned" };
+		if (!m.integrationBranch || !m.integrationWorktree) {
+			return { ok: false, status: 409, reason: "Mission has no integration branch/worktree" };
+		}
+		if (!this.deps.missionGit) return { ok: false, status: 501, reason: "MissionGit not configured" };
+
+		const goal = this.deps.goalStore.get(node.goalId);
+		if (!goal || !goal.branch) return { ok: false, status: 404, reason: "Child goal or branch missing" };
+
+		if (node.mergedAt) return { ok: true, status: "already-merged", planId };
+
+		let result;
+		try {
+			result = await this.deps.missionGit.mergeChild(
+				m.integrationWorktree,
+				goal.branch,
+				m.title,
+				node.title,
+			);
+		} catch (err) {
+			return { ok: false, status: 500, reason: (err as Error).message ?? String(err) };
+		}
+
+		if (result.status === "conflict") {
+			return {
+				ok: false,
+				status: 409,
+				reason: "Merge conflict — strict policy escalates to user",
+				conflictFiles: result.conflictFiles,
+			};
+		}
+		if (result.status === "already-merged") {
+			this.store.updatePlanNodeState(missionId, planId, { mergedAt: Date.now() });
+			return { ok: true, status: "already-merged", planId };
+		}
+		// merged
+		this.store.updatePlanNodeState(missionId, planId, { mergedAt: Date.now() });
+		return { ok: true, status: "merged", mergeSha: result.mergeSha, planId };
+	}
+
+	/**
+	 * Scheduler-facing variant returning MergeResult directly. Throws on error
+	 * shapes so the scheduler logs a warning and continues with other children.
+	 */
+	async integrateChildForScheduler(missionId: string, planId: string): Promise<MergeResult> {
+		const r = await this.integrateChild(missionId, planId);
+		if (!r.ok) {
+			if (r.conflictFiles) return { status: "conflict", conflictFiles: r.conflictFiles };
+			throw new Error(r.reason);
+		}
+		if (r.status === "merged") return { status: "merged", mergeSha: r.mergeSha! };
+		return { status: "already-merged" };
 	}
 }
 

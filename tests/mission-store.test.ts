@@ -129,6 +129,29 @@ describe("MissionStore — plan helpers", () => {
 		assert.equal(node.state, "in-progress");
 		assert.equal(node.failedAttempts, 1);
 	});
+
+	it("update with null clears optional field", () => {
+		const s = new MissionStore(tmpDir());
+		s.put(makeMission("m1", { pausedAt: 12345, pausedReason: "x", planFrozenAt: 999 }));
+		assert.equal(s.get("m1")!.pausedAt, 12345);
+		s.update("m1", { pausedAt: null, pausedReason: null });
+		const after = s.get("m1")!;
+		assert.equal(after.pausedAt, undefined);
+		assert.equal(after.pausedReason, undefined);
+		assert.equal(after.planFrozenAt, 999, "untouched fields remain");
+	});
+
+	it("updatePlanNodeState with null clears node field", () => {
+		const s = new MissionStore(tmpDir());
+		s.put(makeMission("m1"));
+		s.setPlan("m1", plan);
+		s.updatePlanNodeState("m1", "p1", { mergedAt: 5000, failedAttempts: 2 });
+		assert.equal(s.get("m1")!.plan!.goals[0].mergedAt, 5000);
+		s.updatePlanNodeState("m1", "p1", { mergedAt: null });
+		const node = s.get("m1")!.plan!.goals[0];
+		assert.equal(node.mergedAt, undefined);
+		assert.equal(node.failedAttempts, 2, "untouched fields remain");
+	});
 });
 
 describe("validatePlan", () => {

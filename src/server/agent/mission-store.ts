@@ -204,17 +204,24 @@ export class MissionStore {
 		return true;
 	}
 
-	update(id: string, updates: Partial<Omit<PersistedMission, "id" | "createdAt">>): boolean {
-		const existing = this.missions.get(id);
+	update(
+		id: string,
+		updates: { [K in keyof Omit<PersistedMission, "id" | "createdAt">]?: PersistedMission[K] | null },
+	): boolean {
+		const existing = this.missions.get(id) as Record<string, unknown> | undefined;
 		if (!existing) return false;
 		this.generation++;
-		const cleaned: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(updates)) {
-			if (v !== undefined) cleaned[k] = v;
+			if (v === undefined) continue;
+			if (v === null) {
+				delete existing[k];
+			} else {
+				existing[k] = v;
+			}
 		}
-		Object.assign(existing, cleaned, { updatedAt: Date.now() });
+		existing.updatedAt = Date.now();
 		this.save();
-		this.onIndexUpdate?.(existing);
+		this.onIndexUpdate?.(existing as unknown as PersistedMission);
 		return true;
 	}
 
@@ -256,14 +263,23 @@ export class MissionStore {
 		return true;
 	}
 
-	updatePlanNodeState(missionId: string, planId: string, patch: Partial<PlannedGoal>): boolean {
+	updatePlanNodeState(
+		missionId: string,
+		planId: string,
+		patch: { [K in keyof PlannedGoal]?: PlannedGoal[K] | null },
+	): boolean {
 		const m = this.missions.get(missionId);
 		if (!m || !m.plan) return false;
-		const node = m.plan.goals.find(g => g.planId === planId);
+		const node = m.plan.goals.find(g => g.planId === planId) as Record<string, unknown> | undefined;
 		if (!node) return false;
 		this.generation++;
 		for (const [k, v] of Object.entries(patch)) {
-			if (v !== undefined) (node as any)[k] = v;
+			if (v === undefined) continue;
+			if (v === null) {
+				delete node[k];
+			} else {
+				node[k] = v;
+			}
 		}
 		m.updatedAt = Date.now();
 		this.save();

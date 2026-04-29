@@ -77,6 +77,7 @@ interface FakeManager extends SchedulerMissionManager {
 	spawnCalls: Array<{ missionId: string; planId: string }>;
 	integrateCalls: Array<{ missionId: string; planId: string }>;
 	integrateImpl: (missionId: string, planId: string) => Promise<MergeResult>;
+	integrateChildForScheduler(missionId: string, planId: string): Promise<MergeResult>;
 }
 
 function makeManager(missions: MissionView[]): FakeManager {
@@ -107,7 +108,7 @@ function makeManager(missions: MissionView[]): FakeManager {
 			}
 			return persistedGoal(`goal-${planId}`, "todo");
 		},
-		async integrateChild(missionId, planId) {
+		async integrateChildForScheduler(missionId, planId) {
 			fm.integrateCalls.push({ missionId, planId });
 			const result = await fm.integrateImpl(missionId, planId);
 			if (result.status === "merged" || result.status === "already-merged") {

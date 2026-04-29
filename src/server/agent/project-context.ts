@@ -18,6 +18,8 @@ import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
 import { MissionStore } from "./mission-store.js";
 import { MissionManager } from "./mission-manager.js";
+import { MissionGit } from "./mission-git.js";
+import { MissionScheduler } from "./mission-scheduler.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -49,6 +51,7 @@ export class ProjectContext {
   readonly secretsStore: SecretsStore;
   readonly missionStore: MissionStore;
   readonly missionManager: MissionManager;
+  readonly missionScheduler: MissionScheduler;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -85,16 +88,62 @@ export class ProjectContext {
 
     // Mission state — depends on workflowStore + goalManager.
     this.missionStore = new MissionStore(this.stateDir);
+    const missionGit = project.rootPath ? new MissionGit({ repoPath: project.rootPath }) : undefined;
     this.missionManager = new MissionManager(this.missionStore, {
       goalManager: this.goalManager,
       goalStore: this.goalStore,
       workflowStore: this.workflowStore,
       projectId: project.id,
-      // TODO(mission-scheduler-owner): pass `createIntegrationBranch` once
-      // mission-git.ts lands. For phase 1 the integration branch field is
-      // left undefined and child goals branch off origin/master like normal
-      // standalone goals.
+      gateStore: this.gateStore,
+      missionGit,
+      createIntegrationBranch: missionGit
+        ? async (mission) => {
+            const info = await missionGit.createIntegrationBranch(mission.id, mission.title);
+            return {
+              integrationBranch: info.branch,
+              integrationWorktree: info.worktreePath,
+              baseRef: info.baseSha,
+            };
+          }
+        : undefined,
     });
+
+    // Mission scheduler — 60s safety-net tick. wakeCommander is wired by the
+    // server (which owns SessionManager) post-construction if needed.
+    // TODO(mission-followup): subscribe to gate-store status changes / goal-state
+    // changes for instant ticks instead of relying on the periodic safety net.
+    this.missionScheduler = new MissionScheduler({
+      missionManager: {
+        getMission: (id) => {
+          const m = this.missionStore.get(id);
+          if (!m) return undefined;
+          return {
+            id: m.id, title: m.title, state: m.state, maxConcurrentGoals: m.maxConcurrentGoals,
+            plan: m.plan, planFrozenAt: m.planFrozenAt, integrationBranch: m.integrationBranch,
+            integrationWorktree: m.integrationWorktree, commanderSessionId: m.commanderSessionId,
+            archived: m.archived,
+          };
+        },
+        listMissions: () => this.missionStore.getLive().map(m => ({
+          id: m.id, title: m.title, state: m.state, maxConcurrentGoals: m.maxConcurrentGoals,
+          plan: m.plan, planFrozenAt: m.planFrozenAt, integrationBranch: m.integrationBranch,
+          integrationWorktree: m.integrationWorktree, commanderSessionId: m.commanderSessionId,
+          archived: m.archived,
+        })),
+        updatePlanNodeState: (mid, pid, patch) => this.missionStore.updatePlanNodeState(mid, pid, patch),
+        spawnChild: async (mid, pid) => {
+          const r = await this.missionManager.spawnChild(mid, pid);
+          if (!r.ok) throw new Error(r.reason);
+          return r.goal;
+        },
+        integrateChildForScheduler: async (mid, pid) =>
+          this.missionManager.integrateChildForScheduler(mid, pid),
+      },
+      goalStore: { get: (id) => this.goalStore.get(id) },
+      gateStore: { getGate: (oid, gid) => this.gateStore.getGate(oid, gid) },
+      tickIntervalMs: 60_000,
+    });
+    this.missionScheduler.start();
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */
@@ -118,6 +167,7 @@ export class ProjectContext {
 
   /** Close resources for clean shutdown. */
   close(): void {
+    try { this.missionScheduler.stop(); } catch { /* ignore */ }
     this.sessionStore.flush();
     // Fire and forget — close() is sync on the public API for callers.
     void this.searchIndex.close();

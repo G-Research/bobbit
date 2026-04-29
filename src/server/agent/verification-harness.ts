@@ -2,6 +2,33 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Absolute path to the `defaults/helpers` directory shipped with Bobbit, used
+ * to resolve the `{{bobbit_helpers}}` template variable in workflow verify
+ * steps. Resolved relative to this compiled module so it works across
+ * source-mode (tsx) and built/dist deployments.
+ */
+function resolveHelpersDir(): string {
+	try {
+		const here = path.dirname(fileURLToPath(import.meta.url));
+		// Walk up to the repo root, then into defaults/helpers.
+		// dist/server/agent/verification-harness.js → dist/server/agent → … → repo root
+		const candidates = [
+			path.resolve(here, "..", "..", "..", "defaults", "helpers"),
+			path.resolve(here, "..", "..", "defaults", "helpers"),
+			path.resolve(here, "..", "defaults", "helpers"),
+		];
+		for (const c of candidates) {
+			if (fs.existsSync(c)) return c;
+		}
+		return candidates[0];
+	} catch {
+		return "";
+	}
+}
+const HELPERS_DIR = resolveHelpersDir();
 import type { GateStore, GateSignal, GateSignalStep, GateOwnerKind } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
@@ -468,6 +495,7 @@ export class VerificationHarness {
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
+			bobbit_helpers: HELPERS_DIR,
 		};
 		const rerunGate = goal.workflow?.gates?.find((g: any) => g.id === gateId) as WorkflowGate | undefined;
 
@@ -964,10 +992,14 @@ export class VerificationHarness {
 		ownerSpec?: string,
 	): Promise<void> {
 		if (kind === "mission") {
-			throw new Error(
-				`verifyForOwner("mission", ...) is not yet implemented — mission-aware ` +
-				`owner resolution lands with the mission-manager / project-context phases. ` +
-				`(ownerId=${ownerId}, gateId=${gate.id})`,
+			// Hydrate ownership fields.
+			signal.ownerKind = "mission";
+			signal.ownerId = ownerId;
+			signal.goalId = ownerId; // legacy mirror used by broadcasts
+			return this.verifyMissionGateSignal(
+				ownerId, signal, gate, cwd,
+				ownerBranch || "", primaryBranch || "master",
+				allGateStates, ownerSpec || "",
 			);
 		}
 		// For goal-owned signals the existing implementation is correct as-is.
@@ -975,6 +1007,150 @@ export class VerificationHarness {
 		if (!signal.ownerKind) signal.ownerKind = "goal";
 		if (!signal.ownerId) signal.ownerId = ownerId;
 		return this.verifyGateSignal(signal, gate, cwd, ownerBranch, primaryBranch, allGateStates, ownerSpec);
+	}
+
+	/**
+	 * Resolve a project's gate store by mission id (mirror of resolveGateStore
+	 * for goal-keyed signals).
+	 */
+	private resolveGateStoreForMission(missionId: string): GateStore {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForMission(missionId);
+			if (ctx) return ctx.gateStore;
+			throw new Error(`Cannot resolve gate store: mission "${missionId}" not found in any project`);
+		}
+		if (this.gateStore) return this.gateStore;
+		throw new Error(`Cannot resolve gate store: no project context manager and no fallback gate store`);
+	}
+
+	/**
+	 * Mission-owned verification path. Slimmed-down version of `verifyGateSignal`:
+	 * supports `command` and `llm-review` step types, executes sequentially,
+	 * no caching/phasing/optional-step machinery (mission gates v1 don't need
+	 * those). LLM reviews honour BOBBIT_LLM_REVIEW_SKIP and the mission's
+	 * integration worktree as cwd.
+	 */
+	async verifyMissionGateSignal(
+		missionId: string,
+		signal: GateSignal,
+		gate: WorkflowGate,
+		cwd: string,
+		integrationBranch: string,
+		primaryBranch: string,
+		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
+		missionSpec?: string,
+	): Promise<void> {
+		const gateStore = this.resolveGateStoreForMission(missionId);
+		const steps = gate.verify;
+
+		const markStatus = (status: "passed" | "failed", verifSteps: GateSignalStep[]) => {
+			gateStore.updateSignalVerification(signal.id, { status, steps: verifSteps });
+			gateStore.updateGateStatusFor("mission", missionId, gate.id, status);
+			this.broadcastFn(missionId, {
+				type: "gate_verification_complete",
+				goalId: missionId, gateId: gate.id, signalId: signal.id, status,
+			});
+			this.broadcastFn(missionId, {
+				type: "gate_status_changed",
+				goalId: missionId, gateId: gate.id, status,
+			});
+		};
+
+		if (!steps || steps.length === 0) {
+			markStatus("passed", []);
+			return;
+		}
+
+		this.broadcastFn(missionId, {
+			type: "gate_verification_started",
+			goalId: missionId, gateId: gate.id, signalId: signal.id,
+			startedAt: Date.now(),
+			steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+		});
+
+		const builtinVars: Record<string, string> = {
+			branch: integrationBranch || "HEAD",
+			master: primaryBranch,
+			cwd,
+			goal_spec: missionSpec || "",
+			commit: signal.commitSha || "HEAD",
+			mission_id: missionId,
+			integration_branch: integrationBranch || "",
+			bobbit_helpers: HELPERS_DIR,
+		};
+		const projectVars: Record<string, string> = this.projectConfigStore?.getWithDefaults() ?? {};
+		const agentVars: Record<string, string> = signal.metadata || {};
+
+		const results: GateSignalStep[] = [];
+		let anyFailed = false;
+		for (const step of steps) {
+			const started = Date.now();
+			let passed = false;
+			let output = "";
+			if (anyFailed) {
+				results.push({
+					name: step.name, type: step.type,
+					passed: false, skipped: true,
+					output: "Skipped — earlier step failed",
+					duration_ms: 0,
+				});
+				continue;
+			}
+			try {
+				if (step.type === "command") {
+					const cmd = _substituteVars(step.run || "", builtinVars, projectVars, agentVars, allGateStates);
+					const skipReason = isCommandStepSkippable(cmd);
+					if (skipReason) {
+						passed = true;
+						output = skipReason;
+					} else {
+						const r = await this.runCommandStep(cmd, cwd, step.timeout || 300, step.expect === "failure", {
+							goalId: missionId, gateId: gate.id, signalId: signal.id, stepIndex: results.length,
+						}, agentVars["error_pattern"]);
+						passed = r.passed;
+						output = r.output;
+					}
+				} else if (step.type === "llm-review") {
+					if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
+						passed = true;
+						output = "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).";
+					} else {
+						const prompt = _substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+						const r = await this.runLlmReviewStep(
+							{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+							cwd, builtinVars,
+							signal.content, signal.metadata,
+							missionSpec, allGateStates, undefined, undefined,
+							gate,
+						);
+						passed = r.passed;
+						output = r.output;
+					}
+				} else {
+					output = `Mission gate verify type "${step.type}" not supported in v1`;
+					passed = false;
+				}
+			} catch (err) {
+				output = `Step error: ${(err as Error).message ?? String(err)}`;
+				passed = false;
+			}
+			const duration_ms = Date.now() - started;
+			results.push({
+				name: step.name, type: step.type,
+				passed, output, duration_ms, expect: step.expect,
+			});
+			this.broadcastFn(missionId, {
+				type: "gate_verification_step_complete",
+				goalId: missionId, gateId: gate.id, signalId: signal.id,
+				stepIndex: results.length - 1, stepName: step.name,
+				status: passed ? "passed" : "failed",
+				durationMs: duration_ms, output,
+				phase: step.phase ?? 0,
+			});
+			if (!passed) anyFailed = true;
+		}
+
+		markStatus(anyFailed ? "failed" : "passed", results);
 	}
 
 	/**
@@ -1049,6 +1225,7 @@ export class VerificationHarness {
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
+				bobbit_helpers: HELPERS_DIR,
 			};
 
 			// Project config — resolved via {{project.key}}

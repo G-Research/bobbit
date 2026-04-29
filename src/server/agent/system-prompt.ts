@@ -201,6 +201,8 @@ export interface PromptParts {
 	 *  When non-empty, an "Available Skills" section is injected into the system prompt.
 	 *  Skills with `disable-model-invocation: true` should be filtered out by the caller. */
 	skillsCatalog?: SlashSkill[];
+	/** When this session is a child goal of a mission, the mission stanza to inject. */
+	missionContext?: { title: string; integrationBranch: string };
 }
 
 /** Max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -293,6 +295,17 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
 			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
 			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`
+		);
+	}
+
+	// 2.6. Mission context — for child goals of a mission.
+	if (parts.missionContext) {
+		sections.push(
+			`# Mission Context\n\n` +
+			`This goal is part of mission **${parts.missionContext.title}**. ` +
+			`Do NOT raise your own PR to master. When ready, push your branch to origin and ` +
+			`signal \`ready-to-merge\` so the mission Commander can integrate. ` +
+			`The integration branch is \`${parts.missionContext.integrationBranch}\`.`
 		);
 	}
 
