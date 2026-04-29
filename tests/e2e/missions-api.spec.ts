@@ -6,6 +6,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, injectDefaultProjectId } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
 
@@ -289,14 +290,14 @@ test.describe("Missions API", () => {
 		expect(charterResp.status).toBe(201);
 		// Wait for verification to complete (LLM-review skipped → fast).
 		async function waitGatePassed(gateId: string): Promise<void> {
-			for (let i = 0; i < 50; i++) {
+			await pollUntil(async () => {
 				const gates = await (await apiFetch(`/api/missions/${m.id}/gates`)).json();
 				const g = gates.gates.find((x: any) => x.gateId === gateId);
-				if (g && g.status === "passed") return;
-				if (g && g.status === "failed") throw new Error(`gate ${gateId} failed: ${JSON.stringify(g)}`);
-				await new Promise(r => setTimeout(r, 100));
-			}
-			throw new Error(`gate ${gateId} did not pass within 5s`);
+				if (g && g.status === "failed") {
+					throw new Error(`gate ${gateId} failed: ${JSON.stringify(g)}`);
+				}
+				return g && g.status === "passed" ? g : null;
+			}, { timeoutMs: 5000, intervalMs: 50, label: `mission gate ${gateId} passed` });
 		}
 		await waitGatePassed("charter");
 
@@ -307,6 +308,12 @@ test.describe("Missions API", () => {
 		const goalPlanResp = await signal("goal-plan", "# Approved plan");
 		expect(goalPlanResp.status).toBe(201);
 		await waitGatePassed("goal-plan");
+
+		// Wait for the gateStore.onStatusChange hook to run freezePlan.
+		await pollUntil(async () => {
+			const d = await (await apiFetch(`/api/missions/${m.id}`)).json();
+			return d.mission.planFrozenAt ? d : null;
+		}, { timeoutMs: 5000, intervalMs: 50, label: `mission ${m.id} planFrozenAt set` });
 
 		// goal-plan passed → server should have auto-frozen the plan.
 		const detail = await (await apiFetch(`/api/missions/${m.id}`)).json();
