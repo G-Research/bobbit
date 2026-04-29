@@ -94,7 +94,7 @@ test.beforeAll(async () => {
 	}).catch(() => {});
 });
 
-test.describe("Goal creation (full-stack UI)", () => {
+test.describe("Goal creation (full-stack UI) @quarantine", () => {
 	test("create goal via assistant flow @quarantine", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 
