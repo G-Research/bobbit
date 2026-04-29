@@ -56,16 +56,45 @@ export class GitStatusWidget extends LitElement {
     };
 
     /**
-     * Multi-repo aware envelope (Phase 4). When set, `repos` carries per-repo
-     * status entries from `GET /api/goals/:id/git-status`. Today the widget
-     * still renders the flat aggregate fields above; per-repo collapsible
-     * sections are a follow-up.
+     * Multi-repo aware envelope. When set with >1 entry, the widget renders
+     * per-repo collapsible sections inside the dropdown and shows an aggregate
+     * count in the pill (e.g. "3 changed across 2 repos"). Single-key
+     * (`"."`) cases use the flat render and the pill stays simple.
      *
-     * TODO Phase 4 follow-up: render per-repo collapsible sections with
-     * aggregated header counts when `Object.keys(repos).length > 1`. The
-     * single-key (`"."`) case continues to use the flat render.
+     * Per-repo entries accept the canonical server envelope from
+     * `GET /api/goals/:id/git-status`: each value carries either `statusFiles`
+     * (preferred) or the legacy `status` field. We tolerate both so the
+     * widget can be wired against either shape without server contortions.
      */
-    @property({ type: Object }) repos?: Record<string, { summary?: string; clean?: boolean; statusFiles?: Array<{ file: string; status: string }> }>;
+    @property({ type: Object }) repos?: Record<string, {
+        summary?: string;
+        clean?: boolean;
+        statusFiles?: Array<{ file: string; status: string }>;
+        status?: Array<{ file: string; status: string }>;
+        aheadOfPrimary?: number;
+        behindPrimary?: number;
+    }>;
+
+    /** Files for a per-repo entry, tolerating both `statusFiles` and `status`. */
+    private _repoFiles(info: { statusFiles?: Array<{ file: string; status: string }>; status?: Array<{ file: string; status: string }> } | undefined): Array<{ file: string; status: string }> {
+        if (!info) return [];
+        return info.statusFiles ?? info.status ?? [];
+    }
+
+    /** Total dirty-file count across all repos in `repos` (multi-repo mode). */
+    private _aggregateDirtyCount(): number {
+        if (!this.repos) return 0;
+        let n = 0;
+        for (const info of Object.values(this.repos)) n += this._repoFiles(info).length;
+        return n;
+    }
+
+    /** True if this widget is rendering multi-repo data (>1 entry, ignoring "." alone). */
+    private _isMultiRepo(): boolean {
+        if (!this.repos) return false;
+        const keys = Object.keys(this.repos);
+        return keys.length > 1;
+    }
 
     /** Helper: how many distinct repos this widget has data for. */
     getRepoCount(): number {
@@ -733,25 +762,35 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderMultiRepoSections() {
-        if (!this.repos) return null;
-        const entries = Object.entries(this.repos);
-        if (entries.length <= 1) return null;
+        if (!this._isMultiRepo()) return null;
+        const entries = Object.entries(this.repos!);
+        const dirtyRepoCount = entries.filter(([, info]) => this._repoFiles(info).length > 0 || info.clean === false).length;
+        const totalDirty = this._aggregateDirtyCount();
+        const headerText = totalDirty > 0
+            ? `${totalDirty} changed across ${dirtyRepoCount || entries.length} repo${(dirtyRepoCount || entries.length) === 1 ? '' : 's'}`
+            : `${entries.length} repos clean`;
         return html`
             <div class="border-t border-border pt-2 mt-2 flex flex-col gap-1.5" data-testid="multi-repo-sections">
-                <div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium" data-testid="multi-repo-header">${entries.length} repos</div>
+                <div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium flex items-center justify-between" data-testid="multi-repo-header">
+                    <span>Repos</span>
+                    <span class="text-muted-foreground normal-case tracking-normal" data-testid="multi-repo-aggregate">${headerText}</span>
+                </div>
                 ${entries.map(([repoName, info]) => {
-                    const files = info.statusFiles ?? [];
-                    const summary = info.summary ?? (info.clean ? 'clean' : `${files.length} change${files.length === 1 ? '' : 's'}`);
+                    const files = this._repoFiles(info);
+                    const isClean = files.length === 0 && info.clean !== false;
+                    const counts: any[] = [];
+                    if (files.length > 0) counts.push(html`<span class="text-amber-600 dark:text-amber-400 text-[10px] font-medium" data-testid="repo-dirty-count">~${files.length}</span>`);
+                    if (typeof info.aheadOfPrimary === 'number' && info.aheadOfPrimary > 0)
+                        counts.push(html`<span class="text-blue-600 dark:text-blue-400 text-[10px] font-medium">↑${info.aheadOfPrimary}</span>`);
+                    if (typeof info.behindPrimary === 'number' && info.behindPrimary > 0)
+                        counts.push(html`<span class="text-red-600 dark:text-red-400 text-[10px] font-medium">↓${info.behindPrimary}</span>`);
+                    if (counts.length === 0) counts.push(html`<span class="text-green-600 dark:text-green-400 text-[10px] font-medium" data-testid="repo-clean">clean</span>`);
+                    // Auto-expand dirty repos; keep clean ones collapsed for compactness.
                     return html`
-                        <details class="border border-border rounded-md" data-testid="multi-repo-entry" data-repo-name=${repoName}>
+                        <details class="border border-border rounded-md" data-testid="multi-repo-entry" data-repo-name=${repoName} ?open=${!isClean}>
                             <summary class="text-xs font-medium text-foreground cursor-pointer py-1 px-2 flex items-center gap-2">
-                                <code class="text-[10px] font-mono">${repoName === '.' ? '(root)' : repoName}</code>
-                                <span class="text-muted-foreground text-[11px]">${summary}</span>
-                                ${info.clean === false || files.length > 0
-                                    ? html`<span class="text-amber-600 dark:text-amber-400 text-[10px]" data-testid="repo-dirty-dot">●</span>`
-                                    : info.clean === true
-                                        ? html`<span class="text-green-600 dark:text-green-400 text-[10px]">○</span>`
-                                        : ''}
+                                <code class="text-[11px] font-mono" data-testid="repo-name">${repoName === '.' ? '(root)' : repoName}</code>
+                                <span class="flex items-center gap-1.5 ml-auto" data-testid="repo-counts">${counts}</span>
                             </summary>
                             ${files.length > 0
                                 ? html`<div class="flex flex-col gap-0.5 px-2 pb-2 pt-1">
@@ -762,7 +801,7 @@ export class GitStatusWidget extends LitElement {
                                         </div>
                                     `)}
                                 </div>`
-                                : html`<div class="text-[11px] text-muted-foreground italic px-2 pb-2">Working tree clean</div>`}
+                                : html`<div class="text-[11px] text-muted-foreground italic px-2 pb-2" data-testid="repo-empty">Working tree clean</div>`}
                         </details>
                     `;
                 })}
@@ -772,6 +811,11 @@ export class GitStatusWidget extends LitElement {
 
     private _renderDropdownContent() {
         const multiRepoSections = this._renderMultiRepoSections();
+        // In multi-repo mode the per-repo sections are the source of truth
+        // for the dirty file list. The flat aggregate `statusFiles` (which
+        // mirrors the goal worktree's own porcelain) is suppressed to avoid
+        // double-counting / duplicate "uncommitted changes" lists.
+        const showFlatFiles = !multiRepoSections && this.statusFiles.length > 0;
         return html`
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
@@ -788,7 +832,7 @@ export class GitStatusWidget extends LitElement {
 
             ${multiRepoSections}
 
-            ${this.statusFiles.length > 0
+            ${showFlatFiles
                 ? html`
                       <div class="border-t border-border pt-2 mt-2">
                           <div class="text-muted-foreground mb-1 flex items-center gap-2">
@@ -815,7 +859,9 @@ export class GitStatusWidget extends LitElement {
                           </div>
                       </div>
                   `
-                : html`
+                : multiRepoSections
+                    ? nothing
+                    : html`
                       <div class="text-green-600 dark:text-green-400 border-t border-border pt-2 mt-2">
                           Working tree clean
                       </div>
@@ -848,10 +894,25 @@ export class GitStatusWidget extends LitElement {
         if (!this.branch) return nothing;
 
         const segments = this._pillSegments();
+        // Multi-repo aggregate: when we have a per-repo envelope with >1
+        // entries, override the dirty-file count in the pill to reflect
+        // the sum across repos (the flat `statusFiles` only covers the
+        // goal worktree's own repo). Match the design's mock: e.g.
+        // "3 changed across 2 repos".
+        const multiRepoMode = this._isMultiRepo();
+        const aggregateLabel = multiRepoMode
+            ? (() => {
+                const total = this._aggregateDirtyCount();
+                if (total === 0) return null;
+                const dirtyRepos = Object.values(this.repos!).filter(info => this._repoFiles(info).length > 0).length;
+                return `${total} changed across ${dirtyRepos} repo${dirtyRepos === 1 ? '' : 's'}`;
+            })()
+            : null;
         // Show 'clean' only when no other indicators are present and no PR
         const showClean = this.clean && segments.length === 0 && !this.prState
             && (this.isOnPrimary || this.mergedIntoPrimary)
-            && (this.isOnPrimary || this.aheadOfPrimary === 0);
+            && (this.isOnPrimary || this.aheadOfPrimary === 0)
+            && !aggregateLabel;
 
         const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : 'ready';
         const refreshDot = this.loading
@@ -870,7 +931,9 @@ export class GitStatusWidget extends LitElement {
                 <span class="shrink-0 relative" style="display:inline-block">⎇${refreshDot}</span>
                 <span class="truncate">${this.branch}</span>
                 ${showClean ? html`<span class="text-green-600 dark:text-green-400 font-medium shrink-0">clean</span>` : nothing}
-                ${segments}
+                ${aggregateLabel
+                    ? html`<span class="text-amber-600 dark:text-amber-400 font-medium shrink-0" data-testid="pill-multi-repo-aggregate">${aggregateLabel}</span>`
+                    : segments}
                 ${this._prPillIcon()}
             </button>
         `;

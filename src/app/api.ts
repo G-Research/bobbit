@@ -438,6 +438,22 @@ export async function detectProject(dirPath: string): Promise<{
   return res.json();
 }
 
+export interface DetectedRepo {
+  folder: string;
+  hasGit: boolean;
+  detectedCommands: Record<string, string>;
+}
+
+export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]> {
+  const res = await gatewayFetch(`/api/projects/scan?path=${encodeURIComponent(dirPath)}`, {
+    method: 'POST',
+    body: JSON.stringify({ path: dirPath }),
+  });
+  if (!res.ok) throw new Error(`Scan failed (${res.status})`);
+  const data = await res.json();
+  return Array.isArray(data?.repos) ? data.repos as DetectedRepo[] : [];
+}
+
 export async function browseDirectory(dirPath?: string): Promise<{
   current: string;
   parent: string | null;
