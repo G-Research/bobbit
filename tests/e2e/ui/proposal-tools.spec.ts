@@ -42,10 +42,10 @@ async function deleteGoalByTitle(title: string) {
 	if (goal) await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
 }
 
-test.describe("Proposal tool blocks", () => {
-	// @quarantine — Pre-existing flake: textarea visibility times out at 30s under suite contention.
-	// Expiry: 2026-06-30. Tracked as part of master commit #380 follow-up.
-	test("propose_goal tool block renders in message history @smoke @quarantine", async ({ page }) => {
+// @quarantine — Pre-existing flake: shared `triggerGoalProposal` helper times out on textarea visibility at 30s under suite contention.
+// Expiry: 2026-06-30. Tracked as part of master commit #380 follow-up.
+test.describe("Proposal tool blocks @quarantine", () => {
+	test("propose_goal tool block renders in message history @smoke", async ({ page }) => {
 		await triggerGoalProposal(page);
 
 		// The message area should contain a tool card for propose_goal
