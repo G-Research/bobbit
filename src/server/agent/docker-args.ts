@@ -5,16 +5,19 @@
  * managed by the sandbox pool. All sandbox sessions use pool containers
  * (pre-warmed or created on-demand).
  *
- * TODO Phase 4 follow-up: multi-repo mount layout. Today single-repo mounts
- * a single `bobbit-workspace-<projectId>` named volume at `/workspace`. For
- * multi-repo we need:
- *   - `bobbit-workspace-<projectId>` at `/workspace` containing one subdir
- *     per declared repo (`/workspace/<repo>/`).
- *   - `bobbit-worktrees-<projectId>` at `/workspace-wt/` containing
- *     `<branchSlug>/<repo>/` worktrees side-by-side.
- * Until then, multi-repo projects throw on sandbox creation (see
- * `ProjectSandbox.createWorktreeSet` stub) and callers must fall back to
- * non-sandboxed mode. See docs/design/multi-repo-components.md §7.2.
+ * Multi-repo layout (Phase 4a):
+ *   - `bobbit-workspace-<projectId>` at `/workspace`: single-repo holds the
+ *     repo at the volume root; multi-repo holds one subdir per declared
+ *     repo (`/workspace/<repo>/`).
+ *   - `bobbit-worktrees-<projectId>` at `/workspace-wt/`: single-repo lays
+ *     out worktrees as `/workspace-wt/<branchSlug>/`; multi-repo lays them
+ *     out as `/workspace-wt/<branchSlug>/<repo>/` side-by-side.
+ *
+ * Mount args are identical for both shapes — the volume is just a flat
+ * filesystem and the layout differences live in the worktree-creation paths
+ * (see `ProjectSandbox._runInitSequenceMultiRepo` and `createWorktreeSet`).
+ * `toDockerPath` host-path rewriting is unchanged and works for both modes.
+ * See docs/design/multi-repo-components.md §7.2.
  */
 
 import { execFileSync } from "node:child_process";

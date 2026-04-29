@@ -94,7 +94,7 @@ export function _resetDockerLimitsCache(): void {
 export interface ProjectSandboxOptions {
 	projectId: string;
 	projectDir: string;        // host project root
-	repoUrl: string;           // git remote URL to clone inside container
+	repoUrl: string;           // git remote URL to clone inside container (single-repo)
 	image: string;             // Docker image name
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
@@ -102,6 +102,20 @@ export interface ProjectSandboxOptions {
 	githubToken?: string;      // for git push/PR inside container
 	/** Tool manager for resolving builtin tools directory in Docker mounts. */
 	toolManager?: ToolManager;
+	/**
+	 * Multi-repo: components driving worktree-set creation. When present and any
+	 * component has `repo !== "."`, the sandbox enters multi-repo mode — each
+	 * distinct repo gets its own clone under `/workspace/<repo>` and worktrees
+	 * land at `/workspace-wt/<branchSlug>/<repo>`.
+	 * Single-repo (omitted, empty, or all `repo === "."`) is unchanged.
+	 */
+	components?: Component[];
+	/**
+	 * Multi-repo: optional per-repo clone URLs. Falls back to `repoUrl` if a
+	 * mapping is missing for a given repo (useful when all repos share a
+	 * remote prefix and the host can resolve them via `git remote get-url`).
+	 */
+	repoUrlByName?: Record<string, string>;
 }
 
 export interface ContainerState {
@@ -239,12 +253,11 @@ export class ProjectSandbox {
 	}
 
 	/**
-	 * Multi-repo aware worktree creation — single-repo collapses to today's
-	 * `createWorktree(name, branch, baseBranch)`. Multi-repo is a TODO stub:
-	 * the mount layout requires `/workspace/<repo>` named volumes and per-repo
-	 * worktrees under `/workspace-wt/<branchSlug>/<repo>` which `docker-args.ts`
-	 * does not yet emit. Callers should fall back to non-sandboxed mode for
-	 * multi-repo until that lands.
+	 * Multi-repo aware worktree creation. Single-repo (one component with
+	 * `repo === "."`) collapses to today's `createWorktree(name, branch,
+	 * baseBranch)`. Multi-repo creates one worktree per distinct `repo` under
+	 * `/workspace-wt/<name>/<repo>` from sources at `/workspace/<repo>` and
+	 * runs each component's `worktree_setup_command` inside the container.
 	 *
 	 * See docs/design/multi-repo-components.md §7.2.
 	 */
@@ -263,9 +276,84 @@ export class ProjectSandbox {
 			const container = await this.createWorktree(name, branch, baseBranch);
 			return { container, worktrees: [{ repo: ".", worktreePath: container }] };
 		}
-		throw new Error(
-			"multi-repo sandbox createWorktreeSet not yet implemented (Phase 4 follow-up); use non-sandboxed mode for multi-repo until then",
-		);
+
+		// Multi-repo: per-branch container at `/workspace-wt/<name>`, per-repo
+		// worktrees underneath. Each repo's source clone lives at `/workspace/<repo>`.
+		const containerId = await this.getContainerId();
+		const container = `/workspace-wt/${name}`;
+
+		try {
+			await this._dockerExec(containerId, ["mkdir", "-p", container]);
+		} catch {
+			await execFileAsync("docker", [
+				"exec", "-u", "root", containerId, "sh", "-c",
+				`mkdir -p ${container} && chown node:node ${container}`,
+			], { timeout: 10_000, env: DOCKER_ENV });
+		}
+
+		const out: Array<{ repo: string; worktreePath: string }> = [];
+		for (const repo of repos) {
+			const repoSrc = `/workspace/${repo}`;
+			const wtPath = `${container}/${repo}`;
+
+			// Resolve start point (per-repo so different repos can be at different
+			// primary branches if they ever drift — we still warn elsewhere).
+			let startPoint = baseBranch;
+			if (!startPoint) {
+				try {
+					const refResult = await this._dockerExec(containerId,
+						["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+						{ cwd: repoSrc });
+					const ref = refResult.trim().replace("refs/remotes/", "");
+					if (ref) startPoint = ref;
+				} catch { /* fall back below */ }
+				if (!startPoint) startPoint = "origin/master";
+			}
+
+			try {
+				await this._dockerExec(containerId, ["git", "worktree", "add", wtPath, "-b", branch, startPoint], { cwd: repoSrc });
+			} catch {
+				try {
+					await this._dockerExec(containerId, ["git", "worktree", "add", wtPath, branch], { cwd: repoSrc });
+				} catch (err2: any) {
+					if (!(err2?.message?.includes("already exists") || err2?.stderr?.includes("already exists"))) {
+						throw err2;
+					}
+					console.log(`[project-sandbox] Worktree ${name}/${repo} already exists, reusing`);
+				}
+			}
+
+			await this._installPostCommitHook(containerId, wtPath);
+
+			if (!shouldSkipRemotePush()) {
+				try {
+					await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: wtPath });
+				} catch { /* push may fail if branch doesn't exist on remote yet */ }
+			}
+
+			out.push({ repo, worktreePath: wtPath });
+		}
+
+		// Per-component setup hook — sequential, runs inside the container at
+		// each component's resolved root. Shared with the host code path.
+		try {
+			const { runComponentSetups } = await import("../skills/worktree-setup.js");
+			await runComponentSetups({
+				components,
+				branchContainer: container,
+				primaryWorktreeRoot: "/workspace",
+				exec: async (cmd, cwd, env) => {
+					const execEnv: Record<string, string> = {};
+					if (env.SOURCE_REPO) execEnv.SOURCE_REPO = String(env.SOURCE_REPO);
+					await this._dockerExec(containerId, ["sh", "-c", cmd], { cwd, env: execEnv, timeout: 120_000 });
+				},
+			});
+		} catch (err) {
+			console.warn(`[project-sandbox] Component setup failed (non-fatal):`, err);
+		}
+
+		console.log(`[project-sandbox] Created multi-repo worktree set ${name} (branch: ${branch}) at ${container}`);
+		return { container, worktrees: out };
 	}
 
 	/** Remove a git worktree inside the container. */
@@ -541,6 +629,21 @@ export class ProjectSandbox {
 	private async _runInitSequence(): Promise<void> {
 		if (!this.containerId) return;
 
+		// Multi-repo: each declared repo gets its own clone under `/workspace/<repo>/`.
+		// Detect by inspecting components for any repo !== ".".
+		const components = this.options.components ?? [];
+		const repoNames: string[] = [];
+		const seen = new Set<string>();
+		for (const c of components) {
+			if (!seen.has(c.repo)) { seen.add(c.repo); repoNames.push(c.repo); }
+		}
+		const isMultiRepo = repoNames.some(r => r !== ".");
+
+		if (isMultiRepo) {
+			await this._runInitSequenceMultiRepo(repoNames);
+			return;
+		}
+
 		// Check if the workspace already has a git repo (volume persisted from prior run)
 		try {
 			await this._dockerExec(this.containerId, ["test", "-d", "/workspace/.git"]);
@@ -609,6 +712,44 @@ export class ProjectSandbox {
 		}
 
 		console.log(`[project-sandbox] Init sequence complete for project ${this.options.projectId}`);
+	}
+
+	/**
+	 * Multi-repo init: clone each declared repo into `/workspace/<repo>/`.
+	 * Idempotent — a repo with `.git` already present is skipped.
+	 * Component setup commands are NOT run here; they run on each
+	 * worktree-set creation via `runComponentSetups`.
+	 */
+	private async _runInitSequenceMultiRepo(repoNames: string[]): Promise<void> {
+		if (!this.containerId) return;
+		const urlMap = this.options.repoUrlByName ?? {};
+		const defaultUrl = stripTokenFromGitUrl(this.options.repoUrl);
+
+		// Mark all of /workspace as a safe directory for git
+		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
+
+		for (const repo of repoNames) {
+			if (repo === ".") continue;  // sanity
+			const dest = `/workspace/${repo}`;
+			try {
+				await this._dockerExec(this.containerId, ["test", "-d", `${dest}/.git`]);
+				console.log(`[project-sandbox] Repo ${repo} already cloned`);
+				continue;
+			} catch { /* not cloned yet */ }
+
+			const url = stripTokenFromGitUrl(urlMap[repo] ?? defaultUrl);
+			try {
+				await this._dockerExec(this.containerId, ["sh", "-c", `mkdir -p ${dest}`]);
+			} catch { /* will be created by clone */ }
+			try {
+				console.log(`[project-sandbox] Cloning ${url} into ${dest}...`);
+				await this._dockerExec(this.containerId, ["git", "clone", url, dest], { timeout: 120_000 });
+			} catch (err: any) {
+				console.warn(`[project-sandbox] Clone failed for repo ${repo}: ${err?.message || err}`);
+			}
+		}
+
+		console.log(`[project-sandbox] Multi-repo init sequence complete for project ${this.options.projectId}`);
 	}
 
 	// ── Private: Post-commit hook ──────────────────────────────────────

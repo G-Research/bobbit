@@ -102,17 +102,25 @@ async function deleteRemoteGoalBranches(
 		}
 	}
 	if (branches.size === 0) return;
-	for (const branch of branches) {
+
+	// Multi-repo: iterate all configured repos and run `git push --delete` in
+	// each one in parallel. Single-repo collapses to a single repoPath.
+	const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+	const repoPaths: string[] = goalRepoWorktrees && Object.keys(goalRepoWorktrees).length > 0
+		? Object.keys(goalRepoWorktrees).map(repo => repo === "." ? repoPath : path.join(repoPath, repo))
+		: [repoPath];
+
+	await Promise.allSettled(repoPaths.flatMap(rp => Array.from(branches).map(async (branch) => {
 		try {
 			await execFileAsync("git", ["push", "origin", "--delete", branch], {
-				cwd: repoPath,
+				cwd: rp,
 				timeout: 15_000,
 			});
-			console.log(`[api] Deleted remote branch: ${branch}`);
+			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
-			console.warn(`[api] Failed to delete remote branch ${branch}:`, err);
+			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
-	}
+	})));
 }
 
 /** Cached Docker availability result to avoid running `docker info` per session creation */
@@ -1067,6 +1075,28 @@ export function createGateway(config: GatewayConfig) {
 				const githubTokenEnabled = cfg.get("sandbox_github_token") !== "false";
 				const githubToken = githubTokenEnabled ? resolveHostTokenValue("GITHUB_TOKEN") : undefined;
 
+				const components = ctx.projectConfigStore.getComponents();
+				// Multi-repo: try to resolve each repo's clone URL from `<rootPath>/<repo>/.git/config`.
+				// Falls back to the project's primary `repoUrl` for any repo without
+				// a remote configured (the bootstrap will then clone the same repo
+				// into multiple paths — only useful as a defensive default).
+				let repoUrlByName: Record<string, string> | undefined;
+				if (components.some(c => c.repo !== ".")) {
+					repoUrlByName = {};
+					const seen = new Set<string>();
+					for (const c of components) {
+						if (c.repo === "." || seen.has(c.repo)) continue;
+						seen.add(c.repo);
+						const rp = path.join(projectDir, c.repo);
+						try {
+							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: rp, timeout: 5000 });
+							repoUrlByName[c.repo] = stripTokenFromGitUrl(stdout.trim());
+						} catch {
+							repoUrlByName[c.repo] = repoUrl;
+						}
+					}
+				}
+
 				return {
 					projectId,
 					projectDir,
@@ -1077,6 +1107,8 @@ export function createGateway(config: GatewayConfig) {
 					sandboxCredentials: poolCredentials,
 					githubToken,
 					toolManager: ctx.toolManager,
+					components,
+					repoUrlByName,
 				};
 			};
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
@@ -1102,17 +1134,28 @@ export function createGateway(config: GatewayConfig) {
 			// crashed prior instance are reclaimed (or cleaned up) cleanly.
 			try {
 				const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-				const sweepProjects: Array<{ id: string; rootPath: string }> = [];
-				const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean }> = [];
-				const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean }> = [];
+				const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+				const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+				const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 				const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
 				for (const ctx of projectContextManager.all()) {
-					sweepProjects.push({ id: ctx.project.id, rootPath: ctx.project.rootPath });
+					const repoNames = ctx.projectConfigStore.repoNames();
+					sweepProjects.push({
+						id: ctx.project.id,
+						rootPath: ctx.project.rootPath,
+						repos: repoNames.length > 0 ? repoNames : undefined,
+					});
 					for (const g of ctx.goalStore.getAll()) {
-						sweepGoals.push({ id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived });
+						sweepGoals.push({
+							id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+							repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+						});
 					}
 					for (const s of ctx.sessionStore.getAll()) {
-						sweepSessions.push({ id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived });
+						sweepSessions.push({
+							id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+							repoWorktrees: s.repoWorktrees,
+						});
 					}
 					for (const st of ctx.staffStore.getAll()) {
 						sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
@@ -1135,20 +1178,41 @@ export function createGateway(config: GatewayConfig) {
 				for (const ctx of projectContextManager.all()) {
 					try {
 						const repoPath = ctx.project.rootPath;
-						if (await isGitRepo(repoPath)) {
+						const components = ctx.projectConfigStore.getComponents();
+						const isMulti = components.some(c => c.repo !== ".");
+						let poolReady = false;
+						if (isMulti) {
+							const seen = new Set<string>();
+							poolReady = true;
+							for (const c of components) {
+								if (c.repo === "." || seen.has(c.repo)) continue;
+								seen.add(c.repo);
+								if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+							}
+						} else {
+							poolReady = await isGitRepo(repoPath);
+						}
+						if (poolReady) {
 							const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
 							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize);
+							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize, components);
 						}
 					} catch { /* best-effort */ }
 				}
 			}
 
-			// Wire goal-manager pool resolvers so goals claim through the pool first
-			// (Phase 3 — fixes the bug where goals always called createWorktree).
+			// Wire goal-manager resolvers so goals claim through the pool first and
+			// resolve components / project root for multi-repo goal creation.
 			for (const ctx of projectContextManager.all()) {
 				const projectId = ctx.project.id;
 				ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(projectId));
+				ctx.goalManager.setComponentsResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c ? c.projectConfigStore.getComponents() : [];
+				});
+				ctx.goalManager.setProjectRootResolver((pid: string) => {
+					return projectRegistry.get(pid)?.rootPath;
+				});
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -1868,6 +1932,11 @@ async function handleApiRoute(
 							ctx.goalStore.bumpGeneration();
 						};
 						ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(existing.id));
+						ctx.goalManager.setComponentsResolver((pid: string) => {
+							const c = projectContextManager.getOrCreate(pid);
+							return c ? c.projectConfigStore.getComponents() : [];
+						});
+						ctx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
 					}
 					json(existing, 200);
 					return;
@@ -1925,16 +1994,38 @@ async function handleApiRoute(
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
 				try {
-					if (await isGitRepo(body.rootPath)) {
+					// Multi-repo: rootPath is a container dir, individual repos sit
+					// under <rootPath>/<repo>/. We treat that case as "git-ready" if
+					// every declared repo subdir is a git repo.
+					const components = newCtx?.projectConfigStore.getComponents() ?? [];
+					const isMulti = components.some(c => c.repo !== ".");
+					let poolReady = false;
+					if (isMulti) {
+						const seen = new Set<string>();
+						poolReady = true;
+						for (const c of components) {
+							if (c.repo === "." || seen.has(c.repo)) continue;
+							seen.add(c.repo);
+							if (!(await isGitRepo(path.join(body.rootPath, c.repo)))) { poolReady = false; break; }
+						}
+					} else {
+						poolReady = await isGitRepo(body.rootPath);
+					}
+					if (poolReady) {
 						const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize);
+						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize, components);
 					}
 				} catch { /* best-effort */ }
 			}
 			// Wire the goal-manager pool resolver for the new project (Phase 3 — goals via pool).
 			if (newCtx) {
 				newCtx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(project.id));
+				newCtx.goalManager.setComponentsResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c ? c.projectConfigStore.getComponents() : [];
+				});
+				newCtx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
 			}
 			json(project, 201);
 		} catch (err: any) {
@@ -2815,6 +2906,7 @@ async function handleApiRoute(
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
+				projectId: targetProjectId,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {

@@ -30,6 +30,8 @@ const execFile = promisify(execFileCb);
 export interface SweepProject {
 	id: string;
 	rootPath: string;
+	/** Multi-repo: distinct repo subfolder names. Single-repo omits or supplies ["."]. */
+	repos?: string[];
 }
 
 export interface SweepRecord {
@@ -111,24 +113,35 @@ export async function sweepOrphanedWorktrees(opts: {
 	for (const project of opts.projects) {
 		if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
 
-		let worktrees: ParsedWorktree[] = [];
-		try {
-			const { stdout } = await execFile("git", ["worktree", "list", "--porcelain"], {
-				cwd: project.rootPath,
-				timeout: 10_000,
-			});
-			worktrees = parseWorktreeList(stdout);
-		} catch {
-			// Not a git repo, or git unavailable — skip.
-			continue;
+		// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
+		// is reconciled against the goal/session/staff record map. Single-repo
+		// projects have one entry with `repoPath === project.rootPath`.
+		const repoList = (project.repos && project.repos.length > 0)
+			? project.repos.map(r => r === "." ? project.rootPath : path.join(project.rootPath, r))
+			: [project.rootPath];
+
+		const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
+		for (const repoPath of repoList) {
+			if (!fs.existsSync(repoPath)) continue;
+			try {
+				const { stdout } = await execFile("git", ["worktree", "list", "--porcelain"], {
+					cwd: repoPath,
+					timeout: 10_000,
+				});
+				for (const wt of parseWorktreeList(stdout)) {
+					worktrees.push({ ...wt, repoPath });
+				}
+			} catch {
+				// Not a git repo, or git unavailable — skip this repo.
+			}
 		}
 
 		for (const wt of worktrees) {
 			const wtPathNorm = normalize(wt.path);
 			if (!wtPathNorm) continue;
 
-			// Skip the primary worktree (the repo itself).
-			if (wtPathNorm === normalize(project.rootPath)) continue;
+			// Skip the primary worktree(s) of any configured repo.
+			if (wtPathNorm === normalize(wt.repoPath)) continue;
 
 			const branch = wt.branch;
 
@@ -144,6 +157,12 @@ export async function sweepOrphanedWorktrees(opts: {
 			const ownedByPath = ownedPaths.has(wtPathNorm);
 
 			if (ownedByBranch || ownedByPath) {
+				// Multi-repo: a per-repo path explicitly listed in any record's
+				// `repoWorktrees` is active in this repo — do NOT treat path drift
+				// against the record's flat container path as a repair signal.
+				if (ownedByPath) {
+					continue;
+				}
 				// Path drift — record says worktree is at X, git says it's at Y.
 				// Try `git worktree repair` to bring them back into sync.
 				if (ownedByBranch && branch) {
@@ -151,7 +170,7 @@ export async function sweepOrphanedWorktrees(opts: {
 					if (expected && normalize(expected) !== wtPathNorm) {
 						try {
 							await execFile("git", ["worktree", "repair", wt.path], {
-								cwd: project.rootPath,
+								cwd: wt.repoPath,
 								timeout: 15_000,
 							});
 							repaired++;
@@ -170,9 +189,9 @@ export async function sweepOrphanedWorktrees(opts: {
 			if (!branch) continue; // detached worktree; leave alone.
 
 			try {
-				await cleanupWorktree(project.rootPath, wt.path, branch, true);
+				await cleanupWorktree(wt.repoPath, wt.path, branch, true);
 				cleaned++;
-				console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch})`);
+				console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);
 			} catch (err) {
 				console.warn(`[sweeper] Failed to clean orphan worktree ${wt.path}:`, err);
 			}
@@ -226,6 +245,13 @@ export function classifyWorktrees(opts: {
 		const ownedByBranch = !!(wt.branch && ownedBranches.has(wt.branch));
 		const ownedByPath = !!wtPathNorm && ownedPaths.has(wtPathNorm);
 		if (ownedByBranch || ownedByPath) {
+			// Multi-repo: a per-repo path explicitly listed in any record's
+			// `repoWorktrees` map is active even if it differs from the record's
+			// flat `worktreePath` (which holds the container in multi-repo mode).
+			if (ownedByPath) {
+				active.push(wt);
+				continue;
+			}
 			if (ownedByBranch && wt.branch) {
 				const expected = branchToExpectedPath.get(wt.branch);
 				if (expected && normalize(expected) !== wtPathNorm) {
