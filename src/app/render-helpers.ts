@@ -884,3 +884,68 @@ export function goalStateIcon(goalState: GoalState, size = 14) {
 		</svg>
 	`;
 }
+
+// ============================================================================
+// MISSION GROUP (sidebar)
+// ============================================================================
+
+import { Flag } from "lucide";
+import { expandedMissions, toggleMissionExpanded } from "./state.js";
+import type { PersistedMission } from "./mission-types.js";
+import { MISSION_STATE_LABELS } from "./mission-types.js";
+
+/** Render a mission row with its child goals nested below. */
+export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]): TemplateResult {
+	const isExpanded = expandedMissions.has(mission.id);
+	const stateLabel = MISSION_STATE_LABELS[mission.state] ?? mission.state;
+	const toggle = (e: Event) => {
+		e.stopPropagation();
+		toggleMissionExpanded(mission.id);
+		renderApp();
+	};
+	const open = (e: Event) => {
+		e.stopPropagation();
+		setHashRoute("mission-dashboard", mission.id);
+	};
+
+	return html`
+		<div class="flex flex-col gap-0.5" data-testid="mission-group" data-mission-id=${mission.id}>
+			<div
+				class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/40 transition-colors"
+				style="padding-left:${HEADER_CHEVRON_W}px;"
+				@click=${open}
+			>
+				<span
+					class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none"
+					style="width:${HEADER_CHEVRON_W}px;"
+					@click=${toggle}
+					title="${isExpanded ? "Collapse" : "Expand"}"
+				>${isExpanded ? "▾" : "▸"}</span>
+				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Flag, "xs")}</span>
+				<span class="flex-1 text-xs truncate" title=${mission.title}>${mission.title}</span>
+				<span class="text-[10px] text-muted-foreground" title="Mission state">${stateLabel}</span>
+			</div>
+			${isExpanded && childGoals.length > 0 ? html`
+				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+					${childGoals.map(g => renderGoalGroup(g))}
+				</div>
+			` : ""}
+			${isExpanded && childGoals.length === 0 ? html`
+				<div class="text-[10px] text-muted-foreground" style="padding-left:${INDENT + HEADER_CHEVRON_W}px;">
+					No child goals yet.
+				</div>
+			` : ""}
+		</div>
+	`;
+}
+
+/** Filter goals owned by a mission. */
+export function goalsForMission(missionId: string, goals: Goal[]): Goal[] {
+	return goals.filter(g => g.missionId === missionId);
+}
+
+/** Goals NOT owned by any mission (= standalone goals). Used to filter
+ *  the existing Goals subgroup so mission-children don't render twice. */
+export function standaloneGoals(goals: Goal[]): Goal[] {
+	return goals.filter(g => !g.missionId);
+}

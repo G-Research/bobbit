@@ -1123,13 +1123,24 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 
 function renderNavBar(goal: Goal): TemplateResult {
 	const isTeamGoal = !!goal.team;
+	const missionId = (goal as any).missionId as string | undefined;
+	const mission = missionId ? state.missions.find(m => m.id === missionId) : undefined;
 
 	return html`
 		<div class="nav">
 			<div class="nav-left">
-				<button class="back-btn" @click=${() => setHashRoute("landing")} title="Back to sessions">
-					${svgArrowLeft}
-				</button>
+				${mission ? html`
+					<button class="back-btn" data-testid="goal-back-to-mission"
+						@click=${() => setHashRoute("mission-dashboard", mission.id)}
+						title="Back to mission ${mission.title}">
+						${svgArrowLeft}
+					</button>
+					<span style="font-size:11px;color:var(--muted-foreground);margin-right:6px;">Mission: <a href="#/mission/${mission.id}" class="underline">${mission.title}</a> /</span>
+				` : html`
+					<button class="back-btn" @click=${() => setHashRoute("landing")} title="Back to sessions">
+						${svgArrowLeft}
+					</button>
+				`}
 				<span class="nav-title">${goal.title}</span>
 				${goal.workflow ? html`<span class="nav-workflow-badge" title="Uses workflow: ${goal.workflow.name}">${goal.workflow.name}</span>` : nothing}
 				${goal.reattemptOf ? (() => {

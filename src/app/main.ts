@@ -14,6 +14,7 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { doRenderApp } from "./render.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
+import { loadMissionDashboard, clearMissionDashboardState } from "./mission-dashboard.js";
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 
 // ============================================================================
@@ -104,6 +105,7 @@ async function handleHashChange(): Promise<void> {
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId) {
 				return;
 			}
@@ -133,6 +135,7 @@ async function handleHashChange(): Promise<void> {
 			}
 			state.selectedSessionId = null;
 			state.goalDashboardId = route.goalId;
+			clearMissionDashboardState();
 			// Apply palette for the goal's project
 			const gdGoal = state.goals.find(g => g.id === route.goalId);
 			applyProjectPalette(gdGoal?.projectId);
@@ -140,8 +143,25 @@ async function handleHashChange(): Promise<void> {
 			loadDashboardData(route.goalId);
 			renderApp();
 			await refreshSessions();
+		} else if (route.view === "mission-dashboard" && route.missionId) {
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			clearDashboardState();
+			clearMissionDashboardState();
+			const mission = state.missions.find(m => m.id === route.missionId);
+			applyProjectPalette(mission?.projectId);
+			state.appView = "authenticated";
+			await loadMissionDashboard(route.missionId);
+			renderApp();
+			await refreshSessions();
 		} else if (route.view === "roles") {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -156,6 +176,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "role-edit" && route.roleName) {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -170,6 +191,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "tools") {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -184,6 +206,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "tool-edit" && route.toolName) {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -198,6 +221,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "workflows") {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -212,6 +236,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "workflow-edit" && route.workflowId) {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -226,6 +251,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "skills") {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -240,6 +266,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -254,6 +281,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else if (route.view === "staff-edit" && route.staffId) {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -268,6 +296,7 @@ async function handleHashChange(): Promise<void> {
 			await refreshSessions();
 		} else {
 			clearDashboardState();
+			clearMissionDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -380,6 +409,11 @@ async function initApp() {
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;
 				loadDashboardData(route.goalId);
+				renderApp();
+				await refreshSessions();
+			} else if (route.view === "mission-dashboard" && route.missionId) {
+				state.missionDashboardId = route.missionId;
+				await loadMissionDashboard(route.missionId);
 				renderApp();
 				await refreshSessions();
 			} else if (route.view === "roles") {

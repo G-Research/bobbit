@@ -30,7 +30,10 @@ import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, renderMissionGroup, goalsForMission } from "./render-helpers.js";
+import { showMissionDialog } from "./dialogs.js";
+import { Flag } from "lucide";
+import type { PersistedMission } from "./mission-types.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
@@ -798,15 +801,36 @@ function renderProjectContent(
 	staff?: typeof state.staffList,
 	archivedGoals: Goal[] = [],
 	standaloneArchivedSessions: GatewaySession[] = [],
+	missions: PersistedMission[] = [],
 ) {
 	const isProvisional = !!project.provisional;
 	const ungroupedExp = isUngroupedExpanded(project.id);
+	// Standalone goals = goals NOT owned by any mission (mission children render under their mission).
+	const standalone = goals.filter(g => !g.missionId);
 	return html`
-		${goals.map((goal, i) => html`
+		${missions.length > 0 ? html`
+			<div class="flex flex-col gap-0.5" data-testid="missions-subgroup">
+				<div class="relative flex items-center gap-1 pr-1 py-0.5" style="padding-left:${HEADER_CHEVRON_W}px;">
+					<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Flag, "xs")}</span>
+					<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Missions</span>
+					${!isProvisional ? html`
+						<button
+							class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+							@click=${(e: Event) => { e.stopPropagation(); showMissionDialog(project.id); }}
+							title="New mission in ${project.name}"
+							data-testid="new-mission-btn"
+						>${icon(Plus, "xs")}</button>
+					` : ""}
+				</div>
+				${missions.map(m => renderMissionGroup(m, goalsForMission(m.id, goals)))}
+			</div>
+			<div class="border-t border-border/30 mx-2"></div>
+		` : ""}
+		${standalone.map((goal, i) => html`
 			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 			${renderGoalGroup(goal)}
 		`)}
-		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+		${standalone.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 				style="padding-left:${HEADER_CHEVRON_W}px;"
@@ -843,7 +867,7 @@ function renderProjectContent(
 }
 
 export function renderSidebar() {
-	const { ungroupedSessions, liveGoals, archivedGoals } = getSidebarData();
+	const { ungroupedSessions, liveGoals, archivedGoals, liveMissions } = getSidebarData();
 
 	if (state.sidebarCollapsed) {
 		return renderCollapsedSidebar(liveGoals, ungroupedSessions, archivedGoals);
@@ -956,9 +980,16 @@ export function renderSidebar() {
 								staff: typeof filteredStaff;
 								archivedGoals: Goal[];
 								standaloneArchivedSessions: GatewaySession[];
+								missions: PersistedMission[];
 							}
 							const projectMap = new Map<string, ProjectBucket>();
-							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [] });
+							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [], missions: [] });
+							for (const m of liveMissions) {
+								if (!m.projectId) continue;
+								const bucket = projectMap.get(m.projectId);
+								if (!bucket) continue;
+								bucket.missions.push(m);
+							}
 							for (const g of filteredGoals) {
 								if (!g.projectId) { console.warn("[sidebar] orphaned goal with no projectId — skipping", g.id); continue; }
 								const bucket = projectMap.get(g.projectId);
@@ -997,13 +1028,13 @@ export function renderSidebar() {
 
 							return html`
 							${state.projects.map((project, i) => {
-								const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [] };
+								const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [], missions: [] };
 								const expanded = isProjectExpanded(project.id);
 								return html`
 									${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
 									${renderProjectHeader(project, expanded)}
 									${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-										${renderProjectContent(project, data.goals, data.sessions, data.staff, data.archivedGoals, data.standaloneArchivedSessions)}
+										${renderProjectContent(project, data.goals, data.sessions, data.staff, data.archivedGoals, data.standaloneArchivedSessions, data.missions)}
 									</div>` : ""}
 								`;
 							})}
