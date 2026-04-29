@@ -888,7 +888,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(ImageIcon, "sm")}
-					<span class="ml-1">${imageModel.id}</span>
+					<span class="ml-1 hidden sm:inline">${imageModel.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
