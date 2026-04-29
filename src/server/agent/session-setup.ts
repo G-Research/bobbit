@@ -74,6 +74,7 @@ export interface SessionSetupPlan {
 	assistantType?: string;
 	delegateOf?: string;
 	taskId?: string;
+	missionId?: string;
 	worktreePath?: string;
 	repoPath?: string;
 	branch?: string;
@@ -181,7 +182,11 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
-		env: { BOBBIT_SESSION_ID: plan.id, ...plan.env },
+		env: {
+			BOBBIT_SESSION_ID: plan.id,
+			...(plan.missionId ? { BOBBIT_MISSION_ID: plan.missionId } : {}),
+			...plan.env,
+		},
 	};
 	if (ctx.agentCliPath) {
 		plan.bridgeOptions.cliPath = ctx.agentCliPath;
@@ -448,6 +453,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		branch: plan.branch,
 		taskId: plan.taskId,
 		staffId: plan.staffId,
+		missionId: plan.missionId,
 		accessory: plan.accessory,
 		nonInteractive: plan.nonInteractive,
 		sandboxed: plan.sandboxed,
@@ -686,6 +692,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		goalId: plan.goalId,
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
+		missionId: plan.missionId,
 		delegateOf: plan.delegateOf,
 		allowedTools: plan.effectiveAllowedTools,
 		role: plan.role,

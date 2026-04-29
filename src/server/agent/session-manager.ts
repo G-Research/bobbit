@@ -115,6 +115,8 @@ export interface SessionInfo {
 	taskId?: string;
 	/** Staff agent ID this session belongs to */
 	staffId?: string;
+	/** Mission this session is the Commander for (only set on commander sessions). */
+	missionId?: string;
 	/** Pixel-art accessory ID for the Bobbit sprite overlay */
 	accessory?: string;
 	/** Whether this session runs inside a Docker sandbox */
@@ -2196,6 +2198,9 @@ export class SessionManager {
 		if (ps.staffId) {
 			bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId;
 		}
+		if (ps.missionId) {
+			bridgeOptions.env.BOBBIT_MISSION_ID = ps.missionId;
+		}
 
 		// ── Restore Docker sandbox wiring ──
 		if (ps.sandboxed) {
@@ -2378,6 +2383,7 @@ export class SessionManager {
 			worktreePath: ps.worktreePath,
 			taskId: ps.taskId,
 			staffId: ps.staffId,
+			missionId: ps.missionId,
 			accessory: ps.accessory,
 			preview: ps.preview,
 			allowedTools: restoredAllowedTools,
@@ -2461,7 +2467,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; missionId?: string; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -2493,6 +2499,7 @@ export class SessionManager {
 				titleGenerated: false,
 				goalId,
 				assistantType: undefined,
+				missionId: opts?.missionId,
 				taskId: opts?.taskId,
 				allowedTools: opts?.allowedTools,
 				role: opts?.role,
@@ -2511,6 +2518,7 @@ export class SessionManager {
 				title: "New session",
 				cwd,
 				goalId,
+				missionId: opts?.missionId,
 				taskId: opts?.taskId,
 				worktreePath,
 				repoPath,
@@ -2570,6 +2578,7 @@ export class SessionManager {
 			cwd,
 			goalId,
 			assistantType,
+			missionId: opts?.missionId,
 			taskId: opts?.taskId,
 			sandboxed: opts?.sandboxed,
 			role: opts?.role,
@@ -3365,6 +3374,9 @@ export class SessionManager {
 				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 			}
 		}
+		if (session.missionId) {
+			bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
+		}
 
 		// Re-attach proposal tools extension for assistant sessions
 		if (session.assistantType) {
@@ -3810,6 +3822,7 @@ export class SessionManager {
 			worktreePath: ps.worktreePath,
 			taskId: ps.taskId,
 			staffId: ps.staffId,
+			missionId: ps.missionId,
 			accessory: ps.accessory,
 			preview: ps.preview,
 			reattemptGoalId: ps.reattemptGoalId,
@@ -4275,6 +4288,11 @@ export class SessionManager {
 				} else {
 					bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 				}
+			}
+
+			// Restore mission env (commander session)
+			if (session.missionId) {
+				bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
 			}
 
 			// Restore proposal tools extension for assistant sessions
