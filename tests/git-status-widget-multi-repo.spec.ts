@@ -16,25 +16,21 @@ const ENTRY = path.resolve("tests/fixtures/git-status-widget-states-entry.ts");
 const WIDGET_SRC = path.resolve("src/ui/components/GitStatusWidget.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(WIDGET_SRC).mtimeMs,
+	// Always rebuild the bundle to avoid stale-mtime issues across worktree
+	// switches (e.g. CI checks out the branch with bundle older than source
+	// but newer than entry). esbuild is fast (~200ms), so the cost is
+	// negligible compared to the flakes a stale bundle causes.
+	execSync(
+		[
+			`npx esbuild ${ENTRY}`,
+			"--bundle --format=iife --target=es2022",
+			`--outfile=${BUNDLE}`,
+			"--tsconfig=tsconfig.web.json",
+			"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
+			"--define:import.meta.url='\"http://localhost/\"'",
+		].join(" "),
+		{ stdio: "pipe" },
 	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
 });
 
 const PAGE = `file://${FIXTURE}`;
