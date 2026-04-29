@@ -1,0 +1,112 @@
+id: mission
+name: Mission
+description: Multi-goal mission with planning, parallel execution, and integration.
+
+gates:
+  - id: charter
+    name: Mission Charter
+    content: true
+    inject_downstream: true
+    verify:
+      - name: "Charter sanity"
+        type: llm-review
+        role: spec-auditor
+        prompt: |
+          Review the mission charter. Verify:
+          1. Mission scope is bounded and achievable.
+          2. Success criteria are concrete and testable.
+          3. Out-of-scope items are explicitly listed.
+          4. The source spec (if attached) is summarised faithfully.
+          5. The charter does not propose any implementation strategy yet —
+             that is the plan-review gate's job.
+
+  - id: plan-review
+    name: Plan Review
+    depends_on: [charter]
+    content: true
+    inject_downstream: true
+    verify:
+      - name: "DAG correctness"
+        type: llm-review
+        role: architect
+        prompt: |
+          Review the proposed mission plan (DAG of goals).
+          Read the charter via gate_inspect for context.
+
+          1. Every success criterion in the charter is covered by exactly one
+             plan node.
+          2. Dependencies are necessary (no spurious edges) and sufficient
+             (no missing prerequisites).
+          3. The DAG is acyclic.
+          4. Parallelism opportunities are exploited (no false serialisations).
+          5. Each goal's spec is self-contained and implementable.
+          6. Suggested workflow per goal is appropriate.
+      - name: "Plan completeness"
+        type: llm-review
+        role: spec-auditor
+        prompt: |
+          Compare the source mission spec to the plan.
+          Identify requirements in the spec not addressed by any plan node.
+
+  - id: goal-plan
+    name: Goal Plan Approval
+    depends_on: [plan-review]
+    content: true
+    inject_downstream: true
+    # Propose-and-wait: no verify steps. The user must accept in the UI,
+    # which signals this gate with the frozen plan as content. The handler
+    # also calls MissionStore.freezePlan().
+
+  - id: execution
+    name: Execution
+    depends_on: [goal-plan]
+    verify:
+      - name: "All child goals complete and merged"
+        type: command
+        run: "node {{bobbit_helpers}}/check-mission-execution.mjs {{mission_id}}"
+
+  - id: integration
+    name: Integration
+    depends_on: [execution]
+    verify:
+      - name: "Type check on integration branch"
+        type: command
+        run: "{{project.typecheck_command}}"
+      - name: "Unit tests on integration branch"
+        type: command
+        phase: 1
+        run: "{{project.test_unit_command}}"
+      - name: "E2E tests on integration branch"
+        type: command
+        phase: 1
+        timeout: 1800
+        run: "{{project.test_e2e_command}}"
+      - name: "Cross-goal integration review"
+        type: llm-review
+        role: code-reviewer
+        phase: 2
+        prompt: |
+          The mission integration branch contains the union of all child
+          goals' work. Each child goal was reviewed in isolation. Review the
+          cross-cutting concerns:
+          1. APIs introduced by goal A and consumed by goal B match expectations.
+          2. No duplicated implementations across goals.
+          3. Shared types/contracts are consistent.
+          4. No accidental coupling between independent goals.
+
+          Run `git log --oneline origin/{{master}}..{{integration_branch}}` to
+          see the merge history.
+
+  - id: mission-pr
+    name: Mission PR
+    depends_on: [integration]
+    verify:
+      - name: "Master merged into integration branch"
+        type: command
+        run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{integration_branch}}"
+      - name: "Integration branch pushed"
+        type: command
+        run: "git push origin {{integration_branch}} && git ls-remote --heads origin {{integration_branch}} | grep -q ."
+      - name: "PR raised"
+        type: command
+        run: "gh pr list --head {{integration_branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q ."
