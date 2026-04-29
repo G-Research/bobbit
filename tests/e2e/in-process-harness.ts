@@ -141,8 +141,11 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Register the server CWD as a project via REST so existing tests that
 		// rely on a pre-existing "default" project at projects[0] keep working.
 		// The server no longer auto-registers one — see server.ts startup block.
+		// Also seed inline test workflows so workflowId: "general" et al. resolve
+		// (builtin workflow YAMLs were removed in follow-up A of the multi-repo
+		// & components goal).
 		try {
-			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			const createRes = await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -150,6 +153,21 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 				},
 				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
 			});
+			if (createRes.ok) {
+				const project = await createRes.json() as { id?: string };
+				if (project?.id) {
+					const { seedTestWorkflows } = await import("./seed-workflows.js");
+					await seedTestWorkflows({
+						baseURL: `http://127.0.0.1:${port}`,
+						token,
+						projectId: project.id,
+						// Also seed server-level workflow store at <bobbitDir>/config
+						// so cascade-API tests that query /api/workflows without a
+						// projectId see them.
+						serverConfigDir: join(bobbitDir, "config"),
+					});
+				}
+			}
 		} catch { /* best-effort */ }
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can

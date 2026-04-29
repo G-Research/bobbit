@@ -167,8 +167,12 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 
 		// Register the server CWD as a default project via REST. The server no
 		// longer does this implicitly — see "eliminate default project" refactor.
+		// Also seed inline test workflows: builtin workflow YAMLs were removed
+		// (follow-up A of the multi-repo & components goal), so every test that
+		// references workflowId: "general" / "feature" / "bug-fix" / "quick-fix"
+		// / "test-fast" relies on this seed to make those IDs resolvable.
 		try {
-			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			const createRes = await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -176,6 +180,21 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 				},
 				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
 			});
+			if (createRes.ok) {
+				const project = await createRes.json() as { id?: string };
+				if (project?.id) {
+					const { seedTestWorkflows } = await import("./seed-workflows.js");
+					await seedTestWorkflows({
+						baseURL: `http://127.0.0.1:${port}`,
+						token,
+						projectId: project.id,
+						// Also seed server-level workflow store at <bobbitDir>/config
+						// so cascade-API tests that query /api/workflows without a
+						// projectId see them.
+						serverConfigDir: join(bobbitDir, "config"),
+					});
+				}
+			}
 		} catch { /* best-effort */ }
 
 		const info: GatewayInfo = {

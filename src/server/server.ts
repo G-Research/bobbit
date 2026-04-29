@@ -668,6 +668,9 @@ export function createGateway(config: GatewayConfig) {
 	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
 	// fall back to builtins, so no seeding to disk is needed.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
+	// Workflow builtins were removed — workflows now live inline in each
+	// project's project.yaml::workflows block. The provider returns [] so
+	// nothing is seeded here. Projects must declare their own workflows.
 	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
 
