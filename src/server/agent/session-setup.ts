@@ -185,6 +185,12 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 		env: {
 			BOBBIT_SESSION_ID: plan.id,
 			...(plan.missionId ? { BOBBIT_MISSION_ID: plan.missionId } : {}),
+			// Effective role name for the agent process. The mission/proposal
+			// extensions read this to gate registration (commander-only for
+			// mission_*; assistant/commander only for propose_*). Prefer the
+			// already-set role on the plan; fall back to roleName for
+			// verification reviewer sessions which set roleName but not role.
+			...(plan.role || plan.roleName ? { BOBBIT_SESSION_ROLE: (plan.role || plan.roleName) as string } : {}),
 			...plan.env,
 		},
 	};

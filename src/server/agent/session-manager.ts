@@ -2201,6 +2201,10 @@ export class SessionManager {
 		if (ps.missionId) {
 			bridgeOptions.env.BOBBIT_MISSION_ID = ps.missionId;
 		}
+		// Propagate role so mission/proposal extension role-guards survive restart.
+		if (ps.role) {
+			bridgeOptions.env.BOBBIT_SESSION_ROLE = ps.role;
+		}
 
 		// ── Restore Docker sandbox wiring ──
 		if (ps.sandboxed) {
@@ -3379,6 +3383,10 @@ export class SessionManager {
 		if (session.missionId) {
 			bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
 		}
+		// Propagate role so mission/proposal extension role-guards survive respawn.
+		if (session.role) {
+			bridgeOptions.env.BOBBIT_SESSION_ROLE = session.role;
+		}
 
 		// Re-attach proposal tools extension for assistant sessions
 		if (session.assistantType) {
@@ -4295,6 +4303,10 @@ export class SessionManager {
 			// Restore mission env (commander session)
 			if (session.missionId) {
 				bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
+			}
+			// Propagate role so mission/proposal extension role-guards survive force-abort restart.
+			if (session.role) {
+				bridgeOptions.env.BOBBIT_SESSION_ROLE = session.role;
 			}
 
 			// Restore proposal tools extension for assistant sessions

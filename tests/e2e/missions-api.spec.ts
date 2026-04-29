@@ -85,6 +85,12 @@ test.describe("Missions API", () => {
 		expect(bridgeEnv).toBeTruthy();
 		expect(bridgeEnv.BOBBIT_MISSION_ID).toBe(created.id);
 		expect(bridgeEnv.BOBBIT_SESSION_ID).toBe(created.commanderSessionId);
+		// Bug B regression: the role must also be propagated as an env var so the
+		// mission/proposal extension role-guards can decide whether to register
+		// their tools. Reviewer sub-sessions for mission gates pick up
+		// BOBBIT_MISSION_ID but a non-commander role, which is what the extension
+		// uses to skip mission_* tool registration.
+		expect(bridgeEnv.BOBBIT_SESSION_ROLE).toBe("commander");
 	});
 
 	test("create + get + list + update + archive @smoke", async () => {
