@@ -18,6 +18,25 @@ function uniqueDir(label: string): string {
 }
 
 test.describe("Add Project flow (UI)", () => {
+	// Tests in this spec create projects (provisional + promoted) that persist
+	// in the worker's project registry. Without cleanup they leak into
+	// downstream specs — the goal-form-tooltips spec, in particular, expects
+	// exactly one registered project so its New-Goal button opens the goal
+	// form directly rather than a project-picker dialog (PR #380 already hit
+	// this once via per-project-config-dirs leaking; this spec leaked too).
+	test.afterEach(async () => {
+		const res = await apiFetch("/api/projects");
+		const data = await res.json();
+		const projects = data.projects || data || [];
+		for (const p of projects) {
+			if (p.name === "default") continue;
+			// Some leaked projects are provisional (assistant sessions); some
+			// are promoted. force=1 bypasses the "can't remove last project"
+			// guard and is gated on BOBBIT_E2E=1 (set by the harness).
+			await apiFetch(`/api/projects/${p.id}?force=1`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("path-only dialog renders without name or color fields", async ({ page }) => {
 		await openApp(page);
 
