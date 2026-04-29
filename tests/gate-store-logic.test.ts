@@ -340,6 +340,207 @@ describe("GateStore", () => {
 	});
 });
 
+// ===========================================================================
+// Mission/owner-kind generalisation (mission-orchestration §5)
+// ===========================================================================
+
+describe("GateStore — owner kind generalisation", () => {
+	let store: InstanceType<typeof GateStore>;
+
+	beforeEach(() => {
+		ensureStateDir();
+		store = new GateStore(path.join(TEST_DIR, "state"));
+	});
+
+	afterEach(() => {
+		clearGates();
+	});
+
+	it("legacy goalId methods still work and default to ownerKind=goal", () => {
+		store.initGatesForGoal("goal-1", ["a"]);
+		const g = store.getGate("goal-1", "a")!;
+		assert.equal(g.gateId, "a");
+		assert.equal(g.goalId, "goal-1");
+		assert.equal(g.ownerKind, "goal");
+		assert.equal(g.ownerId, "goal-1");
+	});
+
+	it("mission-keyed initGatesFor / getGateFor / getGatesFor work", () => {
+		store.initGatesFor("mission", "mission-1", ["charter", "plan-review", "goal-plan"]);
+		const gates = store.getGatesFor("mission", "mission-1");
+		assert.equal(gates.length, 3);
+		assert.ok(gates.every(g => g.ownerKind === "mission"));
+		assert.ok(gates.every(g => g.ownerId === "mission-1"));
+		assert.equal(store.getGateFor("mission", "mission-1", "charter")!.status, "pending");
+	});
+
+	it("mission and goal with same id do not collide", () => {
+		// Compose key includes kind, so a goal and a mission with the same id
+		// keep distinct gate streams.
+		store.initGatesForGoal("shared-id", ["a"]);
+		store.initGatesFor("mission", "shared-id", ["a"]);
+		store.updateGateStatus("shared-id", "a", "passed");
+		assert.equal(store.getGate("shared-id", "a")!.status, "passed");
+		assert.equal(store.getGateFor("mission", "shared-id", "a")!.status, "pending");
+	});
+
+	it("updateGateStatusFor / ContentFor / MetadataFor mutate mission gates", () => {
+		store.initGatesFor("mission", "m1", ["charter"]);
+		store.updateGateStatusFor("mission", "m1", "charter", "passed");
+		store.updateGateContentFor("mission", "m1", "charter", "# Charter", 1);
+		store.updateGateMetadataFor("mission", "m1", "charter", { plan_version: "1" });
+		const g = store.getGateFor("mission", "m1", "charter")!;
+		assert.equal(g.status, "passed");
+		assert.equal(g.currentContent, "# Charter");
+		assert.equal(g.currentContentVersion, 1);
+		assert.deepEqual(g.currentMetadata, { plan_version: "1" });
+	});
+
+	it("removeGatesFor only removes the targeted owner", () => {
+		store.initGatesForGoal("goal-1", ["a", "b"]);
+		store.initGatesFor("mission", "m1", ["charter", "plan-review"]);
+		store.removeGatesFor("mission", "m1");
+		assert.equal(store.getGatesFor("mission", "m1").length, 0);
+		assert.equal(store.getGatesForGoal("goal-1").length, 2);
+	});
+
+	it("cascadeResetFor resets mission downstream gates", () => {
+		const wf = makeWorkflow([
+			gate("charter"),
+			gate("plan-review", ["charter"]),
+			gate("goal-plan", ["plan-review"]),
+		]);
+		store.initGatesFor("mission", "m1", ["charter", "plan-review", "goal-plan"]);
+		store.updateGateStatusFor("mission", "m1", "charter", "passed");
+		store.updateGateStatusFor("mission", "m1", "plan-review", "passed");
+		store.updateGateStatusFor("mission", "m1", "goal-plan", "passed");
+
+		store.cascadeResetFor("mission", "m1", "charter", wf);
+
+		assert.equal(store.getGateFor("mission", "m1", "charter")!.status, "passed");
+		assert.equal(store.getGateFor("mission", "m1", "plan-review")!.status, "pending");
+		assert.equal(store.getGateFor("mission", "m1", "goal-plan")!.status, "pending");
+	});
+
+	it("recordSignal accepts mission-owned signal and routes to right gate", () => {
+		store.initGatesFor("mission", "m1", ["charter"]);
+		store.recordSignal({
+			id: "sig-m-1",
+			gateId: "charter",
+			ownerKind: "mission",
+			ownerId: "m1",
+			goalId: "m1", // mirrored
+			sessionId: "s1",
+			timestamp: Date.now(),
+			commitSha: "deadbeef",
+			content: "charter v1",
+			contentVersion: 1,
+			verification: { status: "running", steps: [] },
+		});
+		const g = store.getGateFor("mission", "m1", "charter")!;
+		assert.equal(g.signals.length, 1);
+		assert.equal(g.signals[0].ownerKind, "mission");
+		assert.equal(g.signals[0].ownerId, "m1");
+	});
+
+	it("updateSignalVerification works regardless of owner kind", () => {
+		store.initGatesForGoal("goal-1", ["a"]);
+		store.initGatesFor("mission", "m1", ["charter"]);
+		store.recordSignal({
+			id: "sig-g", gateId: "a", goalId: "goal-1", sessionId: "s",
+			timestamp: 0, commitSha: "x",
+			verification: { status: "running", steps: [] },
+		});
+		store.recordSignal({
+			id: "sig-m", gateId: "charter",
+			ownerKind: "mission", ownerId: "m1", goalId: "m1",
+			sessionId: "s", timestamp: 0, commitSha: "x",
+			verification: { status: "running", steps: [] },
+		});
+		store.updateSignalVerification("sig-m", { status: "passed", steps: [] });
+		assert.equal(store.getGateFor("mission", "m1", "charter")!.signals[0].verification.status, "passed");
+		assert.equal(store.getGate("goal-1", "a")!.signals[0].verification.status, "running");
+	});
+
+	it("mixed file with both kinds round-trips through save+load", () => {
+		store.initGatesForGoal("goal-1", ["a"]);
+		store.initGatesFor("mission", "m1", ["charter"]);
+		store.updateGateStatus("goal-1", "a", "passed");
+		store.updateGateStatusFor("mission", "m1", "charter", "failed");
+
+		// Reload from disk
+		const reloaded = new GateStore(path.join(TEST_DIR, "state"));
+		assert.equal(reloaded.getGate("goal-1", "a")!.status, "passed");
+		assert.equal(reloaded.getGateFor("mission", "m1", "charter")!.status, "failed");
+		// And mission gates not visible via legacy goal API
+		assert.equal(reloaded.getGate("m1", "charter"), undefined);
+	});
+
+	it("lazy migration: legacy on-disk records (no ownerKind) load as goal-owned", () => {
+		// Hand-write a legacy gates.json — only goalId, no ownerKind/ownerId.
+		const legacy = [
+			{
+				gateId: "design-doc",
+				goalId: "goal-legacy",
+				status: "passed",
+				signals: [
+					{
+						id: "sig-legacy",
+						gateId: "design-doc",
+						goalId: "goal-legacy",
+						sessionId: "s",
+						timestamp: 1,
+						commitSha: "abc",
+						verification: { status: "passed", steps: [] },
+					},
+				],
+				updatedAt: 1,
+			},
+		];
+		fs.writeFileSync(GATES_FILE, JSON.stringify(legacy));
+
+		const loaded = new GateStore(path.join(TEST_DIR, "state"));
+		// Legacy API still works
+		const g = loaded.getGate("goal-legacy", "design-doc");
+		assert.ok(g, "legacy record should be loadable via getGate");
+		assert.equal(g!.status, "passed");
+		// Hydrated to canonical form
+		assert.equal(g!.ownerKind, "goal");
+		assert.equal(g!.ownerId, "goal-legacy");
+		// And via new API
+		assert.equal(loaded.getGateFor("goal", "goal-legacy", "design-doc")!.status, "passed");
+		// Signals also hydrated
+		assert.equal(g!.signals[0].ownerKind, "goal");
+		assert.equal(g!.signals[0].ownerId, "goal-legacy");
+	});
+
+	it("on-save the new ownerKind/ownerId fields are written", () => {
+		store.initGatesFor("mission", "m-save", ["charter"]);
+		store.updateGateStatusFor("mission", "m-save", "charter", "passed");
+		const raw = JSON.parse(fs.readFileSync(GATES_FILE, "utf-8"));
+		const rec = raw.find((g: any) => g.gateId === "charter" && g.ownerId === "m-save");
+		assert.ok(rec, "mission gate should be persisted");
+		assert.equal(rec.ownerKind, "mission");
+		assert.equal(rec.ownerId, "m-save");
+		// goalId mirrored for forward compatibility / legacy reads
+		assert.equal(rec.goalId, "m-save");
+	});
+
+	it("onStatusChange callback fires with (kind, ownerId, gateId) for both kinds", () => {
+		const calls: Array<{ kind: string; ownerId: string; gateId: string }> = [];
+		store.onStatusChange = (kind, ownerId, gateId) => {
+			calls.push({ kind, ownerId, gateId });
+		};
+		store.initGatesForGoal("g1", ["a"]);
+		store.initGatesFor("mission", "m1", ["charter"]);
+		store.updateGateStatus("g1", "a", "passed");
+		store.updateGateStatusFor("mission", "m1", "charter", "failed");
+		assert.equal(calls.length, 2);
+		assert.deepEqual(calls[0], { kind: "goal", ownerId: "g1", gateId: "a" });
+		assert.deepEqual(calls[1], { kind: "mission", ownerId: "m1", gateId: "charter" });
+	});
+});
+
 after(() => {
 	try { fs.rmSync(TEST_DIR, { recursive: true }); } catch { /* ignore */ }
 });

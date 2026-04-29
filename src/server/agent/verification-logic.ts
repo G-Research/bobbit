@@ -151,6 +151,13 @@ export function isPreImplementationGate(gate: { content?: boolean; depends_on?: 
  * - {{gate_id.meta.key}} — from an upstream gate's metadata
  * - {{goal_spec}} — the goal specification text
  *
+ * Mission-owned gates additionally expose:
+ * - {{mission_id}} — the mission's id
+ * - {{integration_branch}} / {{mission_branch}} — the mission's integration branch
+ *   (callers should set both keys in `builtinVars` for missions; for missions,
+ *   {{branch}} should also resolve to the integration branch so existing
+ *   `git diff origin/{{master}}...{{branch}}` substitutions keep working).
+ *
  * Legacy bare references like {{typecheck_command}} are NOT resolved to
  * prevent accidental cross-namespace collisions. Use the explicit namespace.
  */

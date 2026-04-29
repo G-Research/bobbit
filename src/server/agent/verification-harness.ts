@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
+import type { GateStore, GateSignal, GateSignalStep, GateOwnerKind } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
@@ -940,8 +940,49 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Verify a gate signal asynchronously for an explicit owner kind.
+	 *
+	 * Canonical entry point going forward. The legacy `verifyGateSignal`
+	 * remains as a thin wrapper that calls this with `kind = "goal"` for
+	 * backward compatibility.
+	 *
+	 * The mission path is stubbed for this phase — mission-aware resolution
+	 * (integration worktree, mission spec, mission workflow) is added in the
+	 * mission-manager / project-context phases. Until then, calling with
+	 * `kind === "mission"` is rejected explicitly so callers don't silently
+	 * misroute through the goal codepath.
+	 */
+	async verifyForOwner(
+		kind: GateOwnerKind,
+		ownerId: string,
+		signal: GateSignal,
+		gate: WorkflowGate,
+		cwd: string,
+		ownerBranch?: string,
+		primaryBranch?: string,
+		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
+		ownerSpec?: string,
+	): Promise<void> {
+		if (kind === "mission") {
+			throw new Error(
+				`verifyForOwner("mission", ...) is not yet implemented — mission-aware ` +
+				`owner resolution lands with the mission-manager / project-context phases. ` +
+				`(ownerId=${ownerId}, gateId=${gate.id})`,
+			);
+		}
+		// For goal-owned signals the existing implementation is correct as-is.
+		// Hydrate the signal's owner fields if the caller forgot to.
+		if (!signal.ownerKind) signal.ownerKind = "goal";
+		if (!signal.ownerId) signal.ownerId = ownerId;
+		return this.verifyGateSignal(signal, gate, cwd, ownerBranch, primaryBranch, allGateStates, ownerSpec);
+	}
+
+	/**
 	 * Verify a gate signal asynchronously (fire-and-forget from caller).
 	 * Updates signal verification results and gate status when done.
+	 *
+	 * @deprecated Prefer `verifyForOwner("goal", goalId, ...)`. This method is
+	 * retained as a thin wrapper for backward compatibility.
 	 */
 	async verifyGateSignal(
 		signal: GateSignal,
