@@ -109,9 +109,10 @@ export class ProjectContext {
     });
 
     // Mission scheduler — 60s safety-net tick. wakeCommander is wired by the
-    // server (which owns SessionManager) post-construction if needed.
-    // TODO(mission-followup): subscribe to gate-store status changes / goal-state
-    // changes for instant ticks instead of relying on the periodic safety net.
+    // server (which owns SessionManager) post-construction via
+    // `missionScheduler.setWakeCommander(...)`. Gate-status and goal-state
+    // changes also drive `tickMission` directly — see server.ts hooks on
+    // `gateStore.onStatusChange` and `goalStore.onIndexUpdate`.
     this.missionScheduler = new MissionScheduler({
       missionManager: {
         getMission: (id) => {
@@ -138,6 +139,8 @@ export class ProjectContext {
         },
         integrateChildForScheduler: async (mid, pid) =>
           this.missionManager.integrateChildForScheduler(mid, pid),
+        pauseMission: (mid, reason) => this.missionManager.pauseMission(mid, reason),
+        forwardMergeMaster: (mid) => this.missionManager.forwardMergeMaster(mid),
       },
       goalStore: { get: (id) => this.goalStore.get(id) },
       gateStore: { getGate: (oid, gid) => this.gateStore.getGate(oid, gid) },

@@ -254,6 +254,71 @@ test.describe("Missions API", () => {
 		expect(Array.isArray(body.gates)).toBe(true);
 	});
 
+	test("goal-plan signal auto-freezes plan and unblocks spawn-child (production flow)", async () => {
+		const m = await createMission();
+
+		// Set a valid plan.
+		const patch = await apiFetch(`/api/missions/${m.id}/plan`, {
+			method: "PATCH",
+			body: JSON.stringify({
+				plan: {
+					goals: [{ planId: "a", title: "A", spec: "spec a", workflowId: "feature" }],
+					dependencies: [],
+					rationale: "",
+					estimatedConcurrency: 1,
+					version: 1,
+				},
+			}),
+		});
+		expect(patch.status).toBe(200);
+
+		// Spawn-child blocked because goal-plan not yet passed.
+		const blocked = await apiFetch(`/api/missions/${m.id}/spawn-child/a`, { method: "POST" });
+		expect(blocked.status).toBe(409);
+
+		// Production flow: signal charter → plan-review → goal-plan.
+		// LLM-review steps auto-pass because BOBBIT_LLM_REVIEW_SKIP=1 in harness.
+		async function signal(gateId: string, content: string): Promise<Response> {
+			return apiFetch(`/api/missions/${m.id}/gates/${gateId}/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content, sessionId: "test" }),
+			});
+		}
+
+		const charterResp = await signal("charter", "# Charter\nScope.\nSuccess: x.\nNot in scope: y.");
+		expect(charterResp.status).toBe(201);
+		// Wait for verification to complete (LLM-review skipped → fast).
+		async function waitGatePassed(gateId: string): Promise<void> {
+			for (let i = 0; i < 50; i++) {
+				const gates = await (await apiFetch(`/api/missions/${m.id}/gates`)).json();
+				const g = gates.gates.find((x: any) => x.gateId === gateId);
+				if (g && g.status === "passed") return;
+				if (g && g.status === "failed") throw new Error(`gate ${gateId} failed: ${JSON.stringify(g)}`);
+				await new Promise(r => setTimeout(r, 100));
+			}
+			throw new Error(`gate ${gateId} did not pass within 5s`);
+		}
+		await waitGatePassed("charter");
+
+		const planReviewResp = await signal("plan-review", "# Plan review notes");
+		expect(planReviewResp.status).toBe(201);
+		await waitGatePassed("plan-review");
+
+		const goalPlanResp = await signal("goal-plan", "# Approved plan");
+		expect(goalPlanResp.status).toBe(201);
+		await waitGatePassed("goal-plan");
+
+		// goal-plan passed → server should have auto-frozen the plan.
+		const detail = await (await apiFetch(`/api/missions/${m.id}`)).json();
+		expect(detail.mission.planFrozenAt).toBeTruthy();
+
+		// spawn-child now works without ?force=1.
+		const spawn = await apiFetch(`/api/missions/${m.id}/spawn-child/a`, { method: "POST" });
+		expect(spawn.status).toBe(200);
+		const spawnBody = await spawn.json();
+		expect(spawnBody.goalId).toBeTruthy();
+	});
+
 	test("pause + resume lifecycle", async () => {
 		const m = await createMission();
 		const pause = await apiFetch(`/api/missions/${m.id}/pause`, {

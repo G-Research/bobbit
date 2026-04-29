@@ -53,6 +53,13 @@ export interface PersistedGoal {
 	missionId?: string;
 	/** The PlannedGoal.planId in the owning mission's plan. */
 	missionPlanId?: string;
+	/**
+	 * Optional git ref to base the worktree branch on. Mission children pin
+	 * to the integration branch HEAD SHA at spawn time so two parallel
+	 * siblings observe the same parent commit. Falls back to
+	 * `origin/<primary>` when unset (createWorktree default).
+	 */
+	baseBranch?: string;
 }
 
 /**

@@ -558,6 +558,68 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
+/**
+ * Wire mission-orchestration hooks onto a freshly-built (or freshly-fetched)
+ * ProjectContext. Idempotent: replaces any existing onStatusChange /
+ * onIndexUpdate / wakeCommander wiring with the canonical mission-aware
+ * version.
+ *
+ * Called from createGateway() on startup, and from handleApiRoute() each time
+ * a new (or upserted) project context is materialised.
+ */
+function wireProjectContextHooksImpl(
+	ctx: ReturnType<ProjectContextManager["getOrCreate"]>,
+	sessionManager: { enqueuePrompt: (id: string, text: string, opts?: { isSteered?: boolean }) => Promise<void> | void },
+	broadcastToAll: (msg: any) => void,
+): void {
+	if (!ctx) return;
+	const pc = ctx;
+	pc.gateStore.onStatusChange = (kind, ownerId, gateId) => {
+		pc.goalStore.bumpGeneration();
+		if (kind === "mission") {
+			// Auto-freeze the plan when goal-plan passes (propose-and-wait gate).
+			if (gateId === "goal-plan") {
+				const gs = pc.gateStore.getGateFor("mission", ownerId, "goal-plan");
+				if (gs?.status === "passed") {
+					const m = pc.missionStore.get(ownerId);
+					if (m && !m.planFrozenAt && m.plan) {
+						try {
+							pc.missionManager.freezePlan(ownerId);
+							broadcastToAll({ type: "mission_plan_frozen", missionId: ownerId });
+						} catch (err) {
+							console.error("[mission] freezePlan after goal-plan pass failed", err);
+						}
+					}
+				}
+			}
+			pc.missionScheduler.tickMission(ownerId).catch(err =>
+				console.warn(`[mission] tickMission(${ownerId}) failed:`, err));
+		} else {
+			// Goal-owned gate — if the goal belongs to a mission, tick it.
+			const goal = pc.goalStore.get(ownerId);
+			if (goal?.missionId) {
+				pc.missionScheduler.tickMission(goal.missionId).catch(err =>
+					console.warn(`[mission] tickMission(${goal.missionId}) failed:`, err));
+			}
+		}
+	};
+	const prevGoalIndexUpdate = pc.goalStore.onIndexUpdate;
+	pc.goalStore.onIndexUpdate = (goal) => {
+		prevGoalIndexUpdate?.(goal);
+		if (goal.missionId) {
+			pc.missionScheduler.tickMission(goal.missionId).catch(err =>
+				console.warn(`[mission] tickMission(${goal.missionId}) failed:`, err));
+		}
+	};
+	pc.missionScheduler.setWakeCommander(async (sessionId, message) => {
+		try {
+			await sessionManager.enqueuePrompt(sessionId, message, { isSteered: true });
+		} catch (err) {
+			console.warn(`[mission] wakeCommander(${sessionId}) failed:`, err);
+		}
+	});
+}
+
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -642,11 +704,17 @@ export function createGateway(config: GatewayConfig) {
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
 	projectContextManager.setDependencies({ sessionManager });
-	// Wire gate status changes to bump goal generation for all project contexts
+	// Wire gate status changes / goal-state changes to drive the mission
+	// scheduler on every relevant event — no waiting for the 60s safety-net
+	// tick. `goal-plan` passing automatically freezes the mission plan, the
+	// previously-blocking precondition for child spawning. Lives at module
+	// scope (see `wireProjectContextHooksImpl`) so handleApiRoute can call it
+	// when registering new projects.
+	const wireProjectContextHooks = (ctx: ReturnType<typeof projectContextManager.getOrCreate>): void => {
+		wireProjectContextHooksImpl(ctx, sessionManager, broadcastToAll);
+	};
 	for (const ctx of projectContextManager.all()) {
-		ctx.gateStore.onStatusChange = () => {
-			ctx.goalStore.bumpGeneration();
-		};
+		wireProjectContextHooks(ctx);
 	}
 	const builtinConfigProvider = new BuiltinConfigProvider();
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
@@ -1794,11 +1862,7 @@ async function handleApiRoute(
 				if (existing) {
 					// Ensure context is initialized
 					const ctx = projectContextManager.getOrCreate(existing.id);
-					if (ctx) {
-						ctx.gateStore.onStatusChange = () => {
-							ctx.goalStore.bumpGeneration();
-						};
-					}
+					wireProjectContextHooksImpl(ctx, sessionManager, broadcastToAll);
 					json(existing, 200);
 					return;
 				}
@@ -1807,11 +1871,7 @@ async function handleApiRoute(
 			const project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark });
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
-			if (newCtx) {
-				newCtx.gateStore.onStatusChange = () => {
-					newCtx.goalStore.bumpGeneration();
-				};
-			}
+			wireProjectContextHooksImpl(newCtx, sessionManager, broadcastToAll);
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -2460,11 +2520,7 @@ async function handleApiRoute(
 			resolvedProjectId = provisionalProject.id;
 			// Ensure a ProjectContext exists for the provisional project
 			const provCtx = projectContextManager.getOrCreate(provisionalProject.id);
-			if (provCtx) {
-				provCtx.gateStore.onStatusChange = () => {
-					provCtx.goalStore.bumpGeneration();
-				};
-			}
+			wireProjectContextHooksImpl(provCtx, sessionManager, broadcastToAll);
 		}
 
 		// Project must be resolvable explicitly or from cwd — no silent default fallback.

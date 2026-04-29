@@ -51,13 +51,7 @@ export class GoalManager {
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
 	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; missionId?: string; missionPlanId?: string; baseBranch?: string }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, missionId, missionPlanId, baseBranch: _baseBranch } = opts ?? {};
-		// `baseBranch` is captured for forward-compat with phase-4 worktree creation
-		// (mission children branch off the integration branch). The current
-		// _doSetupWorktree path still calls createWorktree() without a startPoint,
-		// so we persist the value on the goal but defer plumbing it through to
-		// when mission-git.ts lands. See TODO(mission-scheduler-owner) below.
-		void _baseBranch;
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, missionId, missionPlanId, baseBranch } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -107,6 +101,7 @@ export class GoalManager {
 
 		if (missionId) goal.missionId = missionId;
 		if (missionPlanId) goal.missionPlanId = missionPlanId;
+		if (baseBranch) goal.baseBranch = baseBranch;
 
 		// Snapshot workflow onto goal if workflowId is provided
 		if (workflowId && resolvedWorkflow) {
@@ -163,7 +158,7 @@ export class GoalManager {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				const result = await createWorktree(goal.repoPath!, goal.branch!);
+				const result = await createWorktree(goal.repoPath!, goal.branch!, goal.baseBranch ? { startPoint: goal.baseBranch } : undefined);
 				// Apply the subdirectory offset to the actual worktree path
 				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 					? path.join(result.worktreePath, preliminaryOffset)

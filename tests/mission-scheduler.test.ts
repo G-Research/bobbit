@@ -78,6 +78,9 @@ interface FakeManager extends SchedulerMissionManager {
 	integrateCalls: Array<{ missionId: string; planId: string }>;
 	integrateImpl: (missionId: string, planId: string) => Promise<MergeResult>;
 	integrateChildForScheduler(missionId: string, planId: string): Promise<MergeResult>;
+	pauseCalls: Array<{ missionId: string; reason: string }>;
+	forwardCalls: string[];
+	forwardImpl?: (missionId: string) => Promise<{ status: "merged" | "up-to-date" | "conflict" | "skipped" }>;
 }
 
 function makeManager(missions: MissionView[]): FakeManager {
@@ -86,9 +89,22 @@ function makeManager(missions: MissionView[]): FakeManager {
 		missions: map,
 		spawnCalls: [],
 		integrateCalls: [],
+		pauseCalls: [],
+		forwardCalls: [],
 		integrateImpl: async () => ({ status: "merged", mergeSha: "deadbeef" }),
 		getMission(id) { return map.get(id); },
 		listMissions() { return Array.from(map.values()); },
+		async pauseMission(missionId, reason) {
+			fm.pauseCalls.push({ missionId, reason });
+			const m = map.get(missionId);
+			if (m) m.state = "paused";
+			return true;
+		},
+		async forwardMergeMaster(missionId) {
+			fm.forwardCalls.push(missionId);
+			if (fm.forwardImpl) return fm.forwardImpl(missionId);
+			return { status: "up-to-date" };
+		},
 		updatePlanNodeState(missionId, planId, patch) {
 			const m = map.get(missionId);
 			if (!m?.plan) return false;
@@ -452,6 +468,115 @@ test("tickAll: skips archived and terminal-state missions", async () => {
 	await sch.tickAll();
 	const spawned = mgr.spawnCalls.map(c => c.missionId);
 	assert.deepEqual(spawned, ["alive"]);
+});
+
+// ---------------------------------------------------------------------------
+// Bounded autonomy / forward-merge
+// ---------------------------------------------------------------------------
+
+test("failedAttempts: 1st failure increments and re-spawns the slot", async () => {
+	const m = mission({
+		id: "m1",
+		plan: plan({ goals: [planNode("a", { goalId: "g-a" })] }),
+	});
+	const mgr = makeManager([m]);
+	const sch = new MissionScheduler({
+		missionManager: mgr,
+		goalStore: makeGoalLookup([persistedGoal("g-a", "complete")]),
+		gateStore: makeGateLookup([gateState("g-a", "ready-to-merge", "failed")]),
+		tickIntervalMs: 0,
+	});
+	await sch.tickMission("m1");
+	const node = mgr.missions.get("m1")!.plan!.goals[0];
+	assert.equal(node.failedAttempts, 1, "failedAttempts incremented");
+	assert.equal(mgr.pauseCalls.length, 0, "no pause on 1st failure");
+	// Same tick re-spawns the cleared slot — the new goalId differs from the failed one.
+	assert.equal(mgr.spawnCalls.length, 1, "spawn called for retry");
+	assert.equal(mgr.spawnCalls[0].planId, "a");
+	assert.notEqual(node.goalId, "g-a", "goalId replaced on retry");
+});
+
+test("failedAttempts: 2nd failure pauses mission with reason", async () => {
+	const m = mission({
+		id: "m1",
+		plan: plan({
+			goals: [planNode("a", { goalId: "g-a", failedAttempts: 1 })],
+		}),
+	});
+	const mgr = makeManager([m]);
+	const { broadcast, events } = makeBroadcast();
+	const sch = new MissionScheduler({
+		missionManager: mgr,
+		goalStore: makeGoalLookup([persistedGoal("g-a", "shelved")]),
+		gateStore: makeGateLookup([]),
+		broadcast,
+		tickIntervalMs: 0,
+	});
+	await sch.tickMission("m1");
+	assert.equal(mgr.pauseCalls.length, 1);
+	assert.match(mgr.pauseCalls[0].reason, /failed/i);
+	const pausedEvent = events.find(e => e.type === "mission_paused");
+	assert.ok(pausedEvent);
+});
+
+test("forwardMergeMaster: invoked on in-progress mission", async () => {
+	const m = mission({
+		id: "m1",
+		state: "in-progress",
+		plan: plan({ goals: [planNode("a")] }),
+	});
+	const mgr = makeManager([m]);
+	const sch = new MissionScheduler({
+		missionManager: mgr,
+		goalStore: makeGoalLookup([]),
+		gateStore: makeGateLookup([]),
+		tickIntervalMs: 0,
+	});
+	await sch.tickMission("m1");
+	assert.deepEqual(mgr.forwardCalls, ["m1"]);
+});
+
+test("forwardMergeMaster: conflict is soft-fail (no throw)", async () => {
+	const m = mission({
+		id: "m1",
+		state: "in-progress",
+		plan: plan({ goals: [planNode("a")] }),
+	});
+	const mgr = makeManager([m]);
+	mgr.forwardImpl = async () => ({ status: "conflict" });
+	const sch = new MissionScheduler({
+		missionManager: mgr,
+		goalStore: makeGoalLookup([]),
+		gateStore: makeGateLookup([]),
+		tickIntervalMs: 0,
+	});
+	await sch.tickMission("m1");
+	// Subsequent steps still ran (spawnReady).
+	assert.equal(mgr.spawnCalls.length, 1);
+});
+
+test("setWakeCommander: wires the hook post-construction", async () => {
+	const m = mission({
+		id: "m1",
+		commanderSessionId: "c-1",
+		plan: plan({
+			goals: [
+				planNode("a", { goalId: "g-a", mergedAt: 5 }),
+			],
+		}),
+	});
+	const mgr = makeManager([m]);
+	const sch = new MissionScheduler({
+		missionManager: mgr,
+		goalStore: makeGoalLookup([persistedGoal("g-a", "complete")]),
+		gateStore: makeGateLookup([]),
+		tickIntervalMs: 0,
+	});
+	let woken: { sessionId: string; message: string } | null = null;
+	sch.setWakeCommander((sessionId, message) => { woken = { sessionId, message }; });
+	await sch.tickMission("m1");
+	assert.ok(woken);
+	assert.equal(woken!.sessionId, "c-1");
 });
 
 test("start/stop: idempotent and unrefs the timer", () => {

@@ -80,7 +80,17 @@ export interface PersistedMission {
 	pausedAt?: number;
 	pausedReason?: string;
 	setupError?: string;
+	/**
+	 * Number of times this mission has been re-planned (proposePlan called
+	 * after planFrozenAt was set). Capped — see `MAX_REPLANS` in
+	 * mission-manager.ts. Beyond the cap, the mission is auto-paused and
+	 * further replans are rejected.
+	 */
+	replanCount?: number;
 }
+
+/** Cap on consecutive re-plans before a mission auto-pauses for human review. */
+export const MAX_REPLANS = 3;
 
 /**
  * Generate a ULID-ish identifier (Crockford base-32, time-ordered).
@@ -247,6 +257,18 @@ export class MissionStore {
 		this.save();
 		this.onIndexUpdate?.(m);
 		return true;
+	}
+
+	/** Atomically increment replanCount. Returns the new value, or 0 on miss. */
+	incrementReplanCount(id: string): number {
+		const m = this.missions.get(id);
+		if (!m) return 0;
+		this.generation++;
+		m.replanCount = (m.replanCount ?? 0) + 1;
+		m.updatedAt = Date.now();
+		this.save();
+		this.onIndexUpdate?.(m);
+		return m.replanCount;
 	}
 
 	attachGoalToPlanNode(missionId: string, planId: string, goalId: string): boolean {

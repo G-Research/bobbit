@@ -101,6 +101,13 @@ export interface SchedulerMissionManager {
 	spawnChild(missionId: string, planId: string): Promise<PersistedGoal>;
 	/** Drives MissionGit.mergeChild and writes mergedAt on success. */
 	integrateChildForScheduler(missionId: string, planId: string): Promise<MergeResult>;
+	/** Pause the mission. Called when bounded-autonomy thresholds trip. */
+	pauseMission?(missionId: string, reason: string): Promise<boolean>;
+	/**
+	 * Forward-merge `origin/<master>` into the integration branch. Optional;
+	 * called periodically when configured. Soft-fails on conflict.
+	 */
+	forwardMergeMaster?(missionId: string): Promise<{ status: "merged" | "up-to-date" | "conflict" | "skipped" }>;
 }
 
 /** Subset of `GoalStore` (existing) used by the scheduler. */
@@ -127,7 +134,8 @@ export type SchedulerWsMessage =
 	| { type: "mission_child_state_changed"; missionId: string; planId: string; goalId: string; state: GoalState }
 	| { type: "mission_child_merged"; missionId: string; planId: string; goalId: string; mergeSha: string }
 	| { type: "mission_child_merge_conflict"; missionId: string; planId: string; goalId: string; conflictFiles: string[] }
-	| { type: "mission_execution_ready"; missionId: string };
+	| { type: "mission_execution_ready"; missionId: string }
+	| { type: "mission_paused"; missionId: string; reason: string };
 
 export interface SchedulerLogger {
 	info(msg: string, ...args: unknown[]): void;
@@ -147,6 +155,17 @@ export interface MissionSchedulerDeps {
 	tickIntervalMs?: number;
 	/** Test seam — allows fake timers. */
 	now?: () => number;
+	/**
+	 * If the integration branch is more than this many commits behind master,
+	 * `forwardMergeMaster` is invoked during the tick. Soft-fails on conflict.
+	 * Default 10. Set to 0 to disable.
+	 */
+	forwardMergeThreshold?: number;
+	/**
+	 * Maximum number of times a child goal may fail before the scheduler
+	 * pauses the mission for human review. Default 2 (Moderate-policy).
+	 */
+	maxFailedAttempts?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,8 +221,12 @@ export class MissionScheduler {
 	private readonly broadcast: SchedulerWsBroadcast;
 	private readonly tickIntervalMs: number;
 	private readonly now: () => number;
+	private readonly forwardMergeThreshold: number;
+	private readonly maxFailedAttempts: number;
 
 	private readonly inflight = new Map<string, Promise<void>>();
+	/** Track per-(mission,plan) last-seen failure flag so we increment failedAttempts only once per failure. */
+	private readonly seenFailure = new Set<string>();
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private started = false;
 
@@ -213,6 +236,24 @@ export class MissionScheduler {
 		this.broadcast = deps.broadcast ?? (() => {});
 		this.tickIntervalMs = deps.tickIntervalMs ?? DEFAULT_TICK_MS;
 		this.now = deps.now ?? (() => Date.now());
+		this.forwardMergeThreshold = deps.forwardMergeThreshold ?? 10;
+		this.maxFailedAttempts = deps.maxFailedAttempts ?? 2;
+	}
+
+	/** Wire/replace the wakeCommander hook post-construction. */
+	setWakeCommander(fn: (sessionId: string, message: string) => Promise<void> | void): void {
+		this.deps.wakeCommander = fn;
+	}
+
+	/** Wake the Commander session for a given mission, if one is wired. */
+	async wakeCommander(missionId: string, message: string): Promise<void> {
+		const m = this.deps.missionManager.getMission(missionId);
+		if (!m?.commanderSessionId || !this.deps.wakeCommander) return;
+		try {
+			await this.deps.wakeCommander(m.commanderSessionId, message);
+		} catch (err) {
+			this.logger.warn("[scheduler] wakeCommander failed", err);
+		}
 	}
 
 	/** Start the periodic safety-net tick. Idempotent. */
@@ -282,11 +323,18 @@ export class MissionScheduler {
 		if (m.state === "paused" || m.state === "complete" || m.state === "failed" || m.state === "shelved") return;
 		if (!m.plan || !m.planFrozenAt) return; // not yet approved
 
+		// 0) Detect child failures and apply bounded-autonomy policy.
+		const paused = await this.handleChildFailures(m);
+		if (paused) return; // Mission moved to paused state — stop ticking.
+
 		// 1) Mirror child goal states into plan nodes.
 		this.mirrorChildStates(m);
 
 		// 2) Auto-merge children whose ready-to-merge has passed.
 		await this.autoMergeReadyChildren(m);
+
+		// 2b) Periodic forward-merge of master into the integration branch.
+		await this.maybeForwardMergeMaster(m);
 
 		// Re-fetch — integrateChild may have updated mergedAt timestamps.
 		const fresh = this.deps.missionManager.getMission(missionId);
@@ -398,6 +446,87 @@ export class MissionScheduler {
 					err,
 				);
 			}
+		}
+	}
+
+	/**
+	 * Bounded-autonomy enforcement — detect spawned children whose underlying
+	 * goal failed (its `ready-to-merge` gate is `failed`, OR its goal record is
+	 * marked `shelved`/`failed`-equivalent) and apply the policy:
+	 *
+	 *   - 1st failure (Minor): increment failedAttempts, clear the goalId
+	 *     slot so the next tick re-spawns the node afresh, log it.
+	 *   - 2nd+ failure (Moderate): pause the mission with a clear reason and
+	 *     broadcast `mission_paused`. Caller must escalate via UI / Commander.
+	 *
+	 * Returns true iff the mission was paused (caller should stop ticking).
+	 */
+	private async handleChildFailures(m: MissionView): Promise<boolean> {
+		if (!m.plan) return false;
+		const manager = this.deps.missionManager;
+		for (const node of m.plan.goals) {
+			if (!node.goalId) continue;
+			if (node.mergedAt) continue;
+			const goal = this.deps.goalStore.get(node.goalId);
+			if (!goal) continue;
+
+			const rtm = this.deps.gateStore.getGate(node.goalId, "ready-to-merge");
+			const goalShelved = goal.state === "shelved";
+			const gateFailed = rtm?.status === "failed";
+			if (!goalShelved && !gateFailed) continue;
+
+			const key = `${m.id}::${node.planId}::${goal.id}`;
+			if (this.seenFailure.has(key)) continue; // already accounted for this goal record
+			this.seenFailure.add(key);
+
+			const nextAttempts = (node.failedAttempts ?? 0) + 1;
+			manager.updatePlanNodeState(m.id, node.planId, { failedAttempts: nextAttempts });
+
+			if (nextAttempts >= this.maxFailedAttempts) {
+				const reason = `Child '${node.title}' failed ${nextAttempts} times; awaiting user input`;
+				this.logger.warn(`[scheduler] ${reason} — pausing mission ${m.id}`);
+				let paused = false;
+				if (manager.pauseMission) {
+					try {
+						paused = await manager.pauseMission(m.id, reason);
+					} catch (err) {
+						this.logger.error("[scheduler] pauseMission failed", err);
+					}
+				}
+				this.broadcast({ type: "mission_paused", missionId: m.id, reason });
+				if (paused) return true;
+			} else {
+				// Minor: clear the goalId slot so the next tick re-spawns afresh.
+				this.logger.info(
+					`[scheduler] Auto-retry child '${node.title}' (attempt ${nextAttempts}) for mission ${m.id}`,
+				);
+				manager.updatePlanNodeState(m.id, node.planId, {
+					goalId: undefined,
+					spawnedAt: undefined,
+					completedAt: undefined,
+					state: undefined,
+				});
+				// Forget the seen marker for this *new* spawn (different goalId next time).
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * If `forwardMergeMaster` is wired and the mission is in-progress, attempt
+	 * a forward-merge. Soft-fails on conflict / errors.
+	 */
+	private async maybeForwardMergeMaster(m: MissionView): Promise<void> {
+		if (this.forwardMergeThreshold <= 0) return;
+		if (!this.deps.missionManager.forwardMergeMaster) return;
+		if (m.state !== "in-progress") return;
+		try {
+			const r = await this.deps.missionManager.forwardMergeMaster(m.id);
+			if (r.status === "conflict") {
+				this.logger.warn(`[scheduler] forwardMergeMaster conflict for mission ${m.id} — continuing`);
+			}
+		} catch (err) {
+			this.logger.warn(`[scheduler] forwardMergeMaster failed for mission ${m.id}`, err);
 		}
 	}
 }

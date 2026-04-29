@@ -211,6 +211,25 @@ describe("validatePlan", () => {
 	});
 });
 
+describe("MissionStore — replanCount", () => {
+	it("incrementReplanCount returns the new count and persists", () => {
+		const dir = tmpDir();
+		const s = new MissionStore(dir);
+		s.put(makeMission("m1"));
+		assert.equal(s.incrementReplanCount("m1"), 1);
+		assert.equal(s.incrementReplanCount("m1"), 2);
+		assert.equal(s.incrementReplanCount("m1"), 3);
+		// Reload — persisted across instances.
+		const b = new MissionStore(dir);
+		assert.equal(b.get("m1")?.replanCount, 3);
+	});
+
+	it("incrementReplanCount on missing mission returns 0", () => {
+		const s = new MissionStore(tmpDir());
+		assert.equal(s.incrementReplanCount("nope"), 0);
+	});
+});
+
 describe("ulid", () => {
 	it("returns a 26-char Crockford-base32 id", () => {
 		const id = ulid();

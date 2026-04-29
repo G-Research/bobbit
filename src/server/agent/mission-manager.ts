@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+	MAX_REPLANS,
 	MissionStore,
 	validatePlan,
 	type DivergencePolicy,
@@ -195,12 +196,26 @@ export class MissionManager {
 		const validation = validatePlan(plan);
 		if (!validation.ok) return { ok: false, status: 400, reason: validation.reason };
 
-		if (m.planFrozenAt && !opts?.force) {
+		const isReplan = !!m.planFrozenAt && !opts?.force;
+
+		if (isReplan) {
 			if (m.state !== "paused") {
 				return { ok: false, status: 403, reason: "Plan is frozen — pause mission and provide replan_reason" };
 			}
 			if (!opts?.replanReason?.trim()) {
 				return { ok: false, status: 403, reason: "replan_reason required when plan is frozen" };
+			}
+			// Cap repeated re-plans — if we've already replanned MAX_REPLANS times,
+			// force a human review by rejecting further attempts.
+			const already = m.replanCount ?? 0;
+			if (already >= MAX_REPLANS) {
+				// Ensure the mission is paused with a clear reason for the human.
+				this.store.update(id, {
+					state: "paused",
+					pausedAt: m.pausedAt ?? Date.now(),
+					pausedReason: `Replan loop detected (>${MAX_REPLANS} iterations); awaiting human review`,
+				});
+				return { ok: false, status: 429, reason: `Too many replans (cap=${MAX_REPLANS})` };
 			}
 			// Cascade-reset upstream content gates so the user must re-signal them
 			// after a structural replan.
@@ -222,8 +237,9 @@ export class MissionManager {
 		this.store.setPlan(id, next);
 		// If we re-planned a frozen plan, clear the freeze marker — it must be
 		// re-signalled through goal-plan. (Strict mode: state already paused.)
-		if (m.planFrozenAt && opts?.replanReason) {
+		if (isReplan && opts?.replanReason) {
 			this.store.update(id, { planFrozenAt: null });
+			this.store.incrementReplanCount(id);
 		}
 		return { ok: true, version: next.version };
 	}
@@ -285,6 +301,20 @@ export class MissionManager {
 		// cwd which makes createGoal skip worktree provisioning (consistent with
 		// non-team standalone-goal flows in tests).
 		const childCwd = m.integrationWorktree ?? "";
+
+		// Pin the child branch to the integration branch HEAD SHA at this exact
+		// moment — prevents two parallel siblings observing different parents if
+		// a third child lands a merge between their spawn calls. Falls back to
+		// the integration branch name on lookup failure (best-effort).
+		let baseBranch = m.integrationBranch;
+		if (this.deps.missionGit && m.integrationWorktree) {
+			try {
+				baseBranch = await this.deps.missionGit.childStartPoint(m.integrationWorktree);
+			} catch (err) {
+				console.warn("[mission-manager] childStartPoint failed; falling back to integration branch name:", err);
+			}
+		}
+
 		const goal = await this.deps.goalManager.createGoal(node.title, childCwd, {
 			spec: node.spec,
 			workflowId: childWorkflowId,
@@ -294,7 +324,7 @@ export class MissionManager {
 			enabledOptionalSteps: node.enabledOptionalSteps,
 			missionId: m.id,
 			missionPlanId: node.planId,
-			baseBranch: m.integrationBranch,
+			baseBranch,
 		});
 
 		// Tag the goal with the project + mission linkage.
@@ -363,6 +393,21 @@ export class MissionManager {
 		// merged
 		this.store.updatePlanNodeState(missionId, planId, { mergedAt: Date.now() });
 		return { ok: true, status: "merged", mergeSha: result.mergeSha, planId };
+	}
+
+	/**
+	 * Forward-merge `origin/<master>` into the mission integration branch.
+	 * Soft-fails on missing config / conflicts — returns a status so the
+	 * scheduler can log and continue.
+	 */
+	async forwardMergeMaster(missionId: string, masterBranch = "master"): Promise<
+		{ status: "merged" | "up-to-date" | "conflict" | "skipped" }
+	> {
+		const m = this.store.get(missionId);
+		if (!m || m.archived) return { status: "skipped" };
+		if (!m.integrationWorktree || !this.deps.missionGit) return { status: "skipped" };
+		const r = await this.deps.missionGit.forwardMergeMaster(m.integrationWorktree, masterBranch);
+		return { status: r.status };
 	}
 
 	/**

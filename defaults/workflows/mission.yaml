@@ -101,6 +101,9 @@ gates:
     name: Mission PR
     depends_on: [integration]
     verify:
+      - name: "Forward-merge master into integration branch"
+        type: command
+        run: "node {{bobbit_helpers}}/forward-merge-master.mjs {{mission_id}} {{master}}"
       - name: "Master merged into integration branch"
         type: command
         run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{integration_branch}}"

@@ -11,7 +11,8 @@ import { MissionStore, type MissionPlan } from "../src/server/agent/mission-stor
 import { MissionManager } from "../src/server/agent/mission-manager.ts";
 import { GateStore } from "../src/server/agent/gate-store.ts";
 import type { GoalManager } from "../src/server/agent/goal-manager.ts";
-import type { GoalStore } from "../src/server/agent/goal-store.ts";
+import type { GoalStore, PersistedGoal } from "../src/server/agent/goal-store.ts";
+import type { MissionGit } from "../src/server/agent/mission-git.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mission-mgr-"));
@@ -90,5 +91,159 @@ describe("MissionManager — field clearing", () => {
 		for (const gid of ["charter", "plan-review", "goal-plan"]) {
 			assert.equal(gateStore.getGateFor("mission", m.id, gid)?.status, "pending", `${gid} reset`);
 		}
+	});
+});
+
+describe("MissionManager — replan loop cap", () => {
+	it("rejects 4th replan with 429 and pauses mission", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const mgr = new MissionManager(store, {
+			goalManager: noopGoalManager(), goalStore: noopGoalStore(),
+			projectId: "p",
+		});
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+
+		// Initial plan + freeze.
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+
+		const replan = async (v: number) => {
+			await mgr.pauseMission(m.id, "r");
+			const result = await mgr.proposePlan(m.id, { ...PLAN, version: v }, { replanReason: "r" });
+			if (result.ok) {
+				// Re-freeze for the next iteration so isReplan is true again.
+				mgr.freezePlan(m.id);
+			}
+			return result;
+		};
+
+		assert.equal((await replan(2)).ok, true);
+		assert.equal((await replan(3)).ok, true);
+		assert.equal((await replan(4)).ok, true);
+		// 4th replan attempt — over the cap.
+		const fourth = await replan(5);
+		assert.equal(fourth.ok, false);
+		if (!fourth.ok) {
+			assert.equal(fourth.status, 429);
+			assert.match(fourth.reason, /Too many replans/);
+		}
+		const final = store.get(m.id)!;
+		assert.equal(final.state, "paused");
+		assert.match(final.pausedReason ?? "", /Replan loop/);
+	});
+});
+
+describe("MissionManager — spawnChild base branch", () => {
+	it("freezePlan after createMission unblocks spawnChild", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const goals = new Map<string, PersistedGoal>();
+		const goalManager = {
+			createGoal: async (title: string, _cwd: string, opts: any) => {
+				const id = `g-${Math.random().toString(36).slice(2, 8)}`;
+				const goal: PersistedGoal = {
+					id,
+					title,
+					cwd: _cwd,
+					state: "todo",
+					spec: opts?.spec ?? "",
+					createdAt: 1, updatedAt: 1,
+					branch: `goal/${title}-${id}`,
+					baseBranch: opts?.baseBranch,
+				};
+				goals.set(id, goal);
+				return goal;
+			},
+			updateGoal: async () => true,
+		} as unknown as GoalManager;
+		const goalStore = { get: (id: string) => goals.get(id) } as unknown as GoalStore;
+		const mgr = new MissionManager(store, {
+			goalManager, goalStore, projectId: "p",
+		});
+
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		await mgr.proposePlan(m.id, PLAN);
+
+		// Without freezePlan: spawnChild fails 409.
+		const blocked = await mgr.spawnChild(m.id, "a");
+		assert.equal(blocked.ok, false);
+		if (!blocked.ok) assert.equal(blocked.status, 409);
+
+		// freezePlan unblocks it.
+		mgr.freezePlan(m.id);
+		const ok = await mgr.spawnChild(m.id, "a");
+		assert.equal(ok.ok, true);
+	});
+
+	it("spawnChild pins child baseBranch to integration branch HEAD via childStartPoint", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const goals = new Map<string, PersistedGoal>();
+
+		// Capture the baseBranch that createGoal received.
+		let receivedBaseBranch: string | undefined;
+		const goalManager = {
+			createGoal: async (title: string, cwd: string, opts: any) => {
+				receivedBaseBranch = opts?.baseBranch;
+				const goal: PersistedGoal = {
+					id: "g1", title, cwd, state: "todo", spec: "",
+					createdAt: 1, updatedAt: 1,
+					branch: `goal/${title}-g1`,
+					baseBranch: opts?.baseBranch,
+				};
+				goals.set(goal.id, goal);
+				return goal;
+			},
+			updateGoal: async () => true,
+		} as unknown as GoalManager;
+		const goalStore = { get: (id: string) => goals.get(id) } as unknown as GoalStore;
+
+		// Fake MissionGit — childStartPoint returns a fixed SHA.
+		const missionGit = {
+			childStartPoint: async (_wt: string) => "abc123def456",
+		} as unknown as MissionGit;
+
+		const mgr = new MissionManager(store, {
+			goalManager, goalStore, projectId: "p", missionGit,
+		});
+
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		// Manually wire integration branch + worktree.
+		store.update(m.id, {
+			integrationBranch: "mission/t-x",
+			integrationWorktree: "/tmp/mission-wt",
+		});
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+
+		const result = await mgr.spawnChild(m.id, "a");
+		assert.equal(result.ok, true);
+		assert.equal(receivedBaseBranch, "abc123def456", "baseBranch should be the SHA from childStartPoint");
+		if (result.ok) {
+			assert.equal(result.goal.baseBranch, "abc123def456");
+		}
+	});
+
+	it("spawnChild falls back to integrationBranch name when missionGit not configured", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		let receivedBaseBranch: string | undefined;
+		const goalManager = {
+			createGoal: async (title: string, cwd: string, opts: any) => {
+				receivedBaseBranch = opts?.baseBranch;
+				return { id: "g1", title, cwd, state: "todo", spec: "", createdAt: 1, updatedAt: 1, branch: "goal/x" } as PersistedGoal;
+			},
+			updateGoal: async () => true,
+		} as unknown as GoalManager;
+		const mgr = new MissionManager(store, {
+			goalManager, goalStore: noopGoalStore(), projectId: "p",
+		});
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		store.update(m.id, { integrationBranch: "mission/t-x" });
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+		await mgr.spawnChild(m.id, "a");
+		assert.equal(receivedBaseBranch, "mission/t-x");
 	});
 });
