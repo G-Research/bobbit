@@ -228,6 +228,9 @@ export async function refreshSessions(): Promise<void> {
 		}
 	}
 
+	// Refresh missions (best-effort — mission API may not yet be live).
+	refreshMissions().catch(() => {});
+
 	// Fetch gate + PR status for sidebar badges — batched into a single renderApp().
 	const badgePromises: Promise<boolean>[] = [];
 	if (goalsChanged || isInitial) {
@@ -1554,4 +1557,160 @@ export async function deleteDraftFromServer(sessionId: string, type: string): Pr
 	} catch (err) {
 		console.error("[draft-api] Failed to delete draft:", err);
 	}
+}
+
+// ============================================================================
+// MISSIONS
+// ============================================================================
+
+import type {
+	PersistedMission,
+	MissionPlan,
+	MissionDetail,
+	DivergencePolicy,
+} from "./mission-types.js";
+
+export interface CreateMissionInput {
+	projectId: string;
+	title: string;
+	spec: string;
+	divergencePolicy?: DivergencePolicy;
+	maxConcurrentGoals?: number;
+	sandboxed?: boolean;
+	enabledOptionalSteps?: string[];
+}
+
+export async function createMission(input: CreateMissionInput): Promise<PersistedMission | null> {
+	try {
+		const res = await gatewayFetch("/api/missions", {
+			method: "POST",
+			body: JSON.stringify(input),
+		});
+		if (!res.ok) return null;
+		return await res.json();
+	} catch (err) {
+		console.error("[missions] createMission failed", err);
+		return null;
+	}
+}
+
+export async function fetchMissions(projectId?: string): Promise<PersistedMission[]> {
+	try {
+		const url = projectId ? `/api/missions?projectId=${encodeURIComponent(projectId)}` : "/api/missions";
+		const res = await gatewayFetch(url);
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.missions ?? data ?? [];
+	} catch {
+		return [];
+	}
+}
+
+/** Refresh state.missions from the server. Silent on backend-not-ready (404/501). */
+export async function refreshMissions(): Promise<void> {
+	try {
+		const res = await gatewayFetch("/api/missions");
+		if (!res.ok) {
+			// Backend not yet implemented — leave state.missions as-is.
+			if (res.status === 404 || res.status === 501) return;
+			return;
+		}
+		const data = await res.json();
+		const incoming: PersistedMission[] = data.missions ?? data ?? [];
+		if (!Array.isArray(incoming)) return;
+		const prevKey = state.missions.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.title || "")).join(",");
+		const nextKey = incoming.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.title || "")).join(",");
+		if (prevKey !== nextKey) {
+			state.missions = incoming;
+			renderApp();
+		}
+	} catch {
+		// Network error — silent.
+	}
+}
+
+export async function fetchMissionDetail(id: string): Promise<MissionDetail | null> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
+		return null;
+	}
+}
+
+export async function updateMission(id: string, updates: Partial<PersistedMission>): Promise<boolean> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}`, {
+			method: "PUT",
+			body: JSON.stringify(updates),
+		});
+		return res.ok;
+	} catch { return false; }
+}
+
+export async function archiveMission(id: string): Promise<boolean> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}`, { method: "DELETE" });
+		return res.ok;
+	} catch { return false; }
+}
+
+export async function patchMissionPlan(id: string, plan: MissionPlan, opts?: { force?: boolean; replanReason?: string }): Promise<boolean> {
+	try {
+		const qs = opts?.force ? "?force=1" : "";
+		const body: any = { plan };
+		if (opts?.replanReason) body.replan_reason = opts.replanReason;
+		const res = await gatewayFetch(`/api/missions/${id}/plan${qs}`, {
+			method: "PATCH",
+			body: JSON.stringify(body),
+		});
+		return res.ok;
+	} catch { return false; }
+}
+
+export async function pauseMission(id: string, reason?: string): Promise<boolean> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}/pause`, {
+			method: "POST",
+			body: JSON.stringify({ reason: reason ?? "" }),
+		});
+		return res.ok;
+	} catch { return false; }
+}
+
+export async function resumeMission(id: string): Promise<boolean> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}/resume`, { method: "POST" });
+		return res.ok;
+	} catch { return false; }
+}
+
+export async function fetchMissionGates(id: string): Promise<GateState[]> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${id}/gates`);
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.gates ?? data ?? [];
+	} catch { return []; }
+}
+
+export async function spawnMissionChild(missionId: string, planId: string): Promise<{ goalId: string; branch?: string; alreadySpawned?: boolean } | null> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${missionId}/spawn-child/${planId}`, {
+			method: "POST",
+		});
+		if (!res.ok) return null;
+		return await res.json();
+	} catch { return null; }
+}
+
+export async function integrateMissionChild(missionId: string, planId: string): Promise<{ status: string; conflictFiles?: string[] } | null> {
+	try {
+		const res = await gatewayFetch(`/api/missions/${missionId}/integrate-child/${planId}`, {
+			method: "POST",
+		});
+		if (!res.ok) return null;
+		return await res.json();
+	} catch { return null; }
 }

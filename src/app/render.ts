@@ -57,6 +57,7 @@ import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobi
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { renderGoalDashboard } from "./goal-dashboard.js";
 import "./goal-dashboard.css";
+import { renderMissionDashboard } from "./mission-dashboard.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { renderRoleManagerPage } from "./role-manager-page.js";
 import "./role-manager.css";
@@ -2760,6 +2761,9 @@ export function doRenderApp(): void {
 		const route = getRouteFromHash();
 		if (route.view === "goal-dashboard" && route.goalId) {
 			return renderGoalDashboard();
+		}
+		if (route.view === "mission-dashboard" && route.missionId) {
+			return renderMissionDashboard();
 		}
 		if (route.view === "roles" || route.view === "role-edit") {
 			return renderRoleManagerPage();

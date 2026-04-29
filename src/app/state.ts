@@ -1,6 +1,7 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import { isConfigPageRoute } from "./routing.js";
+import type { PersistedMission } from "./mission-types.js";
 
 // ============================================================================
 // TYPES
@@ -89,6 +90,10 @@ export interface Goal {
 	reattemptOf?: string;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	/** Owning mission, when this goal is part of a mission. */
+	missionId?: string;
+	/** PlannedGoal.planId in the owning mission's plan. */
+	missionPlanId?: string;
 	workflow?: {
 		id: string;
 		name: string;
@@ -181,6 +186,12 @@ export const state = {
 	sessionsGeneration: -1,
 	/** Server generation counter for goals — used to skip redundant refreshes */
 	goalsGeneration: -1,
+	/** Live missions (project-scoped). Refreshed via refreshSessions() and WS events. */
+	missions: [] as PersistedMission[],
+	/** Server generation counter for missions — used to skip redundant refreshes */
+	missionsGeneration: -1,
+	/** Currently viewed mission dashboard (null = not on dashboard) */
+	missionDashboardId: null as string | null,
 	/** Gate status cache: goalId → { passed, total, verifying } */
 	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean; verifyingCount: number }>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
@@ -424,6 +435,20 @@ export function saveExpandedGoals(): void {
 	localStorage.setItem(EXPANDED_GOALS_KEY, JSON.stringify([...expandedGoals]));
 }
 
+// Mission expansion (sidebar) — mirrors expandedGoals.
+const EXPANDED_MISSIONS_KEY = "bobbit-expanded-missions";
+export let expandedMissions: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(EXPANDED_MISSIONS_KEY) || "[]"),
+);
+export function saveExpandedMissions(): void {
+	localStorage.setItem(EXPANDED_MISSIONS_KEY, JSON.stringify([...expandedMissions]));
+}
+export function toggleMissionExpanded(missionId: string): void {
+	if (expandedMissions.has(missionId)) expandedMissions.delete(missionId);
+	else expandedMissions.add(missionId);
+	saveExpandedMissions();
+}
+
 
 export function toggleTeamLeadExpanded(sessionId: string): void {
 	if (collapsedTeamLeadSessions.has(sessionId)) {
@@ -605,6 +630,7 @@ export interface SidebarData {
 	liveGoals: Goal[];
 	archivedGoals: Goal[];
 	projects: Project[];
+	liveMissions: PersistedMission[];
 }
 
 let _sidebarDataCache: SidebarData | null = null;
@@ -612,7 +638,7 @@ let _sidebarCacheKey: string = "";
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.missions.length}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}:${state.missions.map(m => m.id + m.state + (m.archived ? "A" : "") + (m.projectId || "") + (m.title || "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
@@ -621,7 +647,8 @@ export function getSidebarData(): SidebarData {
 	const liveGoals = sortedGoals.filter(g => !g.archived);
 	const archivedGoals = sortedGoals.filter(g => g.archived);
 
-	_sidebarDataCache = { staffSessionIds, ungroupedSessions, liveGoals, archivedGoals, projects: state.projects };
+	const liveMissions = state.missions.filter(m => !m.archived);
+	_sidebarDataCache = { staffSessionIds, ungroupedSessions, liveGoals, archivedGoals, projects: state.projects, liveMissions };
 	_sidebarCacheKey = key;
 	return _sidebarDataCache;
 }

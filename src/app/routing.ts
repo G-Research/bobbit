@@ -2,13 +2,13 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "mission-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
 
 export type SettingsTabId = "shortcuts" | "general" | "project" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
 
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
+export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; missionId?: string; roleName?: string; toolName?: string; workflowId?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
@@ -22,6 +22,10 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)$/i);
 	if (goalMatch) {
 		return { view: "goal-dashboard", goalId: goalMatch[1] };
+	}
+	const missionMatch = hash.match(/^#\/mission\/([a-f0-9-]+)$/i);
+	if (missionMatch) {
+		return { view: "mission-dashboard", missionId: missionMatch[1] };
 	}
 	const roleEditMatch = hash.match(/^#\/roles\/([a-zA-Z0-9_-]+)$/);
 	if (roleEditMatch) {
@@ -79,6 +83,8 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = `#/session/${id}`;
 	} else if (view === "goal-dashboard" && id) {
 		newHash = `#/goal/${id}`;
+	} else if (view === "mission-dashboard" && id) {
+		newHash = `#/mission/${id}`;
 	} else if (view === "role-edit" && id) {
 		newHash = `#/roles/${id}`;
 	} else if (view === "roles") {
