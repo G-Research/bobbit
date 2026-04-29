@@ -864,7 +864,12 @@ export class VerificationHarness {
 	 */
 	private resolveRoleForGoal(roleName: string, goalId?: string): { model?: string; thinkingLevel?: string } | undefined {
 		if (this.configCascade) {
-			const projectId = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.project?.id : undefined;
+			// Falls back to mission-context lookup so mission-owned llm-reviews
+			// pick up role overrides too (the parameter name is historical).
+			const projectId = goalId
+				? (this.projectContextManager?.getContextForGoal(goalId)?.project?.id
+					?? this.projectContextManager?.getContextForMission(goalId)?.project?.id)
+				: undefined;
 			try {
 				const resolved = this.configCascade.resolveRoles(projectId);
 				const found = resolved.find(r => r.item.name === roleName);
@@ -1139,22 +1144,19 @@ export class VerificationHarness {
 						output = "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).";
 					} else {
 						const prompt = _substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-						// TODO(mission-llm-review-session-path): pass missionId as goalId so the
-						// session-based path is reachable for mission gates. Today we fall through
-						// to runLlmReviewDirect (the legacy direct-RpcBridge path), which means
-						// charter / plan-review / integration LLM reviews are invisible in the
-						// mission dashboard UI. The crash that this used to trigger is fixed by
-						// rpc-bridge.ts cascading to BUILTIN_TOOLS_DIR + VerificationHarness
-						// threading its ToolManager into the bridge — so this is purely a UX gap,
-						// not a correctness bug. Wiring the session path requires teaching
-						// runLlmReviewViaSession + SessionManager.createSession to accept a
-						// missionId (project lookup currently goes through getContextForGoal).
+						// Pass missionId as the ownerId so runLlmReviewStep takes the visible
+						// SessionManager-based path (charter / plan-review / integration LLM
+						// reviews now appear under the mission in the sidebar instead of as
+						// invisible direct-RpcBridge sub-agents). runLlmReviewViaSession
+						// resolves the project via getContextForMission as a fallback to
+						// getContextForGoal so this works for both kinds.
+						const missionReviewSessionId = `llm-review-mission-${randomUUID().slice(0, 12)}`;
 						const r = await this.runLlmReviewStep(
 							{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 							cwd, builtinVars,
 							signal.content, signal.metadata,
-							missionSpec, allGateStates, undefined, undefined,
-							gate,
+							missionSpec, allGateStates, missionId, missionReviewSessionId,
+							gate, "mission",
 						);
 						passed = r.passed;
 						output = r.output;
@@ -1770,9 +1772,10 @@ export class VerificationHarness {
 		signalMetadata?: Record<string, string>,
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
-		goalId?: string,
+		ownerId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
+		ownerKind: "goal" | "mission" = "goal",
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const roleName = step.role || "reviewer";
 		const role = this.roleStore.get(roleName) || this.roleStore.get("reviewer");
@@ -1804,8 +1807,8 @@ export class VerificationHarness {
 		].join("\n");
 
 		// ── Session-based path (visible in UI) ──
-		if (this.sessionManager && goalId) {
-			return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
+		if (this.sessionManager && ownerId) {
+			return this.runLlmReviewViaSession(step, cwd, ownerId, role, combinedPrompt, kickoff, timeoutMs, sessionId, ownerKind);
 		}
 
 		// ── Legacy direct-RpcBridge path (fallback when SessionManager unavailable) ──
@@ -1822,12 +1825,13 @@ export class VerificationHarness {
 	private async runLlmReviewViaSession(
 		step: { name: string; prompt?: string; timeout?: number; role?: string },
 		cwd: string,
-		goalId: string,
+		ownerId: string,
 		role: { promptTemplate: string; accessory?: string; name?: string },
 		combinedPrompt: string,
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
+		ownerKind: "goal" | "mission" = "goal",
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		// Pre-generate sessionId so we can register the verification_result resolver and extension before session creation
 		const sessionId = preGeneratedSessionId || `llm-review-${randomUUID().slice(0, 12)}`;
@@ -1839,18 +1843,31 @@ export class VerificationHarness {
 		let lastErroredToolOutput: string | null = null;
 		let errListenerUnsub: (() => void) | undefined;
 
+		// For session-creation purposes: only goals carry a goalId; missions own
+		// the session via the missionId field instead.
+		const goalId = ownerKind === "goal" ? ownerId : undefined;
+		const missionIdForSession = ownerKind === "mission" ? ownerId : undefined;
+
 		try {
 			// Create session via SessionManager — no worktree created (direct createSession, not spawnRole)
 			// verification_result tool is registered via the standard goal tools extension (tasks/extension.ts)
 			const roleName = role.name || step.role || "reviewer";
+			// Resolve project + sandbox via either goal or mission context.
+			const goalCtx = goalId ? this.projectContextManager?.getContextForGoal(goalId) : undefined;
+			const missionCtx = missionIdForSession ? this.projectContextManager?.getContextForMission(missionIdForSession) : undefined;
 			const isSandboxed = (goalId
-				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
-				: undefined) ?? this.sessionManager!.isSandboxEnabled;
+				? goalCtx?.goalStore.get(goalId)?.sandboxed
+				: missionIdForSession
+					? missionCtx?.missionStore.get(missionIdForSession)?.sandboxed
+					: undefined) ?? this.sessionManager!.isSandboxEnabled;
+			const projectId = goalCtx?.project.id ?? missionCtx?.project.id;
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
 				sandboxed: isSandboxed,
 				sessionId,
+				missionId: missionIdForSession,
+				projectId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
 			});
@@ -1865,8 +1882,9 @@ export class VerificationHarness {
 				nonInteractive: true,
 			});
 
-			// Register in team store (if team manager available)
-			if (this.teamManager) {
+			// Register in team store (if team manager available; goals only —
+			// mission gates have no team-manager entry, so skip).
+			if (this.teamManager && goalId) {
 				try {
 					await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
 				} catch (err) {
@@ -1990,7 +2008,7 @@ export class VerificationHarness {
 				try {
 					await this.sessionManager!.terminateSession(sessionId);
 				} catch { /* ignore — session may already be terminated */ }
-				if (this.teamManager) {
+				if (this.teamManager && goalId) {
 					try {
 						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
 					} catch { /* ignore */ }

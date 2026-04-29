@@ -65,6 +65,8 @@ export interface GatewaySession {
 	sandboxed?: boolean;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
+	/** Owning mission, when this session is part of a mission (Commander or mission gate reviewer). */
+	missionId?: string;
 }
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
