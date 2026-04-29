@@ -21,6 +21,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Document as FlexDocument } from "flexsearch";
+import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
 import {
 	type MetaRow,
@@ -486,6 +487,10 @@ export class FlexSearchStore {
 	}
 
 	private async _doFlush(): Promise<void> {
+		return profileAsync("flexStore._doFlush", () => this.__doFlush());
+	}
+
+	private async __doFlush(): Promise<void> {
 		const dir = path.join(this.dataDir, INDEX_SUBDIR);
 		await fs.promises.mkdir(dir, { recursive: true });
 		const written: string[] = [];

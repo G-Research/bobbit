@@ -25,6 +25,7 @@ import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
+import { recordElapsed } from "./agent/profiling.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
@@ -2278,6 +2279,7 @@ async function handleApiRoute(
 			restoreError: session.restoreError,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
+			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
 		});
 		return;
@@ -2285,6 +2287,8 @@ async function handleApiRoute(
 
 	// POST /api/sessions
 	if (url.pathname === "/api/sessions" && req.method === "POST") {
+		const __t0 = performance.now();
+		try {
 		const body = await readBody(req);
 
 		// ── Delegate session creation ──
@@ -2520,6 +2524,9 @@ async function handleApiRoute(
 			}, 500);
 		}
 		return;
+		} finally {
+			recordElapsed("POST /api/sessions", performance.now() - __t0);
+		}
 	}
 
 	// ── Goal endpoints ─────────────────────────────────────────────

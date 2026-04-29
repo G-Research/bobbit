@@ -3,6 +3,7 @@ import path from "node:path";
 import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
+import { profile } from "./profiling.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -141,16 +142,66 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	return tools;
 }
 
+// ── mtime-keyed cache for scanToolsDir ────────────────────────────────────
+//
+// Tool YAMLs almost never change at runtime. Re-reading 51 builtin YAMLs +
+// any project overlays on every session create burns 100–800ms per worker
+// under FS contention (Defender, parallel workers competing for the same
+// inodes). We hash the directory tree's structural mtimes (cheap stat()
+// calls) and reuse the parsed result while the tree is unchanged.
+//
+// Invalidation is conservative: if anything looks off we re-scan. The cost
+// of a false miss is one full scan; the cost of a false hit would be a
+// stale tool list, so we err on the side of re-scanning.
+const _scanCache = new Map<string, { fingerprint: string; tools: BaseToolInfo[] }>();
+
+function directoryFingerprint(dir: string): string {
+	try {
+		const rootStat = fs.statSync(dir);
+		const parts: string[] = [`${dir}:${rootStat.mtimeMs}`];
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const p = path.join(dir, entry.name);
+			try {
+				const st = fs.statSync(p);
+				parts.push(`${entry.name}:${st.mtimeMs}:${st.size}`);
+			} catch {
+				parts.push(`${entry.name}:miss`);
+			}
+		}
+		return parts.join("|");
+	} catch {
+		return "missing";
+	}
+}
+
+function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
+	const fp = directoryFingerprint(toolsDir);
+	const hit = _scanCache.get(toolsDir);
+	if (hit && hit.fingerprint === fp) return hit.tools;
+	const tools = scanToolsDir(toolsDir, baseDir);
+	_scanCache.set(toolsDir, { fingerprint: fp, tools });
+	return tools;
+}
+
+/** Test/maintenance hook: drop the scan cache. */
+export function __resetToolScanCache(): void {
+	_scanCache.clear();
+}
+
 /**
  * Load tool definitions with group-level cascade: builtins first, then overlay
  * from config-level toolsDir. A group in the higher layer replaces the entire group.
  */
 function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseToolInfo[] {
+	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir));
+}
+
+function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseToolInfo[] {
 	const seen = new Set<string>();     // tool name dedup
 	const seenGroups = new Set<string>(); // track which groups came from overlay
 
 	// Scan overlay (config-level) first to determine which groups are overridden
-	const overlayTools = scanToolsDir(toolsDir, toolsDir);
+	const overlayTools = scanToolsDirCached(toolsDir, toolsDir);
 	for (const t of overlayTools) {
 		if (t.groupDir) seenGroups.add(t.groupDir);
 	}
@@ -159,7 +210,7 @@ function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseTo
 
 	// Add builtin tools whose group is NOT overridden
 	if (builtinToolsDir) {
-		const builtinTools = scanToolsDir(builtinToolsDir, builtinToolsDir);
+		const builtinTools = scanToolsDirCached(builtinToolsDir, builtinToolsDir);
 		for (const t of builtinTools) {
 			// Skip if the group is overridden by the config level
 			if (t.groupDir && seenGroups.has(t.groupDir)) continue;

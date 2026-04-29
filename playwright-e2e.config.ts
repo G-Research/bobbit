@@ -11,22 +11,16 @@
  */
 import { defineConfig } from "@playwright/test";
 
-// Retries policy:
+// Retries policy: 0 everywhere. Every flake gets root-caused and fixed.
+// No `@quarantine` tag, no quarantine project, no `test.skip("flaky…")`.
 //
-//   Local development: retries: 0. Every flake must be root-caused and
-//   fixed in place. No `@quarantine` tag, no quarantine project, no
-//   `test.skip("flaky…")`. The quarantine project was deliberately removed
-//   because it allowed flakes to accrue silently.
-//
-//   CI (process.env.CI set): retries: 2. The browser project currently
-//   has ~60% clean-run rate due to cross-worker FS contention
-//   (see goal: "E2E browser contention fix"). Without CI retries, ~40%
-//   of goal-gate verifications fail spuriously and block goal progression.
-//   This is a TEMPORARY accommodation — the goal exists to fix the
-//   underlying contention; the CI retry should be removed once that lands.
+// (The previous temporary `retries: 2` in CI was removed once the
+// cross-worker FS contention root causes were fixed: tool-yaml rescan
+// cache in tool-manager.ts, and the completedTurnCount observability
+// hook in spec-framework.ts that eliminated the pre-prompt-idle race.)
 export default defineConfig({
 	timeout: 30_000,
-	retries: process.env.CI ? 2 : 0,
+	retries: 0,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain
