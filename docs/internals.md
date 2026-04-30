@@ -266,6 +266,26 @@ Each registered project can override system-level settings (from `project.yaml`)
 
 The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, plus project-defined custom keys. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
 
+### Native-YAML project.yaml fields
+
+Five fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings or quoted numbers:
+
+| Field | Shape |
+|---|---|
+| `config_directories` | `{ path: string; types: string[] }[]` |
+| `qa_env` | `Record<string, string>` |
+| `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (the secret `value` is split into `SecretsStore` on PUT — unchanged) |
+| `qa_max_duration_minutes` | `number` |
+| `qa_max_scenarios` | `number` |
+
+The motivation is editability and diff-friendliness: hand-editing a JSON-string-inside-YAML field is painful and produces noisy diffs in `propose_project` previews and PRs.
+
+**Lazy-migration loader.** `ProjectConfigStore` accepts both the native shape and the legacy form (JSON-string for the array/map fields, quoted numeric strings for the two numeric fields). Legacy values are parsed transparently into structured side-tables; malformed legacy strings log a warning and fall back to the default. The store sets `isDirty()` on legacy load so the next save rewrites the file in native form — no separate migration step.
+
+**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()`, `getQaEnv()`, `getSandboxTokens()`, `getQaMaxDurationMinutes()`, and `getQaMaxScenarios()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store.
+
+**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these five keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form.
+
 ### Per-project palette
 
 Projects can optionally be assigned one of the 10 built-in color palettes (`forest`, `ocean`, `dusk`, `ember`, `rose`, `slate`, `sand`, `teal`, `copper`, `mono`). This lets you visually distinguish projects — when you navigate to a session or goal belonging to a project with a palette, the entire UI switches to that palette.
