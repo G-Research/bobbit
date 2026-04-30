@@ -7,6 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
+import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -175,7 +176,7 @@ function connectDashboardWs(): void {
 	ws.addEventListener("message", (event) => {
 		try {
 			const msg = JSON.parse(event.data as string);
-			document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+			dispatchVerificationEvent(msg);
 		} catch {
 			// ignore unparseable messages
 		}

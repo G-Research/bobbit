@@ -861,11 +861,16 @@ export class VerificationHarness {
 
 	private configCascade?: import("./config-cascade.js").ConfigCascade;
 
+	/** Monotonic counter used to stamp `seq` on every broadcast event. */
+	private _verifSeqCounter = 0;
+
+	private readonly broadcastFn: (goalId: string, event: any) => void;
+
 	constructor(
 		stateDir: string,
 		/** @deprecated Resolve per-goal via projectContextManager instead. */
 		private gateStore: GateStore | undefined,
-		private broadcastFn: (goalId: string, event: any) => void,
+		private _rawBroadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
 		private preferencesStore?: PreferencesStore,
 		private sessionManager?: import("./session-manager.js").SessionManager,
@@ -875,6 +880,18 @@ export class VerificationHarness {
 		configCascade?: import("./config-cascade.js").ConfigCascade,
 	) {
 		this.configCascade = configCascade;
+		// Wrap the broadcast fn so every gate_verification_* event carries a
+		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
+		// dedupe payloads delivered via per-session WS fan-out (see
+		// src/app/verification-event-bus.ts). The seq is global per harness
+		// instance — simpler than scoping per (goal,gate,signal) and equally
+		// effective since the dedupe key includes signalId.
+		this.broadcastFn = (goalId: string, event: any) => {
+			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_") && event.seq == null) {
+				event.seq = ++this._verifSeqCounter;
+			}
+			this._rawBroadcastFn(goalId, event);
+		};
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
