@@ -70,6 +70,8 @@ export interface PersistedMission {
 
 export interface MissionDetailChild {
 	planId: string;
+	/** Title from the planned goal (sent by server even when no Goal is spawned yet). */
+	title?: string;
 	goal: Goal | null;
 	state?: GoalState | string;
 	lastGate?: string;

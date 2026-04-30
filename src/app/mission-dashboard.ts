@@ -477,18 +477,27 @@ function renderChildGoalsGrid(): TemplateResult {
 	if (!detail.children.length) {
 		return html`<p style="color:var(--muted-foreground);font-size:12px;" data-testid="mission-children-empty">No child goals spawned yet.</p>`;
 	}
+	// Build a planId → planned-goal-title lookup so children whose goal hasn't
+	// been spawned yet still display the planned title (the server sends `title`
+	// in the children payload, but we also fall back to the mission's own plan).
+	const plannedTitleById = new Map<string, string>();
+	for (const g of detail.plan?.goals ?? []) plannedTitleById.set(g.planId, g.title);
 	return html`
 		<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;" data-testid="mission-children-grid">
 			${detail.children.map(c => {
-				const title = c.goal?.title ?? c.planId;
+				const title = c.title ?? plannedTitleById.get(c.planId) ?? c.goal?.title ?? c.planId;
+				const hasGoal = !!c.goal?.id;
+				const onClick = hasGoal
+					? () => setHashRoute("goal-dashboard", c.goal!.id)
+					: undefined;
 				return html`
 					<button
-						style="text-align:left;border:1px solid var(--border);border-radius:6px;padding:10px 12px;background:var(--background);cursor:pointer;"
+						style="text-align:left;border:1px solid var(--border);border-radius:6px;padding:10px 12px;background:var(--background);cursor:${hasGoal ? "pointer" : "default"};"
 						data-testid="mission-child-card" data-plan-id=${c.planId}
-						@click=${() => c.goal?.id && setHashRoute("goal-dashboard", c.goal.id)}
-						?disabled=${!c.goal?.id}
+						@click=${onClick}
+						?disabled=${!hasGoal}
 					>
-						<div style="font-weight:500;">${title}</div>
+						<div style="font-weight:500;" data-testid="mission-child-title">${title}</div>
 						<div style="font-size:11px;color:var(--muted-foreground);margin-top:4px;">
 							${c.goal?.state ?? c.state ?? "pending"}
 							${c.lastGate ? html` · last gate: <code>${c.lastGate}</code>` : ""}
