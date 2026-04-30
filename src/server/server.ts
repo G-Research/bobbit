@@ -1230,10 +1230,10 @@ export function createGateway(config: GatewayConfig) {
 							poolReady = await isGitRepo(repoPath);
 						}
 						if (poolReady) {
-							const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
 							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
 							const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
-							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize, components, wtRoot);
+							const pcs = ctx.projectConfigStore;
+							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, () => pcs.getComponents(), poolSize, wtRoot);
 						}
 					} catch { /* best-effort */ }
 				}
@@ -2058,10 +2058,10 @@ async function handleApiRoute(
 						poolReady = await isGitRepo(body.rootPath);
 					}
 					if (poolReady) {
-						const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
 						const wtRoot = newCtx?.projectConfigStore.get("worktree_root") || undefined;
-						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize, components, wtRoot);
+						const pcs = newCtx?.projectConfigStore;
+						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot);
 					}
 				} catch { /* best-effort */ }
 			}
