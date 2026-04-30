@@ -769,8 +769,23 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
 				style="padding:0 2px;line-height:0;"
+				@click=${(e: Event) => { e.stopPropagation(); showMissionDialog(project.id); }}
+				title="New mission in ${project.name}"
+				data-testid="new-mission-btn"
+			>
+				<span class="relative inline-flex" style="width:12px;height:12px;">
+					${icon(Flag, "xs")}
+					<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:7px;height:7px;filter:drop-shadow(0 0 1.5px var(--background));">
+						<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+					</svg>
+				</span>
+			</button>
+			<button
+				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
+				style="padding:0 2px;line-height:0;"
 				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 				title="New goal in ${project.name}"
+				data-testid="new-goal-btn"
 			>
 				<span class="relative inline-flex" style="width:12px;height:12px;">
 					${icon(GoalIcon, "xs")}
