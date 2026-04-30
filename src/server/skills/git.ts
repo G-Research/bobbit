@@ -567,3 +567,139 @@ export async function recoverWorktree(
 		return null;
 	}
 }
+
+/**
+ * Locally merge a child goal's branch into the parent goal's branch.
+ *
+ * Implements the body of `goal_merge_child` (see
+ * `docs/design/nested-goals.md` §3.3). Used by `GoalManager.mergeChild` when
+ * a subgoal verify-step's child goal has reached `ready-to-merge` and the
+ * parent's verification harness needs to integrate the child's commits.
+ *
+ * Steps:
+ *   1. `git fetch origin <childBranch>` — bring the child branch ref up to
+ *      date inside the parent's worktree.
+ *   2. `git merge --no-ff origin/<childBranch>` — fast-forwards forbidden so
+ *      the merge commit is always present (audit trail). Commit message is
+ *      `Merge child <childBranch> into <parentBranch>` with a bobbit-ai
+ *      co-author trailer.
+ *   3. On clean merge: push parent.branch to origin (gated by
+ *      `shouldSkipRemotePush()`). "No remote PR" semantics — the child
+ *      branch itself is never pushed by this helper. Returns
+ *      `{ merged: true, conflict: false, commitSha }`.
+ *   4. On conflict: `git merge --abort`, return
+ *      `{ merged: false, conflict: true, output }`. Do NOT auto-resolve —
+ *      the parent's team-lead is responsible for resolving conflicts (or
+ *      escalating to the user).
+ *
+ * Pre-conditions:
+ *   - `parentWorktreePath` is the parent goal's worktree (where
+ *     `parentBranch` is the currently checked-out branch). Caller
+ *     responsible for ensuring this.
+ *
+ * @param parentWorktreePath Absolute path to parent goal's worktree.
+ * @param parentBranch       Parent goal's branch name (must be checked out).
+ * @param childBranch        Child goal's branch name (will be fetched).
+ */
+export async function mergeChildBranchLocal(
+	parentWorktreePath: string,
+	parentBranch: string,
+	childBranch: string,
+): Promise<{ merged: boolean; conflict: boolean; commitSha?: string; output: string }> {
+	let output = "";
+	const capture = (label: string, stdout: string, stderr: string): void => {
+		const chunk = (stdout + (stdout && stderr ? "\n" : "") + stderr).trim();
+		if (chunk) output += `[${label}]\n${chunk}\n`;
+	};
+
+	// 1. Fetch the child branch ref. Best-effort — if there is no `origin`
+	//    remote (e.g. tests with BOBBIT_TEST_NO_PUSH=1 and a local-only repo)
+	//    we fall back to the local ref.
+	let childRef = `origin/${childBranch}`;
+	try {
+		const { stdout, stderr } = await execFile(
+			"git",
+			["fetch", "origin", childBranch],
+			{ cwd: parentWorktreePath, timeout: 30_000 },
+		);
+		capture("fetch", stdout, stderr);
+	} catch (err) {
+		// No remote / unreachable / branch not on remote — try local ref.
+		const msg = err instanceof Error ? err.message : String(err);
+		capture("fetch (failed, falling back to local ref)", "", msg);
+		try {
+			await execFile("git", ["rev-parse", "--verify", childBranch], {
+				cwd: parentWorktreePath,
+			});
+			childRef = childBranch;
+		} catch {
+			return { merged: false, conflict: false, output: output + `[error]\nchild branch "${childBranch}" not found locally or on origin\n` };
+		}
+	}
+
+	// 2. Merge with --no-ff and a structured commit message + co-author.
+	const commitMessage =
+		`Merge child ${childBranch} into ${parentBranch}\n\n` +
+		`Co-authored-by: bobbit-ai <bobbit@bobbit.ai>\n`;
+	try {
+		const { stdout, stderr } = await execFile(
+			"git",
+			["merge", "--no-ff", "-m", commitMessage, childRef],
+			{ cwd: parentWorktreePath, timeout: 60_000 },
+		);
+		capture("merge", stdout, stderr);
+	} catch (err) {
+		const stdout = (err as { stdout?: string })?.stdout ?? "";
+		const stderr = (err as { stderr?: string })?.stderr ?? "";
+		capture("merge (failed)", stdout, stderr);
+
+		// 4. Abort to leave the worktree clean. Best-effort.
+		try {
+			const { stdout: aOut, stderr: aErr } = await execFile(
+				"git",
+				["merge", "--abort"],
+				{ cwd: parentWorktreePath, timeout: 15_000 },
+			);
+			capture("merge --abort", aOut, aErr);
+		} catch (abortErr) {
+			const aMsg = abortErr instanceof Error ? abortErr.message : String(abortErr);
+			capture("merge --abort (failed)", "", aMsg);
+		}
+		return { merged: false, conflict: true, output };
+	}
+
+	// Capture the merge commit SHA.
+	let commitSha: string | undefined;
+	try {
+		const { stdout } = await execFile("git", ["rev-parse", "HEAD"], {
+			cwd: parentWorktreePath,
+			timeout: 5_000,
+		});
+		commitSha = stdout.trim() || undefined;
+	} catch {
+		// best-effort
+	}
+
+	// 3. Push parent.branch to origin. "No remote PR" applies to the child;
+	//    parent.branch is still pushed so CI / sibling subgoal verifications
+	//    see the post-merge tip. Gated by shouldSkipRemotePush() exactly like
+	//    every other push site.
+	if (!shouldSkipRemotePush()) {
+		try {
+			const { stdout, stderr } = await execFile(
+				"git",
+				["push", "origin", parentBranch],
+				{ cwd: parentWorktreePath, timeout: 30_000 },
+			);
+			capture("push", stdout, stderr);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			capture("push (failed, non-fatal)", "", msg);
+			// Non-fatal: merge already happened locally. The next sibling
+			// subgoal that branches off parent.branch HEAD will still see the
+			// merge commit in the local worktree.
+		}
+	}
+
+	return { merged: true, conflict: false, commitSha, output };
+}

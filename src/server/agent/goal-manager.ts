@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal } from "../skills/git.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
@@ -559,6 +559,52 @@ export class GoalManager {
 		}
 
 		return this.store.update(id, updates);
+	}
+
+	/**
+	 * Locally merge a child goal's branch into the parent goal's branch.
+	 *
+	 * Wraps `mergeChildBranchLocal` (see `docs/design/nested-goals.md` §3.3):
+	 * resolves the parent goal record, finds its worktree, and dispatches to
+	 * the git helper. Throws if the parent has no worktree (i.e. the parent's
+	 * setup never completed) — the caller (verification harness or the
+	 * `goal_merge_child` tool) should treat that as a hard error.
+	 *
+	 * Does NOT mark the child goal complete or fan out events — those are
+	 * the verification harness / team-manager's responsibility (§2.3).
+	 *
+	 * @returns Result of the merge attempt. On clean merge:
+	 *   `{ merged: true, conflict: false, commitSha }`. On conflict:
+	 *   `{ merged: false, conflict: true, output }`.
+	 */
+	async mergeChild(
+		parentGoalId: string,
+		childGoalId: string,
+	): Promise<{ merged: boolean; conflict: boolean; commitSha?: string; output: string }> {
+		const parent = this.store.get(parentGoalId);
+		if (!parent) {
+			throw new Error(`mergeChild: parent goal not found: ${parentGoalId}`);
+		}
+		const child = this.store.get(childGoalId);
+		if (!child) {
+			throw new Error(`mergeChild: child goal not found: ${childGoalId}`);
+		}
+		if (child.parentGoalId !== parentGoalId) {
+			const pid = child.parentGoalId ?? "<none>";
+			throw new Error(
+				`mergeChild: goal ${childGoalId} is not a child of ${parentGoalId} (parentGoalId=${pid})`,
+			);
+		}
+		if (!parent.worktreePath) {
+			throw new Error(`mergeChild: parent goal ${parentGoalId} has no worktree`);
+		}
+		if (!parent.branch) {
+			throw new Error(`mergeChild: parent goal ${parentGoalId} has no branch`);
+		}
+		if (!child.branch) {
+			throw new Error(`mergeChild: child goal ${childGoalId} has no branch`);
+		}
+		return await mergeChildBranchLocal(parent.worktreePath, parent.branch, child.branch);
 	}
 
 	async deleteGoal(id: string): Promise<boolean> {
