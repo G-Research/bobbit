@@ -63,7 +63,7 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 				{ name: "web", repo: "web", commands: { build: "echo ok" } },
 				{ name: "shared", repo: "shared" }, // data-only — must be in the set
 			];
-			const pool = new WorktreePool({ repoPath: root, targetSize: 1, components });
+			const pool = new WorktreePool({ repoPath: root, targetSize: 1, componentsResolver: () => components });
 			pool.startFilling();
 
 			for (let i = 0; i < 100 && pool.size === 0; i++) {
@@ -107,7 +107,7 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 				{ name: "api", repo: "api" },
 				{ name: "web", repo: "web" },
 			];
-			const pool = new WorktreePool({ repoPath: root, targetSize: 1, components });
+			const pool = new WorktreePool({ repoPath: root, targetSize: 1, componentsResolver: () => components });
 			pool.startFilling();
 			for (let i = 0; i < 100 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
