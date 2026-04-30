@@ -9,6 +9,11 @@ export interface BufferedEvent {
 
 /** Circular buffer of recent agent events for reconnection catch-up. */
 export class EventBuffer {
+	/** Floor sentinel reserved for snapshot ordering. All snapshot `_order`
+	 *  values are strictly less than every live `seq` (which starts at 1).
+	 *  See docs/design/unified-message-ordering-reducer.md §3.2. */
+	static readonly SNAPSHOT_ORDER_FLOOR = -1_000_000_000;
+
 	private buffer: BufferedEvent[] = [];
 	private maxSize: number;
 	private nextSeq = 1;
@@ -26,6 +31,15 @@ export class EventBuffer {
 			this.buffer.shift();
 		}
 		return entry;
+	}
+
+	/** Like push() but for non-`event` frames (e.g. `tool_permission_needed`)
+	 *  that need a seq for client ordering but do NOT need to be retained for
+	 *  reconnect resume — the client recovers them via the messages snapshot.
+	 *  Stamps a monotonic `seq` and wall-clock `ts` without touching the ring.
+	 *  See docs/design/unified-message-ordering-reducer.md §3.1. */
+	pushFrame(): { seq: number; ts: number } {
+		return { seq: this.nextSeq++, ts: Date.now() };
 	}
 
 	/** All buffered entries, oldest first. */

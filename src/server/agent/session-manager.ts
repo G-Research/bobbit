@@ -1906,6 +1906,9 @@ export class SessionManager {
 		// Broadcast to UI clients
 		const roleName = session.role || "general";
 		const role = this.roleManager?.getRole(roleName);
+		// Stamp seq+ts so client reducer can order this frame relative to live
+		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
+		const { seq, ts } = session.eventBuffer.pushFrame();
 		broadcast(session.clients, {
 			type: "tool_permission_needed",
 			toolName,
@@ -1913,6 +1916,8 @@ export class SessionManager {
 			roleName: role?.name ?? roleName,
 			roleLabel: role?.label ?? roleName,
 			lastPromptText: session.lastPromptText,
+			seq,
+			ts,
 		});
 
 		return promise;
