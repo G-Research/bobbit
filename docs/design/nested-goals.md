@@ -487,6 +487,63 @@ through to `resumeInterruptedVerifications()`.
 
 ## 3. Branching & merging
 
+### 3.0 Subgoal worktree / branch topology — invariant
+
+This subsection states the topology unambiguously. The rules below are
+non-negotiable invariants that the implementation in §§3.1–3.4 enforces;
+any divergence is a bug.
+
+1. **Each subgoal gets its own git worktree.** Sandboxed and host-side
+   alike. There is no shared-worktree mode.
+2. **A subgoal's branch is created off the parent goal's branch HEAD at
+   spawn time** — *not* off `origin/master` and *not* off the root's
+   branch. `createWorktree(..., { startPoint: parent.branch })` (§3.1).
+   For a top-level goal, the start point is `origin/<primary>` as today.
+3. **A subgoal's `ready-to-merge` gate triggers a local merge into the
+   parent's branch** (§3.3). No remote PR is raised for children. No
+   push to `master` from a child.
+4. **This is recursive.** A grandchild branches from its child-parent's
+   branch HEAD and merges back into it on `ready-to-merge`. The child
+   then merges into its own parent. Etc., up the tree.
+5. **Only the root goal (`parentGoalId == null`) raises a PR to
+   `master`.** This is the one and only PR for the whole tree, raised
+   by the root's `ready-to-merge` gate as today.
+6. **Sibling subgoals branch off the parent's tip at the moment they
+   spawn.** Once any sibling merges into the parent, subsequently-spawned
+   siblings naturally branch from the advanced tip — they observe the
+   already-merged sibling's commits. (The verification harness re-reads
+   `parent.branch` HEAD on each `runSubgoalStep` invocation; the worktree
+   pool is bypassed for child goals — see §3.1.)
+
+ASCII topology diagram (also reproduced in `docs/nested-goals.md` so
+end-users see it without opening the design doc):
+
+```
+master ─────────●─────────────────────────────────●─────►
+                 \                                /
+                  ●─ goal/root ────●─────●───────●─ (PR: root → master)
+                                    \    \     /
+                                     \    \   / local merge into goal/root
+                                      \    \ /
+                                       ●────●─ goal/v0-1 (child of root)
+                                        \
+                                         \ local merge into goal/v0-1
+                                          \
+                                           ●─ goal/sim-1 (grandchild)
+```
+
+Reading the diagram:
+- `master` carries one merge commit when the root's PR lands.
+- `goal/root` is the root goal's branch. It branches off `master` and
+  is the only branch that pushes a PR back to `master`.
+- `goal/v0-1` (a child) branches off `goal/root` and merges back into
+  `goal/root` locally on its own `ready-to-merge`.
+- `goal/sim-1` (a grandchild) branches off `goal/v0-1` and merges back
+  into `goal/v0-1` locally on its own `ready-to-merge`. The child then
+  later merges its (now-advanced) tip into `goal/root`.
+
+The **only** branch that ever talks to `origin/master` is the root.
+
 ### 3.1 baseBranch in createGoal
 
 In
@@ -1183,6 +1240,73 @@ gate post-freeze classification.
 The freeze flag lives on the goal's snapshotted workflow (already mutable
 per goal) — not on the canonical `parent.yaml` builtin.
 
+### 6.2 Runtime mutation of an in-flight gate — option (b), append-and-continue
+
+When `goal_plan_propose` (or a `goal_spawn_child` that triggers a
+classifier-approved plan amendment) mutates the `verify[]` of a gate
+that is **currently running**, the harness must decide between three
+options:
+
+- **(a) Restart the gate from scratch** — discard in-flight verify-step
+  state. *Rejected.* In-flight reviewer / QA sessions are expensive
+  (5–15 min each, real LLM tokens, real container starts). Throwing
+  that work away on every plan tweak would make legitimate fix-ups
+  punitively costly.
+- **(b) Append the new step(s) and let in-flight steps complete first.**
+  ✅ **Chosen default.**
+- **(c) Reject the mutation with 409** — caller must wait until the
+  gate resolves. *Rejected.* Makes the team-lead's job harder during
+  legitimate fix-up additions and forces awkward
+  "wait-then-retry" loops mid-flight.
+
+**Rationale for (b):** preserves in-flight progress, integrates cleanly
+with the existing phase scheduler (each phase already runs all its
+steps in parallel and waits for the slowest before starting the next),
+and only requires the harness to recompute the active phase set on each
+mutation. It also matches the natural mental model of the team-lead
+("I'll add another subgoal — the existing ones keep going").
+
+**Concrete behaviour (the contract Phase 3 task 3.2 implements):**
+
+1. **Default `phase` for an appended step.** If the caller does **not**
+   set `phase` on the new step, the harness assigns it
+   `max(currentPhases) + 1` so the appended step lands strictly after
+   all in-flight work. The caller may set an explicit `phase` to
+   override this — but a `phase` value `≤ active phase` is silently
+   bumped to `activePhase + 1` (the harness never inserts a step into a
+   phase that has already started).
+2. **Gate start-time is preserved**, not reset. The
+   `gate_verification_started` event broadcast on the original signal
+   keeps its `startedAt`. The harness emits a new
+   `gate_verification_step_appended` event (additive — see §9 below)
+   carrying the new step's index so dashboards re-render the verify
+   list. Overall verdict (pass / fail) defers until every step
+   completes.
+3. **Idempotency.** The mutation request carries a `planId` (or
+   set-of-`planId`s for multi-step proposals). If the team-lead retries
+   a `goal_plan_propose` with the same `planId(s)`, the harness's
+   active-verification record (§2.5) is the source of truth: any step
+   whose `subgoal.planId` is already present is skipped on the retry.
+   The classifier (§4) already handles `planId` uniqueness; the
+   in-flight-mutation path additionally consults the **active
+   verification record's** existing planIds, not just the persisted
+   gate-signal record, so a retry mid-flight doesn't double-spawn.
+4. **Frozen + paused gates are unaffected.** A mutation arriving while
+   the gate is paused (because the goal is paused) is buffered — see
+   §10.5 banner mechanism — and applied on resume. A mutation arriving
+   while the gate has resolved (passed or failed) re-signals the gate
+   normally; that's not a "runtime mutation" and falls outside §6.2.
+5. **Cascade-cancel still wins.** If the parent verification is
+   cancelled while an appended subgoal step is mid-spawn, the cancel
+   tears down the spawned child (per §2.3). Append-and-continue does
+   not weaken cancellation semantics.
+
+This subsection is normative for Phase 3 task 3.2 (`runSubgoalStep`
++ phase-set recomputation). Add a new WS event
+`gate_verification_step_appended` (§9 lists it) and an additional
+`active.steps[]` push in `verifyGateSignal()` keyed off the post-mutation
+phase scheduler tick.
+
 ---
 
 ## 7. Custom workflows + roles resolution
@@ -1374,6 +1498,7 @@ the root id too, so the sidebar and dashboard stay in sync without polling.
 | `goal_mutation_resolved` | `{ goalId, requestId, decision: "approve" \| "reject" }` | User responds to the dashboard banner |
 | `goal_merge_complete` | `{ parentGoalId, childGoalId, commitSha }` | Successful local merge |
 | `goal_merge_conflict` | `{ parentGoalId, childGoalId, output }` | Local merge raised conflict |
+| `gate_verification_step_appended` | `{ goalId, gateId, signalId, stepIndex, stepName, phase, planId? }` | In-flight gate received an appended verify step (§6.2 append-and-continue) |
 
 Existing `goal_state_changed` / `gate_*` events fire as today.
 
@@ -2022,15 +2147,23 @@ This section is the team-lead's planning sheet. Each task is sized for
 - **Depends on:** 1.1
 - **Parallelism:** parallel with 3.4 (parent.yaml).
 
-**3.2 Verification-harness: `subgoal` step branch + idempotency + concurrency cap**
+**3.2 Verification-harness: `subgoal` step branch + idempotency + concurrency cap + in-flight append**
 - **Type:** implementation
 - **Owned files:** `src/server/agent/verification-harness.ts`,
   `src/server/agent/semaphore.ts` (add `capacity` getter)
-- **Spec:** §2.3, §2.4. Add `runSubgoalStep`. Add the per-rootGoalId
-  semaphore. Wire the spawn → wait → merge → pass loop. Persist
-  `childGoalId` + `planId` to the active verification record so restarts
-  recover correctly. On parent verification cancel, terminate the child
-  team and archive the child goal.
+- **Spec:** §2.3, §2.4, **§6.2 (in-flight mutation contract)**. Add
+  `runSubgoalStep`. Add the per-rootGoalId semaphore. Wire the spawn →
+  wait → merge → pass loop. Persist `childGoalId` + `planId` to the
+  active verification record so restarts recover correctly. On parent
+  verification cancel, terminate the child team and archive the child
+  goal. Implement append-and-continue per §6.2: when `verifyGateSignal`
+  observes a mutation to its gate's `verify[]` mid-flight (the goal
+  store's snapshotted workflow has new entries with planIds not in
+  `active.steps[]`), recompute the phase set, default new steps'
+  `phase` to `max(currentPhases) + 1`, broadcast a new
+  `gate_verification_step_appended` event, and continue. Do NOT
+  restart the gate. Idempotent on `planId` against the in-flight
+  active-verification record (not just the gate-signal store).
 - **Tests required:** `tests/verification-subgoal.test.ts` — fake
   `goalManager.createGoal` returning a goal whose `ready-to-merge` we
   flip-pass after a tick; assert pass; assert idempotent re-spawn finds
@@ -2635,15 +2768,38 @@ top-level / child status, regardless of workflow). Markdown block headed
 ```markdown
 ## Mid-Goal Decomposition
 
-You can decompose work mid-flight by calling `goal_spawn_child`. Use
-this when:
+You have **three** decomposition primitives. Pick the right one.
 
-- You discover a sub-task that's large enough to deserve its own
-  workflow + verification cycle (typically: 200+ LoC, multiple files,
-  or a discrete deliverable).
+- **`task_create`** — single tracked deliverable, no agent required (or
+  a single agent picks it up later). The most common choice.
+- **`team_spawn`** — spin up a coder + tester (or any role pair) within
+  *this* goal's review cycle. Use when the work is one cohesive change
+  set being collaborated on by multiple roles.
+- **`goal_spawn_child`** — spawn a **child goal** with its own
+  worktree, branch, workflow, and full review cycle. Use only when ALL
+  three of the following hold: (1) the work has its own design intent
+  (a meaningful unit a reviewer would want to see in isolation),
+  (2) it is independently reviewable (its own design-doc / impl /
+  review cycle makes sense), and (3) it merges meaningfully on its own
+  (the parent branch is sensible with this subgoal merged but its
+  siblings still pending).
+
+**Default: keep the decomposition you would have used before nested
+goals existed.** Only reach for `goal_spawn_child` when the parent goal
+is genuinely a coordination layer over independently shippable units.
+In close-call situations, prefer `team_spawn` or `task_create` — over-using
+subgoals adds review overhead without paying for itself. Trust your
+judgment; don't push toward subgoals when you're not sure.
+
+When you do call `goal_spawn_child`, valid triggers include:
+
+- You discover a sub-deliverable that's large enough to deserve its own
+  design-doc → implementation → review cycle (and the three
+  conditions above hold).
 - A blocking bug needs a focused investigation that shouldn't pollute
   this goal's branch with experiments.
-- You want parallel work on independent slices.
+- You want parallel work on independent slices that can each merge
+  meaningfully into the parent before the others finish.
 
 **Divergence policy: `{{divergencePolicy}}`** controls when mutations
 are allowed after the `goal-plan` gate (if any) has been signalled:
@@ -2737,6 +2893,43 @@ goal-section block) is:
 The three `build*Stanza` helpers are pure string-builders defined in the
 same file alongside `buildSkillsCatalogSection` (so they're testable in
 isolation). They are exported for unit tests.
+
+#### 14.1.5 Decomposition decision rule (woven into the mid-goal stanza)
+
+Subgoals are a **third** decomposition primitive alongside the
+pre-existing `team_spawn` and `task_create`. The mid-goal stanza body
+above (§14.1.3) carries the user-visible decision rule as one paragraph
+in the section that already discusses task / agent decomposition — not
+a separate top-level block. The canonical wording:
+
+> **Use a `subgoal` verify step (or `goal_spawn_child`) when ALL of the
+> following hold:**
+> 1. The work has its own design intent (a meaningful unit a reviewer
+>    would want to see in isolation).
+> 2. It is independently reviewable (its own design-doc / implementation
+>    / review cycle makes sense).
+> 3. It merges meaningfully on its own (the parent branch is sensible
+>    with this subgoal merged but its siblings still pending).
+>
+> **Use `team_spawn`** when the work is within one cohesive review
+> cycle (e.g. a coder + a tester collaborating on the same change set).
+>
+> **Use `task_create`** when the work is a single tracked deliverable
+> that doesn't need its own agent.
+>
+> **Default:** keep the decomposition you would have used before nested
+> goals existed. Only reach for subgoals when the parent goal is
+> genuinely a coordination layer over independently shippable units.
+> Trust the team-lead's judgment — don't push toward subgoals in
+> close-call situations.
+
+This rule lives **in code** at the splice point in
+`src/server/agent/system-prompt.ts::buildMidGoalNestingStanza` so every
+team-lead sees it on every spawn. The doc-writer reproduces the same
+rule in `docs/nested-goals.md` (Phase 7 task 7.1) under a heading
+`## When to use a subgoal vs team_spawn vs task_create`, with one
+worked example per primitive (in-flight reviewer collaboration → team_spawn;
+single tracked TODO → task_create; independently shippable v0.1 → subgoal).
 
 ### 14.2 New-Goal dialog multi-phase suggestion
 
