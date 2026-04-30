@@ -3771,6 +3771,55 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Generate a title for any session by id — live or archived. Returns the
+	 * generated title, or null if no messages were available. Persists the
+	 * title and broadcasts to any connected clients (live sessions only).
+	 * Used by `POST /api/sessions/:id/generate-title` for the rename dialog
+	 * when the user is editing a non-focused session.
+	 */
+	async generateTitleForAnySession(id: string): Promise<string | null> {
+		const live = this.sessions.get(id);
+		if (live && live.status !== "terminated") {
+			const msgsResp = await live.rpcClient.getMessages();
+			if (!msgsResp.success) return null;
+			const messages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(messages) || messages.length === 0) return null;
+			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
+			if (!title) return null;
+			live.title = title;
+			this.resolveStoreForSession(live.id).update(live.id, { title });
+			broadcast(live.clients, { type: "session_title", sessionId: live.id, title });
+			return title;
+		}
+
+		// Archived or dormant — read messages from .jsonl without restoring the agent.
+		const store = this.resolveStoreForId(id);
+		const ps = store?.get(id);
+		if (!ps || !ps.agentSessionFile) return null;
+		let messages: unknown[] = [];
+		try {
+			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			if (content) {
+				for (const line of content.trim().split("\n")) {
+					if (!line.trim()) continue;
+					try {
+						const entry = JSON.parse(line);
+						if (entry.type === "message" && entry.message) messages.push(entry.message);
+					} catch { /* skip malformed */ }
+				}
+			}
+		} catch {
+			messages = [];
+		}
+		if (messages.length === 0) return null;
+		const title = await generateSessionTitle(messages as any[], this.getTitleGenOptions());
+		if (!title) return null;
+		store?.update(id, { title });
+		return title;
+	}
+
 	async autoGenerateTitle(session: SessionInfo): Promise<void> {
 		try {
 			const msgsResp = await session.rpcClient.getMessages();
