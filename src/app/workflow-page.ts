@@ -13,7 +13,7 @@ import {
 } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, revertOverride } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, renderConfigScopeRow, revertOverride } from "./config-scope.js";
 
 // ============================================================================
 // CONSTANTS
@@ -1008,15 +1008,12 @@ async function handleScopeChange(scope: string): Promise<void> {
 }
 
 function renderWorkflowRow(wf: Workflow): TemplateResult {
-	const origin = (wf as any).origin as ConfigOrigin | undefined;
-	const overrides = (wf as any).overrides as ConfigOrigin | undefined;
-	const inherited = isInherited(origin);
 	return html`
-		<div class="wf-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
+		<div class="wf-row" tabindex="0" role="button"
 			@click=${() => showEdit(wf)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(wf); } }}>
 			<div class="wf-row-info">
-				<span class="wf-row-name">${wf.name} ${renderOriginBadge(origin, overrides)}</span>
+				<span class="wf-row-name">${wf.name}</span>
 				<span class="wf-row-desc">${wf.description}</span>
 			</div>
 			<div class="wf-row-badges">
@@ -1298,11 +1295,12 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	}}>Revert to Inherited</button>`;
 }
 
-export function renderWorkflowPage(): TemplateResult {
+export function renderWorkflowPage(opts?: { embedded?: boolean }): TemplateResult {
+	const embedded = !!opts?.embedded;
 	return html`
 		<div class="wf-container">
-			${renderNavBar()}
-			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange, true) : ""}
+			${embedded ? "" : renderNavBar()}
+			${!embedded && currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange, true) : ""}
 			<div class="wf-body">
 				${currentView === "list" ? renderListView() : renderEditView()}
 			</div>

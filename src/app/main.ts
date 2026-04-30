@@ -198,6 +198,16 @@ async function handleHashChange(): Promise<void> {
 			navigateToToolEdit(route.toolName);
 			await refreshSessions();
 		} else if (route.view === "workflows") {
+			// Standalone /workflows route is deprecated — redirect to the active
+			// project's settings Workflows tab. Workflows are project-scoped, and
+			// Settings is the single home for managing them.
+			const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
+			if (projectId) {
+				const { setHashRoute } = await import("./routing.js");
+				setHashRoute("settings", `${projectId}/workflows`, true);
+				return;
+			}
+			// No project yet — fall through to the legacy page so the empty state shows.
 			clearDashboardState();
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
@@ -402,6 +412,12 @@ async function initApp() {
 				await loadToolPageData();
 				navigateToToolEdit(route.toolName);
 			} else if (route.view === "workflows") {
+				const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
+				if (projectId) {
+					const { setHashRoute } = await import("./routing.js");
+					setHashRoute("settings", `${projectId}/workflows`, true);
+					return;
+				}
 				const { loadWorkflowPageData } = await import("./workflow-page.js");
 				loadWorkflowPageData();
 			} else if (route.view === "workflow-edit" && route.workflowId) {

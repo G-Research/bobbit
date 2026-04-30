@@ -116,7 +116,9 @@ function renderMobileLanding() {
 					${(() => {
 						const isRolesActive = isRouteActive("roles", "role-edit");
 						const isToolsActive = isRouteActive("tools", "tool-edit");
-						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
+						const route = getRouteFromHash();
+						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit")
+							|| (route.view === "settings" && (route as any).settingsTab === "workflows");
 						const isSkillsActive = isRouteActive("skills");
 						return html`
 					<div class="flex items-center gap-1">
@@ -134,7 +136,12 @@ function renderMobileLanding() {
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage workflows"
-							@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); })}>
+							@click=${() => {
+								const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
+								if (!projectId) { showProjectDialog(); return; }
+								import("./workflow-page.js").then((m) => m.loadWorkflowPageData());
+								setHashRoute("settings", `${projectId}/workflows`, true);
+							}}>
 							${icon(WorkflowIcon, "xs")} Workflows
 						</button>
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
@@ -1902,7 +1909,11 @@ function projectProposalPanel() {
 		// string keystroke value.
 		if (key === "components" || key === "workflows") return;
 		(state.activeProjectProposal.fields as Record<string, unknown>)[key] = value;
-		saveProjectDraft(state.activeProjectProposal.sessionId);
+		// Only persist edits for project-assistant sessions; non-assistant
+		// sessions follow the goal-proposal model (transient, not restored).
+		if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
+			saveProjectDraft(state.activeProjectProposal.sessionId);
+		}
 		renderApp();
 	};
 

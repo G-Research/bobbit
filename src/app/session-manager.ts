@@ -603,6 +603,15 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	state.selectedSessionId = sessionId;
 
+	// Project proposal is scoped to the session that emitted it. Clear it the
+	// moment the user navigates away so it never bleeds into other sessions.
+	// connectToSession() rehydrates from the persisted draft if the user comes
+	// back to the originating session.
+	if (state.activeProjectProposal && state.activeProjectProposal.sessionId !== sessionId) {
+		state.activeProjectProposal = undefined;
+		state.assistantHasProposal = false;
+	}
+
 	// Fade out the current chat panel instantly
 	if (state.chatPanel) {
 		state.chatPanel.classList.add("session-fade-out");
@@ -1190,7 +1199,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				localStorage.removeItem(collapseKey);
 				if (!isDesktop()) state.previewPanelTab = "project";
 			}
-			saveProjectDraft(sessionId);
+			// Persist only for project-assistant sessions (the session is dedicated
+			// to producing this proposal, so reload should restore work in progress).
+			// For non-assistant sessions, the proposal is transient — same model as
+			// goal proposals: it lives only as long as the user stays on this session.
+			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
+				saveProjectDraft(sessionId);
+			}
 			renderApp();
 		};
 
@@ -1467,12 +1482,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// in parallel. Draft restores must complete before we unlock proposal
 		// checking, but they don't depend on refreshSessions.
 		const draftRestorePromise = (async () => {
-			// Clear stale proposals for non-matching assistant types
+			// Clear stale proposals for non-matching assistant types or sessions
 			if (state.assistantType !== "goal") state.activeGoalProposal = null;
 			if (state.assistantType !== "role") state.activeRoleProposal = null;
 			if (state.assistantType !== "staff") state.activeStaffProposal = null;
-			// Project proposals are valid for ANY session — leave state.activeProjectProposal alone.
-			// Draft restore below handles rehydration for project-assistant sessions.
+			// Project proposal is scoped to the originating session and transient
+			// for non-assistant sessions — mirrors the goal-proposal model. The
+			// project-assistant branch below handles persistence for that session
+			// type only (its session is dedicated to building the proposal).
+			if (state.activeProjectProposal && state.activeProjectProposal.sessionId !== sessionId) {
+				state.activeProjectProposal = undefined;
+				state.assistantHasProposal = false;
+			}
 
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
