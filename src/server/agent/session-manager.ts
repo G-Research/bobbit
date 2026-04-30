@@ -931,9 +931,9 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2, components?: import("./project-config-store.js").Component[], worktreeRoot?: string): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string): void {
 		if (this.worktreePools.has(projectId)) return;
-		const pool = new WorktreePool({ repoPath, targetSize, setupCommand, components, worktreeRoot });
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -947,9 +947,10 @@ export class SessionManager {
 	}
 
 	/** @deprecated Use initWorktreePoolForProject instead. */
-	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
-		// Legacy shim — uses empty string as key for backward compat
-		this.initWorktreePoolForProject("", repoPath, setupCommand, targetSize);
+	initWorktreePool(repoPath: string, _setupCommand?: string, targetSize = 2): void {
+		// Legacy shim — uses empty string as key for backward compat. setupCommand
+		// is ignored; canonical path is `components[*].worktreeSetupCommand`.
+		this.initWorktreePoolForProject("", repoPath, undefined, targetSize);
 	}
 
 	/** Get the worktree pool for a specific project. */
