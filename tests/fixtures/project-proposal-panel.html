@@ -28,9 +28,18 @@ function renderProposal(proposal) {
   out.innerHTML = "";
   out.setAttribute("data-panel", "project-proposal");
   out.setAttribute("data-mode", proposal.mode);
-  const fields = proposal.fields || {};
+  const rawFields = proposal.fields || {};
+  // components/workflows are structured side-tables — partition OUT of the
+  // legacy flat-Input loop. They render in dedicated views, not here.
+  const fields = {};
+  for (const [k, v] of Object.entries(rawFields)) {
+    if (k === "components" || k === "workflows") continue;
+    fields[k] = v;
+  }
   const isRegistered = proposal.mode === "registered";
   const current = proposal.currentConfig;
+  const components = Array.isArray(rawFields.components) ? rawFields.components : [];
+  const workflows = rawFields.workflows && typeof rawFields.workflows === "object" ? rawFields.workflows : {};
 
   const currentValueFor = (key) => {
     if (!current) return "";
@@ -72,6 +81,35 @@ function renderProposal(proposal) {
   const rootDiv = document.createElement("div");
   rootDiv.className = "goal-preview-panel";
 
+  // Components view (rendered above the legacy collapsed-fields group).
+  const compsContainer = document.createElement("div");
+  compsContainer.setAttribute("data-testid", "components-view");
+  for (const c of components) {
+    const card = document.createElement("div");
+    card.setAttribute("data-testid", "component-card-" + c.name);
+    card.textContent = c.name;
+    compsContainer.appendChild(card);
+  }
+  rootDiv.appendChild(compsContainer);
+
+  // Workflows view stub.
+  const wfsContainer = document.createElement("div");
+  wfsContainer.setAttribute("data-testid", "workflows-view");
+  for (const [id, _wf] of Object.entries(workflows)) {
+    const card = document.createElement("div");
+    card.setAttribute("data-testid", "workflow-card-" + id);
+    card.textContent = id;
+    wfsContainer.appendChild(card);
+  }
+  rootDiv.appendChild(wfsContainer);
+
+  // Legacy fields collapsed under a <details>.
+  const legacy = document.createElement("details");
+  legacy.setAttribute("data-testid", "legacy-fields-group");
+  const legacySummary = document.createElement("summary");
+  legacySummary.textContent = "Project-level fields";
+  legacy.appendChild(legacySummary);
+
   // name first
   const renderRow = (key) => {
     const p = fields[key] ?? "";
@@ -103,7 +141,7 @@ function renderProposal(proposal) {
     return row;
   };
 
-  rootDiv.appendChild(renderRow("name"));
+  legacy.appendChild(renderRow("name"));
 
   const rootPathDiv = document.createElement("div");
   rootPathDiv.setAttribute("data-field", "root_path");
@@ -112,11 +150,11 @@ function renderProposal(proposal) {
   rootPathDiv.appendChild(rpLabel);
   const rpVal = document.createElement("div"); rpVal.textContent = fields.root_path || (current && current.rootPath) || "—";
   rootPathDiv.appendChild(rpVal);
-  rootDiv.appendChild(rootPathDiv);
+  legacy.appendChild(rootPathDiv);
 
   for (const k of changed) {
     if (k === "name") continue;
-    rootDiv.appendChild(renderRow(k));
+    legacy.appendChild(renderRow(k));
   }
   if (isRegistered && unchanged.length > 0) {
     const details = document.createElement("details");
@@ -125,8 +163,10 @@ function renderProposal(proposal) {
     summary.textContent = "No changes (" + unchanged.length + " fields)";
     details.appendChild(summary);
     for (const k of unchanged) details.appendChild(renderRow(k));
-    rootDiv.appendChild(details);
+    legacy.appendChild(details);
   }
+
+  rootDiv.appendChild(legacy);
 
   const acceptDiv = document.createElement("div");
   acceptDiv.setAttribute("data-testid", "accept-label");
