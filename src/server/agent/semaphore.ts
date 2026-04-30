@@ -15,6 +15,7 @@ export class Semaphore {
 
 	get available(): number { return this._value; }
 	get waiting(): number { return this._waiters.length; }
+	get capacity(): number { return this._capacity; }
 
 	async acquire(): Promise<void> {
 		if (this._value > 0) {

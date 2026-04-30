@@ -241,7 +241,23 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed" | "skipped" | "waiting"; phase?: number; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{
+		name: string;
+		type: string;
+		status: "running" | "passed" | "failed" | "skipped" | "waiting";
+		phase?: number;
+		durationMs?: number;
+		output?: string;
+		startedAt: number;
+		sessionId?: string;
+		/**
+		 * Idempotency record for `type === "subgoal"` verify steps. Mirrors
+		 * `GateSignalStep.subgoal` (see docs/design/nested-goals.md §2.5) so the
+		 * harness can rebind to an in-flight child goal across both same-process
+		 * retries and server-restart resumption.
+		 */
+		subgoal?: { planId: string; childGoalId: string };
+	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
@@ -433,6 +449,35 @@ export class VerificationHarness {
 	private commandSemaphore = new Semaphore(4);
 	/** Limits concurrent LLM review / QA sessions across all goals. */
 	private reviewSemaphore = new Semaphore(6);
+	/**
+	 * Per-rootGoalId semaphores bounding concurrent in-flight subgoal
+	 * verify steps (`runSubgoalStep`). One cap per goal-tree, per design
+	 * §2.4 + §1.5 (`maxConcurrentChildren` is root-only in v1).
+	 * Capacity is sourced from `goalManager.resolveRootMaxConcurrentChildren`.
+	 */
+	private subgoalSemaphores = new Map<string, Semaphore>();
+
+	/**
+	 * Resolve (or create) the per-tree subgoal semaphore for `rootGoalId`.
+	 * If `cap` differs from the cached semaphore's capacity, replace it
+	 * — mid-run cap changes are rare but supported (e.g. user edits
+	 * `maxConcurrentChildren` while a phase is running). Existing waiters
+	 * on the old semaphore drain naturally; in-flight permits bleed off
+	 * as their owners release. Concurrency may briefly exceed the new
+	 * cap until they do; this is acceptable.
+	 */
+	private getSubgoalSemaphore(rootGoalId: string, cap: number): Semaphore {
+		const existing = this.subgoalSemaphores.get(rootGoalId);
+		if (existing && existing.capacity === cap) return existing;
+		const sem = new Semaphore(cap);
+		this.subgoalSemaphores.set(rootGoalId, sem);
+		return sem;
+	}
+
+	/** Test-only accessor for unit tests. */
+	_getSubgoalSemaphores(): Map<string, Semaphore> {
+		return this.subgoalSemaphores;
+	}
 
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
@@ -1306,7 +1351,84 @@ export class VerificationHarness {
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
 			let phaseFailed = false;
 
-			for (const phase of sortedPhases) {
+			// In-flight append-and-continue (design §6.2). On each phase
+			// iteration, re-read the goal's snapshotted workflow and detect
+			// any new subgoal verify steps appended since we started. New
+			// steps default to `phase = max(currentPhases) + 1`; explicit
+			// phase ≤ activePhase is bumped to activePhase + 1. The harness
+			// never re-runs an in-flight phase — already-running steps
+			// finish naturally; appended steps land strictly after.
+			const maybeAppendNewSteps = (currentPhase: number): void => {
+				const goalForAppend = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+				const gateForAppend = goalForAppend?.workflow?.gates?.find((g: any) => g.id === signal.gateId);
+				const latestVerify: VerifyStep[] | undefined = gateForAppend?.verify;
+				if (!latestVerify || latestVerify.length <= steps.length) return;
+				// Identify entries not already in our `steps` array. We match
+				// existing steps by (planId for subgoal | name) so non-subgoal
+				// reorderings don't trigger spurious appends.
+				const existingIds = new Set<string>();
+				for (const s of steps) {
+					const key = s.type === "subgoal" && s.subgoal?.planId
+						? `subgoal:${s.subgoal.planId}`
+						: `name:${s.name}`;
+					existingIds.add(key);
+				}
+				const additions: VerifyStep[] = [];
+				for (const s of latestVerify) {
+					const key = s.type === "subgoal" && s.subgoal?.planId
+						? `subgoal:${s.subgoal.planId}`
+						: `name:${s.name}`;
+					if (!existingIds.has(key)) additions.push(s);
+				}
+				if (additions.length === 0) return;
+				const currentPhases = steps.map(s => s.phase ?? 0);
+				const maxPhase = currentPhases.length === 0 ? 0 : Math.max(...currentPhases);
+				const minAppendPhase = Math.max(currentPhase + 1, maxPhase + 1);
+				for (const addition of additions) {
+					let effectivePhase = addition.phase ?? minAppendPhase;
+					if (effectivePhase <= currentPhase) effectivePhase = currentPhase + 1;
+					if (effectivePhase < minAppendPhase) effectivePhase = minAppendPhase;
+					const appended: VerifyStep = { ...addition, phase: effectivePhase };
+					const newIndex = steps.length;
+					steps.push(appended);
+					allResults.push(null);
+					active.steps.push({
+						name: appended.name,
+						type: appended.type,
+						status: "waiting",
+						phase: effectivePhase,
+						startedAt: Date.now(),
+					});
+					// Wire into phase groups + sortedPhases.
+					let bucket = phaseGroups.get(effectivePhase);
+					if (!bucket) {
+						bucket = [];
+						phaseGroups.set(effectivePhase, bucket);
+						if (!sortedPhases.includes(effectivePhase)) {
+							sortedPhases.push(effectivePhase);
+							sortedPhases.sort((a, b) => a - b);
+						}
+					}
+					bucket.push({ step: appended, index: newIndex });
+					this.broadcastFn(signal.goalId, {
+						type: "gate_verification_step_appended",
+						goalId: signal.goalId,
+						gateId: signal.gateId,
+						signalId: signal.id,
+						stepIndex: newIndex,
+						stepName: appended.name,
+						phase: effectivePhase,
+						planId: appended.type === "subgoal" ? appended.subgoal?.planId : undefined,
+					});
+				}
+				this._persistActive();
+			};
+
+			// Iterate phases by index so newly-appended phases (added by
+			// `maybeAppendNewSteps`) are picked up on subsequent iterations.
+			for (let phaseIdx = 0; phaseIdx < sortedPhases.length; phaseIdx++) {
+				const phase = sortedPhases[phaseIdx];
+				maybeAppendNewSteps(phase);
 				if (active.cancelled) break;
 
 				if (phaseFailed) {
@@ -1516,6 +1638,85 @@ export class VerificationHarness {
 								this.commandSemaphore.release();
 							}
 							}
+						} else if (step.type === "subgoal") {
+							// Nested-goals subgoal step (design §2.3 / §2.4).
+							// Concurrency cap is enforced by a per-rootGoalId semaphore;
+							// it wraps the *entire* spawn-wait-merge cycle (NOT just the
+							// spawn) so concurrency is bounded by *running children*.
+							active.steps[index].startedAt = Date.now();
+							this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_started",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								startedAt: active.steps[index].startedAt,
+								phase,
+							});
+							const goalForSubgoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+							const rootId = goalForSubgoal?.rootGoalId ?? signal.goalId;
+							const goalManagerForSubgoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalManager;
+							const cap = goalManagerForSubgoal?.resolveRootMaxConcurrentChildren(rootId) ?? 3;
+							const sem = this.getSubgoalSemaphore(rootId, cap);
+							if (sem.available === 0) {
+								console.log(`[verification] Subgoal step "${step.name}" waiting for tree-${rootId.slice(0,8)} semaphore slot (cap=${cap})...`);
+							}
+							await sem.acquire();
+							try {
+								const sgResult = await this.runSubgoalStep(step, signal, index, active);
+								result = { passed: sgResult.passed, output: sgResult.output };
+								if (sgResult.childGoalId || sgResult.mergeConflict) {
+									artifact = {
+										content: result.output,
+										contentType: "text/markdown",
+										metadata: {
+											...(sgResult.childGoalId ? { childGoalId: sgResult.childGoalId } : {}),
+											...(step.subgoal?.planId ? { planId: step.subgoal.planId } : {}),
+											...(sgResult.mergeConflict ? { mergeConflict: "true" } : {}),
+										},
+									};
+								}
+								const duration_ms = Date.now() - startTime;
+								if (!active.cancelled) this.broadcastFn(signal.goalId, {
+									type: "gate_verification_step_complete",
+									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+									stepIndex: index, stepName: step.name,
+									status: result.passed ? "passed" : "failed",
+									durationMs: duration_ms, output: result.output || "",
+									phase,
+								});
+								const av = this.activeVerifications.get(signal.id);
+								if (av && av.steps[index]) {
+									av.steps[index] = {
+										...av.steps[index],
+										status: result.passed ? "passed" : "failed",
+										durationMs: duration_ms,
+										output: result.output || "",
+									};
+									if (sgResult.childGoalId && step.subgoal?.planId) {
+										av.steps[index].subgoal = { planId: step.subgoal.planId, childGoalId: sgResult.childGoalId };
+									}
+									this._persistActive();
+								}
+								const stepResult: GateSignalStep = {
+									name: step.name,
+									type: step.type,
+									passed: result.passed,
+									output: result.output,
+									duration_ms,
+									expect: step.expect,
+								};
+								if (sgResult.childGoalId && step.subgoal?.planId) {
+									stepResult.subgoal = {
+										planId: step.subgoal.planId,
+										childGoalId: sgResult.childGoalId,
+										...(sgResult.mergedAt ? { childMergedAt: sgResult.mergedAt } : {}),
+										...(sgResult.mergeConflict ? { childMergeConflict: true } : {}),
+									};
+								}
+								if (artifact) stepResult.artifact = artifact;
+								return { index, stepResult };
+							} finally {
+								sem.release();
+							}
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -1628,6 +1829,10 @@ export class VerificationHarness {
 				if (phaseResults.some(r => !r.stepResult.passed)) {
 					phaseFailed = true;
 				}
+
+				// Final append check before exiting the loop — catches
+				// mutations that landed during the just-completed phase.
+				maybeAppendNewSteps(phase);
 			}
 
 			// If cancelled while steps were running, skip result processing
@@ -1697,6 +1902,200 @@ export class VerificationHarness {
 				status: "failed",
 			});
 			this.notifyTeamLead(signal.goalId, signal.gateId, "failed");
+		}
+	}
+
+	/**
+	 * Subgoal verify-step runner (design §2.3 / §2.5).
+	 *
+	 * Spawns (or reuses) a child goal for a `type: "subgoal"` verify step,
+	 * then waits for the child's `ready-to-merge` gate to pass and locally
+	 * merges the child's branch into the parent's branch. Idempotent on
+	 * `(signalId, planId)`: re-entry rebinds to the existing child via the
+	 * `subgoal` record on the active verification step (and the persisted
+	 * `GateSignalStep.subgoal` after restart).
+	 *
+	 * Cancellation: if the parent verification is cancelled mid-wait, the
+	 * child's team is torn down (best-effort) and the child goal is
+	 * archived. Returns a passed=false result with diagnostic output.
+	 */
+	private async runSubgoalStep(
+		step: VerifyStep,
+		signal: GateSignal,
+		stepIndex: number,
+		active: ActiveVerification,
+	): Promise<{
+		passed: boolean;
+		output: string;
+		childGoalId?: string;
+		mergeConflict?: boolean;
+		mergedAt?: number;
+	}> {
+		if (step.type !== "subgoal" || !step.subgoal) {
+			return { passed: false, output: `runSubgoalStep called on non-subgoal step "${step.name}"` };
+		}
+		const sg = step.subgoal;
+		const pcm = this.projectContextManager;
+		const parentCtx = pcm?.getContextForGoal(signal.goalId);
+		if (!parentCtx) {
+			return { passed: false, output: `Parent goal ${signal.goalId} not found in any project context.` };
+		}
+		const goalManager = parentCtx.goalManager;
+		const gateStore = parentCtx.gateStore;
+		const parentGoal = parentCtx.goalStore.get(signal.goalId);
+		if (!parentGoal) {
+			return { passed: false, output: `Parent goal ${signal.goalId} not found.` };
+		}
+
+		// 1. Idempotency check — prefer the in-memory active record, fall
+		//    back to the persisted GateSignalStep (post-restart).
+		let childGoalId: string | undefined = active.steps[stepIndex]?.subgoal?.childGoalId;
+		if (!childGoalId) {
+			const gateState = gateStore.getGate(signal.goalId, signal.gateId);
+			const sigRecord = gateState?.signals.find(s => s.id === signal.id);
+			const persistedStep = sigRecord?.verification.steps.find(
+				s => s.type === "subgoal" && s.subgoal?.planId === sg.planId,
+			);
+			if (persistedStep?.subgoal?.childGoalId) {
+				childGoalId = persistedStep.subgoal.childGoalId;
+			}
+		}
+
+		// 2. Spawn (only if no existing child).
+		if (!childGoalId) {
+			try {
+				const child = await goalManager.createGoal(sg.title, parentGoal.cwd, {
+					spec: sg.spec,
+					workflowId: sg.workflowId,
+					inlineWorkflow: sg.inlineWorkflow,
+					parentGoalId: signal.goalId,
+					projectId: parentGoal.projectId,
+					sandboxed: parentGoal.sandboxed,
+					enabledOptionalSteps: sg.enabledOptionalSteps,
+				});
+				childGoalId = child.id;
+				if (parentGoal.projectId) {
+					goalManager.updateGoal(child.id, { projectId: parentGoal.projectId, autoStartTeam: true });
+				}
+				if (child.workflow) {
+					parentCtx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
+				}
+				// Persist on the active record AND the GateSignalStep — so a
+				// crash mid-wait still recovers without re-spawning. (§2.5)
+				const av = this.activeVerifications.get(signal.id);
+				if (av && av.steps[stepIndex]) {
+					av.steps[stepIndex].subgoal = { planId: sg.planId, childGoalId };
+					this._persistActive();
+				}
+				this.broadcastFn(signal.goalId, {
+					type: "goal_child_spawned",
+					parentGoalId: signal.goalId,
+					childGoalId,
+					planId: sg.planId,
+					branch: child.branch,
+					baseBranch: parentGoal.branch,
+				});
+				// Auto-start: setup worktree + start team. Fire-and-forget;
+				// failures will surface as ready-to-merge never passing,
+				// which the wait loop times out / fails. The team-manager
+				// path here can't always be invoked from the harness in
+				// non-PCM tests; guard accordingly.
+				if (child.setupStatus === "preparing" && this.teamManager) {
+					const teamMgr = this.teamManager;
+					goalManager.setupWorktreeAndStartTeam(child.id, () => teamMgr.startTeam(child.id))
+						.catch(err => console.warn(`[verification] Subgoal child setup/start failed for ${child.id}:`, err));
+				} else if (child.setupStatus === "preparing") {
+					goalManager.setupWorktree(child.id)
+						.catch(err => console.warn(`[verification] Subgoal child worktree setup failed for ${child.id}:`, err));
+				}
+			} catch (err: any) {
+				return { passed: false, output: `Failed to spawn subgoal child: ${err.message ?? String(err)}` };
+			}
+		}
+
+		// 3. Wait loop — poll child's ready-to-merge gate (cheap; in-memory
+		//    gate-store reads). Poll interval 2s; cancellation respected.
+		const pollIntervalMs = parseInt(process.env.BOBBIT_SUBGOAL_POLL_MS || "2000", 10) || 2000;
+		while (true) {
+			if (active.cancelled) {
+				// Cascade cancel — tear down child team + archive child (§2.3).
+				await this._cancelSubgoalChild(childGoalId).catch(() => { /* best-effort */ });
+				return {
+					passed: false,
+					output: `Parent verification cancelled — child goal ${childGoalId} archived.`,
+					childGoalId,
+				};
+			}
+			const child = parentCtx.goalStore.get(childGoalId);
+			if (!child) {
+				return {
+					passed: false,
+					output: `Subgoal child ${childGoalId} disappeared from store.`,
+					childGoalId,
+				};
+			}
+			const readyGate = parentCtx.gateStore.getGate(childGoalId, "ready-to-merge");
+			if (readyGate?.status === "passed") break;
+			if (readyGate?.status === "failed") {
+				return {
+					passed: false,
+					output: `Subgoal child ${childGoalId} failed at ready-to-merge gate.`,
+					childGoalId,
+				};
+			}
+			if (child.state === "shelved") {
+				return {
+					passed: false,
+					output: `Subgoal child ${childGoalId} was shelved before ready-to-merge.`,
+					childGoalId,
+				};
+			}
+			await new Promise(r => setTimeout(r, pollIntervalMs));
+		}
+
+		// 4. Local merge into parent's branch.
+		try {
+			const mergeResult = await goalManager.mergeChild(signal.goalId, childGoalId);
+			if (mergeResult.merged) {
+				const mergedAt = Date.now();
+				return {
+					passed: true,
+					output: mergeResult.output || `Subgoal ${sg.title} merged cleanly into parent branch.`,
+					childGoalId,
+					mergedAt,
+				};
+			}
+			return {
+				passed: false,
+				output: mergeResult.output || `Merge of subgoal child ${childGoalId} into parent branch produced a conflict.`,
+				childGoalId,
+				mergeConflict: mergeResult.conflict,
+			};
+		} catch (err: any) {
+			return {
+				passed: false,
+				output: `mergeChild threw: ${err.message ?? String(err)}`,
+				childGoalId,
+			};
+		}
+	}
+
+	/**
+	 * Cancel an in-flight child goal. Best-effort: tear down its team
+	 * (terminates its team-lead session) then archive the goal record.
+	 * Errors are swallowed by callers — cancellation must not block
+	 * parent verification cleanup.
+	 */
+	private async _cancelSubgoalChild(childGoalId: string): Promise<void> {
+		if (this.teamManager) {
+			try { await this.teamManager.teardownTeam(childGoalId); } catch { /* may not have a team */ }
+		}
+		const pcm = this.projectContextManager;
+		if (pcm) {
+			const ctx = pcm.getContextForGoal(childGoalId);
+			if (ctx) {
+				try { await ctx.goalManager.archiveGoal(childGoalId); } catch { /* ignore */ }
+			}
 		}
 	}
 
