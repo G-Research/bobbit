@@ -175,6 +175,21 @@ export class GoalManager {
 	}
 
 	/**
+	 * Broadcaster for WS events scoped to a goal. Wired by the server at
+	 * startup once the WS broadcast helper exists. When unset (test paths
+	 * without a server), broadcasts are silently dropped — the auto-pause
+	 * side effect still fires (paused=true persisted to disk) so behaviour
+	 * is observable via store reads.
+	 *
+	 * Used by `decideMutation` to fan out `goal_paused { by: "auto-replan-cap" }`
+	 * when a post-freeze mutation hits the §14.3 / §4.3 replan cap.
+	 */
+	private broadcastToGoal?: (goalId: string, event: any) => void;
+	setBroadcastToGoal(fn: (goalId: string, event: any) => void): void {
+		this.broadcastToGoal = fn;
+	}
+
+	/**
 	 * On startup, scan for goals stuck in setupStatus === "preparing"
 	 * and mark them as "error" (setup was interrupted by server restart).
 	 */
@@ -609,8 +624,27 @@ export class GoalManager {
 
 		// `replan-cap` — applies regardless of class on post-freeze mutations.
 		// `noop` is exempt (no count bump would happen anyway).
+		//
+		// Side effect (§14.3): when the cap is hit and the goal isn't already
+		// paused, auto-pause it and broadcast `goal_paused { by:
+		// "auto-replan-cap" }`. Idempotent — a second classifier consultation
+		// against an already-paused goal still 409s but does not re-broadcast.
 		const replanCount = goal.replanCount ?? 0;
 		if (frozen && diff.cls !== "noop" && replanCount >= 5) {
+			if (!goal.paused) {
+				this.store.update(goal.id, { paused: true });
+				try {
+					this.broadcastToGoal?.(goal.id, {
+						type: "goal_paused",
+						goalId: goal.id,
+						by: "auto-replan-cap",
+					});
+				} catch (err) {
+					// Broadcast failures must not derail the 409 — the persisted
+					// `paused: true` is the source of truth.
+					console.warn(`[goal-manager] auto-replan-cap broadcast failed for ${goal.id}:`, err);
+				}
+			}
 			return {
 				kind: "reject",
 				status: 409,

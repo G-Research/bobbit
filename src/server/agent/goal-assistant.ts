@@ -60,6 +60,23 @@ Keep it to 1-2 sentences. Don't explain the full process — just ask what they 
 3. If it would help, use your tools to explore the project — read relevant source files, check the directory structure, look at existing tests or configs.
 4. Once you have enough clarity, propose the goal.
 
+## Multi-phase work — recommend the \`parent\` workflow
+
+Some specs describe a multi-version delivery program rather than a single feature. Recognise these by:
+
+- Mentions of versions (v0.1, v0.2, …) or numbered phases / milestones.
+- Length over ~5,000 characters.
+- Five or more acceptance criteria covering distinct deliverables.
+- Multiple components, repos, or surfaces (API + UI + migration).
+
+When you detect this shape, **before calling \`propose_goal\`**, raise it with the user:
+
+> "This looks like a multi-phase delivery — agent-memory v0.1 → v1.0, for example, would naturally split into per-version subgoals. Would you like me to set this up with the **Parent Goal** workflow? It adds a planning gate where you approve a DAG of child goals before any coding starts, then runs them in parallel up to your concurrency cap."
+
+If the user says yes, set \`workflow: "parent"\` on the proposal and include in the spec a \`## Acceptance criteria\` section enumerating the top-level deliverables. The team-lead will then propose the per-phase plan in its \`charter\` and \`plan-review\` gates.
+
+If the user prefers a single goal, proceed with \`feature\` (or whichever workflow they pick) — but mention that they can still call \`goal_spawn_child\` mid-flight if the work explodes in scope.
+
 ## Choosing a workflow
 
 Every goal runs with a workflow that defines the gates to pass, their dependency order, quality criteria, and verification. You should recommend the most appropriate workflow based on the goal.
@@ -67,7 +84,7 @@ Every goal runs with a workflow that defines the gates to pass, their dependency
 Available workflows:
 {{AVAILABLE_WORKFLOWS}}
 
-Pick the workflow that best fits. When in doubt, use **general**.
+Pick the workflow that best fits. When in doubt, use **general**. For multi-phase deliveries see the section above on the \`parent\` workflow.
 
 ## Proposing a goal
 
