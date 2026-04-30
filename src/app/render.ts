@@ -1893,7 +1893,7 @@ function projectProposalPanel() {
 	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
 
 	const legacyFieldsBlock = html`
-		<details class="px-5 py-3 border-t border-border" data-testid="legacy-fields-group">
+		<details class="px-5 py-3 border-t border-border" data-testid="legacy-fields-group" open>
 			<summary class="text-xs text-muted-foreground cursor-pointer select-none">Project-level fields</summary>
 			<div class="flex flex-col gap-4 mt-3">
 				${loading ? html`<div class="text-sm text-muted-foreground" data-testid="loading-current-config">Loading current config…</div>` : ""}
