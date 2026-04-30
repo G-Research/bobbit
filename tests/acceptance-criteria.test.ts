@@ -7,8 +7,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { parseAcceptanceCriteria } from "../src/server/agent/acceptance-criteria.ts";
+import { parseAcceptanceCriteria as parseAcceptanceCriteriaShared } from "../src/shared/acceptance-criteria.ts";
 
 describe("parseAcceptanceCriteria", () => {
+	it("server re-export and shared module are the same function", () => {
+		assert.equal(parseAcceptanceCriteria, parseAcceptanceCriteriaShared);
+	});
+
 	it("returns [] when there is no acceptance-criteria heading", () => {
 		const spec = "# Title\n\nSome prose with no list of criteria at all.";
 		assert.deepEqual(parseAcceptanceCriteria(spec), []);
