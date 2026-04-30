@@ -3,6 +3,8 @@
 **Goal**: Fix live-streaming message duplication and reordering.
 **Scope**: Live streaming only (not reload-replay). Agent execution is correct; this is a transport/rendering bug.
 
+> **Related, parallel pattern.** A separate but structurally similar duplication bug affects the gate verification event family (`gate_verification_*`), which fan-outs across all session WSs in a goal team. The fix mirrors this one — server-stamped monotonic `seq`, plus a client-side dedupe funnel (`src/app/verification-event-bus.ts`). See [docs/internals.md — Verification event dedupe](../internals.md#verification-event-dedupe) and [docs/debugging.md — Verification log duplicated Nx](../debugging.md#verification-log-duplicated-nx).
+
 ---
 
 ## 1. Reproduction
@@ -356,3 +358,33 @@ The test uses the existing spawned-gateway harness (`tests/e2e/ui/gateway-harnes
 | 1000-entry ring evicts mid-reconnect on a very busy session | Server sends `resume_gap`; client falls back to snapshot. Consider bumping to 5000 if telemetry shows frequent gaps — separate tuning change, not blocking. |
 | Out-of-order buffer grows unbounded on a permanently-gapped client | Drain on every ingest; if `_pendingEvents.length > 500`, abandon and force a snapshot reload. |
 | Other broadcast types (`session_status`, etc.) also race | Out of scope — they're idempotent snapshots. The bug is about `{type:"event"}` only. |
+
+---
+
+## 7. Test-only replay pacing
+
+Production `broadcast()` in `src/server/agent/session-manager.ts` force-`terminate()`s any client whose `bufferedAmount` crosses 4 MiB — this is intentional back-pressure that triggers a clean reconnect+resume.
+
+The BOBBIT_E2E-only `replay-buffered-events` endpoint in `src/server/server.ts` does **not** go through `broadcast()`: it iterates `session.eventBuffer` and sends straight to the target socket. Synchronous fan-out can pile bytes faster than the kernel drains, so the test endpoint would sporadically trip the 4 MiB guard and force the client to reconnect mid-replay — exactly the symptom ST-DEDUP-01 was trying to assert against, but caused by the test harness rather than the production path.
+
+`paceAndSend()` in `src/server/replay-pacing.ts` gates each `send()` on `bufferedAmount`:
+
+- **Soft threshold:** 256 KiB (`PACE_THRESHOLD_BYTES`). While buffered output exceeds this, the helper sleeps 10 ms and rechecks.
+- **Per-call deadline:** 2 s (`PACE_TIMEOUT_MS`). If the client never drains (e.g. it has gone away), the helper falls through and lets the underlying `send()` throw or no-op rather than hanging the endpoint.
+- **Closed-socket short-circuit:** returns immediately when `readyState !== 1`.
+
+This change is scoped to the test endpoint. Production `broadcast()` retains its 4 MiB hard cap — the pacing helper is a test-harness band-aid, not a production back-pressure mechanism.
+
+## 8. Production overflow guard — transient-spike tolerance
+
+The original 4 MiB guard in `broadcast()` terminated a client the instant `bufferedAmount` crossed the threshold. Empirically (Windows + Playwright workers=3), the kernel TCP send buffer occasionally spikes past 4 MiB during a tool burst and drains back within ~10 ms. Terminating immediately on a transient spike turned those moments into spurious WS reconnects — the same flake family ST-DEDUP-01 chases.
+
+The guard now defers the terminate decision once. Decision logic lives in `src/server/ws-overflow-guard.ts::decideOverflowAction`:
+
+- **First observation > 4 MiB:** returns `send-and-defer-check`. The broadcast loop schedules a 10 ms re-check, marks the client as having a deferred check pending, and **still attempts the current send**. If the kernel drains in time, the frame is delivered as normal.
+- **Deferred re-check, still > 4 MiB:** returns `terminate`. The spike is genuine and the client gets force-closed (same as before, just delayed by 10 ms).
+- **Deferred re-check, drained back below 4 MiB:** returns `send`. No terminate — the spike was transient.
+
+The per-client "deferred check pending" flag is a `WeakSet` so subsequent broadcasts during the 10 ms window don't pile up duplicate timers; only the original observer schedules the re-check. Unit tests for the policy live in `tests/ws-overflow-guard.test.ts`.
+
+This change is conservative: every persistent overflow still terminates (within ~10 ms of the original detection), so DoS protection and reconnect-resume semantics are preserved. The only behavioural change is that healthy clients with brief kernel-buffer spikes no longer get killed.

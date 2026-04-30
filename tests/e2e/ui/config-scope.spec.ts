@@ -97,17 +97,23 @@ test.describe("Config page scope navigation", () => {
 		).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("workflows page shows scope row and origin badges", async ({ page }) => {
+	test("workflows page hides System tab and shows project tabs only", async ({ page }) => {
+		// Workflows are project-scoped only — the page omits the System tab
+		// (see config-scope.ts::renderConfigScopeRow excludeSystem param).
 		await openApp(page);
 		await navigateToHash(page, "#/workflows");
 
-		await expect(
-			page.locator("button").filter({ hasText: "System" }).first()
-		).toBeVisible({ timeout: 10_000 });
+		// Wait for the page header so the scope row has rendered.
+		await expect(page.getByText("Workflows").first()).toBeVisible({ timeout: 10_000 });
 
+		// The project's scope tab is visible.
 		await expect(
-			page.locator(".config-origin-badge").first()
-		).toBeVisible({ timeout: 10_000 });
+			page.locator("button").filter({ hasText: "Scope UI Project" }).first()
+		).toBeVisible({ timeout: 5_000 });
+
+		// And no "System" tab in the scope row on this page.
+		const systemTabs = await page.locator("button").filter({ hasText: /^System$/ }).count();
+		expect(systemTabs).toBe(0);
 	});
 
 	test("tools page shows scope row", async ({ page }) => {

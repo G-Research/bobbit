@@ -31,6 +31,7 @@ import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
 import { isTransientReviewError } from "./verification-logic.js";
@@ -243,18 +244,50 @@ const WS_BUFFER_OVERFLOW_BYTES = 4 * 1024 * 1024; // 4 MiB
 const WS_BUFFER_WARN_BYTES = 1 * 1024 * 1024;     // 1 MiB — log only
 const _warnedClients = new WeakSet<WebSocket>();
 
+/**
+ * Tracks clients for which a deferred-terminate re-check is in flight. When
+ * `bufferedAmount` first crosses the overflow threshold we don't terminate
+ * immediately — we schedule a 10 ms re-check. The kernel TCP send buffer
+ * often drains transient spikes within that window (we saw this consistently
+ * on Windows + Playwright workers=3 chasing the ST-DEDUP-01 flake family).
+ * If `bufferedAmount` is still over the threshold during the deferred check,
+ * we terminate. We still attempt the current send — if the client survives,
+ * the frame is delivered; if not, `ws` queues it and discards on close.
+ *
+ * Decision logic lives in `src/server/ws-overflow-guard.ts` for testability.
+ */
+const _pendingOverflowCheck = new WeakSet<WebSocket>();
+
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
 	for (const client of clients) {
 		if (client.readyState !== 1) continue;
 		const buffered = (client as any).bufferedAmount ?? 0;
-		if (buffered > WS_BUFFER_OVERFLOW_BYTES) {
+		const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
+			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+			warnBytes: WS_BUFFER_WARN_BYTES,
+		});
+		if (action.kind === "send-and-defer-check" && !_pendingOverflowCheck.has(client)) {
+			_pendingOverflowCheck.add(client);
 			console.warn(
-				`[ws] dropping client with bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; ` +
-				`client will reconnect. Last msg type=${(msg as any).type}.`,
+				`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
 			);
-			try { client.terminate(); } catch { /* ignore */ }
-			continue;
+			setTimeout(() => {
+				_pendingOverflowCheck.delete(client);
+				if (client.readyState !== 1) return;
+				const bufferedNow = (client as any).bufferedAmount ?? 0;
+				const recheck = decideOverflowAction(bufferedNow, /* isDeferredRecheck */ true, {
+					overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+					warnBytes: WS_BUFFER_WARN_BYTES,
+				});
+				if (recheck.kind === "terminate") {
+					console.warn(
+						`[ws] confirmed overflow after 10ms drain attempt: ${bufferedNow}B; terminating client. ` +
+						`Last msg type=${(msg as any).type}.`,
+					);
+					try { client.terminate(); } catch { /* ignore */ }
+				}
+			}, 10);
 		}
 		if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
 			_warnedClients.add(client);
@@ -319,8 +352,6 @@ export interface SessionManagerOptions {
 	toolManager?: ToolManager;
 	/** Group policy store for resolving group-level default tool grant policies */
 	groupPolicyStore?: ToolGroupPolicyStore;
-	/** Workflow store for injecting into GoalManager */
-	workflowStore?: import("./workflow-store.js").WorkflowStore;
 	/** Preferences store for aigw auto-model detection */
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	/** Project config store for reading project defaults (e.g. default_thinking_level) */
@@ -346,7 +377,6 @@ export class SessionManager {
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
-	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
@@ -525,7 +555,6 @@ export class SessionManager {
 		this.toolManager = options?.toolManager;
 		this.groupPolicyStore = options?.groupPolicyStore;
 		this.preferencesStore = options?.preferencesStore;
-		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		if (this.projectContextManager) {
@@ -537,7 +566,7 @@ export class SessionManager {
 			this._testStore = new SessionStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
-			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
 	}
@@ -738,7 +767,7 @@ export class SessionManager {
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
-			buildWorkflowList: () => this._buildWorkflowList(),
+			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 		};
 	}
 
@@ -898,9 +927,9 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2, components?: import("./project-config-store.js").Component[], worktreeRoot?: string): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string): void {
 		if (this.worktreePools.has(projectId)) return;
-		const pool = new WorktreePool({ repoPath, targetSize, setupCommand, components, worktreeRoot });
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -914,9 +943,10 @@ export class SessionManager {
 	}
 
 	/** @deprecated Use initWorktreePoolForProject instead. */
-	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
-		// Legacy shim — uses empty string as key for backward compat
-		this.initWorktreePoolForProject("", repoPath, setupCommand, targetSize);
+	initWorktreePool(repoPath: string, _setupCommand?: string, targetSize = 2): void {
+		// Legacy shim — uses empty string as key for backward compat. setupCommand
+		// is ignored; canonical path is `components[*].worktreeSetupCommand`.
+		this.initWorktreePoolForProject("", repoPath, undefined, targetSize);
 	}
 
 	/** Get the worktree pool for a specific project. */
@@ -979,8 +1009,14 @@ export class SessionManager {
 	}
 
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
-	private _buildWorkflowList(): string {
-		const workflows = this.workflowStore?.getAll();
+	private _buildWorkflowList(projectId?: string): string {
+		let workflows: import("./workflow-store.js").Workflow[] = [];
+		if (projectId && this.configCascade) {
+			workflows = this.configCascade.resolveWorkflows(projectId).map(r => r.item);
+		} else if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) workflows = ctx.workflowStore.getAll();
+		}
 		if (!workflows || workflows.length === 0) {
 			return 'Use **general** as a safe default.';
 		}
@@ -1118,7 +1154,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(session.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.resolveStoreForSession(session.id).get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
@@ -2342,7 +2378,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
 					const origGoal = this.resolveGoal(ps.reattemptGoalId);

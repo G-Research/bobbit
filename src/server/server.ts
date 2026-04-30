@@ -16,6 +16,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
+import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -33,9 +34,8 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
-import { WorkflowStore } from "./agent/workflow-store.js";
-import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -218,12 +218,15 @@ export interface GitStatusResult {
 }
 
 // ── Git status cache + single-flight ──
-// Short TTL (750ms) to coalesce the storm of event-driven refreshes (reconnect,
-// agent-idle, session-switch, etc.) into one underlying git invocation. Errors
-// are NOT cached (so a transient failure doesn't stick). Key includes the
-// untracked flag so dropdown (full) and pill-strip (summary) responses never
-// cross-contaminate each other.
-const GIT_STATUS_TTL_MS = 750;
+// Short TTL (2000ms) to coalesce the storm of event-driven refreshes (reconnect,
+// agent-idle, session-switch, goal-dashboard fan-out across N sessions sharing
+// a cwd) into one underlying git invocation. Native parallel execFile typically
+// returns in 50-150 ms on Windows / 10-30 ms on Linux, so 2 s of staleness is
+// imperceptible to the widget (which polls every 10 s) and high-value for
+// coalescing. Errors are NOT cached (so a transient failure doesn't stick).
+// Key includes the untracked flag so dropdown (full) and pill-strip (summary)
+// responses never cross-contaminate each other.
+const GIT_STATUS_TTL_MS = 2000;
 interface GitStatusCacheEntry {
 	promise: Promise<GitStatusResult | null>;
 	resolvedAt: number; // 0 while in flight
@@ -313,167 +316,19 @@ async function batchGitStatus(
 	return promise;
 }
 
-/** Batched git status — runs all metadata + porcelain in a single shell
- *  invocation (spawning Git Bash on Windows is ~500-1000ms on its own, so
- *  we keep this to a single spawn rather than two phases). Timeout is 15s
- *  total; porcelain accepts `-uno` (default, fast) or `-uall` when opts.untracked.
- *  Returns null if not a git repository. `partial` is reserved for a future
- *  Phase A/B split but is currently always `false` on success. */
+/** Batched git status — host path uses native parallel execFile (no shell);
+ *  container path keeps the legacy `docker exec sh -c <batch>` round-trip.
+ *  Implementation lives in `./skills/git-status-native.ts`. Returns null if
+ *  not a git repository. `partial` is reserved for a future degraded-mode
+ *  flag and is currently always `false` on success. */
 async function runBatchGitStatus(
 	cwd: string,
 	containerId?: string,
 	opts?: { untracked?: boolean },
 ): Promise<GitStatusResult | null> {
 	_runBatchGitStatusCount++;
-
 	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
-
-	const untracked = opts?.untracked === true;
-	const porcelainLine = untracked
-		? 'git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null'
-		: 'git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null';
-
-	const batchScript = [
-		'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__',
-		'printf "\\0"',
-		'git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo __FAIL__',
-		'printf "\\0"',
-		'git rev-parse --verify refs/heads/master 2>/dev/null && echo yes || echo no',
-		'printf "\\0"',
-		'git rev-parse --verify refs/heads/main 2>/dev/null && echo yes || echo no',
-		'printf "\\0"',
-		porcelainLine,
-		'printf "\\0"',
-		'BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)',
-		'git rev-parse --abbrev-ref "$BRANCH@{u}" 2>/dev/null || echo __FAIL__',
-		'printf "\\0"',
-		'git rev-list --count @{u}..HEAD 2>/dev/null || echo 0',
-		'printf "\\0"',
-		'git rev-list --count HEAD..@{u} 2>/dev/null || echo 0',
-		'printf "\\0"',
-		'PRIMARY=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed "s|refs/remotes/origin/||")',
-		'if [ -z "$PRIMARY" ]; then PRIMARY=master; fi',
-		'if git rev-parse --verify "origin/$PRIMARY" >/dev/null 2>&1; then PREF="origin/$PRIMARY"; else PREF="$PRIMARY"; fi',
-		'git rev-list --count "$PREF..HEAD" 2>/dev/null || echo 0',
-		'printf "\\0"',
-		'git rev-list --count "HEAD..$PREF" 2>/dev/null || echo 0',
-	].join('\n');
-
-	const TIMEOUT_MS = 15000;
-	const runOnce = async (): Promise<string> => {
-		if (containerId) {
-			const { stdout } = await execFileAsync("docker", [
-				"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
-			], { encoding: "utf-8", timeout: TIMEOUT_MS, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-			return stdout;
-		}
-		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: TIMEOUT_MS, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
-		return stdout;
-	};
-	// On Windows (and under CPU load anywhere) spawning Git Bash + running the
-	// batch script can legitimately exceed the timeout or fail with transient
-	// spawn errors (EAGAIN, ENOBUFS, EBUSY, etc). Retry broadly — transient
-	// contention is a real-world condition, not a flake. Only genuine git
-	// errors (non-empty stderr, exit code from git itself) are thrown on the
-	// final attempt.
-	let rawOutput: string | undefined;
-	let lastErr: any;
-	const backoffs = [0, 250, 500, 1000, 2000, 4000];
-	const isTransient = (err: any): boolean => {
-		if (!err) return false;
-		if (err?.killed === true) return true;
-		if (err?.signal === "SIGTERM" || err?.signal === "SIGKILL") return true;
-		const code = err?.code;
-		if (code === "ETIMEDOUT" || code === "EAGAIN" || code === "ENOBUFS" ||
-			code === "EBUSY" || code === "EMFILE" || code === "ENFILE") return true;
-		// Windows: spawn can fail with ENOENT temporarily when /dev/null-style
-		// redirection in the batch script is interrupted under load.
-		if (code === "ENOENT" && typeof err?.path === "string") return true;
-		return false;
-	};
-	for (const delay of backoffs) {
-		if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-		try {
-			rawOutput = await runOnce();
-			lastErr = undefined;
-			break;
-		} catch (err: any) {
-			lastErr = err;
-			if (!isTransient(err)) throw err;
-		}
-	}
-	if (rawOutput === undefined) throw lastErr;
-
-	const sections = rawOutput.split('\0').map(s => s.replace(/\s+$/, ''));
-
-	const branchRaw = sections[0] || '';
-	if (branchRaw === '__FAIL__' || !branchRaw) return null;
-	const branch = branchRaw;
-
-	let primaryBranch = 'master';
-	const remoteHeadRaw = sections[1] || '';
-	if (remoteHeadRaw !== '__FAIL__' && remoteHeadRaw) {
-		primaryBranch = remoteHeadRaw.replace('refs/remotes/origin/', '');
-	} else {
-		const masterExists = (sections[2] || '').startsWith('yes');
-		const mainExists = (sections[3] || '').startsWith('yes');
-		if (!masterExists && mainExists) primaryBranch = 'main';
-	}
-
-	const isOnPrimary = branch === primaryBranch;
-	const statusRaw = sections[4] || '';
-
-	const upstreamRaw = sections[5] || '';
-	const hasUpstream = upstreamRaw !== '__FAIL__' && upstreamRaw !== '';
-	let ahead = 0, behind = 0;
-	if (hasUpstream) {
-		ahead = parseInt(sections[6] || '0', 10) || 0;
-		behind = parseInt(sections[7] || '0', 10) || 0;
-	}
-	let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
-	if (!isOnPrimary) {
-		aheadOfPrimary = parseInt(sections[8] || '0', 10) || 0;
-		behindPrimary = parseInt(sections[9] || '0', 10) || 0;
-		mergedIntoPrimary = aheadOfPrimary === 0;
-	}
-	const partial = false;
-
-	const statusLines = statusRaw ? statusRaw.split("\n") : [];
-	const status = statusLines.map(line => {
-		const l = line.endsWith("\r") ? line.slice(0, -1) : line;
-		return { file: l.substring(3), status: l.substring(0, 2).trim() };
-	});
-
-	// With -uno (untracked=false) `clean` reflects *tracked* changes only.
-	// Clients aware of the flag should treat `untrackedIncluded=false` as
-	// "clean does not include untracked files".
-	const clean = statusLines.length === 0;
-	void partial;
-	let summary = 'clean';
-	if (!clean) {
-		const counts: Record<string, number> = {};
-		for (const line of statusLines) {
-			const code = line.substring(0, 2).trim();
-			let key: string;
-			if (code.includes('?')) key = '?';
-			else if (code.includes('M')) key = 'M';
-			else if (code.includes('A')) key = 'A';
-			else if (code.includes('D')) key = 'D';
-			else if (code.includes('R')) key = 'R';
-			else if (code.includes('U')) key = 'U';
-			else key = code;
-			counts[key] = (counts[key] || 0) + 1;
-		}
-		summary = Object.entries(counts).map(([k, v]) => `${v}${k}`).join(' ');
-	}
-
-	return {
-		branch, primaryBranch, isOnPrimary, status, hasUpstream,
-		ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
-		clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
-		partial,
-		untrackedIncluded: untracked,
-	};
+	return runBatchGitStatusNative(cwd, { ...opts, containerId });
 }
 
 // ── Git diff helper (shared between session and goal endpoints) ──
@@ -650,7 +505,6 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const workflowStore = new WorkflowStore(projectConfigStore);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
@@ -658,7 +512,6 @@ export function createGateway(config: GatewayConfig) {
 		colorStore,
 		roleManager,
 		toolManager,
-		workflowStore,
 		preferencesStore,
 		projectConfigStore,
 		groupPolicyStore,
@@ -677,24 +530,19 @@ export function createGateway(config: GatewayConfig) {
 	}
 	const builtinConfigProvider = new BuiltinConfigProvider();
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
-	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
-	// fall back to builtins, so no seeding to disk is needed.
+	// Direct store lookups (roleStore.get()) transparently fall back to
+	// builtins, so no seeding to disk is needed. Workflows are project-
+	// scoped only — no system layer, no builtin layer.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
-	// Workflow builtins were removed — workflows now live inline in each
-	// project's project.yaml::workflows block. The provider returns [] so
-	// nothing is seeded here. Projects must declare their own workflows.
-	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
-		getWorkflows: () => workflowStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
-	const workflowManager = new WorkflowManager(workflowStore, projectConfigStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
@@ -795,7 +643,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, workflowStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1177,78 +1025,89 @@ export function createGateway(config: GatewayConfig) {
 			// E2E / CI can skip this entirely via BOBBIT_SKIP_WORKTREE_POOL=1 — the
 			// pool fills worktrees aggressively at boot and replenishes on every
 			// claim, which costs real CPU on tests that don't need git at all.
-			// Boot sweeper (Phase 3): reconcile on-disk worktrees against persisted
-			// records before pool fill so renamed-but-orphaned worktrees from a
-			// crashed prior instance are reclaimed (or cleaned up) cleanly.
-			try {
-				const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-				const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
-				const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-				const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-				const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
-				for (const ctx of projectContextManager.all()) {
-					const repoNames = ctx.projectConfigStore.repoNames();
-					sweepProjects.push({
-						id: ctx.project.id,
-						rootPath: ctx.project.rootPath,
-						repos: repoNames.length > 0 ? repoNames : undefined,
+			//
+			// Boot sweeper + pool fill run AFTER `server.listen()` as a background
+			// chain — the sweeper shells out to `git worktree list/repair` per repo
+			// with 10–15s timeouts, and the pool readiness check awaits `isGitRepo`
+			// per project. Doing them before listen used to leave the gateway
+			// unreachable for many seconds on installs with stale worktrees.
+			//
+			// Ordering invariant preserved: the sweeper still runs before
+			// `initWorktreePoolForProject`, so the pool's `reclaimOrphaned`
+			// can't race against the sweeper. Requests that arrive during this
+			// window fall through the non-pool session path (the same path used
+			// before the pool ever fills).
+			const runBootBackgroundTasks = async (): Promise<void> => {
+				try {
+					const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+					const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+					const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+					const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+					const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+					for (const ctx of projectContextManager.all()) {
+						const repoNames = ctx.projectConfigStore.repoNames();
+						sweepProjects.push({
+							id: ctx.project.id,
+							rootPath: ctx.project.rootPath,
+							repos: repoNames.length > 0 ? repoNames : undefined,
+						});
+						for (const g of ctx.goalStore.getAll()) {
+							sweepGoals.push({
+								id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+								repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+							});
+						}
+						for (const s of ctx.sessionStore.getAll()) {
+							sweepSessions.push({
+								id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+								repoWorktrees: s.repoWorktrees,
+							});
+						}
+						for (const st of ctx.staffStore.getAll()) {
+							sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+						}
+					}
+					const result = await sweepOrphanedWorktrees({
+						projects: sweepProjects,
+						goals: sweepGoals,
+						sessions: sweepSessions,
+						staff: sweepStaff,
 					});
-					for (const g of ctx.goalStore.getAll()) {
-						sweepGoals.push({
-							id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
-							repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
-						});
+					if (result.reclaimed || result.cleaned || result.repaired) {
+						console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
 					}
-					for (const s of ctx.sessionStore.getAll()) {
-						sweepSessions.push({
-							id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
-							repoWorktrees: s.repoWorktrees,
-						});
-					}
-					for (const st of ctx.staffStore.getAll()) {
-						sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
-					}
+				} catch (err) {
+					console.warn("[server] Worktree sweeper failed (non-fatal):", err);
 				}
-				const result = await sweepOrphanedWorktrees({
-					projects: sweepProjects,
-					goals: sweepGoals,
-					sessions: sweepSessions,
-					staff: sweepStaff,
-				});
-				if (result.reclaimed || result.cleaned || result.repaired) {
-					console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
-				}
-			} catch (err) {
-				console.warn("[server] Worktree sweeper failed (non-fatal):", err);
-			}
 
-			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
-				for (const ctx of projectContextManager.all()) {
-					try {
-						const repoPath = ctx.project.rootPath;
-						const components = ctx.projectConfigStore.getComponents();
-						const isMulti = components.some(c => c.repo !== ".");
-						let poolReady = false;
-						if (isMulti) {
-							const seen = new Set<string>();
-							poolReady = true;
-							for (const c of components) {
-								if (c.repo === "." || seen.has(c.repo)) continue;
-								seen.add(c.repo);
-								if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+				if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
+					for (const ctx of projectContextManager.all()) {
+						try {
+							const repoPath = ctx.project.rootPath;
+							const components = ctx.projectConfigStore.getComponents();
+							const isMulti = components.some(c => c.repo !== ".");
+							let poolReady = false;
+							if (isMulti) {
+								const seen = new Set<string>();
+								poolReady = true;
+								for (const c of components) {
+									if (c.repo === "." || seen.has(c.repo)) continue;
+									seen.add(c.repo);
+									if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+								}
+							} else {
+								poolReady = await isGitRepo(repoPath);
 							}
-						} else {
-							poolReady = await isGitRepo(repoPath);
-						}
-						if (poolReady) {
-							const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
-							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-							const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
-							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize, components, wtRoot);
-						}
-					} catch { /* best-effort */ }
+							if (poolReady) {
+								const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+								const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
+								const pcs = ctx.projectConfigStore;
+								sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, () => pcs.getComponents(), poolSize, wtRoot);
+							}
+						} catch { /* best-effort */ }
+					}
 				}
-			}
+			};
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
 			// resolve components / project root for multi-repo goal creation.
@@ -1287,6 +1146,7 @@ export function createGateway(config: GatewayConfig) {
 					});
 				});
 				const addr = server.address() as import("node:net").AddressInfo;
+				void runBootBackgroundTasks();
 				return addr.port;
 			}
 
@@ -1305,6 +1165,7 @@ export function createGateway(config: GatewayConfig) {
 					if (port !== config.port) {
 						console.log(`Port ${config.port} in use, using port ${port}`);
 					}
+					void runBootBackgroundTasks();
 					return port;
 				} catch (err: any) {
 					if (err.code === "EADDRINUSE" && port < maxPort) {
@@ -1492,7 +1353,6 @@ async function handleApiRoute(
 	projectContextManager: ProjectContextManager,
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
-	workflowManager: WorkflowManager,
 	verificationHarness: VerificationHarness,
 	preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
@@ -1507,12 +1367,10 @@ async function handleApiRoute(
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
-	workflowStore?: WorkflowStore,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
-	const serverWorkflowStore = workflowStore!;
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -1613,6 +1471,7 @@ async function handleApiRoute(
 		if (!session) { json({ error: "session not found" }, 404); return; }
 		const entries = session.eventBuffer.getAll() as any[];
 		let replayed = 0;
+		const deadline = Date.now() + PACE_TIMEOUT_MS;
 		for (const entry of entries) {
 			// Accept both raw-event shape (pre-fix) and {seq,ts,event} (post-fix).
 			const isWrapped = entry && typeof entry === "object" && "event" in entry && ("seq" in entry || "ts" in entry);
@@ -1621,7 +1480,7 @@ async function handleApiRoute(
 				: { type: "event" as const, data: entry };
 			const data = JSON.stringify(framePayload);
 			for (const client of session.clients) {
-				if ((client as any).readyState === 1) (client as any).send(data);
+				await paceAndSend(client as any, data, deadline);
 			}
 			replayed++;
 		}
@@ -2025,6 +1884,22 @@ async function handleApiRoute(
 						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
 					}
 				}
+				// Seed default workflows when none were provided. Workflows are
+				// project-scoped only (no system layer), so without this seed a
+				// freshly-created project would have zero workflows and goal
+				// creation against it would fail. Skip if caller already provided
+				// workflows or the project already has any (idempotent on upsert).
+				if (Object.keys(newCtx.projectConfigStore.getWorkflows() ?? {}).length === 0) {
+					try {
+						const { buildDefaultWorkflows } = await import("./state-migration/seed-default-workflows.js");
+						const comps = newCtx.projectConfigStore.getComponents();
+						const componentName = comps[0]?.name || project.name;
+						const defaults = buildDefaultWorkflows(componentName);
+						newCtx.projectConfigStore.setWorkflows(defaults as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+					} catch (err) {
+						console.warn("[projects] Failed to seed default workflows:", err);
+					}
+				}
 			}
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
@@ -2048,10 +1923,10 @@ async function handleApiRoute(
 						poolReady = await isGitRepo(body.rootPath);
 					}
 					if (poolReady) {
-						const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
 						const wtRoot = newCtx?.projectConfigStore.get("worktree_root") || undefined;
-						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize, components, wtRoot);
+						const pcs = newCtx?.projectConfigStore;
+						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot);
 					}
 				} catch { /* best-effort */ }
 			}
@@ -3125,7 +3000,7 @@ async function handleApiRoute(
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
-				workflowStore: workflowManager.store,
+				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
@@ -5957,25 +5832,16 @@ async function handleApiRoute(
 			invalidateGitStatusCache(cwd, cid);
 		}
 
-		// Belt-and-braces: even with spawn-level retry inside runBatchGitStatus,
-		// rare transient errors (e.g. fs contention, git index lock) can still
-		// surface. Retry the whole cached call once after 250ms before returning
-		// 500 — errors are not cached so a second call will re-run fresh.
+		// Single attempt — native parallel execFile is fast (50–150 ms p50 on
+		// Windows) and errors are not cached, so the client retry loop in
+		// `git-status-refresh.ts` (4 attempts × 0/500/2000/5000 ms backoff) is
+		// the resilience layer for transient failures.
 		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
-		let handlerErr: any;
-		for (let attempt = 0; attempt < 2; attempt++) {
-			try {
-				result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
-				handlerErr = undefined;
-				break;
-			} catch (err: any) {
-				handlerErr = err;
-				if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
-			}
-		}
-		if (handlerErr) {
-			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", handlerErr?.code, "signal=", handlerErr?.signal, "killed=", handlerErr?.killed, "stderr=", handlerErr?.stderr, "message=", handlerErr?.message);
-			json({ error: handlerErr.stderr?.trim() || handlerErr.message || "git status failed" }, 500);
+		try {
+			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
+		} catch (err: any) {
+			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
+			json({ error: err?.stderr?.trim() || err?.message || "git status failed" }, 500);
 			return;
 		}
 		if (!result) { json({ error: "Not a git repository" }, 400); return; }
@@ -6370,7 +6236,7 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows (with cascade origin)
+	// GET /api/workflows — project-scoped only. Without projectId returns [].
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -6379,90 +6245,65 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/workflows (scope-aware)
+	// POST /api/workflows — requires projectId.
 	if (workflowsMatch && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
 		const targetProjectId = body?.projectId;
+		if (!targetProjectId) { json({ error: "projectId required" }, 400); return; }
 		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const now = Date.now();
-				const workflow = {
-					id: body.id as string,
-					name: (body.name as string) ?? body.id,
-					description: (body.description as string) ?? "",
-					gates: body.gates || [],
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-				ctx.workflowStore.put(workflow);
-				json(workflow, 201);
-			} else {
-				const workflow = workflowManager.createWorkflow({
-					id: body.id,
-					name: body.name,
-					description: body.description,
-					gates: body.gates || [],
-				});
-				json(workflow, 201);
-			}
+			const ctx = projectContextManager.getOrCreate(targetProjectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const now = Date.now();
+			const workflow = {
+				id: body.id as string,
+				name: (body.name as string) ?? body.id,
+				description: (body.description as string) ?? "",
+				gates: body.gates || [],
+				createdAt: now,
+				updatedAt: now,
+			};
+			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
+			ctx.workflowStore.put(workflow);
+			json(workflow, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
 		return;
 	}
 
-	// POST /api/workflows/:id/customize — copy resolved workflow to a target scope
+	// POST /api/workflows/:id/customize — copy resolved workflow into a project.
 	const workflowCustomizeMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/customize$/);
 	if (workflowCustomizeMatch && req.method === "POST") {
 		const id = decodeURIComponent(workflowCustomizeMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
 
 		const resolved = configCascade.resolveWorkflows(projectId);
 		const source = resolved.find(r => r.item.id === id);
 		if (!source) { json({ error: "Workflow not found" }, 404); return; }
 
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.workflowStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverWorkflowStore;
-		}
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 
 		const now = Date.now();
 		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		targetStore.put(copy);
+		ctx.workflowStore.put(copy);
 		json(copy, 201);
 		return;
 	}
 
-	// DELETE /api/workflows/:id/override — remove override at a scope
+	// DELETE /api/workflows/:id/override — remove project-level override.
 	const workflowOverrideMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/override$/);
 	if (workflowOverrideMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowOverrideMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
 
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.workflowStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverWorkflowStore;
-		}
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 
-		targetStore.remove(id);
+		ctx.workflowStore.remove(id);
 		json({ ok: true });
 		return;
 	}
@@ -6472,74 +6313,47 @@ async function handleApiRoute(
 	if (workflowMatch && req.method === "GET") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const resolved = configCascade.resolveWorkflows(qProjectId);
-			const found = resolved.find(r => r.item.id === id);
-			if (!found) { json({ error: "Workflow not found" }, 404); return; }
-			json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
-		} else {
-			const wf = workflowManager.getWorkflow(id);
-			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-			json(wf);
-		}
+		if (!qProjectId) { json({ error: "Workflow not found" }, 404); return; }
+		const resolved = configCascade.resolveWorkflows(qProjectId);
+		const found = resolved.find(r => r.item.id === id);
+		if (!found) { json({ error: "Workflow not found" }, 404); return; }
+		json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
 		return;
 	}
 
-	// PUT /api/workflows/:id (scope-aware)
+	// PUT /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const ctx = projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const existing = ctx.workflowStore.get(id);
-			if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-			const updated = {
-				...existing,
-				name: body.name ?? existing.name,
-				description: body.description ?? existing.description,
-				gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-				id,
-				updatedAt: Date.now(),
-			};
-			ctx.workflowStore.put(updated);
-			json(updated);
-		} else {
-			try {
-				const ok = workflowManager.updateWorkflow(id, body);
-				if (!ok) { json({ error: "Workflow not found" }, 404); return; }
-				const updated = workflowManager.getWorkflow(id);
-				json(updated);
-			} catch (err: any) {
-				json({ error: err.message }, 400);
-			}
-		}
+		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(qProjectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		const existing = ctx.workflowStore.get(id);
+		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
+		const updated = {
+			...existing,
+			name: body.name ?? existing.name,
+			description: body.description ?? existing.description,
+			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
+			id,
+			updatedAt: Date.now(),
+		};
+		ctx.workflowStore.put(updated);
+		json(updated);
 		return;
 	}
 
-	// DELETE /api/workflows/:id (scope-aware)
+	// DELETE /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const ctx = projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			ctx.workflowStore.remove(id);
-			json({ ok: true });
-		} else {
-			const wf = workflowManager.getWorkflow(id);
-			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-			const allGoals = projectContextManager.getAllLiveGoals();
-			if (allGoals.some((g: any) => g.workflowId === id && g.state !== "complete")) {
-				json({ error: "Cannot delete: workflow is in use by active goals" }, 409);
-				return;
-			}
-			workflowManager.deleteWorkflow(id);
-			res.writeHead(204);
-			res.end();
-		}
+		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(qProjectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		ctx.workflowStore.remove(id);
+		json({ ok: true });
 		return;
 	}
 

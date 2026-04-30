@@ -158,7 +158,9 @@ Two resolution modes:
 
 ### Config cascade
 
-The config cascade handles resolution of named config entities (roles, tools, workflows, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+
+> **Workflows are NOT in the cascade.** Workflows live exclusively inline in each registered project's `project.yaml::workflows` block — there is no system-scope or builtin workflow layer. `ConfigCascade.resolveWorkflows(projectId)` reads only the project layer; without a `projectId` it returns `[]`. See [Workflows are project-scoped only](#workflows-are-project-scoped-only) below for the rationale.
 
 #### Why a cascade?
 
@@ -175,7 +177,7 @@ Two modules implement this:
 
 - **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, etc.).
 
-- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveWorkflows()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`.
+- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`. `resolveWorkflows()` exists for shape compat but only reads the project layer (see callout above).
 
 Each returned item is a `ResolvedItem<T>` with:
 - `item: T` — the config object
@@ -184,9 +186,23 @@ Each returned item is a `ResolvedItem<T>` with:
 
 #### Resolution rules
 
-For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top. Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
+For each cascaded config type (roles, tools, tool-group-policies), items are merged by a unique key (roles by `name`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top.
 
-**System-scope writes** (role / workflow customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `workflowStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles and workflows because the server stores are independent of `ProjectContextManager`.
+Workflows are not cascaded — `resolveWorkflows(projectId)` reads only the project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`.
+
+**System-scope writes** (role customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles because the server stores are independent of `ProjectContextManager`. Workflow mutations have no system-scope path — they always require a `projectId`.
+
+#### Workflows are project-scoped only
+
+Workflows are inlined per-project (in `project.yaml::workflows`) rather than cascaded because (a) every workflow step references project-specific `(component, command)` pairs that have no meaning outside the owning project, and (b) the project assistant generates a bespoke workflow set per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md) — there is no useful "system default workflow" to inherit. A cascade would just be ceremony around an empty upper layer.
+
+Consequences:
+
+- `BuiltinConfigProvider.getWorkflows()` returns `[]` (kept only for `ServerStores` shape compat).
+- No system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. `<server-cwd>/.bobbit/config/project.yaml::workflows` is **not** read at runtime.
+- All `/api/workflows*` mutations require a `projectId` (400 otherwise — no `?scope=server` parameter).
+- `GET /api/workflows` (no `projectId`) returns `{ workflows: [] }`; `GET /api/workflows/:id` (no `projectId`) returns 404. Reads are intentionally lenient (don't 400) to keep the Workflows page from crashing during scope transitions.
+- New projects get a default seed (`general`, `feature`, `bug-fix`, `quick-fix`) inlined into `project.yaml::workflows` at `POST /api/projects` time when no workflows are provided. Legacy `<project>/.bobbit/config/workflows/*.yaml` files are folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
 
 #### Server stores decoupling
 
@@ -194,11 +210,11 @@ For each config type, items are merged by a unique key (roles by `name`, workflo
 
 #### Builtin seeding
 
-On server startup, standalone stores are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores (e.g. `createGoal()` looking up workflows) work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding.
+On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope at all — they're seeded per-project at project-create time (see [Workflows are project-scoped only](#workflows-are-project-scoped-only)).
 
 #### Scaffolding
 
-`scaffoldBobbitDir()` creates empty `config/roles/`, `config/workflows/` directories. These config types resolve at runtime via the cascade — no files are copied. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
 
 #### Session setup integration
 
@@ -211,16 +227,18 @@ Config list endpoints accept `?projectId=` for project-scoped resolution:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles?projectId=X` | Resolved roles with `origin` and `overrides` fields |
-| `GET` | `/api/workflows?projectId=X` | Resolved workflows |
+| `GET` | `/api/workflows?projectId=X` | Project workflows (returns `[]` without `projectId`) |
 | `GET` | `/api/tools?projectId=X` | Resolved tools |
 | `POST` | `/api/roles/:name/customize?scope=project&projectId=X` | Copy resolved item to target scope for editing |
 | `DELETE` | `/api/roles/:name/override?scope=project&projectId=X` | Remove override, revert to inherited |
 
-The customize/override endpoints follow the same pattern for workflows (`:id`). CRUD endpoints (`POST`, `PUT`, `DELETE`) accept optional `projectId` for scope-aware operations.
+The customize/override endpoints follow the same pattern for roles. Workflow CRUD endpoints (`POST`, `PUT`, `DELETE /api/workflows[/:id]`) **require** `projectId` (400 otherwise) — there is no system-scope path for workflows.
 
 #### UI
 
-The four config pages (Roles, Tools, Skills, Workflows) display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`.
+The Roles, Tools, and Skills config pages display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`; the row accepts an optional `excludeSystem` flag.
+
+The Workflows page is a special case — it has **no System tab** because workflows are project-scoped only. The page passes `excludeSystem: true` to the scope row, and visiting `/workflows` while the global scope is `system` auto-switches to the first registered project (or shows an empty state if none).
 
 ### Project assistant
 
@@ -420,7 +438,7 @@ If the `workflows:` block is empty or missing, goal creation surfaces a clear er
 
 **Removed runtime concepts:**
 
-- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant now generates a bespoke inline `workflows:` block per project from the MD authoring guide. The legacy YAML files are scheduled for deletion (see follow-up note at the bottom of this doc); while they remain on disk during the migration window, `BuiltinConfigProvider.loadWorkflows()` keeps reading them so existing tests that reference workflow IDs by name (`general`, `feature`, `bug-fix`, `quick-fix`, `test-fast`) keep working. New projects do not depend on these IDs being shipped.
+- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant generates a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` also seeds the four canonical workflows (`general`, `feature`, `bug-fix`, `quick-fix`) into a new project's `project.yaml::workflows` when none are provided. `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime — there is no system-scope or builtin workflow layer.
 - **`.bobbit/config/workflows/`** is no longer a runtime concept. `InlineWorkflowStore` reads only from `project.yaml::workflows`. The `migrate-project-yaml.ts` step folds any pre-existing per-project workflow files into the inline block on first boot and removes the directory.
 
 ### Session worktrees
@@ -502,6 +520,26 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or session-first-prompt rename), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
+**Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. Three invocation points fan out from `runComponentSetups()`:
+
+| Site | When it runs | How components are resolved |
+|---|---|---|
+| `WorktreePool._fill()` (single-repo and multi-repo) | After every successful pool prebuild, before the entry is published into the pool | `componentsResolver: () => Component[]` closure passed at construction — invoked **fresh per fill** so live edits to `project.yaml` take effect on the next replenishment without a server restart |
+| `StaffManager.refreshWorktree()` | On each wake cycle for non-sandboxed staff, after rebasing the worktree onto the primary branch | `ctx.projectConfigStore.getComponents()` |
+| `session-setup.ts` (single-repo on-demand) | Fallback `createWorktree` path when the pool is empty | `components[0].worktreeSetupCommand` passed via `opts.setupCommand` to `createWorktree` |
+
+**Why the per-fill resolver matters.** Pool entries can sit in the pool for hours; if components were captured at pool construction time, a user who fixes a wrong setup command in `project.yaml` would still get stale entries baked with the old command until the server restarted. The closure pattern guarantees the next fill picks up edits.
+
+**Loud log line.** Every pool fill that has at least one component with a setup command emits:
+
+```
+[worktree-pool] running setup for components: <names>
+```
+
+This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper.
+
+**`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
+
 #### Remote branch cleanup
 
 Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.
@@ -527,11 +565,20 @@ The git-status widget (shown on every session with a worktree and on the goal da
 
 Full design lives in [docs/design/git-status-widget-reliability.md](design/git-status-widget-reliability.md). The sketch:
 
-**Server (`src/server/server.ts`).** `batchGitStatus` is a 750ms-TTL single-flight cache wrapping the raw `runBatchGitStatus` spawn worker. Cache key is `${containerId ?? 'host'}::${cwd}::${summary|untracked}`. Concurrent callers share the same in-flight promise, resolved entries are reused for up to 750ms, errors are never cached (the entry is deleted on rejection so the next call retries fresh). The 750ms window is short enough that users never see "stale" data but long enough to collapse the idle / reconnect / visibility-change refresh storm into one git invocation. `invalidateGitStatusCache(cwd, containerId?)` is called from `/git-commit`, `/git-pull`, `/git-push`, merge endpoints, and the `?fetch=true` branch so local git writes never return cached pre-write state.
+**Server (`src/server/server.ts`, `src/server/skills/git-status-native.ts`).** `batchGitStatus` is a 2000ms-TTL single-flight cache wrapping `runBatchGitStatus`. Cache key is `${containerId ?? 'host'}::${cwd}::${summary|untracked}`. Concurrent callers share the same in-flight promise, resolved entries are reused for up to 2000ms, errors are never cached (the entry is deleted on rejection so the next call retries fresh). The 2-second window collapses the idle / reconnect / visibility-change / dashboard fan-out refresh storm into one git invocation while keeping data fresh enough for a 10s-cadence widget. `invalidateGitStatusCache(cwd, containerId?)` is called from `/git-commit`, `/git-pull`, `/git-push`, merge endpoints, and the `?fetch=true` branch so local git writes never return cached pre-write state.
 
 The default `/git-status` call uses `git status --porcelain=v1 -uno` (summary: skips untracked scan, which is the long tail on large repos). `?untracked=1` switches to `-uall` and sets `untrackedIncluded: true` on the response; clients must not treat `clean` as authoritative when `untrackedIncluded === false`. The session widget fetches summary by default and refetches `?untracked=1` when the user opens the dropdown — the widget dispatches a `git-status-dropdown-open` CustomEvent (bubbles, composed) for this. Summary and untracked responses live in separate cache keys so one doesn't shadow the other.
 
-Spawn-level retry inside `runBatchGitStatus` swallows transient errors (EAGAIN, ENOBUFS, EBUSY, EMFILE, ENFILE, ETIMEDOUT, SIGTERM/SIGKILL, transient ENOENT on win32) with a short backoff; the HTTP handler adds a single belt-and-braces retry on any uncaught error. 15s overall timeout. Responses carry optional `partial: true` when Phase B (porcelain) times out but Phase A (branch / ahead / behind / upstream) succeeded — the client renders a yellow warning dot and the dropdown offers Re-scan.
+**Host path** (no `containerId`) goes through `runBatchGitStatusNative` in `src/server/skills/git-status-native.ts`, which fans out direct `git.exe` invocations via `child_process.execFile` (argv array — no shell) in two parallel phases:
+
+- **Phase A** (`Promise.all`, ~6 calls): current branch, `origin/HEAD` symbolic-ref, master/main verify, `status --porcelain`, upstream tracking branch.
+- **Phase B** (`Promise.all`, ~4 calls): ahead/behind counts vs upstream and vs primary, after Phase A resolves the primary ref.
+
+Per-call timeout is 3s; only the HEAD lookup is mandatory (any other failure falls back to safe defaults matching the legacy bash behaviour — missing upstream → `hasUpstream=false`, count failures → 0, etc.). Wall-clock is dominated by the slowest single git call (~50–150ms on Windows, ~10–30ms on Linux). This replaces the earlier approach that piped a multi-line script through Git Bash on Windows — that one cold spawn cost 500–1000ms per refresh and the in-script git invocations ran sequentially.
+
+**Container path** (when `containerId` is set) keeps the batched approach: a single `docker exec sh -c '<batch script>'` round-trip. Inside the container, `git` is fast and the perf complaint never applied; one round-trip beats N parallel `docker exec` calls because Docker Desktop's daemon serializes inbound requests under contention.
+
+**No in-server retries.** `runBatchGitStatusCount` increments exactly once per `batchGitStatus` call. The 3s per-call timeout fast-fails contended invocations; client-side retry in `git-status-refresh.ts` (4 attempts at [0, 500, 2000, 5000]ms) is the only resilience layer. Responses still carry optional `partial: true` for Phase-B timeouts — the client renders a yellow warning dot and the dropdown offers Re-scan.
 
 Test-only hooks — `__setGitStatusFake` / `__clearGitStatusFake` / `__getGitStatusInvocationCount` / `__resetGitStatusInvocationCount` — replace the git-spawn path with a deterministic function so coalesce/TTL/retry E2E tests don't depend on the real `git status` binary, which becomes flaky under CI load (EAGAIN / ENFILE / Windows ENOENT races). Production code never touches them.
 
@@ -839,6 +886,50 @@ This is what makes "my `code-reviewer` role always runs on opus" work without ch
 ### UI
 
 The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to **Prompt** and **Tool Access**, labelled **Model**. It reuses the model picker and thinking dropdown components from the settings page, with a leading "(use default)" option that maps to the empty string → omitted from YAML. The standard origin badge / Customize / Revert flow operates on the whole role record, so touching either field flips builtin→overridden and Revert clears them along with any other overrides.
+
+---
+
+## AI Gateway per-session header (`x-opencode-session`)
+
+When Bobbit talks to an on-prem model through the AI Gateway, the gateway's token caches are keyed per upstream caller. Without a per-session discriminator every Bobbit session would share one cache bucket, so cache hits collapse and the gen-AI team's routing loses its signal. To partition cleanly, every aigw request carries an `x-opencode-session: <bobbit-session-id>` header — or, when no session id is available, **no header at all**. A constant fallback would defeat the whole point: it would re-collapse buckets onto a single key.
+
+### Where it's emitted
+
+`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `~/.bobbit/agent/models.json`. The `aigw` provider entry now carries a provider-level `headers` block:
+
+- Key: `x-opencode-session`.
+- Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
+
+Provider-level (not per-model) is deliberate — it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
+
+### Resolver semantics (pi-coding-agent contract surface)
+
+The pi-coding-agent CLI evaluates header values via `resolveConfigValue` (in `dist/core/resolve-config-value.js`):
+
+- A plain string `"X"` falls back to `process.env["X"] || "X"` — i.e. it can leak the literal key name. **Unsafe for our requirement.**
+- A `"!cmd"` string runs `cmd` via `child_process.exec` (shell-interpreted) and returns the trimmed stdout, or `undefined` when stdout is empty.
+- `resolveHeaders` (in `dist/core/model-registry.js`) drops any header whose resolved value is falsy.
+
+So the `!node -e ...` form gives us exactly "send the header iff `BOBBIT_SESSION_ID` is set to a non-empty value, otherwise omit it." That is the only behaviour we want.
+
+### Per-session env injection
+
+Every agent-CLI spawn path (`session-setup.ts`, `session-manager.ts`, the rpc-bridge child spawn) injects `BOBBIT_SESSION_ID=<sessionId>` into the subprocess env. Each Bobbit session owns its own subprocess with its own env, so values are correctly partitioned at the OS level and never leak across sessions.
+
+### Performance: one shell exec per session, not per request
+
+`resolveConfigValue` caches `!cmd` results in a module-level `commandResultCache` `Map` keyed by the command string. The first LLM request in a session pays a one-time ~50 ms `node -e` startup; every subsequent request in that same subprocess reuses the cached value. Because each Bobbit session spawns its own agent subprocess, the cache is naturally per-session — no cross-contamination, no repeated process spawns within a session.
+
+### Cross-shell quoting
+
+`child_process.exec` runs the command through `cmd.exe` on Windows and `/bin/sh` on POSIX. The chosen quoting — outer `"` for the JS argument, inner `'` for the empty-string default — is interpreted identically by both shells (cmd.exe and sh both treat `''` as an empty string literal in this position). The JSON-encoded value in `models.json` is `"!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""`.
+
+### Out of scope
+
+- The `/api/aigw/v1/*` passthrough proxy used for UI model-list/test calls — it never carries a session id and isn't on the request path that needs cache routing.
+- The title generator and other one-shot gateway calls — single-call, no cache benefit.
+- Bedrock/Claude routing — driver ignores `model.headers`, and on-prem models don't route to Bedrock anyway.
+- Custom local providers configured outside the aigw block — the `headers` block is scoped to the `aigw` provider entry only.
 
 ---
 
@@ -1654,6 +1745,58 @@ Seq-less frames (old servers) fall through the dispatch path unchanged — the r
 
 ---
 
+## Verification event dedupe
+
+Gate verification streams a separate event family (`gate_verification_step_output`, `gate_verification_step_end`, `gate_verification_complete`, …) that does **not** flow through `emitSessionEvent` and the per-session seq pipeline above. Verification is goal-scoped, not session-scoped: the harness broadcasts via `broadcastToGoal(goalId, event)` to every WebSocket whose session belongs to the goal team, plus the dashboard `__viewer__` connection. The dedupe story for that family is described here.
+
+### The fan-out problem
+
+In the UI, every open session in a goal team has its own `RemoteAgent` with its own WebSocket. When a verification step writes a stdout line, the server delivers the resulting `gate_verification_step_output` payload to all N session sockets (one copy each), plus +1 for the dashboard's viewer WS when mounted. Pre-fix, each `RemoteAgent` independently re-broadcast the payload as a `document.dispatchEvent(new CustomEvent("gate-verification-event", {detail: msg}))`, so the document-level listeners in `<verification-output-modal>` and `<gate-verification-live>` appended one chunk per dispatch — a single log line ended up rendered N× (or (N+1)× with the dashboard mounted).
+
+The bug is fundamentally about **fan-out at the dispatch layer, not the wire layer**: server-side broadcast volume is fine (clients legitimately need every session WS to stay live), but the listeners need to see each logical event exactly once.
+
+### Server-assigned seq
+
+`src/server/agent/verification-harness.ts` stamps a monotonic `seq: number` on every `gate_verification_*` payload it broadcasts. The protocol type in `src/server/ws/protocol.ts` carries the field additively — older clients ignore it, and a pre-`seq` server still fan-outs (the bus then falls back to a content hash, see below). The seq is unique within the verification stream of a single signal/step, which is all the bus needs to dedupe.
+
+### The dedupe bus
+
+`src/app/verification-event-bus.ts` is a module-scoped singleton that exports `dispatchVerificationEvent(msg)`. All dispatch sources — every `RemoteAgent` instance and the goal dashboard's viewer WS in `src/app/goal-dashboard.ts` — funnel through it instead of calling `document.dispatchEvent` directly. The bus computes a key from `(eventType, signalId, stepIndex, seq)`; if the key was seen recently, the dispatch is dropped, otherwise the bus emits the document-level CustomEvent and remembers the key.
+
+The seen-set is bounded (~5000 keys) with FIFO/LRU eviction so a long-running session can't grow it without limit. The eviction window is wide enough that real fan-out (which happens within milliseconds of the original broadcast) is always within the window, but narrow enough to keep memory bounded across a multi-hour goal.
+
+When `seq` is missing (older server, hand-written test fixtures), the bus falls back to hashing the salient payload fields (`stream`, `text`, `status`, …) so identical fan-out copies still collapse — best-effort, since two semantically distinct events that happen to carry identical content would be coalesced. With the new server stamping `seq` on every event this fallback is only a compatibility shim.
+
+### Bootstrap-vs-live overlap in the modal
+
+`<verification-output-modal>` can be opened mid-stream after some output has already accumulated server-side. The modal seeds its rendered chunks from `initialOutput` (the bootstrap) and then continues consuming live events. Pre-fix, a live event whose payload was already in the bootstrap would be appended again, producing a visible "prefix shown twice" effect on reopen.
+
+The fix tracks a high-water `seq` derived from the bootstrap and silently discards live events with `seq` ≤ that mark. The modal also short-circuits `_fetchBootstrapOutput` when `initialOutput` is already populated, eliminating a parallel snapshot race.
+
+### AbortController listener hygiene
+
+Lit re-renders the modal and live components on property changes; without disciplined teardown, `document.addEventListener` calls would accumulate across re-renders and listeners from prior mount cycles would keep firing on stale closures. `VerificationOutputModal` and `GateVerificationLive` now allocate a fresh `AbortController` on connect, pass `{ signal }` to every `addEventListener`, and call `controller.abort()` from `disconnectedCallback`. This guarantees listener count == 1 per live component instance, regardless of how many times Lit re-renders.
+
+### Tests
+
+- `tests/verification-dedup.spec.ts` (+ `tests/fixtures/verification-dedup-*`) — Playwright file:// fixture that dispatches the same `gate-verification-event` 6× and asserts a single rendered occurrence in both `<verification-output-modal>` and `<gate-verification-live>`. This pins the multi-layer guarantee end-to-end on the listener side.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/app/verification-event-bus.ts` | Module-scoped dedupe funnel; `dispatchVerificationEvent(msg)` + bounded LRU seen-set |
+| `src/app/remote-agent.ts` | Routes `gate_verification_*` WS frames through the bus instead of `document.dispatchEvent` |
+| `src/app/goal-dashboard.ts` | Same routing for the dashboard `__viewer__` WS |
+| `src/server/agent/verification-harness.ts` | Stamps monotonic `seq` on every `gate_verification_*` event |
+| `src/server/ws/protocol.ts` | Additive `seq` field on the verification event union |
+| `src/ui/components/VerificationOutputModal.ts` | `AbortController` listeners + bootstrap high-water seq |
+| `src/ui/tools/renderers/GateVerificationLive.ts` | `AbortController` listeners on the live renderer |
+
+For the parallel pattern on the agent stream (different event family, same shape of fix), see [Event stream ordering & dedup](#event-stream-ordering--dedup) above and [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved — the agent is stuck mid tool-call and the steer feels ignored.
@@ -1822,7 +1965,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `system-prompt.md` | `cli.ts` | Global system prompt template |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
-| `workflows/*.yaml` | `WorkflowStore` | Built-in workflow templates |
+| `workflows/*.yaml` | (legacy) | Default workflow seeds copied into new projects' `project.yaml::workflows`. Not read by `BuiltinConfigProvider` at runtime — see [Workflows are project-scoped only](#workflows-are-project-scoped-only). |
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 
@@ -1834,7 +1977,6 @@ Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs`. 
 |---|---|---|
 | `project.yaml` | `ProjectConfigStore` | Project settings |
 | `roles/*.yaml` | `RoleStore` | Server/project role overrides |
-| `workflows/*.yaml` | `WorkflowStore` | Server/project workflow overrides |
 | `tools/<group>/*.yaml` | `ToolManager` | Server/project tool overrides |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Server/project policy overrides |
 | `mcp.json` | `McpManager` | MCP server overrides |
