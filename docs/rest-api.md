@@ -231,14 +231,18 @@ Server-level fallback (applied when no project override is set):
 
 ### Workflows
 
+Workflows are **project-scoped only** — there is no cascade and no system-scope layer. All mutations require `projectId`; reads without `projectId` return an empty list / 404 (intentionally lenient so the Workflows page doesn't crash during scope transitions). See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) for the rationale.
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/workflows` | List all workflow templates |
-| `GET` | `/api/workflows/:id` | Get full workflow detail |
-| `POST` | `/api/workflows` | Create a workflow |
-| `PUT` | `/api/workflows/:id` | Update a workflow |
-| `DELETE` | `/api/workflows/:id` | Delete (blocked if in-use by active goals) |
-| `POST` | `/api/workflows/:id/clone` | Deep-copy a workflow with a new ID |
+| `GET` | `/api/workflows?projectId=X` | List workflows for a project. Without `projectId`, returns `{ workflows: [] }`. |
+| `GET` | `/api/workflows/:id?projectId=X` | Get full workflow detail. Without `projectId`, returns 404. |
+| `POST` | `/api/workflows?projectId=X` | Create a workflow. **Requires `projectId`** — 400 otherwise. |
+| `PUT` | `/api/workflows/:id?projectId=X` | Update a workflow. **Requires `projectId`** — 400 otherwise. |
+| `DELETE` | `/api/workflows/:id?projectId=X` | Delete (blocked if in-use by active goals). **Requires `projectId`** — 400 otherwise. |
+| `POST` | `/api/workflows/:id/clone?projectId=X` | Deep-copy a workflow with a new ID. **Requires `projectId`** — 400 otherwise. |
+
+There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated.
 
 ### Preferences
 

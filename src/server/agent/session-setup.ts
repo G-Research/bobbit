@@ -147,7 +147,7 @@ export interface PipelineContext {
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
-	buildWorkflowList: () => string;
+	buildWorkflowList: (projectId?: string) => string;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -288,7 +288,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 		assistantGoalSpec += assistantDef.prompt;
 		if (plan.assistantType === "goal") {
-			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList());
+			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList(plan.projectId));
 			if (plan.reattemptGoalId) {
 				const origGoal = ctx.goalManager.getGoal(plan.reattemptGoalId);
 				if (origGoal) {
