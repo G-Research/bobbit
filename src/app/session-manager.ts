@@ -1171,7 +1171,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const mode: "provisional" | "registered" = project?.provisional ? "provisional" : "registered";
 			const isFirstProposal = state.activeProjectProposal == null;
 			const prevCurrent = state.activeProjectProposal?.currentConfig;
-			state.activeProjectProposal = { sessionId, fields, mode, currentConfig: prevCurrent };
+			// Bug C fix: shallow-merge structured side-tables (`components`,
+			// `workflows`) so a streaming partial that lacks one of them doesn't
+			// drop the prior structured value. Incoming flat fields still win.
+			const prevFields = state.activeProjectProposal?.fields ?? {};
+			const merged: Record<string, unknown> = { ...prevFields, ...fields };
+			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
+			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
+			state.activeProjectProposal = { sessionId, fields: merged, mode, currentConfig: prevCurrent };
 			state.assistantHasProposal = true;
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				if (state.assistantTab === "chat" && !isDesktop()) {
@@ -1780,6 +1787,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
 	const { fields, sessionId: propSessionId } = proposal;
+	captureProposalSnapshotForDiff(fields);
 
 	// Find the provisional project for this session
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
@@ -1859,12 +1867,30 @@ function safeParseJson(text: string): unknown {
 	try { return JSON.parse(text); } catch { return undefined; }
 }
 
+/** Snapshot the structured `components` / `workflows` from the about-to-be-cleared
+ *  proposal so the next proposal's diff view has a baseline. */
+function captureProposalSnapshotForDiff(fields: Record<string, unknown>): void {
+	void (async () => {
+		try {
+			const { setProjectProposalPrev } = await import("./render.js");
+			const rawComponents = fields.components;
+			const rawWorkflows = fields.workflows;
+			const components = Array.isArray(rawComponents) ? (rawComponents as unknown[]).map(c => ({ ...(c as Record<string, unknown>) })) as any : [];
+			const workflows = (rawWorkflows && typeof rawWorkflows === "object" && !Array.isArray(rawWorkflows))
+				? JSON.parse(JSON.stringify(rawWorkflows))
+				: {};
+			setProjectProposalPrev({ components, workflows });
+		} catch { /* render module not loaded yet — fine */ }
+	})();
+}
+
 /** Registered-mode accept: apply diffed config fields to the live project
  *  without terminating or navigating away. */
 async function acceptRegisteredProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
 	const { fields, sessionId: propSessionId, currentConfig } = proposal;
+	captureProposalSnapshotForDiff(fields);
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
 	const projectId = session?.projectId;
 	if (!projectId) return;
@@ -1956,6 +1982,12 @@ export function backToSessions(): void {
 	state.activeGoalProposal = null;
 	state.activeRoleProposal = null;
 	state.activeProjectProposal = undefined;
+	void (async () => {
+		try {
+			const { resetProjectProposalPanel } = await import("./render.js");
+			resetProjectProposalPanel();
+		} catch { /* ignore */ }
+	})();
 	state.assistantType = null;
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;

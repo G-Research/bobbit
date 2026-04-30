@@ -905,6 +905,22 @@ body {
 	overflow-x: hidden;
 }
 
+/*
+ * iOS Safari (and Mobile Safari WebView) auto-zoom the page when an input,
+ * textarea, or select is focused with a computed font-size below 16px. The
+ * effect is jarring — the layout snaps to a wider scale and the user has to
+ * pinch back out. We override this only on touch devices (coarse pointer +
+ * no hover) so desktop-sized inputs still honour their Tailwind text-xs / sm
+ * classes for visual density. 16px is the threshold Mobile Safari uses; we
+ * use !important because Tailwind utilities like `text-xs` would otherwise
+ * win the cascade.
+ */
+@media (hover: none) and (pointer: coarse) {
+	input, textarea, select {
+		font-size: 16px !important;
+	}
+}
+
 html {
 	overflow-x: hidden;
 }

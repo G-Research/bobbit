@@ -1738,11 +1738,16 @@ export class AgentInterface extends LitElement {
 		const abbrev: Record<string, string> = { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi" };
 		const full: Record<string, string> = { off: i18n("Off"), minimal: i18n("Minimal"), low: i18n("Low"), medium: i18n("Medium"), high: i18n("High") };
 		const desired = this._isMobileViewport ? (abbrev[level] ?? abbrev.off) : (full[level] ?? full.off);
-		// The label span contains an icon span and a sibling text node — replace only
-		// the text node, leave the icon untouched.
+		// The label span contains: whitespace text nodes (from Lit template formatting),
+		// an icon <span>, and the label text node. We want to update only the label —
+		// i.e. the last text node containing non-whitespace content. Updating the first
+		// text node (whitespace before the icon) was the bug that caused the abbreviated
+		// label to appear to the left of the brain icon.
 		let textNode: Text | null = null;
 		for (const node of Array.from(labelSpan.childNodes)) {
-			if (node.nodeType === Node.TEXT_NODE) { textNode = node as Text; break; }
+			if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim() !== "") {
+				textNode = node as Text;
+			}
 		}
 		if (textNode) {
 			if (textNode.textContent !== desired) textNode.textContent = desired;
