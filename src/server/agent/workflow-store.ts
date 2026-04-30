@@ -1,4 +1,21 @@
-import { YamlStore } from "./yaml-store.js";
+/**
+ * Inline-workflow store — replaces the on-disk `workflows/<id>.yaml` layer.
+ *
+ * See docs/design/multi-repo-components.md §3.2.
+ *
+ * Workflows now live inline in `project.yaml::workflows`. This store is a
+ * thin facade over `ProjectConfigStore` that exposes the same API the
+ * legacy `WorkflowStore` did (so `WorkflowManager`, `ConfigCascade`, and
+ * `goal-manager` can keep calling `get / getAll / put / remove / update`
+ * without changes), but the underlying data source is the inline block.
+ *
+ * The class is exported under both names (`WorkflowStore` and
+ * `InlineWorkflowStore`) for back-compat with existing imports.
+ */
+
+import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineVerifyStep } from "./project-config-store.js";
+
+// ── Public types (kept compatible with the old WorkflowStore shape) ──
 
 export interface VerifyStep {
 	name: string;
@@ -12,6 +29,10 @@ export interface VerifyStep {
 	label?: string;
 	role?: string;
 	description?: string;
+	/** Structural reference: which component to run from (Phase 2). */
+	component?: string;
+	/** Structural reference: which command on that component to invoke (Phase 2). */
+	command?: string;
 }
 
 export interface WorkflowGate {
@@ -21,6 +42,7 @@ export interface WorkflowGate {
 	content?: boolean;
 	injectDownstream?: boolean;
 	optional?: boolean;
+	manual?: boolean;
 	metadata?: Record<string, string>;
 	verify?: VerifyStep[];
 }
@@ -36,109 +58,206 @@ export interface Workflow {
 	hidden?: boolean;
 }
 
-// ── Normalization helpers ────────────────────────────────────────
+// ── Normalization between the inline yaml shape and the runtime shape ──
 
-function normalizeGate(data: Record<string, unknown>): WorkflowGate {
+function normalizeStep(raw: unknown): VerifyStep {
+	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+	const step: VerifyStep = {
+		name: typeof r.name === "string" ? r.name : "",
+		type: (r.type === "llm-review" || r.type === "agent-qa") ? r.type : "command",
+	};
+	if (typeof r.run === "string") step.run = r.run;
+	if (typeof r.prompt === "string") step.prompt = r.prompt;
+	if (r.expect === "success" || r.expect === "failure") step.expect = r.expect;
+	if (typeof r.timeout === "number") step.timeout = r.timeout;
+	if (typeof r.phase === "number") step.phase = r.phase;
+	if (r.optional === true) step.optional = true;
+	if (typeof r.label === "string") step.label = r.label;
+	if (typeof r.role === "string") step.role = r.role;
+	if (typeof r.description === "string") step.description = r.description;
+	if (typeof r.component === "string") step.component = r.component;
+	if (typeof r.command === "string") step.command = r.command;
+	return step;
+}
+
+function normalizeGate(raw: unknown): WorkflowGate {
+	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
 	const gate: WorkflowGate = {
-		id: (data.id as string) ?? "",
-		name: (data.name as string) ?? "",
-		dependsOn: Array.isArray(data.depends_on) ? data.depends_on
-			: Array.isArray(data.dependsOn) ? data.dependsOn
+		id: typeof r.id === "string" ? r.id : "",
+		name: typeof r.name === "string" ? r.name : "",
+		dependsOn: Array.isArray(r.depends_on) ? r.depends_on as string[]
+			: Array.isArray(r.dependsOn) ? r.dependsOn as string[]
 			: [],
 	};
-	if (data.content === true) gate.content = true;
-	if (data.inject_downstream === true || data.injectDownstream === true) gate.injectDownstream = true;
-	if (data.optional === true) gate.optional = true;
-	if (data.metadata && typeof data.metadata === "object") {
-		gate.metadata = data.metadata as Record<string, string>;
+	if (r.content === true) gate.content = true;
+	if (r.inject_downstream === true || r.injectDownstream === true) gate.injectDownstream = true;
+	if (r.optional === true) gate.optional = true;
+	if (r.manual === true) gate.manual = true;
+	if (r.metadata && typeof r.metadata === "object" && !Array.isArray(r.metadata)) {
+		gate.metadata = r.metadata as Record<string, string>;
 	}
-	if (Array.isArray(data.verify)) {
-		gate.verify = (data.verify as Record<string, unknown>[]).map(normalizeVerifyStep);
+	if (Array.isArray(r.verify)) {
+		gate.verify = r.verify.map(normalizeStep);
 	}
 	return gate;
 }
 
-function normalizeVerifyStep(data: Record<string, unknown>): VerifyStep {
-	const step: VerifyStep = {
-		name: (data.name as string) ?? "",
-		type: (data.type as "command" | "llm-review" | "agent-qa") ?? "command",
-	};
-	if (typeof data.run === "string") step.run = data.run;
-	if (typeof data.prompt === "string") step.prompt = data.prompt;
-	if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
-	if (typeof data.timeout === "number") step.timeout = data.timeout;
-	if (typeof data.phase === "number") step.phase = data.phase;
-	if (data.optional === true) step.optional = true;
-	if (typeof data.label === "string") step.label = data.label;
-	if (typeof data.role === "string") step.role = data.role;
-	if (typeof data.description === "string") step.description = data.description;
-	return step;
-}
-
-function parseWorkflow(data: Record<string, unknown>): Workflow | null {
-	if (!data.id) return null;
-	const gates = Array.isArray(data.gates) ? data.gates : [];
+function normalizeWorkflow(raw: unknown, idHint: string): Workflow | null {
+	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : null;
+	if (!r) return null;
+	const id = typeof r.id === "string" && r.id ? r.id : idHint;
+	if (!id) return null;
+	const gates = Array.isArray(r.gates) ? r.gates.map(normalizeGate) : [];
 	const wf: Workflow = {
-		id: data.id as string,
-		name: (data.name as string) ?? (data.id as string),
-		description: (data.description as string) ?? "",
-		gates: gates.map((g: Record<string, unknown>) => normalizeGate(g)),
-		createdAt: (data.createdAt as number) ?? 0,
-		updatedAt: (data.updatedAt as number) ?? 0,
+		id,
+		name: typeof r.name === "string" ? r.name : id,
+		description: typeof r.description === "string" ? r.description : "",
+		gates,
+		createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
+		updatedAt: typeof r.updatedAt === "number" ? r.updatedAt : 0,
 	};
-	if (data.hidden === true) wf.hidden = true;
+	if (r.hidden === true) wf.hidden = true;
 	return wf;
 }
 
-function serializeWorkflow(workflow: Workflow): Record<string, unknown> {
+function serializeStep(s: VerifyStep): Record<string, unknown> {
+	const out: Record<string, unknown> = { name: s.name, type: s.type };
+	if (s.component !== undefined) out.component = s.component;
+	if (s.command !== undefined) out.command = s.command;
+	if (s.run !== undefined) out.run = s.run;
+	if (s.prompt !== undefined) out.prompt = s.prompt;
+	if (s.expect !== undefined) out.expect = s.expect;
+	if (s.timeout !== undefined) out.timeout = s.timeout;
+	if (s.phase !== undefined) out.phase = s.phase;
+	if (s.optional) out.optional = true;
+	if (s.label !== undefined) out.label = s.label;
+	if (s.role !== undefined) out.role = s.role;
+	if (s.description !== undefined) out.description = s.description;
+	return out;
+}
+
+function serializeGate(g: WorkflowGate): Record<string, unknown> {
+	const out: Record<string, unknown> = { id: g.id, name: g.name };
+	if (g.content) out.content = true;
+	if (g.injectDownstream) out.inject_downstream = true;
+	if (g.optional) out.optional = true;
+	if (g.manual) out.manual = true;
+	if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
+	if (g.metadata) out.metadata = g.metadata;
+	if (g.verify && g.verify.length > 0) out.verify = g.verify.map(serializeStep);
+	return out;
+}
+
+function serializeWorkflow(wf: Workflow): InlineWorkflowDef {
+	// Cast through unknown — shapes are structurally compatible.
 	return {
-		id: workflow.id,
-		name: workflow.name,
-		description: workflow.description,
-		...(workflow.hidden ? { hidden: true } : {}),
-		gates: workflow.gates.map((g) => {
-			const out: Record<string, unknown> = { id: g.id, name: g.name };
-			if (g.content) out.content = true;
-			if (g.injectDownstream) out.inject_downstream = true;
-			if (g.optional) out.optional = true;
-			if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
-			if (g.metadata) out.metadata = g.metadata;
-			if (g.verify && g.verify.length > 0) {
-				out.verify = g.verify.map(v => {
-					const s: Record<string, unknown> = { name: v.name, type: v.type };
-					if (v.run) s.run = v.run;
-					if (v.prompt) s.prompt = v.prompt;
-					if (v.expect) s.expect = v.expect;
-					if (v.timeout) s.timeout = v.timeout;
-					if (v.phase) s.phase = v.phase;
-					if (v.optional) s.optional = v.optional;
-					if (v.label) s.label = v.label;
-					if (v.role) s.role = v.role;
-					if (v.description) s.description = v.description;
-					return s;
-				});
-			}
-			return out;
-		}),
-		createdAt: workflow.createdAt,
-		updatedAt: workflow.updatedAt,
-	};
+		id: wf.id,
+		name: wf.name,
+		description: wf.description,
+		...(wf.hidden ? { hidden: true } : {}),
+		gates: wf.gates.map(serializeGate) as unknown as InlineWorkflowGate[],
+	} as unknown as InlineWorkflowDef & { gates: InlineWorkflowGate[] };
 }
 
 /**
- * File-backed workflow store with builtin cascade support.
- * Each workflow is a YAML file in workflows/<id>.yaml.
- * Hidden workflows (e.g. test-only) are filtered from getAll/getAllLocal.
+ * Inline-workflow store.
+ *
+ * Source: `ProjectConfigStore::getWorkflows()`. Mutations go back through
+ * `ProjectConfigStore::setWorkflows()` so everything persists to a single
+ * `project.yaml` file.
+ *
+ * Builtins are held in-memory only and never written to disk; they serve
+ * as the lowest-priority layer in the config cascade.
  */
-export class WorkflowStore extends YamlStore<Workflow> {
-	constructor(configDir: string) {
-		super(configDir, {
-			subdir: "workflows",
-			keyFn: w => w.id,
-			parseItem: parseWorkflow,
-			serializeItem: serializeWorkflow,
-			logPrefix: "[workflow-store]",
-			filter: w => !w.hidden,
-		});
+export class InlineWorkflowStore {
+	private builtins: Map<string, Workflow> = new Map();
+
+	constructor(private readonly cfg: ProjectConfigStore) {}
+
+	// ── Builtin cascade (in-memory only) ────────────────────────
+
+	setBuiltins(items: Workflow[]): void {
+		this.builtins = new Map(items.map(i => [i.id, i]));
+	}
+
+	// ── Read operations ─────────────────────────────────────────
+
+	private readLocal(): Map<string, Workflow> {
+		this.cfg.reload();
+		const block = this.cfg.getWorkflows();
+		const out = new Map<string, Workflow>();
+		if (!block) return out;
+		for (const [id, raw] of Object.entries(block)) {
+			const wf = normalizeWorkflow(raw, id);
+			if (wf) out.set(wf.id, wf);
+		}
+		return out;
+	}
+
+	get(key: string): Workflow | undefined {
+		const local = this.readLocal();
+		return local.get(key) ?? this.builtins.get(key);
+	}
+
+	getLocal(key: string): Workflow | undefined {
+		return this.readLocal().get(key);
+	}
+
+	getAll(): Workflow[] {
+		const local = this.readLocal();
+		const merged = new Map(this.builtins);
+		for (const [k, v] of local) merged.set(k, v);
+		return [...merged.values()].filter(w => !w.hidden);
+	}
+
+	getAllLocal(): Workflow[] {
+		return [...this.readLocal().values()].filter(w => !w.hidden);
+	}
+
+	// ── Write operations ────────────────────────────────────────
+
+	put(workflow: Workflow): void {
+		const block = this.cfg.getWorkflows() ?? {};
+		block[workflow.id] = serializeWorkflow(workflow) as unknown as InlineWorkflowDef;
+		this.cfg.setWorkflows(block);
+	}
+
+	remove(key: string): void {
+		const block = this.cfg.getWorkflows();
+		if (!block) return;
+		if (key in block) {
+			delete block[key];
+			this.cfg.setWorkflows(block);
+		}
+	}
+
+	update(key: string, updates: Partial<Omit<Workflow, "id" | "createdAt">>): boolean {
+		const local = this.readLocal();
+		let existing = local.get(key);
+		if (!existing) {
+			// Copy-on-write from builtins.
+			const bi = this.builtins.get(key);
+			if (!bi) return false;
+			existing = { ...bi };
+		}
+		const merged: Workflow = {
+			...existing,
+			...updates,
+			updatedAt: Date.now(),
+		} as Workflow;
+		this.put(merged);
+		return true;
+	}
+
+	/** Shape-compatible reload hook — no-op since we read on every call. */
+	reload(): void {
+		// readLocal() reloads on every access; nothing to do here.
 	}
 }
+
+/** @deprecated Use `InlineWorkflowStore` directly. Re-exported for back-compat. */
+export const WorkflowStore = InlineWorkflowStore;
+export type WorkflowStore = InlineWorkflowStore;
+
+// Re-export for type-only consumers that only need the inline-step types.
+export type { InlineVerifyStep };

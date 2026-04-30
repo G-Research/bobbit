@@ -78,9 +78,9 @@ export function scaffoldBobbitDir(projectRoot: string): void {
 
   // Create directory structure
   fs.mkdirSync(path.join(dotBobbit, "config", "roles"), { recursive: true });
-  fs.mkdirSync(path.join(dotBobbit, "config", "workflows"), {
-    recursive: true,
-  });
+  // Workflows are no longer scaffolded as a runtime directory — they live
+  // inline in `project.yaml::workflows`. New projects start with no workflows;
+  // the project assistant generates them on registration.
   // Create empty tools directory — tool groups resolve via cascade from builtins
   fs.mkdirSync(path.join(dotBobbit, "config", "tools"), { recursive: true });
   fs.mkdirSync(path.join(dotBobbit, "extensions"), { recursive: true });
@@ -89,8 +89,9 @@ export function scaffoldBobbitDir(projectRoot: string): void {
   });
   fs.mkdirSync(path.join(dotBobbit, "state", "tls"), { recursive: true });
 
-  // Roles, workflows, and tools are resolved at runtime via ConfigCascade
-  // (seeded from builtins on startup). Only create empty directories for them.
+  // Roles and tools are resolved at runtime via ConfigCascade (seeded from
+  // builtins on startup). Only create empty directories for them. Workflows
+  // live inline in project.yaml — no directory needed.
   const defaultsDir = path.join(__dirname, "defaults");
   if (fs.existsSync(defaultsDir)) {
     const sysPromptSrc = path.join(defaultsDir, "system-prompt.md");

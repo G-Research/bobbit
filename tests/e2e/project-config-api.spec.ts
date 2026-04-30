@@ -107,6 +107,51 @@ test.describe("Project config API — mid-session proposal field coverage", () =
 		}
 	});
 
+	test("PUT /api/projects/:id/config translates legacy *_command fields into components[0].commands (back-compat)", async () => {
+		// Per the multi-repo follow-up Issue 2/5: legacy proposal payloads (top-level
+		// build_command/test_command/...) must be folded into components[0].commands
+		// server-side. New proposal payloads (with `components` field) are accepted as-is.
+		const { id, cleanup } = await registerTmpProject("legacy-translate");
+		try {
+			const putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					build_command: "npm run build",
+					test_command: "npm test",
+					typecheck_command: "npm run check",
+					test_unit_command: "npm run test:unit",
+					test_e2e_command: "npm run test:e2e",
+					worktree_setup_command: "npm ci",
+				}),
+			});
+			expect(putRes.status).toBe(200);
+
+			// Resolved view exposes the structured side-table; verify components[0]
+			// was synthesized with project-name and the legacy commands folded in.
+			const getRes = await apiFetch(`/api/projects/${id}/config`);
+			const raw = await getRes.json();
+			// Legacy flat keys are still echoed back for back-compat clients.
+			expect(raw.build_command).toBe("npm run build");
+
+			// The structural components side-table is exposed via /api/projects/:id/structured.
+			const structRes = await apiFetch(`/api/projects/${id}/structured`);
+			const struct = await structRes.json();
+			expect(Array.isArray(struct.components), "structured endpoint should expose components[]").toBe(true);
+			expect(struct.components.length, "single default component").toBe(1);
+			const c0 = struct.components[0];
+			expect(c0.name).toBe("legacy-translate");
+			expect(c0.repo).toBe(".");
+			expect(c0.commands.build).toBe("npm run build");
+			expect(c0.commands.test).toBe("npm test");
+			expect(c0.commands.check).toBe("npm run check");
+			expect(c0.commands.unit).toBe("npm run test:unit");
+			expect(c0.commands.e2e).toBe("npm run test:e2e");
+			expect(c0.worktreeSetupCommand || c0.worktree_setup_command).toBe("npm ci");
+		} finally {
+			cleanup();
+		}
+	});
+
 	test("PUT /api/projects/:id/config preserves unknown custom keys", async () => {
 		const { id, cleanup } = await registerTmpProject("custom-keys");
 		try {

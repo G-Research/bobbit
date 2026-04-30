@@ -14,11 +14,16 @@ Goals can run in **team mode**, where a Team Lead agent orchestrates multiple ro
 
 ### Workflows
 
-A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows are stored as YAML files in `defaults/workflows/`.
+A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows live **inline in `project.yaml::workflows`** — the project assistant generates a bespoke block per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD authoring guide is the single source of truth for workflow patterns; the runtime never reads it.
 
 When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time.
 
 Goals without workflows still work fine — workflows are optional.
+
+**Removed runtime concepts:**
+
+- `.bobbit/config/workflows/<id>.yaml` is no longer read at runtime. The first-boot migration in `migrate-project-yaml.ts` folds any pre-existing files into the inline `workflows:` block and removes the directory.
+- `defaults/workflows/*.yaml` is the legacy shipped-builtins location. New projects do not depend on these IDs being shipped — the project assistant generates project-specific workflows from the MD guide. The legacy YAMLs are scheduled for deletion (see follow-up note in [docs/internals.md — Multi-repo & components](internals.md#multi-repo--components)); during the transition window they are still loaded by `BuiltinConfigProvider` so existing tests that reference workflow IDs by name keep working.
 
 #### Workflow data model
 
@@ -26,8 +31,13 @@ Goals without workflows still work fine — workflows are optional.
 interface VerifyStep {
   name: string;
   type: "command" | "llm-review" | "agent-qa";
-  run?: string;       // Shell command (for type: "command")
-  prompt?: string;    // Review/QA prompt (for type: "llm-review" or "agent-qa")
+  // For type: "command" — three exclusive shapes:
+  component?: string; // Component name to resolve against components[]
+  command?: string;   // Named command on that component (component.commands[command])
+  run?: string;       // Free-form shell. May coexist with component (uses component cwd) or stand alone.
+  // For type: "llm-review" / "agent-qa":
+  prompt?: string;    // Review/QA prompt body (runtime tokens substituted by gate runner)
+  role?: string;      // Reviewer role to spawn
   expect?: "success" | "failure";
   timeout?: number;
   phase?: number;     // Execution phase (default 0). See "Phased verification" below.
@@ -44,6 +54,7 @@ interface WorkflowGate {
   injectDownstream?: boolean; // Whether passed content is injected into downstream agents
   metadata?: Record<string, string>; // Key-value metadata schema
   optional?: boolean;      // If true, team lead may signal with "N/A" (still must be signaled)
+  manual?: boolean;        // If true, gate has no automated verify — user clicks "Mark passed" when ready
   verify?: VerifyStep[];   // Verification steps to run on signal
 }
 
@@ -57,51 +68,63 @@ interface Workflow {
 }
 ```
 
-#### Workflow YAML format
+#### Inline workflow YAML format
 
-Workflows are defined in `defaults/workflows/<id>.yaml`:
+Workflows live inside `project.yaml` under the top-level `workflows:` block (one entry per id). For `type: command` steps, three step shapes are accepted; there is **no `cwd:` field** on any step — working directory is structurally derived from the component, or it is the per-branch container root.
+
+| Step shape | Working directory | Command source |
+|---|---|---|
+| `{ component, command }` | `<branch-container>/<component.repo>/<component.relative_path>` | `components[component].commands[command]` |
+| `{ component, run }` | same as above | literal `run` string |
+| `{ run }` | `<branch-container>` (per-branch worktree set root) | literal `run` string |
 
 ```yaml
-id: general
-name: General
-description: Lightweight workflow for general-purpose goals
+# project.yaml excerpt
+components:
+  - name: myapp
+    repo: "."
+    commands: { build: npm run build, check: npm run check, test: npm test }
 
-gates:
-  - id: design-doc
-    name: Design Document
-    content: true
-    inject_downstream: true
-    verify:
-      - name: "Design quality"
-        type: llm-review
-        prompt: |
-          Review this design document. Verify:
-          1. Approach is clearly described
-          2. File changes are listed
-          3. Acceptance criteria are specific and testable
+workflows:
+  general:
+    name: General
+    description: Lightweight workflow for general-purpose goals.
+    gates:
+      - id: design-doc
+        name: Design Document
+        content: true
+        inject_downstream: true
+        verify:
+          - { name: "Design review", type: llm-review, role: architect, prompt: "Review this design document." }
 
-  - id: implementation
-    name: Implementation
-    depends_on: [design-doc]
-    verify:
-      - name: "Type check passes"
-        type: command
-        run: "npm run check"
-        # phase: 0 (implicit default)
-      - name: "Code review"
-        type: llm-review
-        phase: 1           # Runs only after phase-0 steps pass
-        prompt: |
-          Review the implementation for correctness, completeness, and code quality.
+      - id: implementation
+        name: Implementation
+        depends_on: [design-doc]
+        verify:
+          # Component-linked, named command — resolves to components.myapp.commands.build:
+          - { name: "Build myapp", type: command, component: "myapp", command: "build" }
+          # Component-linked, free-form shell (cwd derived from component):
+          - { name: "Custom thing", type: command, component: "myapp", run: "./scripts/special.sh" }
+          - { name: "Code review", type: llm-review, phase: 1, prompt: "Review the changes on {{branch}} vs origin/{{master}}." }
 
-  - id: ready-to-merge
-    name: Ready to Merge
-    depends_on: [implementation]
-    verify:
-      - name: "All gates passed"
-        type: command
-        run: "echo 'All upstream gates passed'"
+      - id: ready-to-merge
+        name: Ready to Merge
+        depends_on: [implementation]
+        verify:
+          # Pure free-form (cwd = per-branch container root):
+          - { name: "Branch pushed", type: command, run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
+
+**Why structural references.** Editing `components[name].commands[name]` updates every workflow step that references it — no regeneration required for command edits. Validation at load time catches typos and stale references (component renamed, command removed) before the agent runs anything. Cleaner audit trail in gate output: shows the `(component, command)` pair, not just a literal shell string.
+
+**Validator rejects** at workflow-load time:
+
+- `type: command` with `command:` but no `component:`
+- `type: command` with both `command:` and `run:`
+- `component:` referencing an unknown component name
+- a `(component, command)` pair where the component has no such command name
+
+The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{goal_title}}`, etc.) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
 
 #### Dependency DAG
 
@@ -160,7 +183,7 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 
 **How the harness enforces this per-gate:** reviewer/architect/spec-auditor role YAMLs contain a `{{REVIEW_CONTEXT}}` placeholder in their preamble. `buildReviewPrompt()` in `src/server/agent/verification-harness.ts` substitutes it with either (a) an "implementation review" block containing the concrete `origin/<primary>...HEAD` diff instructions and the resolved baseline SHA, or (b) a "pre-implementation" notice that explicitly forbids `git diff` / `git log` and reminds the reviewer that zero goal-unique commits is the normal state. The branching decision uses `isPreImplementationGate()` on the signalled gate — role YAMLs never hardcode diff commands.
 
-**Migration note for user-authored workflow YAMLs in `.bobbit/config/workflows/`:** the harness resolves `{{master}}` to the dynamically-detected primary branch, but the `origin/` prefix is now injected only by built-in YAMLs (the ones in `defaults/workflows/`). User overrides that still say `{{master}}...HEAD` (without `origin/`) will diff against the local ref. To get the full RC1 fix, rewrite those references to `origin/{{master}}...HEAD` in your override. Pre-implementation gates in user overrides automatically benefit from the RC2 fix regardless, because that logic lives in the harness's review-prompt builder.
+**Migration note for user-authored workflows:** `.bobbit/config/workflows/<id>.yaml` is no longer read at runtime. Pre-existing files there are folded into `project.yaml::workflows` on first boot by `migrate-project-yaml.ts` and the directory is removed. The harness resolves `{{master}}` to the dynamically-detected primary branch, but the `origin/` prefix is now injected only by built-in workflow content. User-authored prompts that still say `{{master}}...HEAD` (without `origin/`) will diff against the local ref — rewrite to `origin/{{master}}...HEAD` to get the full fix. Pre-implementation gates automatically benefit regardless, because that logic lives in the harness's review-prompt builder.
 
 #### Phased verification
 
@@ -320,6 +343,21 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
 Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+
+#### Multi-repo git handoff
+
+In multi-repo projects, a single goal/session/staff worktree set spans multiple repos all sharing one branch name (`goal/<slug>-<id>`, `session-<slug>-<id>`, etc.). To track per-repo commit state, tasks carry a per-repo handoff map:
+
+```typescript
+// Multi-repo handoff (Phase 4):
+task.gitHandoff: { [repoName]: { baseSha: string, headSha?: string, branch: string } }
+```
+
+The single-repo flat shape (`task.baseSha` / `task.headSha` / `task.branch` directly on the task) is preserved for back-compat — read helpers transparently project a single-repo task into the same shape so callers don't need to special-case mode.
+
+Goal `git-status` and `git-diff` endpoints aggregate across all repos; the git-status widget shows per-repo collapsible sections. Cleanup tears down all per-repo worktrees and deletes all matching remote branches. PR/merge tooling (gh integration) operates per-repo; a multi-repo goal opens N PRs (one per repo with commits), all titled with the goal's branch.
+
+Multi-repo invariant: all repos in a worktree set sit on the same branch name. There is no per-repo branch divergence within a goal.
 
 Tasks and workflows are complementary layers:
 - **Workflows** = quality layer (what gates to pass, in what order, with what verification)

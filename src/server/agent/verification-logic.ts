@@ -146,10 +146,15 @@ export function isPreImplementationGate(gate: { content?: boolean; depends_on?: 
  *
  * Namespaces:
  * - {{branch}}, {{master}}, etc. — built-in goal variables
- * - {{project.key}} — from project config (.bobbit/config/project.yaml)
  * - {{agent.key}} — from the signal's metadata (provided by the agent)
  * - {{gate_id.meta.key}} — from an upstream gate's metadata
  * - {{goal_spec}} — the goal specification text
+ *
+ * Phase 2 of the multi-repo design dropped support for `{{project.X}}`
+ * tokens — their replacement is the structural `{ component, command }`
+ * step shape resolved at runtime by `verification-harness.resolveStep()`.
+ * The `projectVars` parameter is retained for back-compat at the call site
+ * but is no longer consulted; passing it has no effect.
  *
  * Legacy bare references like {{typecheck_command}} are NOT resolved to
  * prevent accidental cross-namespace collisions. Use the explicit namespace.
@@ -157,17 +162,18 @@ export function isPreImplementationGate(gate: { content?: boolean; depends_on?: 
 export function substituteVars(
 	template: string,
 	builtinVars: Record<string, string>,
-	projectVars: Record<string, string>,
+	_projectVars: Record<string, string>,
 	agentVars: Record<string, string>,
 	allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 ): string {
 	return template.replace(/\{\{([^}]+)\}\}/g, (match, key: string) => {
 		const trimmed = key.trim();
 
-		// {{project.key}} — project config
+		// {{project.key}} — deliberately UNRESOLVED in Phase 2. Workflow steps
+		// that still reference these tokens will surface the unresolved
+		// variable and fail at shell-time as a typo, which is the agreed
+		// breaking-change surface from docs/design/multi-repo-components.md §3.4.
 		if (trimmed.startsWith("project.")) {
-			const field = trimmed.slice("project.".length);
-			if (field in projectVars) return projectVars[field];
 			return match;
 		}
 

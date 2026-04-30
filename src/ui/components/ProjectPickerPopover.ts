@@ -1,3 +1,14 @@
+// NOTE: This popover is the project *switcher* (used in the goal-entry / sidebar
+// flow to swap between already-registered projects). The Add-Project flow lives
+// in `src/app/dialogs.ts::showProjectDialog` and the repo-scan + components
+// checklist + editable commands map per-repo lives in:
+//   - `showProjectDialog` (folder pick + multi-repo scan checklist + route to
+//     project-assistant chat with the scan results pre-loaded).
+//   - Settings → Components tab (`src/app/settings-page.ts::renderProjectComponentsTab`,
+//     wired via `POST /api/projects/:id/rescan-repos`) for already-registered
+//     projects.
+// Keeping the picker folder-only is deliberate: it stays a fast keyboard-driven
+// jump-to-project widget. See docs/design/multi-repo-components.md §8.1.
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 

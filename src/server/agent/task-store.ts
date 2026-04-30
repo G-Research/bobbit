@@ -24,6 +24,23 @@ export interface PersistedTask {
 	workflowGateId?: string;
 	/** Workflow gate IDs whose accepted content to inject when prompting the agent. */
 	inputGateIds?: string[];
+	/** Per-repo git handoff (multi-repo). Falls back to flat baseSha/headSha/branch for single-repo. */
+	gitHandoff?: Record<string, { baseSha?: string; headSha?: string; branch?: string }>;
+}
+
+/**
+ * Read a task's git handoff for a specific repo, falling back to legacy flat
+ * fields for single-repo tasks. Returns an empty object when neither is set.
+ *
+ * Callers should always go through this helper rather than reading flat fields
+ * directly so single- and multi-repo tasks behave uniformly.
+ */
+export function readHandoff(
+	task: PersistedTask,
+	repo: string,
+): { baseSha?: string; headSha?: string; branch?: string } {
+	if (task.gitHandoff && task.gitHandoff[repo]) return { ...task.gitHandoff[repo] };
+	return { baseSha: task.baseSha, headSha: task.headSha, branch: task.branch };
 }
 
 /**

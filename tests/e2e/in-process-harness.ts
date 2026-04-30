@@ -135,6 +135,28 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();
 
+		// Seed inline test workflows BEFORE the gateway boots — direct file
+		// write avoids the HTTP round-trip that previously widened a race
+		// window. See gateway-harness.ts for rationale.
+		try {
+			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+			const { mkdirSync: mkSync, writeFileSync: wrSync } = await import("node:fs");
+			const yaml = await import("yaml");
+			const yamlContent = yaml.stringify({
+				name: "default",
+				components: [TEST_DEFAULT_COMPONENT],
+				workflows: testWorkflows(),
+			});
+			// Server-level config (cascade): <bobbitDir>/config/project.yaml
+			const serverConfigDir = join(bobbitDir, "config");
+			mkSync(serverConfigDir, { recursive: true });
+			wrSync(join(serverConfigDir, "project.yaml"), yamlContent);
+			// Per-project config (project-context): <bobbitDir>/.bobbit/config/project.yaml
+			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			mkSync(projectConfigDir, { recursive: true });
+			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
+		} catch { /* best-effort */ }
+
 		const gw = createGateway({
 			host: "127.0.0.1",
 			port: 0,             // OS-assigned port
@@ -150,6 +172,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Register the server CWD as a project via REST so existing tests that
 		// rely on a pre-existing "default" project at projects[0] keep working.
 		// The server no longer auto-registers one — see server.ts startup block.
+		// Workflows already seeded above via direct project.yaml write.
 		try {
 			await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",

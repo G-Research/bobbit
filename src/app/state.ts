@@ -165,7 +165,8 @@ export const state = {
 	pendingProjects: [] as Array<{ sessionId: string; dirPath: string; name: string }>,
 	activeProjectProposal: undefined as undefined | {
 		sessionId: string;
-		fields: Record<string, string>;
+		/** Plain string fields plus optional structured blocks (components, workflows). */
+		fields: Record<string, unknown>;
 		/** Provisional = project is still in .bobbit/state/projects.json with
 		 *  provisional:true (existing assistant flow). Registered = any other
 		 *  project (regular/goal/staff session pointing at a live project). */

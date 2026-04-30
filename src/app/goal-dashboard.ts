@@ -65,6 +65,18 @@ let loading = true;
 let error = "";
 
 /** Git merge status for goal branch */
+interface GoalRepoEntry {
+	branch?: string;
+	primaryBranch?: string;
+	isOnPrimary?: boolean;
+	clean?: boolean;
+	aheadOfPrimary?: number;
+	behindPrimary?: number;
+	mergedIntoPrimary?: boolean;
+	status?: Array<{ file: string; status: string }>;
+	statusFiles?: Array<{ file: string; status: string }>;
+	summary?: string;
+}
 interface GoalGitStatus {
 	branch: string;
 	primaryBranch: string;
@@ -79,6 +91,8 @@ interface GoalGitStatus {
 	unpushed?: boolean;
 	status?: Array<{ file: string; status: string }>;
 	summary?: string;
+	/** Multi-repo per-repo envelope (Phase 4). Single-repo: { ".": <self> }. */
+	repos?: Record<string, GoalRepoEntry>;
 }
 let gitStatus: GoalGitStatus | null = null;
 /** Tri-state repo detection for the dashboard widget. Widget renders whenever !== 'no'. */
@@ -1314,6 +1328,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.mergedIntoPrimary=${gs?.mergedIntoPrimary ?? false}
 						.unpushed=${gs?.unpushed ?? false}
 						.statusFiles=${gs?.status ?? []}
+						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}
 						.prState=${prStatus?.state}
 						.prUrl=${prStatus?.url}

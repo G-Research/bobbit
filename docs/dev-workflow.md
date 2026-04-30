@@ -246,6 +246,21 @@ See [AGENTS.md](../AGENTS.md#testing) for harness selection guidance and test re
 
 ---
 
+## Worktree branch namespaces
+
+When you list `git branch` in a Bobbit-managed repo you'll see several namespaces:
+
+| Prefix | Owner | Purpose |
+|---|---|---|
+| `pool/_pool-<id>` | Worktree pool | Pre-built worktrees waiting to be claimed by a session or goal. Renamed atomically on claim. (Pre-Phase 3 these used `session/_pool-*`; both prefixes are recognised on startup for back-compat.) |
+| `session/<slug>-<id>` | Live regular session | A session worktree after first prompt rename. Cleaned up on session archive. |
+| `goal/<slug>-<id>` | Live goal | Spans every component repo in multi-repo projects. |
+| `staff-<name>-<id>` | Staff agent | Long-lived; rebased onto the primary branch on each wake. |
+
+The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted state on every server start — orphaned pool entries and renamed-but-unpersisted worktrees are cleaned up automatically. See [internals.md — Session worktrees](internals.md#session-worktrees) for the full lifecycle.
+
+---
+
 ## Related docs
 
 - **[README.md](../README.md)** — Architecture overview, quick start, CLI flags

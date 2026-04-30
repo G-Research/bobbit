@@ -96,6 +96,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Git-status widget** → `src/ui/components/GitStatusWidget.ts`, `AgentInterface.ts`, `src/app/session-manager.ts`, `src/app/goal-dashboard.ts`, `src/app/git-status-refresh.ts`, `src/app/api.ts`, `src/server/server.ts` (`batchGitStatus`). See [docs/design/git-status-widget-reliability.md](docs/design/git-status-widget-reliability.md) and [docs/internals.md — Git status cache & client resilience](docs/internals.md#git-status-cache--client-resilience).
 - **Large content truncation** → `truncate-large-content.ts` (>32KB). Applied in `session-setup.ts`/`session-manager.ts`. Renderers: `WriteRenderer.ts`, `PreviewRenderer.ts`. Lazy-load via `GET /api/sessions/:id/tool-content/:mi/:bi`. See [docs/internals.md — Large content truncation](docs/internals.md#large-content-truncation).
 - **Modify sandbox behavior** → `sandbox: "docker"` in `project.yaml`. Key: `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. See [docs/internals.md — Docker sandbox](docs/internals.md#docker-sandbox).
+- **Add a multi-repo project / components / inline workflows** → components live in `project.yaml::components[]` (the only collection); workflows live inline in `project.yaml::workflows`. Default-component name = project name. Data-only components (no `commands`) declare a repo for the multi-repo invariant without contributing workflow steps. Workflow `type: command` step shapes: `{component, command}` | `{component, run}` | `{run}`; no `cwd:` field. Authoring patterns in [`defaults/workflow-authoring-guide.md`](defaults/workflow-authoring-guide.md). Full reference: [docs/internals.md — Multi-repo & components](docs/internals.md#multi-repo--components).
 - **Cleanup remote branches on archive** → goal archive snapshots agent branch list before teardown then push-deletes via `deleteRemoteGoalBranches` in `server.ts`; session archive eagerly push-deletes merged `session/*` via `session-eager-branch-delete.ts` from `session-manager.ts::terminateSession`. All push-deletes gated by `shouldSkipRemotePush()` in `skills/git.ts`. See [docs/design/orphan-remote-branch-cleanup.md](docs/design/orphan-remote-branch-cleanup.md) and [docs/internals.md — Remote branch cleanup](docs/internals.md#remote-branch-cleanup).
 - **Maintenance cleanup** → Settings → Maintenance. Scan/preview/execute pattern. Hosts Search Index panel. See [docs/internals.md — Semantic search](docs/internals.md#semantic-search).
 - **Per-project settings** → Settings → project tab. Inherits from System. REST: `GET/PUT /api/projects/:id/config`. See [docs/internals.md — Per-project config](docs/internals.md#per-project-config).
@@ -149,7 +150,11 @@ When asked to commit, other unstaged/staged changes may exist from another agent
 
 ### Worktrees
 
-Dev server runs from the **primary worktree** on `master`. All sessions use separate worktrees — goal sessions under `<project-root>-wt-goal/`, regular sessions under `<project-root>-wt-session/`. Assistant sessions (goal/project/tool assistants) don't edit code and don't get worktrees.
+Dev server runs from the **primary worktree** on `master`. All sessions use separate worktrees under `<project-root>-wt/<branch>/` (single-repo) or `<project-root>-wt/<branch>/<repo>/` (multi-repo). The default parent is `<rootPath>-wt/`; override with the project-level `worktree_root` field. Assistant sessions (goal/project/tool assistants) don't edit code and don't get worktrees.
+
+**Branch namespaces:** `pool/_pool-<id>` (pool pre-builds, was `session/_pool-*` pre-Phase 3), `session/<slug>-<id>` (live regular sessions after first prompt), `goal/<slug>-<id>` (goals), `staff-<name>-<id>` (staff). See [docs/dev-workflow.md — Worktree branch namespaces](docs/dev-workflow.md#worktree-branch-namespaces).
+
+**Multi-repo invariant:** in multi-repo projects, every configured component repo (including data-only ones) gets a sibling worktree on the same branch. The agent's cwd is the per-branch container (`<rootPath>-wt/<branch>/`), mirroring the primary `rootPath` structure. See [docs/internals.md — Multi-repo & components](docs/internals.md#multi-repo--components) for the project model and [docs/internals.md — Session worktrees](docs/internals.md#session-worktrees) for layout, pool claim, and rename-on-first-prompt mechanics.
 
 **Always edit files in your session worktree, never in the primary worktree.** Editing the primary worktree risks merge conflicts during rebase, corruption of in-progress work by other agents, and breaking the running dev server. Even for infra files that need to end up in primary, the correct flow is: edit here → commit → push → pull from primary. See [docs/dev-workflow.md](docs/dev-workflow.md) for the full rationale.
 
@@ -161,18 +166,20 @@ cd <primary-worktree> && git pull origin master
 
 You cannot `git checkout master` from a goal worktree — push to remote and pull from primary instead.
 
-### Worktree setup command
+### Worktree setup command (per-component)
 
-Configured via `worktree_setup_command` in `project.yaml`. Runs in new worktree dir with `SOURCE_REPO` env var. 2-minute timeout, non-fatal, `sh -c`.
+Configured **per component** via `components[*].worktree_setup_command` in `project.yaml`. Runs at the component's root path (`<worktree>/<component.repo>/<component.relative_path>`) with `SOURCE_REPO` env var pointing at the matching primary path. 2-minute timeout per component, non-fatal, `sh -c`. **No deduplication** — if multiple components in the same repo each define `worktree_setup_command`, it runs once per component.
 
 ```yaml
-worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
-# or: cp -r "$SOURCE_REPO/node_modules" node_modules
+components:
+  - name: myapp
+    repo: "."
+    worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
+    # or: cp -r "$SOURCE_REPO/node_modules" node_modules
+    commands: { build: npm run build, test: npm test }
 ```
 
-If not set, no setup runs (Bobbit doesn't assume your package manager).
-
-Staff agent worktrees are auto-refreshed on each wake cycle — rebased onto primary and `worktree_setup_command` re-run. `setupWorktreeDeps()` exported from `src/server/skills/git.ts` for reuse. Sandboxed staff skip host-side refresh.
+Components without `worktree_setup_command` (including all data-only components) are silently skipped. Staff agent worktrees are auto-refreshed on each wake cycle — rebased onto primary and per-component setup re-run. `runComponentSetups()` exported from `src/server/skills/worktree-setup.ts`. Sandboxed staff skip host-side refresh.
 
 ## Reference docs
 
