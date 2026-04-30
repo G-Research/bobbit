@@ -88,14 +88,15 @@ class AskWidget {
   optionCount(qIdx) {
     const q = this.questions[qIdx];
     if (!q) return 0;
-    return q.options.length + (q.allow_other ? 1 : 0);
+    // "Other" is always present.
+    return q.options.length + 1;
   }
 
   optionValueAt(qIdx, optIdx) {
     const q = this.questions[qIdx];
     if (!q || optIdx < 0) return null;
     if (optIdx < q.options.length) return q.options[optIdx];
-    if (q.allow_other && optIdx === q.options.length) return OTHER_SENTINEL;
+    if (optIdx === q.options.length) return OTHER_SENTINEL;
     return null;
   }
 
@@ -105,7 +106,7 @@ class AskWidget {
     if (!q || !d) return false;
     if (q.multi) {
       const arr = Array.isArray(d.selected) ? d.selected : [];
-      const maxOptionCount = q.options.length + (q.allow_other ? 1 : 0);
+      const maxOptionCount = q.options.length + 1;
       const min = q.min != null ? q.min : 1;
       const max = q.max != null ? q.max : maxOptionCount;
       if (arr.length < min || arr.length > max) return false;
@@ -443,19 +444,30 @@ class AskWidget {
         <span class="ask-option-index" aria-hidden="true">${optIdx + 1}.</span>
         <span class="ask-option-check" aria-hidden="true">${checked ? "✓" : ""}</span>
         <span class="ask-option-text">${escapeHtml(label)}</span>
-        ${isOther && checked ? `<input type="text" class="ask-other-input" value="${escapeHtml(otherText)}" ${readOnly ? "disabled" : ""}>` : ""}
       `;
       const input = lbl.querySelector(`input[type=${inputType}]`);
       input.addEventListener("change", () => this.selectOption(this.activeTab, value));
       lbl.addEventListener("focus", () => { if (!readOnly) { this.focusedOption = optIdx; } });
-      const txt = lbl.querySelector("input[type=text]");
-      if (txt) {
-        txt.addEventListener("input", (e) => this.setOtherText(this.activeTab, e.target.value));
-      }
-      return lbl;
+      if (!isOther) return lbl;
+      // Other: wrap label + text input in a flex row so label clicks don't
+      // get swallowed by the text input.
+      const row = document.createElement("div");
+      row.className = "ask-option-other-row";
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "8px";
+      row.appendChild(lbl);
+      const txt = document.createElement("input");
+      txt.type = "text";
+      txt.className = "ask-other-input";
+      txt.value = otherText;
+      if (readOnly) txt.disabled = true;
+      txt.addEventListener("input", (e) => this.setOtherText(this.activeTab, e.target.value));
+      row.appendChild(txt);
+      return row;
     };
     q.options.forEach((opt, i) => optsDiv.appendChild(renderOpt(opt, opt, i, false)));
-    if (q.allow_other) optsDiv.appendChild(renderOpt(OTHER_SENTINEL, "Other", q.options.length, true));
+    optsDiv.appendChild(renderOpt(OTHER_SENTINEL, "Other", q.options.length, true));
     panel.appendChild(optsDiv);
     root.appendChild(panel);
 

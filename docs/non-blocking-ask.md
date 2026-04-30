@@ -114,7 +114,7 @@ The interactive widget is a Lit component (`<ask-user-choices-widget>`) rendered
 ### Labels
 
 - **Tabs** (multi-question asks only): `A. <tab_label>`, `B. <tab_label>`, … The letter prefix doubles as the tab-jump shortcut (see below); `tab_label` is required on every question when `questions.length > 1` and must be 2–4 words, ≤24 chars. The server rejects the call with a clear error if any question is missing it. Single-question asks hide the tab strip and ignore `tab_label`.
-- **Options**: every option is prefixed with a numeric badge (`1.`, `2.`, …) matching the number-key shortcut. The "Other" choice (when `allow_other: true`) takes the next number in sequence.
+- **Options**: every option is prefixed with a numeric badge (`1.`, `2.`, …) matching the number-key shortcut. An "Other" free-text choice is always rendered automatically and takes the next number in sequence; agents cannot opt out. The free-text input is **always visible inline** beside the Other row — the user can start typing immediately without first selecting Other. Submission is gated on Other-with-empty-text: if the user picks Other (or includes it in a multi-select) the text field must be non-empty.
 - **Primary button**: on a multi-question ask, every tab except the last shows **Next** (advances to the next tab, disabled until the current question has a valid selection). The last tab shows **Submit**. Single-question asks keep the existing behaviour — single-select auto-submits on pick, multi-select / Other shows **Submit**.
 
 ### Keyboard map

@@ -424,11 +424,11 @@ export class MockAgentCore {
 		const questions = multi
 			? [
 				{ question: "Which colors?", options: ["red", "blue", "green"], multi: true, tab_label: "Colors" },
-				{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true, tab_label: "Team size" },
+				{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
 			]
 			: [
 				{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
-				{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true, tab_label: "Team size" },
+				{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
 			];
 
 		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
