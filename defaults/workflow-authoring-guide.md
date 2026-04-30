@@ -272,8 +272,8 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.1 `general` — lightweight
 
 ```yaml
-- design-doc       (content, llm-review)
-- implementation   (build, check, unit, e2e in phase 1; llm-review in phase 2)
+- design-doc       (content; design-review + gap-analysis llm-review)
+- implementation   (build/check/unit/e2e in phase 1; gap-analysis + code-review llm-review in phase 2)  # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push, fast-forward, PR exists)
 ```
@@ -281,8 +281,8 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.2 `feature` — full design + impl + multi-review + optional QA
 
 ```yaml
-- design-doc       (content; design + gap-analysis llm-review)
-- implementation   (build/check/unit/e2e, gap+code+security llm-review, optional agent-qa)
+- design-doc       (content; design-review + gap-analysis llm-review)
+- implementation   (build/check/unit/e2e, gap+code+security llm-review, optional agent-qa)             # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push/fast-forward/PR)
 ```
@@ -290,9 +290,9 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.3 `bug-fix` — TDD
 
 ```yaml
-- issue-analysis   (content, llm-review)
+- issue-analysis   (content; analysis + gap-analysis llm-review)
 - reproducing-test (command with expect: failure; metadata declares test_command)
-- implementation   (build/check/unit/e2e, llm-review)
+- implementation   (build/check/unit/e2e, llm-review)                                                  # Ralph loop
 - documentation
 - ready-to-merge
 ```
@@ -300,9 +300,18 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.4 `quick-fix` — minimal
 
 ```yaml
-- implementation   (build/check/unit/e2e)
+- implementation   (build/check/unit/e2e)   # Ralph loop, minimal — no gap analysis
 - ready-to-merge
 ```
+
+### 6.5 Per-component & all-components flows (multi-component projects)
+
+When `components.length > 1`, the project assistant's workflow-suggestion checklist offers two derived families on top of the canonical four:
+
+- **Per-component flow** (one entry per component) — a `feature`-shaped workflow scoped to a single component's commands. Built by `buildPerComponentWorkflow(componentName, allComponents)` in `src/server/state-migration/per-component-workflows.ts`. Use when a goal touches only one repo.
+- **All-components fan-out flow** — a single `general`-shaped workflow whose `implementation` gate runs `build`/`check`/`unit`/`e2e` across every component with a `commands` map (data-only components are skipped) using `phase:` to parallelise. Built by `buildAllComponentsWorkflow(components)`.
+
+Both helpers reuse the canonical prompts and `readyToMergeGate()` exported by `seed-default-workflows.ts` so gate semantics stay in one place. Don't hand-roll variants in `project.yaml::workflows` — derive from these helpers instead so renaming a step prompt updates every flow.
 
 ### 6.5 `pr-review` (opt-in)
 
