@@ -41,6 +41,8 @@ import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
+import type { PersistedMission } from "./mission-store.js";
+import { applyMissionPromptSubstitutions } from "./mission-prompt.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
@@ -633,6 +635,21 @@ export class SessionManager {
 		return this._testGoalManager?.getGoalStore().get(goalId);
 	}
 
+	/**
+	 * Resolve a mission across all project contexts.
+	 * Used by the role-prompt rebuild paths (initial spawn / restoreSession /
+	 * assignRole / force-abort) to substitute Commander template placeholders
+	 * via {@link applyMissionPromptSubstitutions}.
+	 */
+	private resolveMission(missionId: string): PersistedMission | undefined {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForMission(missionId);
+			if (ctx) return ctx.missionStore.get(missionId);
+			return undefined;
+		}
+		return undefined;
+	}
+
 	/** Whether Docker sandbox mode is enabled in project config. */
 	get isSandboxEnabled(): boolean {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
@@ -1100,6 +1117,7 @@ export class SessionManager {
 			};
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
+			const mission = session.missionId ? this.resolveMission(session.missionId) : undefined;
 
 			let rolePrompt: string | undefined;
 			let roleName: string | undefined;
@@ -1108,8 +1126,9 @@ export class SessionManager {
 				if (role?.promptTemplate) {
 					rolePrompt = role.promptTemplate;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
-					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
+					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.missionId || session.id).slice(0, 8)}`);
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
+					rolePrompt = applyMissionPromptSubstitutions(rolePrompt, mission);
 					roleName = session.role;
 				}
 			}
@@ -2336,6 +2355,7 @@ export class SessionManager {
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
+			const mission = ps.missionId ? this.resolveMission(ps.missionId) : undefined;
 
 			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
 			const goalSpec = goal?.spec;
@@ -2346,8 +2366,9 @@ export class SessionManager {
 				if (role?.promptTemplate) {
 					rolePrompt = role.promptTemplate;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
-					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
+					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.missionId || ps.id).slice(0, 8)}`);
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
+					rolePrompt = applyMissionPromptSubstitutions(rolePrompt, mission);
 					roleName = ps.role;
 				}
 			}
@@ -3355,13 +3376,19 @@ export class SessionManager {
 		const fullRole = this.roleManager?.getRole(role.name);
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
 
+		// Apply mission-aware substitutions when this session is bound to a
+		// mission (Commander reassign edge-case). assignRole on a goal session
+		// is a no-op for these placeholders.
+		const mission = session.missionId ? this.resolveMission(session.missionId) : undefined;
+		const rolePromptForAssign = applyMissionPromptSubstitutions(role.promptTemplate, mission);
+
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
 			cwd: session.cwd,
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec,
-			rolePrompt: role.promptTemplate,
+			rolePrompt: rolePromptForAssign,
 			roleName: role.name,
 			allowedTools: effectiveAllowed.length > 0 ? effectiveAllowed : undefined,
 			projectConfigStore: this.projectConfigStore,

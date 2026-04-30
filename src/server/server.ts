@@ -72,6 +72,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { PersistedMission, MissionPlan, DivergencePolicy } from "./agent/mission-store.js";
+import { applyMissionPromptSubstitutions } from "./agent/mission-prompt.js";
 import type { MissionManager } from "./agent/mission-manager.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -3029,13 +3030,11 @@ async function handleApiRoute(
 				if (commanderRoleDef) {
 					const commanderCwd = mission.integrationWorktree || targetCtx.project.rootPath;
 					const promptTemplate = commanderRoleDef.promptTemplate || "";
-					const commanderPrompt = promptTemplate
-						.replace(/\{\{INTEGRATION_BRANCH\}\}/g, mission.integrationBranch || "")
-						.replace(/\{\{MISSION_TITLE\}\}/g, mission.title)
-						.replace(/\{\{MAX_CONCURRENT_GOALS\}\}/g, String(mission.maxConcurrentGoals))
-						.replace(/\{\{MISSION_ID\}\}/g, mission.id)
-						.replace(/\{\{AGENT_ID\}\}/g, `commander-${mission.id.slice(0, 8)}`)
-						.replace(/\{\{REVIEW_CONTEXT\}\}/g, "");
+					// Mission placeholders centralised in mission-prompt.ts so the
+					// initial-spawn site here and the restart paths in
+					// session-manager.ts stay byte-equivalent.
+					const commanderPrompt = applyMissionPromptSubstitutions(promptTemplate, mission)
+						.replace(/\{\{AGENT_ID\}\}/g, `commander-${mission.id.slice(0, 8)}`);
 					const commanderSession = await sessionManager.createSession(commanderCwd, undefined, undefined, undefined, {
 						projectId: resolved.projectId,
 						rolePrompt: commanderPrompt,
