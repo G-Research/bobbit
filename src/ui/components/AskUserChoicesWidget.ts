@@ -712,7 +712,7 @@ export class AskUserChoicesWidget extends LitElement {
 				</label>
 				<input
 					type="text"
-					class="ask-other-input flex-1 px-2 py-1 text-xs border border-border rounded bg-background"
+					class="ask-other-input flex-1 self-stretch px-2 py-2 text-sm border border-border rounded bg-background"
 					placeholder="Type your answer…"
 					.value=${otherText}
 					?disabled=${readOnly}
