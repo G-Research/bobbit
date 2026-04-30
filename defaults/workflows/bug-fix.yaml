@@ -78,6 +78,13 @@ gates:
         # Matches the 900s timeout used in general.yaml and feature.yaml.
         timeout: 900
         run: "{{project.test_e2e_command}}"
+      - name: "Integration smoke"
+        type: integration-test
+        phase: 1
+        timeout: 300
+        optional: true
+        label: "Run integration smoke"
+        description: "Boot the project's qa_start_command and exercise smoke scenarios from defaults/qa-scenarios/bug-fix.yaml or .bobbit/config/qa-scenarios.yaml. Skipped with a warning if qa_start_command is not configured."
       - name: "Gap analysis"
         type: llm-review
         role: spec-auditor

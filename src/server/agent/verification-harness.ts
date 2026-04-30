@@ -58,6 +58,7 @@ import {
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
+import { runIntegrationTestStep } from "./integration-test-runner.js";
 
 /** Create a deferred promise with exposed resolve/reject. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
@@ -1576,6 +1577,44 @@ export class VerificationHarness {
 								this.commandSemaphore.release();
 							}
 							}
+						} else if (step.type === "integration-test") {
+							// integration-test — boot the project's qa_start_command, run smoke scenarios.
+							active.steps[index].startedAt = Date.now();
+							this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_started",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								startedAt: active.steps[index].startedAt,
+								phase,
+							});
+							const itGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+							const itCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
+							const itWorkflowId = itGoal?.workflowId || itGoal?.workflow?.id || "feature";
+							const itQaStart = projectVars["qa_start_command"] || "";
+							const itHealth = projectVars["qa_health_check"] || "";
+							const itConfigDir = itCtx?.configDir;
+							const itScenariosPath = step.scenarios
+								? this.substituteVars(step.scenarios, builtinVars, projectVars, agentVars, allGateStates)
+								: undefined;
+							const itTimeoutMs = (step.timeout || 300) * 1000;
+							await this.commandSemaphore.acquire();
+							let itResult;
+							try {
+								itResult = await runIntegrationTestStep({
+									qaStartCommand: itQaStart,
+									qaHealthCheck: itHealth,
+									cwd,
+									workflowId: itWorkflowId,
+									configDir: itConfigDir,
+									scenariosPath: itScenariosPath,
+									overallTimeoutMs: itTimeoutMs,
+								});
+							} finally {
+								this.commandSemaphore.release();
+							}
+							result = { passed: itResult.passed, output: itResult.output };
+							// Treat skipped-as-passed (project has no qa_start_command).
+							if (itResult.skipped) result = { passed: true, output: itResult.output };
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
