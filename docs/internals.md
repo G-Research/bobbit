@@ -1822,6 +1822,36 @@ Two surfaces in the chat client previously relied on time-based heuristics that 
 
 When modifying scroll behaviour: do not introduce new timers, do not widen the 5px tail, and do not reach for `_isAutoScrolling`-style flags. If a new code path scrolls programmatically, it must update the latch via the same helper used by the existing auto-scroll path so its echo gets consumed. Behavioural twin test: `tests/agent-interface-scroll.spec.ts` (the `delta === 0` no-op case is the canonical regression).
 
+### Proposal panel scroll lock invariant
+
+The seven proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow`, `setup` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
+
+The logic lives in **`src/app/follow-tail.ts`** (`reconcileFollowTail(el)`), called from a `queueMicrotask` at the end of each panel's render so it fires after the synchronous DOM commit but before paint. The same three rules apply:
+
+1. **Auto-scroll only on positive delta.** `delta < 0` (shrink) updates the cached height and returns. `delta === 0` is a no-op — the canonical vibration-loop fix from the chat surface. Only `delta > 0` triggers a programmatic `scrollTop` write, and only when `stickToBottom` is true.
+2. **Programmatic-scroll echo filter, not timers.** Before each programmatic write the helper latches `(lastProgScrollTop, lastProgScrollHeight)`. The matching browser-emitted scroll event is consumed exactly once and the latch is cleared, so a later coincidental geometry match is treated as user intent.
+3. **User intent is observed.** `wheel`, `touchstart`, and `keydown` (PageUp/Down, Home, End, Arrow Up/Down) listeners on the scroll container set `stickToBottom = false` immediately. The 5px tail is sub-pixel rounding tolerance only, not an intent heuristic.
+
+Lock state is stored in a module-private `WeakMap<HTMLElement, LockState>` keyed by the scroll element. This matters for two reasons. First, when Lit re-renders and re-attaches the same element across deltas the WeakMap entry is reused, so the user's `stickToBottom = false` choice persists across re-renders without any explicit re-binding. Second, when the panel unmounts the element is GC-eligible and the WeakMap entry goes with it — a fresh remount of the same panel starts with a clean `{stickToBottom: true, lastScrollHeight: 0}` state. This is the **fresh-state-on-remount invariant**: panel close/reopen always behaves like a first render, never inherits stale lock state from the previous lifecycle.
+
+Textarea selection (`selectionStart` / `selectionEnd`) is captured on `select`, `keyup`, and `click`, then re-applied via `setSelectionRange(...)` after every reconcile branch (positive delta, zero delta, and shrink) — `setSelectionRange` is a state mutation per the WHATWG spec and applies even when the textarea is not the active element, so the caret is in the right place when focus returns. The DOMException some browsers throw on detached/hidden inputs is swallowed.
+
+**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The seven panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
+
+When modifying proposal-panel scroll behaviour: route through `reconcileFollowTail` rather than touching `scrollTop` or `setSelectionRange` directly; do not introduce timer-based intent heuristics; do not widen the 5px tail. See `src/app/follow-tail.ts` and the panel render functions in `src/app/render.ts`. Behavioural twin test: `tests/follow-tail.spec.ts`.
+
+### Proposal streaming flag
+
+`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`, `workflow_proposal`, `setup_proposal`. Read via the `isProposalStreaming(tag)` accessor.
+
+A per-tag map rather than a single boolean because the seven panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
+
+**Why the flag exists.** Without it the Create / Apply / Save buttons are clickable mid-stream and a user can submit before the spec/title has finished streaming, producing a goal/role/tool with truncated content. The flag drives (a) the `disabled` state of each panel's primary submit, (b) the `streamingBadge()` + `STREAMING_BORDER` indicator, and (c) consumers in `session-manager.ts` that may want to suppress destructive side-effects on streaming-mode fires.
+
+**Writer (single owner): `RemoteAgent` in `src/app/remote-agent.ts`.** Set to `true` inside `_checkToolProposals(message, streaming=true)` immediately before the per-tag `callback(input, streaming)` fan-out. Cleared on the matching block-finish branch (`!streaming && blockId` — the `_processedProposalIds.add(blockId)` site, reached on `case "message_end"` and on full re-scans), and bulk-cleared on `case "agent_end"` and `RemoteAgent.reset()` so an aborted/errored turn never leaves the flag stuck on. Readers are the seven panel render functions in `src/app/render.ts`; they call `isProposalStreaming("<tag>_proposal")` once at the top.
+
+**WebSocket reconnect.** The resume path (`{type:"resume", fromSeq}`) replays missed events through the same handler, so a replayed `message_update` re-sets the flag and a replayed `message_end` clears it — no extra logic. The resume-gap fallback (`get_messages`) re-scans the snapshot with `_checkToolProposals(m, false)`, which hits the block-finish branch for any propose_* block in the snapshot and clears any stale flag. The `agent_end` / `reset()` bulk-clears are the final safety net on hard disconnect or session change. Cross-session isolation: `state.proposalStreamingByTag` is a singleton on the global `state` object cleared on `reset()`, which fires on session switch.
+
 ### Snapshot merge invariant
 
 `RemoteAgent.messages` snapshot handling (`src/app/remote-agent.ts`, the `messages` frame handler around `serverIds`) merges three client-only buckets — `_liveEventMessages` (optimistic / live-streamed), `_pendingPermissionCards`, `_compactionSyntheticMessages` — into the server-persisted snapshot. The merge contract is:
