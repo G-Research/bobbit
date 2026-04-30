@@ -1388,6 +1388,7 @@ export function createGateway(config: GatewayConfig) {
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
 				});
+				ctx.goalManager.setBroadcastToGoal(broadcastToGoal);
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -2116,6 +2117,7 @@ async function handleApiRoute(
 							const c = projectContextManager.getOrCreate(pid);
 							return c?.projectConfigStore.get("worktree_root") || undefined;
 						});
+						ctx.goalManager.setBroadcastToGoal(broadcastToGoal);
 					}
 					json(existing, 200);
 					return;
@@ -2210,6 +2212,7 @@ async function handleApiRoute(
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
 				});
+				newCtx.goalManager.setBroadcastToGoal(broadcastToGoal);
 			}
 			json(project, 201);
 		} catch (err: any) {
