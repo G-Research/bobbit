@@ -857,10 +857,9 @@ export class AgentInterface extends LitElement {
 		const session = this.session!;
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
-		// Mobile (<640px) shows abbreviated labels in the trigger; the dropdown popover
-		// keeps the full labels regardless. The Select component renders option.label as
-		// text, not HTML, so we swap the strings reactively via matchMedia.
-		const isMobile = this._isMobileViewport;
+		// The dropdown popover always shows full labels; on mobile (<640px) the trigger
+		// label is rewritten to an abbreviation in updated() (DOM post-processing) so the
+		// popover items remain readable.
 		const fullLabels = {
 			off: i18n("Off"),
 			minimal: i18n("Minimal"),
@@ -868,21 +867,18 @@ export class AgentInterface extends LitElement {
 			medium: i18n("Medium"),
 			high: i18n("High"),
 		};
-		const triggerLabels = isMobile
-			? { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi" }
-			: fullLabels;
 		const thinkingTitle = fullLabels[(state.thinkingLevel as keyof typeof fullLabels) ?? "off"] ?? fullLabels.off;
 
 		const thinkingSelect = supportsThinking && this.enableThinkingSelector
 			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
 				value: state.thinkingLevel,
-				placeholder: triggerLabels.off,
+				placeholder: fullLabels.off,
 				options: [
-					{ value: "off", label: triggerLabels.off, icon: icon(Brain, "sm") },
-					{ value: "minimal", label: triggerLabels.minimal, icon: icon(Brain, "sm") },
-					{ value: "low", label: triggerLabels.low, icon: icon(Brain, "sm") },
-					{ value: "medium", label: triggerLabels.medium, icon: icon(Brain, "sm") },
-					{ value: "high", label: triggerLabels.high, icon: icon(Brain, "sm") },
+					{ value: "off", label: fullLabels.off, icon: icon(Brain, "sm") },
+					{ value: "minimal", label: fullLabels.minimal, icon: icon(Brain, "sm") },
+					{ value: "low", label: fullLabels.low, icon: icon(Brain, "sm") },
+					{ value: "medium", label: fullLabels.medium, icon: icon(Brain, "sm") },
+					{ value: "high", label: fullLabels.high, icon: icon(Brain, "sm") },
 				] as SelectOption[],
 				onChange: (value: string) => {
 					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
@@ -1584,6 +1580,13 @@ export class AgentInterface extends LitElement {
 	override updated(changedProperties: Map<string, any>) {
 		super.updated(changedProperties);
 
+		// Mobile-only: rewrite the thinking-selector trigger label to an abbreviation.
+		// The Select component reuses option.label for both the trigger and the popover
+		// items, so we keep options on full labels and only retarget the trigger's
+		// visible text node here. Re-runs on every render and on viewport changes
+		// (which call requestUpdate via _handleMobileMediaChange).
+		this._syncThinkingTriggerLabel();
+
 		// Setup pill overflow observer once the pill strip is rendered
 		if (this.bgProcesses.length > 0) {
 			const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
@@ -1610,6 +1613,28 @@ export class AgentInterface extends LitElement {
 				this._pillResizeObserver.disconnect();
 				this._pillResizeObserver = undefined;
 			}
+		}
+	}
+
+	private _syncThinkingTriggerLabel() {
+		const host = this.querySelector('.thinking-select-compact');
+		if (!host) return;
+		const labelSpan = host.querySelector('button > span') as HTMLElement | null;
+		if (!labelSpan) return;
+		const level = (this.session?.state?.thinkingLevel as string | undefined) ?? "off";
+		const abbrev: Record<string, string> = { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi" };
+		const full: Record<string, string> = { off: i18n("Off"), minimal: i18n("Minimal"), low: i18n("Low"), medium: i18n("Medium"), high: i18n("High") };
+		const desired = this._isMobileViewport ? (abbrev[level] ?? abbrev.off) : (full[level] ?? full.off);
+		// The label span contains an icon span and a sibling text node — replace only
+		// the text node, leave the icon untouched.
+		let textNode: Text | null = null;
+		for (const node of Array.from(labelSpan.childNodes)) {
+			if (node.nodeType === Node.TEXT_NODE) { textNode = node as Text; break; }
+		}
+		if (textNode) {
+			if (textNode.textContent !== desired) textNode.textContent = desired;
+		} else {
+			labelSpan.appendChild(document.createTextNode(desired));
 		}
 	}
 }
