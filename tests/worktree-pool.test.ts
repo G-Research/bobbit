@@ -17,7 +17,12 @@ import path from "node:path";
 import os from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
+import type { Component } from "../src/server/agent/project-config-store.ts";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const execFile = promisify(execFileCb);
 
@@ -150,5 +155,137 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 		} finally {
 			await rmRepo(repo);
 		}
+	});
+});
+
+describe("WorktreePool — components[*].worktreeSetupCommand is the source of truth", () => {
+	// These tests must NOT set BOBBIT_SKIP_NPM_CI — we're asserting the setup
+	// hook actually fires. Keep BOBBIT_TEST_NO_PUSH so we don't touch any remote.
+	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
+	before(() => {
+		process.env.BOBBIT_TEST_NO_PUSH = "1";
+		delete process.env.BOBBIT_SKIP_NPM_CI;
+	});
+	after(() => {
+		if (originalNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
+		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
+		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("single-repo pool fill runs the default component's worktreeSetupCommand", async () => {
+		const repo = await makeRepo();
+		try {
+			const components: Component[] = [
+				{ name: "app", repo: ".", worktreeSetupCommand: "touch SETUP_RAN" },
+			];
+			const pool = new WorktreePool({
+				repoPath: repo,
+				targetSize: 1,
+				componentsResolver: () => components,
+			});
+			pool.startFilling();
+			for (let i = 0; i < 100 && pool.size === 0; i++) {
+				await new Promise(r => setTimeout(r, 100));
+			}
+			assert.equal(pool.size, 1, "pool should have one entry");
+
+			// Peek without claiming — use claimUnnamed which preserves the entry path.
+			const u = pool.claimUnnamed();
+			assert.ok(u, "claimUnnamed should succeed");
+			const marker = path.join(u!.worktreePath, "SETUP_RAN");
+			assert.ok(
+				fs.existsSync(marker),
+				`SETUP_RAN marker missing from pool worktree at ${marker} — setup hook did not run`,
+			);
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+
+	it("single-repo pool fill is a no-op when no component declares worktreeSetupCommand", async () => {
+		const repo = await makeRepo();
+		try {
+			const components: Component[] = [{ name: "app", repo: "." }];
+			const pool = new WorktreePool({
+				repoPath: repo,
+				targetSize: 1,
+				componentsResolver: () => components,
+			});
+			pool.startFilling();
+			for (let i = 0; i < 100 && pool.size === 0; i++) {
+				await new Promise(r => setTimeout(r, 100));
+			}
+			assert.equal(pool.size, 1);
+			const u = pool.claimUnnamed();
+			assert.ok(u);
+			// Worktree is fully usable; just no SETUP_RAN file.
+			assert.ok(fs.existsSync(path.join(u!.worktreePath, ".git")));
+		} finally {
+			await rmRepo(repo);
+		}
+	});
+
+	it("BOBBIT_SKIP_NPM_CI=1 bypasses runComponentSetups", async () => {
+		const repo = await makeRepo();
+		process.env.BOBBIT_SKIP_NPM_CI = "1";
+		try {
+			const components: Component[] = [
+				{ name: "app", repo: ".", worktreeSetupCommand: "touch SETUP_RAN" },
+			];
+			const pool = new WorktreePool({
+				repoPath: repo,
+				targetSize: 1,
+				componentsResolver: () => components,
+			});
+			pool.startFilling();
+			for (let i = 0; i < 100 && pool.size === 0; i++) {
+				await new Promise(r => setTimeout(r, 100));
+			}
+			assert.equal(pool.size, 1);
+			const u = pool.claimUnnamed();
+			assert.ok(u);
+			assert.equal(
+				fs.existsSync(path.join(u!.worktreePath, "SETUP_RAN")),
+				false,
+				"SETUP_RAN should NOT exist when BOBBIT_SKIP_NPM_CI=1",
+			);
+		} finally {
+			delete process.env.BOBBIT_SKIP_NPM_CI;
+			await rmRepo(repo);
+		}
+	});
+});
+
+describe("Regression: legacy top-level worktree_setup_command must not be read", () => {
+	it("no source file under src/ reads `worktree_setup_command` via projectConfigStore.get()", () => {
+		// The migration in state-migration/migrate-project-yaml.ts is the only
+		// allowed reader of the legacy top-level key. Every other reader is a
+		// regression of the components[*].worktreeSetupCommand source-of-truth.
+		const srcRoot = path.resolve(__dirname, "..", "src");
+		const hits: string[] = [];
+		function scan(dir: string) {
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				const p = path.join(dir, entry.name);
+				if (entry.isDirectory()) { scan(p); continue; }
+				if (!entry.name.endsWith(".ts")) continue;
+				// migrate-project-yaml.ts is the one allowed reader.
+				if (p.endsWith(path.join("state-migration", "migrate-project-yaml.ts"))) continue;
+				const body = fs.readFileSync(p, "utf-8");
+				// Match the exact bug we just fixed: a `.get("worktree_setup_command")`
+				// or `.get('worktree_setup_command')` call. Allows the string to appear
+				// in comments / migration-specific helpers / settings UI labels.
+				if (/\.get\(\s*[\"']worktree_setup_command[\"']\s*\)/.test(body)) {
+					hits.push(path.relative(srcRoot, p));
+				}
+			}
+		}
+		scan(srcRoot);
+		assert.deepEqual(
+			hits,
+			[],
+			`Files reading legacy top-level worktree_setup_command via .get(): ${hits.join(", ")}`,
+		);
 	});
 });

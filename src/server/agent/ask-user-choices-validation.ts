@@ -16,12 +16,11 @@ export interface UserQuestion {
 	 * tab strip as `A. <tab_label>`, `B. <tab_label>`, …
 	 */
 	tab_label?: string;
-	allow_other?: boolean;
 	/** When true, the UI renders checkboxes and `selected` is an array. */
 	multi?: boolean;
 	/** Minimum number of selections when `multi`. Defaults to 1. */
 	min?: number;
-	/** Maximum number of selections when `multi`. Defaults to options.length (+1 if allow_other). */
+	/** Maximum number of selections when `multi`. Defaults to options.length+1 (Other is always present). */
 	max?: number;
 }
 
@@ -74,13 +73,11 @@ export function validateQuestions(questions: unknown): string | null {
 				return `questions[${i}].options[${j}] must be a non-empty string`;
 			}
 		}
-		if (qq.allow_other !== undefined && typeof qq.allow_other !== "boolean") {
-			return `questions[${i}].allow_other must be a boolean if present`;
-		}
 		if (qq.multi !== undefined && typeof qq.multi !== "boolean") {
 			return `questions[${i}].multi must be a boolean if present`;
 		}
-		const maxOptionCount = qq.options.length + (qq.allow_other === true ? 1 : 0);
+		// `allow_other` is silently ignored if present (deprecated; Other is always rendered).
+		const maxOptionCount = qq.options.length + 1;
 		if (qq.min !== undefined) {
 			if (typeof qq.min !== "number" || !Number.isInteger(qq.min) || qq.min < 1) {
 				return `questions[${i}].min must be a positive integer if present`;
@@ -148,7 +145,7 @@ export function crossValidate(
 		const q = questions[i];
 		const a = answers[i];
 		const multi = q.multi === true;
-		const maxOptionCount = q.options.length + (q.allow_other === true ? 1 : 0);
+		const maxOptionCount = q.options.length + 1;
 		const min = multi ? (q.min ?? 1) : 1;
 		const max = multi ? (q.max ?? maxOptionCount) : 1;
 		if (multi) {

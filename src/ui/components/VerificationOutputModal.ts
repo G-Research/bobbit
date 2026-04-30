@@ -8,6 +8,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
+import { getVerificationEventKey } from "../../app/verification-event-bus.js";
 
 interface OutputChunk {
 	stream: "stdout" | "stderr";
@@ -30,21 +31,46 @@ export class VerificationOutputModal extends LitElement {
 	@state() private _finalStatus: "passed" | "failed" | "" = "";
 
 	private _userScrolledUp = false;
-	private _boundOnEvent = this._onEvent.bind(this);
-	private _boundOnKeyDown = this._onKeyDown.bind(this);
+	/** Per-instance dedupe window — collapses identical events delivered via
+	 * the document-level fan-out (one per session WS in the goal). Keyed by
+	 * `getVerificationEventKey(detail)`. Bounded to prevent unbounded growth
+	 * during very long verifications. */
+	private _seenEvents: Set<string> = new Set();
+	private _seenEventsOrder: string[] = [];
+	private static readonly _SEEN_CAP = 2048;
+	/** Highest `seq` already accounted for via `initialOutput` bootstrap.
+	 * Live events with `seq` <= this are treated as duplicates. */
+	private _bootstrapSeqHighWater = -1;
+	private _abortCtrl?: AbortController;
 
 	override createRenderRoot() { return this; }
 
 	override connectedCallback() {
 		super.connectedCallback();
-		document.addEventListener("gate-verification-event", this._boundOnEvent);
-		document.addEventListener("keydown", this._boundOnKeyDown);
+		this._abortCtrl = new AbortController();
+		const signal = this._abortCtrl.signal;
+		document.addEventListener("gate-verification-event", (e) => this._onEvent(e), { signal });
+		document.addEventListener("keydown", (e) => this._onKeyDown(e as KeyboardEvent), { signal });
 	}
 
 	override disconnectedCallback() {
 		super.disconnectedCallback();
-		document.removeEventListener("gate-verification-event", this._boundOnEvent);
-		document.removeEventListener("keydown", this._boundOnKeyDown);
+		this._abortCtrl?.abort();
+		this._abortCtrl = undefined;
+		this._seenEvents.clear();
+		this._seenEventsOrder.length = 0;
+	}
+
+	private _markEventSeen(key: string): boolean {
+		if (!key) return true;
+		if (this._seenEvents.has(key)) return false;
+		this._seenEvents.add(key);
+		this._seenEventsOrder.push(key);
+		if (this._seenEventsOrder.length > VerificationOutputModal._SEEN_CAP) {
+			const evict = this._seenEventsOrder.shift();
+			if (evict !== undefined) this._seenEvents.delete(evict);
+		}
+		return true;
 	}
 
 	override updated(changed: Map<string, unknown>) {
@@ -54,11 +80,18 @@ export class VerificationOutputModal extends LitElement {
 			this._completed = false;
 			this._finalStatus = "";
 			this._userScrolledUp = false;
+			this._seenEvents.clear();
+			this._seenEventsOrder.length = 0;
+			this._bootstrapSeqHighWater = -1;
 			// Parse initialOutput as stdout
 			if (this.initialOutput) {
 				this._chunks = [{ stream: "stdout", text: this.initialOutput }];
+				// If the caller passed a `seq` boundary alongside initialOutput,
+				// honour it so live events <= that seq are dropped.
+				const seq = (this as any).initialOutputSeq;
+				if (typeof seq === "number") this._bootstrapSeqHighWater = seq;
 			} else if (this.goalId && this.signalId) {
-				// Bootstrap from API if no initial output provided
+				// Bootstrap from API only when we don't already have content.
 				this._fetchBootstrapOutput();
 			}
 			this.requestUpdate();
@@ -93,7 +126,16 @@ export class VerificationOutputModal extends LitElement {
 		if (!detail || !this.open) return;
 		if (detail.signalId !== this.signalId) return;
 
+		// Per-instance dedupe — the same payload may be redispatched on
+		// `document` once per session WS in the goal team (see
+		// verification-event-bus.ts).
+		const key = getVerificationEventKey(detail);
+		if (!this._markEventSeen(key)) return;
+
 		if (detail.type === "gate_verification_step_output" && detail.stepIndex === this.stepIndex) {
+			// If the event is part of the bootstrap prefix already shown via
+			// `initialOutput`, skip the live append to avoid double-printing.
+			if (typeof detail.seq === "number" && detail.seq <= this._bootstrapSeqHighWater) return;
 			this._chunks = [...this._chunks, { stream: detail.stream, text: detail.text }];
 			if (!this._userScrolledUp) {
 				requestAnimationFrame(() => this._scrollToBottom());

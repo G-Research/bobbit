@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
-import { createWorktree, cleanupWorktree, setupWorktreeDeps } from "../skills/git.js";
+import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { runComponentSetups } from "../skills/worktree-setup.js";
 
 const execFile = promisify(execFileCb);
 
@@ -260,10 +261,24 @@ export class StaffManager {
 			try { await execFile("git", ["rebase", "--abort"], { cwd: wt }); } catch { /* ignore */ }
 		}
 
-		// Run worktree setup command (e.g. npm ci)
-		const setupCmd = ctx?.projectConfigStore.get("worktree_setup_command");
-		if (setupCmd) {
-			await setupWorktreeDeps(staff.cwd, wt, setupCmd);
+		// Run per-component worktree setup commands (e.g. npm ci). The canonical
+		// source of truth is `components[*].worktreeSetupCommand`; we no longer
+		// read the legacy top-level `worktree_setup_command` key (that was
+		// migrated onto the default component on first boot).
+		const components = ctx?.projectConfigStore.getComponents() ?? [];
+		if (components.some(c => c.worktreeSetupCommand)) {
+			try {
+				await runComponentSetups({
+					components,
+					branchContainer: wt,
+					primaryWorktreeRoot: staff.cwd,
+					exec: async (cmd, cwd, env) => {
+						await execFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+					},
+				});
+			} catch (err) {
+				console.warn(`[staff-manager] runComponentSetups failed for ${staff.id} (non-fatal):`, err);
+			}
 		}
 	}
 

@@ -365,8 +365,7 @@ export class VerificationHarness {
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
-	/** Limits concurrent LLM review / QA sessions across all goals. */
-	private reviewSemaphore = new Semaphore(6);
+
 
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
@@ -861,11 +860,16 @@ export class VerificationHarness {
 
 	private configCascade?: import("./config-cascade.js").ConfigCascade;
 
+	/** Monotonic counter used to stamp `seq` on every broadcast event. */
+	private _verifSeqCounter = 0;
+
+	private readonly broadcastFn: (goalId: string, event: any) => void;
+
 	constructor(
 		stateDir: string,
 		/** @deprecated Resolve per-goal via projectContextManager instead. */
 		private gateStore: GateStore | undefined,
-		private broadcastFn: (goalId: string, event: any) => void,
+		private _rawBroadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
 		private preferencesStore?: PreferencesStore,
 		private sessionManager?: import("./session-manager.js").SessionManager,
@@ -875,6 +879,18 @@ export class VerificationHarness {
 		configCascade?: import("./config-cascade.js").ConfigCascade,
 	) {
 		this.configCascade = configCascade;
+		// Wrap the broadcast fn so every gate_verification_* event carries a
+		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
+		// dedupe payloads delivered via per-session WS fan-out (see
+		// src/app/verification-event-bus.ts). The seq is global per harness
+		// instance — simpler than scoping per (goal,gate,signal) and equally
+		// effective since the dedupe key includes signalId.
+		this.broadcastFn = (goalId: string, event: any) => {
+			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_") && event.seq == null) {
+				event.seq = ++this._verifSeqCounter;
+			}
+			this._rawBroadcastFn(goalId, event);
+		};
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
@@ -1430,33 +1446,25 @@ export class VerificationHarness {
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
-								if (this.reviewSemaphore.available === 0) {
-									console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-								}
-								await this.reviewSemaphore.acquire();
-								try {
-									const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-									const maxAttempts = 3;
-									for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-										if (active.cancelled) break;
-										const qaResult = await this.runAgentQaStep(
-											{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-											cwd, signal.goalId, builtinVars,
-											signal.content, signal.metadata,
-											goalSpec, allGateStates, stepSessionId,
-										);
-										result = qaResult;
-										if (qaResult.artifact) {
-											artifact = qaResult.artifact;
-										}
-										const isTransient = isTransientQaError(qaResult.output);
-										if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
-										const delayMs = 2000 * Math.pow(2, attempt - 1);
-										console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-										await new Promise(r => setTimeout(r, delayMs));
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const maxAttempts = 3;
+								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									if (active.cancelled) break;
+									const qaResult = await this.runAgentQaStep(
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+										cwd, signal.goalId, builtinVars,
+										signal.content, signal.metadata,
+										goalSpec, allGateStates, stepSessionId,
+									);
+									result = qaResult;
+									if (qaResult.artifact) {
+										artifact = qaResult.artifact;
 									}
-								} finally {
-									this.reviewSemaphore.release();
+									const isTransient = isTransientQaError(qaResult.output);
+									if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
+									const delayMs = 2000 * Math.pow(2, attempt - 1);
+									console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
 						} else {
@@ -1464,30 +1472,22 @@ export class VerificationHarness {
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
-								if (this.reviewSemaphore.available === 0) {
-									console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-								}
-								await this.reviewSemaphore.acquire();
-								try {
-									const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-									const maxAttempts = 3;
-									for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-										if (active.cancelled) break;
-										result = await this.runLlmReviewStep(
-											{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-											cwd, builtinVars,
-											signal.content, signal.metadata,
-											goalSpec, allGateStates, signal.goalId, stepSessionId,
-											gate,
-										);
-										const isTransient = isTransientReviewError(result.output);
-										if (result.passed || !isTransient || attempt === maxAttempts) break;
-										const delayMs = 2000 * Math.pow(2, attempt - 1);
-										console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-										await new Promise(r => setTimeout(r, delayMs));
-									}
-								} finally {
-									this.reviewSemaphore.release();
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const maxAttempts = 3;
+								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									if (active.cancelled) break;
+									result = await this.runLlmReviewStep(
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+										cwd, builtinVars,
+										signal.content, signal.metadata,
+										goalSpec, allGateStates, signal.goalId, stepSessionId,
+										gate,
+									);
+									const isTransient = isTransientReviewError(result.output);
+									if (result.passed || !isTransient || attempt === maxAttempts) break;
+									const delayMs = 2000 * Math.pow(2, attempt - 1);
+									console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
 						}
