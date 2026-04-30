@@ -33,7 +33,7 @@ import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, isMissionDirectArchivedSession } from "./render-helpers.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -228,7 +228,10 @@ function renderMobileLanding() {
 											bucket.staff.push(s);
 										}
 										// Bucket archived goals + standalone archived sessions per project.
-										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+										// Exclude mission-direct archived sessions — they render nested
+										// under their mission row (see `renderMissionGroup`).
+										const liveMissionIdsMobile = new Set(state.missions.filter(m => !m.archived).map(m => m.id));
+										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf && !isMissionDirectArchivedSession(s, liveMissionIdsMobile)) : [];
 										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
 										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, state.projects);
 										return html`${state.projects.map((project, i) => {

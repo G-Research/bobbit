@@ -957,7 +957,29 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 			return (b.lastActivity ?? 0) - (a.lastActivity ?? 0);
 		});
 
-	const hasDirectSessions = !!commanderSession || otherMissionSessions.length > 0;
+	// Archived mission-direct sessions: reviewer/QA sub-sessions spawned for
+	// mission-gate verification that have since been archived. They should
+	// nest under the mission row (mirroring how archived team-lead sessions
+	// surface under their goal) so the user can audit completed gate runs in
+	// place rather than hunting for them in the global Archived bucket.
+	// Gated on `state.showArchived` to honour the user's archived-visibility
+	// preference. The matching exclusion in the project's standalone-archived
+	// bucket lives in `isMissionDirectArchivedSession` below — keep them in
+	// sync to prevent double-rendering.
+	const archivedMissionSessions = state.showArchived
+		? state.archivedSessions
+			.filter(s =>
+				s.missionId === mission.id
+				&& s.id !== mission.commanderSessionId
+				&& !s.teamGoalId
+				&& !s.delegateOf,
+			)
+			.sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0))
+		: [];
+
+	const hasDirectSessions = !!commanderSession
+		|| otherMissionSessions.length > 0
+		|| archivedMissionSessions.length > 0;
 
 	return html`
 		<div class="flex flex-col gap-0.5" data-testid="mission-group" data-mission-id=${mission.id}>
@@ -986,6 +1008,12 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 					${otherMissionSessions.map(s => renderSessionRow(s))}
 				</div>
 			` : ""}
+			${isExpanded && archivedMissionSessions.length > 0 ? html`
+				<div class="flex flex-col gap-0.5 opacity-60" style="padding-left:${INDENT}px;" data-testid="mission-archived-sessions">
+					<div class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-70" style="padding-left:${HEADER_CHEVRON_W}px;">Archived</div>
+					${archivedMissionSessions.map(s => renderSessionRow(s))}
+				</div>
+			` : ""}
 			${isExpanded && childGoals.length > 0 ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${childGoals.map(g => renderGoalGroup(g))}
@@ -1003,6 +1031,27 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 /** Filter goals owned by a mission. */
 export function goalsForMission(missionId: string, goals: Goal[]): Goal[] {
 	return goals.filter(g => g.missionId === missionId);
+}
+
+/**
+ * Returns true if the archived session belongs to a (non-archived) mission and
+ * therefore renders under that mission's row rather than the project's
+ * standalone Archived bucket. Mirrors `renderMissionGroup`'s
+ * `archivedMissionSessions` filter — keep in sync to prevent double-rendering.
+ *
+ * Sessions whose `missionId` points to an archived or unknown mission fall
+ * through to the standalone bucket (defensive: the mission row won't render
+ * them, so dropping them entirely would orphan them).
+ */
+export function isMissionDirectArchivedSession(
+	s: GatewaySession,
+	liveMissionIds: Set<string>,
+): boolean {
+	if (!s.missionId) return false;
+	if (!liveMissionIds.has(s.missionId)) return false;
+	if (s.teamGoalId) return false;
+	if (s.delegateOf) return false;
+	return true;
 }
 
 /** Goals NOT owned by any mission (= standalone goals). Used to filter

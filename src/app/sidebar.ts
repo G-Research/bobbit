@@ -30,7 +30,7 @@ import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow, startNewMissionFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, renderMissionGroup, goalsForMission } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, renderMissionGroup, goalsForMission, isMissionDirectArchivedSession } from "./render-helpers.js";
 import { showMissionDialog } from "./dialogs.js";
 import { Flag } from "lucide";
 import type { PersistedMission } from "./mission-types.js";
@@ -1037,7 +1037,10 @@ export function renderSidebar() {
 							}
 
 							// Filter + bucket archived goals / standalone archived sessions by project.
-							const allStandaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf);
+							// Exclude mission-direct archived sessions — they render nested
+							// under their mission row (see `renderMissionGroup`).
+							const liveMissionIds = new Set(state.missions.filter(m => !m.archived).map(m => m.id));
+							const allStandaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf && !isMissionDirectArchivedSession(s, liveMissionIds));
 							const filteredArchivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
 							const filteredStandaloneArchived = filterArchivedSessionsByQuery(allStandaloneArchived, state.searchQuery);
 							for (const g of filteredArchivedGoals) {
