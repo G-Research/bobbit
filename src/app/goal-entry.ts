@@ -12,7 +12,7 @@
  */
 
 import { state } from "./state.js";
-import { showGoalDialog, showProjectDialog } from "./dialogs.js";
+import { showGoalDialog, showMissionDialog, showProjectDialog } from "./dialogs.js";
 import "../ui/components/ProjectPickerPopover.js";
 import type { ProjectPickerPopover } from "../ui/components/ProjectPickerPopover.js";
 
@@ -84,5 +84,28 @@ export function startNewGoalFlow(anchorEl?: HTMLElement | null): void {
 	}
 	showProjectPickerPopover(anchorEl ?? null, (projectId) => {
 		showGoalDialog(undefined, projectId);
+	});
+}
+
+/**
+ * Entry point for every "+ New Mission" trigger. Mirrors `startNewGoalFlow`.
+ *
+ *   - 0 projects → opens Add Project.
+ *   - 1 project  → opens the mission flow in that project (no picker).
+ *   - ≥ 2        → opens the project picker anchored below `anchorEl`.
+ */
+export function startNewMissionFlow(anchorEl?: HTMLElement | null): void {
+	const projects = state.projects;
+	if (projects.length === 0) {
+		showProjectDialog();
+		return;
+	}
+	if (projects.length === 1) {
+		const only = projects[0];
+		if (only) showMissionDialog(only.id);
+		return;
+	}
+	showProjectPickerPopover(anchorEl ?? null, (projectId) => {
+		showMissionDialog(projectId);
 	});
 }

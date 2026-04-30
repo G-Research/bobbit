@@ -27,7 +27,7 @@ import {
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
-import { startNewGoalFlow } from "./goal-entry.js";
+import { startNewGoalFlow, startNewMissionFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, renderMissionGroup, goalsForMission } from "./render-helpers.js";
@@ -917,6 +917,8 @@ export function renderSidebar() {
 						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
 						<span>Skills</span>
 					</button>
+				</div>
+				<div class="flex items-center">
 					<button
 						data-new-goal-trigger
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
@@ -929,6 +931,19 @@ export function renderSidebar() {
 					>
 						${icon(GoalIcon, "xs", "!w-3.5 !h-3.5")}
 						<span>New Goal</span>
+					</button>
+					<button
+						data-new-mission-trigger
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						?disabled=${state.projects.length === 0}
+						@click=${(e: Event) => {
+							if (state.projects.length === 0) { showProjectDialog(); return; }
+							startNewMissionFlow(e.currentTarget as HTMLElement);
+						}}
+						title=${state.projects.length === 0 ? "Add a project first" : "New mission"}
+					>
+						${icon(Flag, "xs", "!w-3.5 !h-3.5")}
+						<span>New Mission</span>
 					</button>
 				</div>
 			</div>
