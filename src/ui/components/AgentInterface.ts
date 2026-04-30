@@ -1311,24 +1311,24 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
-	// Change 5 — Jump-to-bottom floating button. Reuses small-floating-button
-	// vocabulary already used for AttachmentTile's remove pill (rounded-full,
-	// border-input, bg-background, shadow-sm). Icon-only on mobile (<640px).
+	// Jump-to-bottom floating button. Reuses small-floating-button vocabulary
+	// (rounded-full, border-input, bg-background, shadow-sm). Centred above
+	// the composer with the label always visible — previously sat bottom-right
+	// where it was hidden by the git-status widget / pill strip on mobile.
 	private _renderJumpToBottom() {
 		const show = this._showJumpToBottom;
-		const label = this._isMobileViewport ? "" : "Jump to bottom";
 		return html`
 			<button
 				type="button"
 				data-testid="jump-to-bottom"
 				aria-label="Jump to bottom"
-				class="absolute bottom-3 right-3 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm"
+				class="absolute bottom-10 left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
 				style="opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out"
 				tabindex="${show ? "0" : "-1"}"
 				@click=${this._handleJumpToBottomClick}
 			>
 				${icon(ArrowDown, "sm")}
-				${label ? html`<span>${label}</span>` : nothing}
+				<span>Jump to bottom</span>
 			</button>
 		`;
 	}
