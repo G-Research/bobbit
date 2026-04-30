@@ -213,6 +213,19 @@ export class AgentInterface extends LitElement {
 	/** Whether initial render is done (skip animations on first paint) */
 	private _pillsInitialized = false;
 	private _unsubscribeSession?: () => void;
+
+	// Tracks viewport <640px (Tailwind sm breakpoint) for mobile-only label abbreviation.
+	private _isMobileViewport = typeof window !== "undefined" && typeof window.matchMedia === "function"
+		? !window.matchMedia("(min-width: 640px)").matches
+		: false;
+	private _mobileMediaQuery?: MediaQueryList;
+	private _handleMobileMediaChange = (e: MediaQueryListEvent) => {
+		const next = !e.matches;
+		if (next !== this._isMobileViewport) {
+			this._isMobileViewport = next;
+			this.requestUpdate();
+		}
+	};
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
 	private _cachedToolResults?: Map<string, ToolResultMessage>;
@@ -325,6 +338,13 @@ export class AgentInterface extends LitElement {
 
 		// Subscribe to external session if provided
 		this.setupSessionSubscription();
+
+		// Track viewport for mobile-only label abbreviation in the thinking selector.
+		if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+			this._mobileMediaQuery = window.matchMedia("(min-width: 640px)");
+			this._isMobileViewport = !this._mobileMediaQuery.matches;
+			this._mobileMediaQuery.addEventListener("change", this._handleMobileMediaChange);
+		}
 	}
 
 	override disconnectedCallback() {
@@ -346,6 +366,11 @@ export class AgentInterface extends LitElement {
 		if (this._pillResizeObserver) {
 			this._pillResizeObserver.disconnect();
 			this._pillResizeObserver = undefined;
+		}
+
+		if (this._mobileMediaQuery) {
+			this._mobileMediaQuery.removeEventListener("change", this._handleMobileMediaChange);
+			this._mobileMediaQuery = undefined;
 		}
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
@@ -832,16 +857,32 @@ export class AgentInterface extends LitElement {
 		const session = this.session!;
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
+		// Mobile (<640px) shows abbreviated labels in the trigger; the dropdown popover
+		// keeps the full labels regardless. The Select component renders option.label as
+		// text, not HTML, so we swap the strings reactively via matchMedia.
+		const isMobile = this._isMobileViewport;
+		const fullLabels = {
+			off: i18n("Off"),
+			minimal: i18n("Minimal"),
+			low: i18n("Low"),
+			medium: i18n("Medium"),
+			high: i18n("High"),
+		};
+		const triggerLabels = isMobile
+			? { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi" }
+			: fullLabels;
+		const thinkingTitle = fullLabels[(state.thinkingLevel as keyof typeof fullLabels) ?? "off"] ?? fullLabels.off;
+
 		const thinkingSelect = supportsThinking && this.enableThinkingSelector
-			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1">${Select({
+			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
 				value: state.thinkingLevel,
-				placeholder: i18n("Off"),
+				placeholder: triggerLabels.off,
 				options: [
-					{ value: "off", label: i18n("Off"), icon: icon(Brain, "sm") },
-					{ value: "minimal", label: i18n("Minimal"), icon: icon(Brain, "sm") },
-					{ value: "low", label: i18n("Low"), icon: icon(Brain, "sm") },
-					{ value: "medium", label: i18n("Medium"), icon: icon(Brain, "sm") },
-					{ value: "high", label: i18n("High"), icon: icon(Brain, "sm") },
+					{ value: "off", label: triggerLabels.off, icon: icon(Brain, "sm") },
+					{ value: "minimal", label: triggerLabels.minimal, icon: icon(Brain, "sm") },
+					{ value: "low", label: triggerLabels.low, icon: icon(Brain, "sm") },
+					{ value: "medium", label: triggerLabels.medium, icon: icon(Brain, "sm") },
+					{ value: "high", label: triggerLabels.high, icon: icon(Brain, "sm") },
 				] as SelectOption[],
 				onChange: (value: string) => {
 					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
@@ -866,7 +907,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-1">${state.model.id}</span>
+					<span class="ml-0.5">${state.model.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
@@ -888,7 +929,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(ImageIcon, "sm")}
-					<span class="ml-1 hidden sm:inline">${imageModel.id}</span>
+					<span class="ml-0.5 hidden sm:inline">${imageModel.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
