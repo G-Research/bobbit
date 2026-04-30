@@ -570,6 +570,7 @@ export class ToolManager {
 			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
 			fs.writeFileSync(filePath, doc.toString(), "utf-8");
+			__resetToolScanCache();
 			return true;
 		} catch (err) {
 			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);
