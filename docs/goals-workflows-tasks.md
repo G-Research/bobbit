@@ -515,3 +515,50 @@ State is per-project — each project has its own copies of these files in `<pro
 | `defaults/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
 | `defaults/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |
 | `defaults/workflows/general.yaml` | Seed workflow: general-purpose lifecycle |
+
+## Nested goals
+
+Goals can nest recursively. A child goal is a regular goal with `parentGoalId` set; the rest of the data model (workflow, gates, team, sidebar row, dashboard) is unchanged.
+
+### Fields on `PersistedGoal`
+
+| Field | Meaning |
+|---|---|
+| `parentGoalId` | Immediate parent, or `undefined` for top-level goals (existing standalone goals are top-level by definition). |
+| `rootGoalId` | Top-of-tree id; equal to `id` for top-level goals. Cached at creation for fast tree queries. |
+| `mergeTarget` | `"master"` for top-level goals, `"parent"` for children. Auto-derived from `parentGoalId` and used by the `ready-to-merge` gate to decide whether to raise a PR (top-level) or merge locally into the parent's branch (child). |
+
+A child goal branches off `parent.branch` HEAD at creation time and merges back into it on `ready-to-merge`. Only the top-level goal's `ready-to-merge` raises a PR to master; child goals never push to remote master and never raise their own PR. Sibling children spawned later observe earlier children's commits naturally because each branches from the parent's advancing tip.
+
+A single `projectId` is enforced across an entire goal-tree — cross-project nesting is not supported.
+
+See **[docs/nested-goals.md](nested-goals.md)** for the full reference: data-model migration, divergence policy, mutation classification, custom workflows + roles per goal-tree, and recovery scenarios.
+
+## Subgoal verify steps
+
+`VerifyStep.type` extends from `command | llm-review | agent-qa | integration-test` to include `subgoal`. A subgoal verify step on any gate of any workflow spawns a child goal and waits for it to merge back into the parent's branch before passing.
+
+```yaml
+verify:
+  - type: subgoal
+    phase: 1
+    subgoal:
+      title: "Build API client"
+      spec: |
+        ## Goal
+        ...
+      workflowId: feature      # resolves through cascade; default "feature"
+      suggestedRole: coder
+      planId: 01HXY...         # ULID, stable across re-plans for idempotency
+```
+
+The verification-harness handles `subgoal` steps the same way it runs phase-grouped command/LLM steps:
+
+1. On step start, look up `planId` on the gate's verification record. If a `childGoalId` is already recorded and the child is `complete` + merged, the step passes immediately. If the child is in flight, the step waits without re-spawning.
+2. Otherwise, the harness calls `GoalManager.createGoal({ parentGoalId, baseBranch: parent.branch, … })`, records the resulting `childGoalId` against `planId`, and transitions the step to `running`.
+3. The step passes when the child's `ready-to-merge` gate passes **and** the local merge of the child's branch into the parent's branch succeeds. Conflicts surface as a step failure.
+4. Multiple subgoal steps with the same `phase` run concurrently up to the parent goal's `maxConcurrentChildren` cap (default 3, max 8).
+
+The `parent` workflow ships as a convenient template (`charter → plan-review → goal-plan → execution → integration → ready-to-merge`) where the `execution` gate's `verify[]` is the plan — populated via `goal_plan_propose`, frozen on the `goal-plan` signal — but any workflow can embed `subgoal` verify steps on any gate.
+
+See **[docs/nested-goals.md](nested-goals.md)** for a worked example covering plan proposal, freeze semantics, idempotent re-spawn under harness restart, and the interaction with divergence policy when a team-lead proposes off-plan children post-freeze.
