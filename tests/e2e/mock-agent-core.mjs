@@ -236,6 +236,23 @@ export class MockAgentCore {
 			return;
 		}
 
+		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>.
+		// Emits N message_update deltas (each with a single tool_use whose input
+		// grows on each delta), then message_end + tool_execution_* + agent_end.
+		// Block id is stable so RemoteAgent's _processedProposalIds dedup engages.
+		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)/);
+		if (proposeStreamMatch) {
+			await this._handleStreamingProposal(proposeStreamMatch[1], parseInt(proposeStreamMatch[2], 10));
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
 		const toolAction = MockAgentCore.respondToPrompt(text);
 
 		if (toolAction && toolAction.toolDenied) {
@@ -608,6 +625,78 @@ export class MockAgentCore {
 				{ type: "text", text: "Preview panel is open and will auto-update." },
 				{ type: "text", text: "__preview_snapshot_v1__\n" + html },
 			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/** Stream a propose_<type> tool_use across N message_update deltas, then
+	 *  emit message_end + tool_execution_start/end. */
+	async _handleStreamingProposal(type, n) {
+		const toolId = `tool_propose_${type}_${Date.now()}`;
+		const toolName = `propose_${type}`;
+		// Per-type input shape — keep the title/name field stable after first delta.
+		const paragraph = (i) => `Paragraph ${i}: ` + "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(2);
+		const growSpec = (count) => Array.from({ length: count }, (_, i) => paragraph(i + 1)).join("\n\n");
+		const buildInput = (deltaIdx) => {
+			const grown = growSpec(deltaIdx + 1);
+			switch (type) {
+				case "goal":
+					return { title: "E2E Streaming Goal", workflow: "general", spec: grown };
+				case "role":
+					return { name: "e2e-stream-role", label: "E2E Stream Role", prompt: grown, tools: "", accessory: "none" };
+				case "tool":
+					return { tool: "e2e_stream_tool", action: "docs", content: grown };
+				case "staff":
+					return { name: "e2e-stream-staff", description: "E2E", prompt: grown, triggers: "[]", cwd: "" };
+				case "setup":
+					return { action: "system-prompt", content: grown };
+				case "workflow":
+					return { id: "e2e-stream-wf", name: "E2E Stream Workflow", description: grown, gates: "[]" };
+				case "project":
+					return { name: "E2E Stream Project", root_path: "/tmp/e2e-stream", build_command: "npm run build" };
+				default:
+					return { spec: grown };
+			}
+		};
+
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+			const input = buildInput(i);
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: toolName, arguments: input, input },
+				],
+			};
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(60);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+
+		// Final message_end carries the complete tool_use block.
+		const finalInput = buildInput(n - 1);
+		const finalMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: toolName, arguments: finalInput, input: finalInput },
+			],
+		};
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+
+		this.emit({ type: "tool_execution_start", toolName, toolId, input: finalInput });
+		const output = "Proposal submitted.";
+		this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: false });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError: false,
+			content: [{ type: "text", text: output }],
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });

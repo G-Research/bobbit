@@ -2811,6 +2811,42 @@ export class SessionManager {
 	}
 
 	/**
+	 * Wait for a session to enter the streaming state.
+	 * Returns immediately if already streaming.
+	 * Rejects on timeout (callers typically `.catch(() => {})` to fall through).
+	 *
+	 * Symmetric to `waitForIdle` — used after dispatching a prompt to a resumed
+	 * session that is currently idle, so the caller can confirm the new turn
+	 * has actually started before racing against `waitForIdle` again.
+	 */
+	waitForStreaming(sessionId: string, timeoutMs = 10_000): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) return Promise.reject(new Error("Session not found"));
+		if (session.status === "streaming") return Promise.resolve();
+
+		return new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				unsub();
+				reject(new Error(`Timeout waiting for session ${sessionId} to start streaming`));
+			}, timeoutMs);
+
+			const unsub = session.rpcClient.onEvent((event: any) => {
+				if (event.type === "agent_start") {
+					clearTimeout(timer);
+					unsub();
+					resolve();
+				}
+				if (event.type === "process_exit") {
+					clearTimeout(timer);
+					unsub();
+					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
+				}
+			});
+		});
+	}
+
+	/**
 	 * Get the final assistant output from a session's messages.
 	 */
 	async getSessionOutput(sessionId: string): Promise<string> {
@@ -3769,6 +3805,55 @@ export class SessionManager {
 				execFile("git", ["push", "-u", "origin", targetBranch], { cwd: r.worktreePath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
 			}
 		}
+	}
+
+	/**
+	 * Generate a title for any session by id — live or archived. Returns the
+	 * generated title, or null if no messages were available. Persists the
+	 * title and broadcasts to any connected clients (live sessions only).
+	 * Used by `POST /api/sessions/:id/generate-title` for the rename dialog
+	 * when the user is editing a non-focused session.
+	 */
+	async generateTitleForAnySession(id: string): Promise<string | null> {
+		const live = this.sessions.get(id);
+		if (live && live.status !== "terminated") {
+			const msgsResp = await live.rpcClient.getMessages();
+			if (!msgsResp.success) return null;
+			const messages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(messages) || messages.length === 0) return null;
+			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
+			if (!title) return null;
+			live.title = title;
+			this.resolveStoreForSession(live.id).update(live.id, { title });
+			broadcast(live.clients, { type: "session_title", sessionId: live.id, title });
+			return title;
+		}
+
+		// Archived or dormant — read messages from .jsonl without restoring the agent.
+		const store = this.resolveStoreForId(id);
+		const ps = store?.get(id);
+		if (!ps || !ps.agentSessionFile) return null;
+		let messages: unknown[] = [];
+		try {
+			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			if (content) {
+				for (const line of content.trim().split("\n")) {
+					if (!line.trim()) continue;
+					try {
+						const entry = JSON.parse(line);
+						if (entry.type === "message" && entry.message) messages.push(entry.message);
+					} catch { /* skip malformed */ }
+				}
+			}
+		} catch {
+			messages = [];
+		}
+		if (messages.length === 0) return null;
+		const title = await generateSessionTitle(messages as any[], this.getTitleGenOptions());
+		if (!title) return null;
+		store?.update(id, { title });
+		return title;
 	}
 
 	async autoGenerateTitle(session: SessionInfo): Promise<void> {

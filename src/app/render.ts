@@ -4,6 +4,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
+import { ref, createRef } from "lit/directives/ref.js";
+import { reconcileFollowTail } from "./follow-tail.js";
 import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
@@ -16,6 +18,7 @@ import {
 
 	resetArchivedExpandState,
 	getSidebarData,
+	isProposalStreaming,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
@@ -445,6 +448,43 @@ function ensureSandboxStatusLoaded(): void {
 }
 
 // ============================================================================
+// PROPOSAL STREAMING UX (shared helpers)
+// ============================================================================
+
+/** Pulsing dot + "Streaming…" label rendered to the left of submit buttons. */
+function streamingBadge() {
+	return html`
+		<span class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
+			  data-testid="proposal-streaming-badge"
+			  aria-live="polite">
+			<span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+			Streaming…
+		</span>
+	`;
+}
+
+/** Tailwind class fragment applied to scrollable preview/textarea regions
+ *  while streaming. Pulsing left border. */
+const STREAMING_BORDER = "border-l-2 border-l-primary/70 animate-pulse";
+
+// Module-scoped refs (one per scroll-target). Refs are singletons because at
+// most one of each panel is mounted at a time (the assistant preview pane is
+// not virtualised).
+const goalSpecPreviewRef = createRef<HTMLDivElement>();
+const goalSpecTextareaRef = createRef<HTMLTextAreaElement>();
+const rolePromptPreviewRef = createRef<HTMLDivElement>();
+const rolePromptTextareaRef = createRef<HTMLTextAreaElement>();
+const toolDocsPreviewRef = createRef<HTMLDivElement>();
+const toolRendererPreviewRef = createRef<HTMLDivElement>();
+const toolOuterScrollRef = createRef<HTMLDivElement>();
+const staffPromptPreviewRef = createRef<HTMLDivElement>();
+const staffPromptTextareaRef = createRef<HTMLTextAreaElement>();
+const setupSystemPromptRef = createRef<HTMLTextAreaElement>();
+const setupOuterScrollRef = createRef<HTMLDivElement>();
+const workflowEditWrapperRef = createRef<HTMLDivElement>();
+const projectOuterScrollRef = createRef<HTMLDivElement>();
+
+// ============================================================================
 // SHARED GOAL FORM
 // ============================================================================
 
@@ -484,6 +524,7 @@ interface GoalFormConfig {
 	// UI state
 	saving?: boolean;
 	createDisabled?: boolean;
+	streaming?: boolean;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -510,6 +551,11 @@ function renderGoalForm(config: GoalFormConfig) {
 	const sandboxConfigured = !!state.sandboxStatus?.configured;
 	const sandboxAvailable = !!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists);
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
+
+	queueMicrotask(() => {
+		reconcileFollowTail(goalSpecPreviewRef.value);
+		reconcileFollowTail(goalSpecTextareaRef.value);
+	});
 
 	return html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
@@ -632,11 +678,12 @@ function renderGoalForm(config: GoalFormConfig) {
 				</div>
 				${config.specEditMode
 					? html`<textarea
-							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+							${ref(goalSpecTextareaRef)}
+							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${config.streaming ? STREAMING_BORDER : ""}"
 							.value=${config.spec}
 							@input=${config.onSpecChange}
 						></textarea>`
-					: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
+					: html`<div ${ref(goalSpecPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${config.streaming ? STREAMING_BORDER : ""}">
 							<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>
 						</div>`
 				}
@@ -644,13 +691,14 @@ function renderGoalForm(config: GoalFormConfig) {
 		</div>
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
+				${config.streaming ? streamingBadge() : ""}
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
-				${Button({
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: config.createDisabled ?? !config.title.trim(),
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -788,6 +836,7 @@ function goalPreviewPanel() {
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
 				onCwdHighlight: (i) => { state.cwdHighlightIndex = i; },
 				onCreate: handleCreateGoal,
+				streaming: isProposalStreaming("goal_proposal"),
 			})}
 		</div>
 	`;
@@ -812,6 +861,11 @@ function ensureToolsLoaded(): void {
 
 function rolePreviewPanel() {
 	ensureToolsLoaded();
+	const streaming = isProposalStreaming("role_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(rolePromptPreviewRef.value);
+		reconcileFollowTail(rolePromptTextareaRef.value);
+	});
 
 	const handleCreateRole = async () => {
 		const trimmedName = state.rolePreviewName.trim();
@@ -973,7 +1027,8 @@ function rolePreviewPanel() {
 					</div>
 					${state.rolePreviewPromptEditMode
 						? html`<textarea
-								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+								${ref(rolePromptTextareaRef)}
+								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
 								.value=${state.rolePreviewPrompt}
 								@input=${(e: Event) => {
 									state.rolePreviewPrompt = (e.target as HTMLTextAreaElement).value;
@@ -982,19 +1037,20 @@ function rolePreviewPanel() {
 									if (sid) saveRoleDraft(sid);
 								}}
 							></textarea>`
-						: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
+						: html`<div ${ref(rolePromptPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}">
 								<markdown-block .content=${state.rolePreviewPrompt || "_No prompt content yet_"}></markdown-block>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({
+				${streaming ? streamingBadge() : ""}
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateRole,
-					disabled: !state.rolePreviewName.trim() || !state.rolePreviewLabel.trim(),
+					disabled: !state.rolePreviewName.trim() || !state.rolePreviewLabel.trim() || streaming,
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(Users, "sm")} Create Role</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -1005,6 +1061,12 @@ function rolePreviewPanel() {
 // ============================================================================
 
 function toolPreviewPanel() {
+	const streaming = isProposalStreaming("tool_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(toolDocsPreviewRef.value);
+		reconcileFollowTail(toolRendererPreviewRef.value);
+		reconcileFollowTail(toolOuterScrollRef.value);
+	});
 	const handleDone = () => {
 		backToSessions();
 	};
@@ -1036,7 +1098,7 @@ function toolPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Tool name header -->
 				<div>
 					<div class="text-xs text-muted-foreground mb-1">Tool</div>
@@ -1071,7 +1133,7 @@ function toolPreviewPanel() {
 				${state.toolPreviewDocs ? html`
 					<div>
 						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Documentation Preview</div>
-						<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[200px]">
+						<div ${ref(toolDocsPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[200px] ${streaming ? STREAMING_BORDER : ""}">
 							<markdown-block .content=${state.toolPreviewDocs}></markdown-block>
 						</div>
 					</div>
@@ -1081,7 +1143,7 @@ function toolPreviewPanel() {
 				${state.toolPreviewRendererHtml ? html`
 					<div>
 						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Renderer Preview</div>
-						<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px]">
+						<div ${ref(toolRendererPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px] ${streaming ? STREAMING_BORDER : ""}">
 							<markdown-block .content=${state.toolPreviewRendererHtml}></markdown-block>
 						</div>
 					</div>
@@ -1090,12 +1152,14 @@ function toolPreviewPanel() {
 
 			<!-- Footer -->
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${streaming ? streamingBadge() : ""}
 				${Button({ variant: "ghost", onClick: handleDone, children: "Close" })}
-				${state.toolPreviewName ? Button({
+				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleViewTool,
+					disabled: streaming,
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} View Tool</span>`,
-				}) : ""}
+				})}</span>` : ""}
 			</div>
 		</div>
 	`;
@@ -1303,6 +1367,11 @@ function describeCron(cron: string): string {
 
 function staffPreviewPanel() {
 	ensureSandboxStatusLoaded();
+	const streaming = isProposalStreaming("staff_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(staffPromptPreviewRef.value);
+		reconcileFollowTail(staffPromptTextareaRef.value);
+	});
 	const handleCreateStaff = async () => {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
@@ -1431,7 +1500,8 @@ function staffPreviewPanel() {
 					</div>
 					${state.staffPreviewPromptEditMode
 						? html`<textarea
-								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+								${ref(staffPromptTextareaRef)}
+								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
 								style="min-height:150px; max-height:400px; width:100%"
 								.value=${state.staffPreviewPrompt}
 								@input=${(e: Event) => {
@@ -1439,19 +1509,20 @@ function staffPreviewPanel() {
 									state.staffPreviewPromptEdited = true;
 								}}
 							></textarea>`
-						: html`<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm" style="min-height:150px; max-height:400px">
+						: html`<div ${ref(staffPromptPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}" style="min-height:150px; max-height:400px">
 								<markdown-block .content=${state.staffPreviewPrompt || "_No prompt content yet_"}></markdown-block>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({
+				${streaming ? streamingBadge() : ""}
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
-					disabled: !state.staffPreviewName.trim(),
+					disabled: !state.staffPreviewName.trim() || streaming,
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(UserCheck, "sm")} Create Staff</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -1514,6 +1585,11 @@ async function saveSetupForm(): Promise<void> {
 }
 
 function setupPreviewPanel() {
+	const streaming = isProposalStreaming("setup_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(setupSystemPromptRef.value);
+		reconcileFollowTail(setupOuterScrollRef.value);
+	});
 	const handleDone = () => { backToSessions(); };
 
 	const stack = state.setupFormStack;
@@ -1564,7 +1640,7 @@ function setupPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+			<div ${ref(setupOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Header -->
 				<div>
 					<div class="text-lg font-semibold flex items-center gap-2">
@@ -1612,8 +1688,9 @@ function setupPreviewPanel() {
 				<div class="flex flex-col gap-2">
 					${sectionLabel("System Prompt \u2014 Project Context")}
 					<textarea
+						${ref(setupSystemPromptRef)}
 						class="w-full min-h-[120px] px-3 py-2 rounded-md border border-input bg-background text-sm
-							font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+							font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y ${streaming ? STREAMING_BORDER : ""}"
 						placeholder="The assistant will draft project-specific directives here..."
 						.value=${state.setupFormSystemPrompt}
 						@input=${(e: Event) => {
@@ -1632,13 +1709,14 @@ function setupPreviewPanel() {
 					${state.setupFormSaved ? html`<span class="text-green-600 dark:text-green-400">&#10003; Saved to config files</span>` : ""}
 				</div>
 				<div class="flex items-center gap-2">
+					${streaming ? streamingBadge() : ""}
 					${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
-					${Button({
+					<span data-testid="proposal-primary-submit">${Button({
 						variant: "default",
 						onClick: saveSetupForm,
-						disabled: !canSave || state.setupFormSaving,
+						disabled: !canSave || state.setupFormSaving || streaming,
 						children: state.setupFormSaving ? "Saving\u2026" : "Save Setup",
-					})}
+					})}</span>
 				</div>
 			</div>
 		</div>
@@ -1654,6 +1732,10 @@ function ensureWorkflowPageLoaded() {
 
 function workflowPreviewPanel() {
 	ensureWorkflowPageLoaded();
+	const streaming = isProposalStreaming("workflow_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(workflowEditWrapperRef.value);
+	});
 
 	const handleCreateWorkflow = async () => {
 		if (_workflowPageModule) {
@@ -1690,19 +1772,20 @@ function workflowPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-4">
+			<div ${ref(workflowEditWrapperRef)} class="flex-1 overflow-y-auto p-4 ${streaming ? STREAMING_BORDER : ""}">
 				${renderWorkflowEditPanel()}
 			</div>
 			<div class="flex items-center justify-between p-3 border-t border-border">
 				<div></div>
 				<div class="flex items-center gap-2">
-					${Button({
+					${streaming ? streamingBadge() : ""}
+					<span data-testid="proposal-primary-submit">${Button({
 						variant: "default",
 						size: "sm",
 						onClick: handleCreateWorkflow,
-						disabled: !canSaveWorkflow(),
+						disabled: !canSaveWorkflow() || streaming,
 						children: isWorkflowSaving() ? "Creating\u2026" : "Create Workflow",
-					})}
+					})}</span>
 				</div>
 			</div>
 		</div>
@@ -1746,6 +1829,10 @@ export function resetProjectProposalPanel(): void {
 
 function projectProposalPanel() {
 	const proposal = state.activeProjectProposal;
+	const streaming = isProposalStreaming("project_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(projectOuterScrollRef.value);
+	});
 
 	if (!proposal) {
 		return html`
@@ -1924,7 +2011,7 @@ function projectProposalPanel() {
 				<div class="text-[11px] text-muted-foreground font-mono truncate" title=${fields.root_path || current?.rootPath || ""}>${fields.root_path || current?.rootPath || ""}</div>
 			</div>
 			${projectViewTabs(activeView, onView, hasDiff)}
-			<div class="flex-1 overflow-y-auto p-5">
+			<div ${ref(projectOuterScrollRef)} class="flex-1 overflow-y-auto p-5 ${streaming ? STREAMING_BORDER : ""}">
 				${activeView === "components"
 					? projectComponentsView(structuredComponents)
 					: activeView === "workflows"
@@ -1933,13 +2020,14 @@ function projectProposalPanel() {
 			</div>
 			${legacyFieldsBlock}
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${streaming ? streamingBadge() : ""}
 				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
-				${Button({
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleAccept,
-					disabled: acceptDisabled,
+					disabled: acceptDisabled || streaming,
 					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -2085,6 +2173,7 @@ function goalProposalPanel() {
 		onDismiss: handleDismiss,
 		saving: _proposalSaving,
 		createDisabled: !_proposalTitle.trim() || _proposalSaving,
+		streaming: isProposalStreaming("goal_proposal"),
 	});
 }
 

@@ -5667,6 +5667,26 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/generate-title — auto-generate a title from chat history.
+	// Works for live sessions (calls SessionManager.autoGenerateTitle) and archived
+	// sessions (parses .jsonl). Used by the rename dialog when the session is not
+	// the currently focused one (no live WebSocket).
+	const genTitleMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/generate-title$/);
+	if (genTitleMatch && req.method === "POST") {
+		const id = genTitleMatch[1];
+		try {
+			const title = await sessionManager.generateTitleForAnySession(id);
+			if (!title) {
+				json({ error: "Could not generate title (session not found or no messages)" }, 404);
+				return;
+			}
+			json({ title });
+		} catch (err) {
+			json({ error: String((err as Error)?.message ?? err) }, 500);
+		}
+		return;
+	}
+
 	// PUT /api/sessions/:id/title — legacy rename endpoint
 	const titleMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/title$/);
 	if (titleMatch && req.method === "PUT") {

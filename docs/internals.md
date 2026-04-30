@@ -140,6 +140,36 @@ The verification system is split into two modules:
 - **`verification-harness.ts`** — orchestration: session lifecycle, WS event broadcasting, process spawning, retry logic, persistence. Also implements the **blocking-tool** contract used by `verification_result`: a tool extension POSTs a verdict, which resolves the Promise registered when the gate signal started verification. See [docs/blocking-tools.md](blocking-tools.md) for the pattern. The `ask_user_choices` tool uses a different, non-blocking shape — see [docs/non-blocking-ask.md](non-blocking-ask.md).
 - **`verification-logic.ts`** — pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps` (cache reuse for same-commit re-signals), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests/verification-logic.test.ts` (~65 tests, <1s) without requiring a running server.
 
+#### Reviewer `kind` & restart resume
+
+Reviewer (and QA) sub-sessions are owned by `VerificationHarness`, but the harness needs them persisted in the team store so a server restart can rebind a running gate signal to the still-alive agent process. `TeamManager.registerReviewerSession()` writes the reviewer's `sessionId` into `entry.agents` for that goal; `unregisterReviewerSession()` removes it on completion.
+
+The persisted-agent shape (`PersistedTeamEntry.agents[]` in `team-store.ts`) carries a `kind: "worker" | "reviewer"` discriminator. Worker entries (regular team agents dispatched via `dispatchToRole`) are nudged on `agent_end` so the team lead learns that a delegate has finished; reviewer entries must never produce that nudge — the verification harness alone interprets reviewer completion. Two enforcement points:
+
+- `resubscribeTeamEvents()` skips agents with `kind === "reviewer"` when re-attaching the `agent_end → notifyTeamLead()` listener after a restart. Pre-fix this listener was attached unconditionally and the live (non-restart) path never noticed because it subscribes only to `tool_execution_end`.
+- `notifyTeamLead()` performs the same check before firing, so even a stray subscription cannot deliver a steer.
+
+Back-compat: `team-state.json` entries written before the field existed have `kind === undefined` after load. The harness treats `undefined` as `"worker"` (the safer default for old records, all of which were workers in practice), but the defensive guard in both sites also accepts `role === "reviewer"` as a fallback discriminator. A persisted reviewer entry that was missing `kind` after a cross-version restart still gets correctly skipped.
+
+Key files: `src/server/agent/team-manager.ts`, `src/server/agent/team-store.ts`. Regression test: `tests/team-manager-reviewer-resume.test.ts`.
+
+#### Reminder race after restart-resume
+
+When a server restart interrupts an in-flight reviewer turn, the harness tries to resume from the existing session rather than spawning a fresh one (`_tryResumeFromSession` in `verification-harness.ts`). Resume sends a reminder prompt asking the agent to call `verification_result`, then races the eventual tool call against an idle-detector so a stuck agent eventually fails rather than hanging the gate.
+
+The race uses two `SessionManager` helpers:
+
+- `waitForIdle(sessionId, timeoutMs)` — resolves when the session transitions to `idle` (or **synchronously** if it is already idle). This is the failure-detector edge of the race: "agent went quiet without calling `verification_result`".
+- `waitForStreaming(sessionId, timeoutMs = 10_000)` — mirror of `waitForIdle` that resolves on `agent_start` (or rejects on `process_exit` / timeout). This confirms the prompt was actually picked up and a new turn has begun.
+
+Both are needed because, after a restart, the resumed session is in `status === "idle"` at the moment the reminder is dispatched. `rpcClient.prompt()` is fire-and-forget on the RPC channel; the session does not synchronously transition to `streaming`. Without `waitForStreaming`, the `waitForIdle` half of the race resolves immediately on the *current* idle, the harness declares failure, and the `finally` block terminates the session before the agent has read the reminder — the user-visible signature is a reviewer archived within tens of milliseconds of restart, with the error string `"Agent did not call verification_result after server restart and reminder."`
+
+The pattern is now applied at all four reminder sites in `verification-harness.ts`: `_tryResumeFromSession` (the original repro), `runLlmReviewViaSession`, the QA-tester reminder, and the legacy direct-`RpcBridge` reminder. The legacy site has no `SessionManager` injected and so reproduces the shape inline with an `agent_start` listener and the same 10s timeout. A `.catch(() => {})` on every `waitForStreaming` call ensures that an unresponsive agent still falls through to the existing `waitForIdle` race rather than blocking forever — the helper raises the floor without lowering the ceiling.
+
+The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern.
+
+Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
@@ -901,6 +931,12 @@ When Bobbit talks to an on-prem model through the AI Gateway, the gateway's toke
 - Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
 
 Provider-level (not per-model) is deliberate — it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
+
+### Startup refresh of `models.json`
+
+On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `~/.bobbit/agent/models.json` doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` — which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
+
+If the gateway is unreachable at startup (network error / HTTP failure / timeout), the function logs `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json` and leaves the file untouched — staleness is preferred to wiping a working file with a stub. The `BOBBIT_SKIP_AIGW_DISCOVERY=1` test/CI escape hatch skips only the network call: when aigw is already configured, the Bedrock env vars are still applied and the existing `models.json` is kept as-is. The not-configured branch (auto-probing for a local gateway) is unchanged.
 
 ### Resolver semantics (pi-coding-agent contract surface)
 
@@ -1861,6 +1897,36 @@ Two surfaces in the chat client previously relied on time-based heuristics that 
 3. **User intent is observed, not inferred.** Explicit `wheel`, `touchstart`, and `keydown` (PageUp/Down, Arrow Up/Down, Home, End) listeners on the scroll container set `_stickToBottom = false` immediately. Geometry alone cannot reliably distinguish a user scroll-up from a programmatic one across browsers and pointer types, so the listeners are the source of truth for "the user took control". The 5px stick-to-bottom tail in `_handleScroll` is just a tolerance for sub-pixel rounding — not an intent heuristic.
 
 When modifying scroll behaviour: do not introduce new timers, do not widen the 5px tail, and do not reach for `_isAutoScrolling`-style flags. If a new code path scrolls programmatically, it must update the latch via the same helper used by the existing auto-scroll path so its echo gets consumed. Behavioural twin test: `tests/agent-interface-scroll.spec.ts` (the `delta === 0` no-op case is the canonical regression).
+
+### Proposal panel scroll lock invariant
+
+The seven proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow`, `setup` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
+
+The logic lives in **`src/app/follow-tail.ts`** (`reconcileFollowTail(el)`), called from a `queueMicrotask` at the end of each panel's render so it fires after the synchronous DOM commit but before paint. The same three rules apply:
+
+1. **Auto-scroll only on positive delta.** `delta < 0` (shrink) updates the cached height and returns. `delta === 0` is a no-op — the canonical vibration-loop fix from the chat surface. Only `delta > 0` triggers a programmatic `scrollTop` write, and only when `stickToBottom` is true.
+2. **Programmatic-scroll echo filter, not timers.** Before each programmatic write the helper latches `(lastProgScrollTop, lastProgScrollHeight)`. The matching browser-emitted scroll event is consumed exactly once and the latch is cleared, so a later coincidental geometry match is treated as user intent.
+3. **User intent is observed.** `wheel`, `touchstart`, and `keydown` (PageUp/Down, Home, End, Arrow Up/Down) listeners on the scroll container set `stickToBottom = false` immediately. The 5px tail is sub-pixel rounding tolerance only, not an intent heuristic.
+
+Lock state is stored in a module-private `WeakMap<HTMLElement, LockState>` keyed by the scroll element. This matters for two reasons. First, when Lit re-renders and re-attaches the same element across deltas the WeakMap entry is reused, so the user's `stickToBottom = false` choice persists across re-renders without any explicit re-binding. Second, when the panel unmounts the element is GC-eligible and the WeakMap entry goes with it — a fresh remount of the same panel starts with a clean `{stickToBottom: true, lastScrollHeight: 0}` state. This is the **fresh-state-on-remount invariant**: panel close/reopen always behaves like a first render, never inherits stale lock state from the previous lifecycle.
+
+Textarea selection (`selectionStart` / `selectionEnd`) is captured on `select`, `keyup`, and `click`, then re-applied via `setSelectionRange(...)` after every reconcile branch (positive delta, zero delta, and shrink) — `setSelectionRange` is a state mutation per the WHATWG spec and applies even when the textarea is not the active element, so the caret is in the right place when focus returns. The DOMException some browsers throw on detached/hidden inputs is swallowed.
+
+**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The seven panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
+
+When modifying proposal-panel scroll behaviour: route through `reconcileFollowTail` rather than touching `scrollTop` or `setSelectionRange` directly; do not introduce timer-based intent heuristics; do not widen the 5px tail. See `src/app/follow-tail.ts` and the panel render functions in `src/app/render.ts`. Behavioural twin test: `tests/follow-tail.spec.ts`.
+
+### Proposal streaming flag
+
+`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`, `workflow_proposal`, `setup_proposal`. Read via the `isProposalStreaming(tag)` accessor.
+
+A per-tag map rather than a single boolean because the seven panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
+
+**Why the flag exists.** Without it the Create / Apply / Save buttons are clickable mid-stream and a user can submit before the spec/title has finished streaming, producing a goal/role/tool with truncated content. The flag drives (a) the `disabled` state of each panel's primary submit, (b) the `streamingBadge()` + `STREAMING_BORDER` indicator, and (c) consumers in `session-manager.ts` that may want to suppress destructive side-effects on streaming-mode fires.
+
+**Writer (single owner): `RemoteAgent` in `src/app/remote-agent.ts`.** Set to `true` inside `_checkToolProposals(message, streaming=true)` immediately before the per-tag `callback(input, streaming)` fan-out. Cleared on the matching block-finish branch (`!streaming && blockId` — the `_processedProposalIds.add(blockId)` site, reached on `case "message_end"` and on full re-scans), and bulk-cleared on `case "agent_end"` and `RemoteAgent.reset()` so an aborted/errored turn never leaves the flag stuck on. Readers are the seven panel render functions in `src/app/render.ts`; they call `isProposalStreaming("<tag>_proposal")` once at the top.
+
+**WebSocket reconnect.** The resume path (`{type:"resume", fromSeq}`) replays missed events through the same handler, so a replayed `message_update` re-sets the flag and a replayed `message_end` clears it — no extra logic. The resume-gap fallback (`get_messages`) re-scans the snapshot with `_checkToolProposals(m, false)`, which hits the block-finish branch for any propose_* block in the snapshot and clears any stale flag. The `agent_end` / `reset()` bulk-clears are the final safety net on hard disconnect or session change. Cross-session isolation: `state.proposalStreamingByTag` is a singleton on the global `state` object cleared on `reset()`, which fires on session switch.
 
 ### Snapshot merge invariant
 
