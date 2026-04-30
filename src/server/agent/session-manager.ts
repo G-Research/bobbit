@@ -678,6 +678,15 @@ export class SessionManager {
 		return this._testGoalManager?.getGoalStore().get(goalId);
 	}
 
+	/** Resolve the GoalManager owning a goal across all project contexts. */
+	private resolveGoalManagerForGoal(goalId: string): GoalManager | undefined {
+		if (this.projectContextManager) {
+			const ctx = this.projectContextManager.getContextForGoal(goalId);
+			return ctx?.goalManager;
+		}
+		return this._testGoalManager ?? undefined;
+	}
+
 	/** Whether Docker sandbox mode is enabled in project config. */
 	get isSandboxEnabled(): boolean {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
@@ -1153,6 +1162,38 @@ export class SessionManager {
 				}
 			}
 
+			// Nested-goal awareness (design §14.1) — same shape as session-setup.ts.
+			const isTeamLead = roleName === "team-lead";
+			let parentGoalCtx: { id: string; title: string; branch: string; specExcerpt: string; rootTitle: string } | undefined;
+			let isTopLevelTeamLead = false;
+			let divergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
+			let maxConcurrentChildren: number | undefined;
+			let goalWorkflowId: string | undefined;
+			if (isTeamLead && goal) {
+				goalWorkflowId = goal.workflowId;
+				const gm = session.goalId ? this.resolveGoalManagerForGoal(session.goalId) : undefined;
+				if (gm) {
+					divergencePolicy = gm.resolveDivergencePolicy(goal.id);
+					const rootId = goal.rootGoalId ?? goal.id;
+					maxConcurrentChildren = gm.resolveRootMaxConcurrentChildren(rootId);
+					if (goal.parentGoalId) {
+						const parent = gm.getGoal(goal.parentGoalId);
+						const rootGoal = gm.getGoal(rootId);
+						if (parent) {
+							parentGoalCtx = {
+								id: parent.id,
+								title: parent.title,
+								branch: parent.branch || "unknown",
+								specExcerpt: (parent.spec || "").slice(0, 800),
+								rootTitle: rootGoal?.title ?? parent.title,
+							};
+						}
+					} else {
+						isTopLevelTeamLead = true;
+					}
+				}
+			}
+
 			parts = {
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
@@ -1163,6 +1204,12 @@ export class SessionManager {
 				roleName,
 				allowedTools: session.allowedTools,
 				projectConfigStore: this.projectConfigStore,
+				isTeamLead,
+				isTopLevelTeamLead,
+				parentGoal: parentGoalCtx,
+				divergencePolicy,
+				maxConcurrentChildren,
+				goalWorkflowId,
 			};
 		}
 
