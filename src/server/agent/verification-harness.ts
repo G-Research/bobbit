@@ -31,6 +31,7 @@ import {
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
+import { resolveRoleForGoal as resolveRoleForGoalImpl } from "./role-resolution.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -1011,12 +1012,33 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Resolve a role from the cascade so project-level overrides apply, falling
-	 * back to the server-level role store when the cascade is unavailable
-	 * (e.g. unit tests). Returns undefined if the role does not exist.
+	 * Resolve a role for verification spawn paths.
+	 *
+	 * When a `goalId` is in scope and both PCM + cascade are wired, this
+	 * delegates to `resolveRoleForGoal` so that the goal's own and ancestor
+	 * `inlineRoles` shadow project / server / builtin definitions —
+	 * matching `team-manager.spawnRole`. Falls back to the cascade-only
+	 * lookup (no goal context) and finally to the server-level role store
+	 * for unit-test paths without a cascade.
+	 *
+	 * See `docs/design/nested-goals.md` §7.2.
 	 */
 	private resolveRoleForGoal(roleName: string, goalId?: string): { model?: string; thinkingLevel?: string } | undefined {
 		if (this.configCascade) {
+			// Goal-aware path: consult inline-role overrides up the parentGoalId chain
+			// before the cascade. Requires PCM to look up the goal's GoalStore.
+			if (goalId && this.projectContextManager) {
+				const ctx = this.projectContextManager.getContextForGoal(goalId);
+				if (ctx) {
+					try {
+						const found = resolveRoleForGoalImpl(ctx.goalStore, this.configCascade, goalId, roleName);
+						if (found) return { model: found.model, thinkingLevel: found.thinkingLevel };
+					} catch (err) {
+						console.warn(`[verification] Failed to resolve role "${roleName}" for goal "${goalId}":`, err);
+					}
+				}
+			}
+			// Cascade-only fallback (no goal context, or goal not found in any project).
 			const projectId = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.project?.id : undefined;
 			try {
 				const resolved = this.configCascade.resolveRoles(projectId);
