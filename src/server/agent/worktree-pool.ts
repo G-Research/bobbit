@@ -31,6 +31,7 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { createWorktree, cleanupWorktree, shouldSkipRemotePush, moveWorktree, createWorktreeSet, type WorktreeResult } from "../skills/git.js";
+import { runComponentSetups } from "../skills/worktree-setup.js";
 import type { Component } from "./project-config-store.js";
 
 const execFile = promisify(execFileCb);
@@ -96,25 +97,28 @@ export class WorktreePool {
 	private filling = false;
 	private repoPath: string;
 	private targetSize: number;
-	private setupCommand?: string;
 
-	/** Components driving multi-repo fill. Undefined or single (repo===".") behaves as today. */
-	private components?: Component[];
+	/**
+	 * Live resolver for the project's components[] — called fresh on every
+	 * `_fill()` so config edits land on the next pool fill without restart.
+	 * When unset (or empty), the pool falls back to legacy single-repo fill
+	 * with no setup hook (no implicit project-yaml read — strictly opt-in).
+	 */
+	private componentsResolver?: () => Component[];
 
 	/** Project-level worktree_root override (sibling of <rootPath>-wt by default). */
 	private worktreeRoot?: string;
 
-	constructor(opts: { repoPath: string; targetSize?: number; setupCommand?: string; components?: PoolComponent[] | Component[]; worktreeRoot?: string }) {
+	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; worktreeRoot?: string }) {
 		this.repoPath = opts.repoPath;
 		this.targetSize = opts.targetSize ?? 2;
-		this.setupCommand = opts.setupCommand;
-		this.components = opts.components as Component[] | undefined;
+		this.componentsResolver = opts.componentsResolver;
 		this.worktreeRoot = opts.worktreeRoot;
 	}
 
-	/** Whether the pool's stored components imply multi-repo fill. */
-	private isMultiRepo(): boolean {
-		return !!this.components && this.components.some(c => c.repo !== ".");
+	/** Whether the given components list implies multi-repo fill. */
+	private isMultiRepo(components: Component[] | undefined): boolean {
+		return !!components && components.some(c => c.repo !== ".");
 	}
 
 	/** Number of ready worktrees available. */
@@ -148,19 +152,12 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Update the setup command (e.g. when project config changes).
-	 * Does NOT invalidate existing pool entries — they were built with the old command.
+	 * Replace the components resolver used for future pool fills. Existing
+	 * entries stay in the pool until claimed; the next `_fill()` calls the
+	 * resolver to pick up the latest project config.
 	 */
-	setSetupCommand(cmd: string | undefined): void {
-		this.setupCommand = cmd;
-	}
-
-	/**
-	 * Replace the component set used for future pool fills. Existing entries
-	 * stay in the pool until claimed; the next `_fill()` will use the new shape.
-	 */
-	setComponents(components: Component[] | PoolComponent[]): void {
-		this.components = components as Component[];
+	setComponentsResolver(resolver: () => Component[]): void {
+		this.componentsResolver = resolver;
 	}
 
 	/**
@@ -430,32 +427,67 @@ export class WorktreePool {
 
 	private async _fill(): Promise<void> {
 		while (this.pool.length < this.targetSize) {
+			// Resolve components fresh on every fill so live project-config edits
+			// (e.g. user toggles `worktreeSetupCommand` in Settings) take effect on
+			// the very next pool entry without a server restart.
+			const components = this.componentsResolver?.() ?? [];
+			const multi = this.isMultiRepo(components);
 			const uuid8 = randomUUID().slice(0, 8);
 			const branchName = `${POOL_BRANCH_PREFIX}${uuid8}`;
 			try {
-				if (this.isMultiRepo() && this.components) {
+				let container: string;
+				let entry: PoolEntry;
+				if (multi) {
 					// Multi-repo prebuild via createWorktreeSet — entry carries per-repo paths.
-					const set = await createWorktreeSet(this.repoPath, this.components, branchName, undefined, { worktreeRoot: this.worktreeRoot });
-					this.pool.push({
+					const set = await createWorktreeSet(this.repoPath, components, branchName, undefined, { worktreeRoot: this.worktreeRoot });
+					container = set.container;
+					entry = {
 						branchName,
 						worktreePath: set.container,
 						worktrees: set.worktrees,
 						createdAt: Date.now(),
+					};
+				} else {
+					// Single-repo prebuild. NOTE: we no longer pass setupCommand to
+					// createWorktree — the canonical path is runComponentSetups()
+					// below so single-repo and multi-repo share one code path and
+					// `components[*].worktreeSetupCommand` is the only source of truth.
+					const result = await createWorktree(this.repoPath, branchName, {
+						skipPush: true,
+						worktreeRoot: this.worktreeRoot,
 					});
-					console.log(`[worktree-pool] Ready (multi-repo): ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
-					continue;
+					container = result.worktreePath;
+					entry = {
+						branchName: result.branchName,
+						worktreePath: result.worktreePath,
+						createdAt: Date.now(),
+					};
 				}
-				const result = await createWorktree(this.repoPath, branchName, {
-					setupCommand: this.setupCommand,
-					skipPush: true,
-					worktreeRoot: this.worktreeRoot,
-				});
-				this.pool.push({
-					branchName: result.branchName,
-					worktreePath: result.worktreePath,
-					createdAt: Date.now(),
-				});
-				console.log(`[worktree-pool] Ready: ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
+
+				// Per-component setup (npm ci, etc.) — runs BEFORE we publish the
+				// entry into the pool so callers that claim immediately after fill
+				// see node_modules/ already populated. Loud log so a future regression
+				// of the source-of-truth migration cannot recur silently the way the
+				// top-level `worktree_setup_command` read did.
+				const setupNames = components.filter(c => c.worktreeSetupCommand).map(c => c.name);
+				if (setupNames.length > 0) {
+					console.log(`[worktree-pool] running setup for components: ${setupNames.join(", ")}`);
+					try {
+						await runComponentSetups({
+							components,
+							branchContainer: container,
+							primaryWorktreeRoot: this.repoPath,
+							exec: async (cmd, cwd, env) => {
+								await execFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+							},
+						});
+					} catch (err) {
+						console.warn(`[worktree-pool] runComponentSetups failed for ${branchName} (non-fatal):`, err);
+					}
+				}
+
+				this.pool.push(entry);
+				console.log(`[worktree-pool] Ready${multi ? " (multi-repo)" : ""}: ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
 			} catch (err) {
 				console.error(`[worktree-pool] Failed to pre-build ${branchName}:`, err);
 				break;

@@ -482,6 +482,26 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or session-first-prompt rename), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
+**Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. Three invocation points fan out from `runComponentSetups()`:
+
+| Site | When it runs | How components are resolved |
+|---|---|---|
+| `WorktreePool._fill()` (single-repo and multi-repo) | After every successful pool prebuild, before the entry is published into the pool | `componentsResolver: () => Component[]` closure passed at construction — invoked **fresh per fill** so live edits to `project.yaml` take effect on the next replenishment without a server restart |
+| `StaffManager.refreshWorktree()` | On each wake cycle for non-sandboxed staff, after rebasing the worktree onto the primary branch | `ctx.projectConfigStore.getComponents()` |
+| `session-setup.ts` (single-repo on-demand) | Fallback `createWorktree` path when the pool is empty | `components[0].worktreeSetupCommand` passed via `opts.setupCommand` to `createWorktree` |
+
+**Why the per-fill resolver matters.** Pool entries can sit in the pool for hours; if components were captured at pool construction time, a user who fixes a wrong setup command in `project.yaml` would still get stale entries baked with the old command until the server restarted. The closure pattern guarantees the next fill picks up edits.
+
+**Loud log line.** Every pool fill that has at least one component with a setup command emits:
+
+```
+[worktree-pool] running setup for components: <names>
+```
+
+This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper.
+
+**`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
+
 #### Remote branch cleanup
 
 Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.

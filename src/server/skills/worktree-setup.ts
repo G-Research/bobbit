@@ -39,6 +39,10 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<void> {
+	// Global escape hatch — used by E2E/CI to skip slow npm/pip installs in
+	// freshly-claimed pool/staff worktrees. Mirrors the legacy gate that lived
+	// inside `createWorktree` before per-component setup was the canonical path.
+	if (process.env.BOBBIT_SKIP_NPM_CI) return;
 	for (const c of opts.components) {
 		if (!c.worktreeSetupCommand) continue;  // data-only or no hook
 
