@@ -57,6 +57,7 @@ import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobi
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { renderGoalDashboard } from "./goal-dashboard.js";
 import "./goal-dashboard.css";
+import "../ui/styles/plan-tab.css";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { renderRoleManagerPage } from "./role-manager-page.js";
 import "./role-manager.css";

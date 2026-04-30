@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Plan tab \u2014 SVG layout + node card (task 4.2)</title>
+</head>
+<body>
+<script>
+/**
+ * Pure logic mirror of the Plan-tab helpers added to
+ * src/app/goal-dashboard.ts in nested-goals task 4.2 (see
+ * docs/design/nested-goals.md \u00a710.2).
+ *
+ * Mirrors `extractPlanSteps`, `computePlanColumns`, and `isPlanEditable`
+ * byte-for-byte while staying pure (no DOM, no lit, no module-level state)
+ * so the file:// fixture can drive them with synthetic state and assert on
+ * column/node counts + edit-button visibility without spinning up the
+ * full UI bundle.
+ */
+
+function extractPlanSteps(goal) {
+  const exec = goal && goal.workflow && goal.workflow.gates
+    ? goal.workflow.gates.find(g => g.id === "execution")
+    : undefined;
+  const verify = (exec && exec.verify) || [];
+  return verify.filter(s => s && s.type === "subgoal" && s.subgoal && typeof s.subgoal.planId === "string");
+}
+
+function computePlanColumns(steps) {
+  const byPhase = new Map();
+  for (const s of steps) {
+    const p = ((s.phase != null ? s.phase : (s.subgoal && s.subgoal.phase) || 0) | 0);
+    let arr = byPhase.get(p);
+    if (!arr) { arr = []; byPhase.set(p, arr); }
+    arr.push(s);
+  }
+  const columns = [];
+  for (const phase of [...byPhase.keys()].sort((a, b) => a - b)) {
+    const nodes = byPhase.get(phase).slice().sort((a, b) => {
+      const at = ((a.subgoal && a.subgoal.title) || a.name || "").toLowerCase();
+      const bt = ((b.subgoal && b.subgoal.title) || b.name || "").toLowerCase();
+      return at < bt ? -1 : at > bt ? 1 : 0;
+    });
+    columns.push({ phase, nodes });
+  }
+  return columns;
+}
+
+function isPlanEditable(goal, gateStates) {
+  if (!goal) return false;
+  if (goal.paused === true) return true;
+  const gp = (gateStates || []).find(g => g.gateId === "goal-plan");
+  return ((gp && gp.status) || "pending") !== "passed";
+}
+
+/** Build a fixture goal with N subgoal verify steps spread across `phases` distinct phase numbers. */
+function buildPlan(nodesPerPhase) {
+  const verify = [];
+  let i = 0;
+  for (const [phaseNum, n] of Object.entries(nodesPerPhase)) {
+    const p = Number(phaseNum);
+    for (let k = 0; k < n; k++) {
+      verify.push({
+        name: `step-${i}`,
+        type: "subgoal",
+        phase: p,
+        subgoal: {
+          title: `Subgoal ${i}`,
+          spec: `Spec for subgoal ${i}`,
+          workflowId: "feature",
+          planId: `plan-${i}`,
+        },
+      });
+      i++;
+    }
+  }
+  return {
+    id: "g1",
+    title: "Parent",
+    state: "in-progress",
+    workflow: {
+      id: "parent",
+      name: "Parent Goal",
+      description: "",
+      gates: [
+        { id: "charter", name: "Charter", dependsOn: [] },
+        { id: "plan-review", name: "Plan Review", dependsOn: ["charter"] },
+        { id: "goal-plan", name: "Approve Plan", dependsOn: ["plan-review"] },
+        { id: "execution", name: "Execution", dependsOn: ["goal-plan"], verify },
+        { id: "ready-to-merge", name: "Ready", dependsOn: ["execution"] },
+      ],
+    },
+  };
+}
+
+window.extractPlanSteps = extractPlanSteps;
+window.computePlanColumns = computePlanColumns;
+window.isPlanEditable = isPlanEditable;
+window.buildPlan = buildPlan;
+</script>
+</body>
+</html>

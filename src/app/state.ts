@@ -125,14 +125,57 @@ export interface Goal {
 			metadata?: Record<string, string>;
 			verify?: Array<{
 				name: string;
-				type: "command" | "llm-review";
+				type: "command" | "llm-review" | "agent-qa" | "subgoal";
 				run?: string;
 				prompt?: string;
 				expect?: "success" | "failure";
 				timeout?: number;
+				phase?: number;
+				optional?: boolean;
+				label?: string;
+				role?: string;
+				description?: string;
+				/** Subgoal step parameters when type === "subgoal" — see
+				 *  docs/design/nested-goals.md §2.1. The dashboard's Plan tab
+				 *  reads from this. */
+				subgoal?: {
+					title: string;
+					spec: string;
+					workflowId?: string;
+					suggestedRole?: string;
+					enabledOptionalSteps?: string[];
+					planId: string;
+					phase?: number;
+					/** Resolved child goal id once the harness has spawned it.
+					 *  Recorded on the verification record by the subgoal verify
+					 *  step (§2.4). */
+					childGoalId?: string;
+				};
 			}>;
 		}>;
 	};
+}
+
+// ── Pending plan-mutation banner (nested-goals §10.5) ───────────────
+//
+// Server fans out a `goal_mutation_pending` WS event to every dashboard
+// viewer when its plan-mutation classifier needs the user to approve or
+// reject a buffered plan change. Task 4.2 declares the shape; task 4.3
+// will fill it in via the WS event handler and render the banner.
+//
+// `requestId` is the server-allocated buffer key used by the decision
+// REST endpoint. `classification` mirrors the classifier output. The
+// adherence-check arrays surface inside the `Details` disclosure.
+export interface PendingMutation {
+	goalId: string;
+	requestId: string;
+	classification: "fix-up" | "expansion" | "restructure" | "criteria-drop";
+	summary: string;
+	addedNodes?: string[];
+	removedNodes?: string[];
+	droppedCriteria?: string[];
+	changedDeps?: boolean;
+	receivedAt: number;
 }
 
 export type AppView = "disconnected" | "gateway-starting" | "authenticated";
@@ -367,6 +410,10 @@ export const state = {
 
 	/** Docker sandbox status (fetched on demand) */
 	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
+
+	/** Pending plan-mutation banner state for the active goal dashboard
+	 *  (nested-goals §10.5). Declared in 4.2; populated by 4.3's WS handler. */
+	pendingMutation: undefined as PendingMutation | undefined,
 };
 
 // Expose state on window for E2E test diagnostics. The bundle is identical for
