@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  #scroll {
+    width: 300px;
+    height: 200px;
+    overflow-y: auto;
+    border: 1px solid #ccc;
+  }
+  #content > div { padding: 8px; border-bottom: 1px solid #eee; }
+  #ta {
+    width: 300px;
+    height: 100px;
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+<div id="scroll"><div id="content"></div></div>
+<textarea id="ta"></textarea>
+<script src="follow-tail-bundle.js"></script>
+<script>
+  window.__ready = true;
+  window.__getScroll = () => {
+    const el = document.getElementById('scroll');
+    return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
+  };
+  window.__appendContent = (n, sizePx) => {
+    const c = document.getElementById('content');
+    for (let i = 0; i < n; i++) {
+      const d = document.createElement('div');
+      d.style.height = (sizePx || 30) + 'px';
+      d.textContent = 'Line ' + (c.children.length + 1);
+      c.appendChild(d);
+    }
+  };
+  window.__shrinkContent = (n) => {
+    const c = document.getElementById('content');
+    for (let i = 0; i < n; i++) c.removeChild(c.lastChild);
+  };
+  window.__reconcile = () => window.__followTail.reconcileFollowTail(document.getElementById('scroll'));
+  window.__reconcileTa = () => window.__followTail.reconcileFollowTail(document.getElementById('ta'));
+  window.__scrollTo = (n) => { document.getElementById('scroll').scrollTop = n; };
+  window.__setScrollTopSpy = () => {
+    const el = document.getElementById('scroll');
+    let count = 0;
+    const proto = HTMLElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'scrollTop');
+    Object.defineProperty(el, 'scrollTop', {
+      get() { return desc.get.call(this); },
+      set(v) { count++; desc.set.call(this, v); },
+      configurable: true,
+    });
+    window.__getScrollTopSetCount = () => count;
+  };
+</script>
+</body>
+</html>

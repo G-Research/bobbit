@@ -988,7 +988,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			})();
 		};
 
-		remote.onGoalProposal = (proposal) => {
+		remote.onGoalProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			if (state.assistantType === "goal") {
 				state.activeGoalProposal = proposal;
@@ -1038,7 +1038,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onRoleProposal = (proposal) => {
+		remote.onRoleProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.activeRoleProposal = proposal;
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
@@ -1055,7 +1055,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onToolProposal = (proposal) => {
+		remote.onToolProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.toolPreviewName = proposal.tool;
 			// Map action to checklist item
@@ -1086,7 +1086,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onSetupProposal = (proposal) => {
+		remote.onSetupProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.setupPreviewAction = proposal.action;
 			state.assistantHasProposal = true;
@@ -1121,7 +1121,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onWorkflowProposal = (proposal) => {
+		remote.onWorkflowProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.workflowPreviewId = proposal.id || "";
 			state.workflowPreviewName = proposal.name || "";
@@ -1149,7 +1149,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onStaffProposal = (proposal) => {
+		remote.onStaffProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.activeStaffProposal = proposal;
 			if (!state.staffPreviewNameEdited) state.staffPreviewName = proposal.name;
@@ -1164,7 +1164,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onProjectProposal = async (fields: Record<string, unknown>) => {
+		remote.onProjectProposal = async (fields: Record<string, unknown>, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			const session = state.gatewaySessions.find(s => s.id === sessionId);
 			const project = state.projects.find(p => p.id === session?.projectId);
@@ -1201,7 +1201,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Clear any previous dismissal so the proposal re-opens
 			// (the user explicitly clicked "Open proposal")
 			if (type === "goal") clearProposalDismissed(sessionId);
-			const callbackMap: Record<string, ((p: any) => void) | undefined> = {
+			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
 				tool: remote.onToolProposal,
@@ -1211,7 +1211,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				project: remote.onProjectProposal,
 			};
 			const cb = callbackMap[type];
-			if (cb) cb(fields);
+			if (cb) cb(fields, /* streaming */ false);
 		}) as EventListener;
 		document.addEventListener("proposal-open", proposalOpenHandler);
 

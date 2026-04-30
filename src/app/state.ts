@@ -346,7 +346,21 @@ export const state = {
 
 	/** Docker sandbox status (fetched on demand) */
 	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
+
+	/** Per-proposal-tag streaming flag. True between the first message_update
+	 *  delta carrying a propose_<tag> block and the matching block-finish event.
+	 *  Keyed by the `tag` from PROPOSAL_PARSERS — i.e. "goal_proposal",
+	 *  "project_proposal", "role_proposal", "tool_proposal", "staff_proposal",
+	 *  "workflow_proposal", "setup_proposal".
+	 *  Owner: state.ts. Sole writer: RemoteAgent. Readers: render.ts panels
+	 *  via isProposalStreaming(tag). */
+	proposalStreamingByTag: {} as Record<string, boolean>,
 };
+
+/** Read-only accessor for the per-tag streaming flag. */
+export function isProposalStreaming(tag: string): boolean {
+	return !!state.proposalStreamingByTag[tag];
+}
 
 // Expose state on window for E2E test diagnostics. The bundle is identical for
 // dev and tests — attaching a reference (not a copy) is cheap and read-only

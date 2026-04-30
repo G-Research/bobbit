@@ -189,20 +189,23 @@ export class RemoteAgent {
 	onStatusChange?: (status: string) => void;
 	/** Callback fired when connection status changes (connected/reconnecting/disconnected). */
 	onConnectionStatusChange?: (status: ConnectionStatus) => void;
-	/** Callback fired when a goal proposal is detected in an assistant message. */
-	onGoalProposal?: (proposal: { title: string; spec: string; cwd?: string; workflow?: string }) => void;
+	/** Callback fired when a goal proposal is detected in an assistant message.
+	 *  `streaming === true` means input is still arriving; consumers must keep
+	 *  their `*Edited` gating intact and must not commit destructive actions on
+	 *  streaming-mode fires. */
+	onGoalProposal?: (proposal: { title: string; spec: string; cwd?: string; workflow?: string }, streaming: boolean) => void;
 	/** Callback fired when a role proposal is detected in an assistant message. */
-	onRoleProposal?: (proposal: { name: string; label: string; prompt: string; tools: string; accessory: string }) => void;
+	onRoleProposal?: (proposal: { name: string; label: string; prompt: string; tools: string; accessory: string }, streaming: boolean) => void;
 	/** Callback fired when a tool proposal is detected in an assistant message. */
-	onToolProposal?: (proposal: { tool: string; action: string; content: string }) => void;
+	onToolProposal?: (proposal: { tool: string; action: string; content: string }, streaming: boolean) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
-	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }) => void;
+	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
 	/** Callback fired when a setup proposal is detected in an assistant message. */
-	onSetupProposal?: (proposal: Record<string, string> & { action: string }) => void;
+	onSetupProposal?: (proposal: Record<string, string> & { action: string }, streaming: boolean) => void;
 	/** Callback fired when a workflow proposal is detected in an assistant message. */
-	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }) => void;
+	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
-	onProjectProposal?: (fields: Record<string, unknown>) => void;
+	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
@@ -684,6 +687,11 @@ export class RemoteAgent {
 		this._seqInitialized = false;
 		this._pendingEvents = [];
 		this._inResumeFallback = false;
+		// Cross-session isolation: clear per-tag streaming flags so navigating
+		// to another session always starts with all flags false.
+		for (const k of Object.keys(state.proposalStreamingByTag)) {
+			state.proposalStreamingByTag[k] = false;
+		}
 	}
 
 	/** Drain any pending out-of-order events whose predecessor has now arrived. */
@@ -1316,13 +1324,19 @@ export class RemoteAgent {
 			// During streaming, tool arguments arrive incrementally (e.g. "{}" → {"title":""} → full).
 			// Skip empty objects to avoid firing with no meaningful data.
 			if (Object.keys(input).length === 0) continue;
-			callback(input);
+
+			const tagKey = `${proposalType}_proposal`;
+			if (streaming) {
+				state.proposalStreamingByTag[tagKey] = true;
+			}
+			callback(input, streaming);
 
 			// Only mark as processed on non-streaming calls (message_end, full re-scan).
 			// During streaming we fire the callback repeatedly for live preview sync
 			// without marking processed — so the final complete arguments always fire too.
 			if (!streaming && blockId) {
 				this._processedProposalIds.add(blockId);
+				state.proposalStreamingByTag[tagKey] = false;
 				// Persist to sessionStorage so it survives page refresh
 				if (this._sessionId) {
 					try {
@@ -1520,6 +1534,11 @@ export class RemoteAgent {
 				this._isAborting = false;
 				this._state.streamingMessage = null;
 				this._state.pendingToolCalls = new Set();
+				// Bulk-clear any stuck per-tag streaming flags (safety net for
+				// turns that error out or are aborted before message_end).
+				for (const k of Object.keys(state.proposalStreamingByTag)) {
+					state.proposalStreamingByTag[k] = false;
+				}
 
 				// Notify: beep + favicon badge
 				RemoteAgent.playNotificationBeep();
