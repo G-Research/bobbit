@@ -139,9 +139,10 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 
 - **Symptom**: in a completely idle session, dragging the scrollbar up snaps the viewport back to the bottom (often as a visible "vibration"). Resizing the window breaks the loop temporarily.
 - **Root cause in one line**: zero-delta `ResizeObserver` fires were re-clamping `scrollTop = scrollHeight` while a timer-based `_isAutoScrolling` guard silently swallowed the user's scroll events.
-- **Where the fix lives**: `src/ui/components/AgentInterface.ts` — the RO callback now no-ops on `delta === 0` and only auto-scrolls on `delta > 0`. The timer guard is gone. Programmatic scroll echoes are filtered via the `_lastProgrammaticScrollTop`/`_lastProgrammaticScrollHeight` latch in `_handleScroll`. User intent is captured via `_handleUserIntent` (wheel/touchstart) and `_handleScrollKeydown` (PageUp/Down/Home/End/Arrow). Stickiness tail shrunk from 50px to 5px.
-- **Invariant**: see [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant). Do not reintroduce timer-based auto-scroll guards.
-- **Repro test**: `tests/agent-interface-scroll.spec.ts` — behavioural twin of the RO + scroll handler. With `stickToBottom=true` and a small user scroll inside the tail, an RO fire with `delta === 0` must preserve `scrollTop` (asserts the no-op branch).
+- **Where the fix lives**: `src/ui/components/AgentInterface.ts` — the RO callback now no-ops on `delta === 0` and only auto-scrolls on `delta > 0`. The timer guard is gone. Programmatic scroll echoes are filtered via the `_lastProgrammaticScrollTop`/`_lastProgrammaticScrollHeight` latch in `_handleScroll` with sub-pixel tolerance (`Math.abs(... ) < 1`) for HiDPI rounding. User intent is captured via `_handleUserIntent` (wheel/touchstart) and `_handleScrollKeydown` (PageUp/Down/Home/End/Arrow). Stickiness tail is 10px (was 50px → 5px → 10px to absorb HiDPI rounding without losing tail).
+- **Hardening (cc47a4e7)**: `_wasAtBottomAtLastUserScroll` carry-over consulted in the `state_update` branch of `setupSessionSubscription` — a transient scroll-up that flips `_stickToBottom` false for one tick still scrolls on the next state update (cleared on real user intent). Session-load settle window (`_settleWindowActive` + `_settleWindowDeadline`, 2000ms, re-armed per `setupSessionSubscription`) re-scrolls on each RO tick while sticky, exits on stable `scrollHeight` / deadline / user intent; torn down in `disconnectedCallback`. Jump-to-bottom button (`_showJumpToBottom`) appears when `scrollHeight - scrollTop - clientHeight > clientHeight * 0.5`; click runs `_scrollToBottom()` + sets `_stickToBottom = true` (no parallel flag).
+- **Invariant**: see [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant). Do not reintroduce timer-based auto-scroll guards; do not widen the 10px tail; do not add a parallel "is at bottom" flag (the jump-to-bottom button reuses `_stickToBottom`).
+- **Repro tests**: `tests/agent-interface-scroll.spec.ts` (canonical `delta === 0` no-op regression — with `stickToBottom=true` and a small user scroll inside the tail, an RO fire with `delta === 0` must preserve `scrollTop`); `tests/agent-interface-scroll-hardening.spec.ts` (sub-pixel echo tolerance, 10px tail, `_wasAtBottomAtLastUserScroll` carry-over, settle window); `tests/e2e/ui/jump-to-bottom.spec.ts` (button visibility threshold + click).
 
 ## Stale messages trailing after newer ones on session navigate
 
@@ -355,6 +356,25 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - **State migration**: On first startup after upgrade, central state is distributed to per-project dirs. Check for `.bobbit/state/.migrated-to-per-project` marker. Central files renamed with `.pre-migration` suffix (not deleted). If migration didn't run, check that projects are registered before migration runs
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
 - **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
+
+## Project proposal panel doesn't reflect the latest `propose_project` call
+
+- **Symptom**: an agent calls `propose_project` a second time in the same session (e.g. after the user steers component naming), but the right-hand panel still shows the previous components or workflows. Components/Workflows tabs are stale; the Diff tab may show no diff or the wrong diff.
+- **Diagnostic order**:
+  1. **Bug A — JSON-string coercion**: confirm the `propose_project` tool extension is not stringifying `components` / `workflows` into the legacy flat field map. They must arrive at `onProjectProposal` as structured arrays/objects, not as JSON strings rendered into a legacy `Input` row.
+  2. **Bug B — `onFieldInput` clobber**: confirm `onFieldInput` in `src/app/render.ts::projectProposalPanel` early-returns for `key === "components"` and `key === "workflows"`. Without that guard, a stray keystroke on a hidden Input row overwrites the structured side-table with a string.
+  3. **Bug C — missing shallow-merge**: confirm `onProjectProposal` in `src/app/session-manager.ts` shallow-merges the new payload over the previous one and re-attaches `components` / `workflows` from the prior proposal when missing in the incoming partial. A wholesale replace drops one of the structured tables on every streaming delta.
+- **Verify**: open the Components tab, trigger a `propose_project` that adds a new component, then watch for the new `component-card-${name}` testid to appear without dismissing/reopening the panel. Same drill on the Workflows tab with `workflow-card-${id}`.
+- **Architecture**: see [docs/internals.md — Project-proposal panel structure](internals.md#project-proposal-panel-structure) for the live-update guarantee and the three-view layout (Components / Workflows / Diff + legacy fields block).
+
+## Monorepo subprojects not detected
+
+- **Symptom**: project assistant doesn't suggest per-component workflows for a clearly-monorepo project (pnpm/npm workspaces, Nx, Turbo, Lerna, Cargo, Go workspace, Gradle multi-module), or `POST /api/projects/scan` returns an empty `monorepo` field.
+- **Diagnostic order**:
+  1. Confirm the workspace manifest is one `monorepo-scan.ts` recognises: `pnpm-workspace.yaml`, `package.json` with a `workspaces` array, `nx.json`, `turbo.json`, `lerna.json`, `Cargo.toml` with `[workspace]`, `go.work`, or Gradle `settings.gradle[.kts]` containing `include(...)`. Anything else falls through to single-repo detection.
+  2. Confirm the manifest is at the project's `rootPath`, not nested below it. The scanner is one level deep — it does not recurse into the workspaces themselves.
+  3. If a project legitimately has more than 30 workspace packages, output is capped at `MAX_CANDIDATES = 30` (alphabetical truncation marker emitted). The assistant still gets a representative slice; the user can add the rest manually.
+- **Architecture**: see `src/server/agent/monorepo-scan.ts` and [docs/internals.md — Project-proposal panel structure](internals.md#project-proposal-panel-structure) (Monorepo subproject scan).
 
 ## Legacy JSON-string project.yaml field rejected
 

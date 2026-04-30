@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  .container { width: 100%; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  .overflow-y-auto {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    overflow-anchor: none;
+  }
+  .max-w-5xl { max-width: 64rem; margin: 0 auto; padding: 8px; }
+  .message { padding: 16px; margin: 8px; background: #f0f0f0; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="overflow-y-auto" id="scroll-container">
+    <div class="max-w-5xl" id="content"></div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Behavioural twin of the post-hardening scroll logic in
+// src/ui/components/AgentInterface.ts. Tests the five changes described in
+// the "Scroll-lock hardening" design doc.
+// ---------------------------------------------------------------------------
+const scrollContainer = document.getElementById('scroll-container');
+const content = document.getElementById('content');
+
+for (let i = 0; i < 200; i++) {
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.textContent = `Message ${i + 1}: lorem ipsum dolor sit amet, consectetur adipiscing elit.`;
+  content.appendChild(div);
+}
+
+// State mirrors the production component fields (post-hardening).
+let _stickToBottom = true;
+let _wasAtBottomAtLastUserScroll = true;
+let _lastProgrammaticScrollTop = null;
+let _lastProgrammaticScrollHeight = null;
+let _lastScrollHeight = scrollContainer.scrollHeight;
+let _showJumpToBottom = false;
+let _scrollToBottomCallCount = 0;
+
+// Settle-window state.
+let _settleWindowActive = false;
+let _settleWindowDeadline = 0;
+let _lastSettleScrollHeight = -1;
+
+function _scrollToBottom() {
+  _scrollToBottomCallCount++;
+  _stickToBottom = true;
+  const sh = scrollContainer.scrollHeight;
+  const target = sh - scrollContainer.clientHeight;
+  _lastProgrammaticScrollTop = target;
+  _lastProgrammaticScrollHeight = sh;
+  scrollContainer.scrollTop = sh;
+}
+
+// Mirrors AgentInterface._handleScroll
+function _handleScroll() {
+  const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
+  if (
+    _lastProgrammaticScrollTop !== null &&
+    _lastProgrammaticScrollHeight !== null &&
+    Math.abs(scrollTop - _lastProgrammaticScrollTop) < 1 &&
+    Math.abs(scrollHeight - _lastProgrammaticScrollHeight) < 1
+  ) {
+    _lastProgrammaticScrollTop = null;
+    _lastProgrammaticScrollHeight = null;
+    return;
+  }
+  // Change 3: capture pre-recompute value of stickToBottom.
+  _wasAtBottomAtLastUserScroll = _stickToBottom;
+  // Change 2: tail < 10
+  _stickToBottom = scrollHeight - scrollTop - clientHeight < 10;
+  // Change 5: jump-to-bottom visibility.
+  _showJumpToBottom = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
+}
+
+function _handleUserIntent() {
+  _stickToBottom = false;
+  _wasAtBottomAtLastUserScroll = false;
+  _settleWindowActive = false;
+}
+
+function _handleScrollKeydown(e) {
+  switch (e.key) {
+    case "PageUp":
+    case "ArrowUp":
+    case "Home":
+    case "PageDown":
+    case "ArrowDown":
+    case "End":
+      _stickToBottom = false;
+      _wasAtBottomAtLastUserScroll = false;
+      _settleWindowActive = false;
+      break;
+  }
+}
+
+// Mirrors the state_update branch in setupSessionSubscription
+function _handleStateUpdate() {
+  if (_stickToBottom || _wasAtBottomAtLastUserScroll) {
+    _scrollToBottom();
+  }
+}
+
+// Mirrors the ResizeObserver callback (settle-window slice + delta logic)
+function _resizeObserverCallback() {
+  const newScrollHeight = scrollContainer.scrollHeight;
+
+  if (_settleWindowActive) {
+    if (performance.now() > _settleWindowDeadline) {
+      _settleWindowActive = false;
+    } else if (_lastSettleScrollHeight === newScrollHeight) {
+      _settleWindowActive = false;
+    } else {
+      _lastSettleScrollHeight = newScrollHeight;
+      if (_stickToBottom) {
+        _scrollToBottom();
+        _lastScrollHeight = newScrollHeight;
+        return;
+      }
+    }
+  }
+
+  const delta = newScrollHeight - _lastScrollHeight;
+  if (delta < 0) {
+    _lastScrollHeight = newScrollHeight;
+    return;
+  }
+  if (delta === 0) return;
+  if (_stickToBottom) {
+    _lastScrollHeight = newScrollHeight;
+    _scrollToBottom();
+  } else {
+    _lastScrollHeight = newScrollHeight;
+  }
+}
+
+// NOTE: We intentionally do NOT register a real scroll listener here.
+// Each test hook below explicitly calls _handleScroll() once after
+// mutating scrollTop, so we get fully deterministic single-shot semantics
+// (no double-invocation race between the listener and the explicit call).
+
+// --- Test hooks -------------------------------------------------------------
+
+window.__startAtBottom = () => {
+  scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  _lastScrollHeight = scrollContainer.scrollHeight;
+  _stickToBottom = true;
+  _wasAtBottomAtLastUserScroll = true;
+  _lastProgrammaticScrollTop = null;
+  _lastProgrammaticScrollHeight = null;
+  _showJumpToBottom = false;
+  _scrollToBottomCallCount = 0;
+};
+
+window.__getState = () => ({
+  scrollTop: scrollContainer.scrollTop,
+  scrollHeight: scrollContainer.scrollHeight,
+  clientHeight: scrollContainer.clientHeight,
+  stickToBottom: _stickToBottom,
+  wasAtBottomAtLastUserScroll: _wasAtBottomAtLastUserScroll,
+  lastProgrammaticScrollTop: _lastProgrammaticScrollTop,
+  lastProgrammaticScrollHeight: _lastProgrammaticScrollHeight,
+  showJumpToBottom: _showJumpToBottom,
+  settleWindowActive: _settleWindowActive,
+  scrollToBottomCallCount: _scrollToBottomCallCount,
+});
+
+// Change 1 — sub-pixel echo latch tolerance.
+// Set scrollTop programmatically (capturing the latch), then synthesize a
+// scroll event reporting a fractional offset (HiDPI rounding).
+window.__primeProgrammaticScroll = () => {
+  const sh = scrollContainer.scrollHeight;
+  const target = sh - scrollContainer.clientHeight;
+  _lastProgrammaticScrollTop = target;
+  _lastProgrammaticScrollHeight = sh;
+  scrollContainer.scrollTop = target;
+  // Reset stick to a known state so we can detect spurious flips
+  _stickToBottom = true;
+};
+
+window.__simulateFractionalEcho = () => {
+  // Simulate a scrollTop read fractionally off the latched value (HiDPI rounding).
+  // Easiest equivalent: shift the latch by -0.4 so the real scrollTop reads
+  // as latch + 0.4 from the handler's perspective.
+  if (_lastProgrammaticScrollTop !== null) {
+    _lastProgrammaticScrollTop -= 0.4;
+  }
+  _handleScroll();
+};
+
+// Change 2 — set scrollTop so distance-from-bottom == n, then handle scroll.
+window.__scrollSoDistanceFromBottomIs = (n) => {
+  const target = scrollContainer.scrollHeight - scrollContainer.clientHeight - n;
+  // Set last programmatic latch to a value that won't match (we want a real
+  // user-scroll recompute, not an echo).
+  _lastProgrammaticScrollTop = null;
+  _lastProgrammaticScrollHeight = null;
+  scrollContainer.scrollTop = target;
+  _handleScroll();
+};
+
+// Change 3 — simulate a transient scroll-up that flips _stickToBottom false.
+// Then fire state_update; assert _scrollToBottom was called.
+window.__simulateTransientScrollUp = (px) => {
+  // Start at bottom so wasAtBottomAtLastUserScroll captures `true`.
+  // (caller must have called __startAtBottom first)
+  const target = scrollContainer.scrollHeight - scrollContainer.clientHeight - px;
+  _lastProgrammaticScrollTop = null;
+  _lastProgrammaticScrollHeight = null;
+  scrollContainer.scrollTop = target;
+  _handleScroll();
+};
+
+window.__fireStateUpdate = () => _handleStateUpdate();
+
+// Change 4 — settle window. Arm + simulate growth across 3 RO ticks.
+window.__armSettleWindow = (timeoutMs) => {
+  _stickToBottom = true;
+  _wasAtBottomAtLastUserScroll = true;
+  _settleWindowActive = true;
+  _settleWindowDeadline = performance.now() + (timeoutMs ?? 2000);
+  _lastSettleScrollHeight = -1;
+  _scrollToBottomCallCount = 0;
+};
+
+window.__appendMessages = (n) => {
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement('div');
+    d.className = 'message';
+    d.textContent = 'Late message ' + i;
+    content.appendChild(d);
+  }
+};
+
+window.__fireResizeObserver = () => _resizeObserverCallback();
+
+window.__fireUserWheel = () => _handleUserIntent();
+
+window.__fireScrollKey = (key) => _handleScrollKeydown({ key });
+</script>
+</body>
+</html>

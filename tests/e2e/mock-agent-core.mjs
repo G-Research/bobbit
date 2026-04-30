@@ -80,6 +80,58 @@ export class MockAgentCore {
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
 		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
 
+		// Live-update flow: two consecutive propose_project tool calls in the
+		// same turn. Checked BEFORE the more general project_proposal substring
+		// match because LIVE_UPDATE_PROPOSAL also contains "proposal".
+		if (text.includes("LIVE_UPDATE_PROPOSAL")) {
+			return { liveUpdateProposal: true };
+		}
+
+		// Multi-component proposal with structured components + workflows.
+		if (text.includes("MULTI_COMPONENT_PROPOSAL")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Multi Comp Project",
+					root_path: "/tmp/multi-comp",
+					components: [
+						{ name: "api", repo: ".", relative_path: "packages/api", commands: { build: "npm run build:api", test: "npm test --workspace=api" } },
+						{ name: "web", repo: ".", relative_path: "packages/web", commands: { build: "npm run build:web", test: "npm test --workspace=web" } },
+					],
+					workflows: {
+						"feature-api": {
+							id: "feature-api",
+							name: "Feature (api)",
+							description: "Feature flow scoped to the api component.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+						"feature-web": {
+							id: "feature-web",
+							name: "Feature (web)",
+							description: "Feature flow scoped to the web component.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+						"all-components": {
+							id: "all-components",
+							name: "All Components",
+							description: "Fan-out flow that builds every component in parallel.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+					},
+				},
+				output: "Multi-component project proposal submitted.",
+			};
+		}
+
 		if (lower.includes("project_proposal") || lower.includes("project proposal")) {
 			return {
 				tool: "propose_project",
@@ -268,6 +320,8 @@ export class MockAgentCore {
 			await this._handleToolDenied(toolAction.toolDenied);
 		} else if (toolAction && toolAction.askUserChoices) {
 			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+		} else if (toolAction && toolAction.liveUpdateProposal) {
+			await this._handleLiveUpdateProposal();
 		} else if (toolAction && toolAction.activateSkill) {
 			await this._handleActivateSkill(toolAction.activateSkill);
 		} else if (toolAction && toolAction.proposalBurst) {
@@ -704,6 +758,75 @@ export class MockAgentCore {
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/** Live-update test driver: emit two consecutive propose_project tool
+	 *  calls in the same turn. The first carries components only; the second
+	 *  carries the same components plus a workflows map. This proves the
+	 *  client merges structured side-tables across calls (Bug C live-update
+	 *  fix) and re-renders the panel for each call. */
+	async _handleLiveUpdateProposal() {
+		const components = [
+			{ name: "api", repo: ".", relative_path: "packages/api", commands: { build: "npm run build:api" } },
+			{ name: "web", repo: ".", relative_path: "packages/web", commands: { build: "npm run build:web" } },
+		];
+		const firstInput = {
+			name: "Live Update Project",
+			root_path: "/tmp/live-update",
+			components,
+		};
+		const secondInput = {
+			name: "Live Update Project",
+			root_path: "/tmp/live-update",
+			components,
+			workflows: {
+				"feature-api": {
+					id: "feature-api",
+					name: "Feature (api)",
+					description: "Feature flow scoped to the api component.",
+					gates: [
+						{ id: "design-doc", name: "Design Document", verify: [] },
+						{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+					],
+				},
+				"feature-web": {
+					id: "feature-web",
+					name: "Feature (web)",
+					description: "Feature flow scoped to the web component.",
+					gates: [
+						{ id: "design-doc", name: "Design Document", verify: [] },
+						{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+					],
+				},
+			},
+		};
+
+		const emitOne = (input, label) => {
+			const toolId = `tool_propose_project_${label}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+			this.emit({ type: "tool_execution_start", toolName: "propose_project", toolId, input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "propose_project", arguments: input, input }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			const output = `Proposal (${label}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId, toolName: "propose_project", status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "propose_project", isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "propose_project",
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		emitOne(firstInput, "first");
+		await this.tick(60);
+		emitOne(secondInput, "second");
 	}
 
 	/** Stream a propose_<type> tool_use across N message_update deltas, then

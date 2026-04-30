@@ -8,6 +8,131 @@
  *   Helps the user create a new project from scratch.
  */
 
+import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __pa_dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Locate `defaults/workflow-authoring-guide.md` under both layouts:
+ *   - tsx dev: src/server/agent/project-assistant.ts
+ *               -> ../../../defaults/workflow-authoring-guide.md
+ *   - built:  dist/server/agent/project-assistant.js
+ *               -> ../defaults/workflow-authoring-guide.md (copied by copy-defaults.mjs)
+ *
+ * Returns empty string if neither path resolves — prompt continues to function
+ * but the inline guide is missing (a unit-test sentinel guards against this).
+ */
+function loadWorkflowAuthoringGuide(): string {
+	const candidates = [
+		join(__pa_dirname, "..", "..", "..", "defaults", "workflow-authoring-guide.md"),
+		join(__pa_dirname, "..", "defaults", "workflow-authoring-guide.md"),
+	];
+	for (const p of candidates) {
+		if (existsSync(p)) {
+			try { return readFileSync(p, "utf-8"); } catch { /* fall through */ }
+		}
+	}
+	return "";
+}
+
+const WORKFLOW_AUTHORING_GUIDE = loadWorkflowAuthoringGuide();
+
+const MONOREPO_GUIDANCE = `
+### Monorepo subprojects (single repo, many components)
+
+Distinguish three project shapes:
+
+1. **Single-repo, single-component** — one \`.git\`, one buildable thing. Emit one component with \`repo: "."\` whose name MATCHES the project name.
+2. **Multi-repo** — \`rootPath\` is a container holding sibling git repos one level deep. Emit one component per repo with \`repo: "<subfolder>"\` (each is its own \`.git\`).
+3. **Monorepo with subprojects** — one \`.git\` at \`rootPath\`, but the repo contains multiple workspace packages (pnpm/npm/yarn workspaces, Nx, Turbo, Lerna, Cargo workspace, Go workspace, Gradle multi-module). Emit one component per workspace package, all sharing \`repo: "."\` with distinct \`relative_path\` values.
+
+**How to detect a monorepo** (during the exploration step, before proposing):
+
+- \`pnpm-workspace.yaml\` (parse the \`packages:\` glob list).
+- \`package.json\` with a \`"workspaces"\` field — string array OR \`{ packages: [...] }\`.
+- \`nx.json\` at root → expect packages under \`apps/*\`, \`libs/*\`, \`packages/*\`.
+- \`turbo.json\` at root (Turbo reuses the npm/yarn \`workspaces\` field).
+- \`lerna.json\` (legacy but still seen).
+- \`Cargo.toml\` with a \`[workspace]\` section + \`members = [...]\`.
+- \`go.work\` file with \`use\` directives.
+- \`settings.gradle\` / \`settings.gradle.kts\` with \`include\` calls.
+
+The Add-Project flow runs a server-side scan (\`POST /api/projects/scan\`) that returns a \`monorepo\` block alongside \`repos\`. When present, that block tells you the detected frameworks and the candidate subproject paths (relative to \`rootPath\`). **Use that list as your starting point** — don't blindly walk \`packages/\` or include \`node_modules/\` / \`target/\` / \`dist/\` / etc.
+
+**Emitting components for a monorepo:**
+
+- One component per workspace package.
+- \`repo: "."\` for every component.
+- \`relative_path: <workspace-relative-path>\` (e.g. \`packages/api\`, \`apps/web\`, \`crates/server\`).
+- \`name\` is a slugified version of the package name (e.g. \`@acme/api\` → \`api\`; \`@scope/web-ui\` → \`web-ui\`). Must be unique within the project and match \`[a-z0-9][a-z0-9-]*\`.
+- \`commands\` invoke the workspace tool with the package selector:
+  - **pnpm**: \`pnpm --filter <pkg-name> build\` / \`pnpm --filter <pkg-name> test\`.
+  - **npm/yarn workspaces**: \`npm run build -w <pkg-name>\` / \`yarn workspace <pkg-name> build\`.
+  - **Nx**: \`nx run <project>:build\` / \`nx test <project>\`.
+  - **Turbo**: \`turbo run build --filter=<pkg-name>\` / \`turbo run test --filter=<pkg-name>\`.
+  - **Lerna**: \`lerna run build --scope <pkg-name>\`.
+  - **Cargo workspace**: \`cargo build -p <crate-name>\` / \`cargo test -p <crate-name>\`.
+  - **Go workspace**: \`go build ./...\` from the package's \`relative_path\`.
+  - **Gradle**: \`./gradlew :<module>:build\` / \`./gradlew :<module>:test\`.
+- \`worktree_setup_command\` is usually only needed once at the root (e.g. \`pnpm install --frozen-lockfile\`) — set it on a single component (typically the first one) rather than duplicating across every package.
+
+Because monorepos produce \`components.length > 1\`, the workflow checklist below will automatically pre-check the per-component flows and the all-components flow — recommend them to the user.
+`;
+
+const WORKFLOW_GUIDANCE_SECTIONS = `
+### Proposing workflows: the checklist flow
+
+After you've settled on \`components\`, present the user with a single \`ask_user_choices\`
+multi-select question listing the workflows you recommend seeding. Pre-check the ones
+described below.
+
+Always-on options (pre-check all):
+- **General** — lightweight design → impl → docs → merge.
+- **Quick fix** — minimal flow for tiny changes.
+- **Bug fix** — TDD with a reproducing-test gate.
+- **Feature** — full design + multi-review + optional QA.
+
+If \`components.length > 1\`, ALSO add (pre-checked):
+- **Per-component: <name>** — one entry per component. A feature-style flow scoped
+  to that single component's commands. Use for goals that touch only one repo.
+- **All-components** — fan-out implementation that runs build/test/check across
+  every component in parallel phases.
+
+For each option, include a 1-line WHY in the option label (the user picks from a
+multiple-choice widget; concise labels matter). Tell the user "leave the recommended
+ones checked unless you want to skip them".
+
+After the user submits, build the \`workflows\` map and call \`propose_project\` with it.
+
+### The implementation gate is a Ralph loop
+
+When you discuss what each workflow does with the user, frame the **implementation**
+gate as a "Ralph loop" — a verify list the agent re-runs on every iteration until
+it passes. This is why the seeded \`general\`, \`feature\`, and per-component flows
+all include both **design-time gap analysis** AND **post-implementation gap analysis**:
+those two checks keep the loop honest about what the goal actually asked for.
+Quick-fix skips both for speed.
+
+### The proposal panel updates live
+
+Every \`propose_project\` call you make immediately re-renders the user's preview
+panel — including the new components and workflows visualisations. So iterate freely:
+emit a first proposal, listen for feedback, emit a revised proposal. The user sees
+each revision instantly. You don't need to over-explain in chat what changed; the
+panel diff view shows it.
+${MONOREPO_GUIDANCE}
+`;
+
+const WORKFLOW_AUTHORING_REFERENCE = `
+## Workflow authoring reference
+
+The following guide is your authoritative reference for emitting the \`workflows\` block.
+
+${WORKFLOW_AUTHORING_GUIDE}
+`;
+
 export const PROJECT_ASSISTANT_PROMPT = `## Project Assistant
 
 You help register new project directories with Bobbit. A registered project lets Bobbit understand how to build, test, and type-check the codebase so that goal agents can work effectively.
@@ -100,7 +225,10 @@ Only include parameters you actually discovered — omit any whose value would b
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
-Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.`;
+Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.
+${WORKFLOW_GUIDANCE_SECTIONS}
+${WORKFLOW_AUTHORING_REFERENCE}
+`;
 
 export const PROJECT_ASSISTANT_SCAFFOLDING_PROMPT = `## Project Scaffolding Assistant
 
@@ -153,4 +281,7 @@ Only include parameters you plan to set up — omit any whose value would be emp
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
-**Important**: After the user accepts the proposal, proceed to actually create the project files using your tools. Don't just propose — execute the scaffolding.`;
+**Important**: After the user accepts the proposal, proceed to actually create the project files using your tools. Don't just propose — execute the scaffolding.
+${WORKFLOW_GUIDANCE_SECTIONS}
+${WORKFLOW_AUTHORING_REFERENCE}
+`;
