@@ -85,6 +85,138 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
 
+// ── Inline-workflow / inline-roles shape validators (POST /api/goals) ──
+// See docs/design/nested-goals.md §10.4 + §7. The client parses the user's
+// YAML in the New Goal dialog and POSTs the parsed object; these helpers run
+// a structural schema check and return a human-readable error string for
+// 400 responses with { field, error }.
+
+const INLINE_WORKFLOW_ID_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
+
+function validateInlineWorkflowShape(wf: unknown): string | null {
+	if (!wf || typeof wf !== "object" || Array.isArray(wf)) {
+		return "inlineWorkflow must be a YAML mapping (object)";
+	}
+	const obj = wf as Record<string, unknown>;
+	if (obj.id !== undefined) {
+		if (typeof obj.id !== "string" || !obj.id) {
+			return "inlineWorkflow.id must be a non-empty string";
+		}
+		if (!INLINE_WORKFLOW_ID_PATTERN.test(obj.id)) {
+			return `inlineWorkflow.id "${obj.id}" must be lowercase alphanumeric + hyphens`;
+		}
+	}
+	if (obj.name !== undefined && typeof obj.name !== "string") {
+		return "inlineWorkflow.name must be a string";
+	}
+	if (obj.description !== undefined && typeof obj.description !== "string") {
+		return "inlineWorkflow.description must be a string";
+	}
+	const gates = obj.gates;
+	if (!Array.isArray(gates) || gates.length === 0) {
+		return "inlineWorkflow.gates must be a non-empty array";
+	}
+	const seenIds = new Set<string>();
+	for (let i = 0; i < gates.length; i++) {
+		const g = gates[i];
+		const loc = `inlineWorkflow.gates[${i}]`;
+		if (!g || typeof g !== "object" || Array.isArray(g)) {
+			return `${loc} must be an object`;
+		}
+		const gate = g as Record<string, unknown>;
+		if (typeof gate.id !== "string" || !gate.id) {
+			return `${loc}.id must be a non-empty string`;
+		}
+		if (!INLINE_WORKFLOW_ID_PATTERN.test(gate.id)) {
+			return `${loc}.id "${gate.id}" must be lowercase alphanumeric + hyphens`;
+		}
+		if (seenIds.has(gate.id)) {
+			return `${loc} duplicate gate id "${gate.id}"`;
+		}
+		seenIds.add(gate.id);
+		if (typeof gate.name !== "string" || !gate.name) {
+			return `${loc} ("${gate.id}") must have a non-empty name`;
+		}
+		if (gate.dependsOn !== undefined) {
+			if (!Array.isArray(gate.dependsOn)) {
+				return `${loc}.dependsOn must be an array of gate ids`;
+			}
+			for (const dep of gate.dependsOn) {
+				if (typeof dep !== "string" || !dep) {
+					return `${loc}.dependsOn entries must be non-empty strings`;
+				}
+				if (dep === gate.id) {
+					return `${loc} ("${gate.id}") cannot depend on itself`;
+				}
+			}
+		}
+		if (gate.verify !== undefined && !Array.isArray(gate.verify)) {
+			return `${loc}.verify must be an array if present`;
+		}
+	}
+	// All dependsOn refs must point at known gate ids in the workflow.
+	for (let i = 0; i < gates.length; i++) {
+		const gate = gates[i] as Record<string, unknown>;
+		const deps = gate.dependsOn;
+		if (Array.isArray(deps)) {
+			for (const dep of deps) {
+				if (!seenIds.has(dep as string)) {
+					return `inlineWorkflow.gates[${i}] ("${gate.id}") depends on unknown gate "${dep}"`;
+				}
+			}
+		}
+	}
+	return null;
+}
+
+function validateInlineRolesShape(roles: unknown): string | null {
+	if (!roles || typeof roles !== "object" || Array.isArray(roles)) {
+		return "inlineRoles must be a YAML mapping of name → role";
+	}
+	const obj = roles as Record<string, unknown>;
+	const entries = Object.entries(obj);
+	if (entries.length === 0) {
+		return null; // empty map is benign
+	}
+	for (const [name, raw] of entries) {
+		if (!INLINE_WORKFLOW_ID_PATTERN.test(name)) {
+			return `inlineRoles."${name}" — role name must be lowercase alphanumeric + hyphens`;
+		}
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+			return `inlineRoles.${name} must be an object`;
+		}
+		const role = raw as Record<string, unknown>;
+		if (role.label !== undefined && typeof role.label !== "string") {
+			return `inlineRoles.${name}.label must be a string`;
+		}
+		const hasPromptTemplate = role.promptTemplate !== undefined;
+		const hasPrompt = role.prompt !== undefined;
+		if (!hasPromptTemplate && !hasPrompt) {
+			return `inlineRoles.${name} must define a promptTemplate (or prompt) string`;
+		}
+		if (hasPromptTemplate && typeof role.promptTemplate !== "string") {
+			return `inlineRoles.${name}.promptTemplate must be a string`;
+		}
+		if (hasPrompt && typeof role.prompt !== "string") {
+			return `inlineRoles.${name}.prompt must be a string`;
+		}
+		if (role.accessory !== undefined && typeof role.accessory !== "string") {
+			return `inlineRoles.${name}.accessory must be a string`;
+		}
+		if (role.toolPolicies !== undefined) {
+			if (!role.toolPolicies || typeof role.toolPolicies !== "object" || Array.isArray(role.toolPolicies)) {
+				return `inlineRoles.${name}.toolPolicies must be an object`;
+			}
+		}
+	}
+	return null;
+}
+
+/** Test-only export — exposed for the inline-workflow validation E2E test. */
+export function __validateInlineWorkflowShape(wf: unknown): string | null { return validateInlineWorkflowShape(wf); }
+/** Test-only export — exposed for the inline-roles validation E2E test. */
+export function __validateInlineRolesShape(roles: unknown): string | null { return validateInlineRolesShape(roles); }
+
 /**
  * Delete remote branches associated with a goal (integration + agent worktree branches).
  * Fire-and-forget — errors are logged but never block the archive flow.
@@ -3007,23 +3139,19 @@ async function handleApiRoute(
 			}
 			let inlineWorkflow: any | undefined;
 			if (body.inlineWorkflow !== undefined) {
-				if (!body.inlineWorkflow || typeof body.inlineWorkflow !== "object" || Array.isArray(body.inlineWorkflow)) {
-					json({ error: "inlineWorkflow must be an object" }, 400);
+				const err = validateInlineWorkflowShape(body.inlineWorkflow);
+				if (err) {
+					json({ field: "inlineWorkflow", error: err }, 400);
 					return;
 				}
 				inlineWorkflow = body.inlineWorkflow;
 			}
 			let inlineRoles: Record<string, any> | undefined;
 			if (body.inlineRoles !== undefined) {
-				if (!body.inlineRoles || typeof body.inlineRoles !== "object" || Array.isArray(body.inlineRoles)) {
-					json({ error: "inlineRoles must be an object" }, 400);
+				const err = validateInlineRolesShape(body.inlineRoles);
+				if (err) {
+					json({ field: "inlineRoles", error: err }, 400);
 					return;
-				}
-				for (const [k, v] of Object.entries(body.inlineRoles)) {
-					if (!v || typeof v !== "object" || Array.isArray(v)) {
-						json({ error: `inlineRoles.${k} must be an object` }, 400);
-						return;
-					}
 				}
 				inlineRoles = body.inlineRoles;
 			}

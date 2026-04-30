@@ -6,6 +6,7 @@ import { html, render } from "lit";
 import { WandSparkles } from "lucide";
 import { cwdCombobox } from "./cwd-combobox.js";
 import QRCode from "qrcode";
+import { parse as yamlParse, YAMLParseError } from "yaml";
 import {
 	state,
 	renderApp,
@@ -969,9 +970,22 @@ export interface NewGoalDialogResult {
 	workflowId: string;
 	divergencePolicy: "strict" | "balanced" | "autonomous";
 	maxConcurrentChildren: number;
-	/** Free-text YAML; server validates (task 6.3 — out of scope here). */
+	/**
+	 * Parsed inline workflow object from the Advanced YAML textarea, or
+	 * `undefined` when the textarea is empty. Parse failures block submit
+	 * (Create button is disabled while a parse error is showing). The server
+	 * still runs full schema validation and returns 400 on shape violations.
+	 */
+	inlineWorkflow?: Record<string, unknown>;
+	/**
+	 * Parsed inline roles map from the Advanced YAML textarea, or `undefined`
+	 * when the textarea is empty. Parse failures block submit. The server runs
+	 * full schema validation and returns 400 on shape violations.
+	 */
+	inlineRoles?: Record<string, unknown>;
+	/** Raw YAML for the inline workflow textarea (preserved for caller round-tripping). */
 	inlineWorkflowYaml: string;
-	/** Free-text YAML; server validates (task 6.3 — out of scope here). */
+	/** Raw YAML for the inline roles textarea (preserved for caller round-tripping). */
 	inlineRolesYaml: string;
 }
 
@@ -1008,9 +1022,40 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 		let maxConcurrentChildren = 3;
 		let inlineWorkflowYaml = "";
 		let inlineRolesYaml = "";
+		// Parsed object cache + per-textarea inline parse error.
+		// Empty textarea → parsed=undefined, error=null (treated as "not provided").
+		// Non-empty + valid → parsed=object, error=null. Submit allowed.
+		// Non-empty + invalid → parsed=undefined, error=string. Submit disabled.
+		let inlineWorkflowParsed: Record<string, unknown> | undefined;
+		let inlineWorkflowError: string | null = null;
+		let inlineRolesParsed: Record<string, unknown> | undefined;
+		let inlineRolesError: string | null = null;
 		let advancedOpen = false;
 		let bannerDismissedThisSession = false;
 		let workflows: Workflow[] = [];
+
+		const parseInlineYaml = (
+			raw: string,
+			label: "inlineWorkflow" | "inlineRoles",
+		): { parsed?: Record<string, unknown>; error: string | null } => {
+			const trimmed = raw.trim();
+			if (!trimmed) return { parsed: undefined, error: null };
+			try {
+				const doc = yamlParse(raw);
+				if (doc === null || doc === undefined) {
+					return { parsed: undefined, error: null };
+				}
+				if (typeof doc !== "object" || Array.isArray(doc)) {
+					return { parsed: undefined, error: `${label} must be a YAML mapping (object)` };
+				}
+				return { parsed: doc as Record<string, unknown>, error: null };
+			} catch (err) {
+				const msg = err instanceof YAMLParseError
+					? err.message
+					: (err instanceof Error ? err.message : String(err));
+				return { parsed: undefined, error: msg };
+			}
+		};
 
 		// Best-effort load of project workflows so the picker has options.
 		// File:// fixtures stub `fetchWorkflows()` — we tolerate failure.
@@ -1025,12 +1070,27 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 		const doCreate = () => {
 			const trimmed = titleValue.trim();
 			if (!trimmed) return;
+			// Re-parse on submit as a defence in depth (the input handler keeps the
+			// caches fresh, but a programmatic .value mutation could bypass it).
+			const wf = parseInlineYaml(inlineWorkflowYaml, "inlineWorkflow");
+			const roles = parseInlineYaml(inlineRolesYaml, "inlineRoles");
+			inlineWorkflowParsed = wf.parsed;
+			inlineWorkflowError = wf.error;
+			inlineRolesParsed = roles.parsed;
+			inlineRolesError = roles.error;
+			if (inlineWorkflowError || inlineRolesError) {
+				advancedOpen = true;
+				renderDialog();
+				return;
+			}
 			cleanup({
 				title: trimmed,
 				spec: specValue,
 				workflowId,
 				divergencePolicy,
 				maxConcurrentChildren,
+				inlineWorkflow: inlineWorkflowParsed,
+				inlineRoles: inlineRolesParsed,
 				inlineWorkflowYaml,
 				inlineRolesYaml,
 			});
@@ -1207,24 +1267,50 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 												<textarea
 													data-testid="inline-workflow-yaml"
 													rows="8"
-													class="w-full p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+													class=${`w-full p-2 text-xs font-mono rounded-md border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${inlineWorkflowError ? "border-destructive focus:ring-destructive" : "border-border focus:ring-ring"}`}
 													placeholder=${`# id: my-workflow\n# gates:\n#   - id: charter\n#   - id: ready-to-merge\n#     dependsOn: [charter]`}
 													.value=${inlineWorkflowYaml}
-													@input=${(e: Event) => { inlineWorkflowYaml = (e.target as HTMLTextAreaElement).value; }}
+													@input=${(e: Event) => {
+														inlineWorkflowYaml = (e.target as HTMLTextAreaElement).value;
+														const r = parseInlineYaml(inlineWorkflowYaml, "inlineWorkflow");
+														inlineWorkflowParsed = r.parsed;
+														inlineWorkflowError = r.error;
+														renderDialog();
+													}}
 												></textarea>
-												<p class="text-[10px] text-muted-foreground mt-1">Validated by the server on submit.</p>
+												${inlineWorkflowError ? html`
+													<p
+														data-testid="inline-workflow-error"
+														class="text-[11px] text-destructive mt-1 whitespace-pre-wrap font-mono"
+													>${inlineWorkflowError}</p>
+												` : html`
+													<p class="text-[10px] text-muted-foreground mt-1">Validated locally on input; server runs full schema validation on submit.</p>
+												`}
 											</div>
 											<div>
 												<label class="text-xs text-muted-foreground mb-1 block">Inline roles YAML (optional)</label>
 												<textarea
 													data-testid="inline-roles-yaml"
 													rows="6"
-													class="w-full p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+													class=${`w-full p-2 text-xs font-mono rounded-md border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${inlineRolesError ? "border-destructive focus:ring-destructive" : "border-border focus:ring-ring"}`}
 													placeholder=${`# coder:\n#   prompt: |\n#     You are a coder…`}
 													.value=${inlineRolesYaml}
-													@input=${(e: Event) => { inlineRolesYaml = (e.target as HTMLTextAreaElement).value; }}
+													@input=${(e: Event) => {
+														inlineRolesYaml = (e.target as HTMLTextAreaElement).value;
+														const r = parseInlineYaml(inlineRolesYaml, "inlineRoles");
+														inlineRolesParsed = r.parsed;
+														inlineRolesError = r.error;
+														renderDialog();
+													}}
 												></textarea>
-												<p class="text-[10px] text-muted-foreground mt-1">Map of <code>name → role</code>. Validated by the server on submit.</p>
+												${inlineRolesError ? html`
+													<p
+														data-testid="inline-roles-error"
+														class="text-[11px] text-destructive mt-1 whitespace-pre-wrap font-mono"
+													>${inlineRolesError}</p>
+												` : html`
+													<p class="text-[10px] text-muted-foreground mt-1">Map of <code>name → role</code>. Validated locally on input; server runs full schema validation on submit.</p>
+												`}
 											</div>
 										</div>
 									</details>
@@ -1239,7 +1325,7 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 									${Button({
 										variant: "default",
 										onClick: doCreate,
-										disabled: !titleValue.trim(),
+										disabled: !titleValue.trim() || !!inlineWorkflowError || !!inlineRolesError,
 										children: "Create",
 									})}
 								</div>
