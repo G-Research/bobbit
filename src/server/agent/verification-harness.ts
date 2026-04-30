@@ -1817,6 +1817,12 @@ export class VerificationHarness {
 			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
 			await session.rpcClient.prompt(reminderPrompt);
+			// Wait for the agent to actually pick up the reminder before racing
+			// against waitForIdle — see _tryResumeFromSession for rationale. The
+			// live-session path is normally streaming when the reminder fires, but
+			// guard for consistency in case the kickoff turn ended without a tool
+			// call and the session is already idle.
+			await this.sessionManager!.waitForStreaming(sessionId, 10_000).catch(() => {});
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
