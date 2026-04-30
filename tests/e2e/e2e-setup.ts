@@ -98,26 +98,72 @@ export function gitCwd(): string {
 /**
  * Read the auth token that the test server auto-created on startup.
  *
- * Retries briefly on ENOENT because Windows filesystem under heavy parallel
- * load occasionally returns ENOENT for files that exist — the token is
- * written once per worker by the gateway fixture and then never removed
- * until worker teardown, so any ENOENT mid-run is spurious.
+ * The token is written once per worker by the gateway fixture (sync
+ * `loadOrCreateToken()` during setup) and lives for the worker's lifetime.
+ * In practice, by the time any test code calls this, the file exists.
+ *
+ * History note: a previous version had a 10×50ms BUSY-WAIT spin loop on
+ * ENOENT under the theory that Windows FS occasionally returned ENOENT for
+ * files that existed. A sync busy-wait in a worker process **blocks the
+ * entire event loop**, which paradoxically made cross-test contention
+ * worse — every concurrent fetch in the worker parked behind the spin.
+ * This version reads once and surfaces a precise error if the file is
+ * truly missing.
+ */
+/**
+ * Synchronous token read. Kept for callers that build headers in expression
+ * position (e.g. inside an object literal). Throws ENOENT immediately —
+ * does NOT retry. Use `readE2ETokenAsync()` from new code; over time we'd
+ * like every caller to be async so we can retry transient FS errors.
  */
 export function readE2EToken(): string {
 	const p = join(bobbitDir(), "state", "token");
-	let lastErr: unknown;
-	for (let attempt = 0; attempt < 10; attempt++) {
+	try {
+		return readFileSync(p, "utf-8").trim();
+	} catch (err: any) {
+		if (err?.code === "ENOENT") {
+			throw new Error(
+				`E2E token missing at ${p}. ` +
+				`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
+				`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
+			);
+		}
+		throw err;
+	}
+}
+
+/**
+ * Async token read with bounded retry. Retries ENOENT/EBUSY/EPERM/EACCES
+ * for ~150ms total — covers Windows Defender lock windows on freshly-
+ * written files without masking real configuration mistakes.
+ *
+ * Prefer this over `readE2EToken()` from any code path that already runs
+ * inside an `async` function (which is essentially every test).
+ */
+export async function readE2ETokenAsync(): Promise<string> {
+	const p = join(bobbitDir(), "state", "token");
+	let lastErr: any;
+	for (let attempt = 0; attempt < 6; attempt++) {
 		try {
 			return readFileSync(p, "utf-8").trim();
 		} catch (err: any) {
 			lastErr = err;
-			if (err?.code !== "ENOENT") throw err;
-			// Busy-wait briefly — 10×50ms = 500ms worst case.
-			const until = Date.now() + 50;
-			while (Date.now() < until) { /* spin */ }
+			const code = err?.code;
+			if (code === "ENOENT" || code === "EBUSY" || code === "EPERM" || code === "EACCES") {
+				if (attempt < 5) await new Promise(r => setTimeout(r, 30));
+				continue;
+			}
+			throw err;
 		}
 	}
-	throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+	if (lastErr?.code === "ENOENT") {
+		throw new Error(
+			`E2E token missing at ${p} (after 6 retries). ` +
+			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
+			`points at the wrong dir. BOBBIT_DIR=${process.env.BOBBIT_DIR ?? "<unset>"}.`
+		);
+	}
+	throw lastErr;
 }
 
 // ---------------------------------------------------------------------------

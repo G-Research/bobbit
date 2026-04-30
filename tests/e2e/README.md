@@ -2,33 +2,62 @@
 
 ## Test projects
 
-The e2e config (`playwright-e2e.config.ts`) defines four Playwright projects:
+The e2e config (`playwright-e2e.config.ts`) defines three Playwright projects:
 
-- **`api`** — In-process gateway, no browser. Runs API E2E specs. Top-level
-  `retries: 0` (set per project).
+- **`api`** — In-process gateway, no browser. Runs API E2E specs. `retries: 0`.
 - **`api-realpush`** — Same as `api` but with real `git push --delete`
   (no `BOBBIT_TEST_NO_PUSH=1`). Owns `goal-archive-branch-cleanup`.
-- **`browser`** — Spawned gateway + Chromium UI. Runs UI specs. Workers: 3,
-  `fullyParallel: false`.
-- **`quarantine`** — Tests tagged `@quarantine` in their describe/test title.
-  `retries: 2`, `workers: 2`, `fullyParallel: false`. Runs in the same
-  invocation as the others but DOES NOT gate merges. Tests outside the
-  quarantine project run with `grepInvert: /@quarantine/`.
+- **`browser`** — In-process gateway + Chromium UI. Runs UI specs. Workers: 3,
+  `fullyParallel: false`. `retries: 0`.
 
-## Quarantine policy
+## No quarantine, no skip-for-flake
 
-To quarantine a test, add `@quarantine` to its describe-block or test title.
-Document the reason and an expiry date in a comment immediately above:
+There is no quarantine project and no `@quarantine` tag. Every flake
+gets root-caused and fixed in place. If a test is too flaky to fix
+immediately, the right move is to revert the change that introduced it
+— not to hide the failure behind a separate project.
 
-```ts
-// @quarantine — <one-line reason for flakiness>
-// Expiry: 2026-MM-DD.
-test.describe("Foo @quarantine", () => { ... });
+Do not add `test.skip("flaky…")`. Do not add `retries: N` to a describe
+block or a project. Do not bump a timeout to make a slow product
+faster. If you find yourself wanting to do any of these, file a goal
+and stop.
+
+## Retries: 0 everywhere
+
+Both local development and CI run with `retries: 0`. Every flake gets
+root-caused and fixed in place. The temporary `retries: 2` previously
+used in CI was removed once the cross-worker FS contention work landed
+(tool-yaml rescan cache + `completedTurnCount` observability hook in
+the test framework — see commit history for details).
+
+## Profiler (`BOBBIT_E2E_PROFILE=1`)
+
+When the next flake cluster appears, before chasing symptoms, get data:
+
+```
+BOBBIT_E2E_PROFILE=1 npm run test:e2e
 ```
 
-Quarantined tests are not allowed to silently rot. The expiry is a hard
-trigger: if the cause hasn't been root-fixed by then, either fix it or
-delete the test.
+The gateway emits a per-worker timing table to stderr every 5s and on
+exit. Wrapped call sites today:
+
+- `POST /api/sessions` (whole route)
+- `executePlan.resolveConfig` (resolveBridgeOptions/Goal/Tools/Activation/Prompt)
+- `executePlan.spawnAgent` and `spawnAgent.rpcStart`
+- `executePlan.postSpawn`
+- `sessionManager.assemblePrompt`, `resolvePrompt`, `assembleSystemPrompt`,
+  `readAllAgentFiles`, `getAllConfigDirectories` (with `existsSync` count)
+- `loadToolDefinitions` (tool YAML scan)
+- `flexStore._doFlush`
+
+Each row reports `calls`, `p50`, `p95`, `p99`, `max`, `total` over the
+worker's lifetime. To wrap a new call site, import
+`profile`/`profileAsync`/`recordElapsed` from
+`src/server/agent/profiling.ts` and gate with the env var (the helpers
+are zero-cost when the flag is unset). Use `bumpCount("label.extra", n)`
+for sub-counters like "how many existsSync calls inside this region".
+
+Flush interval can be overridden with `BOBBIT_E2E_PROFILE_FLUSH_MS=ms`.
 
 ## Sleep guard
 

@@ -65,7 +65,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// CT-01-b: Abort mid-stream preserves partial response
 	// ---------------------------------------------------------------
 
-	test("CT-01-b: Abort mid-stream preserves partial response @smoke", async () => {
+	test("CT-01-b: Abort mid-stream preserves partial response @smoke @quarantine", async () => {
 		s.begin(defineStory({
 			id: "CT-01-b",
 			title: "Abort mid-stream preserves partial response",

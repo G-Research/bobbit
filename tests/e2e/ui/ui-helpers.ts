@@ -6,14 +6,14 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { readE2EToken, base, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
+import { readE2ETokenAsync, base, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 
 /**
  * Open the app authenticated via token query param.
  * Waits for the sidebar "New session" button to confirm the app has loaded.
  */
 export async function openApp(page: Page): Promise<void> {
-	const token = readE2EToken();
+	const token = await readE2ETokenAsync();
 	const baseUrl = base();
 	await page.goto(`${baseUrl}/?token=${encodeURIComponent(token)}`);
 	// Wait for sidebar to be fully loaded — Settings button is always present

@@ -11,12 +11,13 @@
  */
 import { defineConfig } from "@playwright/test";
 
-// Phase 1 of E2E flakiness fix: top-level `retries: 0` is the new default.
-// Specs that are still flaky must be tagged `@quarantine` (in their
-// describe/test title) — they run in a separate project with retries
-// enabled and DO NOT gate the main green suite. The `quarantine` project
-// runs in the same invocation so visibility is preserved; merge gating
-// is decided by the green projects only.
+// Retries policy: 0 everywhere. Every flake gets root-caused and fixed.
+// No `@quarantine` tag, no quarantine project, no `test.skip("flaky…")`.
+//
+// (The previous temporary `retries: 2` in CI was removed once the
+// cross-worker FS contention root causes were fixed: tool-yaml rescan
+// cache in tool-manager.ts, and the completedTurnCount observability
+// hook in spec-framework.ts that eliminated the pre-prompt-idle race.)
 export default defineConfig({
 	timeout: 30_000,
 	retries: 0,
@@ -68,7 +69,6 @@ export default defineConfig({
 				"**/goal-archive-branch-cleanup*",
 			],
 			workers: 4,
-			grepInvert: /@quarantine/,
 		},
 		{
 			// Real-push variant of the in-process harness — isolated project so it
@@ -96,31 +96,14 @@ export default defineConfig({
 				"**/sandbox-recovery-docker*",
 			],
 			workers: 3,
-			// M5: serialise browser specs within the project. Each browser worker
+			// Serialise browser specs within the project. Each browser worker
 			// is gateway + Chromium + UI static serve — even at workers=3, cross-
 			// worker contention on Windows FS / Defender still produced 3–4 flakes
 			// per run. fullyParallel=false confines parallelism to the 3 workers
 			// (one spec per worker, sequential within-spec), which empirically
-			// eliminates the remaining flake cluster. API project stays
-			// fullyParallel: true (inherited from top-level).
+			// eliminates a flake cluster. API project stays fullyParallel: true
+			// (inherited from top-level).
 			fullyParallel: false,
-			grepInvert: /@quarantine/,
-		},
-		{
-			// Quarantine project: any test whose describe/test title contains
-			// `@quarantine` runs here with retries enabled. Failures here are
-			// reported but do NOT gate merges. New entries require a tracking
-			// comment with an expiry date — see tests/e2e/README.md.
-			name: "quarantine",
-			testDir: "./tests/e2e",
-			testIgnore: [
-				// Docker-dependent tests stay out of the in-process matrix.
-				"**/sandbox-recovery-docker*",
-			],
-			workers: 2,
-			fullyParallel: false,
-			retries: 2,
-			grep: /@quarantine/,
 		},
 	],
 });

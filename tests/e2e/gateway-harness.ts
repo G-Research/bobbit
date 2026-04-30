@@ -23,10 +23,26 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
+
+// Enable a per-worker V8 compile cache before any dist/ import. A single
+// shared NODE_COMPILE_CACHE dir across 3 concurrent browser workers
+// cold-importing the same dist files produced spurious "SyntaxError:
+// module X does not provide an export Y" on the first run — partial cache
+// entries were served before the writer's atomic rename completed. Per-worker
+// subdirs eliminate the race. Idempotent if already enabled.
+{
+	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT || join(tmpdir(), "bobbit-e2e-v8cache");
+	// Per-process subdir keyed by pid — Playwright workers are separate
+	// processes so this gives a clean partition.
+	const workerCacheDir = join(cacheRoot, `w-${process.pid}`);
+	try { mkdirSync(workerCacheDir, { recursive: true }); } catch { /* best-effort */ }
+	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
+}
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
@@ -50,9 +66,43 @@ export interface GatewayInfo {
 	wsBase: string;
 	bobbitDir: string;
 	sessionManager?: any;
+	/** Server-side log ring buffer (last 200 lines), populated by the harness's
+	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
+	 * tail of this buffer into the test artifact directory. */
+	logs: { ring: string[]; capacity: number };
 }
 
-export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: boolean; gateway: GatewayInfo }>({
+// Server log ring buffer — module-scoped so the gateway worker fixture and
+// the per-test failure-context fixture can both reach it without juggling a
+// shared object through Playwright fixture chains.
+const _serverLogs: { ring: string[]; capacity: number } = { ring: [], capacity: 500 };
+function _pushLog(line: string): void {
+	_serverLogs.ring.push(line);
+	if (_serverLogs.ring.length > _serverLogs.capacity) {
+		_serverLogs.ring.splice(0, _serverLogs.ring.length - _serverLogs.capacity);
+	}
+}
+{
+	// Tap console once per worker process. Calls are still passed through to
+	// the original console so existing log inspection (and Playwright's
+	// stdout/stderr piping) keeps working.
+	const origLog = console.log.bind(console);
+	const origWarn = console.warn.bind(console);
+	const origError = console.error.bind(console);
+	const fmt = (level: string, args: unknown[]): string => {
+		const ts = new Date().toISOString();
+		const msg = args.map(a => {
+			if (typeof a === "string") return a;
+			try { return JSON.stringify(a); } catch { return String(a); }
+		}).join(" ");
+		return `${ts} [${level}] ${msg}`;
+	};
+	console.log = (...a: unknown[]) => { _pushLog(fmt("log", a)); origLog(...a); };
+	console.warn = (...a: unknown[]) => { _pushLog(fmt("warn", a)); origWarn(...a); };
+	console.error = (...a: unknown[]) => { _pushLog(fmt("error", a)); origError(...a); };
+}
+
+export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; enableWorktreePool: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -184,6 +234,7 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 			wsBase: `ws://127.0.0.1:${port}`,
 			bobbitDir,
 			sessionManager: gw.sessionManager,
+			logs: _serverLogs,
 		};
 
 		await use(info);
@@ -203,6 +254,60 @@ export const test = base.extend<{}, { enableMcp: boolean; enableWorktreePool: bo
 			},
 		});
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
+
+	// Per-test failure-context fixture (auto). On test failure, attaches a
+	// JSON snapshot of `window.bobbitState` (the read-only client state
+	// reference exposed for diagnostics) and the tail of the server-log
+	// ring buffer to the test result. Helps root-cause the long-tail flakes
+	// (e.g. "button visible:false but assertion expected visible") by
+	// preserving actual state at fail time instead of leaving us to guess
+	// from stack traces.
+	failureContext: [async ({ page }, use, testInfo) => {
+		// Mark where this test’s server logs start so the snapshot only
+		// includes lines emitted during this test’s execution, not the
+		// entire worker session.
+		const startIndex = _serverLogs.ring.length;
+		await use();
+		if (testInfo.status === testInfo.expectedStatus) return;
+		try {
+			const clientState = await page.evaluate(() => {
+				try {
+					const s = (window as any).bobbitState;
+					if (!s) return { __bobbitState: "missing" };
+					// Strip non-serialisable fields (DOM nodes, classes, event handlers).
+					return JSON.parse(JSON.stringify(s, (_k, v) => {
+						if (v instanceof Element) return `[Element ${v.tagName}]`;
+						if (typeof v === "function") return "[Function]";
+						if (v && typeof v === "object" && "nodeType" in v) return "[Node]";
+						return v;
+					}));
+				} catch (err) {
+					return { __bobbitStateError: String(err) };
+				}
+			});
+			await testInfo.attach("client-state.json", {
+				body: JSON.stringify(clientState, null, 2),
+				contentType: "application/json",
+			});
+			const hash = await page.evaluate(() => window.location.hash).catch(() => "<unavailable>");
+			await testInfo.attach("client-route.txt", {
+				body: `hash=${hash}`,
+				contentType: "text/plain",
+			});
+		} catch (err) {
+			await testInfo.attach("client-state-error.txt", {
+				body: `Failed to capture client state: ${err}`,
+				contentType: "text/plain",
+			}).catch(() => { /* best-effort */ });
+		}
+		try {
+			const recent = _serverLogs.ring.slice(Math.max(startIndex - 10, 0));
+			await testInfo.attach("server-logs.txt", {
+				body: recent.join("\n"),
+				contentType: "text/plain",
+			});
+		} catch { /* best-effort */ }
+	}, { auto: true }],
 });
 
 export { expect } from "@playwright/test";
