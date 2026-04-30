@@ -314,6 +314,15 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		baseUrl: normalizedUrl,
 		apiKey: "none",
 		api: "openai-completions",
+		// Provider-level header. pi-coding-agent's `resolveConfigValue` runs the
+		// `!cmd` form via `child_process.exec` (shell-interpreted) and drops the
+		// header entirely when stdout is empty — so when BOBBIT_SESSION_ID is
+		// unset, no `x-opencode-session` header is sent (no fallback constant).
+		// The literal here JSON-encodes to:
+		//   "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
+		headers: {
+			"x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`,
+		},
 		models: models.map(m => {
 			if (isClaudeModel(m.id)) {
 				return {
