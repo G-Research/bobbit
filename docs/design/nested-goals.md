@@ -223,10 +223,11 @@ if (g.parentGoalId === undefined) {
 Existing single goals load with `parentGoalId === undefined`, `rootGoalId === id`,
 `mergeTarget === "master"`, no policy fields. Behaviour is exactly as today.
 
-### 1.5 Inheritance walk for `divergencePolicy` and `maxConcurrentChildren`
+### 1.5 Inheritance walk for `divergencePolicy`; root-only `maxConcurrentChildren`
 
-`GoalManager` exposes two read-only resolvers used everywhere the policy is
-consulted (mutation classifier, harness phase scheduling, UI rendering):
+`GoalManager` exposes two read-only resolvers used everywhere the
+relevant per-goal field is consulted (mutation classifier, harness phase
+scheduling, UI rendering):
 
 ```ts
 class GoalManager {
@@ -237,16 +238,29 @@ class GoalManager {
   resolveDivergencePolicy(goalId: string): "strict" | "balanced" | "autonomous";
 
   /**
-   * Resolve effective concurrency cap. Walk parentGoalId chain; default 3,
-   * clamped to [1, 8].
+   * Resolve the **root** goal's concurrency cap for a given goal-tree.
+   *
+   * Only the root of the tree (parentGoalId == null) carries an effective
+   * `maxConcurrentChildren`. Sub-goal values for `maxConcurrentChildren`
+   * are accepted on disk for forward compatibility but are **inert** in
+   * v1 — the harness honours one cap per tree. Default 3, clamped to
+   * [1, 8].
+   *
+   * Walks `rootGoalId` to fetch the root, then reads its
+   * `maxConcurrentChildren`. Does **not** walk the parent chain.
    */
-  resolveMaxConcurrentChildren(goalId: string): number;
+  resolveRootMaxConcurrentChildren(rootGoalId: string): number;
 }
 ```
 
 These are the **only** sanctioned readers. UI and tools must never read the
-raw fields directly — always go through the manager so inheritance applies
-uniformly.
+raw fields directly — always go through the manager so the root-only
+semantics apply uniformly. (Rationale: the spec calls out
+`maxConcurrentChildren` as a **per-goal** field "inheriting from parent if
+unset" — in v1 that inheritance collapses to "the root wins". The
+alternative — a per-parent semaphore key `(rootGoalId, parentGoalId)` —
+would let mid-tree caps shape parallelism, but adds bookkeeping for a
+case nobody asked for. v2 may revisit if real plans surface the need.)
 
 ---
 
@@ -424,10 +438,16 @@ already exposes `available` / `acquire()` / `release()`. Add a `capacity`
 getter returning the constructor argument.
 
 The harness step branch resolves the cap via
-`goalManager.resolveMaxConcurrentChildren(parent.rootGoalId!)` (§1.5) and
-acquires before spawning. **Important:** the semaphore must wrap **the wait
-loop**, not just the spawn — concurrency is bounded by *running children*,
-not by *spawn rate*.
+`goalManager.resolveRootMaxConcurrentChildren(parent.rootGoalId!)` (§1.5)
+and acquires before spawning. **The semaphore key is `rootGoalId`** —
+exactly one cap per goal-tree, which matches §1.5's root-only semantics.
+A sub-goal that sets `maxConcurrentChildren` does not get its own
+semaphore in v1; its value is silently ignored by the harness. Document
+that behaviour in the field's JSDoc on `PersistedGoal`.
+
+**Important:** the semaphore must wrap **the wait loop**, not just the
+spawn — concurrency is bounded by *running children*, not by *spawn
+rate*.
 
 ### 2.5 Idempotency record
 
@@ -535,6 +555,22 @@ Logic additions, in order:
 6. **Acceptance-criteria parse.** Call `parseAcceptanceCriteria(spec)` (§1.3)
    and store on `goal.acceptanceCriteria`.
 
+**Schema additions touched in this task.** `PersistedGoal` (§1.1) is the
+big one. In addition, Phase 3 task 3.4 (parent.yaml) extends
+`WorkflowGate` with one new optional field:
+
+```ts
+interface WorkflowGate {
+  // existing fields unchanged — `manual?: boolean` stays as-is
+  /** Self-documenting prose rendered in the dashboard's gate detail
+   *  panel (§14.4). Optional; null/undefined renders no extra prose. */
+  description?: string;
+}
+```
+
+The `manual?: boolean` field is **pre-existing**; we reuse it for the
+`goal-plan` gate. No other `WorkflowGate` changes are required.
+
 ### 3.2 `mergeTarget` propagation in verification baselines
 
 [`src/server/agent/verification-logic.ts`](../../src/server/agent/verification-logic.ts)::`substituteVars`
@@ -604,6 +640,15 @@ export async function mergeChildBranchLocal(
 `GoalManager.mergeChild(parentId, childId)` lives in `goal-manager.ts` and
 wraps the helper, plus marking the child goal `state = "complete"` and
 notifying the team-lead.
+
+**Push semantics — clarification.** The spec wording "no remote push" for
+child goals refers specifically to **no PR-raising push of the child
+branch** (children never `gh pr create` against `master`). The **parent
+branch** is still pushed to `origin` after a clean merge — gated by
+`shouldSkipRemotePush()` exactly like every other push in the codebase —
+so CI, replication, and downstream subgoal verifications can fetch the
+post-merge tip. Without that push, sibling subgoals spawned at the next
+phase would branch off a stale local tip.
 
 ### 3.4 Children skip PR-raising at `ready-to-merge`
 
@@ -736,15 +781,53 @@ specific child". This is intentionally lenient — the goal of the check is
 to catch a team-lead who replaces "Build agent-memory v0.1 schema" with
 something completely off-topic, not to police prose drift.
 
+**Note on the word "hashed".** The spec's mutation-classifier section
+mentioned acceptance criteria being "hashed for adherence checks". That
+phrasing is loose — the actual mechanism implemented here is **not**
+cryptographic hashing. It is whitespace-normalised (`/\s+/g → " "`),
+case-insensitive **substring matching** of each criterion against the
+union of root-goal spec and remaining subgoal specs. Hashing wouldn't
+help: an exact-match hash would fail the moment the team-lead
+paraphrases a criterion in a subgoal spec, even if coverage is
+preserved. Substring matching with normalisation is the right balance
+between "criterion text appears verbatim somewhere" and "noise tolerated".
+
 ### 4.3 Decision matrix
+
+This matrix is the **binding** policy table — it implements Decision #6
+of the goal spec verbatim. Note in particular that **expansion always
+prompts the user under every policy** (including `autonomous`); the only
+class that ever auto-approves is `fix-up`.
 
 | classifier output | `divergencePolicy: strict` | `balanced` | `autonomous` |
 |---|---|---|---|
 | `noop`           | allow | allow | allow |
 | `fix-up`         | prompt user | **auto-approve** | **auto-approve** |
-| `expansion`      | prompt user | prompt user | **auto-approve + WS notification** |
-| `restructure`    | reject (409) unless `goal.paused` then prompt | prompt user | prompt user |
-| `criteria-drop`  | reject (409) | reject (409) | reject (409) |
+| `expansion`      | prompt user | prompt user | prompt user (with WS notification) |
+| `restructure`    | reject 409 unless `goal.paused`, then prompt user | prompt user | prompt user |
+| `criteria-drop`  | reject 409 (no policy override) | reject 409 (no policy override) | reject 409 (no policy override) |
+
+Notes on individual cells:
+
+- **`fix-up`** — adding a leaf subgoal under an in-progress branch with
+  no dep changes. Auto-approves under `balanced` and `autonomous`;
+  prompts under `strict`.
+- **`expansion`** — adding a new top-level branch or new dependencies.
+  **Always prompts the user** regardless of policy. Under `autonomous`
+  the prompt still goes through the dashboard banner (§10.5), but the
+  server **also** broadcasts a `goal_mutation_pending` WS notification
+  so an autonomous-mode operator sees the prompt without having to be
+  on the dashboard tab. Decision #6 explicitly nominated `ask_user_choices`
+  here; §10.5 documents why we substitute a banner with equivalent UX.
+- **`restructure`** — removing nodes or changing existing dependencies.
+  **Always prompts the user.** Under `strict`, the goal must first be
+  paused (`goal_pause`) — if it isn't, the server returns 409 with
+  reason `restructure-requires-pause` and no prompt is queued.
+- **`criteria-drop`** — a mutation that would leave one of the root
+  goal's acceptance criteria uncovered. **Always rejected with 409, no
+  policy override.** This is the one rule no escalation flow can
+  unblock; the team-lead must restructure the proposal so coverage is
+  preserved or escalate to the user to amend the root spec.
 
 `replanCount > 5` → server unconditionally returns 409 with reason
 `replan-cap`; UI offers "Pause goal" button which sets `paused = true` and
@@ -855,16 +938,53 @@ REST: `PATCH /api/goals/:id/plan`. Same response shape as 5.1.
 ```yaml
 name: goal_plan_status
 group: Children
-description: Return the current plan (verify[] of the named gate) plus child
-  goal states for any subgoal steps.
+description: Return the current plan (verify[] of the named gate) plus
+  per-node child-goal state. Cheap to call; use this before proposing a
+  mutation to ensure you are working from the latest snapshot.
 parameters:
   type: object
   properties:
     gateId: { type: string, default: "execution" }
 ```
 
-REST: `GET /api/goals/:id?include=tree`. Server projects the response to the
-plan-shaped payload the tool returns.
+**REST endpoint (new — separate from `?include=tree`):**
+
+```http
+GET /api/goals/:id/plan?gateId=execution
+```
+
+Response 200:
+
+```ts
+{
+  gateId: string;
+  frozen: boolean;          // true once goal-plan gate has been signalled
+  replanCount: number;
+  planSteps: Array<{
+    planId: string;
+    title: string;
+    spec: string;             // full spec — caller may truncate
+    workflowId?: string;
+    suggestedRole?: string;
+    phase: number;            // 0 if unset
+    /** Inferred from phase ordering: every step at phase < this.phase
+     *  is a logical dep. Materialised so the tool consumer doesn't have
+     *  to recompute. Empty array when phase === minPhase. */
+    dependsOnPlanIds: string[];
+    /** Live child-goal state, joined from the goal store. */
+    child?: {
+      goalId: string;
+      state: "todo" | "in-progress" | "complete" | "shelved";
+      branch?: string;
+      lastVerificationVerdict?: "passed" | "failed" | "running";
+    };
+  }>;
+}
+```
+
+`?include=tree` on `/api/goals/:id` is the **broader** projection (all
+descendants + per-goal gate states); `/plan` is the **narrow** projection
+the tool returns. §8 lists both endpoints.
 
 ### 5.4 `goal_merge_child`
 
@@ -924,6 +1044,23 @@ The workflow is **a builtin template** — discoverable in the New Goal
 dialog's workflow picker (§10.4). It works as-is for any user creating a
 parent goal; other workflows can also embed `subgoal` verify steps on any
 gate they like.
+
+**File-location note.** The goal spec named `defaults/workflows/parent.yaml`,
+but the existing canonical workflows (`general` / `feature` / `bug-fix` /
+`quick-fix`) are **code-seeded** from `seed-default-workflows.ts` rather
+than shipped as YAML on disk — see the file's header comment (the on-disk
+`defaults/workflows/*.yaml` fallbacks were deleted in the multi-repo
+migration). We follow that pattern. Functionally equivalent: a user
+inspecting the workflow sees the same shape; the cascade resolves it the
+same way; project-level inline overrides still win.
+
+**`WorkflowGate.description`.** §6 below introduces self-documenting
+gate-level prose (§14.4). The current `WorkflowGate` interface in
+[`src/server/agent/workflow-store.ts`](../../src/server/agent/workflow-store.ts)
+already has `manual?: boolean` (used by the `goal-plan` gate). It does
+**not** have `description?: string` today — that's a **new** optional
+field added by Phase 3 task 3.4 (alongside the seed-workflow change).
+The `manual` flag is pre-existing; no schema change there.
 
 Inside `buildDefaultWorkflows(componentName)`, append:
 
@@ -1136,14 +1273,18 @@ Switch points (search-and-replace `roleStore.get(roleName)` to
 | POST | `/api/goals` | `{ title, cwd, spec, workflowId?, sandboxed?, projectId?, parentGoalId?, inlineWorkflow?, inlineRoles?, divergencePolicy?, maxConcurrentChildren?, baseBranch? }` | `201 { goal }` (existing shape extended) | Bearer; `projectId` required (or `cwd` resolves to a project) |
 | GET | `/api/goals/:id` (extended) | — | `200 { goal, workflow?, gates? }` (existing) | Bearer |
 | GET | `/api/goals/:id?include=tree` | — | `200 { goal, descendants: PersistedGoal[], gatesByGoal: Record<string, GateState[]> }` | Bearer |
-| PATCH | `/api/goals/:id/plan` | `{ planSteps: VerifyStep[], gateId?: string, replanReason?: string }` | `200 { plan, replanCount }`, `409 { error, classification, droppedCriteria, addedNodes, removedNodes, summary, requiresApproval? }` | Bearer + same project as goal |
-| POST | `/api/goals/:id/spawn-child` | `{ title, spec, workflowId?, inlineWorkflow?, suggestedRole?, enabledOptionalSteps?, planId? }` | `201 { childGoalId, planId }`, `200 { childGoalId, planId, alreadySpawned: true }`, `409` (same shape as PATCH /plan) | Bearer; idempotent on `planId` |
+| GET | `/api/goals/:id/plan?gateId=execution` | — | `200 { gateId, frozen, replanCount, planSteps: [...] }` (see §5.3) | Bearer |
+| PATCH | `/api/goals/:id/plan` | `{ planSteps: VerifyStep[], gateId?: string, replanReason?: string, expectedReplanCount?: number }` | `200 { plan, replanCount }`, `409` (mutation-rejected or stale-plan; see body schemas below) | Bearer + same project as goal |
+| POST | `/api/goals/:id/spawn-child` | `{ title, spec, workflowId?, inlineWorkflow?, suggestedRole?, enabledOptionalSteps?, planId? }` | `201 { childGoalId, planId }`, `200 { childGoalId, planId, alreadySpawned: true }`, `409` (same body shape as PATCH /plan) | Bearer; idempotent on `planId` |
 | POST | `/api/goals/:id/integrate-child/:childGoalId` | — | `200 { merged: true, commitSha }`, `409 { merged: false, conflict: true, output }` | Bearer; both goals same project |
+| POST | `/api/goals/:id/mutation/:requestId/decision` | `{ decision: "approve" \| "reject" }` | `200 { resolved: true, applied?: { plan?: VerifyStep[], childGoalId?: string } }`, `404 { error: "unknown-or-stale-request" }` | Bearer + same project as goal |
 | POST | `/api/goals/:id/pause` | — | `200 { paused: true }` | Bearer |
 | POST | `/api/goals/:id/resume` | — | `200 { paused: false }` | Bearer |
 | DELETE | `/api/goals/:id?recursive=1` (extended) | — | `200 { archived: [...goalIds] }` | Bearer |
 
-**409 body schema (mutation-rejection):**
+**409 body schemas (multiple variants on PATCH /plan and POST /spawn-child):**
+
+*1. Mutation-rejection — divergence policy or criteria-drop:*
 
 ```json
 {
@@ -1159,9 +1300,41 @@ Switch points (search-and-replace `roleStore.get(roleName)` to
 }
 ```
 
-When `requiresApproval === true`, the server **also broadcasts**
-`goal_mutation_pending` (§9) so the dashboard renders the banner. The tool
-extension returns the 409 body as the tool error to the model.
+*2. Optimistic-concurrency mismatch — `expectedReplanCount` does not
+match server state (e.g. team-lead and dashboard both edit
+simultaneously):*
+
+```json
+{
+  "error": "stale-plan",
+  "currentReplanCount": 3
+}
+```
+
+Clients (UI and tool extension) must re-fetch the plan via `GET
+/api/goals/:id/plan?gateId=…` and retry with the new
+`expectedReplanCount` if they still want to apply their change.
+
+*3. Replan-cap exhausted (>5 post-freeze mutations):*
+
+```json
+{ "error": "replan-cap", "replanCount": 6 }
+```
+
+When `requiresApproval === true` (variant 1, prompt-required outcomes),
+the server **also broadcasts** `goal_mutation_pending` (§9) so the
+dashboard renders the banner. The tool extension returns the 409 body as
+the tool error to the model so the team-lead can explain the rejection.
+
+**404 body schema** (POST /mutation/:requestId/decision only):
+
+```json
+{ "error": "unknown-or-stale-request" }
+```
+
+Returned when the named `requestId` has expired (>15 min unresolved), is
+already resolved, or never existed. Caller fetches the active plan and
+proceeds without retrying the decision.
 
 **`?include=tree` semantics:**
 
@@ -1397,8 +1570,23 @@ buffered mutation. (The mutation is buffered server-side keyed by
 
 The banner is implemented as a dashboard-level component; `ask_user_choices`
 is **not** used here because the agent is not the actor — the user is
-responding directly. The button handlers post to the REST endpoint and
-broadcast `goal_mutation_resolved` so the team-lead can resume.
+responding directly.
+
+**Mechanism note (Decision #6 acknowledgement).** The goal spec named
+`ask_user_choices` as the prompt mechanism for divergence-policy
+escalations. `ask_user_choices` is an **agent-→user** prompt — it ends
+the calling agent's turn and posts an inline widget tied to that
+agent's chat. Plan mutations are different: the trigger is a server
+classifier decision, broadcast as a WS event to **every** client viewing
+the goal (and its ancestors). The actor is the user, not an agent. A
+dashboard-level banner driven by `goal_mutation_pending` is the right
+shape — the UX outcome is equivalent (structured choice → REST decision
+endpoint), but the wiring matches the actual data flow. The decision
+endpoint applies the buffered mutation server-side and broadcasts
+`goal_mutation_resolved` so the team-lead can resume.
+
+The button handlers post to the REST endpoint and broadcast
+`goal_mutation_resolved` so the team-lead can resume.
 
 ---
 
@@ -1640,8 +1828,8 @@ This section is the team-lead's planning sheet. Each task is sized for
   `inlineWorkflow`, `inlineRoles`, `divergencePolicy`,
   `maxConcurrentChildren`, `baseBranch`. Resolve parent, reject on missing/
   archived/cross-project. Derive `rootGoalId` and `mergeTarget`. Add
-  `resolveDivergencePolicy` and `resolveMaxConcurrentChildren` walk-up
-  resolvers (§1.5). Pass `startPoint` to `createWorktree` for child goals
+  `resolveDivergencePolicy` (walk-up) and `resolveRootMaxConcurrentChildren`
+  (root-only lookup) per §1.5. Pass `startPoint` to `createWorktree` for child goals
   and bypass the worktree pool for child goals (pool worktrees branch off
   primary). Call `parseAcceptanceCriteria` and store on goal.
 - **Tests required:** `tests/goal-manager-nesting.test.ts` — child goal
@@ -1793,6 +1981,30 @@ This section is the team-lead's planning sheet. Each task is sized for
 - **Tests required:** the spec is the test.
 - **Depends on:** 2.1, 2.2, 2.3, 2.4, 1.7
 - **Parallelism:** sequential at the end of Phase 2.
+
+**2.6 bobbit-e2e-tests: `sandboxed-parent-child.spec.ts` (sandbox interaction)**
+- **Type:** testing
+- **Owned files:**
+  `bobbit-e2e-tests/tests/nested-goals/sandboxed-parent-child.spec.ts`
+- **Spec:** Enforce the sandbox-+-children risk called out in §13.2.
+  Create a sandboxed parent goal (`sandboxed: true`) and call
+  `goal_spawn_child`. Assert one of two outcomes:
+    (a) **Supported path** — the child is created, its container-internal
+        worktree branches off the parent's tip, the child team-lead
+        produces a commit, and the parent's local merge succeeds.
+    (b) **Documented hard-error path** — the spawn returns 400 with
+        `{ error: "sandboxed nested goals require sandbox bump", risk: "sandbox-child-base-branch" }`,
+        matching the structured error documented in §13.2. The test
+        asserts whichever branch the implementation chose; the
+        implementer flips a flag in the test on Phase 2 task 2.2's
+        decision.
+  Without this test, the §13.2 "tracked as explicit gap" claim is not
+  enforceable — sandbox + child silently regressing to "branch off
+  primary inside the container" is the precise failure mode this guards
+  against.
+- **Tests required:** the spec is the test.
+- **Depends on:** 2.1, 2.2, 2.3, 1.7
+- **Parallelism:** sequential at the end of Phase 2 (after 2.5).
 
 ### Phase 3 — `subgoal` verify-step type + `parent.yaml` workflow + `goal-plan` freeze
 
@@ -2305,7 +2517,8 @@ Caller wiring lives in
 [`src/server/agent/team-manager.ts`](../../src/server/agent/team-manager.ts)::`startTeam`,
 which already builds the `PromptParts` for the team-lead session. Resolve
 the new fields from the goal record (consulting `goalManager.resolveDivergencePolicy`
-and `resolveMaxConcurrentChildren`).
+for child sessions and `resolveRootMaxConcurrentChildren` for the cap; the
+cap is read from the root only — see §1.5).
 
 #### 14.1.1 Top-level team-lead stanza
 
@@ -2441,10 +2654,15 @@ are allowed after the `goal-plan` gate (if any) has been signalled:
   predictability matters more than agility.
 - **`balanced`** — Adding leaf children at existing phases ("fix-up"
   mutations) auto-approves. Adding new top-level branches or new
-  dependencies ("expansion") still prompts the user. Removing or
-  reordering nodes ("restructure") always prompts.
-- **`autonomous`** — Both fix-up and expansion auto-approve, with a
-  WebSocket notification to the user. Restructure still prompts.
+  dependencies ("expansion") prompts the user. Removing or reordering
+  nodes ("restructure") prompts the user.
+- **`autonomous`** — Only "fix-up" auto-approves. **Expansion still
+  prompts the user under autonomous** — the difference from `balanced`
+  is only that the prompt is accompanied by a WebSocket notification so
+  an autonomous-mode operator sees it without watching the dashboard.
+  Restructure prompts. (The spec is explicit: every policy prompts on
+  expansion. Do not assume autonomous lets you skip user approval for
+  new branches.)
 
 **Critical rule — `criteria-drop` is always rejected.** A mutation that
 would leave one of the root goal's acceptance criteria uncovered
@@ -2460,6 +2678,18 @@ user to pause / amend the root spec / un-pause.
 
 **The plan is in service of the spec.** Never drop or contradict an
 acceptance criterion to make a mutation classifiable as fix-up.
+
+**Restate acceptance criteria verbatim in subgoal specs.** When you draft
+a subgoal's `spec` field, **copy the exact wording** of every root-goal
+acceptance criterion that subgoal is responsible for — at least once, in
+the spec body. Paraphrasing is risky: the adherence checker (see the
+mid-goal stanza on `criteria-drop`) does whitespace-normalised,
+case-insensitive **substring matching** against the union of the root
+spec and the remaining subgoal specs, not semantic similarity. A
+paraphrase that drops or rewords a key noun phrase from the criterion
+can register as `criteria-drop` even when the work plainly covers it.
+The cheapest way to stay on the safe side is to quote the criterion
+verbatim somewhere in the spec — even just under a `## Covers` heading.
 ```
 
 #### 14.1.4 Splice order
