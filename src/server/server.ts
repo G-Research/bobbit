@@ -5325,6 +5325,204 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Nested-goals endpoints (design §8) ─────────────────────────
+	//
+	// POST /api/goals/:id/spawn-child — create a child goal branched off the
+	// parent's branch.
+	//
+	// IMPORTANT: This handler does NOT consult the mutation classifier (design
+	// §4 / Decision #6). That gate is wired in Phase 5 task 5.2 — until then,
+	// every spawn-child call succeeds (subject only to the existing invariants
+	// in `GoalManager.createGoal`: archived parent rejected, cross-project
+	// nesting rejected, cycle rejected). Idempotency on `planId` is the
+	// classifier's responsibility once it lands; pre-Phase-5 callers always
+	// get a fresh child goal even if a `planId` collides.
+	const spawnChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/spawn-child$/);
+	if (spawnChildMatch && req.method === "POST") {
+		const parentGoalId = spawnChildMatch[1];
+		const parent = getGoalAcrossProjects(parentGoalId);
+		if (!parent) { json({ error: "Parent goal not found" }, 404); return; }
+		if (parent.archived) { json({ error: "Parent goal is archived" }, 409); return; }
+		const body = await readBody(req);
+		const title = body?.title;
+		const spec = typeof body?.spec === "string" ? body.spec : "";
+		if (!title || typeof title !== "string") {
+			json({ error: "Missing title" }, 400);
+			return;
+		}
+		// Shape-validate optional pass-throughs the same way POST /api/goals does.
+		let inlineWorkflow: any | undefined;
+		if (body?.inlineWorkflow !== undefined) {
+			if (!body.inlineWorkflow || typeof body.inlineWorkflow !== "object" || Array.isArray(body.inlineWorkflow)) {
+				json({ error: "inlineWorkflow must be an object" }, 400);
+				return;
+			}
+			inlineWorkflow = body.inlineWorkflow;
+		}
+		let enabledOptionalSteps: string[] | undefined;
+		if (body?.enabledOptionalSteps !== undefined) {
+			if (!Array.isArray(body.enabledOptionalSteps) || !body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
+				json({ error: "enabledOptionalSteps must be an array of strings" }, 400);
+				return;
+			}
+			enabledOptionalSteps = body.enabledOptionalSteps;
+		}
+		let planId: string | undefined;
+		if (body?.planId !== undefined) {
+			if (typeof body.planId !== "string" || !body.planId) {
+				json({ error: "planId must be a non-empty string" }, 400);
+				return;
+			}
+			planId = body.planId;
+		}
+		let workflowId: string | undefined;
+		if (body?.workflowId !== undefined) {
+			if (typeof body.workflowId !== "string" || !body.workflowId) {
+				json({ error: "workflowId must be a non-empty string" }, 400);
+				return;
+			}
+			workflowId = body.workflowId;
+		}
+		// suggestedRole is accepted but ignored at the REST layer pre-Phase-5;
+		// it'll be persisted onto the spawned subgoal verify-step in 3.1/3.2.
+		try {
+			const targetProjectId = parent.projectId;
+			if (!targetProjectId) {
+				json({ error: "Parent goal has no projectId" }, 400);
+				return;
+			}
+			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
+			if (!targetCtx) {
+				json({ error: "Invalid project for parent goal" }, 400);
+				return;
+			}
+			const targetGoalManager = targetCtx.goalManager;
+			const effectiveWorkflowId = workflowId ?? "general";
+			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === effectiveWorkflowId)?.item;
+			const child = await targetGoalManager.createGoal(title, parent.cwd, {
+				spec,
+				workflowId: effectiveWorkflowId,
+				workflowStore: workflowManager.store,
+				resolvedWorkflow,
+				sandboxed: parent.sandboxed,
+				enabledOptionalSteps,
+				projectId: targetProjectId,
+				parentGoalId,
+				inlineWorkflow,
+			});
+			// Mirror POST /api/goals: persist projectId + autoStartTeam + init gates.
+			targetGoalManager.updateGoal(child.id, { projectId: targetProjectId });
+			child.projectId = targetProjectId;
+			targetGoalManager.updateGoal(child.id, { autoStartTeam: true });
+			child.autoStartTeam = true;
+			if (child.workflow) {
+				targetCtx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
+			}
+			json({ childGoalId: child.id, planId: planId ?? null }, 201);
+			// WS event per §9. Branch may not exist yet (worktree setup is async)
+			// — reading from goal record at this point still gives the planned name.
+			broadcastToGoal(parentGoalId, {
+				type: "goal_child_spawned",
+				parentGoalId,
+				childGoalId: child.id,
+				planId: planId ?? null,
+				branch: child.branch,
+				baseBranch: parent.branch,
+			});
+			// Fire-and-forget worktree setup (mirrors POST /api/goals).
+			if (child.setupStatus === "preparing") {
+				if (child.autoStartTeam) {
+					targetGoalManager.setupWorktreeAndStartTeam(child.id, () => teamManager.startTeam(child.id)).then(() => {
+						broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
+					}).catch((err) => {
+						const g = targetGoalManager.getGoal(child.id);
+						if (g?.setupStatus === "ready") {
+							broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
+							console.error("[goal] Auto-start team failed for spawn-child (worktree ready):", err);
+						} else {
+							broadcastToAll({ type: "goal_setup_error", goalId: child.id, error: String(err) });
+						}
+					});
+				} else {
+					targetGoalManager.setupWorktree(child.id).then(() => {
+						broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
+					}).catch((err) => {
+						broadcastToAll({ type: "goal_setup_error", goalId: child.id, error: String(err) });
+					});
+				}
+			}
+		} catch (err) {
+			json({ error: String(err) }, 400);
+		}
+		return;
+	}
+
+	// POST /api/goals/:id/integrate-child/:childGoalId — local merge of the
+	// completed child branch into the parent branch (§3.3).
+	const integrateChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/integrate-child\/([^/]+)$/);
+	if (integrateChildMatch && req.method === "POST") {
+		const parentGoalId = integrateChildMatch[1];
+		const childGoalId = integrateChildMatch[2];
+		const parent = getGoalAcrossProjects(parentGoalId);
+		if (!parent) { json({ error: "Parent goal not found" }, 404); return; }
+		const child = getGoalAcrossProjects(childGoalId);
+		if (!child) { json({ error: "Child goal not found" }, 404); return; }
+		// Same-project invariant per §8 (`Bearer; both goals same project`).
+		if (parent.projectId && child.projectId && parent.projectId !== child.projectId) {
+			json({ error: "Parent and child goals belong to different projects" }, 400);
+			return;
+		}
+		try {
+			const goalMgr = getGoalManagerForGoal(parentGoalId);
+			const result = await goalMgr.mergeChild(parentGoalId, childGoalId);
+			if (result.merged) {
+				json({ merged: true, commitSha: result.commitSha });
+				broadcastToGoal(parentGoalId, {
+					type: "goal_merge_complete",
+					parentGoalId,
+					childGoalId,
+					commitSha: result.commitSha,
+				});
+			} else {
+				json({ merged: false, conflict: true, output: result.output }, 409);
+			}
+		} catch (err) {
+			json({ error: String(err) }, 400);
+		}
+		return;
+	}
+
+	// POST /api/goals/:id/pause — flip goal.paused = true (§8 / §9).
+	const pauseMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pause$/);
+	if (pauseMatch && req.method === "POST") {
+		const goalId = pauseMatch[1];
+		const pauseGoal = getGoalAcrossProjects(goalId);
+		if (!pauseGoal) { json({ error: "Goal not found" }, 404); return; }
+		if (pauseGoal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		const pauseCtx = projectContextManager.getContextForGoal(goalId);
+		if (!pauseCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		pauseCtx.goalStore.update(goalId, { paused: true });
+		json({ paused: true });
+		broadcastToGoal(goalId, { type: "goal_paused", goalId, by: "user" });
+		return;
+	}
+
+	// POST /api/goals/:id/resume — flip goal.paused = false (§8 / §9).
+	const resumeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/resume$/);
+	if (resumeMatch && req.method === "POST") {
+		const goalId = resumeMatch[1];
+		const resumeGoal = getGoalAcrossProjects(goalId);
+		if (!resumeGoal) { json({ error: "Goal not found" }, 404); return; }
+		if (resumeGoal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		const resumeCtx = projectContextManager.getContextForGoal(goalId);
+		if (!resumeCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		resumeCtx.goalStore.update(goalId, { paused: false });
+		json({ paused: false });
+		broadcastToGoal(goalId, { type: "goal_resumed", goalId });
+		return;
+	}
+
 	// Routes with :id parameter
 	const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (sessionMatch) {
