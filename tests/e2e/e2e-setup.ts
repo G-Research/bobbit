@@ -689,6 +689,42 @@ export async function waitForHealth(timeoutMs = 10_000): Promise<void> {
  * Poll a session's status until it matches the target.
  * Replaces fixed `setTimeout` waits and manual poll loops.
  */
+/**
+ * Poll a synchronous probe until it returns truthy. The poll interval
+ * defaults to 25 ms which is short enough to keep the assertion timing
+ * tight without burning CPU. Throws on timeout.
+ */
+export async function waitForCondition(
+	probe: () => boolean,
+	opts: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
+): Promise<void> {
+	const { timeoutMs = 5_000, intervalMs = 25, message = "condition" } = opts;
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		if (probe()) return;
+		await new Promise((r) => setTimeout(r, intervalMs));
+	}
+	if (!probe()) throw new Error(`Timed out (${timeoutMs}ms) waiting for ${message}`);
+}
+
+/**
+ * Assert that a synchronous probe stays falsy for a fixed duration.
+ * Used for negative assertions ("X must NOT happen within Yms").
+ * Polls every `intervalMs` so we fail fast on the first violation
+ * rather than waiting the full window.
+ */
+export async function assertStaysFalse(
+	probe: () => boolean,
+	opts: { durationMs: number; intervalMs?: number; message?: string },
+): Promise<void> {
+	const { durationMs, intervalMs = 25, message = "condition" } = opts;
+	const end = Date.now() + durationMs;
+	while (Date.now() < end) {
+		if (probe()) throw new Error(`Unexpected: ${message} became true within ${durationMs}ms`);
+		await new Promise((r) => setTimeout(r, intervalMs));
+	}
+}
+
 export async function waitForSessionStatus(
 	sessionId: string,
 	targetStatus: string,
