@@ -309,6 +309,137 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(post.user).toBe(baseline.user);
 	});
 
+	// ---------------------------------------------------------------
+	// ST-DEDUP-02: Proposal burst keeps both widgets in order (unified
+	// message-ordering reducer).
+	// ---------------------------------------------------------------
+	//
+	// Pre-fix: legacy `_deferredAssistantMessage` slot held the first
+	// `propose_*` assistant message until the next message_update; a second
+	// `propose_*` assistant turn arriving before that flush silently
+	// overwrote the first. Post-fix: the unified reducer keys every
+	// transcript row by (_order, _insertionTick) — both widgets land in
+	// chronological order and stay rendered.
+	test("ST-DEDUP-02: Proposal burst keeps both widgets in order", async () => {
+		s.begin(defineStory({
+			id: "ST-DEDUP-02",
+			title: "Proposal burst keeps both widgets in order",
+			contracts: [CT_01],
+			covers: ["unified-message-ordering-reducer", "proposal-burst"],
+		}));
+
+		// setup
+		await s.createTestSession("A");
+		await s.open();
+		await s.navigate_to("session", "A");
+
+		// act
+		s.act();
+		await s.send_message("please run a proposal_burst for E2E");
+		await s.wait_for_idle();
+
+		// Wait for the closing assistant message that signals the burst is done.
+		await expect.poll(
+			async () => await s.page.evaluate(() =>
+				Array.from(document.querySelectorAll("assistant-message")).filter(
+					(el) => (el.textContent || "").includes("BURST_DONE_E2E")
+				).length
+			),
+			{ timeout: 15_000, message: "burst close marker did not render" },
+		).toBeGreaterThan(0);
+
+		// assert — both proposal widgets render exactly once, in source order.
+		s.assert();
+		const counts = await s.page.evaluate(() => {
+			const names: string[] = [];
+			let goalProposals = 0, roleProposals = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const text = el.textContent || "";
+				if (text.includes("Goal Proposal")) { names.push("goal"); goalProposals++; }
+				if (text.includes("Role Proposal")) { names.push("role"); roleProposals++; }
+			}
+			return { goalProposals, roleProposals, order: names };
+		});
+		expect(counts.goalProposals).toBe(1);
+		expect(counts.roleProposals).toBe(1);
+		expect(counts.order).toEqual(["goal", "role"]);
+	});
+
+	// ---------------------------------------------------------------
+	// ST-DEDUP-03: Mid-burst replay does not duplicate the proposal widgets.
+	// ---------------------------------------------------------------
+	//
+	// Combines ST-DEDUP-01 (replay infrastructure) with the proposal burst:
+	// after a full burst lands, replaying every buffered event must NOT
+	// produce a second copy of either widget. The reducer's id-keyed render
+	// keys + seq-stamped live-event dedup ensure stability.
+	test("ST-DEDUP-03: Mid-burst reconnect / replay preserves widgets exactly once", async () => {
+		s.begin(defineStory({
+			id: "ST-DEDUP-03",
+			title: "Mid-burst reconnect preserves widgets exactly once",
+			contracts: [CT_01, CT_05],
+			covers: ["unified-message-ordering-reducer", "replay-dedup"],
+		}));
+
+		// setup
+		const sessionId = await s.createTestSession("A");
+		await s.open();
+		await s.navigate_to("session", "A");
+
+		await s.send_message("please run a proposal_burst for E2E");
+		await s.wait_for_idle();
+
+		const countWidgets = async () => await s.page.evaluate(() => {
+			const body = document.body.textContent || "";
+			let goal = 0, role = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const t = el.textContent || "";
+				if (t.includes("Goal Proposal")) goal++;
+				if (t.includes("Role Proposal")) role++;
+			}
+			return {
+				goal, role,
+				assistant: document.querySelectorAll("assistant-message").length,
+				done: body.split("BURST_DONE_E2E").length - 1,
+			};
+		});
+
+		await expect.poll(async () => (await countWidgets()).done, { timeout: 15_000 }).toBeGreaterThan(0);
+		const before = await countWidgets();
+		expect(before.goal).toBe(1);
+		expect(before.role).toBe(1);
+
+		// act — replay every buffered event.
+		s.act();
+		const replayResp = await apiFetch(`/api/internal/test/replay-buffered-events/${sessionId}`, { method: "POST" });
+		expect(replayResp.status).toBe(200);
+
+		// Wait for DOM to stabilise.
+		await s.page.waitForFunction(() => {
+			let goal = 0, role = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const t = el.textContent || "";
+				if (t.includes("Goal Proposal")) goal++;
+				if (t.includes("Role Proposal")) role++;
+			}
+			const hash = `${goal}|${role}|${document.querySelectorAll("assistant-message").length}`;
+			const w = window as any;
+			if (!w.__burstStability || w.__burstStability.last !== hash) {
+				w.__burstStability = { last: hash, ticks: 1 };
+				return false;
+			}
+			w.__burstStability.ticks++;
+			return w.__burstStability.ticks >= 5;
+		}, null, { timeout: 5_000, polling: 100 });
+
+		// assert
+		s.assert();
+		const after = await countWidgets();
+		expect(after.goal).toBe(1);
+		expect(after.role).toBe(1);
+		expect(after.assistant).toBe(before.assistant);
+	});
+
 	test("CT-01-f: Page reload during stream", async () => {
 		s.begin(defineStory({
 			id: "CT-01-f",
