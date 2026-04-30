@@ -12,6 +12,15 @@ export interface MissionDagSvgOptions {
 /**
  * Render a mission plan as an SVG DAG. Pure view component — caller controls
  * data and click handling.
+ *
+ * IMPORTANT (lit + SVG): SVG presentation attributes like `fill`, `stroke`,
+ * `stroke-width`, `font-size`, `font-weight`, `text-anchor`, `opacity` are
+ * NOT exposed as JS properties on SVGElement. lit's default attribute
+ * binding (`fill=${expr}`) does `element[name] = value`, which silently
+ * no-ops on these. The result is invisible 0×0 black rects. To force lit
+ * to write a real DOM attribute we either prefix with `.` (property),
+ * `?` (boolean), or fold the values into an inline `style="..."` string —
+ * the latter is bulletproof since `style` is always parsed as an attribute.
  */
 export function renderMissionDagSvg(
 	plan: MissionPlan | null | undefined,
@@ -33,7 +42,7 @@ export function renderMissionDagSvg(
 	const byId = new Map<string, PlannedGoal>(plan.goals.map(g => [g.planId, g]));
 
 	return html`
-		<div class="mission-dag-wrap" style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--background);display:flex;justify-content:center;padding:8px;">
+		<div class="mission-dag-wrap" style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--background);display:flex;justify-content:center;padding:8px;min-height:${layout.size.h + 16}px;">
 			<svg
 				viewBox="0 0 ${layout.size.w} ${layout.size.h}"
 				width="${layout.size.w}"
@@ -57,7 +66,7 @@ export function renderMissionDagSvg(
 
 function renderEdges(plan: MissionPlan, layout: LayoutResult): TemplateResult {
 	return html`
-		<g stroke="var(--muted-foreground)" stroke-width="1.5" fill="none" opacity="0.6">
+		<g style="stroke:var(--muted-foreground,#64748b);stroke-width:1.5;fill:none;opacity:0.6;">
 			${plan.dependencies.map(e => {
 				const from = layout.positions.get(e.from);
 				const to = layout.positions.get(e.to);
@@ -89,24 +98,26 @@ function renderNode(
 	const click = opts.onNodeClick
 		? (e: Event) => { e.stopPropagation(); opts.onNodeClick!(node.planId); }
 		: undefined;
+	const groupStyle = click ? "cursor:pointer;" : "";
+	const rectStyle = `fill:${c.fill};stroke:${stroke};stroke-width:${strokeWidth};`;
+	const titleStyle = "font-size:12px;font-weight:600;fill:#0f172a;text-anchor:middle;pointer-events:none;";
+	const labelStyle = "font-size:10px;fill:#475569;text-anchor:middle;pointer-events:none;";
 	return html`
 		<g
 			class="mission-dag-node"
 			data-plan-id=${node.planId}
 			data-state=${c.label}
-			style=${click ? "cursor:pointer;" : ""}
+			style=${groupStyle}
 			@click=${click}
 		>
 			<rect x=${pos.x} y=${pos.y} width="160" height="56" rx="8" ry="8"
-				fill=${c.fill} stroke=${stroke} stroke-width=${strokeWidth}></rect>
-			<text x=${pos.x + 80} y=${pos.y + 22} text-anchor="middle"
-				font-size="12" font-weight="600" fill="#0f172a"
-				style="pointer-events:none;">
+				style=${rectStyle}></rect>
+			<text x=${pos.x + 80} y=${pos.y + 22}
+				style=${titleStyle}>
 				${truncate(node.title, 22)}
 			</text>
-			<text x=${pos.x + 80} y=${pos.y + 40} text-anchor="middle"
-				font-size="10" fill="#475569"
-				style="pointer-events:none;">
+			<text x=${pos.x + 80} y=${pos.y + 40}
+				style=${labelStyle}>
 				${c.label}
 			</text>
 		</g>
