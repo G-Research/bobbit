@@ -214,14 +214,22 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 
 /** Step 2: Add goal/team extension paths to bridge args. */
 export function resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	if (plan.goalId && !plan.assistantType) {
+	// The tasks/extension exposes verification_result + gate_* + task_* and
+	// gates registration on either BOBBIT_GOAL_ID or BOBBIT_MISSION_ID being
+	// set. Mission-gate reviewer sub-sessions (spec-auditor, architect, etc.)
+	// only carry missionId — they still need verification_result to report back
+	// to the harness, so we wire the extension here too.
+	if (!plan.assistantType && (plan.goalId || plan.missionId)) {
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
-		// Add goal tools extension (task + gate management) if not already present.
 		const goalExtPath = resolveGoalToolsExtPath(ctx);
 		if (!plan.bridgeOptions.args.includes(goalExtPath)) {
 			plan.bridgeOptions.args.push("--extension", goalExtPath);
 		}
-		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
+		if (plan.goalId) {
+			plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
+		}
+		// BOBBIT_MISSION_ID is set on plan.bridgeOptions.env in resolveBridgeOptions
+		// (Step 1) — nothing to do here for mission-only sessions.
 	}
 
 	// Add proposal tools extension for assistant sessions (goal assistant, role assistant, etc.)

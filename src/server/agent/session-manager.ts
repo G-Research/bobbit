@@ -2268,8 +2268,11 @@ export class SessionManager {
 			}
 		}
 
-		// Restore extension args for goal/team sessions
-		if (ps.goalId && !ps.assistantType) {
+		// Restore extension args for goal/team sessions. The tasks/extension
+		// also serves mission-only sessions (verification_result + gate_*),
+		// gated on either BOBBIT_GOAL_ID or BOBBIT_MISSION_ID inside the
+		// extension itself.
+		if (!ps.assistantType && (ps.goalId || ps.missionId)) {
 			const isTeamLead = ps.role === "team-lead";
 			if (isTeamLead) {
 				// Team leads need both: team tools + goal tools (tasks/gates)
@@ -3372,16 +3375,20 @@ export class SessionManager {
 		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
-			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
+		}
+		if (session.missionId) {
+			bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
+		}
+		// Re-attach the tasks/gate extension for goal- AND mission-owned sessions.
+		// Mission-only sessions (e.g. spec-auditor reviewing a mission gate) need
+		// verification_result + gate_* registered against /api/missions/...
+		if (session.goalId || session.missionId) {
 			const isTeamLead = session.role === "team-lead";
 			if (isTeamLead) {
 				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
 				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 			}
-		}
-		if (session.missionId) {
-			bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
 		}
 		// Propagate role so mission/proposal extension role-guards survive respawn.
 		if (session.role) {
@@ -4289,20 +4296,23 @@ export class SessionManager {
 				});
 			}
 
-			// Restore goal extension
+			// Restore goal/mission env
 			if (session.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
+			}
+			if (session.missionId) {
+				bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
+			}
+			// Re-attach the tasks/gate extension for goal- AND mission-owned
+			// sessions — mission-only sessions still need verification_result and
+			// gate_* against /api/missions/... (e.g. mission-gate reviewers).
+			if (session.goalId || session.missionId) {
 				const isTeamLead = session.role === "team-lead";
 				if (isTeamLead) {
 					bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 				} else {
 					bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
 				}
-			}
-
-			// Restore mission env (commander session)
-			if (session.missionId) {
-				bridgeOptions.env.BOBBIT_MISSION_ID = session.missionId;
 			}
 			// Propagate role so mission/proposal extension role-guards survive force-abort restart.
 			if (session.role) {

@@ -1,8 +1,19 @@
 /**
- * Goal tool extensions for Bobbit.
+ * Goal & mission tool extensions for Bobbit.
  *
  * Registers task and gate management tools for ANY session associated
- * with a goal. Loaded automatically via --extension when a session has a goalId.
+ * with a goal OR a mission. Loaded automatically via --extension when a
+ * session has a goalId or missionId.
+ *
+ * Owner-kind selection:
+ *   - goalId set    → all task_* and gate_* tools point at /api/goals/...
+ *   - missionId set (no goalId) → only gate_* + verification_result registered;
+ *                                  gate_* tools point at /api/missions/...
+ *                                  task_* are skipped (missions have no tasks).
+ *
+ * `verification_result` is registered in BOTH cases — it's the blocking-tool
+ * by which reviewer/QA sub-sessions report back to the harness, regardless of
+ * whether the gate is owned by a goal or a mission.
  *
  * Team-specific tools (team_spawn, team_dismiss, etc.) live in team-lead-tools.ts
  * and are only loaded for team lead sessions.
@@ -17,9 +28,18 @@ export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const goalId = process.env.BOBBIT_GOAL_ID;
-	if (!sessionId || !goalId) {
+	const missionId = process.env.BOBBIT_MISSION_ID;
+	if (!sessionId || (!goalId && !missionId)) {
 		return;
 	}
+
+	// Owner-kind dispatch: goalId wins if both are set (goal-owned sessions
+	// running on behalf of a mission still scope task/gate ops to the goal).
+	const ownerKind: "goal" | "mission" = goalId ? "goal" : "mission";
+	const ownerId: string = goalId ?? missionId!;
+	const gatesBasePath = ownerKind === "goal"
+		? `/api/goals/${ownerId}/gates`
+		: `/api/missions/${ownerId}/gates`;
 
 	let token: string;
 	let baseUrl: string;
@@ -70,97 +90,102 @@ export default function (pi: ExtensionAPI) {
 		return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
 	}
 
-	// ── Task tools ────────────────────────────────────────────────────
+	// ── Task tools (goal-only — missions have no tasks) ──────────────
 
-	pi.registerTool({
-		name: "task_list",
-		label: "List Tasks",
-		description: "List all tasks for the current goal with their state, type, assignment, and dependencies. Returns a slim summary — use task detail for full spec or result.",
-		promptSnippet: "List all tasks for the goal.",
-		parameters: Type.Object({}),
-		async execute() {
-			try {
-				return ok(await api("GET", `/api/goals/${goalId}/tasks?view=summary`));
-			} catch (e: any) { return err(e.message); }
-		},
-	});
+	if (ownerKind === "goal") {
+		pi.registerTool({
+			name: "task_list",
+			label: "List Tasks",
+			description: "List all tasks for the current goal with their state, type, assignment, and dependencies. Returns a slim summary — use task detail for full spec or result.",
+			promptSnippet: "List all tasks for the goal.",
+			parameters: Type.Object({}),
+			async execute() {
+				try {
+					return ok(await api("GET", `/api/goals/${ownerId}/tasks?view=summary`));
+				} catch (e: any) { return err(e.message); }
+			},
+		});
 
-	pi.registerTool({
-		name: "task_create",
-		label: "Create Task",
-		description: [
-			"Create a new task for the goal.",
-			"Types: implementation, code-review, testing, bug-fix, refactor, custom.",
-		].join(" "),
-		promptSnippet: "Create a task with title, type, optional spec, and dependencies.",
-		parameters: Type.Object({
-			title: Type.String({ description: "Short task title" }),
-			type: Type.String({ description: "Task type: implementation, code-review, testing, bug-fix, refactor, or custom" }),
-			spec: Type.Optional(Type.String({ description: "Detailed specification for the task" })),
-			depends_on: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on" })),
-		}),
-		async execute(_id, params) {
-			try {
-				const body: Record<string, unknown> = { title: params.title, type: params.type };
-				if (params.spec) body.spec = params.spec;
-				if (params.depends_on?.length) body.dependsOn = params.depends_on;
-				return ok(await api("POST", `/api/goals/${goalId}/tasks`, body));
-			} catch (e: any) { return err(e.message); }
-		},
-	});
+		pi.registerTool({
+			name: "task_create",
+			label: "Create Task",
+			description: [
+				"Create a new task for the goal.",
+				"Types: implementation, code-review, testing, bug-fix, refactor, custom.",
+			].join(" "),
+			promptSnippet: "Create a task with title, type, optional spec, and dependencies.",
+			parameters: Type.Object({
+				title: Type.String({ description: "Short task title" }),
+				type: Type.String({ description: "Task type: implementation, code-review, testing, bug-fix, refactor, or custom" }),
+				spec: Type.Optional(Type.String({ description: "Detailed specification for the task" })),
+				depends_on: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on" })),
+			}),
+			async execute(_id, params) {
+				try {
+					const body: Record<string, unknown> = { title: params.title, type: params.type };
+					if (params.spec) body.spec = params.spec;
+					if (params.depends_on?.length) body.dependsOn = params.depends_on;
+					return ok(await api("POST", `/api/goals/${ownerId}/tasks`, body));
+				} catch (e: any) { return err(e.message); }
+			},
+		});
 
-	pi.registerTool({
-		name: "task_update",
-		label: "Update Task",
-		description: [
-			"Update a task's fields, assignment, and/or state in a single call.",
-			"Provide any combination: field updates (title, spec, result_summary, head_sha),",
-			"assignment (assigned_to session ID), and/or state transition (state).",
-			"States: todo, in-progress, blocked, complete, skipped.",
-		].join(" "),
-		promptSnippet: "Update task fields, assign to a session, and/or transition state.",
-		parameters: Type.Object({
-			task_id: Type.String({ description: "Task ID" }),
-			title: Type.Optional(Type.String({ description: "New title" })),
-			spec: Type.Optional(Type.String({ description: "New spec" })),
-			result_summary: Type.Optional(Type.String({ description: "Summary of results" })),
-			head_sha: Type.Optional(Type.String({ description: "HEAD commit SHA of your finished work" })),
-			assigned_to: Type.Optional(Type.String({ description: "Session ID to assign task to" })),
-			state: Type.Optional(Type.String({ description: "Transition to: todo, in-progress, blocked, complete, skipped" })),
-		}),
-		async execute(_id, params) {
-			try {
-				const { task_id, assigned_to, state, ...fields } = params;
-				const updateBody: Record<string, unknown> = {};
-				if (fields.title !== undefined) updateBody.title = fields.title;
-				if (fields.spec !== undefined) updateBody.spec = fields.spec;
-				if (fields.result_summary !== undefined) updateBody.resultSummary = fields.result_summary;
-				if (fields.head_sha !== undefined) updateBody.headSha = fields.head_sha;
-				if (Object.keys(updateBody).length > 0) {
-					await api("PUT", `/api/tasks/${task_id}`, updateBody);
-				}
-				if (assigned_to) {
-					await api("POST", `/api/tasks/${task_id}/assign`, { sessionId: assigned_to });
-				}
-				if (state) {
-					await api("POST", `/api/tasks/${task_id}/transition`, { state });
-				}
-				return ok(await api("GET", `/api/tasks/${task_id}`));
-			} catch (e: any) { return err(e.message); }
-		},
-	});
+		pi.registerTool({
+			name: "task_update",
+			label: "Update Task",
+			description: [
+				"Update a task's fields, assignment, and/or state in a single call.",
+				"Provide any combination: field updates (title, spec, result_summary, head_sha),",
+				"assignment (assigned_to session ID), and/or state transition (state).",
+				"States: todo, in-progress, blocked, complete, skipped.",
+			].join(" "),
+			promptSnippet: "Update task fields, assign to a session, and/or transition state.",
+			parameters: Type.Object({
+				task_id: Type.String({ description: "Task ID" }),
+				title: Type.Optional(Type.String({ description: "New title" })),
+				spec: Type.Optional(Type.String({ description: "New spec" })),
+				result_summary: Type.Optional(Type.String({ description: "Summary of results" })),
+				head_sha: Type.Optional(Type.String({ description: "HEAD commit SHA of your finished work" })),
+				assigned_to: Type.Optional(Type.String({ description: "Session ID to assign task to" })),
+				state: Type.Optional(Type.String({ description: "Transition to: todo, in-progress, blocked, complete, skipped" })),
+			}),
+			async execute(_id, params) {
+				try {
+					const { task_id, assigned_to, state, ...fields } = params;
+					const updateBody: Record<string, unknown> = {};
+					if (fields.title !== undefined) updateBody.title = fields.title;
+					if (fields.spec !== undefined) updateBody.spec = fields.spec;
+					if (fields.result_summary !== undefined) updateBody.resultSummary = fields.result_summary;
+					if (fields.head_sha !== undefined) updateBody.headSha = fields.head_sha;
+					if (Object.keys(updateBody).length > 0) {
+						await api("PUT", `/api/tasks/${task_id}`, updateBody);
+					}
+					if (assigned_to) {
+						await api("POST", `/api/tasks/${task_id}/assign`, { sessionId: assigned_to });
+					}
+					if (state) {
+						await api("POST", `/api/tasks/${task_id}/transition`, { state });
+					}
+					return ok(await api("GET", `/api/tasks/${task_id}`));
+				} catch (e: any) { return err(e.message); }
+			},
+		});
+	}
 
 	// ── Gate tools ────────────────────────────────────────────────────
 
 	pi.registerTool({
 		name: "gate_list",
 		label: "List Gates",
-		description: "List all gates for the current goal — status, dependencies, signal count, and failed step names. Slim summary with no content bodies.",
-		promptSnippet: "List all gates for the goal with status.",
+		description: "List all gates for the current goal/mission — status, dependencies, signal count, and failed step names. Slim summary with no content bodies.",
+		promptSnippet: "List all gates with status.",
 		parameters: Type.Object({}),
 		async execute() {
 			try {
-				return ok(await api("GET", `/api/goals/${goalId}/gates?view=summary`));
+				// Mission gates endpoint does not currently support ?view=summary; only
+				// pass it for goals where it's implemented.
+				const qs = ownerKind === "goal" ? "?view=summary" : "";
+				return ok(await api("GET", `${gatesBasePath}${qs}`));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -175,7 +200,8 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("GET", `/api/goals/${goalId}/gates/${params.gate_id}?view=summary`));
+				const qs = ownerKind === "goal" ? "?view=summary" : "";
+				return ok(await api("GET", `${gatesBasePath}/${params.gate_id}${qs}`));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -200,38 +226,43 @@ export default function (pi: ExtensionAPI) {
 				const body: Record<string, unknown> = { sessionId };
 				if (params.content) body.content = params.content;
 				if (params.metadata) body.metadata = params.metadata;
-				return ok(await api("POST", `/api/goals/${goalId}/gates/${params.gate_id}/signal`, body));
+				return ok(await api("POST", `${gatesBasePath}/${params.gate_id}/signal`, body));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
 
-	pi.registerTool({
-		name: "gate_inspect",
-		label: "Inspect Gate",
-		description: [
-			"Read gate content, verification output, or signal history.",
-			"section='content': returns the markdown content from a signal.",
-			"section='verification': returns full verification step output.",
-			"section='signals': returns summary list of all signals (no content bodies).",
-		].join(" "),
-		promptSnippet: "Read detailed gate data: content, verification output, or signal history.",
-		parameters: Type.Object({
-			gate_id: Type.String({ description: "Gate ID" }),
-			section: Type.Union([
-				Type.Literal("content"),
-				Type.Literal("verification"),
-				Type.Literal("signals"),
-			], { description: "What to read: 'content', 'verification', or 'signals'" }),
-			signal_index: Type.Optional(Type.Number({ description: "Which signal (0-based, negative from end, default: -1 = latest)" })),
-		}),
-		async execute(_id, params) {
-			try {
-				const qs = new URLSearchParams({ section: params.section });
-				if (params.signal_index !== undefined) qs.set("signal_index", String(params.signal_index));
-				return ok(await api("GET", `/api/goals/${goalId}/gates/${params.gate_id}/inspect?${qs}`));
-			} catch (e: any) { return err(e.message); }
-		},
-	});
+	// gate_inspect: only available for goals — the per-section inspect endpoint
+	// does not yet exist for missions. Skip registration for mission sessions
+	// rather than expose a broken tool.
+	if (ownerKind === "goal") {
+		pi.registerTool({
+			name: "gate_inspect",
+			label: "Inspect Gate",
+			description: [
+				"Read gate content, verification output, or signal history.",
+				"section='content': returns the markdown content from a signal.",
+				"section='verification': returns full verification step output.",
+				"section='signals': returns summary list of all signals (no content bodies).",
+			].join(" "),
+			promptSnippet: "Read detailed gate data: content, verification output, or signal history.",
+			parameters: Type.Object({
+				gate_id: Type.String({ description: "Gate ID" }),
+				section: Type.Union([
+					Type.Literal("content"),
+					Type.Literal("verification"),
+					Type.Literal("signals"),
+				], { description: "What to read: 'content', 'verification', or 'signals'" }),
+				signal_index: Type.Optional(Type.Number({ description: "Which signal (0-based, negative from end, default: -1 = latest)" })),
+			}),
+			async execute(_id, params) {
+				try {
+					const qs = new URLSearchParams({ section: params.section });
+					if (params.signal_index !== undefined) qs.set("signal_index", String(params.signal_index));
+					return ok(await api("GET", `/api/goals/${ownerId}/gates/${params.gate_id}/inspect?${qs}`));
+				} catch (e: any) { return err(e.message); }
+			},
+		});
+	}
 
 	// ── verification_result ──────────────────────────────────────────
 	pi.registerTool({
@@ -258,5 +289,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[goal-tools] Registered 8 task/gate tools for session ${sessionId}, goal ${goalId}`);
+	console.log(
+		`[goal-tools] Registered task/gate tools for session ${sessionId} (ownerKind=${ownerKind}, ownerId=${ownerId})`,
+	);
 }
