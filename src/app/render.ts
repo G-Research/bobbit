@@ -34,6 +34,7 @@ import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
+import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, diffView as projectDiffView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -1727,6 +1728,22 @@ const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 	{ key: "naming_model", label: "Naming Model" },
 ];
 
+// Module-level state for the project proposal panel's three-tab UI.
+let _projectProposalView: ProjectViewMode = "components";
+let _projectProposalPrev: { components: ProposalComponent[]; workflows: Record<string, ProposalWorkflow> } | null = null;
+
+/** Capture a snapshot of the current proposal as the "previous" baseline for the
+ *  diff view. Called by session-manager.ts before clearing an accepted proposal. */
+export function setProjectProposalPrev(snap: { components: ProposalComponent[]; workflows: Record<string, ProposalWorkflow> } | null): void {
+	_projectProposalPrev = snap;
+}
+
+/** Reset module-level proposal panel state. Called on session disconnect. */
+export function resetProjectProposalPanel(): void {
+	_projectProposalView = "components";
+	_projectProposalPrev = null;
+}
+
 function projectProposalPanel() {
 	const proposal = state.activeProjectProposal;
 
@@ -1740,13 +1757,18 @@ function projectProposalPanel() {
 		`;
 	}
 
-	// `fields` may now contain structured `components` / `workflows` blocks
-	// (Phase 4b). The diff partitioning logic below expects flat strings, so
-	// we coerce any non-string value into a JSON string for display purposes
-	// only — the original structured value is preserved on `proposal.fields`.
+	// `fields` carries structured `components` / `workflows` blocks alongside
+	// flat string fields. The legacy collapsed-fields loop below operates on
+	// strings only — `components` / `workflows` are partitioned OUT and handed
+	// to dedicated views. Other non-string values are JSON-stringified for the
+	// flat Input rows; the original structured value is preserved on
+	// `proposal.fields`.
 	const rawFields = proposal.fields as Record<string, unknown>;
+	const structuredComponents = (rawFields.components as ProposalComponent[] | undefined) ?? [];
+	const structuredWorkflows = (rawFields.workflows as Record<string, ProposalWorkflow> | undefined) ?? {};
 	const fields: Record<string, string> = {};
 	for (const [k, v] of Object.entries(rawFields)) {
+		if (k === "components" || k === "workflows") continue;
 		if (typeof v === "string") fields[k] = v;
 		else if (v == null) fields[k] = "";
 		else {
@@ -1792,6 +1814,10 @@ function projectProposalPanel() {
 
 	const onFieldInput = (key: string, value: string) => {
 		if (!state.activeProjectProposal) return;
+		// Bug B guard: `components` and `workflows` are structured side-tables
+		// owned by dedicated views — never let an Input row clobber them with a
+		// string keystroke value.
+		if (key === "components" || key === "workflows") return;
 		(state.activeProjectProposal.fields as Record<string, unknown>)[key] = value;
 		saveProjectDraft(state.activeProjectProposal.sessionId);
 		renderApp();
@@ -1862,12 +1888,17 @@ function projectProposalPanel() {
 
 	const acceptDisabled = !fields.name?.trim() || (isRegistered && diffCount === 0);
 
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal" data-mode=${mode}>
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+	const hasDiff = _projectProposalPrev != null;
+	const activeView = _projectProposalView;
+	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
+
+	const legacyFieldsBlock = html`
+		<details class="px-5 py-3 border-t border-border" data-testid="legacy-fields-group">
+			<summary class="text-xs text-muted-foreground cursor-pointer select-none">Project-level fields</summary>
+			<div class="flex flex-col gap-4 mt-3">
 				${loading ? html`<div class="text-sm text-muted-foreground" data-testid="loading-current-config">Loading current config…</div>` : ""}
 				${renderRow("name", "Project Name")}
-				<div>
+				<div data-field="root_path" data-readonly="true">
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
 					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || current?.rootPath || ""}>
 						${fields.root_path || current?.rootPath || "—"}
@@ -1883,6 +1914,24 @@ function projectProposalPanel() {
 					</details>
 				` : ""}
 			</div>
+		</details>
+	`;
+
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal" data-mode=${mode}>
+			<div class="shrink-0 px-5 pt-4 pb-2 flex flex-col gap-1">
+				<div class="text-sm font-medium">${fields.name || "(unnamed project)"}</div>
+				<div class="text-[11px] text-muted-foreground font-mono truncate" title=${fields.root_path || current?.rootPath || ""}>${fields.root_path || current?.rootPath || ""}</div>
+			</div>
+			${projectViewTabs(activeView, onView, hasDiff)}
+			<div class="flex-1 overflow-y-auto p-5">
+				${activeView === "components"
+					? projectComponentsView(structuredComponents)
+					: activeView === "workflows"
+					? projectWorkflowsView(structuredWorkflows, structuredComponents)
+					: projectDiffView(_projectProposalPrev, { components: structuredComponents, workflows: structuredWorkflows })}
+			</div>
+			${legacyFieldsBlock}
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
 				${Button({
