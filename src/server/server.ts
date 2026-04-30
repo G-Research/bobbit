@@ -1023,78 +1023,89 @@ export function createGateway(config: GatewayConfig) {
 			// E2E / CI can skip this entirely via BOBBIT_SKIP_WORKTREE_POOL=1 — the
 			// pool fills worktrees aggressively at boot and replenishes on every
 			// claim, which costs real CPU on tests that don't need git at all.
-			// Boot sweeper (Phase 3): reconcile on-disk worktrees against persisted
-			// records before pool fill so renamed-but-orphaned worktrees from a
-			// crashed prior instance are reclaimed (or cleaned up) cleanly.
-			try {
-				const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-				const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
-				const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-				const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-				const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
-				for (const ctx of projectContextManager.all()) {
-					const repoNames = ctx.projectConfigStore.repoNames();
-					sweepProjects.push({
-						id: ctx.project.id,
-						rootPath: ctx.project.rootPath,
-						repos: repoNames.length > 0 ? repoNames : undefined,
+			//
+			// Boot sweeper + pool fill run AFTER `server.listen()` as a background
+			// chain — the sweeper shells out to `git worktree list/repair` per repo
+			// with 10–15s timeouts, and the pool readiness check awaits `isGitRepo`
+			// per project. Doing them before listen used to leave the gateway
+			// unreachable for many seconds on installs with stale worktrees.
+			//
+			// Ordering invariant preserved: the sweeper still runs before
+			// `initWorktreePoolForProject`, so the pool's `reclaimOrphaned`
+			// can't race against the sweeper. Requests that arrive during this
+			// window fall through the non-pool session path (the same path used
+			// before the pool ever fills).
+			const runBootBackgroundTasks = async (): Promise<void> => {
+				try {
+					const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+					const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+					const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+					const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+					const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+					for (const ctx of projectContextManager.all()) {
+						const repoNames = ctx.projectConfigStore.repoNames();
+						sweepProjects.push({
+							id: ctx.project.id,
+							rootPath: ctx.project.rootPath,
+							repos: repoNames.length > 0 ? repoNames : undefined,
+						});
+						for (const g of ctx.goalStore.getAll()) {
+							sweepGoals.push({
+								id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+								repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+							});
+						}
+						for (const s of ctx.sessionStore.getAll()) {
+							sweepSessions.push({
+								id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+								repoWorktrees: s.repoWorktrees,
+							});
+						}
+						for (const st of ctx.staffStore.getAll()) {
+							sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+						}
+					}
+					const result = await sweepOrphanedWorktrees({
+						projects: sweepProjects,
+						goals: sweepGoals,
+						sessions: sweepSessions,
+						staff: sweepStaff,
 					});
-					for (const g of ctx.goalStore.getAll()) {
-						sweepGoals.push({
-							id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
-							repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
-						});
+					if (result.reclaimed || result.cleaned || result.repaired) {
+						console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
 					}
-					for (const s of ctx.sessionStore.getAll()) {
-						sweepSessions.push({
-							id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
-							repoWorktrees: s.repoWorktrees,
-						});
-					}
-					for (const st of ctx.staffStore.getAll()) {
-						sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
-					}
+				} catch (err) {
+					console.warn("[server] Worktree sweeper failed (non-fatal):", err);
 				}
-				const result = await sweepOrphanedWorktrees({
-					projects: sweepProjects,
-					goals: sweepGoals,
-					sessions: sweepSessions,
-					staff: sweepStaff,
-				});
-				if (result.reclaimed || result.cleaned || result.repaired) {
-					console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
-				}
-			} catch (err) {
-				console.warn("[server] Worktree sweeper failed (non-fatal):", err);
-			}
 
-			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
-				for (const ctx of projectContextManager.all()) {
-					try {
-						const repoPath = ctx.project.rootPath;
-						const components = ctx.projectConfigStore.getComponents();
-						const isMulti = components.some(c => c.repo !== ".");
-						let poolReady = false;
-						if (isMulti) {
-							const seen = new Set<string>();
-							poolReady = true;
-							for (const c of components) {
-								if (c.repo === "." || seen.has(c.repo)) continue;
-								seen.add(c.repo);
-								if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+				if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
+					for (const ctx of projectContextManager.all()) {
+						try {
+							const repoPath = ctx.project.rootPath;
+							const components = ctx.projectConfigStore.getComponents();
+							const isMulti = components.some(c => c.repo !== ".");
+							let poolReady = false;
+							if (isMulti) {
+								const seen = new Set<string>();
+								poolReady = true;
+								for (const c of components) {
+									if (c.repo === "." || seen.has(c.repo)) continue;
+									seen.add(c.repo);
+									if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+								}
+							} else {
+								poolReady = await isGitRepo(repoPath);
 							}
-						} else {
-							poolReady = await isGitRepo(repoPath);
-						}
-						if (poolReady) {
-							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-							const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
-							const pcs = ctx.projectConfigStore;
-							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, () => pcs.getComponents(), poolSize, wtRoot);
-						}
-					} catch { /* best-effort */ }
+							if (poolReady) {
+								const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
+								const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
+								const pcs = ctx.projectConfigStore;
+								sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, () => pcs.getComponents(), poolSize, wtRoot);
+							}
+						} catch { /* best-effort */ }
+					}
 				}
-			}
+			};
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
 			// resolve components / project root for multi-repo goal creation.
@@ -1133,6 +1144,7 @@ export function createGateway(config: GatewayConfig) {
 					});
 				});
 				const addr = server.address() as import("node:net").AddressInfo;
+				void runBootBackgroundTasks();
 				return addr.port;
 			}
 
@@ -1151,6 +1163,7 @@ export function createGateway(config: GatewayConfig) {
 					if (port !== config.port) {
 						console.log(`Port ${config.port} in use, using port ${port}`);
 					}
+					void runBootBackgroundTasks();
 					return port;
 				} catch (err: any) {
 					if (err.code === "EADDRINUSE" && port < maxPort) {
