@@ -371,4 +371,18 @@ The BOBBIT_E2E-only `replay-buffered-events` endpoint in `src/server/server.ts` 
 - **Per-call deadline:** 2 s (`PACE_TIMEOUT_MS`). If the client never drains (e.g. it has gone away), the helper falls through and lets the underlying `send()` throw or no-op rather than hanging the endpoint.
 - **Closed-socket short-circuit:** returns immediately when `readyState !== 1`.
 
-This change is scoped to the test endpoint. Production `broadcast()` retains its 4 MiB hard cap unchanged — the pacing helper is a test-harness band-aid, not a production back-pressure mechanism.
+This change is scoped to the test endpoint. Production `broadcast()` retains its 4 MiB hard cap — the pacing helper is a test-harness band-aid, not a production back-pressure mechanism.
+
+## 8. Production overflow guard — transient-spike tolerance
+
+The original 4 MiB guard in `broadcast()` terminated a client the instant `bufferedAmount` crossed the threshold. Empirically (Windows + Playwright workers=3), the kernel TCP send buffer occasionally spikes past 4 MiB during a tool burst and drains back within ~10 ms. Terminating immediately on a transient spike turned those moments into spurious WS reconnects — the same flake family ST-DEDUP-01 chases.
+
+The guard now defers the terminate decision once. Decision logic lives in `src/server/ws-overflow-guard.ts::decideOverflowAction`:
+
+- **First observation > 4 MiB:** returns `send-and-defer-check`. The broadcast loop schedules a 10 ms re-check, marks the client as having a deferred check pending, and **still attempts the current send**. If the kernel drains in time, the frame is delivered as normal.
+- **Deferred re-check, still > 4 MiB:** returns `terminate`. The spike is genuine and the client gets force-closed (same as before, just delayed by 10 ms).
+- **Deferred re-check, drained back below 4 MiB:** returns `send`. No terminate — the spike was transient.
+
+The per-client "deferred check pending" flag is a `WeakSet` so subsequent broadcasts during the 10 ms window don't pile up duplicate timers; only the original observer schedules the re-check. Unit tests for the policy live in `tests/ws-overflow-guard.test.ts`.
+
+This change is conservative: every persistent overflow still terminates (within ~10 ms of the original detection), so DoS protection and reconnect-resume semantics are preserved. The only behavioural change is that healthy clients with brief kernel-buffer spikes no longer get killed.
