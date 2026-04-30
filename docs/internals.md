@@ -1076,12 +1076,14 @@ Per-session toggle overrides the project default.
 
 Bobbit scans multiple directories for skills, MCP servers, tools, and agent files. Manage via Settings → Config Directories tab or `config_directories` in `project.yaml`.
 
-Storage format:
+Storage format (native YAML):
 ```yaml
-config_directories: '[{"path":"~/my-config","types":["skills","mcp"]}]'
+config_directories:
+  - path: ~/my-config
+    types: [skills, mcp]
 ```
 
-Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority.
+Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority. Legacy JSON-string form (`config_directories: '[…]'`) still parses but is rewritten in native form on next save — see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields).
 
 **Per-project scoping:** Config directories are resolved per-project. Each project's `config_directories` in its `project.yaml` affects only that project's sessions — a session in project B uses project B's custom directories for skill, MCP, and agent file discovery. Projects never inherit each other's config directories. The API endpoints (`/api/config-directories`, `/api/slash-skills`, `/api/slash-skills/details`) accept a `?projectId=` query parameter to resolve directories for a specific project.
 
