@@ -75,6 +75,7 @@ import type { PersistedGoal } from "./agent/goal-store.js";
 import type { PersistedMission, MissionPlan, DivergencePolicy } from "./agent/mission-store.js";
 import { applyMissionPromptSubstitutions } from "./agent/mission-prompt.js";
 import type { MissionManager } from "./agent/mission-manager.js";
+import { wireMissionHooks } from "./agent/wire-mission-hooks.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
@@ -562,64 +563,17 @@ export interface GatewayConfig {
 
 /**
  * Wire mission-orchestration hooks onto a freshly-built (or freshly-fetched)
- * ProjectContext. Idempotent: replaces any existing onStatusChange /
- * onIndexUpdate / wakeCommander wiring with the canonical mission-aware
- * version.
- *
- * Called from createGateway() on startup, and from handleApiRoute() each time
- * a new (or upserted) project context is materialised.
+ * ProjectContext. The actual implementation now lives in
+ * `agent/wire-mission-hooks.ts` (extracted so unit/integration tests can
+ * import it without dragging the HTTP handler in). This thin wrapper keeps
+ * the existing in-file callsites untouched.
  */
 function wireProjectContextHooksImpl(
 	ctx: ReturnType<ProjectContextManager["getOrCreate"]>,
 	sessionManager: { enqueuePrompt: (id: string, text: string, opts?: { isSteered?: boolean }) => Promise<void> | void },
 	broadcastToAll: (msg: any) => void,
 ): void {
-	if (!ctx) return;
-	const pc = ctx;
-	pc.gateStore.onStatusChange = (kind, ownerId, gateId) => {
-		pc.goalStore.bumpGeneration();
-		if (kind === "mission") {
-			// Auto-freeze the plan when goal-plan passes (propose-and-wait gate).
-			if (gateId === "goal-plan") {
-				const gs = pc.gateStore.getGateFor("mission", ownerId, "goal-plan");
-				if (gs?.status === "passed") {
-					const m = pc.missionStore.get(ownerId);
-					if (m && !m.planFrozenAt && m.plan) {
-						try {
-							pc.missionManager.freezePlan(ownerId);
-							broadcastToAll({ type: "mission_plan_frozen", missionId: ownerId });
-						} catch (err) {
-							console.error("[mission] freezePlan after goal-plan pass failed", err);
-						}
-					}
-				}
-			}
-			pc.missionScheduler.tickMission(ownerId).catch(err =>
-				console.warn(`[mission] tickMission(${ownerId}) failed:`, err));
-		} else {
-			// Goal-owned gate — if the goal belongs to a mission, tick it.
-			const goal = pc.goalStore.get(ownerId);
-			if (goal?.missionId) {
-				pc.missionScheduler.tickMission(goal.missionId).catch(err =>
-					console.warn(`[mission] tickMission(${goal.missionId}) failed:`, err));
-			}
-		}
-	};
-	const prevGoalIndexUpdate = pc.goalStore.onIndexUpdate;
-	pc.goalStore.onIndexUpdate = (goal) => {
-		prevGoalIndexUpdate?.(goal);
-		if (goal.missionId) {
-			pc.missionScheduler.tickMission(goal.missionId).catch(err =>
-				console.warn(`[mission] tickMission(${goal.missionId}) failed:`, err));
-		}
-	};
-	pc.missionScheduler.setWakeCommander(async (sessionId, message) => {
-		try {
-			await sessionManager.enqueuePrompt(sessionId, message, { isSteered: true });
-		} catch (err) {
-			console.warn(`[mission] wakeCommander(${sessionId}) failed:`, err);
-		}
-	});
+	wireMissionHooks(ctx, sessionManager, broadcastToAll);
 }
 
 export function createGateway(config: GatewayConfig) {

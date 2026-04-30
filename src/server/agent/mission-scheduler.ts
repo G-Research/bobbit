@@ -135,7 +135,8 @@ export type SchedulerWsMessage =
 	| { type: "mission_child_merged"; missionId: string; planId: string; goalId: string; mergeSha: string }
 	| { type: "mission_child_merge_conflict"; missionId: string; planId: string; goalId: string; conflictFiles: string[] }
 	| { type: "mission_execution_ready"; missionId: string }
-	| { type: "mission_paused"; missionId: string; reason: string };
+	| { type: "mission_paused"; missionId: string; reason: string }
+	| { type: "mission_spawn_failed"; missionId: string; planId: string; error: string; failedAttempts: number };
 
 export interface SchedulerLogger {
 	info(msg: string, ...args: unknown[]): void;
@@ -290,6 +291,7 @@ export class MissionScheduler {
 			try {
 				await this.tickMission(m.id);
 			} catch (err) {
+				console.error(`[scheduler] tick failed for mission ${m.id}:`, err);
 				this.logger.error(`[scheduler] tick failed for mission ${m.id}`, err);
 			}
 		}
@@ -305,7 +307,16 @@ export class MissionScheduler {
 			if (prev) {
 				try { await prev; } catch { /* swallow upstream errors; we'll do our own work */ }
 			}
-			await this.doTick(missionId);
+			try {
+				await this.doTick(missionId);
+			} catch (err) {
+				// Last-resort observability — every individual phase has its own
+				// catch+log, but a buggy invariant or new code path could still
+				// throw here. Make it loud so the scheduler can't silently wedge.
+				console.error(`[scheduler] doTick threw for mission ${missionId}:`, err);
+				this.logger.error(`[scheduler] doTick threw for mission ${missionId}`, err);
+				throw err;
+			}
 		})();
 		this.inflight.set(missionId, next);
 		return next.finally(() => {
@@ -367,22 +378,31 @@ export class MissionScheduler {
 		if (!m.plan) return;
 		for (const node of m.plan.goals) {
 			if (!node.goalId) continue;
-			const goal = this.deps.goalStore.get(node.goalId);
-			if (!goal) continue;
-			if (goal.state !== node.state) {
-				const updated = this.deps.missionManager.updatePlanNodeState(m.id, node.planId, {
-					state: goal.state,
-					...(goal.state === "complete" && !node.completedAt ? { completedAt: this.now() } : {}),
-				});
-				if (updated) {
-					this.broadcast({
-						type: "mission_child_state_changed",
-						missionId: m.id,
-						planId: node.planId,
-						goalId: node.goalId,
+			try {
+				const goal = this.deps.goalStore.get(node.goalId);
+				if (!goal) continue;
+				if (goal.state !== node.state) {
+					const updated = this.deps.missionManager.updatePlanNodeState(m.id, node.planId, {
 						state: goal.state,
+						...(goal.state === "complete" && !node.completedAt ? { completedAt: this.now() } : {}),
 					});
+					if (updated) {
+						this.broadcast({
+							type: "mission_child_state_changed",
+							missionId: m.id,
+							planId: node.planId,
+							goalId: node.goalId,
+							state: goal.state,
+						});
+					}
 				}
+			} catch (err) {
+				console.error(
+					`[scheduler] mirrorChildStates failed mission=${m.id} plan=${node.planId}:`,
+					err,
+				);
+				this.logger.warn("[scheduler] mirrorChildStates failed", err);
+				// Continue with other nodes — never let one bad goal block the tick.
 			}
 		}
 	}
@@ -398,6 +418,10 @@ export class MissionScheduler {
 			try {
 				result = await this.deps.missionManager.integrateChildForScheduler(m.id, node.planId);
 			} catch (err) {
+				console.error(
+					`[scheduler] integrateChild failed mission=${m.id} plan=${node.planId}:`,
+					err,
+				);
 				this.logger.warn(`[scheduler] integrateChild failed for plan ${node.planId}`, err);
 				continue;
 			}
@@ -440,11 +464,52 @@ export class MissionScheduler {
 					planId: node.planId,
 					goalId: goal.id,
 				});
+				// Wake the Commander so its dashboard shows progress and it knows
+				// to start watching the child's ready-to-merge gate. Fire-and-forget;
+				// failures are logged but do not block subsequent spawns.
+				if (m.commanderSessionId && this.deps.wakeCommander) {
+					try {
+						await this.deps.wakeCommander(
+							m.commanderSessionId,
+							`A new child goal has spawned: ${node.title} (${node.planId}). Watch for its \`ready-to-merge\` gate and call mission_merge_child once it passes.`,
+						);
+					} catch (wakeErr) {
+						console.error(
+							`[scheduler] wakeCommander after spawn failed mission=${m.id} plan=${node.planId}:`,
+							wakeErr,
+						);
+						this.logger.warn("[scheduler] wakeCommander after spawn failed", wakeErr);
+					}
+				}
 			} catch (err) {
+				const message = (err instanceof Error ? err.message : String(err)) || "unknown error";
+				console.error(
+					`[scheduler] spawnChild failed mission=${m.id} plan=${node.planId}:`,
+					err,
+				);
 				this.logger.warn(
 					`[scheduler] spawnChild failed for mission=${m.id} plan=${node.planId}`,
 					err,
 				);
+				// Bump failedAttempts so the next tick doesn't infinite-retry.
+				const nextAttempts = (node.failedAttempts ?? 0) + 1;
+				try {
+					this.deps.missionManager.updatePlanNodeState(m.id, node.planId, {
+						failedAttempts: nextAttempts,
+					});
+				} catch (updErr) {
+					console.error(
+						`[scheduler] failed to bump failedAttempts mission=${m.id} plan=${node.planId}:`,
+						updErr,
+					);
+				}
+				this.broadcast({
+					type: "mission_spawn_failed",
+					missionId: m.id,
+					planId: node.planId,
+					error: message,
+					failedAttempts: nextAttempts,
+				});
 			}
 		}
 	}
@@ -523,9 +588,11 @@ export class MissionScheduler {
 		try {
 			const r = await this.deps.missionManager.forwardMergeMaster(m.id);
 			if (r.status === "conflict") {
+				console.error(`[scheduler] forwardMergeMaster conflict for mission ${m.id} — continuing`);
 				this.logger.warn(`[scheduler] forwardMergeMaster conflict for mission ${m.id} — continuing`);
 			}
 		} catch (err) {
+			console.error(`[scheduler] forwardMergeMaster failed for mission ${m.id}:`, err);
 			this.logger.warn(`[scheduler] forwardMergeMaster failed for mission ${m.id}`, err);
 		}
 	}

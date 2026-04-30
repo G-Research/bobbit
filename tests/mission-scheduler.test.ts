@@ -579,6 +579,71 @@ test("setWakeCommander: wires the hook post-construction", async () => {
 	assert.equal(woken!.sessionId, "c-1");
 });
 
+test("spawnReady: spawn failure broadcasts mission_spawn_failed and bumps failedAttempts", async () => {
+	const m = mission({
+		id: "m1",
+		plan: plan({ goals: [planNode("a")] }),
+	});
+	const mgr = makeManager([m]);
+	mgr.spawnChild = async (_mid, _pid) => {
+		throw new Error("boom");
+	};
+	const { broadcast, events } = makeBroadcast();
+	const origErr = console.error;
+	console.error = () => {}; // silence expected loud log
+	try {
+		const sch = new MissionScheduler({
+			missionManager: mgr,
+			goalStore: makeGoalLookup([]),
+			gateStore: makeGateLookup([]),
+			broadcast,
+			tickIntervalMs: 0,
+		});
+		await sch.tickMission("m1");
+	} finally {
+		console.error = origErr;
+	}
+	const failed = events.find(e => e.type === "mission_spawn_failed");
+	assert.ok(failed, "should broadcast mission_spawn_failed");
+	if (failed?.type === "mission_spawn_failed") {
+		assert.equal(failed.missionId, "m1");
+		assert.equal(failed.planId, "a");
+		assert.match(failed.error, /boom/);
+		assert.equal(failed.failedAttempts, 1);
+	}
+	const node = mgr.missions.get("m1")!.plan!.goals[0];
+	assert.equal(node.failedAttempts, 1, "node.failedAttempts incremented");
+});
+
+test("spawnReady: wakes Commander on each successful spawn", async () => {
+	const m = mission({
+		id: "m1",
+		commanderSessionId: "cmdr-1",
+		plan: plan({
+			goals: [planNode("a", { title: "Alpha" }), planNode("b", { title: "Beta" })],
+			dependencies: [],
+		}),
+	});
+	const mgr = makeManager([m]);
+	const wakes: Array<{ sessionId: string; message: string }> = [];
+	const sch = new MissionScheduler({
+		missionManager: mgr,
+		goalStore: makeGoalLookup([]),
+		gateStore: makeGateLookup([]),
+		wakeCommander: (sessionId, message) => { wakes.push({ sessionId, message }); },
+		tickIntervalMs: 0,
+	});
+	await sch.tickMission("m1");
+	// Both children spawned + their wake messages, plus none for execution-ready
+	// (still in flight — not merged).
+	assert.equal(wakes.length, 2, "one wake per spawned child");
+	assert.ok(wakes.every(w => w.sessionId === "cmdr-1"));
+	assert.match(wakes[0].message, /child goal has spawned: Alpha \(a\)/);
+	assert.match(wakes[1].message, /child goal has spawned: Beta \(b\)/);
+	assert.match(wakes[0].message, /ready-to-merge/);
+	assert.match(wakes[0].message, /mission_merge_child/);
+});
+
 test("start/stop: idempotent and unrefs the timer", () => {
 	const sch = new MissionScheduler({
 		missionManager: makeManager([]),

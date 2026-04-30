@@ -145,6 +145,14 @@ export class ProjectContext {
       goalStore: { get: (id) => this.goalStore.get(id) },
       gateStore: { getGate: (oid, gid) => this.gateStore.getGate(oid, gid) },
       tickIntervalMs: 60_000,
+      // Surface scheduler info/warnings/errors via console so production logs
+      // capture them. The default NULL_LOGGER would silently swallow every
+      // spawnChild failure (and similarly for mirror/merge/forward-merge).
+      logger: {
+        info: (msg, ...args) => console.log(msg, ...args),
+        warn: (msg, ...args) => console.warn(msg, ...args),
+        error: (msg, ...args) => console.error(msg, ...args),
+      },
     });
     this.missionScheduler.start();
   }
