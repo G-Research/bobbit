@@ -52,7 +52,7 @@ shapes, formats, and test surface.
   - Add a keydown listener on the `.ask-widget` root (`@keydown=${this._onKey}`).
   - New state: `@state() private _focusedOption = 0` — index of focused option
     card within the active question (0 = first real option, `q.options.length`
-    = "Other" when `allow_other`). Reset to 0 on tab change. Applied as a
+    = the always-rendered "Other" row). Reset to 0 on tab change. Applied as a
     roving `tabindex="0"` on the focused card, `-1` on others.
   - Tabs get roving tabindex too: the active tab button has `tabindex="0"`,
     others `tabindex="-1"`. ArrowLeft/ArrowRight on a focused tab button moves
@@ -85,7 +85,7 @@ export interface AskQuestion {
   question: string;
   options: string[];
   tab_label?: string;       // NEW — required when questions.length > 1
-  allow_other?: boolean;
+  // allow_other removed — "Other" is always rendered.
   multi?: boolean;
   min?: number;
   max?: number;
@@ -96,7 +96,7 @@ export interface UserQuestion {
   question: string;
   options: string[];
   tab_label?: string;       // NEW — same semantics
-  allow_other?: boolean;
+  // allow_other removed — "Other" is always rendered.
   multi?: boolean;
   min?: number;
   max?: number;
@@ -161,7 +161,7 @@ Key map (handler runs only when focus is inside the widget):
 | `A`–`Z` (case-insensitive) | `jumpToTab(code - 65)` in multi-question asks. Out-of-range ignored. Updates `_activeTab` and resets `_focusedOption = 0`. Single-question asks: ignored. Skipped when text input has focus. |
 
 Helper predicates:
-- `optionCount(qIdx) = q.options.length + (q.allow_other ? 1 : 0)`.
+- `optionCount(qIdx) = q.options.length + 1` (the +1 is the always-rendered "Other" row).
 - `isTextInputFocused()` = `document.activeElement instanceof HTMLInputElement
   && activeElement.type === "text"`.
 
@@ -215,9 +215,10 @@ Add:
     `3`, `b`: text field receives the characters, widget does not intercept.
     Only Enter (submit) and Escape (clear) still intercept from inside the
     Other input.
-12. **"Other" numbering** — option list with `allow_other: true` renders the
-    Other row with `${options.length + 1}.`; pressing that number key selects
-    Other (single-select — reveals text input; multi-select — toggles).
+12. **"Other" numbering** — every option list renders the Other row with
+    `${options.length + 1}.` (it is always present); pressing that number key
+    selects Other (single-select — focuses the always-visible text input;
+    multi-select — toggles).
 
 ### Server validation (`tests/ask-user-choices-validation.spec.ts` if present, else a new one)
 13. `validateQuestions` rejects a 2-question ask where `tab_label` is missing on

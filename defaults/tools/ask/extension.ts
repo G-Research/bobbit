@@ -53,9 +53,6 @@ export default function (pi: ExtensionAPI) {
 						maxLength: 24,
 						description: "Short 2–4 word tab label (≤24 chars) summarizing the question. REQUIRED when posting more than one question — used as the tab title so users can jump between questions without reading full prompts.",
 					})),
-					allow_other: Type.Optional(Type.Boolean({
-						description: "If true, render an 'Other' option with a free-text input",
-					})),
 					multi: Type.Optional(Type.Boolean({
 						description: "If true, user may select multiple options; selected is returned as a string[].",
 					})),
@@ -67,7 +64,7 @@ export default function (pi: ExtensionAPI) {
 						minimum: 1,
 						description: "Maximum selections when multi:true (default = options.length).",
 					})),
-				}),
+				}, { additionalProperties: true }),
 				{ minItems: 1, maxItems: 5, description: "1–5 multiple-choice questions" },
 			),
 		}),
