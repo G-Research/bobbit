@@ -1,4 +1,4 @@
-import { html, type TemplateResult } from "lit";
+import { html, svg, type TemplateResult } from "lit";
 import { layoutDag, type LayoutResult } from "./mission-dag-layout.js";
 import type { MissionPlan, PlannedGoal } from "../../app/mission-types.js";
 import { plannedGoalColor } from "../../app/mission-types.js";
@@ -42,19 +42,21 @@ export function renderMissionDagSvg(
 	const byId = new Map<string, PlannedGoal>(plan.goals.map(g => [g.planId, g]));
 
 	return html`
-		<div class="mission-dag-wrap" style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--background);display:flex;justify-content:center;padding:8px;min-height:${layout.size.h + 16}px;">
-			<svg
-				viewBox="0 0 ${layout.size.w} ${layout.size.h}"
-				width="${layout.size.w}"
-				height="${layout.size.h}"
-				style="display:block;max-width:100%;font-family:inherit;"
-				role="img"
-				aria-label="Mission plan DAG"
-				data-testid="mission-dag-svg"
-			>
-				${renderEdges(plan, layout)}
-				${plan.goals.map(node => renderNode(node, layout, byId, opts))}
-			</svg>
+		<div class="mission-dag-wrap" style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--background);display:flex;flex-direction:column;align-items:center;padding:8px;min-height:${layout.size.h + 16}px;">
+			${svg`
+				<svg
+					viewBox="0 0 ${layout.size.w} ${layout.size.h}"
+					width="${layout.size.w}"
+					height="${layout.size.h}"
+					style="display:block;max-width:100%;font-family:inherit;"
+					role="img"
+					aria-label="Mission plan DAG"
+					data-testid="mission-dag-svg"
+				>
+					${renderEdges(plan, layout)}
+					${plan.goals.map(node => renderNode(node, layout, byId, opts))}
+				</svg>
+			`}
 			${layout.cyclic ? html`
 				<div role="alert" style="padding:8px 12px;color:#b91c1c;font-size:12px;border-top:1px solid var(--border);">
 					Warning: DAG contains a cycle — falling back to linear layout.
@@ -65,19 +67,19 @@ export function renderMissionDagSvg(
 }
 
 function renderEdges(plan: MissionPlan, layout: LayoutResult): TemplateResult {
-	return html`
+	return svg`
 		<g style="stroke:var(--muted-foreground,#64748b);stroke-width:1.5;fill:none;opacity:0.6;">
 			${plan.dependencies.map(e => {
 				const from = layout.positions.get(e.from);
 				const to = layout.positions.get(e.to);
-				if (!from || !to) return html``;
+				if (!from || !to) return svg``;
 				const fx = from.x + 160; // node right edge
 				const fy = from.y + 28;  // node centre y
 				const tx = to.x;
 				const ty = to.y + 28;
 				const midX = (fx + tx) / 2;
 				const path = `M ${fx} ${fy} C ${midX} ${fy} ${midX} ${ty} ${tx} ${ty}`;
-				return html`<path d=${path}></path>`;
+				return svg`<path d=${path}></path>`;
 			})}
 		</g>
 	`;
@@ -90,7 +92,7 @@ function renderNode(
 	opts: MissionDagSvgOptions,
 ): TemplateResult {
 	const pos = layout.positions.get(node.planId);
-	if (!pos) return html``;
+	if (!pos) return svg``;
 	const c = plannedGoalColor(node);
 	const isHighlight = opts.highlightPlanId === node.planId;
 	const stroke = isHighlight ? "#0f172a" : c.stroke;
@@ -102,7 +104,7 @@ function renderNode(
 	const rectStyle = `fill:${c.fill};stroke:${stroke};stroke-width:${strokeWidth};`;
 	const titleStyle = "font-size:12px;font-weight:600;fill:#0f172a;text-anchor:middle;pointer-events:none;";
 	const labelStyle = "font-size:10px;fill:#475569;text-anchor:middle;pointer-events:none;";
-	return html`
+	return svg`
 		<g
 			class="mission-dag-node"
 			data-plan-id=${node.planId}
