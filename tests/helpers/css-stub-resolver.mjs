@@ -34,9 +34,17 @@ const UI_SHIM_URL =
   "data:text/javascript," + encodeURIComponent(UI_SHIM_SOURCE);
 
 // Stub for src/app/api.ts — drops the render-helpers / session-manager /
-// storage cascade. RemoteAgent only references `refreshGateStatusForGoal`.
+// storage cascade. Exports the handful of symbols RemoteAgent references at
+// module-init / runtime. The stubbed refreshMissions / refreshSessions hit
+// the test's mock `fetch` so unit tests can assert the right endpoints fired.
 const API_SHIM_SOURCE = `
 export async function refreshGateStatusForGoal() {}
+export async function refreshMissions() {
+  try { await fetch("/api/missions"); } catch {}
+}
+export async function refreshSessions() {
+  try { await fetch("/api/sessions"); await fetch("/api/goals"); } catch {}
+}
 export function gatewayFetch() { return Promise.resolve(new Response("{}")); }
 export function patchSession() {}
 export function startTeam() {}

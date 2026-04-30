@@ -30,6 +30,7 @@ let loading = true;
 let error = "";
 let activeTab: "overview" | "plan" = "overview";
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let missionEventListener: ((e: Event) => void) | null = null;
 let approving = false;
 let toastMessage: { text: string; kind: "success" | "error" } | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -197,14 +198,28 @@ export async function loadMissionDashboard(missionId: string): Promise<void> {
 		renderApp();
 	}
 
-	// Periodic refresh so DAG/gates stay current. Cheap polling is fine until
-	// WS event wiring lands.
+	// Periodic refresh as a safety net (e.g. dropped WS events). The primary
+	// path is the `mission-event` listener below — server WS events trigger
+	// an immediate refreshMissionData().
 	stopPolling();
 	pollTimer = setInterval(() => {
 		if (document.visibilityState !== "visible") return;
 		if (!currentMissionId) return;
 		refreshMissionData();
 	}, 7_000);
+
+	// Listen for mission_* WS events bubbled by RemoteAgent. When the event
+	// targets the current mission (by id) or has no id (e.g. initial fanout),
+	// pull the fresh detail/gates immediately so the dashboard updates without
+	// waiting for the 7s safety-net poll.
+	if (missionEventListener) document.removeEventListener("mission-event", missionEventListener);
+	missionEventListener = (e: Event) => {
+		const d = (e as CustomEvent).detail;
+		if (!d || !currentMissionId) return;
+		if (d.missionId && d.missionId !== currentMissionId) return;
+		refreshMissionData();
+	};
+	document.addEventListener("mission-event", missionEventListener);
 }
 
 export function clearMissionDashboardState(): void {
@@ -215,6 +230,10 @@ export function clearMissionDashboardState(): void {
 	error = "";
 	state.missionDashboardId = null;
 	stopPolling();
+	if (missionEventListener) {
+		document.removeEventListener("mission-event", missionEventListener);
+		missionEventListener = null;
+	}
 	teardownCommanderEmbed();
 }
 

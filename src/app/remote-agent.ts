@@ -2,7 +2,7 @@ import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
-import { refreshGateStatusForGoal } from "./api.js";
+import { refreshGateStatusForGoal, refreshMissions, refreshSessions } from "./api.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
@@ -1215,6 +1215,61 @@ export class RemoteAgent {
 
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
+				break;
+
+			// ---- Mission events --------------------------------------------
+			// The server broadcasts these whenever a mission, its plan, or one of
+			// its child goals changes. The client has no per-event-type registry,
+			// so we fan out via refreshMissions() (and refreshSessions() for child
+			// goals, since /api/goals owns mission-owned goal rows). We also emit
+			// a DOM CustomEvent (`mission-event`) so the mission dashboard /
+			// other view-scoped UI can react without coupling to RemoteAgent.
+			case "mission_created":
+			case "mission_updated":
+			case "mission_deleted":
+			case "mission_plan_proposed":
+			case "mission_plan_frozen":
+			case "mission_plan_reset":
+			case "mission_paused":
+			case "mission_resumed":
+			case "mission_execution_ready":
+				refreshMissions().catch(() => {});
+				document.dispatchEvent(new CustomEvent("mission-event", { detail: msg }));
+				break;
+
+			case "mission_child_spawned":
+			case "mission_child_merged":
+				refreshMissions().catch(() => {});
+				// New goal row appeared (or its merged-state moved) — pull the
+				// goal list so the sidebar reflects it instantly. refreshSessions
+				// fetches /api/goals alongside /api/sessions and calls renderApp().
+				refreshSessions().catch(() => {});
+				document.dispatchEvent(new CustomEvent("mission-event", { detail: msg }));
+				break;
+
+			case "mission_child_state_changed":
+				// Child goal moved through a state — pull goals only; mission shape
+				// itself didn't change.
+				refreshSessions().catch(() => {});
+				document.dispatchEvent(new CustomEvent("mission-event", { detail: msg }));
+				break;
+
+			case "mission_child_merge_conflict":
+				refreshMissions().catch(() => {});
+				this._appendNotification(
+					`Mission merge conflict on plan node ${(msg as any).planId ?? ""}`.trim(),
+					"error",
+				);
+				document.dispatchEvent(new CustomEvent("mission-event", { detail: msg }));
+				break;
+
+			case "mission_spawn_failed":
+				refreshMissions().catch(() => {});
+				this._appendNotification(
+					`Mission spawn failed: ${(msg as any).error || (msg as any).planId || "unknown"}`,
+					"error",
+				);
+				document.dispatchEvent(new CustomEvent("mission-event", { detail: msg }));
 				break;
 
 			case "session_removed": {
