@@ -480,6 +480,39 @@ export class VerificationHarness {
 		return this.subgoalSemaphores;
 	}
 
+	/**
+	 * Pause-awareness for phase advancement (design §2.4 + Phase 5.3).
+	 *
+	 * Returns `true` if `goalId` itself or any ancestor in its `parentGoalId`
+	 * chain has `paused === true`. The verification harness consults this
+	 * before advancing to the next phase: if any goal in the tree is paused,
+	 * the signal stays parked in `activeVerifications` and the harness polls
+	 * until the pause clears (handled by `goal_resumed`). In-flight steps
+	 * already running within the current phase are not interrupted; only
+	 * future phase advancement is gated.
+	 *
+	 * Cycle-safe: tracks a `seen` set so a corrupted parent chain can't loop.
+	 */
+	private isGoalPaused(goalId: string): boolean {
+		const goalStore = this.projectContextManager?.getContextForGoal(goalId)?.goalStore;
+		if (!goalStore) return false;
+		const seen = new Set<string>();
+		let cursor: { paused?: boolean; parentGoalId?: string } | undefined = goalStore.get(goalId);
+		while (cursor) {
+			if (cursor.paused === true) return true;
+			const parentId = cursor.parentGoalId;
+			if (!parentId || seen.has(parentId)) break;
+			seen.add(parentId);
+			cursor = goalStore.get(parentId);
+		}
+		return false;
+	}
+
+	/** Test-only accessor — exposes the tree-pause check. */
+	_isGoalPausedForTest(goalId: string): boolean {
+		return this.isGoalPaused(goalId);
+	}
+
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
 
@@ -1452,6 +1485,27 @@ export class VerificationHarness {
 				const phase = sortedPhases[phaseIdx];
 				maybeAppendNewSteps(phase);
 				if (active.cancelled) break;
+
+				// Pause-aware phase advancement (design §2.4 + Phase 5.3).
+				// If this signal's goal (or any ancestor) is paused, park here
+				// and poll until unpaused. The signal stays in activeVerifications
+				// so `goal_resumed` resumes phase advancement without respawning.
+				// Already-running steps from a previous phase are unaffected — they
+				// finish naturally; only forward progress is gated.
+				const pausePollMs = parseInt(process.env.BOBBIT_PAUSE_POLL_MS || "500", 10) || 500;
+				let pauseLogged = false;
+				while (!active.cancelled && this.isGoalPaused(signal.goalId)) {
+					if (!pauseLogged) {
+						console.log(`[verification] Goal ${signal.goalId} paused — parking phase ${phase} of signal ${signal.id} until resume.`);
+						pauseLogged = true;
+					}
+					maybeAppendNewSteps(phase);
+					await new Promise(r => setTimeout(r, pausePollMs));
+				}
+				if (active.cancelled) break;
+				if (pauseLogged) {
+					console.log(`[verification] Goal ${signal.goalId} resumed — advancing phase ${phase} of signal ${signal.id}.`);
+				}
 
 				if (phaseFailed) {
 					// Skip all steps in this and subsequent phases
