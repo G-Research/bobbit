@@ -38,6 +38,7 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
+import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 
 // ── Extension path helpers ─────────────────────────────────────────────────
@@ -179,6 +180,9 @@ export async function withRetry<T>(
 
 /** Step 1: Construct RpcBridgeOptions base (cliPath, env, args). */
 export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	return profile("resolveBridgeOptions", () => _resolveBridgeOptions(plan, ctx));
+}
+function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
@@ -214,6 +218,9 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 
 /** Step 2: Add goal/team extension paths to bridge args. */
 export function resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	return profile("resolveGoalExtensions", () => _resolveGoalExtensions(plan, ctx));
+}
+function _resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	// The tasks/extension exposes verification_result + gate_* + task_* and
 	// gates registration on either BOBBIT_GOAL_ID or BOBBIT_MISSION_ID being
 	// set. Mission-gate reviewer sub-sessions (spec-auditor, architect, etc.)
@@ -244,6 +251,9 @@ export function resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineConte
 
 /** Step 3: Compute effectiveAllowedTools, filter host-only tools for sandbox. */
 export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	return profile("resolveTools", () => _resolveTools(plan, ctx));
+}
+function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	let effectiveAllowedTools = plan.effectiveAllowedTools;
 
 	// Fall back to general role's allowed tools
@@ -278,6 +288,10 @@ function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext):
 
 /** Step 4: Assemble system prompt (handles assistant, normal, delegate variants). */
 export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	return profile("resolvePrompt", () => _resolvePrompt(plan, ctx));
+}
+
+function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
 
 	if (assistantDef) {
@@ -411,6 +425,9 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
  * `never` so the agent can't bypass the policy by calling the tool directly.
  */
 export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
+}
+function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
 	const mcpExtPaths = ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
@@ -484,12 +501,14 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
  * Used by normal and delegate session creation.
  */
 export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
 	resolveBridgeOptions(plan, ctx);
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
 	if (plan.sandboxed) {
@@ -524,13 +543,13 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	persistOnce(preSpawnSession, plan, ctx.store);
 
 	// Step 8: spawn agent
-	const session = await spawnAgent(plan, ctx);
+	const session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
 
 	// Step 9: update persistence with full session data (agentSessionFile, etc.)
 	persistOnce(session, plan, ctx.store);
 
 	// Step 10: post-spawn setup (model, thinking level)
-	await postSpawn(session, plan, ctx);
+	await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
 
 	return session;
 }
@@ -737,10 +756,12 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	session.unsubscribe = subscribeToEvents(session, ctx);
 
 	// Start agent with retry
+	const __t = performance.now();
 	await withRetry(
 		() => rpcClient.start(),
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
+	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
 	session.status = "idle";
 
 	ctx.sessions.set(session.id, session);

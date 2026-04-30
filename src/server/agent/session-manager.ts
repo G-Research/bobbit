@@ -18,6 +18,7 @@ import { SessionStore, type PersistedSession } from "./session-store.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
+import { profile } from "./profiling.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -151,6 +152,11 @@ export interface SessionInfo {
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
 	streamingStartedAt?: number;
+	/** Number of agent turns that have completed (agent_end fired). Used by
+	 * tests to detect that a prompt has actually been processed end-to-end
+	 * — polling for `status==idle` alone races with the pre-prompt idle
+	 * state, so observability of “a turn finished” needs its own counter. */
+	completedTurnCount?: number;
 	/** Last user prompt text, for retry on fresh-response errors */
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
@@ -212,12 +218,39 @@ function rewriteUserMessageText(message: any, newText: string): any {
 	return { ...message, content: newText };
 }
 
+/**
+ * Threshold above which a client's outbound buffer is considered
+ * pathologically backed up. The `ws` library doesn't drop frames on its
+ * own — it just lets `bufferedAmount` grow until the kernel pushes back.
+ * On loopback under cross-worker FS contention we've seen short bursts
+ * push this past 1MB; beyond ~8MB the connection effectively stalls and
+ * is then closed by the OS, manifesting as the 'Reconnecting to server…'
+ * E2E flake. We log loudly when crossed and drop the client so the
+ * client-side reconnect path takes over cleanly instead of waiting for a
+ * TCP timeout.
+ */
+const WS_BUFFER_OVERFLOW_BYTES = 4 * 1024 * 1024; // 4 MiB
+const WS_BUFFER_WARN_BYTES = 1 * 1024 * 1024;     // 1 MiB — log only
+const _warnedClients = new WeakSet<WebSocket>();
+
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
 	for (const client of clients) {
-		if (client.readyState === 1) {
-			client.send(data);
+		if (client.readyState !== 1) continue;
+		const buffered = (client as any).bufferedAmount ?? 0;
+		if (buffered > WS_BUFFER_OVERFLOW_BYTES) {
+			console.warn(
+				`[ws] dropping client with bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; ` +
+				`client will reconnect. Last msg type=${(msg as any).type}.`,
+			);
+			try { client.terminate(); } catch { /* ignore */ }
+			continue;
 		}
+		if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
+			_warnedClients.add(client);
+			console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
+		}
+		client.send(data);
 	}
 }
 
@@ -313,7 +346,7 @@ export class SessionManager {
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
-	private _terminationListeners: Array<(sessionId: string) => void> = [];
+	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
 	/** @internal Non-PCM test path only. */
@@ -332,7 +365,7 @@ export class SessionManager {
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
-	addTerminationListener(fn: (sessionId: string) => void): void {
+	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void): void {
 		this._terminationListeners.push(fn);
 	}
 
@@ -1030,6 +1063,10 @@ export class SessionManager {
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
 	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		return profile("sessionManager.assemblePrompt", () => this._assemblePrompt(sessionId, parts));
+	}
+
+	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
@@ -1553,6 +1590,7 @@ export class SessionManager {
 
 			session.status = "idle";
 			session.streamingStartedAt = undefined;
+			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcast(session.clients, { type: "session_status", status: "idle" });
 			// Don't drain the queue if the turn ended with a model error —
@@ -3751,9 +3789,10 @@ export class SessionManager {
 			console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
 		});
 
-		// Notify termination listeners (e.g. user-question harness cleanup).
+	// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
+		const projectIdForListeners = session.projectId;
 		for (const listener of this._terminationListeners) {
-			try { listener(id); } catch (err) {
+			try { listener(id, { projectId: projectIdForListeners, reason: "archived" }); } catch (err) {
 				console.error(`[session ${id}] termination listener failed:`, err);
 			}
 		}
@@ -3948,6 +3987,14 @@ export class SessionManager {
 
 		// Remove from store
 		this.resolveStoreForId(ps.id)?.purge(ps.id);
+
+		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
+		// drop the entry without waiting for a polling tick.
+		for (const listener of this._terminationListeners) {
+			try { listener(ps.id, { projectId: ps.projectId, reason: "purged" }); } catch (err) {
+				console.error(`[session ${ps.id}] purge listener failed:`, err);
+			}
+		}
 	}
 
 	/** Remove search index entries for a session. Used when removing a session from the store. */

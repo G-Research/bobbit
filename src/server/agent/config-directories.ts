@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { profile, bumpCount } from "./profiling.js";
 
 export type ConfigType = "skills" | "mcp" | "tools" | "agents";
 
@@ -111,7 +112,19 @@ export function parseCustomDirectories(
 /**
  * Get all config directories (built-in + custom) with existence checks.
  */
+function existsSyncCounted(p: string): boolean {
+	bumpCount("getAllConfigDirectories.existsSync");
+	return fs.existsSync(p);
+}
+
 export function getAllConfigDirectories(
+	cwd: string,
+	projectConfigStore: ProjectConfigReader,
+): ConfigDirectory[] {
+	return profile("getAllConfigDirectories", () => _getAllConfigDirectories(cwd, projectConfigStore));
+}
+
+function _getAllConfigDirectories(
 	cwd: string,
 	projectConfigStore: ProjectConfigReader,
 ): ConfigDirectory[] {
@@ -131,7 +144,7 @@ export function getAllConfigDirectories(
 			path: resolved,
 			types: ["skills"],
 			scope,
-			exists: fs.existsSync(resolved),
+			exists: existsSyncCounted(resolved),
 			isRemovable: false,
 		});
 	}
@@ -151,7 +164,7 @@ export function getAllConfigDirectories(
 			path: resolved,
 			types: ["mcp"],
 			scope,
-			exists: fs.existsSync(resolved),
+			exists: existsSyncCounted(resolved),
 			isRemovable: false,
 		});
 	}
@@ -162,15 +175,15 @@ export function getAllConfigDirectories(
 		path: toolsDir,
 		types: ["tools"],
 		scope: "project",
-		exists: fs.existsSync(toolsDir),
+		exists: existsSyncCounted(toolsDir),
 		isRemovable: false,
 	});
 
 	// ── Agents (1 built-in — file path, not directory) ──
 	const agentsMdPath = path.resolve(path.join(cwd, "AGENTS.md"));
 	const claudeMdPath = path.resolve(path.join(cwd, "CLAUDE.md"));
-	const agentsMdExists = fs.existsSync(agentsMdPath);
-	const claudeMdExists = !agentsMdExists && fs.existsSync(claudeMdPath);
+	const agentsMdExists = existsSyncCounted(agentsMdPath);
+	const claudeMdExists = !agentsMdExists && existsSyncCounted(claudeMdPath);
 	const builtinAgentPath = agentsMdExists ? agentsMdPath : claudeMdExists ? claudeMdPath : agentsMdPath;
 	dirs.push({
 		path: builtinAgentPath,
@@ -187,7 +200,7 @@ export function getAllConfigDirectories(
 			path: entry.path,
 			types: entry.types,
 			scope: "custom",
-			exists: fs.existsSync(entry.path),
+			exists: existsSyncCounted(entry.path),
 			isRemovable: true,
 		});
 	}

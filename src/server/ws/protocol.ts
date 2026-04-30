@@ -55,6 +55,12 @@ export type ServerMessage =
 	| { type: "error"; message: string; code: string }
 	| { type: "session_status"; status: string; streamingStartedAt?: number; archivedAt?: number; /* status includes "aborting" */ }
 	| { type: "session_archived"; sessionId: string; archivedAt: number }
+	/** Sent to ALL authenticated clients (not just the session's own clients)
+	 * when a session is terminated/archived/purged. Lets sidebars and dashboards
+	 * react instantly instead of waiting for the 5s polling tick. The receiving
+	 * client should remove the session from local lists and, if the user is
+	 * currently viewing it, redirect to landing with a friendly toast. */
+	| { type: "session_removed"; sessionId: string; projectId?: string; reason: "terminated" | "archived" | "purged" }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } }

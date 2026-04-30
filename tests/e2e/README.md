@@ -22,14 +22,42 @@ block or a project. Do not bump a timeout to make a slow product
 faster. If you find yourself wanting to do any of these, file a goal
 and stop.
 
-## Retries: local 0, CI 2 (temporary)
+## Retries: 0 everywhere
 
-Local development runs with `retries: 0` so flakes are immediately
-visible to the engineer running the tests. CI runs with `retries: 2`
-to unblock goal-gate verification while cross-worker FS contention in
-the browser project is being root-caused (see goal "E2E browser
-contention fix"). The CI retry is a temporary accommodation and should
-be removed once the contention work lands.
+Both local development and CI run with `retries: 0`. Every flake gets
+root-caused and fixed in place. The temporary `retries: 2` previously
+used in CI was removed once the cross-worker FS contention work landed
+(tool-yaml rescan cache + `completedTurnCount` observability hook in
+the test framework — see commit history for details).
+
+## Profiler (`BOBBIT_E2E_PROFILE=1`)
+
+When the next flake cluster appears, before chasing symptoms, get data:
+
+```
+BOBBIT_E2E_PROFILE=1 npm run test:e2e
+```
+
+The gateway emits a per-worker timing table to stderr every 5s and on
+exit. Wrapped call sites today:
+
+- `POST /api/sessions` (whole route)
+- `executePlan.resolveConfig` (resolveBridgeOptions/Goal/Tools/Activation/Prompt)
+- `executePlan.spawnAgent` and `spawnAgent.rpcStart`
+- `executePlan.postSpawn`
+- `sessionManager.assemblePrompt`, `resolvePrompt`, `assembleSystemPrompt`,
+  `readAllAgentFiles`, `getAllConfigDirectories` (with `existsSync` count)
+- `loadToolDefinitions` (tool YAML scan)
+- `flexStore._doFlush`
+
+Each row reports `calls`, `p50`, `p95`, `p99`, `max`, `total` over the
+worker's lifetime. To wrap a new call site, import
+`profile`/`profileAsync`/`recordElapsed` from
+`src/server/agent/profiling.ts` and gate with the env var (the helpers
+are zero-cost when the flag is unset). Use `bumpCount("label.extra", n)`
+for sub-counters like "how many existsSync calls inside this region".
+
+Flush interval can be overridden with `BOBBIT_E2E_PROFILE_FLUSH_MS=ms`.
 
 ## Sleep guard
 
