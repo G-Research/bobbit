@@ -13,6 +13,34 @@ import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
+import { EventBuffer } from "../agent/event-buffer.js";
+
+/**
+ * Stamp `_order` on every message in a snapshot for the unified message
+ * ordering reducer. Position-derived: index `i` gets `EventBuffer.SNAPSHOT_ORDER_FLOOR + i`,
+ * which keeps every snapshot order strictly less than every live `seq` (live
+ * seq starts at 1, snapshot floor is -1e9). Old clients ignore the field.
+ * Accepts either a bare array or `{ messages: [...] }` shape; non-object
+ * entries pass through untouched. Mutates messages in place for cheapness;
+ * callers already produce fresh arrays via truncate/merge.
+ * See docs/design/unified-message-ordering-reducer.md §3.1–3.2.
+ */
+function stampSnapshotOrder(data: unknown): unknown {
+	const stamp = (arr: any[]): any[] => {
+		for (let i = 0; i < arr.length; i++) {
+			const m = arr[i];
+			if (m && typeof m === "object") {
+				(m as any)._order = EventBuffer.SNAPSHOT_ORDER_FLOOR + i;
+			}
+		}
+		return arr;
+	};
+	if (Array.isArray(data)) return stamp(data);
+	if (data && typeof data === "object" && Array.isArray((data as any).messages)) {
+		stamp((data as any).messages);
+	}
+	return data;
+}
 // patchModelContextWindow removed — model-registry returns correct context windows via inferMeta()
 
 /**
@@ -256,10 +284,13 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
 
-			// If there's a pending tool permission request, send it to the new client
+			// If there's a pending tool permission request, send it to the new client.
+			// Stamp a fresh seq+ts so the client reducer can order this frame relative
+			// to live events. See docs/design/unified-message-ordering-reducer.md §3.1.
 			const pendingPerm = sessionManager.getPendingToolPermission(sessionId);
 			if (pendingPerm) {
-				send(ws, { type: "tool_permission_needed", ...pendingPerm });
+				const { seq, ts } = session.eventBuffer.pushFrame();
+				send(ws, { type: "tool_permission_needed", ...pendingPerm, seq, ts });
 			}
 			return;
 		}
@@ -281,7 +312,7 @@ export function handleWebSocketConnection(
 				}
 				case "get_messages": {
 					const messages = await sessionManager.getArchivedMessages(sessionId);
-					send(ws, { type: "messages", data: messages });
+					send(ws, { type: "messages", data: stampSnapshotOrder(messages) as unknown[] });
 					break;
 				}
 				case "ping":
@@ -313,7 +344,7 @@ export function handleWebSocketConnection(
 					send(ws, { type: "state", data: { preparing: true } });
 					return;
 				case "get_messages":
-					send(ws, { type: "messages", data: [] });
+					send(ws, { type: "messages", data: stampSnapshotOrder([]) as unknown[] });
 					return;
 				case "prompt":
 					// Allow prompts — they'll be queued by enqueuePrompt since status != idle
@@ -506,7 +537,7 @@ export function handleWebSocketConnection(
 							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 							data = merged === raw.messages ? raw : { ...raw, messages: merged };
 						}
-						send(ws, { type: "messages", data });
+						send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
 					}
 					break;
 				}
@@ -590,7 +621,7 @@ export function handleWebSocketConnection(
 										const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 										data = merged === raw.messages ? raw : { ...raw, messages: merged };
 									}
-									send(ws, { type: "messages", data });
+									send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
 								})
 								.catch(() => {});
 						}

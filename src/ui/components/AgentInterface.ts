@@ -698,10 +698,13 @@ export class AgentInterface extends LitElement {
 					timestamp: Date.now(),
 					id: `compact_cmd_${Date.now()}`,
 				};
-				session.state.messages = [...session.state.messages, userMsg];
-				// Store as synthetic so it survives the server's messages refresh
-				if ((session as any)._compactionSyntheticMessages) {
-					(session as any)._compactionSyntheticMessages = [userMsg];
+				// Append the /compact user message via the reducer's appendMessage path —
+				// it persists across the post-compaction snapshot via the reducer's
+				// optimistic-survivor rule (id not in snapshot ⇒ kept tail-positioned).
+				if (typeof (session as any).appendMessage === "function") {
+					(session as any).appendMessage(userMsg);
+				} else {
+					session.state.messages = [...session.state.messages, userMsg];
 				}
 				this.requestUpdate();
 
@@ -799,8 +802,14 @@ export class AgentInterface extends LitElement {
 		// rendered transcript — the matching tool_use card renders the user's
 		// answers inline via the widget's Answered mode. The envelope message must
 		// still reach the LLM (convertToLlm) so do NOT strip it from state.messages.
+		// Hide the message currently owned by the streaming container —
+		// otherwise the same row would render in both message-list and
+		// streaming-container. The reducer publishes this id via RemoteAgent's
+		// `_streamingMessageId` private field; we read it defensively.
+		const streamingMessageId: string | undefined = (this.session as any)?.streamingMessageId;
 		const visibleMessages = (this.session.state.messages || []).filter(
-			(m: any) => !isAskResponseEnvelope(m),
+			(m: any) => !isAskResponseEnvelope(m) &&
+				(!streamingMessageId || m.id !== streamingMessageId),
 		);
 		return html`
 			<div class="flex flex-col gap-3">

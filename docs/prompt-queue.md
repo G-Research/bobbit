@@ -96,7 +96,7 @@ When the server echoes a user message via `message_end`, `RemoteAgent` checks if
 
 ### Live event tracking
 
-`_liveEventMessages` tracks user messages received via live `message_end` events. This protects against a race where `get_messages` (reconnect, compaction) returns a stale snapshot that doesn't include a recently-sent user message. After the `messages` response replaces `state.messages`, any tracked messages missing from the response are re-appended.
+Live user messages are tracked through the unified message reducer (`src/app/message-reducer.ts`). The legacy `_liveEventMessages` bucket has been removed: `live-event` actions stamp the server `seq` as `_order`, and the `snapshot` action is authoritative for any id it contains. Surviving optimistic and live-only rows that the snapshot doesn't supersede are merged in by id and kept in their original order via `(_order, _insertionTick)` sorting. See [internals.md — Reducer ordering invariant](internals.md#reducer-ordering-invariant).
 
 ### Queue display
 

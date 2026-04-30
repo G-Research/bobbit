@@ -309,6 +309,242 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(post.user).toBe(baseline.user);
 	});
 
+	// ---------------------------------------------------------------
+	// ST-DEDUP-02: Proposal burst keeps both widgets in order (unified
+	// message-ordering reducer).
+	// ---------------------------------------------------------------
+	//
+	// Pre-fix: legacy `_deferredAssistantMessage` slot held the first
+	// `propose_*` assistant message until the next message_update; a second
+	// `propose_*` assistant turn arriving before that flush silently
+	// overwrote the first. Post-fix: the unified reducer keys every
+	// transcript row by (_order, _insertionTick) — both widgets land in
+	// chronological order and stay rendered.
+	test("ST-DEDUP-02: Proposal burst keeps both widgets in order", async () => {
+		s.begin(defineStory({
+			id: "ST-DEDUP-02",
+			title: "Proposal burst keeps both widgets in order",
+			contracts: [CT_01],
+			covers: ["unified-message-ordering-reducer", "proposal-burst"],
+		}));
+
+		// setup
+		await s.createTestSession("A");
+		await s.open();
+		await s.navigate_to("session", "A");
+
+		// act
+		s.act();
+		await s.send_message("please run a proposal_burst for E2E");
+		await s.wait_for_idle();
+
+		// Wait for the closing assistant message that signals the burst is done.
+		await expect.poll(
+			async () => await s.page.evaluate(() =>
+				Array.from(document.querySelectorAll("assistant-message")).filter(
+					(el) => (el.textContent || "").includes("BURST_DONE_E2E")
+				).length
+			),
+			{ timeout: 15_000, message: "burst close marker did not render" },
+		).toBeGreaterThan(0);
+
+		// assert — both proposal widgets render exactly once, in source order.
+		s.assert();
+		const counts = await s.page.evaluate(() => {
+			const names: string[] = [];
+			let goalProposals = 0, roleProposals = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const text = el.textContent || "";
+				if (text.includes("Goal Proposal")) { names.push("goal"); goalProposals++; }
+				if (text.includes("Role Proposal")) { names.push("role"); roleProposals++; }
+			}
+			return { goalProposals, roleProposals, order: names };
+		});
+		expect(counts.goalProposals).toBe(1);
+		expect(counts.roleProposals).toBe(1);
+		expect(counts.order).toEqual(["goal", "role"]);
+	});
+
+	// ---------------------------------------------------------------
+	// ST-DEDUP-03: Mid-burst replay does not duplicate the proposal widgets.
+	// ---------------------------------------------------------------
+	//
+	// Combines ST-DEDUP-01 (replay infrastructure) with the proposal burst:
+	// after a full burst lands, replaying every buffered event must NOT
+	// produce a second copy of either widget. The reducer's id-keyed render
+	// keys + seq-stamped live-event dedup ensure stability.
+	test("ST-DEDUP-03: Mid-burst reconnect / replay preserves widgets exactly once", async () => {
+		s.begin(defineStory({
+			id: "ST-DEDUP-03",
+			title: "Mid-burst reconnect preserves widgets exactly once",
+			contracts: [CT_01, CT_05],
+			covers: ["unified-message-ordering-reducer", "replay-dedup"],
+		}));
+
+		// setup
+		const sessionId = await s.createTestSession("A");
+		await s.open();
+		await s.navigate_to("session", "A");
+
+		await s.send_message("please run a proposal_burst for E2E");
+		await s.wait_for_idle();
+
+		const countWidgets = async () => await s.page.evaluate(() => {
+			const body = document.body.textContent || "";
+			let goal = 0, role = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const t = el.textContent || "";
+				if (t.includes("Goal Proposal")) goal++;
+				if (t.includes("Role Proposal")) role++;
+			}
+			return {
+				goal, role,
+				assistant: document.querySelectorAll("assistant-message").length,
+				done: body.split("BURST_DONE_E2E").length - 1,
+			};
+		});
+
+		await expect.poll(async () => (await countWidgets()).done, { timeout: 15_000 }).toBeGreaterThan(0);
+		const before = await countWidgets();
+		expect(before.goal).toBe(1);
+		expect(before.role).toBe(1);
+
+		// act — replay every buffered event.
+		s.act();
+		const replayResp = await apiFetch(`/api/internal/test/replay-buffered-events/${sessionId}`, { method: "POST" });
+		expect(replayResp.status).toBe(200);
+
+		// Wait for DOM to stabilise.
+		await s.page.waitForFunction(() => {
+			let goal = 0, role = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const t = el.textContent || "";
+				if (t.includes("Goal Proposal")) goal++;
+				if (t.includes("Role Proposal")) role++;
+			}
+			const hash = `${goal}|${role}|${document.querySelectorAll("assistant-message").length}`;
+			const w = window as any;
+			if (!w.__burstStability || w.__burstStability.last !== hash) {
+				w.__burstStability = { last: hash, ticks: 1 };
+				return false;
+			}
+			w.__burstStability.ticks++;
+			return w.__burstStability.ticks >= 5;
+		}, null, { timeout: 5_000, polling: 100 });
+
+		// assert
+		s.assert();
+		const after = await countWidgets();
+		expect(after.goal).toBe(1);
+		expect(after.role).toBe(1);
+		expect(after.assistant).toBe(before.assistant);
+	});
+
+	// ---------------------------------------------------------------
+	// ST-DEDUP-04: ask_user_choices envelope routing — answers on card B do
+	// not bleed into card A.
+	// ---------------------------------------------------------------
+	//
+	// Two `ask_user_choices` widgets sit in the same transcript (one per
+	// prompt). Each carries its own `tool_use_id`. Submitting answers on
+	// the second widget must:
+	//   (a) flip the second widget to read-only (no Submit button),
+	//   (b) leave the first widget interactive (Submit still visible),
+	//   (c) `RemoteAgent.findAskResponseAnswers(toolUseId-B)` returns the
+	//       answers; `findAskResponseAnswers(toolUseId-A)` stays null.
+	//
+	// Pre-fix the envelope user message could land out-of-order or be
+	// dropped when a snapshot arrived mid-flight, causing card B's flip to
+	// silently fail or both widgets to read the same answers. Post-fix the
+	// reducer keys every transcript row by (_order, _insertionTick) and the
+	// envelope-scan walks the messages in transcript order — answers route
+	// to exactly the matching tool_use_id.
+	test("ST-DEDUP-04: ask_user_choices envelope routes answers to the correct card", async () => {
+		s.begin(defineStory({
+			id: "ST-DEDUP-04",
+			title: "ask_user_choices envelope routes to the correct card",
+			contracts: [CT_01],
+			covers: ["unified-message-ordering-reducer", "ask-user-choices-routing"],
+		}));
+
+		// setup
+		await s.createTestSession("A");
+		await s.open();
+		await s.navigate_to("session", "A");
+
+		// First widget.
+		await s.send_message("please use ask_user_choices");
+		await s.wait_for_idle();
+		await expect(s.page.locator("ask-user-choices-widget")).toHaveCount(1, { timeout: 20_000 });
+
+		// Second widget.
+		await s.send_message("please use ask_user_choices again");
+		await s.wait_for_idle();
+		await expect(s.page.locator("ask-user-choices-widget")).toHaveCount(2, { timeout: 20_000 });
+
+		// act — answer the SECOND widget.
+		s.act();
+		const widgetB = s.page.locator("ask-user-choices-widget").nth(1);
+		const widgetA = s.page.locator("ask-user-choices-widget").first();
+
+		// Capture both tool_use_ids before any state mutation.
+		const toolUseIdA = await widgetA.evaluate((el) => (el as any).toolUseId as string);
+		const toolUseIdB = await widgetB.evaluate((el) => (el as any).toolUseId as string);
+		expect(toolUseIdA).toBeTruthy();
+		expect(toolUseIdB).toBeTruthy();
+		expect(toolUseIdA).not.toBe(toolUseIdB);
+
+		// Pick "green" on Q1 (auto-advance) then "large" on Q2, submit.
+		await widgetB.locator('label:has(input[value="green"])').click();
+		await expect(widgetB.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+		await widgetB.locator('label:has(input[value="large"])').click();
+		await widgetB.locator(".ask-submit").click();
+
+		// assert
+		s.assert();
+		// (a) widget B flipped to read-only.
+		await expect(widgetB.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(widgetB.locator('input[type="radio"]').first()).toBeDisabled();
+
+		// (b) widget A is still interactive — its envelope never landed.
+		await expect(widgetA.locator(".ask-submit")).toBeVisible();
+		await expect(widgetA.locator('input[type="radio"]').first()).toBeEnabled();
+
+		// (c) RemoteAgent.findAskResponseAnswers routes by toolUseId — B has
+		//     answers, A is null. This is the reducer's transcript-ordering
+		//     guarantee surfaced through the public agent API.
+		const routing = await s.page.evaluate(
+			([idA, idB]: [string, string]) => {
+				const app = (window as any).__appState ?? (window as any).appState ?? null;
+				const agent = app?.remoteAgent
+					?? (window as any).__remoteAgent
+					?? (window as any).remoteAgent
+					?? null;
+				if (!agent || typeof agent.findAskResponseAnswers !== "function") {
+					return { exposed: false, a: null, b: null };
+				}
+				return {
+					exposed: true,
+					a: agent.findAskResponseAnswers(idA),
+					b: agent.findAskResponseAnswers(idB),
+				};
+			},
+			[toolUseIdA, toolUseIdB] as [string, string],
+		);
+		// The agent handle isn't always exposed on window in production builds.
+		// When it IS exposed, the routing assertion is the canonical proof; when
+		// it's not, the DOM-level read-only flip on B + interactive A is
+		// equivalent (the renderer reads `findAskResponseAnswers` to decide
+		// whether to show Submit). We assert whichever signal is available.
+		if (routing.exposed) {
+			expect(routing.b).not.toBeNull();
+			expect(Array.isArray(routing.b)).toBe(true);
+			expect((routing.b as any[]).length).toBe(2);
+			expect(routing.a).toBeNull();
+		}
+	});
+
 	test("CT-01-f: Page reload during stream", async () => {
 		s.begin(defineStory({
 			id: "CT-01-f",

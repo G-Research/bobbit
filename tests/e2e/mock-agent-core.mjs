@@ -147,6 +147,15 @@ export class MockAgentCore {
 			};
 		}
 
+		// Burst of two consecutive `propose_*` tool calls in two separate
+		// assistant turns, each followed by a toolResult. Used by ST-DEDUP-02
+		// to prove the unified message-ordering reducer keeps both widgets in
+		// order without overwriting (regression: legacy single-slot deferred
+		// assistant message overwrote the first widget when the second arrived).
+		if (lower.includes("proposal_burst")) {
+			return { proposalBurst: true };
+		}
+
 		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 			return {
 				tool: "propose_goal",
@@ -315,6 +324,8 @@ export class MockAgentCore {
 			await this._handleLiveUpdateProposal();
 		} else if (toolAction && toolAction.activateSkill) {
 			await this._handleActivateSkill(toolAction.activateSkill);
+		} else if (toolAction && toolAction.proposalBurst) {
+			await this._handleProposalBurst();
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.previewSnapshot) {
@@ -625,6 +636,71 @@ export class MockAgentCore {
 			this.conversationMessages.push(assistantMsg);
 			this.emit({ type: "message_end", message: assistantMsg });
 		}
+	}
+
+	/**
+	 * Burst two consecutive `propose_*` tool-call assistant turns followed by
+	 * matching toolResults. Each propose_* assistant turn is its own message
+	 * (so the legacy `_deferredAssistantMessage` slot would have overwritten
+	 * the first when the second arrived); the unified reducer keeps both
+	 * widgets in chronological order keyed by their tool_use id.
+	 */
+	async _handleProposalBurst() {
+		const proposals = [
+			{
+				tool: "propose_goal",
+				input: {
+					title: "Burst Goal A",
+					workflow: "general",
+					spec: "first proposal in the burst",
+				},
+			},
+			{
+				tool: "propose_role",
+				input: {
+					name: "burst-role-b",
+					label: "Burst Role B",
+					prompt: "second proposal in the burst",
+					tools: "",
+					accessory: "none",
+				},
+			},
+		];
+		for (const p of proposals) {
+			const toolId = `tool_burst_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+			const toolName = p.tool;
+			this.emit({ type: "tool_execution_start", toolName, toolId, input: p.input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: toolName, arguments: p.input, input: p.input },
+				],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(5);
+			this.emit({ type: "message_end", message: assistantMsg });
+
+			const output = `${toolName} proposal accepted`;
+			this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName,
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+			await this.tick(5);
+		}
+		const finalMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: "BURST_DONE_E2E" }],
+		};
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
 	}
 
 	_handleMultiTool(multiTool) {

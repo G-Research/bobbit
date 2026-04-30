@@ -12,6 +12,15 @@ import "./ErrorMessage.js";
 import "./ToolGroup.js";
 import "./ToolPermissionCard.js";
 
+/** Build a stable render key for a message — id-based with a synthetic
+ *  fallback that includes reducer metadata when available. */
+function keyFor(msg: any, group?: string): string {
+	const id = typeof msg.id === "string" && msg.id.length > 0
+		? msg.id
+		: `synth:${msg._origin ?? "unknown"}:${msg._order ?? 0}:${msg._insertionTick ?? 0}`;
+	return group ? `${group}:${id}` : id;
+}
+
 /** Tool names eligible for cross-message grouping */
 const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "delegate"]);
 
@@ -116,14 +125,14 @@ export class MessageList extends LitElement {
 			// Try custom renderer first
 			const customTemplate = renderMessage(msg);
 			if (customTemplate) {
-				items.push({ key: `msg:${i}`, template: customTemplate });
+				items.push({ key: keyFor(msg), template: customTemplate });
 				i++;
 				continue;
 			}
 
 			if (msg.role === "user" || msg.role === "user-with-attachments") {
 				items.push({
-					key: `msg:${i}`,
+					key: keyFor(msg),
 					template: html`<user-message .message=${msg}></user-message>`,
 				});
 				i++;
@@ -155,7 +164,7 @@ export class MessageList extends LitElement {
 
 					if (groupCalls.length >= 2) {
 						items.push({
-							key: `group:${i}`,
+							key: keyFor(msg, "group"),
 							template: html`<div class="px-4">
 								<tool-group
 									.toolName=${toolName}
@@ -179,7 +188,7 @@ export class MessageList extends LitElement {
 				}
 				const showRetry = isLastAssistant && amsg.stopReason === "error" && this.onRetry;
 				items.push({
-					key: `msg:${i}`,
+					key: keyFor(msg),
 					template: html`<assistant-message
 						.message=${amsg}
 						.tools=${this.tools}
