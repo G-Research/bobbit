@@ -193,6 +193,31 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();
 
+		// Seed inline test workflows BEFORE the gateway boots — direct file
+		// write avoids the HTTP round-trip that previously widened a race
+		// window where parallel workers' token files weren't yet readable.
+		// Builtin workflow YAMLs were removed (follow-up A); tests that
+		// reference workflowId: "general" / "feature" / "bug-fix" / "quick-fix"
+		// / "test-fast" rely on this seed to make those IDs resolvable.
+		try {
+			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+			const { mkdirSync: mkSync, writeFileSync: wrSync } = await import("node:fs");
+			const yaml = await import("yaml");
+			const yamlContent = yaml.stringify({
+				name: "default",
+				components: [TEST_DEFAULT_COMPONENT],
+				workflows: testWorkflows(),
+			});
+			// Server-level config (cascade): <bobbitDir>/config/project.yaml
+			const serverConfigDir = join(bobbitDir, "config");
+			mkSync(serverConfigDir, { recursive: true });
+			wrSync(join(serverConfigDir, "project.yaml"), yamlContent);
+			// Per-project config (project-context): <bobbitDir>/.bobbit/config/project.yaml
+			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			mkSync(projectConfigDir, { recursive: true });
+			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
+		} catch { /* best-effort */ }
+
 		const gw = createGateway({
 			host: "127.0.0.1",
 			port: 0,             // OS-assigned port
@@ -217,6 +242,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 
 		// Register the server CWD as a default project via REST. The server no
 		// longer does this implicitly — see "eliminate default project" refactor.
+		// Workflows already seeded above via direct project.yaml write.
 		try {
 			await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",

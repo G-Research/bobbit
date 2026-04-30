@@ -59,6 +59,41 @@ describe("QaTestingConfig", () => {
 		assert.equal(config.buildCommand, "npm run mybuild");
 	});
 
+	it("falls back to components[0].commands.build when qa_build_command and legacy build_command not set", () => {
+		const yaml = [
+			"components:",
+			"  - name: myapp",
+			"    repo: .",
+			"    commands:",
+			"      build: npm run component-build",
+			'qa_start_command: "node server.js"',
+		].join("\n");
+		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml);
+		const store = new ProjectConfigStore(tmpDir);
+		const config = store.getQaTestingConfig();
+		assert.ok(config);
+		assert.equal(config.buildCommand, "npm run component-build");
+	});
+
+	it("prefers component build over default `build_command` from DEFAULTS map", () => {
+		// With Follow-up A landed, top-level build_command no longer exists in user yaml,
+		// but the DEFAULTS map still defines it as `npm run build`. The new fallback chain
+		// must prefer a real component-defined build over the inert default.
+		const yaml = [
+			"components:",
+			"  - name: api",
+			"    repo: .",
+			"    commands:",
+			"      build: cargo build --release",
+			'qa_start_command: "./target/release/api"',
+		].join("\n");
+		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml);
+		const store = new ProjectConfigStore(tmpDir);
+		const config = store.getQaTestingConfig();
+		assert.ok(config);
+		assert.equal(config.buildCommand, "cargo build --release");
+	});
+
 	it("uses defaults for optional fields", () => {
 		const yaml = 'qa_start_command: "node server.js"\n';
 		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml);

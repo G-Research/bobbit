@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../skills/git.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
+import type { WorktreePool } from "./worktree-pool.js";
+import type { Component } from "./project-config-store.js";
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -22,12 +24,61 @@ export class GoalManager {
 	private workflowStore?: WorkflowStore;
 	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
 	private _setupsInFlight = new Set<string>();
+	/**
+	 * Resolver that looks up the worktree pool for this goal's project.
+	 * Wired by the server at startup once SessionManager owns the pools.
+	 * When set, `_doSetupWorktree` claims through the pool first and only
+	 * falls back to a fresh `createWorktree` if the pool is empty.
+	 */
+	private poolResolver?: () => WorktreePool | null | undefined;
+	/**
+	 * Resolve the components[] for a goal's project. When set and the project
+	 * has any `repo !== "."` component, `_doSetupWorktree` uses
+	 * `createWorktreeSet()` instead of the single-repo `createWorktree()`
+	 * fallback. Single-repo behavior is unchanged.
+	 */
+	private componentsResolver?: (projectId: string) => Component[];
+	/**
+	 * Resolve the project's `rootPath` for multi-repo goal creation. When set
+	 * and the project is multi-repo, `createGoal` overrides the detected
+	 * `repoPath` (which would otherwise point at one of the sibling repos) to
+	 * the project's container directory. Single-repo behavior is unchanged.
+	 */
+	private projectRootResolver?: (projectId: string) => string | undefined;
 
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
 		this.store = goalStore;
 		this.workflowStore = workflowStore;
 		// Mark any goals stuck in "preparing" from a previous run as error
 		this._recoverStuckSetups();
+	}
+
+	/**
+	 * Wire a pool resolver. Phase 3: goal worktrees go through the pool first,
+	 * matching the session path so goals are observably as fast as sessions
+	 * when the pool is warm.
+	 */
+	setPoolResolver(resolver: () => WorktreePool | null | undefined): void {
+		this.poolResolver = resolver;
+	}
+
+	/**
+	 * Wire the components resolver. When unset (or returning a single-component
+	 * list), goal worktrees use the legacy `createWorktree` fallback.
+	 */
+	setComponentsResolver(resolver: (projectId: string) => Component[]): void {
+		this.componentsResolver = resolver;
+	}
+
+	/** Wire a project-rootPath resolver (Phase 4a multi-repo goal creation). */
+	setProjectRootResolver(resolver: (projectId: string) => string | undefined): void {
+		this.projectRootResolver = resolver;
+	}
+
+	/** Wire a project worktree_root resolver (project-level override of <rootPath>-wt/). */
+	private worktreeRootResolver?: (projectId: string) => string | undefined;
+	setWorktreeRootResolver(resolver: (projectId: string) => string | undefined): void {
+		this.worktreeRootResolver = resolver;
 	}
 
 	/**
@@ -50,8 +101,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[] }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -63,8 +114,15 @@ export class GoalManager {
 		let goalCwd = cwd;
 		let setupStatus: "ready" | "preparing" = "ready";
 
-		// Detect git repo root — needed for team operations even without a worktree
-		if (await isGitRepo(cwd)) {
+		// Detect git repo root — needed for team operations even without a worktree.
+		// Multi-repo: override `repoPath` with the project's container root so the
+		// per-repo worktrees land beneath one shared `<rootPath>-wt/<branch>/`.
+		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
+		const isMulti = !!components && components.some(c => c.repo !== ".");
+		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
+		if (isMulti && projectRoot) {
+			repoPath = projectRoot;
+		} else if (await isGitRepo(cwd)) {
 			repoPath = await getRepoRoot(cwd);
 		}
 
@@ -99,7 +157,15 @@ export class GoalManager {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
 		}
 
-		// Snapshot workflow onto goal if workflowId is provided
+		// Snapshot workflow onto goal. Resolution order:
+		//   1. Caller passed `resolvedWorkflow` (from config cascade) — use it.
+		//   2. Caller passed `workflowId` only — read from the inline workflow store.
+		//   3. Neither — fall back to "general".
+		// If we can't resolve a workflow at all, throw a clear error so
+		// `POST /api/goals` surfaces a 400 instead of silently creating a
+		// gateless goal. See docs/design/multi-repo-components.md §3.4.
+		const NO_WORKFLOWS_MSG =
+			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
 			// Use pre-resolved workflow (from config cascade)
 			goal.workflowId = workflowId;
@@ -107,16 +173,22 @@ export class GoalManager {
 		} else if (workflowId && workflowStore) {
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {
+				// If the store has nothing at all, surface the canonical message.
+				if (workflowStore.getAll().length === 0) {
+					throw new Error(NO_WORKFLOWS_MSG);
+				}
 				throw new Error(`Workflow not found: ${workflowId}`);
 			}
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(wf));
 		} else if (!workflowId && workflowStore) {
-			// Default to "general" workflow when none specified
+			// Default to "general" workflow when none specified.
 			const defaultWf = workflowStore.get("general");
 			if (defaultWf) {
 				goal.workflowId = "general";
 				goal.workflow = JSON.parse(JSON.stringify(defaultWf));
+			} else if (workflowStore.getAll().length === 0) {
+				throw new Error(NO_WORKFLOWS_MSG);
 			}
 		}
 
@@ -151,10 +223,86 @@ export class GoalManager {
 		// Compute subdirectory offset: the difference between the preliminary
 		// worktreePath (repo root level) and goal.cwd (which may include offset).
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
+
+		// Pool-first (Phase 3): claim a pre-built worktree if one is available.
+		// On success this is observably as fast as session start (~tens of ms).
+		// On failure or empty pool we fall through to the legacy createWorktree path.
+		const pool = this.poolResolver?.();
+		if (pool) {
+			try {
+				const claim = await pool.claim(goal.branch!);
+				if (claim) {
+					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
+						? path.join(claim.worktreePath, preliminaryOffset)
+						: claim.worktreePath;
+					const updates: Parameters<typeof this.store.update>[1] = {
+						worktreePath: claim.worktreePath,
+						cwd: offsetCwd,
+						setupStatus: "ready",
+						setupError: undefined,
+					};
+					if (claim.worktrees && claim.worktrees.length > 0) {
+						updates.repoWorktrees = Object.fromEntries(
+							claim.worktrees.map(w => [w.repo, w.worktreePath]),
+						);
+					}
+					this.store.update(goal.id, updates);
+					console.log(`[goal-manager] Worktree claimed from pool for goal "${goal.title}": ${claim.worktreePath} (branch: ${goal.branch}${claim.degraded ? ", degraded" : ""})`);
+					return;
+				}
+			} catch (err) {
+				console.warn(`[goal-manager] Pool claim failed for goal "${goal.title}" — falling back to createWorktree:`, err);
+			}
+		}
+
+		// If multi-repo and we have a components resolver, use createWorktreeSet.
+		const components = goal.projectId && this.componentsResolver
+			? this.componentsResolver(goal.projectId)
+			: undefined;
+		const isMulti = !!components && components.some(c => c.repo !== ".");
+
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				const result = await createWorktree(goal.repoPath!, goal.branch!);
+				const worktreeRootOverride = goal.projectId && this.worktreeRootResolver
+					? this.worktreeRootResolver(goal.projectId) : undefined;
+				if (isMulti && components) {
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride });
+					// Per-component setup commands run after the worktree set lands.
+					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
+					try {
+						const { runComponentSetups } = await import("../skills/worktree-setup.js");
+						const { execFile } = await import("node:child_process");
+						const { promisify } = await import("node:util");
+						const pExecFile = promisify(execFile);
+						await runComponentSetups({
+							components,
+							branchContainer: set.container,
+							primaryWorktreeRoot: goal.repoPath!,
+							exec: async (cmd, cwd, env) => {
+								await pExecFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+							},
+						});
+					} catch (err) {
+						console.warn(`[goal-manager] runComponentSetups failed for goal "${goal.title}" (non-fatal):`, err);
+					}
+					const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
+						? path.join(set.container, preliminaryOffset)
+						: set.container;
+					const repoWorktrees = Object.fromEntries(
+						set.worktrees.map(w => [w.repo, w.worktreePath]),
+					);
+					this.store.update(goal.id, {
+						worktreePath: set.container,
+						cwd: offsetCwd,
+						repoWorktrees,
+						setupStatus: "ready",
+						setupError: undefined,
+					});
+					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
+					return;
+				}
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride });
 				// Apply the subdirectory offset to the actual worktree path
 				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 					? path.join(result.worktreePath, preliminaryOffset)
@@ -214,7 +362,20 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		return this.store.archive(id);
+		const archived = this.store.archive(id);
+		// Phase 4a multi-repo cleanup: best-effort, fire-and-forget per-repo
+		// worktree removal + remote branch deletion in parallel. Single-repo
+		// goal cleanup remains owned by session purge (worktree shared with the
+		// team-lead session) so we only fan out when repoWorktrees is set.
+		if (archived && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
+			const { cleanupWorktree } = await import("../skills/git.js");
+			const entries = Object.entries(goal.repoWorktrees);
+			Promise.allSettled(entries.map(([repo, wt]) => {
+				const repoPath = repo === "." ? goal.repoPath! : path.join(goal.repoPath!, repo);
+				return cleanupWorktree(repoPath, wt, goal.branch, true);
+			})).catch(() => { /* swallow — best-effort */ });
+		}
+		return archived;
 	}
 
 	listLiveGoals(): PersistedGoal[] {

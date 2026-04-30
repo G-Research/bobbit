@@ -1429,6 +1429,29 @@
       this.squashPushing = false;
       this.squashPushError = "";
     }
+    /** Files for a per-repo entry, tolerating both `statusFiles` and `status`. */
+    _repoFiles(info) {
+      if (!info) return [];
+      return info.statusFiles ?? info.status ?? [];
+    }
+    /** Total dirty-file count across all repos in `repos` (multi-repo mode). */
+    _aggregateDirtyCount() {
+      if (!this.repos) return 0;
+      let n7 = 0;
+      for (const info of Object.values(this.repos)) n7 += this._repoFiles(info).length;
+      return n7;
+    }
+    /** True if this widget is rendering multi-repo data (>1 entry, ignoring "." alone). */
+    _isMultiRepo() {
+      if (!this.repos) return false;
+      const keys = Object.keys(this.repos);
+      return keys.length > 1;
+    }
+    /** Helper: how many distinct repos this widget has data for. */
+    getRepoCount() {
+      if (!this.repos) return 1;
+      return Object.keys(this.repos).length;
+    }
     _closeDropdown() {
       if (this._closing || !this._dropdownEl) return;
       this._closing = true;
@@ -2041,11 +2064,56 @@
       if (days < 30) return `${days}d ago`;
       return new Date(timestamp).toLocaleDateString();
     }
+    _renderMultiRepoSections() {
+      if (!this._isMultiRepo()) return null;
+      const entries = Object.entries(this.repos);
+      const dirtyRepoCount = entries.filter(([, info]) => this._repoFiles(info).length > 0 || info.clean === false).length;
+      const totalDirty = this._aggregateDirtyCount();
+      const headerText = totalDirty > 0 ? `${totalDirty} changed across ${dirtyRepoCount || entries.length} repo${(dirtyRepoCount || entries.length) === 1 ? "" : "s"}` : `${entries.length} repos clean`;
+      return b2`
+            <div class="border-t border-border pt-2 mt-2 flex flex-col gap-1.5" data-testid="multi-repo-sections">
+                <div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium flex items-center justify-between" data-testid="multi-repo-header">
+                    <span>Repos</span>
+                    <span class="text-muted-foreground normal-case tracking-normal" data-testid="multi-repo-aggregate">${headerText}</span>
+                </div>
+                ${entries.map(([repoName, info]) => {
+        const files = this._repoFiles(info);
+        const isClean = files.length === 0 && info.clean !== false;
+        const counts = [];
+        if (files.length > 0) counts.push(b2`<span class="text-amber-600 dark:text-amber-400 text-[10px] font-medium" data-testid="repo-dirty-count">~${files.length}</span>`);
+        if (typeof info.aheadOfPrimary === "number" && info.aheadOfPrimary > 0)
+          counts.push(b2`<span class="text-blue-600 dark:text-blue-400 text-[10px] font-medium">↑${info.aheadOfPrimary}</span>`);
+        if (typeof info.behindPrimary === "number" && info.behindPrimary > 0)
+          counts.push(b2`<span class="text-red-600 dark:text-red-400 text-[10px] font-medium">↓${info.behindPrimary}</span>`);
+        if (counts.length === 0) counts.push(b2`<span class="text-green-600 dark:text-green-400 text-[10px] font-medium" data-testid="repo-clean">clean</span>`);
+        return b2`
+                        <details class="border border-border rounded-md" data-testid="multi-repo-entry" data-repo-name=${repoName} ?open=${!isClean}>
+                            <summary class="text-xs font-medium text-foreground cursor-pointer py-1 px-2 flex items-center gap-2">
+                                <code class="text-[11px] font-mono" data-testid="repo-name">${repoName === "." ? "(root)" : repoName}</code>
+                                <span class="flex items-center gap-1.5 ml-auto" data-testid="repo-counts">${counts}</span>
+                            </summary>
+                            ${files.length > 0 ? b2`<div class="flex flex-col gap-0.5 px-2 pb-2 pt-1">
+                                    ${files.map((f4) => b2`
+                                        <div class="flex items-center gap-2 py-0.5 min-w-0">
+                                            <span class="${this._statusColor(f4.status)} font-mono w-[60px] shrink-0 text-right text-[10px]" title=${this._statusLabel(f4.status)}>${this._statusLabel(f4.status)}</span>
+                                            <span class="text-foreground truncate text-[11px]" title=${f4.file}>${f4.file}</span>
+                                        </div>
+                                    `)}
+                                </div>` : b2`<div class="text-[11px] text-muted-foreground italic px-2 pb-2" data-testid="repo-empty">Working tree clean</div>`}
+                        </details>
+                    `;
+      })}
+            </div>
+        `;
+    }
     _renderDropdownContent() {
+      const multiRepoSections = this._renderMultiRepoSections();
+      const showFlatFiles = !multiRepoSections && this.statusFiles.length > 0;
       return b2`
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
                 <span class="break-all">${this.branch}</span>
+                ${multiRepoSections ? b2`<span class="ml-auto text-[10px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos).length} repos</span>` : ""}
             </div>
 
             <div class="flex flex-col gap-1 mb-2">
@@ -2055,7 +2123,9 @@
 
             ${this._renderPrSection()}
 
-            ${this.statusFiles.length > 0 ? b2`
+            ${multiRepoSections}
+
+            ${showFlatFiles ? b2`
                       <div class="border-t border-border pt-2 mt-2">
                           <div class="text-muted-foreground mb-1 flex items-center gap-2">
                               <span class="text-amber-600 dark:text-amber-400">${this.statusFiles.length} uncommitted change${this.statusFiles.length !== 1 ? "s" : ""}</span>
@@ -2080,7 +2150,7 @@
       )}
                           </div>
                       </div>
-                  ` : b2`
+                  ` : multiRepoSections ? A : b2`
                       <div class="text-green-600 dark:text-green-400 border-t border-border pt-2 mt-2">
                           Working tree clean
                       </div>
@@ -2106,7 +2176,14 @@
       }
       if (!this.branch) return A;
       const segments = this._pillSegments();
-      const showClean = this.clean && segments.length === 0 && !this.prState && (this.isOnPrimary || this.mergedIntoPrimary) && (this.isOnPrimary || this.aheadOfPrimary === 0);
+      const multiRepoMode = this._isMultiRepo();
+      const aggregateLabel = multiRepoMode ? (() => {
+        const total = this._aggregateDirtyCount();
+        if (total === 0) return null;
+        const dirtyRepos = Object.values(this.repos).filter((info) => this._repoFiles(info).length > 0).length;
+        return `${total} changed across ${dirtyRepos} repo${dirtyRepos === 1 ? "" : "s"}`;
+      })() : null;
+      const showClean = this.clean && segments.length === 0 && !this.prState && (this.isOnPrimary || this.mergedIntoPrimary) && (this.isOnPrimary || this.aheadOfPrimary === 0) && !aggregateLabel;
       const stateAttr = this.loading ? "refreshing" : this.partial ? "partial" : "ready";
       const refreshDot = this.loading ? b2`<span class="git-refresh-dot" aria-label="Refreshing" title="Refreshing git status\u2026"></span>` : this.partial ? b2`<span class="git-partial-dot" aria-label="Partial" title="Status scan timed out \u2014 showing partial data."></span>` : A;
       return b2`
@@ -2119,7 +2196,7 @@
                 <span class="shrink-0 relative" style="display:inline-block">⎇${refreshDot}</span>
                 <span class="truncate">${this.branch}</span>
                 ${showClean ? b2`<span class="text-green-600 dark:text-green-400 font-medium shrink-0">clean</span>` : A}
-                ${segments}
+                ${aggregateLabel ? b2`<span class="text-amber-600 dark:text-amber-400 font-medium shrink-0" data-testid="pill-multi-repo-aggregate">${aggregateLabel}</span>` : segments}
                 ${this._prPillIcon()}
             </button>
         `;
@@ -2358,6 +2435,9 @@
   __decorateClass([
     r5()
   ], GitStatusWidget.prototype, "_commitsVs", 2);
+  __decorateClass([
+    n4({ type: Object })
+  ], GitStatusWidget.prototype, "repos", 2);
   __decorateClass([
     r5()
   ], GitStatusWidget.prototype, "expanded", 2);

@@ -77,12 +77,14 @@ describe("substituteVars", () => {
 		assert.equal(substituteVars("Goal: {{goal_spec}}", builtins, {}, {}), "Goal: Fix the bug");
 	});
 
-	it("resolves {{project.test_command}}", () => {
-		assert.equal(substituteVars("run {{project.test_command}}", {}, project, {}), "run npm test");
+	// Phase 2 of multi-repo & components removed `{{project.X}}` substitution.
+	// The token is now left literal so isCommandStepSkippable() can detect it.
+	it("leaves {{project.test_command}} literal (Phase 2 break)", () => {
+		assert.equal(substituteVars("run {{project.test_command}}", {}, project, {}), "run {{project.test_command}}");
 	});
 
-	it("resolves {{project.typecheck_command}}", () => {
-		assert.equal(substituteVars("{{project.typecheck_command}} --strict", {}, project, {}), "npm run check --strict");
+	it("leaves {{project.typecheck_command}} literal (Phase 2 break)", () => {
+		assert.equal(substituteVars("{{project.typecheck_command}} --strict", {}, project, {}), "{{project.typecheck_command}} --strict");
 	});
 
 	it("resolves {{agent.error_pattern}}", () => {
@@ -117,20 +119,20 @@ describe("substituteVars", () => {
 		assert.equal(substituteVars("just text", builtins, project, agent), "just text");
 	});
 
-	it("handles mixed namespaces in one template", () => {
+	it("handles mixed namespaces in one template (project.X stays literal)", () => {
 		const result = substituteVars(
 			"cd {{cwd}} && {{project.test_command}} --branch={{branch}} --pat={{agent.error_pattern}}",
 			builtins, project, agent,
 		);
-		assert.equal(result, "cd /work && npm test --branch=feat/x --pat=Expected.*fail");
+		assert.equal(result, "cd /work && {{project.test_command}} --branch=feat/x --pat=Expected.*fail");
 	});
 
 	it("handles whitespace inside braces {{ branch }}", () => {
 		assert.equal(substituteVars("{{ branch }}", builtins, {}, {}), "feat/x");
 	});
 
-	it("handles whitespace in namespaced var {{ project.test_command }}", () => {
-		assert.equal(substituteVars("{{ project.test_command }}", {}, project, {}), "npm test");
+	it("handles whitespace in namespaced var {{ project.test_command }} (still left literal)", () => {
+		assert.equal(substituteVars("{{ project.test_command }}", {}, project, {}), "{{ project.test_command }}");
 	});
 });
 

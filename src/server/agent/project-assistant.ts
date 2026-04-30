@@ -38,15 +38,63 @@ Be conversational. If something is ambiguous (e.g. multiple test commands), ask 
 
 ## Proposing a project
 
-When ready, call the \`propose_project\` tool with these parameters:
-- **name**: A short identifier for the project (e.g. "my-api")
-- **root_path**: Absolute path to the project root directory
-- **build_command**: (optional) The command to build the project
-- **test_command**: (optional) The primary test command (runs all tests)
-- **typecheck_command**: (optional) Type-checking command (e.g. \`tsc --noEmit\`)
-- **test_unit_command**: (optional) Unit test command, if separate from the main test command
-- **test_e2e_command**: (optional) E2E test command, if separate
-- **worktree_setup_command**: (optional) Command to run when setting up a new git worktree. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`
+A project is described by a small set of fields plus a **components** array. Single-repo projects have one component; multi-repo projects have one component per repo.
+
+Call the \`propose_project\` tool with:
+- **name**: short project identifier (e.g. "my-api")
+- **root_path**: absolute path to the project root
+- **components**: array — one entry per repo or build target. **REQUIRED**.
+- **workflows**: inline workflow definitions keyed by id (\`general\`, \`feature\`, \`bug-fix\`, \`quick-fix\`, plus any custom flows). The server will seed defaults if you omit this; you only need to provide \`workflows\` when the project genuinely needs custom gates.
+- **worktree_root**: optional override for the worktree parent directory.
+- **qa_start_command** / **sandbox** / **session_model** / **review_model** / **naming_model**: optional project-level fields (unchanged).
+
+### Components
+
+Each component is one entry in the array:
+\`\`\`yaml
+name: api
+repo: "."                          # "." for single-repo, else a sibling subfolder of rootPath
+relative_path: ""                  # optional sub-path inside the repo (e.g. "packages/api" for monorepos)
+worktree_setup_command: "npm ci"   # optional — runs in this component's worktree on provisioning
+commands:                          # flat name → shell. Omit for data-only components.
+  build: npm run build
+  test:  npm test
+  check: npm run check
+  unit:  npm run test:unit
+  e2e:   npm run test:e2e
+\`\`\`
+
+Key rules:
+- **Single-repo projects use exactly one component with \`repo: "."\` whose name MATCHES the project name.** Do NOT use a generic name like "default" or "app".
+- **Multi-repo projects** have \`rootPath\` as a container directory holding sibling git repos one level deep. Emit one component per repo with \`repo: "<subfolder>"\`. Skip subfolders without \`.git\` and without a recognisable manifest.
+- A component without a \`commands\` map is **data-only** (docs/, schemas/, fixtures). It contributes no workflow steps but reserves a worktree slot when you need cross-repo state.
+- Command names are not fixed. Common ones: \`build\`, \`test\`, \`check\`, \`unit\`, \`e2e\`, \`lint\`, \`format\`, plus any project-specific commands (\`migrate\`, \`seed\`, etc.).
+
+### Workflows
+
+Workflow steps reference component commands structurally (not as literal shell strings) so editing a command updates every step that uses it:
+
+\`\`\`yaml
+- name: "Build"
+  type: command
+  component: api      # references components[name="api"]
+  command: build      # resolves to components["api"].commands.build
+\`\`\`
+
+Free-form shell is allowed for ad-hoc operations:
+\`\`\`yaml
+- name: "Push branch"
+  type: command
+  run: "git push origin {{branch}}"
+\`\`\`
+
+See \`defaults/workflow-authoring-guide.md\` for the full step grammar (llm-review, agent-qa, expect:failure, depends_on, phase, etc.).
+
+If you don't pass \`workflows\`, the server seeds the four canonical defaults (general/feature/bug-fix/quick-fix) targeting the project's default component.
+
+### Legacy fields (back-compat only)
+
+\`build_command\`, \`test_command\`, \`typecheck_command\`, \`test_unit_command\`, \`test_e2e_command\`, \`worktree_setup_command\` at the **top level** of the proposal still work — the server folds them into a single default component named after the project. Prefer \`components\` directly.
 
 Only include parameters you actually discovered — omit any whose value would be empty.
 
@@ -90,15 +138,16 @@ Be conversational but efficient. Don't overwhelm with options — make a sensibl
 
 ## Proposing a project
 
-When ready, call the \`propose_project\` tool with these parameters:
-- **name**: A short identifier for the project (e.g. "my-api")
-- **root_path**: Absolute path to the project root directory
-- **build_command**: (optional) The command to build the project
-- **test_command**: (optional) The primary test command (runs all tests)
-- **typecheck_command**: (optional) Type-checking command (e.g. \`tsc --noEmit\`)
-- **test_unit_command**: (optional) Unit test command, if separate from the main test command
-- **test_e2e_command**: (optional) E2E test command, if separate
-- **worktree_setup_command**: (optional) Command to run when setting up a new git worktree. Typically installs dependencies. Runs via \`sh -c\` with \`SOURCE_REPO\` env var pointing to the original repo. Examples: \`npm ci\`, \`cp -r "$SOURCE_REPO/node_modules" node_modules\`
+Call \`propose_project\` with:
+- **name**: short project identifier (e.g. "my-api")
+- **root_path**: absolute path
+- **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, worktree_setup_command? }\`.
+- **workflows**: optional. Server seeds defaults (general/feature/bug-fix/quick-fix) targeting the default component if you omit this.
+- **qa_start_command**, **sandbox**, **session_model** / **review_model** / **naming_model**: optional project-level fields.
+
+Legacy top-level \`build_command\` / \`test_command\` / \`typecheck_command\` / \`test_unit_command\` / \`test_e2e_command\` / \`worktree_setup_command\` are still accepted for back-compat and folded into a default component server-side, but **prefer the explicit \`components\` shape**.
+
+See \`defaults/workflow-authoring-guide.md\` for the workflow grammar (structural \`{ component, command }\` step refs vs free-form \`run:\` shell).
 
 Only include parameters you plan to set up — omit any whose value would be empty.
 

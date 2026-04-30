@@ -230,7 +230,8 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
  * the 400-projectId-required path.
  */
 export async function rawApiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	return fetch(`${base()}${path}`, {
+	const method = (opts.method || "GET").toUpperCase();
+	const resp = await fetch(`${base()}${path}`, {
 		...opts,
 		headers: {
 			"Content-Type": "application/json",
@@ -238,15 +239,73 @@ export async function rawApiFetch(path: string, opts: RequestInit = {}): Promise
 			...(opts.headers as Record<string, string> || {}),
 		},
 	});
+	await maybeAutoSeedWorkflows(path, method, opts.body as unknown, resp);
+	return resp;
+}
+
+/**
+ * Auto-seed inline workflows into newly-created E2E projects.
+ *
+ * Builtin workflow YAMLs were removed (follow-up A of the multi-repo &
+ * components goal). Tests that POST a fresh project and then create
+ * goals against it (workflowId defaults to "general") would otherwise
+ * 400 because the new project has no workflows. We post-process the
+ * 201 response from POST /api/projects and PUT a baseline workflow
+ * block into the new project's config. Idempotent: skipped if the
+ * caller already provided a `workflows` field in the request body.
+ *
+ * Marker `__e2e_seed_skip__` on the request body opts out (used by the
+ * harness's own initial "default" project registration, which seeds
+ * workflows itself with a known component name).
+ */
+async function maybeAutoSeedWorkflows(path: string, method: string, requestBody: unknown, response: Response): Promise<void> {
+	if (method !== "POST" || path !== "/api/projects") return;
+	if (!response.ok) return;
+	let parsed: Record<string, unknown> | undefined;
+	if (typeof requestBody === "string") {
+		try { parsed = JSON.parse(requestBody); } catch { /* skip */ }
+	} else if (requestBody && typeof requestBody === "object") {
+		parsed = requestBody as Record<string, unknown>;
+	}
+	if (parsed?.workflows) return;
+	if (parsed?.__e2e_seed_skip__) return;
+	let projectId: string | undefined;
+	try {
+		const clone = response.clone();
+		const json = await clone.json() as { id?: string };
+		projectId = json?.id;
+	} catch { return; }
+	if (!projectId) return;
+	// PUT only the workflows block. We must NOT touch the project's
+	// `components` here — multi-repo tests register specific component
+	// shapes in the create body and rely on them surviving. The workflow
+	// validator runs at PUT time only when both `components` and
+	// `workflows` are in the body, so omitting components is safe; the
+	// workflow steps reference component name "test" which only exists
+	// in the harness's default project. Multi-repo tests don't try to
+	// run gate verification against this seeded workflow — they only
+	// need the workflow IDs to resolve so goal creation succeeds.
+	try {
+		const { testWorkflows } = await import("./seed-workflows.js");
+		await fetch(`${base()}/api/projects/${projectId}/config`, {
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token()}`,
+			},
+			body: JSON.stringify({ workflows: testWorkflows() }),
+		});
+	} catch { /* best-effort */ }
 }
 
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	const injected = await maybeInjectProjectId(path, opts);
 	const maxRetries = 4;
+	const method = (injected.method || opts.method || "GET").toUpperCase();
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
-			return await fetch(`${base()}${path}`, {
+			const resp = await fetch(`${base()}${path}`, {
 				...injected,
 				headers: {
 					"Content-Type": "application/json",
@@ -254,6 +313,8 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 					...(injected.headers as Record<string, string> || {}),
 				},
 			});
+			await maybeAutoSeedWorkflows(path, method, injected.body as unknown, resp);
+			return resp;
 		} catch (err: unknown) {
 			const msg = err instanceof Error
 				? [err.message, (err as any).cause?.message, (err as any).cause?.code].filter(Boolean).join(" ")

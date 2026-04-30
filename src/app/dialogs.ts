@@ -1240,6 +1240,19 @@ export function showProjectDialog(): void {
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
 	let detectTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Multi-repo scan checklist state — surfaced as an intermediate step when
+	// the chosen path resolves to more than one detected repo. Single-repo
+	// projects skip this step entirely. The selection is informational
+	// (transparency before routing to the assistant); the project assistant
+	// re-runs `scanRepos` server-side and uses it as ground truth, but this
+	// step gives the user a chance to confirm + understand what's coming
+	// without typing anything in chat.
+	interface DetectedRepo { folder: string; hasGit: boolean; detectedCommands: Record<string, string> }
+	let scanResults: DetectedRepo[] | null = null;
+	let scanSelection: Set<string> = new Set();
+	let showingScan = false;
+	let scanScaffolding = false;
+
 	const runDetection = async (dirPath: string) => {
 		if (!dirPath.trim()) { detectionResult = null; renderDialog(); return; }
 		try {
@@ -1269,7 +1282,7 @@ export function showProjectDialog(): void {
 		renderDialog();
 
 		try {
-			const { detectProject, registerProject, fetchProjects } = await import("./api.js");
+			const { detectProject, registerProject, fetchProjects, scanProjectRepos } = await import("./api.js");
 			const detection = await detectProject(trimmedPath);
 
 			if (detection.hasBobbit) {
@@ -1283,20 +1296,46 @@ export function showProjectDialog(): void {
 					loading = false;
 					renderDialog();
 				}
-			} else if (detection.exists && !detection.isEmpty && !detection.hasBobbit) {
-				// Path B: Project assistant (detection mode)
-				cleanup();
-				await createProjectAssistantSession(trimmedPath, false);
-			} else {
-				// Path C: Project assistant (scaffolding mode)
-				cleanup();
-				await createProjectAssistantSession(trimmedPath, true);
+				return;
 			}
+
+			const scaffolding = !(detection.exists && !detection.isEmpty);
+			// Run a multi-repo scan for non-scaffolding paths so we can surface
+			// detected sibling repos as a checklist before routing to the
+			// assistant. Scaffolding (empty dir / new path) skips the scan.
+			if (!scaffolding) {
+				try {
+					const repos = await scanProjectRepos(trimmedPath);
+					const hasMulti = repos.length > 1 || repos.some(r => r.folder !== ".");
+					if (hasMulti) {
+						scanResults = repos;
+						scanSelection = new Set(repos.map(r => r.folder));
+						showingScan = true;
+						scanScaffolding = false;
+						loading = false;
+						renderDialog();
+						return;
+					}
+				} catch {
+					// Scan failure is non-fatal — fall through to the standard flow.
+				}
+			}
+
+			// Single-repo (or scan failed / scaffolding): existing flow.
+			cleanup();
+			await createProjectAssistantSession(trimmedPath, scaffolding);
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
 			loading = false;
 			renderDialog();
 		}
+	};
+
+	const confirmScanAndContinue = async () => {
+		const trimmedPath = pathValue.trim();
+		if (!trimmedPath) return;
+		cleanup();
+		await createProjectAssistantSession(trimmedPath, scanScaffolding);
 	};
 
 	const openBrowser = async () => {
@@ -1379,6 +1418,51 @@ export function showProjectDialog(): void {
 			</div>
 		` : "";
 
+		const scanContent = showingScan && scanResults ? html`
+			<div class="flex flex-col gap-3" data-testid="project-scan-checklist">
+				<p class="text-xs text-muted-foreground">
+					Detected ${scanResults.length} repo${scanResults.length === 1 ? "" : "s"} in <code class="font-mono">${pathValue.trim()}</code>.
+					The project assistant will use this as a starting point — you can refine
+					the selection in the chat.
+				</p>
+				<div class="max-h-[260px] overflow-y-auto border border-border rounded" data-testid="scan-repo-list">
+					${scanResults.length === 0
+						? html`<div class="px-3 py-2 text-xs text-muted-foreground">No repos detected.</div>`
+						: scanResults.map(r => {
+							const checked = scanSelection.has(r.folder);
+							const cmdCount = Object.keys(r.detectedCommands || {}).length;
+							return html`
+								<label class="flex items-start gap-2 px-3 py-2 text-sm border-b border-border last:border-0 cursor-pointer hover:bg-secondary/40" data-testid="scan-repo-row" data-repo-folder=${r.folder}>
+									<input type="checkbox" class="mt-1 shrink-0" .checked=${checked}
+										data-testid="scan-repo-toggle"
+										@change=${(e: Event) => {
+											if ((e.target as HTMLInputElement).checked) scanSelection.add(r.folder);
+											else scanSelection.delete(r.folder);
+											renderDialog();
+										}}/>
+									<div class="flex flex-col min-w-0 flex-1">
+										<div class="flex items-center gap-2">
+											<code class="font-mono text-foreground">${r.folder === "." ? "(root)" : r.folder}</code>
+											<span class="text-[10px] text-muted-foreground uppercase tracking-wider">${r.hasGit ? "git" : "manifest"}</span>
+											<span class="text-[10px] text-muted-foreground">${cmdCount} cmd${cmdCount === 1 ? "" : "s"}</span>
+											${cmdCount === 0
+												? html`<span class="text-[10px] text-amber-600 dark:text-amber-400 italic" data-testid="scan-repo-data-only">data-only</span>`
+												: ""}
+										</div>
+										${cmdCount > 0 ? html`<div class="text-[10px] text-muted-foreground font-mono truncate" title=${Object.keys(r.detectedCommands).join(", ")}>${Object.keys(r.detectedCommands).join(", ")}</div>` : ""}
+									</div>
+								</label>
+							`;
+						})}
+				</div>
+				<p class="text-[11px] text-muted-foreground">
+					Unchecked repos won't be added as components. The project assistant
+					will scaffold workflows for the checked ones, or you can preview
+					and edit later in <strong>Settings → Components</strong>.
+				</p>
+			</div>
+		` : "";
+
 		render(
 			Dialog({
 				isOpen: true,
@@ -1389,9 +1473,9 @@ export function showProjectDialog(): void {
 				children: html`
 					${DialogContent({
 						children: html`
-							${DialogHeader({ title: detectionResult?.hasBobbit ? "Register Project" : "Add Project" })}
+							${DialogHeader({ title: showingScan ? "Detected repos" : (detectionResult?.hasBobbit ? "Register Project" : "Add Project") })}
 							<div class="mt-4 flex flex-col gap-4">
-								${!browsing ? html`
+								${showingScan ? scanContent : !browsing ? html`
 									<div>
 										<label class="text-xs text-muted-foreground mb-1 block">Project Directory</label>
 										<div class="flex items-center gap-2">
@@ -1432,7 +1516,20 @@ export function showProjectDialog(): void {
 							</div>
 						`,
 					})}
-					${!browsing ? DialogFooter({
+					${showingScan ? DialogFooter({
+						className: "px-6 pb-4",
+						children: html`
+							<div class="flex gap-2 justify-end">
+								${Button({ variant: "ghost", onClick: () => { showingScan = false; scanResults = null; renderDialog(); }, children: "Back" })}
+								${Button({
+									variant: "default",
+									onClick: confirmScanAndContinue,
+									disabled: scanSelection.size === 0,
+									children: "Continue with assistant",
+								})}
+							</div>
+						`,
+					}) : !browsing ? DialogFooter({
 						className: "px-6 pb-4",
 						children: html`
 							<div class="flex gap-2 justify-end">

@@ -1075,6 +1075,7 @@ export class AgentInterface extends LitElement {
 								.mergedIntoPrimary=${this.gitStatus?.mergedIntoPrimary ?? false}
 								.unpushed=${this.gitStatus?.unpushed ?? false}
 								.statusFiles=${this.gitStatus?.status ?? []}
+								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}
 								.partial=${this.partial}
 								.prState=${this.prState}

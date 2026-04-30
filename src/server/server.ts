@@ -73,6 +73,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
+import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade } from "./agent/config-cascade.js";
@@ -100,17 +101,25 @@ async function deleteRemoteGoalBranches(
 	}
 	if (branches.size === 0) return;
 	if (shouldSkipRemotePush()) return;
-	for (const branch of branches) {
+
+	// Multi-repo: iterate all configured repos and run `git push --delete` in
+	// each one in parallel. Single-repo collapses to a single repoPath.
+	const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+	const repoPaths: string[] = goalRepoWorktrees && Object.keys(goalRepoWorktrees).length > 0
+		? Object.keys(goalRepoWorktrees).map(repo => repo === "." ? repoPath : path.join(repoPath, repo))
+		: [repoPath];
+
+	await Promise.allSettled(repoPaths.flatMap(rp => Array.from(branches).map(async (branch) => {
 		try {
 			await execFileAsync("git", ["push", "origin", "--delete", branch], {
-				cwd: repoPath,
+				cwd: rp,
 				timeout: 15_000,
 			});
-			console.log(`[api] Deleted remote branch: ${branch}`);
+			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
-			console.warn(`[api] Failed to delete remote branch ${branch}:`, err);
+			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
-	}
+	})));
 }
 
 /** Cached Docker availability result to avoid running `docker info` per session creation */
@@ -580,6 +589,14 @@ export function createGateway(config: GatewayConfig) {
 	// when central dir == default project dir). Must run before stores load.
 	recoverPreMigrationData(stateDir);
 
+	// One-shot project.yaml migration: synthesize components[] for legacy
+	// single-repo projects. Idempotent. Must run BEFORE ProjectContext
+	// instantiation so ProjectConfigStore.load() picks up the new shape,
+	// and BEFORE the worktree pool fills.
+	migrateAllProjectYaml(
+		projectRegistry.list().map(p => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
+	);
+
 	// Initialize per-project contexts
 	const projectContextManager = new ProjectContextManager(projectRegistry);
 	projectContextManager.initAll();
@@ -622,7 +639,7 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const workflowStore = new WorkflowStore(configDir);
+	const workflowStore = new WorkflowStore(projectConfigStore);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
@@ -652,6 +669,9 @@ export function createGateway(config: GatewayConfig) {
 	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
 	// fall back to builtins, so no seeding to disk is needed.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
+	// Workflow builtins were removed — workflows now live inline in each
+	// project's project.yaml::workflows block. The provider returns [] so
+	// nothing is seeded here. Projects must declare their own workflows.
 	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
 
@@ -663,7 +683,7 @@ export function createGateway(config: GatewayConfig) {
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
-	const workflowManager = new WorkflowManager(workflowStore);
+	const workflowManager = new WorkflowManager(workflowStore, projectConfigStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
@@ -1092,6 +1112,28 @@ export function createGateway(config: GatewayConfig) {
 				const githubTokenEnabled = cfg.get("sandbox_github_token") !== "false";
 				const githubToken = githubTokenEnabled ? resolveHostTokenValue("GITHUB_TOKEN") : undefined;
 
+				const components = ctx.projectConfigStore.getComponents();
+				// Multi-repo: try to resolve each repo's clone URL from `<rootPath>/<repo>/.git/config`.
+				// Falls back to the project's primary `repoUrl` for any repo without
+				// a remote configured (the bootstrap will then clone the same repo
+				// into multiple paths — only useful as a defensive default).
+				let repoUrlByName: Record<string, string> | undefined;
+				if (components.some(c => c.repo !== ".")) {
+					repoUrlByName = {};
+					const seen = new Set<string>();
+					for (const c of components) {
+						if (c.repo === "." || seen.has(c.repo)) continue;
+						seen.add(c.repo);
+						const rp = path.join(projectDir, c.repo);
+						try {
+							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: rp, timeout: 5000 });
+							repoUrlByName[c.repo] = stripTokenFromGitUrl(stdout.trim());
+						} catch {
+							repoUrlByName[c.repo] = repoUrl;
+						}
+					}
+				}
+
 				return {
 					projectId,
 					projectDir,
@@ -1102,6 +1144,8 @@ export function createGateway(config: GatewayConfig) {
 					sandboxCredentials: poolCredentials,
 					githubToken,
 					toolManager: ctx.toolManager,
+					components,
+					repoUrlByName,
 				};
 			};
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
@@ -1122,17 +1166,95 @@ export function createGateway(config: GatewayConfig) {
 			// E2E / CI can skip this entirely via BOBBIT_SKIP_WORKTREE_POOL=1 — the
 			// pool fills worktrees aggressively at boot and replenishes on every
 			// claim, which costs real CPU on tests that don't need git at all.
+			// Boot sweeper (Phase 3): reconcile on-disk worktrees against persisted
+			// records before pool fill so renamed-but-orphaned worktrees from a
+			// crashed prior instance are reclaimed (or cleaned up) cleanly.
+			try {
+				const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+				const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+				const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+				const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+				const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+				for (const ctx of projectContextManager.all()) {
+					const repoNames = ctx.projectConfigStore.repoNames();
+					sweepProjects.push({
+						id: ctx.project.id,
+						rootPath: ctx.project.rootPath,
+						repos: repoNames.length > 0 ? repoNames : undefined,
+					});
+					for (const g of ctx.goalStore.getAll()) {
+						sweepGoals.push({
+							id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+							repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+						});
+					}
+					for (const s of ctx.sessionStore.getAll()) {
+						sweepSessions.push({
+							id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+							repoWorktrees: s.repoWorktrees,
+						});
+					}
+					for (const st of ctx.staffStore.getAll()) {
+						sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+					}
+				}
+				const result = await sweepOrphanedWorktrees({
+					projects: sweepProjects,
+					goals: sweepGoals,
+					sessions: sweepSessions,
+					staff: sweepStaff,
+				});
+				if (result.reclaimed || result.cleaned || result.repaired) {
+					console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
+				}
+			} catch (err) {
+				console.warn("[server] Worktree sweeper failed (non-fatal):", err);
+			}
+
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
 				for (const ctx of projectContextManager.all()) {
 					try {
 						const repoPath = ctx.project.rootPath;
-						if (await isGitRepo(repoPath)) {
+						const components = ctx.projectConfigStore.getComponents();
+						const isMulti = components.some(c => c.repo !== ".");
+						let poolReady = false;
+						if (isMulti) {
+							const seen = new Set<string>();
+							poolReady = true;
+							for (const c of components) {
+								if (c.repo === "." || seen.has(c.repo)) continue;
+								seen.add(c.repo);
+								if (!(await isGitRepo(path.join(repoPath, c.repo)))) { poolReady = false; break; }
+							}
+						} else {
+							poolReady = await isGitRepo(repoPath);
+						}
+						if (poolReady) {
 							const setupCmd = ctx.projectConfigStore.get("worktree_setup_command") || undefined;
 							const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize);
+							const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
+							sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, setupCmd, poolSize, components, wtRoot);
 						}
 					} catch { /* best-effort */ }
 				}
+			}
+
+			// Wire goal-manager resolvers so goals claim through the pool first and
+			// resolve components / project root for multi-repo goal creation.
+			for (const ctx of projectContextManager.all()) {
+				const projectId = ctx.project.id;
+				ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(projectId));
+				ctx.goalManager.setComponentsResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c ? c.projectConfigStore.getComponents() : [];
+				});
+				ctx.goalManager.setProjectRootResolver((pid: string) => {
+					return projectRegistry.get(pid)?.rootPath;
+				});
+				ctx.goalManager.setWorktreeRootResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("worktree_root") || undefined;
+				});
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -1717,6 +1839,57 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/projects/scan?path=...  → run repo-scan on a folder.
+	// Returns { repos: DetectedRepo[] }. Used by the Add-Project flow and
+	// Settings → "Re-scan repos". Phase 4b — see docs/design/multi-repo-components.md §8.1.
+	if (url.pathname === "/api/projects/scan" && req.method === "POST") {
+		const body = await readBody(req).catch(() => ({}));
+		const rawPath = url.searchParams.get("path") ?? (body && typeof body.path === "string" ? body.path : "");
+		if (!rawPath) { json({ error: "Missing path" }, 400); return; }
+		const dirPath = path.resolve(rawPath);
+		if (!fs.existsSync(dirPath)) { json({ error: "Path not found" }, 404); return; }
+		try {
+			const { scanRepos } = await import("./agent/repo-scan.js");
+			const repos = await scanRepos(dirPath);
+			json({ repos });
+		} catch (err: any) {
+			json({ error: err?.message || String(err) }, 500);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/structured  → returns { components, workflows,
+	// worktree_root } in their structured (non-string) shape. Used by the
+	// Settings → Components tab so the UI doesn't have to parse YAML.
+	// Phase 4b.
+	const projectStructuredMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/structured$/);
+	if (projectStructuredMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(projectStructuredMatch[1]);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		const components = ctx.projectConfigStore.getComponents();
+		const workflows = ctx.projectConfigStore.getWorkflows() ?? {};
+		const worktreeRoot = ctx.projectConfigStore.get("worktree_root") ?? "";
+		json({ components, workflows, worktree_root: worktreeRoot });
+		return;
+	}
+
+	// POST /api/projects/:id/rescan-repos  → re-run repo-scan on the
+	// project's rootPath; returns the same shape as /api/projects/scan.
+	// Settings "Re-scan repos" button. Phase 4b.
+	const projectRescanMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/rescan-repos$/);
+	if (projectRescanMatch && req.method === "POST") {
+		const project = projectRegistry.get(projectRescanMatch[1]);
+		if (!project) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const { scanRepos } = await import("./agent/repo-scan.js");
+			const repos = await scanRepos(project.rootPath);
+			json({ repos, rootPath: project.rootPath });
+		} catch (err: any) {
+			json({ error: err?.message || String(err) }, 500);
+		}
+		return;
+	}
+
 	// GET /api/browse-directory
 	if (url.pathname === "/api/browse-directory" && req.method === "GET") {
 		const rawPath = url.searchParams.get("path");
@@ -1800,6 +1973,16 @@ async function handleApiRoute(
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
 						};
+						ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(existing.id));
+						ctx.goalManager.setComponentsResolver((pid: string) => {
+							const c = projectContextManager.getOrCreate(pid);
+							return c ? c.projectConfigStore.getComponents() : [];
+						});
+						ctx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
+						ctx.goalManager.setWorktreeRootResolver((pid: string) => {
+							const c = projectContextManager.getOrCreate(pid);
+							return c?.projectConfigStore.get("worktree_root") || undefined;
+						});
 					}
 					json(existing, 200);
 					return;
@@ -1814,16 +1997,86 @@ async function handleApiRoute(
 					newCtx.goalStore.bumpGeneration();
 				};
 			}
+
+			// Multi-repo: accept optional components / workflows in the create body.
+			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
+			const createComponents = (body as Record<string, unknown>).components;
+			const createWorkflows = (body as Record<string, unknown>).workflows;
+			if (newCtx) {
+				if (Array.isArray(createComponents) && createComponents.length > 0) {
+					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
+						try {
+							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
+							const errors = validateAllWorkflows(
+								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
+								createComponents as Parameters<typeof validateAllWorkflows>[1],
+							);
+							if (errors.length > 0) {
+								projectRegistry.remove(project.id);
+								json({ error: "Workflow validation failed", details: errors }, 400);
+								return;
+							}
+						} catch { /* best-effort */ }
+					}
+					const normalized = (createComponents as Array<Record<string, unknown>>).map(c => ({
+						name: String(c.name ?? ""),
+						repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
+						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
+						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
+						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+					}));
+					newCtx.projectConfigStore.setComponents(normalized);
+					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
+						newCtx.projectConfigStore.setWorkflows(createWorkflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+					}
+				} else {
+					// Default single-repo component named after the project.
+					if (newCtx.projectConfigStore.getComponents().length === 0) {
+						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
+					}
+				}
+			}
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
 				try {
-					if (await isGitRepo(body.rootPath)) {
+					// Multi-repo: rootPath is a container dir, individual repos sit
+					// under <rootPath>/<repo>/. We treat that case as "git-ready" if
+					// every declared repo subdir is a git repo.
+					const components = newCtx?.projectConfigStore.getComponents() ?? [];
+					const isMulti = components.some(c => c.repo !== ".");
+					let poolReady = false;
+					if (isMulti) {
+						const seen = new Set<string>();
+						poolReady = true;
+						for (const c of components) {
+							if (c.repo === "." || seen.has(c.repo)) continue;
+							seen.add(c.repo);
+							if (!(await isGitRepo(path.join(body.rootPath, c.repo)))) { poolReady = false; break; }
+						}
+					} else {
+						poolReady = await isGitRepo(body.rootPath);
+					}
+					if (poolReady) {
 						const setupCmd = newCtx?.projectConfigStore.get("worktree_setup_command") || undefined;
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
-						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize);
+						const wtRoot = newCtx?.projectConfigStore.get("worktree_root") || undefined;
+						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, setupCmd, poolSize, components, wtRoot);
 					}
 				} catch { /* best-effort */ }
+			}
+			// Wire the goal-manager pool resolver for the new project (Phase 3 — goals via pool).
+			if (newCtx) {
+				newCtx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(project.id));
+				newCtx.goalManager.setComponentsResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c ? c.projectConfigStore.getComponents() : [];
+				});
+				newCtx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
+				newCtx.goalManager.setWorktreeRootResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("worktree_root") || undefined;
+				});
 			}
 			json(project, 201);
 		} catch (err: any) {
@@ -1959,11 +2212,87 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 
-			// Validate ALL keys before writing ANY (atomic: all-or-nothing)
+			// Extract structured fields (components / workflows) before flat-key validation.
+			let components = (body as Record<string, unknown>).components;
+			const workflows = (body as Record<string, unknown>).workflows;
+			delete (body as Record<string, unknown>).components;
+			delete (body as Record<string, unknown>).workflows;
+
+			// Back-compat: legacy top-level *_command fields (build_command, test_command, etc.)
+			// are folded into components[0].commands when no `components` field was supplied.
+			// This keeps the propose_project tool, the project assistant, and the provisional
+			// promotion path working after Follow-up A removed the legacy schema. Existing
+			// components stored on disk are not modified — callers who want to update components
+			// must pass a fresh `components` array. See multi-repo follow-up Issue 2 / Issue 5.
+			if (!Array.isArray(components)) {
+				const LEGACY_KEY_MAP: Record<string, string> = {
+					build_command: "build",
+					test_command: "test",
+					typecheck_command: "check",
+					test_unit_command: "unit",
+					test_e2e_command: "e2e",
+				};
+				const legacyCmds: Record<string, string> = {};
+				for (const [legacyKey, newKey] of Object.entries(LEGACY_KEY_MAP)) {
+					const v = (body as Record<string, unknown>)[legacyKey];
+					if (typeof v === "string" && v.trim().length > 0) legacyCmds[newKey] = v.trim();
+				}
+				const legacyHook = (body as Record<string, unknown>).worktree_setup_command;
+				const hasAnyLegacy = Object.keys(legacyCmds).length > 0
+					|| (typeof legacyHook === "string" && legacyHook.trim().length > 0);
+				if (hasAnyLegacy) {
+					const existing = ctx.projectConfigStore.getComponents();
+					const defaultName = existing[0]?.name || ctx.project.name || "default";
+					const defaultRepo = existing[0]?.repo || ".";
+					const mergedCommands = { ...(existing[0]?.commands ?? {}), ...legacyCmds };
+					const defaultComponent: Record<string, unknown> = {
+						name: defaultName,
+						repo: defaultRepo,
+						commands: mergedCommands,
+					};
+					if (existing[0]?.relativePath) defaultComponent.relative_path = existing[0].relativePath;
+					const hookValue = (typeof legacyHook === "string" && legacyHook.trim().length > 0)
+						? legacyHook.trim()
+						: existing[0]?.worktreeSetupCommand;
+					if (hookValue) defaultComponent.worktree_setup_command = hookValue;
+					// Replace the first component but preserve any additional components on disk.
+					const remaining = existing.slice(1).map(c => {
+						const entry: Record<string, unknown> = { name: c.name, repo: c.repo };
+						if (c.relativePath) entry.relative_path = c.relativePath;
+						if (c.worktreeSetupCommand) entry.worktree_setup_command = c.worktreeSetupCommand;
+						if (c.commands) entry.commands = c.commands;
+						return entry;
+					});
+					components = [defaultComponent, ...remaining];
+				}
+				// Legacy flat keys remain in `body` so they are ALSO written as legacy
+				// flat-config entries (preserves GET round-trip for existing API clients
+				// that only know the legacy schema). The structural components mirror is
+				// the source of truth for workflow steps and the Components UI.
+			}
+
+			// Validate ALL flat keys before writing ANY (atomic: all-or-nothing)
 			for (const [key] of Object.entries(body)) {
 				if (key.includes(".")) {
 					json({ error: `Config key "${key}" must not contain dots` }, 400);
 					return;
+				}
+			}
+
+			// Validate workflows structurally if both components and workflows are present.
+			if (components && workflows && Array.isArray(components) && typeof workflows === "object") {
+				try {
+					const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
+					const errors = validateAllWorkflows(
+						workflows as Parameters<typeof validateAllWorkflows>[0],
+						components as Parameters<typeof validateAllWorkflows>[1],
+					);
+					if (errors.length > 0) {
+						json({ error: "Workflow validation failed", details: errors }, 400);
+						return;
+					}
+				} catch (err) {
+					console.warn("[server] workflow validation skipped:", err);
 				}
 			}
 
@@ -1976,6 +2305,22 @@ async function handleApiRoute(
 					ctx.projectConfigStore.set(key, value);
 				}
 			}
+
+			// Persist structured fields if provided.
+			if (Array.isArray(components)) {
+				const normalized = (components as Array<Record<string, unknown>>).map(c => ({
+					name: String(c.name ?? ""),
+					repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
+					relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
+					worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
+					commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+				}));
+				ctx.projectConfigStore.setComponents(normalized);
+			}
+			if (workflows && typeof workflows === "object" && !Array.isArray(workflows)) {
+				ctx.projectConfigStore.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+			}
+
 			json({ ok: true });
 			return;
 		}
@@ -2286,6 +2631,7 @@ async function handleApiRoute(
 			teamGoalId: session.teamGoalId,
 			teamLeadSessionId: session.teamLeadSessionId,
 			worktreePath: session.worktreePath,
+			branch: session.branch ?? sessionPs?.branch,
 			taskId: session.taskId,
 			staffId: session.staffId,
 			colorIndex: colorStore.get(session.id),
@@ -2676,6 +3022,7 @@ async function handleApiRoute(
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
+				projectId: targetProjectId,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -4588,7 +4935,24 @@ async function handleApiRoute(
 		try {
 			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked });
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-			json(result);
+
+			// Multi-repo aware envelope: include `repos` map + `aggregate` for back-compat.
+			const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+			if (repoWorktrees && Object.keys(repoWorktrees).length > 0) {
+				const repos: Record<string, typeof result> = {};
+				for (const [repoName, repoPath] of Object.entries(repoWorktrees)) {
+					try {
+						if (cid || fs.existsSync(repoPath)) {
+							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked });
+							if (r) repos[repoName] = r;
+						}
+					} catch { /* per-repo failure non-fatal */ }
+				}
+				json({ ...result, aggregate: result, repos });
+			} else {
+				// Single-repo: include `repos: { ".": result }, aggregate: result` for back-compat.
+				json({ ...result, aggregate: result, repos: { ".": result } });
+			}
 		} catch (err: any) {
 			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
 		}
@@ -4615,8 +4979,14 @@ async function handleApiRoute(
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		const repoParam = url.searchParams.get("repo") || undefined;
+		const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+		let diffCwd = cwd;
+		if (repoParam && goalRepoWorktrees && goalRepoWorktrees[repoParam]) {
+			diffCwd = goalRepoWorktrees[repoParam];
+		}
 		try {
-			const diff = await getGitDiff(cwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
