@@ -5,7 +5,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import { streamSimple, type ToolResultMessage, type Usage } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query } from "lit/decorators.js";
-import { Brain, Image as ImageIcon, Sparkles } from "lucide";
+import { ArrowDown, Brain, Image as ImageIcon, Sparkles } from "lucide";
 import { ModelSelector } from "../dialogs/ModelSelector.js";
 import { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 import type { MessageEditor } from "./MessageEditor.js";
@@ -199,6 +199,26 @@ export class AgentInterface extends LitElement {
 	private _resizeObserver?: ResizeObserver;
 	private _lastScrollHeight = 0;
 
+	// Change 3 — `wasAtBottom` carry-over for `state_update`.
+	// Captures the pre-recompute value of `_stickToBottom` at every non-echo
+	// scroll event. Consulted by the `state_update` branch so a transient
+	// scroll-up that flips `_stickToBottom` false right before a server-driven
+	// state refresh still re-anchors to the bottom. Reset on explicit user
+	// intent (`_handleUserIntent`/`_handleScrollKeydown`).
+	private _wasAtBottomAtLastUserScroll = true;
+
+	// Change 4 — session-load settle window. While active, the ResizeObserver
+	// re-asserts `_scrollToBottom()` on every tick (capped at 2 s, exits early
+	// on stable scrollHeight or user-intent). Re-armed on every
+	// `setupSessionSubscription` call.
+	private _settleWindowActive = false;
+	private _settleWindowDeadline = 0;
+	private _lastSettleScrollHeight = -1;
+
+	// Change 5 — Jump-to-bottom button visibility. True when the viewport is
+	// more than half a screen from the bottom. Recomputed in `_handleScroll`.
+	private _showJumpToBottom = false;
+
 	// --- Pill overflow collapsing state ---
 	/** Number of pills visible before overflow (rest collapse into "More") */
 	private _visiblePillCount = Infinity;
@@ -284,6 +304,25 @@ export class AgentInterface extends LitElement {
 				const newScrollHeight = this._scrollContainer.scrollHeight;
 				const delta = newScrollHeight - this._lastScrollHeight;
 
+				// Change 4 — session-load settle window. Re-assert bottom on every
+				// tick while active. Exit on deadline, stable height across two
+				// consecutive ticks, or user intent (handled elsewhere).
+				if (this._settleWindowActive) {
+					if (performance.now() > this._settleWindowDeadline) {
+						this._settleWindowActive = false;
+					} else if (this._lastSettleScrollHeight === newScrollHeight) {
+						// Two consecutive ticks at the same scrollHeight → settled.
+						this._settleWindowActive = false;
+					} else {
+						this._lastSettleScrollHeight = newScrollHeight;
+						if (this._stickToBottom) {
+							this._scrollToBottom();
+							this._lastScrollHeight = newScrollHeight;
+							return;
+						}
+					}
+				}
+
 				if (delta < 0) {
 					// Content shrunk (collapse) — apply post-collapse clamp.
 					// Let the browser naturally adjust scrollTop, then check:
@@ -350,6 +389,11 @@ export class AgentInterface extends LitElement {
 	override disconnectedCallback() {
 		super.disconnectedCallback();
 
+		// Change 4 — tear down settle window state alongside other observers.
+		this._settleWindowActive = false;
+		this._settleWindowDeadline = 0;
+		this._lastSettleScrollHeight = -1;
+
 		// Clean up observers and listeners
 		if (this._resizeObserver) {
 			this._resizeObserver.disconnect();
@@ -390,7 +434,13 @@ export class AgentInterface extends LitElement {
 
 		// Reset scroll state for new session and scroll to bottom once rendered
 		this._stickToBottom = true;
+		this._wasAtBottomAtLastUserScroll = true;
 		this.updateComplete.then(() => this._scrollToBottom());
+
+		// Change 4 — arm the settle window for this session load.
+		this._settleWindowActive = true;
+		this._settleWindowDeadline = performance.now() + 2000;
+		this._lastSettleScrollHeight = -1;
 
 		// Set default streamFn with proxy support if not already set
 		if (this.session.streamFn === streamSimple) {
@@ -453,8 +503,10 @@ export class AgentInterface extends LitElement {
 				// Server state refresh (e.g. after compaction or reconnect) — re-render stats
 				// and scroll to bottom if we were tracking bottom (content may have been
 				// bulk-replaced without triggering a ResizeObserver change).
+				// Change 3 — also honour `_wasAtBottomAtLastUserScroll` so a transient
+				// scroll-up that just flipped `_stickToBottom` false doesn't lose the bottom.
 				this.requestUpdate();
-				if (this._stickToBottom) {
+				if (this._stickToBottom || this._wasAtBottomAtLastUserScroll) {
 					this.updateComplete.then(() => this._scrollToBottom());
 				}
 				return;
@@ -563,21 +615,42 @@ export class AgentInterface extends LitElement {
 		if (
 			this._lastProgrammaticScrollTop !== null &&
 			this._lastProgrammaticScrollHeight !== null &&
-			scrollTop === this._lastProgrammaticScrollTop &&
-			scrollHeight === this._lastProgrammaticScrollHeight
+			// Change 1 — sub-pixel echo-latch tolerance. HiDPI / device-pixel
+			// rounding can produce fractional offsets between the scrollTop we
+			// programmatically set and the value the browser reports back; a
+			// strict equality check would miss the echo and treat it as user
+			// intent. < 1 px is well below any meaningful gesture.
+			Math.abs(scrollTop - this._lastProgrammaticScrollTop) < 1 &&
+			Math.abs(scrollHeight - this._lastProgrammaticScrollHeight) < 1
 		) {
 			// Consume the echo exactly once.
 			this._lastProgrammaticScrollTop = null;
 			this._lastProgrammaticScrollHeight = null;
 			return;
 		}
-		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 5;
+		// Change 3 — capture pre-recompute value so a transient scroll-up that
+		// flips `_stickToBottom` false in the next line still gets honoured by
+		// the `state_update` branch.
+		this._wasAtBottomAtLastUserScroll = this._stickToBottom;
+		// Change 2 — widen tail tolerance from < 5 to < 10 to absorb HiDPI
+		// rounding and small jitter without losing stick-to-bottom.
+		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 10;
+		// Change 5 — Jump-to-bottom visibility (more than half a screen from bottom).
+		const nextShow = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
+		if (nextShow !== this._showJumpToBottom) {
+			this._showJumpToBottom = nextShow;
+			this.requestUpdate();
+		}
 	};
 
 	/** Any direct user-input gesture on the scroll container immediately
 	 *  releases the stickiness. We don't second-guess the user via geometry. */
 	private _handleUserIntent = () => {
 		this._stickToBottom = false;
+		// Change 3 — explicit user intent clears the carry-over.
+		this._wasAtBottomAtLastUserScroll = false;
+		// Change 4 — explicit user intent cancels the settle window immediately.
+		this._settleWindowActive = false;
 	};
 
 	private _handleScrollKeydown = (e: KeyboardEvent) => {
@@ -589,7 +662,22 @@ export class AgentInterface extends LitElement {
 			case "ArrowDown":
 			case "End":
 				this._stickToBottom = false;
+				// Change 3 — explicit user intent clears the carry-over.
+				this._wasAtBottomAtLastUserScroll = false;
+				// Change 4 — explicit user intent cancels the settle window immediately.
+				this._settleWindowActive = false;
 				break;
+		}
+	};
+
+	// Change 5 — Jump-to-bottom click handler.
+	private _handleJumpToBottomClick = () => {
+		this._scrollToBottom();
+		this._stickToBottom = true;
+		this._wasAtBottomAtLastUserScroll = true;
+		if (this._showJumpToBottom) {
+			this._showJumpToBottom = false;
+			this.requestUpdate();
 		}
 	};
 
@@ -1080,8 +1168,11 @@ export class AgentInterface extends LitElement {
 		return html`
 			<div class="flex flex-col h-full bg-background text-foreground min-w-0">
 				<!-- Messages Area -->
-				<div class="flex-1 overflow-y-auto overflow-x-hidden">
-					<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
+				<div class="flex-1 min-h-0 relative">
+					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden">
+						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
+					</div>
+					${this._renderJumpToBottom()}
 				</div>
 
 				<!-- Input Area -->
@@ -1213,6 +1304,28 @@ export class AgentInterface extends LitElement {
 					</div>
 				</div>
 			</div>
+		`;
+	}
+
+	// Change 5 — Jump-to-bottom floating button. Reuses small-floating-button
+	// vocabulary already used for AttachmentTile's remove pill (rounded-full,
+	// border-input, bg-background, shadow-sm). Icon-only on mobile (<640px).
+	private _renderJumpToBottom() {
+		const show = this._showJumpToBottom;
+		const label = this._isMobileViewport ? "" : "Jump to bottom";
+		return html`
+			<button
+				type="button"
+				data-testid="jump-to-bottom"
+				aria-label="Jump to bottom"
+				class="absolute bottom-3 right-3 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm"
+				style="opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out"
+				tabindex="${show ? "0" : "-1"}"
+				@click=${this._handleJumpToBottomClick}
+			>
+				${icon(ArrowDown, "sm")}
+				${label ? html`<span>${label}</span>` : nothing}
+			</button>
 		`;
 	}
 
