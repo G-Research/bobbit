@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal } from "../skills/git.js";
-import type { WorkflowStore, Workflow } from "./workflow-store.js";
+import type { WorkflowStore, Workflow, VerifyStep } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { Role } from "./role-store.js";
@@ -21,9 +21,63 @@ function toBranchName(title: string): string {
 }
 
 
+/**
+ * Buffered plan mutation, awaiting user approval via
+ * `POST /api/goals/:id/mutation/:requestId/decision`.
+ *
+ * Phase 4 task 4.3 introduces only the **storage** + apply/reject
+ * primitives. Phase 5 task 5.2 wires the classifier that decides when a
+ * mutation must be buffered (vs. auto-applied or rejected outright). Until
+ * 5.2 lands, nothing populates `pendingMutations` in production paths;
+ * tests cover the storage shape via direct buffer/apply/reject calls.
+ *
+ * Two mutation kinds are supported up-front so 5.2 doesn't need to revisit
+ * this surface:
+ *   - `plan-replace`     — swap a gate's `verify[]` (PATCH /plan)
+ *   - `child-spawn`      — off-plan child creation (POST /spawn-child)
+ *
+ * `applyBufferedMutation` returns the same shape the REST decision
+ * endpoint surfaces in its `applied` field.
+ *
+ * See `docs/design/nested-goals.md` §10.5 + §8 + §9.
+ */
+export interface BufferedPlanReplace {
+	kind: "plan-replace";
+	goalId: string;
+	gateId: string;
+	planSteps: VerifyStep[];
+	replanReason?: string;
+	/** Optimistic-concurrency cursor at buffer time. */
+	expectedReplanCount?: number;
+	createdAt: number;
+}
+
+export interface BufferedChildSpawn {
+	kind: "child-spawn";
+	goalId: string;
+	/** Frozen request body passed to `POST /api/goals/:id/spawn-child`. */
+	spawnPayload: Record<string, unknown>;
+	createdAt: number;
+}
+
+export type BufferedMutation = BufferedPlanReplace | BufferedChildSpawn;
+
+export interface AppliedMutationResult {
+	plan?: VerifyStep[];
+	childGoalId?: string;
+}
+
 export class GoalManager {
 	private store: GoalStore;
 	private workflowStore?: WorkflowStore;
+	/**
+	 * Per-goal pending plan-mutation buffer, keyed by `requestId` (§10.5).
+	 *
+	 * Phase 4 task 4.3 owns the storage + apply/reject primitives. Phase 5
+	 * task 5.2 will populate the map from the classifier and clear it on
+	 * `goal_mutation_resolved`. Cleared on goal archive / delete.
+	 */
+	private pendingMutations = new Map<string, BufferedMutation>();
 	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
 	private _setupsInFlight = new Set<string>();
 	/**
@@ -493,6 +547,12 @@ export class GoalManager {
 		const goal = this.store.get(id);
 		if (!goal) return false;
 		const archived = this.store.archive(id);
+		// Drop any buffered mutations targeting this goal — they're stale.
+		if (archived) {
+			for (const [reqId, mutation] of this.pendingMutations) {
+				if (mutation.goalId === id) this.pendingMutations.delete(reqId);
+			}
+		}
 		// Phase 4a multi-repo cleanup: best-effort, fire-and-forget per-repo
 		// worktree removal + remote branch deletion in parallel. Single-repo
 		// goal cleanup remains owned by session purge (worktree shared with the
@@ -607,6 +667,100 @@ export class GoalManager {
 		return await mergeChildBranchLocal(parent.worktreePath, parent.branch, child.branch);
 	}
 
+	// ── Pending plan-mutation buffer (§10.5) ────────────────────────
+
+	/**
+	 * Buffer a mutation for later apply/reject via the decision endpoint.
+	 * Idempotent on `requestId` — calling twice with the same id replaces
+	 * the previous buffered entry (5.2 may want to refresh the payload).
+	 */
+	bufferMutation(requestId: string, mutation: BufferedMutation): void {
+		if (!requestId) throw new Error("bufferMutation: requestId is required");
+		if (!mutation || typeof mutation !== "object") {
+			throw new Error("bufferMutation: mutation payload is required");
+		}
+		this.pendingMutations.set(requestId, mutation);
+	}
+
+	/** Inspect a buffered mutation without consuming it. */
+	getBufferedMutation(requestId: string): BufferedMutation | undefined {
+		return this.pendingMutations.get(requestId);
+	}
+
+	/** Test/diagnostic helper. Not used by production code paths. */
+	listBufferedMutationIds(goalId?: string): string[] {
+		const ids: string[] = [];
+		for (const [id, m] of this.pendingMutations) {
+			if (!goalId || m.goalId === goalId) ids.push(id);
+		}
+		return ids;
+	}
+
+	/**
+	 * Apply a buffered mutation and remove it from the buffer.
+	 *
+	 * Returns the `applied` payload the REST decision endpoint surfaces in
+	 * its 200 response (see §8 / §10.5):
+	 *   - `plan-replace`  → `{ plan: VerifyStep[] }`
+	 *   - `child-spawn`   → `{ childGoalId }` (5.2 fills this in once it
+	 *                       wires the off-plan-spawn flow; 4.3 returns an
+	 *                       empty object so the storage shape is exercised
+	 *                       without committing to spawn semantics here.)
+	 *
+	 * Throws if `requestId` is unknown — callers should treat that as a
+	 * stale/duplicate-decision case and surface 404.
+	 */
+	applyBufferedMutation(requestId: string): AppliedMutationResult {
+		const mutation = this.pendingMutations.get(requestId);
+		if (!mutation) {
+			throw new Error(`applyBufferedMutation: unknown requestId ${requestId}`);
+		}
+		// Remove first so any throw downstream still drops the entry —
+		// the user already decided; we don't want a half-applied retry.
+		this.pendingMutations.delete(requestId);
+
+		if (mutation.kind === "plan-replace") {
+			const goal = this.store.get(mutation.goalId);
+			if (!goal) {
+				throw new Error(`applyBufferedMutation: goal ${mutation.goalId} not found`);
+			}
+			if (!goal.workflow) {
+				throw new Error(`applyBufferedMutation: goal ${mutation.goalId} has no workflow snapshot`);
+			}
+			const gate = goal.workflow.gates.find(g => g.id === mutation.gateId);
+			if (!gate) {
+				throw new Error(
+					`applyBufferedMutation: gate ${mutation.gateId} not found in goal ${mutation.goalId}`,
+				);
+			}
+			gate.verify = mutation.planSteps;
+			const frozen = gate.metadata?.frozen === "true";
+			const nextReplan = (goal.replanCount ?? 0) + (frozen ? 1 : 0);
+			if (frozen) {
+				this.store.update(mutation.goalId, { workflow: goal.workflow, replanCount: nextReplan });
+			} else {
+				this.store.update(mutation.goalId, { workflow: goal.workflow });
+			}
+			return { plan: gate.verify };
+		}
+
+		// child-spawn: 4.3 doesn't perform the spawn here — 5.2 will. We
+		// surface an empty payload so callers can post-decide without
+		// pretending a child was created. The decision endpoint still
+		// returns `resolved: true`; clients then re-fetch the goal tree.
+		return {};
+	}
+
+	/**
+	 * Drop a buffered mutation. Idempotent on unknown ids in the sense that
+	 * the caller can use the boolean return to decide whether to broadcast
+	 * `goal_mutation_resolved`. Returns `true` if a buffer was dropped,
+	 * `false` if `requestId` was unknown.
+	 */
+	rejectBufferedMutation(requestId: string): boolean {
+		return this.pendingMutations.delete(requestId);
+	}
+
 	async deleteGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
@@ -619,6 +773,10 @@ export class GoalManager {
 			console.log(`[goal-manager] Deleting team goal "${goal.title}" — worktrees preserved for archived session review`);
 		}
 
+		// Drop any buffered mutations targeting this goal — they're stale.
+		for (const [reqId, mutation] of this.pendingMutations) {
+			if (mutation.goalId === id) this.pendingMutations.delete(reqId);
+		}
 		this.store.remove(id);
 		return true;
 	}

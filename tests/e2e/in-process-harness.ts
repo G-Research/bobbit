@@ -57,6 +57,7 @@ export interface GatewayInfo {
 	bobbitDir: string;
 	sessionManager: any;  // Exposed for sandbox security tests
 	bgProcessManager: any;  // Exposed for bg-wait abort tests
+	projectContextManager: any;  // Exposed for plan-mutation buffer tests
 }
 
 /**
@@ -203,6 +204,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 			bobbitDir,
 			sessionManager: gw.sessionManager,
 			bgProcessManager: gw.bgProcessManager,
+			projectContextManager: gw.projectContextManager,
 		};
 
 		await use(info);

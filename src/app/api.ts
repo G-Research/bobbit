@@ -982,6 +982,57 @@ export async function teardownTeam(goalId: string): Promise<boolean> {
 }
 
 // ============================================================================
+// GOAL PLAN-MUTATION DECISION (nested-goals task 4.3)
+//
+// Approve / reject a server-buffered plan mutation, identified by
+// `requestId`. Routes to `POST /api/goals/:id/mutation/:requestId/decision`
+// with `{ decision: "approve" | "reject" }`. The server applies the buffered
+// mutation (approve) or drops it (reject) and broadcasts
+// `goal_mutation_resolved`. See `docs/design/nested-goals.md` §10.5 + §9.
+//
+// Returns:
+//   { ok: true,  resolved: true, applied?: { plan?, childGoalId? } } on 200
+//   { ok: false, status: 404 }                                       on stale/unknown requestId
+//   { ok: false, status }                                            on any other failure
+// ============================================================================
+
+export interface MutationDecisionResult {
+	ok: boolean;
+	status: number;
+	resolved?: boolean;
+	applied?: { plan?: unknown; childGoalId?: string };
+	error?: string;
+}
+
+async function postMutationDecision(
+	goalId: string,
+	requestId: string,
+	decision: "approve" | "reject",
+): Promise<MutationDecisionResult> {
+	try {
+		const res = await gatewayFetch(
+			`/api/goals/${encodeURIComponent(goalId)}/mutation/${encodeURIComponent(requestId)}/decision`,
+			{ method: "POST", body: JSON.stringify({ decision }) },
+		);
+		const body = await res.json().catch(() => ({}));
+		if (!res.ok) {
+			return { ok: false, status: res.status, error: body?.error };
+		}
+		return { ok: true, status: res.status, resolved: !!body?.resolved, applied: body?.applied };
+	} catch (err) {
+		return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+export function approveMutation(goalId: string, requestId: string): Promise<MutationDecisionResult> {
+	return postMutationDecision(goalId, requestId, "approve");
+}
+
+export function rejectMutation(goalId: string, requestId: string): Promise<MutationDecisionResult> {
+	return postMutationDecision(goalId, requestId, "reject");
+}
+
+// ============================================================================
 // GOAL ARTIFACT API
 // ============================================================================
 
