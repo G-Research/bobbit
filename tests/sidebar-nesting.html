@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Nesting — unit tests</title>
+</head>
+<body>
+<script>
+/**
+ * Pure logic extracted from src/app/render-helpers.ts (the nested-goal helpers
+ * added in Phase 1 task 1.5) for unit testing the recursive child-goal
+ * rendering rules: depth cap, descendant counting, and the n/m count badge.
+ *
+ * This fixture mirrors the production logic byte-for-byte but stays pure
+ * (no DOM, no lit, no state) so we can drive it with a wide variety of
+ * synthetic goal trees and assert on the structural decisions the renderer
+ * will make.
+ */
+
+const MAX_GOAL_DEPTH = 5;
+
+/** Immediate non-archived child goals of `parentId`, sorted by createdAt ASC. */
+function getChildGoalsFrom(parentId, goals) {
+  return goals
+    .filter(g => g.parentGoalId === parentId && !g.archived)
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** Count all transitive non-archived descendants of `goalId`. Cycle-safe. */
+function countDescendantsFrom(goalId, goals) {
+  const byParent = new Map();
+  for (const g of goals) {
+    if (g.archived) continue;
+    if (!g.parentGoalId) continue;
+    let arr = byParent.get(g.parentGoalId);
+    if (!arr) { arr = []; byParent.set(g.parentGoalId, arr); }
+    arr.push(g);
+  }
+  const seen = new Set();
+  let count = 0;
+  const stack = [goalId];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    const kids = byParent.get(id);
+    if (!kids) continue;
+    for (const k of kids) {
+      if (seen.has(k.id)) continue;
+      seen.add(k.id);
+      count++;
+      stack.push(k.id);
+    }
+  }
+  return count;
+}
+
+/** Compute the n/m count badge for a goal that has child goals. */
+function computeChildCountBadge(parentId, goals) {
+  const children = getChildGoalsFrom(parentId, goals);
+  if (children.length === 0) return null;
+  const complete = children.filter(c => c.state === "complete").length;
+  return { complete, total: children.length, label: `${complete}/${children.length}` };
+}
+
+/**
+ * Decide what `renderGoalGroup` would do for a given goal at a given depth.
+ * Mirrors the structural choice in render-helpers.ts:
+ *
+ *   if (no children)               -> "leaf"        (no recursion, no "show more")
+ *   else if (depth >= MAX_DEPTH)   -> "show-more"   (link to dashboard, count = descendants)
+ *   else                           -> "recurse"     (render each child via renderGoalGroup with depth+1)
+ */
+function decideRender(goal, depth, goals) {
+  const children = getChildGoalsFrom(goal.id, goals);
+  if (children.length === 0) return { kind: "leaf" };
+  if (depth >= MAX_GOAL_DEPTH) {
+    return { kind: "show-more", count: countDescendantsFrom(goal.id, goals) };
+  }
+  return { kind: "recurse", childIds: children.map(c => c.id) };
+}
+
+/** Build a chain goal-0 -> goal-1 -> goal-2 -> ... -> goal-(depth-1). */
+function buildLinearChain(depth) {
+  const goals = [];
+  for (let i = 0; i < depth; i++) {
+    goals.push({
+      id: `goal-${i}`,
+      title: `G${i}`,
+      state: "in-progress",
+      createdAt: i,
+      parentGoalId: i === 0 ? undefined : `goal-${i - 1}`,
+      archived: false,
+    });
+  }
+  return goals;
+}
+
+window.MAX_GOAL_DEPTH = MAX_GOAL_DEPTH;
+window.getChildGoalsFrom = getChildGoalsFrom;
+window.countDescendantsFrom = countDescendantsFrom;
+window.computeChildCountBadge = computeChildCountBadge;
+window.decideRender = decideRender;
+window.buildLinearChain = buildLinearChain;
+</script>
+</body>
+</html>

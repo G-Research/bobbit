@@ -91,6 +91,27 @@ export interface Goal {
 	reattemptOf?: string;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	// ── Nested-goals fields (mirror PersistedGoal — see docs/design/nested-goals.md §1.1) ──
+	/** Parent goal ID. Undefined for top-level goals. */
+	parentGoalId?: string;
+	/** Top-of-tree goal ID. Equals `id` for top-level goals. Cached for fast queries. */
+	rootGoalId?: string;
+	/** Where this goal's branch merges to: "master" for top-level, "parent" for children. */
+	mergeTarget?: "master" | "parent";
+	/** Per-goal divergence policy (inherited from parent if unset). */
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	/** Max concurrent child subgoals (root-only in v1; default 3, max 8). */
+	maxConcurrentChildren?: number;
+	/** Whether this goal is paused (verification harness skips ticks). */
+	paused?: boolean;
+	/** Acceptance criteria parsed from spec — used by the mutation classifier. */
+	acceptanceCriteria?: string[];
+	/** Number of post-freeze plan mutations applied. Auto-pauses at > 5. */
+	replanCount?: number;
+	/** Inline workflow override snapshot (overrides workflowId resolution for this goal). */
+	inlineWorkflow?: unknown;
+	/** Inline role overrides scoped to this goal-tree (name → role definition). */
+	inlineRoles?: Record<string, unknown>;
 	workflow?: {
 		id: string;
 		name: string;
