@@ -80,12 +80,16 @@ async function loadExtensionWithGoalId(goalId: string | undefined) {
 }
 
 describe("Children tool extension — registration", () => {
-	it("registers all 4 tools when BOBBIT_GOAL_ID is present", async () => {
+	it("registers all Children tools when BOBBIT_GOAL_ID is present", async () => {
 		await loadExtensionWithGoalId(GOAL_ID);
 		const names = registered.map(t => t.name).sort();
+		// `goal_plan_propose` and `goal_plan_status` were added in Phase 3.3;
+		// see tests/tool-extension-plan.test.ts for their dedicated coverage.
 		assert.deepEqual(names, [
 			"goal_merge_child",
 			"goal_pause",
+			"goal_plan_propose",
+			"goal_plan_status",
 			"goal_resume",
 			"goal_spawn_child",
 		]);

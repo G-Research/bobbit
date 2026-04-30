@@ -4,12 +4,12 @@
  * Registers the four "Children" group tools used by team-leads of nested
  * goals to spawn / merge / pause / resume sub-goals:
  *
- *   - goal_spawn_child         POST /api/goals/:id/spawn-child
- *   - goal_merge_child         POST /api/goals/:id/integrate-child/:childGoalId
- *   - goal_pause               POST /api/goals/:id/pause
- *   - goal_resume              POST /api/goals/:id/resume
- *
- * (`goal_plan_propose` and `goal_plan_status` are added in Phase 3.3.)
+ *   - goal_spawn_child         POST  /api/goals/:id/spawn-child
+ *   - goal_plan_propose        PATCH /api/goals/:id/plan
+ *   - goal_plan_status         GET   /api/goals/:id/plan?gateId=…
+ *   - goal_merge_child         POST  /api/goals/:id/integrate-child/:childGoalId
+ *   - goal_pause               POST  /api/goals/:id/pause
+ *   - goal_resume              POST  /api/goals/:id/resume
  *
  * Loaded automatically when the session has `BOBBIT_GOAL_ID` in its env —
  * which the gateway populates for any team-lead session via
@@ -43,17 +43,34 @@ export default function (pi: ExtensionAPI) {
 	// All Children endpoints are POST. We surface the response body verbatim
 	// to the model on both success and failure so the team-lead can explain
 	// 409 mutation classifications to the user.
-	async function postJson(urlPath: string, body?: unknown): Promise<{ ok: true; data: unknown } | { ok: false; data: unknown; status: number }> {
+	type HttpResult = { ok: true; data: unknown } | { ok: false; data: unknown; status: number };
+
+	async function requestJson(method: "GET" | "POST" | "PATCH", urlPath: string, body?: unknown): Promise<HttpResult> {
+		const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+		const hasBody = body !== undefined && method !== "GET";
+		if (hasBody) headers["Content-Type"] = "application/json";
 		const resp = await fetch(`${baseUrl}${urlPath}`, {
-			method: "POST",
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-			body: body !== undefined ? JSON.stringify(body) : undefined,
+			method,
+			headers,
+			body: hasBody ? JSON.stringify(body) : undefined,
 		});
 		const text = await resp.text();
 		let data: unknown;
 		try { data = JSON.parse(text); } catch { data = text; }
 		if (!resp.ok) return { ok: false, data, status: resp.status };
 		return { ok: true, data };
+	}
+
+	async function postJson(urlPath: string, body?: unknown): Promise<HttpResult> {
+		return requestJson("POST", urlPath, body);
+	}
+
+	async function patchJson(urlPath: string, body?: unknown): Promise<HttpResult> {
+		return requestJson("PATCH", urlPath, body);
+	}
+
+	async function getJson(urlPath: string): Promise<HttpResult> {
+		return requestJson("GET", urlPath);
 	}
 
 	function ok(data: unknown) {
@@ -117,6 +134,61 @@ export default function (pi: ExtensionAPI) {
 				return ok(result.data);
 			} catch (e) {
 				return netErr("goal_spawn_child", e);
+			}
+		},
+	});
+
+	// ── goal_plan_propose ────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_plan_propose",
+		label: "Propose Goal Plan",
+		description: [
+			"Replace the verify[] of a named gate (default `execution`) with the proposed list of",
+			"subgoal steps. Pre-freeze (before `goal-plan` is signalled) the plan is freely editable.",
+			"Post-freeze, mutations are classified server-side (fix-up / expansion / restructure /",
+			"criteria-drop) and gated by your goal's divergence policy. `criteria-drop` is rejected",
+			"unconditionally. Phase 5 enforces the classifier; replanCount > 5 auto-pauses the goal.",
+		].join(" "),
+		promptSnippet: "Replace a gate's verify[] with the proposed plan steps.",
+		parameters: Type.Object({
+			planSteps: Type.Array(Type.Any(), { description: "Replacement VerifyStep[]. `subgoal` steps carry { phase, subgoal: { title, spec, workflowId?, suggestedRole?, planId } }." }),
+			gateId: Type.Optional(Type.String({ description: "Workflow gate id. Defaults to 'execution'." })),
+			replanReason: Type.Optional(Type.String({ description: "Required once `goal-plan` has been signalled." })),
+			expectedReplanCount: Type.Optional(Type.Number({ description: "Optimistic-concurrency guard; pass the value from goal_plan_status." })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const result = await patchJson(`/api/goals/${goalId}/plan`, params);
+				if (!result.ok) return err("goal_plan_propose", result.status, result.data);
+				return ok(result.data);
+			} catch (e) {
+				return netErr("goal_plan_propose", e);
+			}
+		},
+	});
+
+	// ── goal_plan_status ─────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_plan_status",
+		label: "Goal Plan Status",
+		description: [
+			"Return the current plan (verify[] of the named gate) plus per-step live child-goal",
+			"state. Cheap to call; use this before proposing a mutation to read `replanCount` and",
+			"pass it back as `expectedReplanCount` for optimistic concurrency.",
+		].join(" "),
+		promptSnippet: "Return the current plan and live child states.",
+		parameters: Type.Object({
+			gateId: Type.Optional(Type.String({ description: "Workflow gate id. Defaults to 'execution'." })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const gate = params?.gateId ?? "execution";
+				const qs = `?gateId=${encodeURIComponent(gate)}`;
+				const result = await getJson(`/api/goals/${goalId}/plan${qs}`);
+				if (!result.ok) return err("goal_plan_status", result.status, result.data);
+				return ok(result.data);
+			} catch (e) {
+				return netErr("goal_plan_status", e);
 			}
 		},
 	});
