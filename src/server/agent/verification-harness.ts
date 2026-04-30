@@ -175,6 +175,67 @@ function buildJsonRetryPrompt(quotedError: string): string {
 	);
 }
 
+/**
+ * Compute the nested-goal baseline template variables (`mergeBase`,
+ * `rootGoalBranch`) for a goal, used by the verification harness to populate
+ * `builtinVars` before running a verification round.
+ *
+ * Defined at module scope so unit tests can exercise it without spinning up
+ * a full harness. See docs/design/nested-goals.md §3.2.
+ *
+ * - Top-level goal (no `parentGoalId`): `mergeBase = origin/<primary>`,
+ *   `rootGoalBranch = goal.branch`.
+ * - Child goal: `mergeBase = origin/<parent.branch>`,
+ *   `rootGoalBranch = origin/<root.branch>` (falling back through the
+ *   parent chain if `rootGoalId` is missing or stale).
+ * - Legacy goal lacking `parentGoalId`/`rootGoalId`: defaults applied as if
+ *   top-level.
+ * - Missing parent or root record: lookups fall back to the top-level
+ *   defaults so verification is never blocked by a stale id.
+ *
+ * The function is pure modulo the supplied `lookupGoal` callback.
+ */
+export function computeNestedBaselineVars(
+	goal: { branch?: string; parentGoalId?: string; rootGoalId?: string } | undefined,
+	primaryBranch: string,
+	lookupGoal: (id: string) => { branch?: string } | undefined,
+	fallbackBranch?: string,
+): { mergeBase: string; rootGoalBranch: string } {
+	const master = primaryBranch || "master";
+	const topLevelMergeBase = `origin/${master}`;
+	const goalBranch = goal?.branch || fallbackBranch || "HEAD";
+
+	if (!goal || !goal.parentGoalId) {
+		return { mergeBase: topLevelMergeBase, rootGoalBranch: goalBranch };
+	}
+
+	const parent = lookupGoal(goal.parentGoalId);
+	const mergeBase = parent?.branch ? `origin/${parent.branch}` : topLevelMergeBase;
+
+	let rootBranch: string | undefined;
+	if (goal.rootGoalId && goal.rootGoalId !== goal.parentGoalId) {
+		rootBranch = lookupGoal(goal.rootGoalId)?.branch;
+	}
+	if (!rootBranch) {
+		// Walk up the parent chain manually — covers cases where rootGoalId is
+		// missing (legacy) or points at a record we couldn't resolve.
+		const seen = new Set<string>();
+		let cursor: { branch?: string; parentGoalId?: string } | undefined =
+			lookupGoal(goal.parentGoalId);
+		while (cursor && cursor.parentGoalId && !seen.has(cursor.parentGoalId)) {
+			seen.add(cursor.parentGoalId);
+			const next = lookupGoal(cursor.parentGoalId);
+			if (!next) break;
+			cursor = next;
+		}
+		rootBranch = cursor?.branch;
+	}
+	return {
+		mergeBase,
+		rootGoalBranch: rootBranch || goalBranch,
+	};
+}
+
 /** In-flight verification state for REST bootstrapping */
 export interface ActiveVerification {
 	goalId: string;
@@ -216,6 +277,11 @@ export async function buildReviewPrompt(
 	const master = builtinVars.master || "master";
 	const branch = builtinVars.branch || "HEAD";
 	const commit = builtinVars.commit || "HEAD";
+	// Diff baseline for nested goals (design §3.2). For top-level goals or
+	// older goals lacking nesting fields this defaults to `origin/<primary>`.
+	// For child goals it points at `origin/<parent.branch>` so reviewers see
+	// only what the child added on top of its parent.
+	const mergeBase = builtinVars.mergeBase || `origin/${master}`;
 
 	// Working-directory / review-context block, branches on gate kind.
 	const reviewContext = isDesignGate
@@ -232,9 +298,9 @@ export async function buildReviewPrompt(
 			"`git pull`** — the directory is already in the right state.",
 			"",
 			"To see what changed:",
-			`- \`git diff --stat origin/${master}...HEAD -- . ':!package-lock.json'\` — summary`,
-			`- \`git diff origin/${master}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
-			`- \`git log --oneline origin/${master}..HEAD\` — commits on this branch`,
+			`- \`git diff --stat ${mergeBase}...HEAD -- . ':!package-lock.json'\` — summary`,
+			`- \`git diff ${mergeBase}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
+			`- \`git log --oneline ${mergeBase}..HEAD\` — commits on this branch`,
 			"- Read files directly with `read` — they are already at the correct version",
 		].join("\n");
 
@@ -290,14 +356,14 @@ export async function buildReviewPrompt(
 			const { execFile: execFileCb } = await import("node:child_process");
 			const { promisify } = await import("node:util");
 			const execFileAsync = promisify(execFileCb);
-			const { stdout } = await execFileAsync("git", ["rev-parse", `origin/${master}`], { cwd, timeout: 5_000 });
+			const { stdout } = await execFileAsync("git", ["rev-parse", mergeBase], { cwd, timeout: 5_000 });
 			baselineSha = stdout.toString().trim().slice(0, 12);
 		} catch {
 			baselineSha = null;
 		}
 		baselineLine = baselineSha
-			? `- Baseline: diffed against origin/${master}@${baselineSha}`
-			: `- Baseline: origin/${master} (sha unresolved)`;
+			? `- Baseline: diffed against ${mergeBase}@${baselineSha}`
+			: `- Baseline: ${mergeBase} (sha unresolved)`;
 	}
 
 	const contextLines: string[] = [];
@@ -328,10 +394,10 @@ export async function buildReviewPrompt(
 			"Other reviewers may be reading from this directory concurrently. Mutating it causes stale reads.",
 			"",
 			"To see what changed (read-only, safe for concurrent use):",
-			`- \`git diff --stat origin/${master}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
-			`- \`git diff origin/${master}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
+			`- \`git diff --stat ${mergeBase}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
+			`- \`git diff ${mergeBase}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
 			`- For large diffs, review individual files with \`read\` instead of loading the full diff into context`,
-			`- \`git log --oneline origin/${master}..HEAD\` — commits on this branch`,
+			`- \`git log --oneline ${mergeBase}..HEAD\` — commits on this branch`,
 			"- Use `read` to view files directly — they are already at the correct version",
 			"",
 			"## Signal Context",
@@ -542,12 +608,25 @@ export class VerificationHarness {
 
 		const cwd = goal.worktreePath || goal.cwd;
 		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
+		// Nested-goals baseline vars (design §3.2). For top-level (or older,
+		// non-nested) goals: mergeBase = origin/<primary>, rootGoalBranch =
+		// goal.branch. For child goals: mergeBase = origin/<parent.branch>,
+		// rootGoalBranch = root.branch (so reviewer prompts and verify-step
+		// commands see what the child added on top of the parent's branch).
+		const goalStoreForBaseline = this.projectContextManager?.getContextForGoal(goalId)?.goalStore;
+		const { mergeBase, rootGoalBranch } = computeNestedBaselineVars(
+			goal,
+			primary,
+			(id) => goalStoreForBaseline?.get(id),
+		);
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
 			master: primary,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
+			mergeBase,
+			rootGoalBranch,
 		};
 		const rerunGate = goal.workflow?.gates?.find((g: any) => g.id === gateId) as WorkflowGate | undefined;
 
@@ -1082,12 +1161,24 @@ export class VerificationHarness {
 		this._persistActive();
 
 		try {
+			// Nested-goals baseline vars (design §3.2). See _gatherRerunContext
+			// for the equivalent block on the rerun path.
+			const goalForBaseline = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+			const goalStoreForBaseline = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore;
+			const { mergeBase, rootGoalBranch } = computeNestedBaselineVars(
+				goalForBaseline,
+				primaryBranch || "master",
+				(id) => goalStoreForBaseline?.get(id),
+				goalBranch,
+			);
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
 				master: primaryBranch || "master",
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
+				mergeBase,
+				rootGoalBranch,
 			};
 
 			// Project config — resolved via {{project.key}}
