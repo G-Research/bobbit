@@ -3,6 +3,7 @@ import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
+import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
@@ -1155,19 +1156,20 @@ export class RemoteAgent {
 			}
 
 			case "gate_verification_started":
-				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				dispatchVerificationEvent(msg);
 				refreshGateStatusForGoal((msg as any).goalId);
 				break;
+			case "gate_verification_phase_started":
 			case "gate_verification_step_complete":
 			case "gate_verification_step_started":
 			case "gate_verification_step_output":
-				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				dispatchVerificationEvent(msg);
 				break;
 
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
-				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				dispatchVerificationEvent(msg);
 				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}

@@ -12,6 +12,7 @@ import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import "../../components/LiveTimer.js";
 import "../../components/VerificationOutputModal.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
+import { getVerificationEventKey } from "../../../app/verification-event-bus.js";
 import {
 	type DelegateCardEntry,
 	statusColor,
@@ -74,10 +75,15 @@ export class GateVerificationLive extends LitElement {
 	/** Accumulated streamed output per step index */
 	private _stepOutputs = new Map<number, string>();
 
-	private _boundOnEvent = this._onEvent.bind(this);
 	private _reconcileTimer?: ReturnType<typeof setTimeout>;
 	/** Throttled re-render after streaming output events (high-frequency). */
 	private _outputFlushTimer?: ReturnType<typeof setTimeout>;
+	private _abortCtrl?: AbortController;
+	/** Per-instance dedupe window — collapses identical events delivered via
+	 * the document-level fan-out (one per session WS in the goal). */
+	private _seenEvents: Set<string> = new Set();
+	private _seenEventsOrder: string[] = [];
+	private static readonly _SEEN_CAP = 4096;
 
 	override createRenderRoot() { return this; }
 
@@ -96,7 +102,8 @@ export class GateVerificationLive extends LitElement {
 
 	override connectedCallback() {
 		super.connectedCallback();
-		document.addEventListener("gate-verification-event", this._boundOnEvent);
+		this._abortCtrl = new AbortController();
+		document.addEventListener("gate-verification-event", (e) => this._onEvent(e), { signal: this._abortCtrl.signal });
 		this._reconcileTimer = setTimeout(() => {
 			if (this.overallStatus === "running" || this.overallStatus === "idle") {
 				this._fetchAndReconcile();
@@ -104,9 +111,24 @@ export class GateVerificationLive extends LitElement {
 		}, 300);
 	}
 
+	private _markEventSeen(key: string): boolean {
+		if (!key) return true;
+		if (this._seenEvents.has(key)) return false;
+		this._seenEvents.add(key);
+		this._seenEventsOrder.push(key);
+		if (this._seenEventsOrder.length > GateVerificationLive._SEEN_CAP) {
+			const evict = this._seenEventsOrder.shift();
+			if (evict !== undefined) this._seenEvents.delete(evict);
+		}
+		return true;
+	}
+
 	override disconnectedCallback() {
 		super.disconnectedCallback();
-		document.removeEventListener("gate-verification-event", this._boundOnEvent);
+		this._abortCtrl?.abort();
+		this._abortCtrl = undefined;
+		this._seenEvents.clear();
+		this._seenEventsOrder.length = 0;
 		if (this._reconcileTimer) {
 			clearTimeout(this._reconcileTimer);
 			this._reconcileTimer = undefined;
@@ -189,6 +211,11 @@ export class GateVerificationLive extends LitElement {
 		if (detail.gateId !== this.gateId || detail.signalId !== this.signalId) return;
 		// Also check goalId if available
 		if (this.goalId && detail.goalId && detail.goalId !== this.goalId) return;
+
+		// Per-instance dedupe — same payload may be redispatched once per
+		// session WS in the goal team (see verification-event-bus.ts).
+		const dedupeKey = getVerificationEventKey(detail);
+		if (!this._markEventSeen(dedupeKey)) return;
 
 		switch (detail.type) {
 			case "gate_verification_started": {
