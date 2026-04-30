@@ -36,6 +36,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { WorkflowStore } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -218,12 +219,15 @@ export interface GitStatusResult {
 }
 
 // ── Git status cache + single-flight ──
-// Short TTL (750ms) to coalesce the storm of event-driven refreshes (reconnect,
-// agent-idle, session-switch, etc.) into one underlying git invocation. Errors
-// are NOT cached (so a transient failure doesn't stick). Key includes the
-// untracked flag so dropdown (full) and pill-strip (summary) responses never
-// cross-contaminate each other.
-const GIT_STATUS_TTL_MS = 750;
+// Short TTL (2000ms) to coalesce the storm of event-driven refreshes (reconnect,
+// agent-idle, session-switch, goal-dashboard fan-out across N sessions sharing
+// a cwd) into one underlying git invocation. Native parallel execFile typically
+// returns in 50-150 ms on Windows / 10-30 ms on Linux, so 2 s of staleness is
+// imperceptible to the widget (which polls every 10 s) and high-value for
+// coalescing. Errors are NOT cached (so a transient failure doesn't stick).
+// Key includes the untracked flag so dropdown (full) and pill-strip (summary)
+// responses never cross-contaminate each other.
+const GIT_STATUS_TTL_MS = 2000;
 interface GitStatusCacheEntry {
 	promise: Promise<GitStatusResult | null>;
 	resolvedAt: number; // 0 while in flight
@@ -313,167 +317,19 @@ async function batchGitStatus(
 	return promise;
 }
 
-/** Batched git status — runs all metadata + porcelain in a single shell
- *  invocation (spawning Git Bash on Windows is ~500-1000ms on its own, so
- *  we keep this to a single spawn rather than two phases). Timeout is 15s
- *  total; porcelain accepts `-uno` (default, fast) or `-uall` when opts.untracked.
- *  Returns null if not a git repository. `partial` is reserved for a future
- *  Phase A/B split but is currently always `false` on success. */
+/** Batched git status — host path uses native parallel execFile (no shell);
+ *  container path keeps the legacy `docker exec sh -c <batch>` round-trip.
+ *  Implementation lives in `./skills/git-status-native.ts`. Returns null if
+ *  not a git repository. `partial` is reserved for a future degraded-mode
+ *  flag and is currently always `false` on success. */
 async function runBatchGitStatus(
 	cwd: string,
 	containerId?: string,
 	opts?: { untracked?: boolean },
 ): Promise<GitStatusResult | null> {
 	_runBatchGitStatusCount++;
-
 	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
-
-	const untracked = opts?.untracked === true;
-	const porcelainLine = untracked
-		? 'git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null'
-		: 'git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null';
-
-	const batchScript = [
-		'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__',
-		'printf "\\0"',
-		'git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo __FAIL__',
-		'printf "\\0"',
-		'git rev-parse --verify refs/heads/master 2>/dev/null && echo yes || echo no',
-		'printf "\\0"',
-		'git rev-parse --verify refs/heads/main 2>/dev/null && echo yes || echo no',
-		'printf "\\0"',
-		porcelainLine,
-		'printf "\\0"',
-		'BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)',
-		'git rev-parse --abbrev-ref "$BRANCH@{u}" 2>/dev/null || echo __FAIL__',
-		'printf "\\0"',
-		'git rev-list --count @{u}..HEAD 2>/dev/null || echo 0',
-		'printf "\\0"',
-		'git rev-list --count HEAD..@{u} 2>/dev/null || echo 0',
-		'printf "\\0"',
-		'PRIMARY=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed "s|refs/remotes/origin/||")',
-		'if [ -z "$PRIMARY" ]; then PRIMARY=master; fi',
-		'if git rev-parse --verify "origin/$PRIMARY" >/dev/null 2>&1; then PREF="origin/$PRIMARY"; else PREF="$PRIMARY"; fi',
-		'git rev-list --count "$PREF..HEAD" 2>/dev/null || echo 0',
-		'printf "\\0"',
-		'git rev-list --count "HEAD..$PREF" 2>/dev/null || echo 0',
-	].join('\n');
-
-	const TIMEOUT_MS = 15000;
-	const runOnce = async (): Promise<string> => {
-		if (containerId) {
-			const { stdout } = await execFileAsync("docker", [
-				"exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript,
-			], { encoding: "utf-8", timeout: TIMEOUT_MS, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-			return stdout;
-		}
-		const { stdout } = await execAsync(batchScript, { cwd, encoding: "utf-8", timeout: TIMEOUT_MS, shell: process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh" });
-		return stdout;
-	};
-	// On Windows (and under CPU load anywhere) spawning Git Bash + running the
-	// batch script can legitimately exceed the timeout or fail with transient
-	// spawn errors (EAGAIN, ENOBUFS, EBUSY, etc). Retry broadly — transient
-	// contention is a real-world condition, not a flake. Only genuine git
-	// errors (non-empty stderr, exit code from git itself) are thrown on the
-	// final attempt.
-	let rawOutput: string | undefined;
-	let lastErr: any;
-	const backoffs = [0, 250, 500, 1000, 2000, 4000];
-	const isTransient = (err: any): boolean => {
-		if (!err) return false;
-		if (err?.killed === true) return true;
-		if (err?.signal === "SIGTERM" || err?.signal === "SIGKILL") return true;
-		const code = err?.code;
-		if (code === "ETIMEDOUT" || code === "EAGAIN" || code === "ENOBUFS" ||
-			code === "EBUSY" || code === "EMFILE" || code === "ENFILE") return true;
-		// Windows: spawn can fail with ENOENT temporarily when /dev/null-style
-		// redirection in the batch script is interrupted under load.
-		if (code === "ENOENT" && typeof err?.path === "string") return true;
-		return false;
-	};
-	for (const delay of backoffs) {
-		if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-		try {
-			rawOutput = await runOnce();
-			lastErr = undefined;
-			break;
-		} catch (err: any) {
-			lastErr = err;
-			if (!isTransient(err)) throw err;
-		}
-	}
-	if (rawOutput === undefined) throw lastErr;
-
-	const sections = rawOutput.split('\0').map(s => s.replace(/\s+$/, ''));
-
-	const branchRaw = sections[0] || '';
-	if (branchRaw === '__FAIL__' || !branchRaw) return null;
-	const branch = branchRaw;
-
-	let primaryBranch = 'master';
-	const remoteHeadRaw = sections[1] || '';
-	if (remoteHeadRaw !== '__FAIL__' && remoteHeadRaw) {
-		primaryBranch = remoteHeadRaw.replace('refs/remotes/origin/', '');
-	} else {
-		const masterExists = (sections[2] || '').startsWith('yes');
-		const mainExists = (sections[3] || '').startsWith('yes');
-		if (!masterExists && mainExists) primaryBranch = 'main';
-	}
-
-	const isOnPrimary = branch === primaryBranch;
-	const statusRaw = sections[4] || '';
-
-	const upstreamRaw = sections[5] || '';
-	const hasUpstream = upstreamRaw !== '__FAIL__' && upstreamRaw !== '';
-	let ahead = 0, behind = 0;
-	if (hasUpstream) {
-		ahead = parseInt(sections[6] || '0', 10) || 0;
-		behind = parseInt(sections[7] || '0', 10) || 0;
-	}
-	let aheadOfPrimary = 0, behindPrimary = 0, mergedIntoPrimary = false;
-	if (!isOnPrimary) {
-		aheadOfPrimary = parseInt(sections[8] || '0', 10) || 0;
-		behindPrimary = parseInt(sections[9] || '0', 10) || 0;
-		mergedIntoPrimary = aheadOfPrimary === 0;
-	}
-	const partial = false;
-
-	const statusLines = statusRaw ? statusRaw.split("\n") : [];
-	const status = statusLines.map(line => {
-		const l = line.endsWith("\r") ? line.slice(0, -1) : line;
-		return { file: l.substring(3), status: l.substring(0, 2).trim() };
-	});
-
-	// With -uno (untracked=false) `clean` reflects *tracked* changes only.
-	// Clients aware of the flag should treat `untrackedIncluded=false` as
-	// "clean does not include untracked files".
-	const clean = statusLines.length === 0;
-	void partial;
-	let summary = 'clean';
-	if (!clean) {
-		const counts: Record<string, number> = {};
-		for (const line of statusLines) {
-			const code = line.substring(0, 2).trim();
-			let key: string;
-			if (code.includes('?')) key = '?';
-			else if (code.includes('M')) key = 'M';
-			else if (code.includes('A')) key = 'A';
-			else if (code.includes('D')) key = 'D';
-			else if (code.includes('R')) key = 'R';
-			else if (code.includes('U')) key = 'U';
-			else key = code;
-			counts[key] = (counts[key] || 0) + 1;
-		}
-		summary = Object.entries(counts).map(([k, v]) => `${v}${k}`).join(' ');
-	}
-
-	return {
-		branch, primaryBranch, isOnPrimary, status, hasUpstream,
-		ahead, behind, aheadOfPrimary, behindPrimary, mergedIntoPrimary,
-		clean, summary, unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
-		partial,
-		untrackedIncluded: untracked,
-	};
+	return runBatchGitStatusNative(cwd, { ...opts, containerId });
 }
 
 // ── Git diff helper (shared between session and goal endpoints) ──
@@ -5776,25 +5632,16 @@ async function handleApiRoute(
 			invalidateGitStatusCache(cwd, cid);
 		}
 
-		// Belt-and-braces: even with spawn-level retry inside runBatchGitStatus,
-		// rare transient errors (e.g. fs contention, git index lock) can still
-		// surface. Retry the whole cached call once after 250ms before returning
-		// 500 — errors are not cached so a second call will re-run fresh.
+		// Single attempt — native parallel execFile is fast (50–150 ms p50 on
+		// Windows) and errors are not cached, so the client retry loop in
+		// `git-status-refresh.ts` (4 attempts × 0/500/2000/5000 ms backoff) is
+		// the resilience layer for transient failures.
 		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
-		let handlerErr: any;
-		for (let attempt = 0; attempt < 2; attempt++) {
-			try {
-				result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
-				handlerErr = undefined;
-				break;
-			} catch (err: any) {
-				handlerErr = err;
-				if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
-			}
-		}
-		if (handlerErr) {
-			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", handlerErr?.code, "signal=", handlerErr?.signal, "killed=", handlerErr?.killed, "stderr=", handlerErr?.stderr, "message=", handlerErr?.message);
-			json({ error: handlerErr.stderr?.trim() || handlerErr.message || "git status failed" }, 500);
+		try {
+			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
+		} catch (err: any) {
+			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
+			json({ error: err?.stderr?.trim() || err?.message || "git status failed" }, 500);
 			return;
 		}
 		if (!result) { json({ error: "Not a git repository" }, 400); return; }
