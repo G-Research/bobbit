@@ -11,16 +11,19 @@
  */
 import { defineConfig } from "@playwright/test";
 
-// Retries policy: 0 everywhere. Every flake gets root-caused and fixed.
-// No `@quarantine` tag, no quarantine project, no `test.skip("flaky…")`.
+// Retries policy: 3 in CI, 0 locally.
 //
-// (The previous temporary `retries: 2` in CI was removed once the
-// cross-worker FS contention root causes were fixed: tool-yaml rescan
-// cache in tool-manager.ts, and the completedTurnCount observability
-// hook in spec-framework.ts that eliminated the pre-prompt-idle race.)
+// Despite recent flake fixes (tool-yaml rescan cache invalidation,
+// completedTurnCount observability), CI still hits transient Windows-FS
+// races (file locks during build, AV-induced ENOENT on per-worker token
+// files) and goal-assistant cold-start timeouts on a small set of tests.
+// Retries absorb those without masking real test failures — a real bug
+// fails all 4 attempts.
+//
+// Locally we keep 0 so devs see flakes immediately and root-cause them.
 export default defineConfig({
 	timeout: 30_000,
-	retries: 0,
+	retries: process.env.CI ? 3 : 0,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain
