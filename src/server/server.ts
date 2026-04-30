@@ -2023,6 +2023,22 @@ async function handleApiRoute(
 						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
 					}
 				}
+				// Seed default workflows when none were provided. Workflows are
+				// project-scoped only (no system layer), so without this seed a
+				// freshly-created project would have zero workflows and goal
+				// creation against it would fail. Skip if caller already provided
+				// workflows or the project already has any (idempotent on upsert).
+				if (Object.keys(newCtx.projectConfigStore.getWorkflows() ?? {}).length === 0) {
+					try {
+						const { buildDefaultWorkflows } = await import("./state-migration/seed-default-workflows.js");
+						const comps = newCtx.projectConfigStore.getComponents();
+						const componentName = comps[0]?.name || project.name;
+						const defaults = buildDefaultWorkflows(componentName);
+						newCtx.projectConfigStore.setWorkflows(defaults as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+					} catch (err) {
+						console.warn("[projects] Failed to seed default workflows:", err);
+					}
+				}
 			}
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
