@@ -1,0 +1,25 @@
+name: goal_pause
+description: |-
+  Suspend verification-harness ticks for this goal-tree. Required by `strict` divergence policy before applying restructure mutations. Use sparingly — pausing halts all running child verifications.
+summary: "Suspend verification-harness ticks for this goal-tree. Required by `strict` policy before restructure mutations."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  POSTs to `POST /api/goals/:id/pause`. Flips `goal.paused = true` and broadcasts a `goal_paused` WS event. While paused, no `subgoal` verify steps spawn or progress; in-flight child verifications complete but new ticks are suppressed.
+detail_docs: |-
+  ## Purpose
+
+  Halt verification-harness ticks for the goal-tree rooted at this goal. Used as a safety mechanism before applying a `restructure` plan mutation under `strict` divergence policy (the classifier rejects 409 unless the goal is paused first).
+
+  ## Parameters
+
+  None.
+
+  ## When to use
+
+  - Before issuing a `goal_plan_propose` that the classifier will rate `restructure` under your goal's policy.
+  - To freeze the tree while a human investigates a stuck child.
+
+  Pair with `goal_resume` once the mutation is applied or the investigation ends.

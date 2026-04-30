@@ -1,0 +1,48 @@
+name: goal_spawn_child
+description: |-
+  Spawn a child goal under the current goal. The child branches off your branch HEAD and merges back when its `ready-to-merge` passes — you keep ownership of integration. Subject to your goal's divergence policy when the `goal-plan` gate has already been signalled (see the Mid-Goal Decomposition section of your system prompt).
+
+  **Decomposition decision rule — when to use a subgoal vs `team_spawn` vs `task_create`:**
+
+  Use a subgoal (this tool, or a `subgoal` verify step) when ALL of the following hold:
+    1. The work has its own design intent (a meaningful unit a reviewer would want to see in isolation).
+    2. It is independently reviewable (its own design-doc / implementation / review cycle makes sense).
+    3. It merges meaningfully on its own (the parent branch is sensible with this subgoal merged but its siblings still pending).
+
+  Use `team_spawn` when the work is within one cohesive review cycle (e.g. a coder + a tester collaborating on the same change set).
+
+  Use `task_create` when the work is a single tracked deliverable that doesn't need its own agent.
+
+  Default: keep the decomposition you would have used before nested goals existed. Only reach for subgoals when the parent goal is genuinely a coordination layer over independently shippable units. Trust your judgment — don't push toward subgoals in close-call situations.
+summary: "Spawn a child goal that branches off this goal's HEAD and merges back when its `ready-to-merge` passes."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  POSTs to `POST /api/goals/:parentId/spawn-child`. Response 201 `{ childGoalId, planId, alreadySpawned: false }` or 200 `{ ..., alreadySpawned: true }`. Pass an explicit `planId` for idempotency. 409 carries a structured mutation classification when the `goal-plan` gate is already frozen — surface the body verbatim to the user.
+detail_docs: |-
+  ## Purpose
+
+  Create a nested child goal under the current goal. The child gets its own workflow + verification cycle and merges back into the parent's branch (no PR, no remote-master push) when its `ready-to-merge` gate passes.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `title` | string | **Yes** | Short title for the child goal (max 200 chars). |
+  | `spec` | string | **Yes** | Markdown spec. Restate every acceptance criterion you intend the child to cover **verbatim** — the server's adherence check uses substring matching, so paraphrased criteria fail. A `## Covers` heading listing the criteria is a safe convention. |
+  | `workflowId` | string | No | Workflow id resolved through the cascade (inline → ancestor inline → project → server → builtin). Defaults to `feature`. |
+  | `inlineWorkflow` | object | No | Inline workflow YAML object — overrides `workflowId` and is snapshotted onto the child. |
+  | `suggestedRole` | string | No | Hint for the team-lead seed role. |
+  | `enabledOptionalSteps` | string[] | No | Workflow optional-step ids to enable. |
+  | `planId` | string | No | Stable id for idempotency. Server generates one if omitted. Re-spawning with the same `planId` returns the existing child (200 + `alreadySpawned: true`). |
+
+  ## When to use
+
+  See the decomposition decision rule in the description. In short: when the work deserves its own design / review / merge cycle. Otherwise prefer `team_spawn` (cohesive review cycle) or `task_create` (single tracked deliverable).
+
+  ## Errors
+
+  - **409 Conflict** — mutation classified as `expansion` / `restructure` / `criteria-drop` under your goal's divergence policy. Body includes `classification`, `droppedCriteria`, `addedNodes`, `removedNodes`, `summary`. `criteria-drop` is unconditional — do not retry. For `expansion` / `restructure`, the user is prompted via the dashboard mutation banner; surface the body to the user and wait.
+  - **400 Bad Request** — malformed `inlineWorkflow` YAML or invalid `workflowId`.

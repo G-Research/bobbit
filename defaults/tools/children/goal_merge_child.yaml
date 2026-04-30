@@ -1,0 +1,28 @@
+name: goal_merge_child
+description: |-
+  Locally merge a completed child goal's branch into the current goal's branch. Called automatically by the harness when a `subgoal` verify step fires — you generally don't call this by hand. Fails on conflict; never auto-resolve. On conflict, escalate to the user via `ask_user_choices`.
+summary: "Locally merge a completed child goal's branch into this goal's branch. Fails on conflict — never auto-resolves."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  POSTs to `POST /api/goals/:parentId/integrate-child/:childGoalId`. The merge runs in the parent goal's worktree against the child's branch HEAD. The parent branch is pushed to origin after a clean merge (gated by `shouldSkipRemotePush()`); the child's branch is **not** PR-pushed to master — children never raise PRs. Returns the merge result (clean / conflict / already-merged).
+detail_docs: |-
+  ## Purpose
+
+  Integrate a completed child's work into the parent's branch by performing a local `git merge` from the child's branch HEAD. Used when a `subgoal` verify step's child has passed its `ready-to-merge` gate.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `childGoalId` | string | **Yes** | The id of the child goal whose branch should be merged into the current goal's branch. |
+
+  ## Push semantics
+
+  "No remote PR push" means we do not push the child's branch to a PR-raising remote ref. The **parent's branch IS pushed** to origin after a clean merge so CI / replication / sibling subgoal verifications see the post-merge tip. Push gating is via `shouldSkipRemotePush()` — `BOBBIT_TEST_NO_PUSH=1` disables all remote pushes for tests.
+
+  ## Errors
+
+  Conflicts are surfaced verbatim from the merge — **never auto-resolve**. The team-lead must escalate via `ask_user_choices` so the user can decide whether to spawn a `bug-fix` subgoal, abandon the merge, or override.

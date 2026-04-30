@@ -1,0 +1,18 @@
+name: goal_resume
+description: |-
+  Resume verification-harness ticks for this goal-tree. Pair with `goal_pause`.
+summary: "Resume verification-harness ticks for this goal-tree."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  POSTs to `POST /api/goals/:id/resume`. Flips `goal.paused = false` and broadcasts a `goal_resumed` WS event. The harness picks up where it left off on the next tick.
+detail_docs: |-
+  ## Purpose
+
+  Re-enable verification-harness ticks after a `goal_pause`.
+
+  ## Parameters
+
+  None.
