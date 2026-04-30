@@ -116,6 +116,20 @@ test.describe("Mission UI (mocked backend)", () => {
 		await expect(page.getByTestId("mission-title")).toHaveText("Build unified-memory system");
 		await expect(page.getByTestId("mission-state-pill")).toContainText(/planning/i);
 		await expect(page.getByTestId("mission-dag-svg")).toBeVisible();
+		// Regression guard for the lit-attribute-binding bug: SVG presentation
+		// attributes (fill/stroke/...) must be applied as styles or real DOM
+		// attributes — otherwise lit silently no-ops on them and rects render
+		// 0×0. Verify the first node rect has non-zero box and a non-default fill.
+		const rectBox = await page.locator("[data-testid='mission-dag-svg'] rect").first().boundingBox();
+		expect(rectBox?.width ?? 0).toBeGreaterThan(0);
+		expect(rectBox?.height ?? 0).toBeGreaterThan(0);
+		const rectFill = await page.locator("[data-testid='mission-dag-svg'] rect").first().evaluate(
+			(el) => getComputedStyle(el).fill,
+		);
+		// rgb(0, 0, 0) is the lit-no-op signature — anything else means the
+		// fill from plannedGoalColor() actually applied.
+		expect(rectFill).not.toBe("rgb(0, 0, 0)");
+
 		await expect(page.getByTestId("mission-gates-list")).toBeVisible();
 		// 3 gates present
 		await expect(page.getByTestId("mission-gates-list").locator("li")).toHaveCount(3);
@@ -124,6 +138,94 @@ test.describe("Mission UI (mocked backend)", () => {
 		await page.getByTestId("mission-tab-plan").click();
 		await expect(page.getByTestId("mission-plan-tab")).toBeVisible();
 		await expect(page.getByTestId("planned-goal-card")).toHaveCount(3);
+	});
+
+	test("plan section shows empty placeholder when plan is null", async ({ page }) => {
+		const planless = { ...FAKE_MISSION, plan: undefined };
+		const handler = async (
+			route: import("@playwright/test").Route,
+			request: import("@playwright/test").Request,
+		) => {
+			const url = new URL(request.url());
+			const path = url.pathname;
+			const method = request.method();
+			if (path === "/api/missions" && method === "GET") {
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ missions: [planless] }) });
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}` && method === "GET") {
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ mission: planless, plan: null, children: [], gates: [] }) });
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}/gates` && method === "GET") {
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ gates: [] }) });
+				return;
+			}
+			await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+		};
+		await page.route("**/api/missions", handler);
+		await page.route("**/api/missions?**", handler);
+		await page.route("**/api/missions/**", handler);
+
+		await openApp(page);
+		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
+		// The Plan section should show the empty placeholder, not the SVG.
+		await expect(page.getByTestId("mission-dag-empty").first()).toBeVisible();
+		await expect(page.getByTestId("mission-dag-svg")).toHaveCount(0);
+	});
+
+	test("child goal cards show planned-goal title (not the planId)", async ({ page }) => {
+		const missionWithChildren = { ...FAKE_MISSION };
+		const handler = async (
+			route: import("@playwright/test").Route,
+			request: import("@playwright/test").Request,
+		) => {
+			const url = new URL(request.url());
+			const path = url.pathname;
+			const method = request.method();
+			if (path === "/api/missions" && method === "GET") {
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ missions: [missionWithChildren] }) });
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}` && method === "GET") {
+				await route.fulfill({
+					status: 200, contentType: "application/json",
+					body: JSON.stringify({
+						mission: missionWithChildren,
+						plan: missionWithChildren.plan,
+						// Mirror the server payload: children carry `title` from the
+						// plan node even when no Goal has been spawned yet.
+						children: [
+							{ planId: "01HZ0", title: "Schema migration", goal: null, state: "pending" },
+							{ planId: "01HZ1", title: "API endpoints", goal: null, state: "pending" },
+							{ planId: "01HZ2", title: "UI integration", goal: null, state: "pending" },
+						],
+						gates: [],
+					}),
+				});
+				return;
+			}
+			if (path === `/api/missions/${MISSION_ID}/gates` && method === "GET") {
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ gates: [] }) });
+				return;
+			}
+			await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+		};
+		await page.route("**/api/missions", handler);
+		await page.route("**/api/missions?**", handler);
+		await page.route("**/api/missions/**", handler);
+
+		await openApp(page);
+		await navigateToHash(page, `#/mission/${MISSION_ID}`);
+		await expect(page.getByTestId("mission-dashboard")).toBeVisible({ timeout: 10_000 });
+
+		const cards = page.getByTestId("mission-child-card");
+		await expect(cards).toHaveCount(3);
+		// First card must show the human-readable title, NOT the ULID planId.
+		const firstTitle = await cards.first().getByTestId("mission-child-title").textContent();
+		expect(firstTitle?.trim()).toBe("Schema migration");
+		expect(firstTitle?.trim()).not.toBe("01HZ0");
 	});
 
 	test("dashboard persists after reload (direct hash navigation)", async ({ page }) => {
@@ -497,6 +599,66 @@ test.describe("Mission UI (mocked backend)", () => {
 		const commanderRow = missionGroup.locator(`[data-testid="mission-commander-row"]`);
 		await expect(commanderRow).toBeVisible({ timeout: 5_000 });
 		await expect(commanderRow.locator(`[data-session-id="${COMMANDER_ID}"]`)).toBeVisible();
+		// The role-aware label prefix surfaces the Commander session as
+		// `Commander: <name>` — mirrors how goal team-leads render as
+		// `Team Lead: <name>`.
+		await expect(commanderRow).toContainText(/Commander:\s*Commander/);
+	});
+
+	test("sidebar prefixes the commander session with 'Commander:' label @smoke", async ({ page }) => {
+		const MISSION_ID_LBL = "22222222-2222-2222-2222-222222222222";
+		const COMMANDER_ID = "label-commander-id";
+
+		await openApp(page);
+
+		await page.evaluate(({ missionId, cmdId }) => {
+			const w = window as any;
+			if (!w.bobbitState) throw new Error("bobbitState not exposed");
+			const projectId = w.bobbitState.projects[0]?.id;
+			if (!projectId) throw new Error("no project loaded");
+			w.bobbitState.gatewaySessions.push({
+				id: cmdId,
+				// Title-generator output for the Commander session is something
+				// like "Planning Progress" — plain, no role prefix. The sidebar
+				// renderer must add the "Commander: " prefix itself.
+				title: "Planning Progress",
+				role: "commander",
+				accessory: "flag",
+				status: "idle",
+				createdAt: Date.now(),
+				lastActivity: Date.now(),
+				projectId,
+			});
+			w.bobbitState.missions.push({
+				id: missionId,
+				projectId,
+				projects: [projectId],
+				title: "Label Mission",
+				spec: "",
+				state: "planning",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				workflowId: "mission",
+				divergencePolicy: "strict",
+				maxConcurrentGoals: 3,
+				commanderSessionId: cmdId,
+			});
+		}, { missionId: MISSION_ID_LBL, cmdId: COMMANDER_ID });
+
+		await navigateToHash(page, "#/");
+		await page.evaluate(() => { (window as any).bobbitRenderApp?.(); });
+
+		const missionGroup = page.locator(`[data-testid="mission-group"][data-mission-id="${MISSION_ID_LBL}"]`);
+		await expect(missionGroup).toBeVisible({ timeout: 10_000 });
+		const expandSpan = missionGroup.locator("span").filter({ hasText: /▸|▾/ }).first();
+		const content = await expandSpan.textContent();
+		if (content?.includes("▸")) await expandSpan.click();
+
+		const commanderRow = missionGroup.locator(`[data-testid="mission-commander-row"]`);
+		await expect(commanderRow).toBeVisible({ timeout: 5_000 });
+		// The raw session title was "Planning Progress"; the sidebar must show
+		// it prefixed as "Commander: Planning Progress".
+		await expect(commanderRow).toContainText(/Commander:\s*Planning Progress/);
 	});
 
 	test("renders error state for unknown mission id", async ({ page }) => {

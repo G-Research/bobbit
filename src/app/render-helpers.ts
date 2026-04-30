@@ -264,6 +264,26 @@ export function stopTimeRefresh(): void {
 // SESSION TIME + UNSEEN BADGE
 // ============================================================================
 
+/**
+ * Apply a role-aware display prefix to a session's raw title.
+ *
+ * Goal team-leads have their `Team Lead: <funname>` prefix baked in server-side
+ * (see TeamManager.createTeamLeadSession). Commander sessions use the same
+ * title-generator pipeline that produces names like "Planning Progress" with
+ * no role prefix — add one here so the sidebar consistently surfaces them as
+ * `Commander: <name>`.
+ *
+ * Idempotent: if the raw title already starts with the role prefix (e.g.
+ * because the server applies one in the future), we leave it unchanged.
+ */
+export function displayTitleForSession(session: GatewaySession, rawTitle: string): string {
+	if (!rawTitle) return rawTitle;
+	if (session.role === "commander" && !/^Commander:\s/i.test(rawTitle)) {
+		return `Commander: ${rawTitle}`;
+	}
+	return rawTitle;
+}
+
 /** Render session title with a subtle rolling shadow when active. */
 let _waveIndex = 0;
 export function renderSessionTitle(title: string, isActive?: boolean, query?: string | null) {
@@ -424,7 +444,8 @@ export function renderSessionRow(session: GatewaySession) {
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const connecting = state.connectingSessionId === session.id;
-	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const rawTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const displayTitle = displayTitleForSession(session, rawTitle);
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	// Check for children (live delegates + archived delegates)
@@ -504,7 +525,8 @@ export { renderSessionRow as renderSidebarSession };
 export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false) {
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
-	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const rawTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const displayTitle = displayTitleForSession(session, rawTitle);
 	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
@@ -557,7 +579,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const connecting = state.connectingSessionId === session.id;
-	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const rawTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+	const displayTitle = displayTitleForSession(session, rawTitle);
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
