@@ -274,48 +274,11 @@ test.describe("Config Cascade API", () => {
 		}
 	});
 
-	test("customize workflow at project level", async () => {
-		const tmpDir = createProjectDir();
-		const proj = await registerProject("cascade-workflow", tmpDir);
-
-		try {
-			const before = await apiFetch(`/api/workflows?projectId=${proj.id}`);
-			const beforeData = await before.json();
-			expect(beforeData.workflows.length).toBeGreaterThan(0);
-			const first = beforeData.workflows[0];
-			const initialOrigin = first.origin;
-			const wfId = first.id;
-
-			// Customize at project level
-			const customizeRes = await apiFetch(
-				`/api/workflows/${wfId}/customize?scope=project&projectId=${proj.id}`,
-				{ method: "POST" },
-			);
-			expect(customizeRes.status).toBe(201);
-
-			// Verify
-			const after = await apiFetch(`/api/workflows?projectId=${proj.id}`);
-			const afterData = await after.json();
-			const customized = afterData.workflows.find((w: any) => w.id === wfId);
-			expect(customized.origin).toBe("project");
-			expect(customized.overrides).toBe(initialOrigin);
-
-			// Revert
-			const revertRes = await apiFetch(
-				`/api/workflows/${wfId}/override?scope=project&projectId=${proj.id}`,
-				{ method: "DELETE" },
-			);
-			expect(revertRes.status).toBe(200);
-
-			const reverted = await apiFetch(`/api/workflows?projectId=${proj.id}`);
-			const revertedData = await reverted.json();
-			const revertedItem = revertedData.workflows.find((w: any) => w.id === wfId);
-			expect(revertedItem.origin).toBe(initialOrigin);
-		} finally {
-			await deleteProject(proj.id);
-			rmSync(tmpDir, { recursive: true, force: true });
-		}
-	});
+	// Removed: "customize workflow at project level" — workflows are no longer
+	// part of the cascade (no builtin/server layer for them), so the
+	// customize/override endpoints have nothing upstream to copy from. The
+	// surviving project-only revert path is exercised by
+	// `tests/e2e/workflows-project-scope.spec.ts` and `workflows-api.spec.ts`.
 
 	test("tools with projectId scope return origin fields", async () => {
 		const tmpDir = createProjectDir();

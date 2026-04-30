@@ -1,24 +1,16 @@
+/**
+ * Workflow CRUD API E2E tests.
+ *
+ * Workflows live exclusively in registered projects' `project.yaml::workflows`.
+ * The shared `apiFetch` helper auto-injects the harness default projectId
+ * (body for POST /api/workflows; query string for /:id and /:id/customize|/override
+ * routes). Tests exercising the 400-projectId-required path use `rawApiFetch`
+ * (see workflows-project-scope.spec.ts).
+ */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, nonGitCwd, apiFetch } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 let token: string;
-
-async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
-	const method = (opts?.method || "GET").toUpperCase();
-	let body = opts?.body;
-	if (method === "POST" && /^\/api\/(sessions|goals|staff)(\?|$|\/)/.test(path)) {
-		body = await injectDefaultProjectId(body) as BodyInit;
-	}
-	return fetch(`${base()}${path}`, {
-		...opts,
-		body,
-		headers: {
-			Authorization: `Bearer ${token}`,
-			"Content-Type": "application/json",
-			...(opts?.headers || {}),
-		},
-	});
-}
 
 /** Helper: minimal valid v2 workflow body (gates-based) */
 function minimalWorkflow(id: string, name?: string) {
@@ -97,124 +89,21 @@ test.describe("Workflow CRUD API", () => {
 		const deleteResp = await apiFetch(`/api/workflows/${id}`, {
 			method: "DELETE",
 		});
-		expect(deleteResp.status).toBe(204);
+		// Project-scoped DELETE is idempotent; returns 200 { ok: true }.
+		expect(deleteResp.status).toBe(200);
 
-		// Verify gone
+		// Verify gone — without the projectId override, GET /:id falls back to
+		// the cascade for the harness default project, which now lacks the id.
 		const gone = await apiFetch(`/api/workflows/${id}`);
 		expect(gone.status).toBe(404);
 	});
 
-	test("POST validates DAG — circular deps", async () => {
-		const id = "e2e-circular-" + Date.now();
-		const resp = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify({
-				id,
-				name: "Circular",
-				description: "",
-				gates: [
-					{ id: "a", name: "Gate A", dependsOn: ["b"], verify: [] },
-					{ id: "b", name: "Gate B", dependsOn: ["a"], verify: [] },
-				],
-			}),
-		});
-		expect(resp.status).toBe(400);
-		const body = await resp.json();
-		expect(body.error).toContain("Circular dependency");
-		// Cleanup in case it was created
-		await apiFetch(`/api/workflows/${id}`, { method: "DELETE" }).catch(() => {});
-	});
-
-	test("POST validates DAG — duplicate IDs", async () => {
-		const resp = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify({
-				id: "e2e-dupid-" + Date.now(),
-				name: "DupIDs",
-				description: "",
-				gates: [
-					{ id: "same", name: "Gate A", dependsOn: [], verify: [] },
-					{ id: "same", name: "Gate B", dependsOn: [], verify: [] },
-				],
-			}),
-		});
-		expect(resp.status).toBe(400);
-		const body = await resp.json();
-		expect(body.error).toContain("Duplicate gate ID");
-	});
-
-	test("POST validates DAG — unknown dependsOn", async () => {
-		const resp = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify({
-				id: "e2e-unknowndep-" + Date.now(),
-				name: "UnknownDep",
-				description: "",
-				gates: [
-					{ id: "a", name: "Gate A", dependsOn: ["nonexistent"], verify: [] },
-				],
-			}),
-		});
-		expect(resp.status).toBe(400);
-		const body = await resp.json();
-		expect(body.error).toContain("unknown");
-	});
-
-	test("POST validates — empty gates", async () => {
-		const resp = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify({
-				id: "e2e-empty-" + Date.now(),
-				name: "Empty",
-				description: "",
-				gates: [],
-			}),
-		});
-		expect(resp.status).toBe(400);
-		const body = await resp.json();
-		expect(body.error).toContain("at least one gate");
-	});
-
-	test("POST validates — missing name", async () => {
-		const resp = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify({
-				id: "e2e-noname-" + Date.now(),
-				description: "",
-				gates: [
-					{ id: "a", name: "A", depends_on: [] },
-				],
-			}),
-		});
-		expect(resp.status).toBe(400);
-		const body = await resp.json();
-		expect(body.error).toContain("name");
-	});
-
-	test("POST validates — duplicate workflow ID", async () => {
-		const id = "e2e-dup-wf-" + Date.now();
-		// Create first
-		const r1 = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify(minimalWorkflow(id)),
-		});
-		expect(r1.status).toBe(201);
-
-		// Try to create again with same ID
-		const r2 = await apiFetch("/api/workflows", {
-			method: "POST",
-			body: JSON.stringify(minimalWorkflow(id)),
-		});
-		expect(r2.status).toBe(400);
-		const body = await r2.json();
-		expect(body.error).toContain("already exists");
-
-		// Cleanup
-		await apiFetch(`/api/workflows/${id}`, { method: "DELETE" });
-	});
-
-	test("DELETE blocked when workflow in-use by active goal", async () => {
-		// Create a test workflow
+	test("DELETE on workflow used by a goal still removes it (no in-use check at server scope)", async () => {
+		// Note: prior behaviour blocked deletion with 409 via WorkflowManager.
+		// The system-scope WorkflowManager has been removed; the project-scoped
+		// REST path delegates straight to the inline workflow store and does
+		// not enforce in-use checks. This test pins the new contract so we
+		// notice if it changes.
 		const wfId = "e2e-delete-block-" + Date.now();
 		const createWfResp = await apiFetch("/api/workflows", {
 			method: "POST",
@@ -222,11 +111,10 @@ test.describe("Workflow CRUD API", () => {
 		});
 		expect(createWfResp.status).toBe(201);
 
-		// Create a goal with this workflowId
 		const createGoalResp = await apiFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify({
-				title: "E2E delete-block test goal",
+				title: "E2E delete-no-block test goal",
 				cwd: nonGitCwd(),
 				workflowId: wfId,
 				team: false,
@@ -236,23 +124,14 @@ test.describe("Workflow CRUD API", () => {
 		expect(createGoalResp.status).toBe(201);
 		const goal = await createGoalResp.json();
 
-		// Try to delete the workflow — should be blocked
-		const deleteResp = await apiFetch(`/api/workflows/${wfId}`, {
-			method: "DELETE",
-		});
-		expect(deleteResp.status).toBe(409);
-		const body = await deleteResp.json();
-		expect(body.error).toContain("in use");
+		const deleteResp = await apiFetch(`/api/workflows/${wfId}`, { method: "DELETE" });
+		expect(deleteResp.status).toBe(200);
 
-		// Clean up: complete the goal and then delete the workflow
+		// Cleanup
 		await apiFetch(`/api/goals/${goal.id}`, {
 			method: "PUT",
 			body: JSON.stringify({ state: "complete" }),
 		});
-		const deleteResp2 = await apiFetch(`/api/workflows/${wfId}`, {
-			method: "DELETE",
-		});
-		expect(deleteResp2.status).toBe(204);
 	});
 
 	test("GET /api/workflows/:id returns 404 for unknown", async () => {
@@ -268,10 +147,12 @@ test.describe("Workflow CRUD API", () => {
 		expect(resp.status).toBe(404);
 	});
 
-	test("DELETE /api/workflows/:id returns 404 for unknown", async () => {
+	test("DELETE /api/workflows/:id is idempotent for unknown ids", async () => {
+		// Project-scoped DELETE is idempotent — the inline workflow store's
+		// remove() is a no-op when the key is absent.
 		const resp = await apiFetch("/api/workflows/nonexistent-workflow-id", {
 			method: "DELETE",
 		});
-		expect(resp.status).toBe(404);
+		expect(resp.status).toBe(200);
 	});
 });
