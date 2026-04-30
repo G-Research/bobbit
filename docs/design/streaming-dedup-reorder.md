@@ -277,7 +277,7 @@ this._drainOrderedEvents();
 
 On reconnect (when the WS opens), if `_highestSeq > 0`, send `{type:"resume", fromSeq: this._highestSeq}` **before** any other traffic. On `resume_gap`, fall back to today's `get_messages` path (reset `_highestSeq` from the server's reported `lastSeq`).
 
-`_liveEventMessages` text-merge hack (`remote-agent.ts:775`) becomes unnecessary for the resume path (events arrive in order, no snapshot-vs-live gap). Keep it for the `resume_gap` fallback only, but gate it behind the gap flag so the happy path doesn't pay its cost.
+> **Update (unified-message-ordering-reducer):** the `_liveEventMessages` text-merge hack referenced by earlier revisions of this doc no longer exists. The unified reducer in `src/app/message-reducer.ts` reconciles live events and snapshots by id (`_order` / `_insertionTick`) for both the happy path and the `resume_gap` fallback, so there is no carve-out to gate. See [`docs/design/unified-message-ordering-reducer.md`](./unified-message-ordering-reducer.md) and the "Reducer ordering invariant" section in [`docs/internals.md`](../internals.md).
 
 ### 4.6 Client — `.seq` is the identity key
 

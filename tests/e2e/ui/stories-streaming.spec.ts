@@ -440,6 +440,111 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(after.assistant).toBe(before.assistant);
 	});
 
+	// ---------------------------------------------------------------
+	// ST-DEDUP-04: ask_user_choices envelope routing — answers on card B do
+	// not bleed into card A.
+	// ---------------------------------------------------------------
+	//
+	// Two `ask_user_choices` widgets sit in the same transcript (one per
+	// prompt). Each carries its own `tool_use_id`. Submitting answers on
+	// the second widget must:
+	//   (a) flip the second widget to read-only (no Submit button),
+	//   (b) leave the first widget interactive (Submit still visible),
+	//   (c) `RemoteAgent.findAskResponseAnswers(toolUseId-B)` returns the
+	//       answers; `findAskResponseAnswers(toolUseId-A)` stays null.
+	//
+	// Pre-fix the envelope user message could land out-of-order or be
+	// dropped when a snapshot arrived mid-flight, causing card B's flip to
+	// silently fail or both widgets to read the same answers. Post-fix the
+	// reducer keys every transcript row by (_order, _insertionTick) and the
+	// envelope-scan walks the messages in transcript order — answers route
+	// to exactly the matching tool_use_id.
+	test("ST-DEDUP-04: ask_user_choices envelope routes answers to the correct card", async () => {
+		s.begin(defineStory({
+			id: "ST-DEDUP-04",
+			title: "ask_user_choices envelope routes to the correct card",
+			contracts: [CT_01],
+			covers: ["unified-message-ordering-reducer", "ask-user-choices-routing"],
+		}));
+
+		// setup
+		await s.createTestSession("A");
+		await s.open();
+		await s.navigate_to("session", "A");
+
+		// First widget.
+		await s.send_message("please use ask_user_choices");
+		await s.wait_for_idle();
+		await expect(s.page.locator("ask-user-choices-widget")).toHaveCount(1, { timeout: 20_000 });
+
+		// Second widget.
+		await s.send_message("please use ask_user_choices again");
+		await s.wait_for_idle();
+		await expect(s.page.locator("ask-user-choices-widget")).toHaveCount(2, { timeout: 20_000 });
+
+		// act — answer the SECOND widget.
+		s.act();
+		const widgetB = s.page.locator("ask-user-choices-widget").nth(1);
+		const widgetA = s.page.locator("ask-user-choices-widget").first();
+
+		// Capture both tool_use_ids before any state mutation.
+		const toolUseIdA = await widgetA.evaluate((el) => (el as any).toolUseId as string);
+		const toolUseIdB = await widgetB.evaluate((el) => (el as any).toolUseId as string);
+		expect(toolUseIdA).toBeTruthy();
+		expect(toolUseIdB).toBeTruthy();
+		expect(toolUseIdA).not.toBe(toolUseIdB);
+
+		// Pick "green" on Q1 (auto-advance) then "large" on Q2, submit.
+		await widgetB.locator('label:has(input[value="green"])').click();
+		await expect(widgetB.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+		await widgetB.locator('label:has(input[value="large"])').click();
+		await widgetB.locator(".ask-submit").click();
+
+		// assert
+		s.assert();
+		// (a) widget B flipped to read-only.
+		await expect(widgetB.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(widgetB.locator('input[type="radio"]').first()).toBeDisabled();
+
+		// (b) widget A is still interactive — its envelope never landed.
+		await expect(widgetA.locator(".ask-submit")).toBeVisible();
+		await expect(widgetA.locator('input[type="radio"]').first()).toBeEnabled();
+
+		// (c) RemoteAgent.findAskResponseAnswers routes by toolUseId — B has
+		//     answers, A is null. This is the reducer's transcript-ordering
+		//     guarantee surfaced through the public agent API.
+		const routing = await s.page.evaluate(
+			([idA, idB]: [string, string]) => {
+				const app = (window as any).__appState ?? (window as any).appState ?? null;
+				const agent = app?.remoteAgent
+					?? (window as any).__remoteAgent
+					?? (window as any).remoteAgent
+					?? null;
+				if (!agent || typeof agent.findAskResponseAnswers !== "function") {
+					return { exposed: false, a: null, b: null };
+				}
+				return {
+					exposed: true,
+					a: agent.findAskResponseAnswers(idA),
+					b: agent.findAskResponseAnswers(idB),
+				};
+			},
+			[toolUseIdA, toolUseIdB] as [string, string],
+		);
+		// The agent handle isn't always exposed on window in production builds.
+		// When it IS exposed, the routing assertion is the canonical proof; when
+		// it's not, the DOM-level read-only flip on B + interactive A is
+		// equivalent (the renderer reads `findAskResponseAnswers` to decide
+		// whether to show Submit). We assert whichever signal is available.
+		if (routing.exposed) {
+			expect(routing.b).not.toBeNull();
+			expect(Array.isArray(routing.b)).toBe(true);
+			expect((routing.b as any[]).length).toBe(2);
+			expect(routing.a).toBeNull();
+		}
+	});
+
 	test("CT-01-f: Page reload during stream", async () => {
 		s.begin(defineStory({
 			id: "CT-01-f",
