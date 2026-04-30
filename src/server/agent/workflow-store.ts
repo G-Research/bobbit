@@ -87,6 +87,13 @@ export interface WorkflowGate {
 	injectDownstream?: boolean;
 	optional?: boolean;
 	manual?: boolean;
+	/**
+	 * Self-documenting gate-level prose surfaced in the dashboard's
+	 * gate-detail panel. Used by the `parent` workflow (nested goals —
+	 * docs/design/nested-goals.md §14.4) so a model reading the workflow
+	 * cold understands the orchestration intent.
+	 */
+	description?: string;
 	metadata?: Record<string, string>;
 	verify?: VerifyStep[];
 }
@@ -184,6 +191,7 @@ function normalizeGate(raw: unknown): WorkflowGate {
 	if (r.inject_downstream === true || r.injectDownstream === true) gate.injectDownstream = true;
 	if (r.optional === true) gate.optional = true;
 	if (r.manual === true) gate.manual = true;
+	if (typeof r.description === "string") gate.description = r.description;
 	if (r.metadata && typeof r.metadata === "object" && !Array.isArray(r.metadata)) {
 		gate.metadata = r.metadata as Record<string, string>;
 	}
@@ -252,6 +260,7 @@ function serializeGate(g: WorkflowGate): Record<string, unknown> {
 	if (g.injectDownstream) out.inject_downstream = true;
 	if (g.optional) out.optional = true;
 	if (g.manual) out.manual = true;
+	if (g.description !== undefined) out.description = g.description;
 	if (g.dependsOn && g.dependsOn.length > 0) out.depends_on = g.dependsOn;
 	if (g.metadata) out.metadata = g.metadata;
 	if (g.verify && g.verify.length > 0) out.verify = g.verify.map(serializeStep);

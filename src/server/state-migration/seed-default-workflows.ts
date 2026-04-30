@@ -60,6 +60,15 @@ export interface SeededGate {
 	depends_on?: string[];
 	content?: boolean;
 	inject_downstream?: boolean;
+	/** Manual gate — no LLM verify steps, signalled by the user. */
+	manual?: boolean;
+	/**
+	 * Self-documenting gate-level prose (nested goals —
+	 * docs/design/nested-goals.md §14.4). Surfaced in the dashboard's
+	 * gate-detail panel so a reader understands the orchestration intent
+	 * without external docs.
+	 */
+	description?: string;
 	metadata?: Record<string, string>;
 	verify?: SeededVerifyStep[];
 }
@@ -161,6 +170,38 @@ Check:
 3. Data validation — are inputs validated and sanitized?
 4. Secrets handling — no hardcoded secrets, tokens, or credentials
 5. Dependency risks — any new dependencies with known vulnerabilities?`;
+
+// ── Parent workflow prompts (nested goals — docs/design/nested-goals.md §6) ──
+
+const CHARTER_PROMPT = `Review the charter for goal {{branch}}.
+
+The goal spec is:
+{{goal_spec}}
+
+A charter must:
+1. State the user-visible outcome in plain English.
+2. List 3-7 acceptance criteria that are independently verifiable.
+3. Identify the natural decomposition into 2-8 child goals (subtasks).
+4. Flag any acceptance criterion that cannot be assigned to exactly one child.
+
+PASS only when all four checks hold.`;
+
+const PLAN_REVIEW_DAG_PROMPT = `Inspect the proposed plan ({{branch}} execution.verify[]).
+
+Verify:
+1. Every node has a non-empty title and spec.
+2. The phase numbers form a valid DAG (no cycles by construction — they are
+   layer numbers).
+3. No two siblings at the same phase share a planId.
+4. workflowId values resolve through the cascade (call out unknowns).
+
+PASS only when all four checks hold.`;
+
+const PLAN_REVIEW_COMPLETENESS_PROMPT = `Compare the plan against the
+acceptance criteria from the charter.
+
+For each criterion, identify which planned subgoal addresses it. Flag any
+criterion left uncovered. PASS when every criterion is covered.`;
 
 /** Build the four canonical workflows targeting `componentName` (typically the project name). */
 export function buildDefaultWorkflows(componentName: string): Record<string, SeededWorkflow> {
@@ -339,10 +380,101 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 		],
 	};
 
+	// ── parent workflow (nested goals — docs/design/nested-goals.md §6 + §14.4) ──
+	//
+	// Orchestrates a goal that decomposes into child subgoals. The
+	// `goal-plan` gate is manual (human-only signal) and triggers a
+	// server-side freeze hook that stamps `metadata.frozen="true"` onto the
+	// goal's snapshotted `execution` gate. Subsequent plan mutations are
+	// then subject to the goal's divergence policy and the plan-mutation
+	// classifier.
+	//
+	// `execution.verify[]` starts EMPTY — it's populated by the team-lead
+	// via `goal_plan_propose` calls before the user signals `goal-plan`.
+	const parentRtm = readyToMergeGate();
+	const parent: SeededWorkflow = {
+		id: "parent",
+		name: "Parent Goal",
+		description: [
+			"Orchestrates a goal that decomposes into child subgoals. The team-lead",
+			"drafts a charter (user-visible outcome + acceptance criteria), proposes",
+			"a DAG of child goals at \"plan-review\", and waits for the user to",
+			"approve the plan via the `goal-plan` gate. Once approved, the execution",
+			"gate's verify[] freezes; the verification harness then spawns the planned",
+			"children in parallel up to maxConcurrentChildren, each branching off this",
+			"goal's branch and merging back when their own `ready-to-merge` gate passes.",
+			"The parent's `ready-to-merge` raises the single PR to master once all",
+			"children have merged.",
+		].join(" "),
+		gates: [
+			{
+				id: "charter",
+				name: "Charter",
+				content: true,
+				inject_downstream: true,
+				description: "Define the user-visible outcome in plain English, list 3-7 acceptance criteria that are independently verifiable, and identify the natural decomposition into child goals. The plan-review gate will read this charter as upstream context — be explicit about scope so the reviewer can flag missing coverage.",
+				verify: [
+					{ name: "Charter review", type: "llm-review", role: "architect", prompt: CHARTER_PROMPT },
+				],
+			},
+			{
+				id: "plan-review",
+				name: "Plan Review",
+				depends_on: ["charter"],
+				content: true,
+				inject_downstream: true,
+				description: "Submit the proposed plan as a list of `subgoal` verify steps on the execution gate (call `goal_plan_propose`). LLM reviewers check: every node has a non-empty title and spec; phase numbers form a valid layered DAG; every charter acceptance criterion is assigned to at least one child; workflow ids resolve. The review is advisory — the user's `goal-plan` signal is the authoritative approval.",
+				verify: [
+					{ name: "DAG correctness", type: "llm-review", role: "architect", prompt: PLAN_REVIEW_DAG_PROMPT },
+					{ name: "Spec completeness", type: "llm-review", role: "spec-auditor", phase: 1, prompt: PLAN_REVIEW_COMPLETENESS_PROMPT },
+				],
+			},
+			{
+				id: "goal-plan",
+				name: "Plan Approval",
+				depends_on: ["plan-review"],
+				manual: true,
+				description: "Manual gate. Signalling this gate freezes the execution gate's verify[] — post-freeze plan mutations are subject to the goal's divergence policy and the plan-mutation classifier. The user signals this gate from the dashboard's Plan tab once they're satisfied with the proposed DAG.",
+			},
+			{
+				id: "execution",
+				name: "Execution",
+				depends_on: ["goal-plan"],
+				description: "The plan runs here. Each `subgoal` verify step spawns a child goal at the appropriate phase, branched off this goal's branch. Phase parallelism is bounded by `maxConcurrentChildren`. A child step passes when its `ready-to-merge` gate passes AND the local merge into this goal's branch succeeds without conflict. Merge conflicts surface back to the team-lead, who escalates to the user.",
+				// verify[] is empty at creation; populated by `goal_plan_propose`
+				// calls and frozen once goal-plan is signalled. Each entry is a
+				// `subgoal` step. Multiple entries with the same `phase` run in
+				// parallel, bounded by goal.maxConcurrentChildren.
+				verify: [],
+			},
+			{
+				id: "integration",
+				name: "Integration",
+				depends_on: ["execution"],
+				description: "Run typecheck/build/tests on this goal's branch after all children have merged. Catches integration issues that per-child verification couldn't see.",
+				verify: [
+					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
+					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
+					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+				],
+			},
+			// readyToMergeGate() helper hardcodes depends_on: ["documentation"];
+			// parent has no documentation gate — patch dependencies + description.
+			{
+				...parentRtm,
+				depends_on: ["integration"],
+				description: "Top-level goals raise a PR to master from this branch. Child goals (mergeTarget == 'parent') short-circuit this gate — the parent's harness performs the local merge instead. Either way, this gate signals the goal is done.",
+			},
+		],
+	};
+
 	return {
 		general,
 		feature,
 		"bug-fix": bugFix,
 		"quick-fix": quickFix,
+		parent,
 	};
 }
