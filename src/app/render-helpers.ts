@@ -321,6 +321,10 @@ export const SESSION_ROW_PY = "py-0.5";
 
 /** Consistent indent per nesting level (px). */
 export const INDENT = 5;
+/** Maximum depth at which child goals are rendered inline in the sidebar.
+ *  Beyond this, a "Show N more child goals…" link replaces the recursion.
+ *  See docs/design/nested-goals.md §10.1. */
+export const MAX_GOAL_DEPTH = 5;
 /** Width of the chevron/spacer slot (px) — same for all chevrons. */
 export const CHEVRON_W = 14;
 /** Wider chevron slot for level-0 section headers (extra right breathing room). */
@@ -616,6 +620,68 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 /** Track in-flight team start/stop (shared across desktop and mobile). */
 const teamLoading = new Set<string>();
 
+// ============================================================================
+// NESTED-GOAL HELPERS (see docs/design/nested-goals.md §10.1)
+// ============================================================================
+
+/** Immediate non-archived child goals of `parentId`, sorted by createdAt ASC.
+ *  Pure function over the supplied goals array — the second arg makes this
+ *  testable without touching `state`. */
+export function getChildGoalsFrom(parentId: string, goals: Goal[]): Goal[] {
+	return goals
+		.filter(g => g.parentGoalId === parentId && !g.archived)
+		.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** Live wrapper around `getChildGoalsFrom` that reads `state.goals`. */
+export function getChildGoals(parentId: string): Goal[] {
+	return getChildGoalsFrom(parentId, state.goals);
+}
+
+/** Count all (transitive) non-archived descendants of `goalId`, excluding the
+ *  goal itself. Pure over the supplied goals array. Cycle-safe via visited set. */
+export function countDescendantsFrom(goalId: string, goals: Goal[]): number {
+	const byParent = new Map<string, Goal[]>();
+	for (const g of goals) {
+		if (g.archived) continue;
+		if (!g.parentGoalId) continue;
+		let arr = byParent.get(g.parentGoalId);
+		if (!arr) { arr = []; byParent.set(g.parentGoalId, arr); }
+		arr.push(g);
+	}
+	const seen = new Set<string>();
+	let count = 0;
+	const stack = [goalId];
+	while (stack.length > 0) {
+		const id = stack.pop()!;
+		const kids = byParent.get(id);
+		if (!kids) continue;
+		for (const k of kids) {
+			if (seen.has(k.id)) continue;
+			seen.add(k.id);
+			count++;
+			stack.push(k.id);
+		}
+	}
+	return count;
+}
+
+/** Live wrapper around `countDescendantsFrom`. */
+export function countDescendants(goalId: string): number {
+	return countDescendantsFrom(goalId, state.goals);
+}
+
+/** Compute the n/m count badge string for a goal that has child goals.
+ *  Returns null when the goal has no children (callers fall back to the
+ *  PR/gate badge). "Complete" counts immediate children only — we don't
+ *  reach into grandchildren so the user sees direct progress. */
+export function computeChildCountBadge(parentId: string, goals: Goal[]): { complete: number; total: number; label: string } | null {
+	const children = getChildGoalsFrom(parentId, goals);
+	if (children.length === 0) return null;
+	const complete = children.filter(c => c.state === "complete").length;
+	return { complete, total: children.length, label: `${complete}/${children.length}` };
+}
+
 /** Render a PR icon or gate status badge next to a goal in the sidebar. */
 function renderGoalBadge(goalId: string) {
 	// PR status takes priority over gate counts
@@ -681,9 +747,13 @@ function renderGoalBadge(goalId: string) {
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
  * Mobile:  dashboard button always visible. No double-click (no hover hint).
  */
-export function renderGoalGroup(goal: Goal) {
+export function renderGoalGroup(goal: Goal, depth: number = 0): TemplateResult {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
+	// Nested children of this goal (live, non-archived, sorted by createdAt).
+	const childGoals = getChildGoals(goal.id);
+	const hasChildGoals = childGoals.length > 0;
+	const childCountBadge = hasChildGoals ? computeChildCountBadge(goal.id, state.goals) : null;
 	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
 	const isCreatingHere = state.creatingSessionForGoalId === goal.id;
 	const isTeamGoal = !!(goal as any).team;
@@ -810,7 +880,9 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:10px;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate ${mobile ? "text-sm" : "text-[10px]"} text-muted-foreground uppercase tracking-wider font-medium">${renderHighlightedText(goal.title, state.searchQuery)}</span>
-				${renderGoalBadge(goal.id)}
+				${childCountBadge
+					? html`<span class="shrink-0 tabular-nums" style="font-size:9px;color:${childCountBadge.complete === childCountBadge.total ? "#22c55e" : "var(--muted-foreground)"};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;" title="${childCountBadge.complete} of ${childCountBadge.total} child goals complete">${childCountBadge.label}</span>`
+					: renderGoalBadge(goal.id)}
 				${mobile
 					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
@@ -825,6 +897,12 @@ export function renderGoalGroup(goal: Goal) {
 						Creating…
 					</div>` : ""}
 					${teamControls}
+					${hasChildGoals ? (depth >= MAX_GOAL_DEPTH
+						? html`<button class="show-more-children pl-2 py-1 text-left ${mobile ? "text-xs" : "text-[11px]"} text-muted-foreground hover:text-foreground transition-colors"
+							@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); }}
+							title="Open goal dashboard to view nested children"
+						>Show ${countDescendants(goal.id)} more child goals…</button>`
+						: childGoals.map(c => renderGoalGroup(c, depth + 1))) : ""}
 					${state.showArchived ? (() => {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
