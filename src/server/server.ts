@@ -33,8 +33,6 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
-import { WorkflowStore } from "./agent/workflow-store.js";
-import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -639,7 +637,6 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const workflowStore = new WorkflowStore(projectConfigStore);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
@@ -647,7 +644,6 @@ export function createGateway(config: GatewayConfig) {
 		colorStore,
 		roleManager,
 		toolManager,
-		workflowStore,
 		preferencesStore,
 		projectConfigStore,
 		groupPolicyStore,
@@ -666,24 +662,19 @@ export function createGateway(config: GatewayConfig) {
 	}
 	const builtinConfigProvider = new BuiltinConfigProvider();
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
-	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
-	// fall back to builtins, so no seeding to disk is needed.
+	// Direct store lookups (roleStore.get()) transparently fall back to
+	// builtins, so no seeding to disk is needed. Workflows are project-
+	// scoped only — no system layer, no builtin layer.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
-	// Workflow builtins were removed — workflows now live inline in each
-	// project's project.yaml::workflows block. The provider returns [] so
-	// nothing is seeded here. Projects must declare their own workflows.
-	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
-		getWorkflows: () => workflowStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
-	const workflowManager = new WorkflowManager(workflowStore, projectConfigStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
@@ -784,7 +775,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, workflowStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1502,7 +1493,6 @@ async function handleApiRoute(
 	projectContextManager: ProjectContextManager,
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
-	workflowManager: WorkflowManager,
 	verificationHarness: VerificationHarness,
 	preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
@@ -1517,12 +1507,10 @@ async function handleApiRoute(
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
-	workflowStore?: WorkflowStore,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
-	const serverWorkflowStore = workflowStore!;
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -3018,7 +3006,7 @@ async function handleApiRoute(
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
-				workflowStore: workflowManager.store,
+				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
@@ -6189,7 +6177,7 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows (with cascade origin)
+	// GET /api/workflows — project-scoped only. Without projectId returns [].
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -6198,90 +6186,65 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/workflows (scope-aware)
+	// POST /api/workflows — requires projectId.
 	if (workflowsMatch && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
 		const targetProjectId = body?.projectId;
+		if (!targetProjectId) { json({ error: "projectId required" }, 400); return; }
 		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const now = Date.now();
-				const workflow = {
-					id: body.id as string,
-					name: (body.name as string) ?? body.id,
-					description: (body.description as string) ?? "",
-					gates: body.gates || [],
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-				ctx.workflowStore.put(workflow);
-				json(workflow, 201);
-			} else {
-				const workflow = workflowManager.createWorkflow({
-					id: body.id,
-					name: body.name,
-					description: body.description,
-					gates: body.gates || [],
-				});
-				json(workflow, 201);
-			}
+			const ctx = projectContextManager.getOrCreate(targetProjectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const now = Date.now();
+			const workflow = {
+				id: body.id as string,
+				name: (body.name as string) ?? body.id,
+				description: (body.description as string) ?? "",
+				gates: body.gates || [],
+				createdAt: now,
+				updatedAt: now,
+			};
+			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
+			ctx.workflowStore.put(workflow);
+			json(workflow, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
 		return;
 	}
 
-	// POST /api/workflows/:id/customize — copy resolved workflow to a target scope
+	// POST /api/workflows/:id/customize — copy resolved workflow into a project.
 	const workflowCustomizeMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/customize$/);
 	if (workflowCustomizeMatch && req.method === "POST") {
 		const id = decodeURIComponent(workflowCustomizeMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
 
 		const resolved = configCascade.resolveWorkflows(projectId);
 		const source = resolved.find(r => r.item.id === id);
 		if (!source) { json({ error: "Workflow not found" }, 404); return; }
 
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.workflowStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverWorkflowStore;
-		}
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 
 		const now = Date.now();
 		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		targetStore.put(copy);
+		ctx.workflowStore.put(copy);
 		json(copy, 201);
 		return;
 	}
 
-	// DELETE /api/workflows/:id/override — remove override at a scope
+	// DELETE /api/workflows/:id/override — remove project-level override.
 	const workflowOverrideMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/override$/);
 	if (workflowOverrideMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowOverrideMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
 
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.workflowStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverWorkflowStore;
-		}
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 
-		targetStore.remove(id);
+		ctx.workflowStore.remove(id);
 		json({ ok: true });
 		return;
 	}
@@ -6291,74 +6254,47 @@ async function handleApiRoute(
 	if (workflowMatch && req.method === "GET") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const resolved = configCascade.resolveWorkflows(qProjectId);
-			const found = resolved.find(r => r.item.id === id);
-			if (!found) { json({ error: "Workflow not found" }, 404); return; }
-			json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
-		} else {
-			const wf = workflowManager.getWorkflow(id);
-			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-			json(wf);
-		}
+		if (!qProjectId) { json({ error: "Workflow not found" }, 404); return; }
+		const resolved = configCascade.resolveWorkflows(qProjectId);
+		const found = resolved.find(r => r.item.id === id);
+		if (!found) { json({ error: "Workflow not found" }, 404); return; }
+		json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
 		return;
 	}
 
-	// PUT /api/workflows/:id (scope-aware)
+	// PUT /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const ctx = projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const existing = ctx.workflowStore.get(id);
-			if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-			const updated = {
-				...existing,
-				name: body.name ?? existing.name,
-				description: body.description ?? existing.description,
-				gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-				id,
-				updatedAt: Date.now(),
-			};
-			ctx.workflowStore.put(updated);
-			json(updated);
-		} else {
-			try {
-				const ok = workflowManager.updateWorkflow(id, body);
-				if (!ok) { json({ error: "Workflow not found" }, 404); return; }
-				const updated = workflowManager.getWorkflow(id);
-				json(updated);
-			} catch (err: any) {
-				json({ error: err.message }, 400);
-			}
-		}
+		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(qProjectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		const existing = ctx.workflowStore.get(id);
+		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
+		const updated = {
+			...existing,
+			name: body.name ?? existing.name,
+			description: body.description ?? existing.description,
+			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
+			id,
+			updatedAt: Date.now(),
+		};
+		ctx.workflowStore.put(updated);
+		json(updated);
 		return;
 	}
 
-	// DELETE /api/workflows/:id (scope-aware)
+	// DELETE /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const ctx = projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			ctx.workflowStore.remove(id);
-			json({ ok: true });
-		} else {
-			const wf = workflowManager.getWorkflow(id);
-			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-			const allGoals = projectContextManager.getAllLiveGoals();
-			if (allGoals.some((g: any) => g.workflowId === id && g.state !== "complete")) {
-				json({ error: "Cannot delete: workflow is in use by active goals" }, 409);
-				return;
-			}
-			workflowManager.deleteWorkflow(id);
-			res.writeHead(204);
-			res.end();
-		}
+		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(qProjectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		ctx.workflowStore.remove(id);
+		json({ ok: true });
 		return;
 	}
 

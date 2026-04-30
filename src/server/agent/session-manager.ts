@@ -319,8 +319,6 @@ export interface SessionManagerOptions {
 	toolManager?: ToolManager;
 	/** Group policy store for resolving group-level default tool grant policies */
 	groupPolicyStore?: ToolGroupPolicyStore;
-	/** Workflow store for injecting into GoalManager */
-	workflowStore?: import("./workflow-store.js").WorkflowStore;
 	/** Preferences store for aigw auto-model detection */
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	/** Project config store for reading project defaults (e.g. default_thinking_level) */
@@ -346,7 +344,6 @@ export class SessionManager {
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
-	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
@@ -525,7 +522,6 @@ export class SessionManager {
 		this.toolManager = options?.toolManager;
 		this.groupPolicyStore = options?.groupPolicyStore;
 		this.preferencesStore = options?.preferencesStore;
-		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		if (this.projectContextManager) {
@@ -537,7 +533,7 @@ export class SessionManager {
 			this._testStore = new SessionStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
-			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
 	}
@@ -738,7 +734,7 @@ export class SessionManager {
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
-			buildWorkflowList: () => this._buildWorkflowList(),
+			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 		};
 	}
 
@@ -979,8 +975,14 @@ export class SessionManager {
 	}
 
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
-	private _buildWorkflowList(): string {
-		const workflows = this.workflowStore?.getAll();
+	private _buildWorkflowList(projectId?: string): string {
+		let workflows: import("./workflow-store.js").Workflow[] = [];
+		if (projectId && this.configCascade) {
+			workflows = this.configCascade.resolveWorkflows(projectId).map(r => r.item);
+		} else if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) workflows = ctx.workflowStore.getAll();
+		}
 		if (!workflows || workflows.length === 0) {
 			return 'Use **general** as a safe default.';
 		}
@@ -1118,7 +1120,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(session.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.resolveStoreForSession(session.id).get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
@@ -2342,7 +2344,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
 					const origGoal = this.resolveGoal(ps.reattemptGoalId);

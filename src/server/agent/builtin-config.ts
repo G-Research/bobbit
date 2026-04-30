@@ -40,10 +40,8 @@ export class BuiltinConfigProvider {
 	}
 
 	/**
-	 * Workflows are no longer shipped as builtin YAMLs — they live inline in
-	 * each project's `project.yaml::workflows` block. This always returns []
-	 * so the cascade has no builtin workflow layer. Kept for API compatibility
-	 * with `ServerStores`/`ConfigCascade`.
+	 * Workflows are project-scoped only; this method exists for shape compat
+	 * with the cascade and may be removed once `ServerStores` drops it.
 	 */
 	getWorkflows(): Workflow[] {
 		return [];
