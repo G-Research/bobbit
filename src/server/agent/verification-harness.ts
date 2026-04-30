@@ -710,6 +710,11 @@ export class VerificationHarness {
 			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder...`);
 			await session.rpcClient.prompt(reminderPrompt);
+			// Reminder dispatch is fire-and-forget on the RPC channel; the session
+			// stays `idle` for a tick before transitioning to `streaming`. Wait for
+			// the next agent_start so the subsequent waitForIdle race doesn't
+			// resolve instantly against the still-idle status.
+			await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
@@ -2051,6 +2056,9 @@ export class VerificationHarness {
 			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
 			await session.rpcClient.prompt(qaReminderPrompt);
+			// Wait for the agent to actually pick up the reminder before racing
+			// against waitForIdle — see _tryResumeFromSession for rationale.
+			await this.sessionManager!.waitForStreaming(qaSessionId, 10_000).catch(() => {});
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
@@ -2262,6 +2270,19 @@ export class VerificationHarness {
 				console.log(`[verification] Detected JSON/arg-validation glitch in ${subSessionId}, sending targeted retry prompt`);
 			}
 			await rpc.prompt(legacyReminderPrompt);
+			// Wait briefly for the agent to acknowledge the reminder (agent_start)
+			// before racing against agent_end — mirror of SessionManager.waitForStreaming
+			// for the legacy direct-RpcBridge path.
+			await new Promise<void>((resolve) => {
+				const t = setTimeout(() => { try { unsub(); } catch { /* ignore */ } resolve(); }, 10_000);
+				const unsub = rpc.onEvent((event: any) => {
+					if (event.type === "agent_start") {
+						clearTimeout(t);
+						try { unsub(); } catch { /* ignore */ }
+						resolve();
+					}
+				});
+			}).catch(() => {});
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
