@@ -167,7 +167,19 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			try {
-				const body: Record<string, unknown> = { plan: params.plan };
+				// Defensive: even though the schema declares `plan` as an object,
+				// some SDK paths have been observed to pass it as a JSON-encoded
+				// string. Parse before forwarding so the gateway always sees a
+				// structured body.
+				let plan: unknown = params.plan;
+				if (typeof plan === "string") {
+					try {
+						plan = JSON.parse(plan);
+					} catch (parseErr: any) {
+						return err(`mission_plan_propose: 'plan' parameter is a malformed JSON string: ${parseErr?.message ?? parseErr}. Pass plan as a structured object literal, not a JSON-encoded string.`);
+					}
+				}
+				const body: Record<string, unknown> = { plan };
 				if (params.replan_reason) body.replan_reason = params.replan_reason;
 				return ok(await api("PATCH", `/api/missions/${missionId}/plan`, body));
 			} catch (e: any) { return err(e.message); }
@@ -223,7 +235,18 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const body: Record<string, unknown> = {};
 				if (params.content !== undefined) body.content = params.content;
-				if (params.metadata !== undefined) body.metadata = params.metadata;
+				// Defensive: tolerate JSON-string metadata for the same reason as
+				// mission_plan_propose's `plan` arg — some SDK paths wrap nested
+				// objects as JSON strings.
+				let metadata: unknown = params.metadata;
+				if (typeof metadata === "string") {
+					try {
+						metadata = JSON.parse(metadata);
+					} catch (parseErr: any) {
+						return err(`mission_signal: 'metadata' parameter is a malformed JSON string: ${parseErr?.message ?? parseErr}. Pass metadata as a structured object literal, not a JSON-encoded string.`);
+					}
+				}
+				if (metadata !== undefined) body.metadata = metadata;
 				return ok(await api("POST", `/api/missions/${missionId}/gates/${encodeURIComponent(params.gate_id)}/signal`, body));
 			} catch (e: any) { return err(e.message); }
 		},
