@@ -74,7 +74,26 @@
       return { commander, otherMissionSessions: others };
     }
 
-    window.__missionGrouping = { isMissionOwnedSession, buildSidebar, missionDirectSessions };
+    /**
+     * Mirror of the archived-mission-direct-sessions filter inside
+     * renderMissionGroup. Returns the rows that surface under a mission's
+     * row when state.showArchived is on. Used by tests to assert parity
+     * with archived team-lead sub-sessions under a goal.
+     */
+    function missionArchivedDirectSessions(state, mission) {
+      if (!state.showArchived) return [];
+      const archived = state.archivedSessions || [];
+      return archived
+        .filter(s =>
+          s.missionId === mission.id
+          && s.id !== mission.commanderSessionId
+          && !s.teamGoalId
+          && !s.delegateOf
+        )
+        .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
+    }
+
+    window.__missionGrouping = { isMissionOwnedSession, buildSidebar, missionDirectSessions, missionArchivedDirectSessions };
   </script>
 </head>
 <body>

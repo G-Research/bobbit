@@ -1032,9 +1032,11 @@ export function renderMissionGroup(mission: PersistedMission, childGoals: Goal[]
 				</div>
 			` : ""}
 			${isExpanded && archivedMissionSessions.length > 0 ? html`
-				<div class="flex flex-col gap-0.5 opacity-60" style="padding-left:${INDENT}px;" data-testid="mission-archived-sessions">
-					<div class="text-[9px] text-muted-foreground uppercase tracking-wider opacity-70" style="padding-left:${HEADER_CHEVRON_W}px;">Archived</div>
-					${archivedMissionSessions.map(s => renderSessionRow(s))}
+				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;" data-testid="mission-archived-sessions">
+					${archivedMissionSessions.map(s => html`
+						${renderArchivedSessionRow(s)}
+						${renderArchivedDelegates(s.id)}
+					`)}
 				</div>
 			` : ""}
 			${isExpanded && childGoals.length > 0 ? html`
