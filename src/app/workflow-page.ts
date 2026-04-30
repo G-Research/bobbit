@@ -382,7 +382,7 @@ async function handleSave(): Promise<void> {
 			name: editName,
 			description: editDescription,
 			gates: gatesWithDeps,
-		});
+		}, getConfigProjectId() || undefined);
 		if (result) {
 			workflows = await fetchWorkflowsScoped();
 			showEdit(result);
@@ -888,7 +888,7 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 				name: editName,
 				description: editDescription,
 				gates: compactedGates,
-			});
+			}, getConfigProjectId() || undefined);
 			if (result) {
 				selectedWorkflow = result;
 				isNew = false;
