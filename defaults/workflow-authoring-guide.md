@@ -120,6 +120,30 @@ workflows:
 | `metadata` | map? | declared metadata schema for signals; values resolved via `{{agent.X}}`/`{{<gate>.meta.X}}` |
 | `verify` | VerifyStep[] | verification steps (see §4) |
 
+### 3.1 The implementation gate is a Ralph loop
+
+The `implementation` gate's `verify` list is the agent's loop body. When verification
+fails, the gate runner reports the failed steps to the implementing agent, which
+fixes the code and re-signals the gate. The agent circles back through the same
+verify list until it passes — this is the **Ralph loop**.
+
+Practical implications when authoring workflows:
+
+- **Verify steps must be self-contained checks**, not setup actions. The agent
+  re-runs all of them on each iteration; a step that mutates external state
+  (publishes a package, opens a PR) belongs in `ready-to-merge`, not `implementation`.
+- **Phase your steps so cheap signals fail fast**: phase 0 = build, phase 1 = parallel
+  test/check, phase 2 = expensive LLM reviews, phase 3 = optional QA. The runner
+  short-circuits later phases when an earlier phase fails, so the Ralph loop spends
+  its iterations on the cheapest signal that's still red.
+- **Always include a gap-analysis step at design-time AND post-implementation**
+  (except quick-fix). Design-time gap analysis catches missing requirements before
+  the agent burns iterations; post-impl gap analysis catches drift between design
+  and code. The seeded `general`, `feature`, and per-component flows include both.
+- **The `description` field on the gate** surfaces in the project-proposal panel
+  and the goal dashboard. Use it to remind reviewers that this gate is a loop, not
+  a checkpoint.
+
 ## 4. Verification step shapes
 
 There are three step `type:` values: `command`, `llm-review`, `agent-qa`.
@@ -200,6 +224,10 @@ These are substituted by the gate runner before the step executes. **Do not** us
 ## 6. Pattern library
 
 These are the typical gate sets per workflow style. Generators MAY extend, prune, or reorder freely.
+
+> All non-quick-fix flows below include **both** a design-time gap-analysis step
+> (in `design-doc` / `issue-analysis`) and a post-implementation gap-analysis step
+> (in `implementation`, phase 2). See §3.1 — these two checks bracket the Ralph loop.
 
 ### 6.1 `general` — lightweight
 

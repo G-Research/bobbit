@@ -8,6 +8,88 @@
  *   Helps the user create a new project from scratch.
  */
 
+import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __pa_dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Locate `defaults/workflow-authoring-guide.md` under both layouts:
+ *   - tsx dev: src/server/agent/project-assistant.ts
+ *               -> ../../../defaults/workflow-authoring-guide.md
+ *   - built:  dist/server/agent/project-assistant.js
+ *               -> ../defaults/workflow-authoring-guide.md (copied by copy-defaults.mjs)
+ *
+ * Returns empty string if neither path resolves — prompt continues to function
+ * but the inline guide is missing (a unit-test sentinel guards against this).
+ */
+function loadWorkflowAuthoringGuide(): string {
+	const candidates = [
+		join(__pa_dirname, "..", "..", "..", "defaults", "workflow-authoring-guide.md"),
+		join(__pa_dirname, "..", "defaults", "workflow-authoring-guide.md"),
+	];
+	for (const p of candidates) {
+		if (existsSync(p)) {
+			try { return readFileSync(p, "utf-8"); } catch { /* fall through */ }
+		}
+	}
+	return "";
+}
+
+const WORKFLOW_AUTHORING_GUIDE = loadWorkflowAuthoringGuide();
+
+const WORKFLOW_GUIDANCE_SECTIONS = `
+### Proposing workflows: the checklist flow
+
+After you've settled on \`components\`, present the user with a single \`ask_user_choices\`
+multi-select question listing the workflows you recommend seeding. Pre-check the ones
+described below.
+
+Always-on options (pre-check all):
+- **General** — lightweight design → impl → docs → merge.
+- **Quick fix** — minimal flow for tiny changes.
+- **Bug fix** — TDD with a reproducing-test gate.
+- **Feature** — full design + multi-review + optional QA.
+
+If \`components.length > 1\`, ALSO add (pre-checked):
+- **Per-component: <name>** — one entry per component. A feature-style flow scoped
+  to that single component's commands. Use for goals that touch only one repo.
+- **All-components** — fan-out implementation that runs build/test/check across
+  every component in parallel phases.
+
+For each option, include a 1-line WHY in the option label (the user picks from a
+multiple-choice widget; concise labels matter). Tell the user "leave the recommended
+ones checked unless you want to skip them".
+
+After the user submits, build the \`workflows\` map and call \`propose_project\` with it.
+
+### The implementation gate is a Ralph loop
+
+When you discuss what each workflow does with the user, frame the **implementation**
+gate as a "Ralph loop" — a verify list the agent re-runs on every iteration until
+it passes. This is why the seeded \`general\`, \`feature\`, and per-component flows
+all include both **design-time gap analysis** AND **post-implementation gap analysis**:
+those two checks keep the loop honest about what the goal actually asked for.
+Quick-fix skips both for speed.
+
+### The proposal panel updates live
+
+Every \`propose_project\` call you make immediately re-renders the user's preview
+panel — including the new components and workflows visualisations. So iterate freely:
+emit a first proposal, listen for feedback, emit a revised proposal. The user sees
+each revision instantly. You don't need to over-explain in chat what changed; the
+panel diff view shows it.
+`;
+
+const WORKFLOW_AUTHORING_REFERENCE = `
+## Workflow authoring reference
+
+The following guide is your authoritative reference for emitting the \`workflows\` block.
+
+${WORKFLOW_AUTHORING_GUIDE}
+`;
+
 export const PROJECT_ASSISTANT_PROMPT = `## Project Assistant
 
 You help register new project directories with Bobbit. A registered project lets Bobbit understand how to build, test, and type-check the codebase so that goal agents can work effectively.
@@ -100,7 +182,10 @@ Only include parameters you actually discovered — omit any whose value would b
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
-Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.`;
+Be concise. Prefer structured questions (\`ask_user_choices\`) over prose when the answer space is finite.
+${WORKFLOW_GUIDANCE_SECTIONS}
+${WORKFLOW_AUTHORING_REFERENCE}
+`;
 
 export const PROJECT_ASSISTANT_SCAFFOLDING_PROMPT = `## Project Scaffolding Assistant
 
@@ -153,4 +238,7 @@ Only include parameters you plan to set up — omit any whose value would be emp
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_project\` again with the changes.
 
-**Important**: After the user accepts the proposal, proceed to actually create the project files using your tools. Don't just propose — execute the scaffolding.`;
+**Important**: After the user accepts the proposal, proceed to actually create the project files using your tools. Don't just propose — execute the scaffolding.
+${WORKFLOW_GUIDANCE_SECTIONS}
+${WORKFLOW_AUTHORING_REFERENCE}
+`;
