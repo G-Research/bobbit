@@ -14,9 +14,27 @@
  * (which is now obsolete now that `defaults/workflows/*.yaml` is gone).
  */
 
+/**
+ * Subgoal verify-step parameters — mirror of
+ * `workflow-store.ts::SubgoalStepParams`. Re-declared here (rather than
+ * imported) so this file remains free of agent-runtime imports, matching
+ * the pattern of the other seeded shapes.
+ */
+export interface SeededSubgoalStepParams {
+	title: string;
+	spec: string;
+	workflowId?: string;
+	/** Free-form workflow definition; structurally a Workflow but kept as `unknown` here. */
+	inlineWorkflow?: unknown;
+	suggestedRole?: string;
+	enabledOptionalSteps?: string[];
+	planId: string;
+	phase?: number;
+}
+
 export interface SeededVerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal";
 	component?: string;
 	command?: string;
 	run?: string;
@@ -28,6 +46,11 @@ export interface SeededVerifyStep {
 	optional?: boolean;
 	label?: string;
 	description?: string;
+	/**
+	 * Subgoal step parameters when `type === "subgoal"` (nested goals,
+	 * see docs/design/nested-goals.md §2.1 / §6).
+	 */
+	subgoal?: SeededSubgoalStepParams;
 	[key: string]: unknown;
 }
 

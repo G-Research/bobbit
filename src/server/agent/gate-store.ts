@@ -6,7 +6,7 @@ export type GateStatus = "pending" | "passed" | "failed";
 
 export interface GateSignalStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal";
 	passed: boolean;
 	skipped?: boolean;
 	output: string;
@@ -16,6 +16,17 @@ export interface GateSignalStep {
 		content: string;
 		contentType: string;
 		metadata?: Record<string, string>;
+	};
+	/**
+	 * Idempotency record for `type === "subgoal"` verification steps. Carries
+	 * the spawned child goal id so the verification harness can resume / reuse
+	 * across restarts. See docs/design/nested-goals.md §2.5.
+	 */
+	subgoal?: {
+		planId: string;
+		childGoalId: string;
+		childMergedAt?: number;
+		childMergeConflict?: boolean;
 	};
 }
 
