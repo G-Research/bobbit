@@ -122,11 +122,45 @@ export function showConnectionError(title: string, message: string): void {
 // OAUTH DIALOG
 // ============================================================================
 
+/**
+ * Returns the OAuth authentication status for `provider`.
+ *
+ * IMPORTANT: a transient HTTP failure (network blip, gateway restart in
+ * flight, server overload) must NOT be reported as "not authenticated" —
+ * doing so causes `authenticateGateway()` to spuriously open the OAuth
+ * dialog over a perfectly valid session, which is a confusing UX bug in
+ * production and a long-tail E2E flake (the dialog steals focus and
+ * subsequent assertions on sidebar/page elements time out).
+ *
+ * Distinguish:
+ *   - HTTP 200 + `authenticated: false`  → genuinely not authenticated
+ *   - any other response (non-2xx, JSON parse failure, network error)
+ *     → status indeterminate; retry once. If still indeterminate, treat as
+ *     authenticated (best-effort) — the actual gateway endpoints will
+ *     reject if the credential really is missing.
+ */
 export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean> {
-	const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider)}`);
-	if (!res.ok) return false;
-	const data = await res.json();
-	return data.authenticated === true;
+	const attempt = async (): Promise<{ ok: boolean; auth: boolean | null }> => {
+		try {
+			const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider)}`);
+			if (!res.ok) return { ok: false, auth: null };
+			const data = await res.json();
+			return { ok: true, auth: data.authenticated === true };
+		} catch {
+			return { ok: false, auth: null };
+		}
+	};
+	const first = await attempt();
+	if (first.ok) return first.auth === true;
+	// Indeterminate — retry once after a short delay.
+	await new Promise((r) => setTimeout(r, 250));
+	const second = await attempt();
+	if (second.ok) return second.auth === true;
+	// Still indeterminate after a retry. Assume authenticated rather than
+	// stealing the user's flow with a spurious OAuth dialog. The first real
+	// authenticated request will fail-closed if the credential truly is
+	// missing, and the dialog will surface there.
+	return true;
 }
 
 export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
