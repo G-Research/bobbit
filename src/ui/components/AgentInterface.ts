@@ -213,6 +213,19 @@ export class AgentInterface extends LitElement {
 	/** Whether initial render is done (skip animations on first paint) */
 	private _pillsInitialized = false;
 	private _unsubscribeSession?: () => void;
+
+	// Tracks viewport <640px (Tailwind sm breakpoint) for mobile-only label abbreviation.
+	private _isMobileViewport = typeof window !== "undefined" && typeof window.matchMedia === "function"
+		? !window.matchMedia("(min-width: 640px)").matches
+		: false;
+	private _mobileMediaQuery?: MediaQueryList;
+	private _handleMobileMediaChange = (e: MediaQueryListEvent) => {
+		const next = !e.matches;
+		if (next !== this._isMobileViewport) {
+			this._isMobileViewport = next;
+			this.requestUpdate();
+		}
+	};
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
 	private _cachedToolResults?: Map<string, ToolResultMessage>;
@@ -325,6 +338,13 @@ export class AgentInterface extends LitElement {
 
 		// Subscribe to external session if provided
 		this.setupSessionSubscription();
+
+		// Track viewport for mobile-only label abbreviation in the thinking selector.
+		if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+			this._mobileMediaQuery = window.matchMedia("(min-width: 640px)");
+			this._isMobileViewport = !this._mobileMediaQuery.matches;
+			this._mobileMediaQuery.addEventListener("change", this._handleMobileMediaChange);
+		}
 	}
 
 	override disconnectedCallback() {
@@ -346,6 +366,11 @@ export class AgentInterface extends LitElement {
 		if (this._pillResizeObserver) {
 			this._pillResizeObserver.disconnect();
 			this._pillResizeObserver = undefined;
+		}
+
+		if (this._mobileMediaQuery) {
+			this._mobileMediaQuery.removeEventListener("change", this._handleMobileMediaChange);
+			this._mobileMediaQuery = undefined;
 		}
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
@@ -832,16 +857,28 @@ export class AgentInterface extends LitElement {
 		const session = this.session!;
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
+		// The dropdown popover always shows full labels; on mobile (<640px) the trigger
+		// label is rewritten to an abbreviation in updated() (DOM post-processing) so the
+		// popover items remain readable.
+		const fullLabels = {
+			off: i18n("Off"),
+			minimal: i18n("Minimal"),
+			low: i18n("Low"),
+			medium: i18n("Medium"),
+			high: i18n("High"),
+		};
+		const thinkingTitle = fullLabels[(state.thinkingLevel as keyof typeof fullLabels) ?? "off"] ?? fullLabels.off;
+
 		const thinkingSelect = supportsThinking && this.enableThinkingSelector
-			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1">${Select({
+			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
 				value: state.thinkingLevel,
-				placeholder: i18n("Off"),
+				placeholder: fullLabels.off,
 				options: [
-					{ value: "off", label: i18n("Off"), icon: icon(Brain, "sm") },
-					{ value: "minimal", label: i18n("Minimal"), icon: icon(Brain, "sm") },
-					{ value: "low", label: i18n("Low"), icon: icon(Brain, "sm") },
-					{ value: "medium", label: i18n("Medium"), icon: icon(Brain, "sm") },
-					{ value: "high", label: i18n("High"), icon: icon(Brain, "sm") },
+					{ value: "off", label: fullLabels.off, icon: icon(Brain, "sm") },
+					{ value: "minimal", label: fullLabels.minimal, icon: icon(Brain, "sm") },
+					{ value: "low", label: fullLabels.low, icon: icon(Brain, "sm") },
+					{ value: "medium", label: fullLabels.medium, icon: icon(Brain, "sm") },
+					{ value: "high", label: fullLabels.high, icon: icon(Brain, "sm") },
 				] as SelectOption[],
 				onChange: (value: string) => {
 					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
@@ -866,7 +903,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-1">${state.model.id}</span>
+					<span class="ml-0.5">${state.model.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
@@ -888,7 +925,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(ImageIcon, "sm")}
-					<span class="ml-1 hidden sm:inline">${imageModel.id}</span>
+					<span class="ml-0.5 hidden sm:inline">${imageModel.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
@@ -1543,6 +1580,13 @@ export class AgentInterface extends LitElement {
 	override updated(changedProperties: Map<string, any>) {
 		super.updated(changedProperties);
 
+		// Mobile-only: rewrite the thinking-selector trigger label to an abbreviation.
+		// The Select component reuses option.label for both the trigger and the popover
+		// items, so we keep options on full labels and only retarget the trigger's
+		// visible text node here. Re-runs on every render and on viewport changes
+		// (which call requestUpdate via _handleMobileMediaChange).
+		this._syncThinkingTriggerLabel();
+
 		// Setup pill overflow observer once the pill strip is rendered
 		if (this.bgProcesses.length > 0) {
 			const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
@@ -1569,6 +1613,28 @@ export class AgentInterface extends LitElement {
 				this._pillResizeObserver.disconnect();
 				this._pillResizeObserver = undefined;
 			}
+		}
+	}
+
+	private _syncThinkingTriggerLabel() {
+		const host = this.querySelector('.thinking-select-compact');
+		if (!host) return;
+		const labelSpan = host.querySelector('button > span') as HTMLElement | null;
+		if (!labelSpan) return;
+		const level = (this.session?.state?.thinkingLevel as string | undefined) ?? "off";
+		const abbrev: Record<string, string> = { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi" };
+		const full: Record<string, string> = { off: i18n("Off"), minimal: i18n("Minimal"), low: i18n("Low"), medium: i18n("Medium"), high: i18n("High") };
+		const desired = this._isMobileViewport ? (abbrev[level] ?? abbrev.off) : (full[level] ?? full.off);
+		// The label span contains an icon span and a sibling text node — replace only
+		// the text node, leave the icon untouched.
+		let textNode: Text | null = null;
+		for (const node of Array.from(labelSpan.childNodes)) {
+			if (node.nodeType === Node.TEXT_NODE) { textNode = node as Text; break; }
+		}
+		if (textNode) {
+			if (textNode.textContent !== desired) textNode.textContent = desired;
+		} else {
+			labelSpan.appendChild(document.createTextNode(desired));
 		}
 	}
 }
