@@ -822,30 +822,27 @@ function renderProjectContent(
 	const ungroupedExp = isUngroupedExpanded(project.id);
 	// Standalone goals = goals NOT owned by any mission (mission children render under their mission).
 	const standalone = goals.filter(g => !g.missionId);
+	// Interleave missions and standalone goals chronologically by createdAt.
+	// Goals already arrive sorted by createdAt; we merge with missions on the
+	// same key. The MISSIONS subgroup header is intentionally absent — missions
+	// render inline with goals, distinguished only by their `Flag` icon
+	// (rendered by renderMissionGroup).
+	type MissionItem = { kind: "mission"; createdAt: number; mission: PersistedMission };
+	type GoalItem = { kind: "goal"; createdAt: number; goal: Goal };
+	type Item = MissionItem | GoalItem;
+	const items: Item[] = [
+		...missions.map<MissionItem>(m => ({ kind: "mission", createdAt: m.createdAt, mission: m })),
+		...standalone.map<GoalItem>(g => ({ kind: "goal", createdAt: g.createdAt, goal: g })),
+	];
+	items.sort((a, b) => a.createdAt - b.createdAt);
 	return html`
-		${missions.length > 0 ? html`
-			<div class="flex flex-col gap-0.5" data-testid="missions-subgroup">
-				<div class="relative flex items-center gap-1 pr-1 py-0.5" style="padding-left:${HEADER_CHEVRON_W}px;">
-					<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Flag, "xs")}</span>
-					<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Missions</span>
-					${!isProvisional ? html`
-						<button
-							class="p-0.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-							@click=${(e: Event) => { e.stopPropagation(); showMissionDialog(project.id); }}
-							title="New mission in ${project.name}"
-							data-testid="new-mission-btn"
-						>${icon(Plus, "xs")}</button>
-					` : ""}
-				</div>
-				${missions.map(m => renderMissionGroup(m, goalsForMission(m.id, goals)))}
-			</div>
-			<div class="border-t border-border/30 mx-2"></div>
-		` : ""}
-		${standalone.map((goal, i) => html`
+		${items.map((item, i) => html`
 			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
-			${renderGoalGroup(goal)}
+			${item.kind === "mission"
+				? renderMissionGroup(item.mission, goalsForMission(item.mission.id, goals))
+				: renderGoalGroup(item.goal)}
 		`)}
-		${standalone.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+		${items.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 				style="padding-left:${HEADER_CHEVRON_W}px;"
