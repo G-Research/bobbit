@@ -356,3 +356,19 @@ The test uses the existing spawned-gateway harness (`tests/e2e/ui/gateway-harnes
 | 1000-entry ring evicts mid-reconnect on a very busy session | Server sends `resume_gap`; client falls back to snapshot. Consider bumping to 5000 if telemetry shows frequent gaps — separate tuning change, not blocking. |
 | Out-of-order buffer grows unbounded on a permanently-gapped client | Drain on every ingest; if `_pendingEvents.length > 500`, abandon and force a snapshot reload. |
 | Other broadcast types (`session_status`, etc.) also race | Out of scope — they're idempotent snapshots. The bug is about `{type:"event"}` only. |
+
+---
+
+## 7. Test-only replay pacing
+
+Production `broadcast()` in `src/server/agent/session-manager.ts` force-`terminate()`s any client whose `bufferedAmount` crosses 4 MiB — this is intentional back-pressure that triggers a clean reconnect+resume.
+
+The BOBBIT_E2E-only `replay-buffered-events` endpoint in `src/server/server.ts` does **not** go through `broadcast()`: it iterates `session.eventBuffer` and sends straight to the target socket. Synchronous fan-out can pile bytes faster than the kernel drains, so the test endpoint would sporadically trip the 4 MiB guard and force the client to reconnect mid-replay — exactly the symptom ST-DEDUP-01 was trying to assert against, but caused by the test harness rather than the production path.
+
+`paceAndSend()` in `src/server/replay-pacing.ts` gates each `send()` on `bufferedAmount`:
+
+- **Soft threshold:** 256 KiB (`PACE_THRESHOLD_BYTES`). While buffered output exceeds this, the helper sleeps 10 ms and rechecks.
+- **Per-call deadline:** 2 s (`PACE_TIMEOUT_MS`). If the client never drains (e.g. it has gone away), the helper falls through and lets the underlying `send()` throw or no-op rather than hanging the endpoint.
+- **Closed-socket short-circuit:** returns immediately when `readyState !== 1`.
+
+This change is scoped to the test endpoint. Production `broadcast()` retains its 4 MiB hard cap unchanged — the pacing helper is a test-harness band-aid, not a production back-pressure mechanism.
