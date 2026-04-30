@@ -93,13 +93,16 @@ let settingsShowTimestampsLoaded = false;
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
-	resolved: Record<string, { value: string; source: string }>;
-	raw: Record<string, string>;
+	// `value` is widened to `any` because migrated fields (config_directories, qa_env,
+	// sandbox_tokens, qa_max_duration_minutes, qa_max_scenarios) come back as native
+	// JSON types (array/object/number); other keys remain strings.
+	resolved: Record<string, { value: any; source: string }>;
+	raw: Record<string, any>;
 	loaded: boolean;
 }>();
 
 let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
-const _projectScopePending = new Map<string, Record<string, string>>();
+const _projectScopePending = new Map<string, Record<string, any>>();
 
 function loadProjectScopeConfig(projectId: string): void {
 	const cached = projectScopeConfigCache.get(projectId);
@@ -122,14 +125,30 @@ function loadProjectScopeConfig(projectId: string): void {
 	})();
 }
 
-async function saveProjectScopeConfig(projectId: string, updates: Record<string, string>): Promise<void> {
+async function saveProjectScopeConfig(projectId: string, updates: Record<string, any>): Promise<void> {
 	projectScopeSaveStatus = "saving";
 	renderApp();
 	try {
 		// Handle rootPath separately via project update API
 		const rootPath = updates._rootPath;
-		const configUpdates = { ...updates };
+		const configUpdates: Record<string, any> = { ...updates };
 		delete configUpdates._rootPath;
+		// Coerce numeric migrated fields from text-input strings to real numbers.
+		for (const key of ["qa_max_duration_minutes", "qa_max_scenarios"]) {
+			if (key in configUpdates) {
+				const v = configUpdates[key];
+				if (typeof v === "string") {
+					const trimmed = v.trim();
+					if (trimmed === "") {
+						configUpdates[key] = null;
+					} else {
+						const n = parseInt(trimmed, 10);
+						if (Number.isFinite(n)) configUpdates[key] = n;
+						else delete configUpdates[key];
+					}
+				}
+			}
+		}
 
 		const promises: Promise<Response>[] = [];
 
@@ -170,7 +189,8 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 }
 
 async function resetProjectScopeField(projectId: string, key: string): Promise<void> {
-	await saveProjectScopeConfig(projectId, { [key]: "" });
+	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios"]);
+	await saveProjectScopeConfig(projectId, { [key]: NATIVE_FIELDS.has(key) ? null : "" });
 }
 
 // ── Sandbox section state ──
@@ -247,35 +267,37 @@ function loadWorktreePoolStatus(): void {
 }
 
 /** Initialize token/mount entries from resolved config if not already tracked. */
-function initSandboxEntries(projectId: string, resolved: Record<string, { value: string; source: string }>): void {
+function initSandboxEntries(projectId: string, resolved: Record<string, { value: any; source: string }>): void {
 	// Defer token entry init until host tokens have loaded (async),
 	// otherwise the list would be seeded with zero host tokens.
 	if (!_sandboxTokenEntries.has(projectId) && hostTokens !== null) {
-		const tokensRaw = resolved.sandbox_tokens?.value || "";
+		const tokensVal = resolved.sandbox_tokens?.value;
 		const hostEnvVars = new Set((hostTokens || []).map(t => t.envVar));
-		if (tokensRaw) {
-			// New unified format
+		// New unified format — may arrive as native array (post-native-YAML) or
+		// legacy JSON-encoded string. Accept both for forward+back compat.
+		let arr: { key: string; value?: string; enabled: boolean }[] | null = null;
+		if (Array.isArray(tokensVal)) {
+			arr = tokensVal as Array<{ key: string; value?: string; enabled: boolean }>;
+		} else if (typeof tokensVal === "string" && tokensVal.length > 0) {
 			try {
-				const arr: { key: string; value: string; enabled: boolean }[] = JSON.parse(tokensRaw);
-				if (Array.isArray(arr)) {
-					const entries = arr.map(e => ({
-						key: e.key || "",
-						value: e.value === "__REDACTED__" ? "" : (e.value || ""),
-						enabled: !!e.enabled,
-						isHost: hostEnvVars.has(e.key),
-						redacted: e.value === "__REDACTED__",
-					}));
-					// Add any detected host tokens not already in the saved list as disabled
-					for (const ht of (hostTokens || [])) {
-						if (!entries.some(e => e.key === ht.envVar)) {
-							entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true, redacted: false });
-						}
-					}
-					_sandboxTokenEntries.set(projectId, entries);
-				} else {
-					_sandboxTokenEntries.set(projectId, []);
+				const parsed = JSON.parse(tokensVal);
+				if (Array.isArray(parsed)) arr = parsed;
+			} catch { arr = null; }
+		}
+		if (arr) {
+			const entries = arr.map(e => ({
+				key: e.key || "",
+				value: e.value === "__REDACTED__" ? "" : (e.value || ""),
+				enabled: !!e.enabled,
+				isHost: hostEnvVars.has(e.key),
+				redacted: e.value === "__REDACTED__",
+			}));
+			for (const ht of (hostTokens || [])) {
+				if (!entries.some(e => e.key === ht.envVar)) {
+					entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true, redacted: false });
 				}
-			} catch { _sandboxTokenEntries.set(projectId, []); }
+			}
+			_sandboxTokenEntries.set(projectId, entries);
 		} else {
 			// Legacy fallback: merge host tokens + sandbox_credentials + sandbox_host_token_overrides
 			const entries: { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[] = [];
@@ -342,21 +364,23 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 	}
 }
 
-/** Serialize token entries to pendingChanges.sandbox_tokens */
+/** Serialize token entries to pendingChanges.sandbox_tokens as a structured array.
+ *  Server-side `PUT /api/projects/:id/config` rejects JSON-encoded strings for this
+ *  field after the native-YAML migration. */
 function syncTokenEntries(
 	tokenEntries: { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[],
-	pendingChanges: Record<string, string>,
+	pendingChanges: Record<string, any>,
 ): void {
 	const arr = tokenEntries
 		.filter(e => e.key) // skip empty key rows
 		.map(e => ({ key: e.key, value: e.redacted && !e.value ? "__REDACTED__" : e.value, enabled: e.enabled }));
-	pendingChanges.sandbox_tokens = arr.length > 0 ? JSON.stringify(arr) : "";
+	pendingChanges.sandbox_tokens = arr.length > 0 ? arr : null;
 }
 
 function renderSandboxSection(
 	projectId: string,
-	resolved: Record<string, { value: string; source: string }>,
-	pendingChanges: Record<string, string>,
+	resolved: Record<string, { value: any; source: string }>,
+	pendingChanges: Record<string, any>,
 	inputClass: string,
 	labelClass: string,
 ) {
@@ -1914,7 +1938,8 @@ async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] 
 			: "/api/project-config";
 		const res = await gatewayFetch(endpoint, {
 			method: "PUT",
-			body: JSON.stringify({ config_directories: JSON.stringify(customDirs), skill_directories: null }),
+			// Send structured array (post-native-YAML); server rejects JSON-encoded strings for migrated fields.
+			body: JSON.stringify({ config_directories: customDirs, skill_directories: null }),
 		});
 		if (res.ok) {
 			configDirsSaveStatus = "saved";

@@ -141,10 +141,12 @@ test.describe("Per-project Config Directories", () => {
 			{ path: mcpPath, types: ["mcp", "tools"] },
 		];
 
+		// Native-YAML migration: server now rejects JSON-string payloads for
+		// `config_directories`; send the structured array directly.
 		const putResp = await apiFetch(`/api/projects/${projectId}/config`, {
 			method: "PUT",
 			body: JSON.stringify({
-				config_directories: JSON.stringify(customDirs),
+				config_directories: customDirs,
 				skill_directories: null,
 			}),
 		});
