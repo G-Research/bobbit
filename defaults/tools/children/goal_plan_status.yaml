@@ -1,0 +1,57 @@
+name: goal_plan_status
+description: |-
+  Return the current plan (the `verify[]` of a named gate, default `execution`) plus the live state of any spawned children. Cheap to call; use this before proposing a mutation to ensure you are working from the latest snapshot.
+
+  The response includes `frozen` (true once `goal-plan` has been signalled), `replanCount` (pass back as `expectedReplanCount` to `goal_plan_propose` for optimistic concurrency), and per-step `dependsOnPlanIds` (materialised from `phase` ordering so you don't have to recompute).
+summary: "Return the current plan + live child states for a gate (default `execution`)."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  GETs `GET /api/goals/:id/plan?gateId=execution`. Response 200: `{ gateId, frozen, replanCount, planSteps: [{ planId, title, spec, workflowId?, suggestedRole?, phase, dependsOnPlanIds, child? }] }`. The narrow projection complements `GET /api/goals/:id?include=tree` (which is the broader descendants-and-gates view). 404 if `gateId` is not in the workflow. The REST route is added in Phase 3.5; this tool only fans out the URL.
+detail_docs: |-
+  ## Purpose
+
+  Read the current plan for a gate and the live state of any spawned child goals, in one round-trip. Use before `goal_plan_propose` to read `replanCount` for the optimistic-concurrency guard, or to inspect what's already running.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `gateId` | string | No | Workflow gate id. Defaults to `"execution"` (the canonical plan-hosting gate on `parent.yaml`). |
+
+  ## Response shape
+
+  ```ts
+  {
+    gateId: string;
+    frozen: boolean;          // true once goal-plan has been signalled
+    replanCount: number;      // pass back as expectedReplanCount to goal_plan_propose
+    planSteps: Array<{
+      planId: string;
+      title: string;
+      spec: string;            // full spec; caller may truncate
+      workflowId?: string;
+      suggestedRole?: string;
+      phase: number;           // 0 if unset
+      dependsOnPlanIds: string[];   // inferred from phase ordering
+      child?: {                     // present once spawned
+        goalId: string;
+        state: "todo" | "in-progress" | "complete" | "shelved";
+        branch?: string;
+        lastVerificationVerdict?: "passed" | "failed" | "running";
+      };
+    }>;
+  }
+  ```
+
+  ## When to use
+
+  - Before any `goal_plan_propose` call (read `replanCount`, pass as `expectedReplanCount`).
+  - When the user asks "what's in flight?" — the `child.state` and `child.lastVerificationVerdict` columns are the source of truth.
+  - As a sanity check before signalling the `goal-plan` gate (no missing `planId`s, every acceptance criterion covered).
+
+  ## Errors
+
+  - **404 Not Found** — `gateId` is not part of this goal's workflow.

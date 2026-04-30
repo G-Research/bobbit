@@ -1,0 +1,47 @@
+name: goal_plan_propose
+description: |-
+  Replace the verify[] of a named gate (default `execution`) with the proposed list of subgoal steps. This is how you author a planned decomposition for a `parent`-workflow goal.
+
+  Pre-freeze (before the `goal-plan` gate has been signalled), the plan is freely editable — any shape is accepted.
+
+  Post-freeze, mutations are classified server-side by shape (`fix-up` / `expansion` / `restructure` / `criteria-drop`) and gated by your goal's divergence policy:
+    - `fix-up` — auto-approves under `balanced` / `autonomous`; prompts the user under `strict`.
+    - `expansion` — always prompts the user (every policy, including `autonomous`).
+    - `restructure` — under `strict`, requires the goal to be paused first (call `goal_pause`); otherwise prompts the user.
+    - `criteria-drop` — rejected unconditionally (no policy override). Do not retry: drop-criteria mutations would leave a root acceptance criterion uncovered.
+
+  Post-freeze callers MUST supply `replanReason`. `replanCount` is bumped on every accepted post-freeze mutation; once it exceeds 5 the goal auto-pauses for human review (Phase 5 enforcement).
+summary: "Replace a gate's verify[] with the proposed plan steps. Pre-freeze: free. Post-freeze: classifier + divergence-policy gated."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  PATCHes `PATCH /api/goals/:id/plan` with body `{ planSteps: VerifyStep[], gateId?: string, replanReason?: string, expectedReplanCount?: number }`. Response 200 echoes the persisted plan. 409 carries the structured mutation rejection (`error: "mutation-rejected"` with `classification`, `droppedCriteria`, `addedNodes`, `removedNodes`, `summary`, `requiresApproval?`), the stale-plan guard (`error: "stale-plan", currentReplanCount`), or the replan-cap guard (`error: "replan-cap", replanCount`). Surface the body verbatim to the user. The REST route is added in Phase 3.5; this tool only fans out the URL.
+detail_docs: |-
+  ## Purpose
+
+  Author or replace the planned decomposition (the `verify[]` of a workflow gate, default `execution`) for a `parent`-workflow goal. Each plan step is typically a `subgoal` step — `{ type: "subgoal", phase, subgoal: { title, spec, workflowId?, suggestedRole?, planId } }` — but other verify-step types are accepted too.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `planSteps` | `VerifyStep[]` | **Yes** | Full replacement list for the gate's `verify[]`. Order is irrelevant; `phase` numbers drive parallelism and dependency ordering. |
+  | `gateId` | string | No | Workflow gate id whose `verify[]` is being replaced. Defaults to `"execution"`. |
+  | `replanReason` | string | No (pre-freeze) / **Yes (post-freeze)** | Free-form rationale shown in the dashboard mutation banner. Required once `goal-plan` has been signalled. |
+  | `expectedReplanCount` | number | No | Optimistic-concurrency guard. Pass the `replanCount` returned by the most recent `goal_plan_status` call; the server returns 409 `stale-plan` if another mutation has bumped the counter since. |
+
+  ## When to use
+
+  - **Pre-freeze** — author the initial plan during the `charter` / `plan-review` gates. Iterate freely; nothing is locked until `goal-plan` is signalled.
+  - **Post-freeze (replan)** — only when the team-lead realises a planned subgoal needs splitting (`fix-up`), an entirely new branch of work has emerged (`expansion`), or the dependency graph itself was wrong (`restructure`). Always call `goal_plan_status` first to read the current `replanCount` and pass it as `expectedReplanCount`.
+
+  Always restate every covered acceptance criterion verbatim in each subgoal step's `spec` — the server's adherence check uses substring matching, so paraphrased criteria fail the check.
+
+  ## Errors
+
+  - **409 mutation-rejected** — body includes `classification` (`fix-up` | `expansion` | `restructure` | `criteria-drop`), `droppedCriteria`, `addedNodes`, `removedNodes`, `summary`, and `requiresApproval?`. `criteria-drop` is unconditional. For `expansion` / `restructure` (and `fix-up` under `strict`), the user is prompted via the dashboard mutation banner; surface the body to the user and wait.
+  - **409 stale-plan** — `currentReplanCount` is the latest persisted value; re-read with `goal_plan_status` and re-issue.
+  - **409 replan-cap** — `replanCount > 5`; the goal has auto-paused. The user must intervene.
+  - **400 Bad Request** — malformed `planSteps` (cycles, dangling deps, unknown step type) or unknown `gateId`.
