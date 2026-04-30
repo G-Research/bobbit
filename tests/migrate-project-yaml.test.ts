@@ -122,7 +122,7 @@ describe("migrateProjectYaml", () => {
 
 		// Default workflows seeded with structural refs to the existing component.
 		const wf = out.workflows as Record<string, any>;
-		assert.ok(wf.general && wf.feature && wf["bug-fix"] && wf["quick-fix"], "all four default workflows must be seeded");
+		assert.ok(wf.general && wf.feature && wf["bug-fix"] && wf["quick-fix"] && wf.parent, "all five default workflows must be seeded");
 		// Spot-check: the implementation gate's Build step targets components[0].name.
 		const impl = wf.general.gates.find((g: any) => g.id === "implementation");
 		const build = impl.verify.find((s: any) => s.name === "Build");
@@ -152,7 +152,7 @@ describe("migrateProjectYaml", () => {
 		const wf = out.workflows as Record<string, any>;
 		assert.deepEqual(
 			Object.keys(wf).sort(),
-			["bug-fix", "feature", "general", "quick-fix"],
+			["bug-fix", "feature", "general", "parent", "quick-fix"],
 		);
 		// Default-component name == project name, and structural refs point at it.
 		assert.equal((out.components as any[])[0].name, "myapp");
