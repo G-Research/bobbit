@@ -208,16 +208,16 @@ test.describe("git-status server cache + single-flight", () => {
 		fakeShouldThrow = true;
 		const before = serverModule.__getGitStatusInvocationCount();
 		const r1 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
-		// Handler retries once internally, so 2 invocations for a single
-		// failed HTTP call; verify the outer status is 500 and that state
-		// didn't leak into the cache.
+		// Handler is single-attempt now (no internal retry loop). One
+		// invocation per failed HTTP call; verify the outer status is 500.
 		expect(r1.status).toBe(500);
 
 		fakeShouldThrow = false;
 		const r2 = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 		expect(r2.status).toBe(200);
-		// >=3 because handler does 2 internal attempts on failure + 1 fresh success.
-		expect(serverModule.__getGitStatusInvocationCount() - before).toBeGreaterThanOrEqual(3);
+		// Exactly 2: 1 failed + 1 fresh success. Errors are not cached so the
+		// second call falls through to a fresh underlying invocation.
+		expect(serverModule.__getGitStatusInvocationCount() - before).toBe(2);
 	});
 
 	test("not-a-repo (null result) returns 400", async () => {
