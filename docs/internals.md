@@ -1634,6 +1634,58 @@ Seq-less frames (old servers) fall through the dispatch path unchanged — the r
 
 ---
 
+## Verification event dedupe
+
+Gate verification streams a separate event family (`gate_verification_step_output`, `gate_verification_step_end`, `gate_verification_complete`, …) that does **not** flow through `emitSessionEvent` and the per-session seq pipeline above. Verification is goal-scoped, not session-scoped: the harness broadcasts via `broadcastToGoal(goalId, event)` to every WebSocket whose session belongs to the goal team, plus the dashboard `__viewer__` connection. The dedupe story for that family is described here.
+
+### The fan-out problem
+
+In the UI, every open session in a goal team has its own `RemoteAgent` with its own WebSocket. When a verification step writes a stdout line, the server delivers the resulting `gate_verification_step_output` payload to all N session sockets (one copy each), plus +1 for the dashboard's viewer WS when mounted. Pre-fix, each `RemoteAgent` independently re-broadcast the payload as a `document.dispatchEvent(new CustomEvent("gate-verification-event", {detail: msg}))`, so the document-level listeners in `<verification-output-modal>` and `<gate-verification-live>` appended one chunk per dispatch — a single log line ended up rendered N× (or (N+1)× with the dashboard mounted).
+
+The bug is fundamentally about **fan-out at the dispatch layer, not the wire layer**: server-side broadcast volume is fine (clients legitimately need every session WS to stay live), but the listeners need to see each logical event exactly once.
+
+### Server-assigned seq
+
+`src/server/agent/verification-harness.ts` stamps a monotonic `seq: number` on every `gate_verification_*` payload it broadcasts. The protocol type in `src/server/ws/protocol.ts` carries the field additively — older clients ignore it, and a pre-`seq` server still fan-outs (the bus then falls back to a content hash, see below). The seq is unique within the verification stream of a single signal/step, which is all the bus needs to dedupe.
+
+### The dedupe bus
+
+`src/app/verification-event-bus.ts` is a module-scoped singleton that exports `dispatchVerificationEvent(msg)`. All dispatch sources — every `RemoteAgent` instance and the goal dashboard's viewer WS in `src/app/goal-dashboard.ts` — funnel through it instead of calling `document.dispatchEvent` directly. The bus computes a key from `(eventType, signalId, stepIndex, seq)`; if the key was seen recently, the dispatch is dropped, otherwise the bus emits the document-level CustomEvent and remembers the key.
+
+The seen-set is bounded (~5000 keys) with FIFO/LRU eviction so a long-running session can't grow it without limit. The eviction window is wide enough that real fan-out (which happens within milliseconds of the original broadcast) is always within the window, but narrow enough to keep memory bounded across a multi-hour goal.
+
+When `seq` is missing (older server, hand-written test fixtures), the bus falls back to hashing the salient payload fields (`stream`, `text`, `status`, …) so identical fan-out copies still collapse — best-effort, since two semantically distinct events that happen to carry identical content would be coalesced. With the new server stamping `seq` on every event this fallback is only a compatibility shim.
+
+### Bootstrap-vs-live overlap in the modal
+
+`<verification-output-modal>` can be opened mid-stream after some output has already accumulated server-side. The modal seeds its rendered chunks from `initialOutput` (the bootstrap) and then continues consuming live events. Pre-fix, a live event whose payload was already in the bootstrap would be appended again, producing a visible "prefix shown twice" effect on reopen.
+
+The fix tracks a high-water `seq` derived from the bootstrap and silently discards live events with `seq` ≤ that mark. The modal also short-circuits `_fetchBootstrapOutput` when `initialOutput` is already populated, eliminating a parallel snapshot race.
+
+### AbortController listener hygiene
+
+Lit re-renders the modal and live components on property changes; without disciplined teardown, `document.addEventListener` calls would accumulate across re-renders and listeners from prior mount cycles would keep firing on stale closures. `VerificationOutputModal` and `GateVerificationLive` now allocate a fresh `AbortController` on connect, pass `{ signal }` to every `addEventListener`, and call `controller.abort()` from `disconnectedCallback`. This guarantees listener count == 1 per live component instance, regardless of how many times Lit re-renders.
+
+### Tests
+
+- `tests/verification-dedup.spec.ts` (+ `tests/fixtures/verification-dedup-*`) — Playwright file:// fixture that dispatches the same `gate-verification-event` 6× and asserts a single rendered occurrence in both `<verification-output-modal>` and `<gate-verification-live>`. This pins the multi-layer guarantee end-to-end on the listener side.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/app/verification-event-bus.ts` | Module-scoped dedupe funnel; `dispatchVerificationEvent(msg)` + bounded LRU seen-set |
+| `src/app/remote-agent.ts` | Routes `gate_verification_*` WS frames through the bus instead of `document.dispatchEvent` |
+| `src/app/goal-dashboard.ts` | Same routing for the dashboard `__viewer__` WS |
+| `src/server/agent/verification-harness.ts` | Stamps monotonic `seq` on every `gate_verification_*` event |
+| `src/server/ws/protocol.ts` | Additive `seq` field on the verification event union |
+| `src/ui/components/VerificationOutputModal.ts` | `AbortController` listeners + bootstrap high-water seq |
+| `src/ui/tools/renderers/GateVerificationLive.ts` | `AbortController` listeners on the live renderer |
+
+For the parallel pattern on the agent stream (different event family, same shape of fix), see [Event stream ordering & dedup](#event-stream-ordering--dedup) above and [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved — the agent is stuck mid tool-call and the steer feels ignored.
