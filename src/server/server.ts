@@ -699,6 +699,7 @@ export function createGateway(config: GatewayConfig) {
 		roleStore,
 		projectContextManager,
 		toolManager,
+		configCascade,
 	});
 	const bgProcessManager = new BgProcessManager((sessionId: string) => {
 		const session = sessionManager.getSession(sessionId);

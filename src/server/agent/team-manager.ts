@@ -16,6 +16,8 @@ import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import type { ConfigCascade } from "./config-cascade.js";
+import { resolveRoleForGoal } from "./role-resolution.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
 
 const execFile = promisify(execFileCb);
@@ -120,6 +122,13 @@ export interface TeamManagerConfig {
 	projectContextManager?: ProjectContextManager;
 	/** Tool manager for resolving extension paths via the cascade */
 	toolManager?: ToolManager;
+	/**
+	 * Three-layer config resolver — used (together with the goal's ancestor chain)
+	 * by `resolveRoleForGoal` so per-goal-tree inline role overrides shadow project
+	 * / server / builtin roles. Optional: when absent (test paths without a
+	 * cascade), role lookup falls back to `roleStore.get(name)`.
+	 */
+	configCascade?: ConfigCascade;
 }
 
 export class TeamManager {
@@ -573,6 +582,25 @@ export class TeamManager {
 		return this.taskManager.getTasksForSession(sessionId);
 	}
 
+	/**
+	 * Resolve a Role for a goal, walking the inline-role chain (own goal →
+	 * ancestors, closest-first) before falling back to the project / server /
+	 * builtin cascade. When PCM and configCascade are both wired, this is the
+	 * canonical path. Falls back to `roleStore.get(name)` for the non-PCM /
+	 * non-cascade test path.
+	 *
+	 * See `docs/design/nested-goals.md` §7.2.
+	 */
+	private resolveRole(goalId: string, roleName: string): Role | undefined {
+		if (this.config.projectContextManager && this.config.configCascade) {
+			const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+			if (ctx) {
+				return resolveRoleForGoal(ctx.goalStore, this.config.configCascade, goalId, roleName);
+			}
+		}
+		return this.config.roleStore?.get(roleName);
+	}
+
 	/** Resolve a goal across all project contexts. */
 	private resolveGoal(goalId: string): PersistedGoal | undefined {
 		if (this.config.projectContextManager) {
@@ -631,7 +659,7 @@ export class TeamManager {
 		// Build the Team Lead role prompt with structural placeholders only
 		// Secrets (gateway URL, auth token, goal ID) are passed as env vars, NOT embedded in prompt text
 		const roleStore = this.config.roleStore;
-		const storedRole = roleStore?.get("team-lead");
+		const storedRole = this.resolveRole(goalId, "team-lead");
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
@@ -796,7 +824,7 @@ export class TeamManager {
 		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
 		const roleStore = this.config.roleStore;
-		const storedRoleDef = roleStore?.get(role);
+		const storedRoleDef = this.resolveRole(goalId, role);
 		if (!storedRoleDef) {
 			const available = roleStore?.getAll().map(r => r.name).join(", ") ?? "none";
 			throw new Error(`Role "${role}" not found. Available roles: ${available}`);
