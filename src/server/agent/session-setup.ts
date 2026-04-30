@@ -359,6 +359,40 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			}
 		}
 
+		// Nested-goal awareness: only emitted for team-lead sessions (design §14.1).
+		// Other roles (coder/reviewer/...) never spawn children and don't need the
+		// stanzas. The mid-goal stanza fires for every team-lead; the top-level OR
+		// child stanza fires based on `parentGoalId`.
+		const isTeamLead = plan.roleName === "team-lead";
+		let parentGoalCtx: { id: string; title: string; branch: string; specExcerpt: string; rootTitle: string } | undefined;
+		let isTopLevelTeamLead = false;
+		let divergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
+		let maxConcurrentChildren: number | undefined;
+		let goalWorkflowId: string | undefined;
+		if (isTeamLead && goal) {
+			goalWorkflowId = goal.workflowId;
+			divergencePolicy = ctx.goalManager.resolveDivergencePolicy(goal.id);
+			const rootId = goal.rootGoalId ?? goal.id;
+			maxConcurrentChildren = ctx.goalManager.resolveRootMaxConcurrentChildren(rootId);
+
+			if (goal.parentGoalId) {
+				const parent = ctx.goalManager.getGoal(goal.parentGoalId);
+				const rootGoal = ctx.goalManager.getGoal(rootId);
+				if (parent) {
+					const rawSpec = parent.spec || "";
+					parentGoalCtx = {
+						id: parent.id,
+						title: parent.title,
+						branch: parent.branch || "unknown",
+						specExcerpt: rawSpec.slice(0, 800),
+						rootTitle: rootGoal?.title ?? parent.title,
+					};
+				}
+			} else {
+				isTopLevelTeamLead = true;
+			}
+		}
+
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
@@ -377,6 +411,12 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 			seedContext: plan.seedContext,
 			seedContextSource: plan.seedContextSourceId,
+			isTeamLead,
+			isTopLevelTeamLead,
+			parentGoal: parentGoalCtx,
+			divergencePolicy,
+			maxConcurrentChildren,
+			goalWorkflowId,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
