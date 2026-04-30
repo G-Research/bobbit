@@ -122,6 +122,8 @@ export interface InlineWorkflowGate {
 	injectDownstream?: boolean;
 	optional?: boolean;
 	manual?: boolean;
+	/** Self-documenting gate prose (nested goals — docs/design/nested-goals.md §14.4). */
+	description?: string;
 	metadata?: Record<string, string>;
 	verify?: InlineVerifyStep[];
 }

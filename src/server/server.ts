@@ -4576,6 +4576,19 @@ async function handleApiRoute(
 						gateStore.updateGateMetadata(goalId, gateId, body.metadata);
 					}
 					gateStore.updateGateStatus(goalId, gateId, "passed");
+					// Freeze hook (cached re-signal path) — see
+					// docs/design/nested-goals.md §6.1. Idempotent.
+					if (gateId === "goal-plan" && goal.workflow) {
+						const execGate = goal.workflow.gates.find(g => g.id === "execution");
+						if (execGate) {
+							if (!execGate.metadata) execGate.metadata = {};
+							if (execGate.metadata.frozen !== "true") {
+								execGate.metadata.frozen = "true";
+								execGate.metadata.frozenAt = String(Date.now());
+								gateSignalCtx.goalStore.update(goalId, { workflow: goal.workflow });
+							}
+						}
+					}
 					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
 					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
 					broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
@@ -4626,6 +4639,27 @@ async function handleApiRoute(
 		}
 		if (body?.metadata) {
 			gateStore.updateGateMetadata(goalId, gateId, body.metadata);
+		}
+
+		// Freeze hook (nested goals — docs/design/nested-goals.md §6.1).
+		// When `goal-plan` is signalled on the `parent` workflow (or any
+		// workflow that includes a goal-plan gate), stamp
+		// `metadata.frozen="true"` onto the goal's snapshotted `execution`
+		// gate. Subsequent `goal_plan_propose` / `goal_spawn_child` calls
+		// inspect this metadata to gate post-freeze classification. The
+		// freeze flag lives on the goal's snapshotted workflow — not on
+		// the canonical builtin. Idempotent: a second call leaves the
+		// original `frozenAt` intact.
+		if (gateId === "goal-plan" && goal.workflow) {
+			const execGate = goal.workflow.gates.find(g => g.id === "execution");
+			if (execGate) {
+				if (!execGate.metadata) execGate.metadata = {};
+				if (execGate.metadata.frozen !== "true") {
+					execGate.metadata.frozen = "true";
+					execGate.metadata.frozenAt = String(Date.now());
+					gateSignalCtx.goalStore.update(goalId, { workflow: goal.workflow });
+				}
+			}
 		}
 
 		// Broadcast signal received
