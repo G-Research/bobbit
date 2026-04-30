@@ -570,6 +570,11 @@ export class ToolManager {
 			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
 			fs.writeFileSync(filePath, doc.toString(), "utf-8");
+			// Invalidate scan cache: directoryFingerprint uses mtimeMs which has
+			// coarse resolution (~10-15ms on Windows). Two rapid writes can produce
+			// identical fingerprints, returning stale cached scans on the next read.
+			_scanCache.delete(this.toolsDir);
+			if (this.builtinToolsDir) _scanCache.delete(this.builtinToolsDir);
 			return true;
 		} catch (err) {
 			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);
