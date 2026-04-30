@@ -90,7 +90,14 @@ function ensureCommanderEmbed(sessionId: string): AgentInterface {
 				try { remote.disconnect(); } catch { /* ignore */ }
 				return;
 			}
+			// Bind agent to the AgentInterface FIRST so its subscription is
+			// active before any messages snapshot arrives. The server does not
+			// push history on initial connect (only on reconnect-with-seq), so
+			// we must explicitly request a snapshot — otherwise the embed
+			// renders an empty transcript even though the Commander session has
+			// real history. Mirrors the existing pattern in `connectToSession`.
 			el.session = remote as any;
+			try { remote.requestMessages(); } catch { /* ignore */ }
 			renderApp();
 		}).catch(() => { /* leave unbound */ });
 	}
