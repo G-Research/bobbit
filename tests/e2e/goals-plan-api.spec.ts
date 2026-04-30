@@ -1,15 +1,19 @@
 /**
- * E2E tests: PATCH /api/goals/:id/plan — Phase 3 task 3.5.
+ * E2E tests: PATCH /api/goals/:id/plan — Phase 3 task 3.5 (freeze + OCC),
+ * updated by Phase 5 task 5.2 to reflect classifier-driven behaviour.
  *
- * Pre-Phase-5 behaviour (no classifier yet):
- *   - Pre-freeze (no metadata.frozen on the gate) → applies freely.
+ * Behaviour:
+ *   - Pre-freeze (no metadata.frozen on the gate) → applies freely (matrix bypassed).
  *   - Post-freeze without `replanReason` → 409 { error: "frozen-no-reason" }.
- *   - Post-freeze with `replanReason` → succeeds AND bumps replanCount.
+ *   - Post-freeze with `replanReason` → classifier-driven decision matrix
+ *     applies (auto-apply / buffer-and-prompt / hard-reject). Auto-applies
+ *     bump `replanCount`.
  *   - `expectedReplanCount` mismatch → 409 { error: "stale-plan", currentReplanCount }.
  *
- * The classifier hook (mutation classification, criteria-drop, replan-cap,
- * goal_mutation_pending broadcasting) lands in Phase 5 task 5.2 — these
- * tests deliberately don't exercise that surface.
+ * Tests covering the matrix cells live in `tests/e2e/goals-classifier-api.spec.ts`.
+ * The post-freeze tests below use `divergencePolicy: "balanced"` and `fix-up`
+ * shape mutations so they auto-approve and the bump-replanCount /
+ * stale-plan / OCC paths can be exercised cleanly.
  *
  * Approach: register two custom workflows on the harness's default project
  * via PUT /api/projects/:id/config — one with an `execution` gate that has
@@ -81,6 +85,13 @@ async function seedPlanWorkflows(projectId: string): Promise<void> {
 }
 
 async function createGoal(workflowId: string): Promise<string> {
+	return createGoalPolicy(workflowId);
+}
+
+async function createGoalPolicy(
+	workflowId: string,
+	divergencePolicy?: "strict" | "balanced" | "autonomous",
+): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
@@ -90,6 +101,7 @@ async function createGoal(workflowId: string): Promise<string> {
 			worktree: false,
 			workflowId,
 			autoStartTeam: false,
+			divergencePolicy,
 		}),
 	});
 	if (resp.status !== 201) {
@@ -98,6 +110,24 @@ async function createGoal(workflowId: string): Promise<string> {
 	}
 	const goal = await resp.json();
 	return goal.id;
+}
+
+/**
+ * Seed the goal's snapshotted execution gate directly via the in-process
+ * GoalManager. Phase 5 task 5.2 added classifier consultation: the frozen
+ * fixture starts post-freeze with `verify=[]`, so a normal PATCH would
+ * classify any addition from empty as `expansion` (always prompts). Tests
+ * that need a `fix-up`-shaped baseline pre-seed via this helper.
+ */
+async function seedFrozenPlanInProc(gateway: any, goalId: string, before: Record<string, unknown>[]): Promise<void> {
+	const ctx = gateway.projectContextManager.getContextForGoal(goalId);
+	if (!ctx) throw new Error(`No project context for goal ${goalId}`);
+	const goal = ctx.goalStore.get(goalId);
+	if (!goal?.workflow) throw new Error(`Goal ${goalId} has no workflow snapshot`);
+	const exec = goal.workflow.gates.find((g: any) => g.id === "execution");
+	if (!exec) throw new Error(`No execution gate on goal ${goalId}`);
+	exec.verify = before as any;
+	ctx.goalStore.update(goalId, { workflow: goal.workflow });
 }
 
 async function deleteGoal(goalId: string): Promise<void> {
@@ -167,27 +197,40 @@ test.describe("PATCH /api/goals/:id/plan", () => {
 		}
 	});
 
-	test("post-freeze with replanReason → applies and bumps replanCount", async () => {
-		const goalId = await createGoal(PLAN_FROZEN_WORKFLOW_ID);
+	test("post-freeze fix-up under balanced → applies and bumps replanCount", async ({ gateway }) => {
+		// Use a balanced-policy goal + fix-up shape (additive leaf at existing
+		// phase) so the classifier auto-approves. Pre-seed a non-empty plan so
+		// the second PATCH is a true `fix-up` rather than `expansion`-from-empty.
+		const goalId = await createGoalPolicy(PLAN_FROZEN_WORKFLOW_ID, "balanced");
 		try {
-			const planSteps = [fakeSubgoalStep("plan-A", "Stand up service")];
+			await seedFrozenPlanInProc(gateway, goalId, [
+				fakeSubgoalStep("plan-A", "Stand up service"),
+			]);
+			const planSteps = [
+				fakeSubgoalStep("plan-A", "Stand up service"),
+				fakeSubgoalStep("plan-B", "Add CI"),
+			];
 			const { status, body } = await patchPlan(goalId, {
 				planSteps,
-				replanReason: "User asked for a service split.",
+				replanReason: "Add CI step.",
 			});
 			expect(status).toBe(200);
 			expect(body.replanCount).toBe(1);
-			expect(body.plan).toHaveLength(1);
-			expect(body.plan[0].subgoal.planId).toBe("plan-A");
+			expect(body.plan).toHaveLength(2);
+			expect(body.plan[1].subgoal.planId).toBe("plan-B");
 
 			// Second post-freeze update bumps replanCount again.
 			const second = await patchPlan(goalId, {
-				planSteps: [fakeSubgoalStep("plan-A", "Stand up service"), fakeSubgoalStep("plan-B", "Add CI")],
-				replanReason: "Add CI step.",
+				planSteps: [
+					fakeSubgoalStep("plan-A", "Stand up service"),
+					fakeSubgoalStep("plan-B", "Add CI"),
+					fakeSubgoalStep("plan-C", "Add metrics"),
+				],
+				replanReason: "Add metrics step.",
 			});
 			expect(second.status).toBe(200);
 			expect(second.body.replanCount).toBe(2);
-			expect(second.body.plan).toHaveLength(2);
+			expect(second.body.plan).toHaveLength(3);
 
 			// The persisted goal carries the bumped counter.
 			const fetched = await apiFetch(`/api/goals/${goalId}`);
@@ -198,12 +241,19 @@ test.describe("PATCH /api/goals/:id/plan", () => {
 		}
 	});
 
-	test("expectedReplanCount mismatch → 409 stale-plan with currentReplanCount", async () => {
-		const goalId = await createGoal(PLAN_FROZEN_WORKFLOW_ID);
+	test("expectedReplanCount mismatch → 409 stale-plan with currentReplanCount", async ({ gateway }) => {
+		const goalId = await createGoalPolicy(PLAN_FROZEN_WORKFLOW_ID, "balanced");
 		try {
+			// Pre-seed so the first PATCH is a fix-up (auto-approves under balanced).
+			await seedFrozenPlanInProc(gateway, goalId, [
+				fakeSubgoalStep("plan-seed", "Seed"),
+			]);
 			// Bump the counter to 1 first.
 			const first = await patchPlan(goalId, {
-				planSteps: [fakeSubgoalStep("plan-X", "Initial")],
+				planSteps: [
+					fakeSubgoalStep("plan-seed", "Seed"),
+					fakeSubgoalStep("plan-X", "Initial"),
+				],
 				replanReason: "First write.",
 			});
 			expect(first.status).toBe(200);
@@ -211,7 +261,11 @@ test.describe("PATCH /api/goals/:id/plan", () => {
 
 			// Caller thinks the counter is still 0 → stale-plan.
 			const stale = await patchPlan(goalId, {
-				planSteps: [fakeSubgoalStep("plan-Y", "Stale")],
+				planSteps: [
+					fakeSubgoalStep("plan-seed", "Seed"),
+					fakeSubgoalStep("plan-X", "Initial"),
+					fakeSubgoalStep("plan-Y", "Stale"),
+				],
 				replanReason: "Should be rejected.",
 				expectedReplanCount: 0,
 			});
@@ -221,7 +275,11 @@ test.describe("PATCH /api/goals/:id/plan", () => {
 
 			// Correct expectedReplanCount → succeeds.
 			const fresh = await patchPlan(goalId, {
-				planSteps: [fakeSubgoalStep("plan-Y", "Fresh")],
+				planSteps: [
+					fakeSubgoalStep("plan-seed", "Seed"),
+					fakeSubgoalStep("plan-X", "Initial"),
+					fakeSubgoalStep("plan-Y", "Fresh"),
+				],
 				replanReason: "Now correct.",
 				expectedReplanCount: 1,
 			});

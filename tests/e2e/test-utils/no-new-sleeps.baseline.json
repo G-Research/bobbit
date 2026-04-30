@@ -1,6 +1,7 @@
 {
 	"continue-archived.spec.ts": 1,
 	"git-status-caching.spec.ts": 1,
+	"goals-mutation-banner.spec.ts": 1,
 	"goals-spawn-child-api.spec.ts": 1,
 	"inline-workflow-goal-flow.spec.ts": 1,
 	"mcp-tool-permission.spec.ts": 1,

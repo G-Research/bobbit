@@ -3,6 +3,7 @@ import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal } from "../skills/git.js";
 import type { WorkflowStore, Workflow, VerifyStep } from "./workflow-store.js";
+import { classifyMutation, type MutationDiff } from "./plan-mutation.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { Role } from "./role-store.js";
@@ -66,6 +67,36 @@ export interface AppliedMutationResult {
 	plan?: VerifyStep[];
 	childGoalId?: string;
 }
+
+/**
+ * Outcome of `GoalManager.decideMutation` — the §4.3 dispatcher result.
+ *
+ *   - `apply`  — caller applies the mutation immediately.
+ *   - `buffer` — caller stashes the mutation under `requestId`, broadcasts
+ *               `goal_mutation_pending`, and surfaces 409 with `body`.
+ *   - `reject` — caller surfaces `status` + `body`; no buffer, no broadcast.
+ */
+export type MutationDecision =
+	| {
+		kind: "apply";
+		diff: MutationDiff;
+		policy: "strict" | "balanced" | "autonomous";
+	}
+	| {
+		kind: "buffer";
+		requestId: string;
+		status: 409;
+		body: Record<string, unknown>;
+		diff: MutationDiff;
+		policy: "strict" | "balanced" | "autonomous";
+	}
+	| {
+		kind: "reject";
+		status: number;
+		body: Record<string, unknown>;
+		diff?: MutationDiff;
+		policy?: "strict" | "balanced" | "autonomous";
+	};
 
 export class GoalManager {
 	private store: GoalStore;
@@ -516,6 +547,183 @@ export class GoalManager {
 		const raw = root?.maxConcurrentChildren;
 		if (typeof raw !== "number" || !Number.isFinite(raw)) return 3;
 		return Math.max(1, Math.min(8, Math.floor(raw)));
+	}
+
+	// ── Plan-mutation decision (§4.3) ────────────────────────────────
+
+	/**
+	 * Server-side dispatcher for the §4.3 decision matrix. Combines the
+	 * `classifyMutation` output with the goal's effective divergence policy
+	 * and freeze state to produce one of three outcomes:
+	 *
+	 *   - `apply`  — auto-approve. Caller applies the mutation immediately.
+	 *   - `buffer` — prompt-required. Caller buffers the mutation under the
+	 *               returned `requestId`, broadcasts `goal_mutation_pending`,
+	 *               and surfaces 409 `{ requiresApproval: true, ... }`.
+	 *   - `reject` — hard reject. Caller surfaces 409 with the structured
+	 *               body. No buffer, no broadcast.
+	 *
+	 * Pre-condition checks (`replan-cap`, `restructure-requires-pause` under
+	 * strict policy) are baked into the matrix and surface as `reject`.
+	 * Pre-freeze mutations that classify as `noop` always apply; the matrix
+	 * is consulted in full once the gate is frozen, but pre-freeze fix-ups
+	 * and expansions are also auto-applied per §4.3 (the matrix is for
+	 * post-freeze mutations — the gate state is the gating signal for whether
+	 * the matrix applies at all).
+	 *
+	 * Inputs:
+	 *   - goalId: the goal whose plan is being mutated.
+	 *   - before: previous `verify[]` of the gate (post-freeze) or `[]`
+	 *             (pre-freeze proposal — the whole plan is new).
+	 *   - after:  the proposed `verify[]`.
+	 *   - frozen: whether the gate is frozen (drives matrix consultation
+	 *             AND replanCount bumps).
+	 *
+	 * The caller MUST pass the **root** goal so adherence checks see the
+	 * correct acceptance criteria. We resolve that internally.
+	 *
+	 * See `docs/design/nested-goals.md` §4.3 (decision matrix) and §8
+	 * (REST 409 body schemas).
+	 */
+	decideMutation(
+		goalId: string,
+		before: VerifyStep[],
+		after: VerifyStep[],
+		frozen: boolean,
+	): MutationDecision {
+		const goal = this.store.get(goalId);
+		if (!goal) {
+			return {
+				kind: "reject",
+				status: 404,
+				body: { error: "Goal not found" },
+			};
+		}
+
+		// Resolve root goal — adherence check needs root.acceptanceCriteria
+		// and root.spec. For top-level goals rootGoalId === id.
+		const rootId = goal.rootGoalId ?? goal.id;
+		const rootGoal = this.store.get(rootId) ?? goal;
+		const diff = classifyMutation(before, after, rootGoal);
+		const policy = this.resolveDivergencePolicy(goalId);
+
+		// `replan-cap` — applies regardless of class on post-freeze mutations.
+		// `noop` is exempt (no count bump would happen anyway).
+		const replanCount = goal.replanCount ?? 0;
+		if (frozen && diff.cls !== "noop" && replanCount >= 5) {
+			return {
+				kind: "reject",
+				status: 409,
+				body: { error: "replan-cap", replanCount },
+				diff,
+				policy,
+			};
+		}
+
+		// criteria-drop — always rejected (no policy override).
+		if (diff.cls === "criteria-drop") {
+			return {
+				kind: "reject",
+				status: 409,
+				body: {
+					error: "mutation-rejected",
+					classification: diff.cls,
+					droppedCriteria: diff.droppedCriteria,
+					addedNodes: diff.addedNodes,
+					removedNodes: diff.removedNodes,
+					changedDeps: diff.changedDeps,
+					summary: diff.summary,
+					requiresApproval: false,
+					policy,
+				},
+				diff,
+				policy,
+			};
+		}
+
+		// noop — apply without touching replanCount. Matrix says "allow"
+		// under every policy.
+		if (diff.cls === "noop") {
+			return { kind: "apply", diff, policy };
+		}
+
+		// Pre-freeze: matrix doesn't apply. The gate's verify[] is editable
+		// freely until `goal-plan` is signalled. The classifier's structural
+		// shape still flows through `diff` for telemetry, but no policy gate.
+		if (!frozen) {
+			return { kind: "apply", diff, policy };
+		}
+
+		// Post-freeze matrix consultation:
+		switch (diff.cls) {
+			case "fix-up": {
+				// strict → prompt; balanced/autonomous → auto-approve.
+				if (policy === "strict") {
+					return this.bufferDecision(goalId, diff, policy);
+				}
+				return { kind: "apply", diff, policy };
+			}
+			case "expansion": {
+				// Always prompts under every policy (§4.3 binding rule).
+				return this.bufferDecision(goalId, diff, policy);
+			}
+			case "restructure": {
+				// strict requires goal.paused === true; else 409 (no prompt).
+				if (policy === "strict" && !goal.paused) {
+					return {
+						kind: "reject",
+						status: 409,
+						body: {
+							error: "mutation-rejected",
+							classification: diff.cls,
+							droppedCriteria: diff.droppedCriteria,
+							addedNodes: diff.addedNodes,
+							removedNodes: diff.removedNodes,
+							changedDeps: diff.changedDeps,
+							summary: diff.summary,
+							requiresApproval: false,
+							reason: "restructure-requires-pause",
+							policy,
+						},
+						diff,
+						policy,
+					};
+				}
+				return this.bufferDecision(goalId, diff, policy);
+			}
+		}
+		// Unreachable — TS exhaustiveness fallback.
+		return { kind: "apply", diff, policy };
+	}
+
+	private bufferDecision(
+		_goalId: string,
+		diff: MutationDiff,
+		policy: "strict" | "balanced" | "autonomous",
+	): MutationDecision {
+		const requestId = randomUUID();
+		return {
+			kind: "buffer",
+			requestId,
+			status: 409,
+			body: {
+				error: "mutation-rejected",
+				classification: diff.cls,
+				droppedCriteria: diff.droppedCriteria,
+				addedNodes: diff.addedNodes,
+				removedNodes: diff.removedNodes,
+				changedDeps: diff.changedDeps,
+				summary: diff.summary,
+				requiresApproval: true,
+				requestId,
+				policy,
+			},
+			diff,
+			policy,
+		};
+		// Caller is expected to invoke `bufferMutation(requestId, …)` and
+		// broadcast `goal_mutation_pending`. Keeping side effects in the
+		// caller keeps this function pure modulo `randomUUID`.
 	}
 
 	/**

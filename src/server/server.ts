@@ -5493,13 +5493,13 @@ async function handleApiRoute(
 	// POST /api/goals/:id/spawn-child — create a child goal branched off the
 	// parent's branch.
 	//
-	// IMPORTANT: This handler does NOT consult the mutation classifier (design
-	// §4 / Decision #6). That gate is wired in Phase 5 task 5.2 — until then,
-	// every spawn-child call succeeds (subject only to the existing invariants
-	// in `GoalManager.createGoal`: archived parent rejected, cross-project
-	// nesting rejected, cycle rejected). Idempotency on `planId` is the
-	// classifier's responsibility once it lands; pre-Phase-5 callers always
-	// get a fresh child goal even if a `planId` collides.
+	// Phase 5 task 5.2 added classifier consultation: if the parent's
+	// workflow exposes an `execution` gate, the spawn is treated as a plan
+	// mutation (`before = execution.verify[]`, `after = before + synthetic
+	// subgoal step`) and the §4.3 decision matrix decides apply / buffer /
+	// reject. Goals without an `execution` gate fall through to the
+	// pre-classifier behaviour (always apply) since the matrix has nothing
+	// to anchor against.
 	const spawnChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/spawn-child$/);
 	if (spawnChildMatch && req.method === "POST") {
 		const parentGoalId = spawnChildMatch[1];
@@ -5546,8 +5546,79 @@ async function handleApiRoute(
 			}
 			workflowId = body.workflowId;
 		}
-		// suggestedRole is accepted but ignored at the REST layer pre-Phase-5;
-		// it'll be persisted onto the spawned subgoal verify-step in 3.1/3.2.
+		let suggestedRole: string | undefined;
+		if (body?.suggestedRole !== undefined) {
+			if (typeof body.suggestedRole !== "string" || !body.suggestedRole) {
+				json({ error: "suggestedRole must be a non-empty string" }, 400);
+				return;
+			}
+			suggestedRole = body.suggestedRole;
+		}
+
+		// Classifier consultation (§4.3). Only applies when the parent has an
+		// `execution` gate — otherwise no plan exists for the matrix to gate
+		// against. Pre-freeze and no-execution-gate cases bypass the matrix
+		// (criteria-drop adherence is still enforced inside `decideMutation`).
+		const execGate = parent.workflow?.gates.find(g => g.id === "execution");
+		if (execGate) {
+			const execFrozen = execGate.metadata?.frozen === "true";
+			const before: VerifyStep[] = (execGate.verify ?? []) as VerifyStep[];
+			// Synthetic subgoal step describing the proposed addition. The
+			// `planId` is taken from the body when supplied; otherwise we
+			// fabricate one for the diff (it doesn't get persisted on a
+			// reject/buffer outcome). Stable across repeated calls in the
+			// idempotent-on-planId sense — see 5.4 for the auto-pause hook.
+			const syntheticPlanId = planId ?? `spawn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			const synthetic: VerifyStep = {
+				name: title,
+				type: "subgoal",
+				phase: 0,
+				subgoal: {
+					title,
+					spec,
+					planId: syntheticPlanId,
+					workflowId,
+					suggestedRole,
+				},
+			} as VerifyStep;
+			const after = [...before, synthetic];
+			const gmDecide = getGoalManagerForGoal(parentGoalId);
+			const decision = gmDecide.decideMutation(parentGoalId, before, after, execFrozen);
+
+			if (decision.kind === "reject") {
+				json(decision.body, decision.status);
+				return;
+			}
+			if (decision.kind === "buffer") {
+				// Stash the spawn payload verbatim; 4.3's apply path will
+				// surface `applied: { childGoalId }` once 5.4 wires the
+				// decision-endpoint spawn flow. For now the buffer is
+				// observable via `goal_mutation_pending` and the dashboard
+				// banner, which is what the matrix tests assert.
+				gmDecide.bufferMutation(decision.requestId, {
+					kind: "child-spawn",
+					goalId: parentGoalId,
+					spawnPayload: { ...body, planId: syntheticPlanId },
+					createdAt: Date.now(),
+				});
+				json(decision.body, decision.status);
+				broadcastToGoal(parentGoalId, {
+					type: "goal_mutation_pending",
+					goalId: parentGoalId,
+					requestId: decision.requestId,
+					classification: decision.diff.cls,
+					summary: decision.diff.summary,
+					droppedCriteria: decision.diff.droppedCriteria,
+					addedNodes: decision.diff.addedNodes,
+					removedNodes: decision.diff.removedNodes,
+					changedDeps: decision.diff.changedDeps,
+					policy: decision.policy,
+				});
+				return;
+			}
+			// decision.kind === "apply" — fall through to the createGoal flow.
+		}
+
 		try {
 			const targetProjectId = parent.projectId;
 			if (!targetProjectId) {
@@ -5688,16 +5759,16 @@ async function handleApiRoute(
 
 	// PATCH /api/goals/:id/plan — replace the named gate's verify[] (§8).
 	//
-	// Pre-Phase-5 behaviour: applies updates without classifier consultation.
-	// Only enforces freeze gating + optimistic-concurrency:
-	//   * Pre-freeze (gate.metadata.frozen !== "true"): apply freely.
+	// Behaviour:
+	//   * Pre-freeze (gate.metadata.frozen !== "true"): the classifier still
+	//     produces telemetry but the matrix is bypassed — apply freely (any
+	//     class except `criteria-drop` resolves to `apply`).
 	//   * Post-freeze without `replanReason`: 409 { error: "frozen-no-reason" }.
 	//   * `expectedReplanCount` mismatch: 409 { error: "stale-plan", currentReplanCount }.
-	//   * Successful post-freeze update bumps goal.replanCount.
-	//
-	// Phase 5 task 5.2 will add classifier consultation (mutation rejection,
-	// criteria-drop, replan-cap, prompt-required outcomes broadcasting
-	// `goal_mutation_pending`). Phase 4 task 4.3 adds the decision endpoint.
+	//   * Post-freeze: classifier-driven decision matrix (§4.3) decides
+	//     auto-apply / buffer-and-prompt / hard-reject. `criteria-drop`
+	//     rejects under any policy. `replanCount > 5` returns `replan-cap`.
+	//   * Successful post-freeze apply bumps goal.replanCount.
 	const planPatchMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
 	if (planPatchMatch && req.method === "PATCH") {
 		const goalId = planPatchMatch[1];
@@ -5739,10 +5810,52 @@ async function handleApiRoute(
 			json({ error: "frozen-no-reason" }, 409);
 			return;
 		}
-		// Apply the update on the goal's snapshotted workflow.
-		gate.verify = body.planSteps as VerifyStep[];
+
+		// Classifier consultation (§4.3). The decision wraps `replan-cap`,
+		// `criteria-drop`, `restructure-requires-pause` (strict), and
+		// prompt-required outcomes for `expansion` (always) / `fix-up` (strict)
+		// / `restructure` (paused). Pre-freeze, the matrix is bypassed and
+		// every class except `criteria-drop` resolves to `apply`.
+		const gm = getGoalManagerForGoal(goalId);
+		const before: VerifyStep[] = (gate.verify ?? []) as VerifyStep[];
+		const after = body.planSteps as VerifyStep[];
+		const decision = gm.decideMutation(goalId, before, after, frozen);
+
+		if (decision.kind === "reject") {
+			json(decision.body, decision.status);
+			return;
+		}
+		if (decision.kind === "buffer") {
+			gm.bufferMutation(decision.requestId, {
+				kind: "plan-replace",
+				goalId,
+				gateId,
+				planSteps: after,
+				replanReason,
+				expectedReplanCount,
+				createdAt: Date.now(),
+			});
+			json(decision.body, decision.status);
+			broadcastToGoal(goalId, {
+				type: "goal_mutation_pending",
+				goalId,
+				requestId: decision.requestId,
+				classification: decision.diff.cls,
+				summary: decision.diff.summary,
+				droppedCriteria: decision.diff.droppedCriteria,
+				addedNodes: decision.diff.addedNodes,
+				removedNodes: decision.diff.removedNodes,
+				changedDeps: decision.diff.changedDeps,
+				policy: decision.policy,
+			});
+			return;
+		}
+
+		// decision.kind === "apply"
+		gate.verify = after;
+		// Bump replanCount only on post-freeze, non-noop applies.
 		let nextReplanCount = currentReplanCount;
-		if (frozen) {
+		if (frozen && decision.diff.cls !== "noop") {
 			nextReplanCount = currentReplanCount + 1;
 			planCtx.goalStore.update(goalId, { workflow: goal.workflow, replanCount: nextReplanCount });
 		} else {
