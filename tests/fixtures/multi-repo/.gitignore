@@ -1,0 +1,6 @@
+# The three subdirectories are initialized as real git repos by
+# setup-fixture.mjs. Their .git/ directories must NOT be committed
+# to the parent bobbit repo as submodules.
+api/.git
+web/.git
+shared/.git

@@ -311,6 +311,9 @@ export class ToolManager {
 		try {
 			if (fs.statSync(configGroup).isDirectory()) {
 				fs.rmSync(configGroup, { recursive: true, force: true });
+				// Invalidate the scan cache (PR #388) so the next read sees the
+				// reverted state on Windows where mtime resolution is coarse.
+				_scanCache.delete(this.toolsDir);
 				return true;
 			}
 		} catch { /* not found */ }
@@ -570,7 +573,11 @@ export class ToolManager {
 			if (updates.grantPolicy !== undefined) doc.set("grantPolicy", updates.grantPolicy);
 
 			fs.writeFileSync(filePath, doc.toString(), "utf-8");
-			__resetToolScanCache();
+			// Invalidate the mtime-keyed scan cache. Without this, a PUT followed
+			// by an immediate GET can return stale data on Windows where mtime
+			// resolution is coarse (1–2s) and the directory fingerprint matches
+			// the pre-write state. PR #388 introduced the cache; PUT must drop it.
+			_scanCache.delete(this.toolsDir);
 			return true;
 		} catch (err) {
 			console.error(`[tool-manager] Failed to update ${name} at ${filePath}:`, err);

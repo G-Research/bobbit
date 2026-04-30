@@ -16,7 +16,7 @@ import { parse } from "yaml";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from "./role-store.js";
-import type { Workflow, WorkflowGate, VerifyStep } from "./workflow-store.js";
+import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 
 export class BuiltinConfigProvider {
@@ -24,7 +24,6 @@ export class BuiltinConfigProvider {
 
 	// Lazy caches — null means "not loaded yet"
 	private _roles: Role[] | null = null;
-	private _workflows: Workflow[] | null = null;
 	private _tools: ToolInfo[] | null = null;
 	private _toolGroupPolicies: Record<string, GrantPolicy> | null = null;
 
@@ -40,9 +39,14 @@ export class BuiltinConfigProvider {
 		return this._roles;
 	}
 
+	/**
+	 * Workflows are no longer shipped as builtin YAMLs — they live inline in
+	 * each project's `project.yaml::workflows` block. This always returns []
+	 * so the cascade has no builtin workflow layer. Kept for API compatibility
+	 * with `ServerStores`/`ConfigCascade`.
+	 */
 	getWorkflows(): Workflow[] {
-		if (!this._workflows) this._workflows = this.loadWorkflows();
-		return this._workflows;
+		return [];
 	}
 
 	getTools(): ToolInfo[] {
@@ -58,7 +62,6 @@ export class BuiltinConfigProvider {
 	/** Clear all caches so the next getter call re-reads from disk. */
 	reload(): void {
 		this._roles = null;
-		this._workflows = null;
 		this._tools = null;
 		this._toolGroupPolicies = null;
 	}
@@ -98,24 +101,6 @@ export class BuiltinConfigProvider {
 			}
 		}
 		return roles;
-	}
-
-	private loadWorkflows(): Workflow[] {
-		const dir = path.join(this.builtinsDir, "workflows");
-		const workflows: Workflow[] = [];
-		for (const entry of this.readYamlDir(dir)) {
-			try {
-				const data = parse(entry.content);
-				if (!data?.id) continue;
-				const wf = this.normalizeWorkflow(data);
-				// Include all workflows (including hidden ones like test-fast) —
-				// hidden filtering is done at the API/cascade level, not here.
-				workflows.push(wf);
-			} catch (err) {
-				console.error(`[builtin-config] Failed to parse workflow ${entry.file}:`, err);
-			}
-		}
-		return workflows;
 	}
 
 	private loadTools(): ToolInfo[] {
@@ -203,59 +188,6 @@ export class BuiltinConfigProvider {
 		} catch {
 			return {};
 		}
-	}
-
-	// ── Workflow normalization (mirrors WorkflowStore) ────────────
-
-	private normalizeWorkflow(data: Record<string, unknown>): Workflow {
-		const gates = Array.isArray(data.gates) ? data.gates : [];
-		const wf: Workflow = {
-			id: data.id as string,
-			name: (data.name as string) ?? (data.id as string),
-			description: (data.description as string) ?? "",
-			gates: gates.map((g: Record<string, unknown>) => this.normalizeGate(g)),
-			createdAt: (data.createdAt as number) ?? 0,
-			updatedAt: (data.updatedAt as number) ?? 0,
-		};
-		if (data.hidden === true) wf.hidden = true;
-		return wf;
-	}
-
-	private normalizeGate(data: Record<string, unknown>): WorkflowGate {
-		const gate: WorkflowGate = {
-			id: (data.id as string) ?? "",
-			name: (data.name as string) ?? "",
-			dependsOn: Array.isArray(data.depends_on) ? data.depends_on
-				: Array.isArray(data.dependsOn) ? data.dependsOn
-					: [],
-		};
-		if (data.content === true) gate.content = true;
-		if (data.inject_downstream === true || data.injectDownstream === true) gate.injectDownstream = true;
-		if (data.optional === true) gate.optional = true;
-		if (data.metadata && typeof data.metadata === "object") {
-			gate.metadata = data.metadata as Record<string, string>;
-		}
-		if (Array.isArray(data.verify)) {
-			gate.verify = (data.verify as Record<string, unknown>[]).map(v => this.normalizeVerifyStep(v));
-		}
-		return gate;
-	}
-
-	private normalizeVerifyStep(data: Record<string, unknown>): VerifyStep {
-		const step: VerifyStep = {
-			name: (data.name as string) ?? "",
-			type: (data.type as "command" | "llm-review" | "agent-qa") ?? "command",
-		};
-		if (typeof data.run === "string") step.run = data.run;
-		if (typeof data.prompt === "string") step.prompt = data.prompt;
-		if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
-		if (typeof data.timeout === "number") step.timeout = data.timeout;
-		if (typeof data.phase === "number") step.phase = data.phase;
-		if (data.optional === true) step.optional = true;
-		if (typeof data.label === "string") step.label = data.label;
-		if (typeof data.role === "string") step.role = data.role;
-		if (typeof data.description === "string") step.description = data.description;
-		return step;
 	}
 
 	// ── Helpers ──────────────────────────────────────────────────

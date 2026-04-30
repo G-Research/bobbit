@@ -5,6 +5,8 @@ import path from "node:path";
 import yaml from "yaml";
 import { bobbitConfigDir } from "../bobbit-dir.js";
 import { resolveShell } from "../agent/shell-util.js";
+import type { Component } from "../agent/project-config-store.js";
+import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
 const execFile = promisify(execFileCb);
 
@@ -115,6 +117,42 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	return stdout.toString().trim();
 }
 
+/**
+ * Thrown when `git worktree move` fails. Surfaces the underlying git error
+ * so the worktree pool can decide whether to fall back to degraded mode
+ * (branch renamed, dir kept at the old path).
+ */
+export class WorktreeMoveError extends Error {
+	constructor(message: string, readonly cause?: unknown) {
+		super(message);
+		this.name = "WorktreeMoveError";
+	}
+}
+
+/**
+ * Move a worktree directory to a new path using `git worktree move`.
+ *
+ * `git worktree move` (added in git 2.17) atomically updates both the
+ * worktree's `.git` pointer and the admin entry under `<repo>/.git/worktrees/`,
+ * unlike a plain `mv` which leaves git tracking the old path.
+ *
+ * @throws WorktreeMoveError on failure (e.g. file locks on Windows). Callers
+ *   in the worktree pool fall back to degraded mode (branch renamed only,
+ *   directory stays at the old path).
+ */
+export async function moveWorktree(repoPath: string, oldPath: string, newPath: string): Promise<void> {
+	if (oldPath === newPath) return;
+	try {
+		await execFile("git", ["worktree", "move", oldPath, newPath], {
+			cwd: repoPath,
+			timeout: 30_000,
+		});
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		throw new WorktreeMoveError(`git worktree move failed: ${oldPath} -> ${newPath}: ${msg}`, err);
+	}
+}
+
 export interface WorktreeResult {
 	worktreePath: string;
 	branchName: string;
@@ -134,15 +172,16 @@ export interface WorktreeResult {
  * @param opts.startPoint — git ref to base the new branch on (default `"HEAD"`).
  *   Pass e.g. `origin/my-branch` to start from a remote tracking branch.
  */
-export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string; skipPush?: boolean }): Promise<WorktreeResult> {
+export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string; skipPush?: boolean; worktreeRoot?: string }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
 		throw new Error(`Cannot create worktree: repoPath does not exist: ${repoPath}`);
 	}
 
-	// Place all worktrees under a single sibling directory: <repo>-wt/
-	const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
+	// Place all worktrees under a single sibling directory: <repo>-wt/ by default,
+	// or under the project-level `worktree_root` override when provided.
+	const wtRoot = wtRootHelper({ rootPath: repoPath, worktreeRoot: opts?.worktreeRoot });
 	// branchName may contain slashes (e.g. "goal/slug-id"), flatten to a safe dirname
 	const safeName = branchName.replace(/\//g, "-");
 	const worktreePath = path.join(wtRoot, safeName);
@@ -227,6 +266,85 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	}
 
 	return { worktreePath, branchName };
+}
+
+/**
+ * Create a coordinated set of worktrees — one per distinct repo declared in
+ * `components`. Single-repo (one component, repo===".") collapses to today's
+ * `createWorktree` behavior identically; multi-repo creates a per-repo worktree
+ * under `<wtRoot>/<branchSlug>/<repo>/` from each repo's source at
+ * `<rootPath>/<repo>/`.
+ *
+ * Does NOT run per-component setup commands — caller is responsible for
+ * invoking `runComponentSetups()` afterward.
+ *
+ * See docs/design/multi-repo-components.md §4 + §5.
+ */
+export async function createWorktreeSet(
+	rootPath: string,
+	components: Component[],
+	branchName: string,
+	baseBranch?: string,
+	opts?: { worktreeRoot?: string },
+): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
+	// Distinct repos in declared order.
+	const seen = new Set<string>();
+	const repos: string[] = [];
+	for (const c of components) {
+		if (!seen.has(c.repo)) { seen.add(c.repo); repos.push(c.repo); }
+	}
+	if (repos.length === 0) repos.push(".");  // defensive — empty components → single-repo
+
+	const slug = branchToSlug(branchName);
+
+	// Single-repo path collapses to existing behavior.
+	if (repos.length === 1 && repos[0] === ".") {
+		const result = await createWorktree(rootPath, branchName, { startPoint: baseBranch, skipPush: true, worktreeRoot: opts?.worktreeRoot });
+		return {
+			container: result.worktreePath,
+			worktrees: [{ repo: ".", repoPath: rootPath, worktreePath: result.worktreePath }],
+		};
+	}
+
+	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.
+	// `worktreeRoot` honors the project-level `worktree_root` override; falls back
+	// to `<rootPath>-wt/` when unset.
+	const wtRoot = wtRootHelper({ rootPath, worktreeRoot: opts?.worktreeRoot });
+	const container = path.join(wtRoot, slug);
+	if (!fs.existsSync(container)) {
+		fs.mkdirSync(container, { recursive: true });
+	}
+
+	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
+	for (const repo of repos) {
+		const repoSrc = path.join(rootPath, repo);
+		const wtPath = path.join(container, repo);
+		if (!fs.existsSync(repoSrc)) {
+			throw new Error(`createWorktreeSet: source repo not found: ${repoSrc}`);
+		}
+		const startPoint = baseBranch ?? await resolveRemotePrimary(repoSrc);
+
+		// Branch may already exist from a prior partial attempt.
+		let branchExists = false;
+		try {
+			await execFile("git", ["rev-parse", "--verify", branchName], { cwd: repoSrc });
+			branchExists = true;
+		} catch { /* not present */ }
+
+		try {
+			if (branchExists) {
+				await execFile("git", ["worktree", "add", wtPath, branchName], { cwd: repoSrc });
+			} else {
+				await execFile("git", ["worktree", "add", "-b", branchName, wtPath, startPoint], { cwd: repoSrc });
+			}
+		} catch (err) {
+			throw new Error(`createWorktreeSet: git worktree add failed for repo "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
+		}
+
+		out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
+	}
+
+	return { container, worktrees: out };
 }
 
 /**

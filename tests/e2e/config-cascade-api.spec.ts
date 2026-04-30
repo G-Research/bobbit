@@ -29,7 +29,11 @@ function createProjectDir(): string {
 async function registerProject(name: string, rootPath: string) {
 	const res = await apiFetch("/api/projects", {
 		method: "POST",
-		body: JSON.stringify({ name, rootPath }),
+		// Opt out of the harness's auto-workflow-seed so cascade-origin
+		// assertions in this file see workflows resolving to the layer
+		// they actually came from (server-seed by the harness, not
+		// project-seed by apiFetch). See tests/e2e/seed-workflows.ts.
+		body: JSON.stringify({ name, rootPath, __e2e_seed_skip__: true }),
 	});
 	expect(res.status).toBe(201);
 	return res.json();
