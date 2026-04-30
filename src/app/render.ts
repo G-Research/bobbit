@@ -1893,9 +1893,9 @@ function projectProposalPanel() {
 	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
 
 	const legacyFieldsBlock = html`
-		<details class="px-5 py-3 border-t border-border" data-testid="legacy-fields-group">
-			<summary class="text-xs text-muted-foreground cursor-pointer select-none">Project-level fields</summary>
-			<div class="flex flex-col gap-4 mt-3">
+		<div class="shrink-0 px-5 py-3 border-t border-border max-h-[45vh] overflow-y-auto" data-testid="legacy-fields-group">
+			<div class="text-xs text-muted-foreground mb-3 font-medium">Project-level fields</div>
+			<div class="flex flex-col gap-4">
 				${loading ? html`<div class="text-sm text-muted-foreground" data-testid="loading-current-config">Loading current config…</div>` : ""}
 				${renderRow("name", "Project Name")}
 				<div data-field="root_path" data-readonly="true">
@@ -1914,7 +1914,7 @@ function projectProposalPanel() {
 					</details>
 				` : ""}
 			</div>
-		</details>
+		</div>
 	`;
 
 	return html`
