@@ -33,7 +33,7 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
-import { WorkflowStore } from "./agent/workflow-store.js";
+import { WorkflowStore, type VerifyStep } from "./agent/workflow-store.js";
 import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
@@ -5554,6 +5554,79 @@ async function handleApiRoute(
 		resumeCtx.goalStore.update(goalId, { paused: false });
 		json({ paused: false });
 		broadcastToGoal(goalId, { type: "goal_resumed", goalId });
+		return;
+	}
+
+	// PATCH /api/goals/:id/plan — replace the named gate's verify[] (§8).
+	//
+	// Pre-Phase-5 behaviour: applies updates without classifier consultation.
+	// Only enforces freeze gating + optimistic-concurrency:
+	//   * Pre-freeze (gate.metadata.frozen !== "true"): apply freely.
+	//   * Post-freeze without `replanReason`: 409 { error: "frozen-no-reason" }.
+	//   * `expectedReplanCount` mismatch: 409 { error: "stale-plan", currentReplanCount }.
+	//   * Successful post-freeze update bumps goal.replanCount.
+	//
+	// Phase 5 task 5.2 will add classifier consultation (mutation rejection,
+	// criteria-drop, replan-cap, prompt-required outcomes broadcasting
+	// `goal_mutation_pending`). Phase 4 task 4.3 adds the decision endpoint.
+	const planPatchMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
+	if (planPatchMatch && req.method === "PATCH") {
+		const goalId = planPatchMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (!goal.workflow) { json({ error: "Goal has no snapshotted workflow" }, 400); return; }
+		const planCtx = projectContextManager.getContextForGoal(goalId);
+		if (!planCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const body = await readBody(req).catch(() => ({}));
+		const gateId = typeof body?.gateId === "string" && body.gateId ? body.gateId : "execution";
+		const gate = goal.workflow.gates.find(g => g.id === gateId);
+		if (!gate) { json({ error: `Gate "${gateId}" not found in goal workflow` }, 404); return; }
+		if (!Array.isArray(body?.planSteps)) {
+			json({ error: "planSteps must be an array" }, 400);
+			return;
+		}
+		// Light shape validation — every step must be an object with a name/type.
+		// Deeper subgoal-payload validation lives in `workflow-store.normalizeStep`
+		// (which 3.1 added) and is exercised when the workflow is re-loaded; we
+		// just guard against obviously bad input here.
+		for (const s of body.planSteps as unknown[]) {
+			if (!s || typeof s !== "object" || Array.isArray(s)) {
+				json({ error: "Each planSteps entry must be an object" }, 400);
+				return;
+			}
+		}
+		const expectedReplanCount = typeof body?.expectedReplanCount === "number"
+			? body.expectedReplanCount
+			: undefined;
+		const replanReason = typeof body?.replanReason === "string" && body.replanReason ? body.replanReason : undefined;
+		const currentReplanCount = goal.replanCount ?? 0;
+		if (expectedReplanCount !== undefined && expectedReplanCount !== currentReplanCount) {
+			json({ error: "stale-plan", currentReplanCount }, 409);
+			return;
+		}
+		const frozen = gate.metadata?.frozen === "true";
+		if (frozen && !replanReason) {
+			json({ error: "frozen-no-reason" }, 409);
+			return;
+		}
+		// Apply the update on the goal's snapshotted workflow.
+		gate.verify = body.planSteps as VerifyStep[];
+		let nextReplanCount = currentReplanCount;
+		if (frozen) {
+			nextReplanCount = currentReplanCount + 1;
+			planCtx.goalStore.update(goalId, { workflow: goal.workflow, replanCount: nextReplanCount });
+		} else {
+			planCtx.goalStore.update(goalId, { workflow: goal.workflow });
+		}
+		json({ plan: gate.verify, replanCount: nextReplanCount });
+		broadcastToGoal(goalId, {
+			type: "goal_plan_proposed",
+			goalId,
+			gateId,
+			planSteps: gate.verify,
+			replanCount: nextReplanCount,
+		});
 		return;
 	}
 
