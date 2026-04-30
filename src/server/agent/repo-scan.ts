@@ -179,6 +179,14 @@ export async function scanRepos(
 		entries = fs.readdirSync(rootAbs, { withFileTypes: true });
 	} catch { return out; }
 
+	// Resolve rootAbs through realpath ONCE so we can detect entries that
+	// resolve outside the resolved root (genuine symlink escape) without
+	// false-positiving on platforms where the parent itself is a symlink
+	// (e.g. macOS `/var/folders/...` → `/private/var/folders/...`).
+	let rootReal: string;
+	try { rootReal = fs.realpathSync(rootAbs); }
+	catch { rootReal = rootAbs; }
+
 	for (const e of entries) {
 		if (!e.isDirectory() && !e.isSymbolicLink()) continue;
 		const name = e.name;
@@ -186,10 +194,14 @@ export async function scanRepos(
 		if (SKIP_NAMES.has(name)) continue;
 
 		const absChild = path.join(rootAbs, name);
-		// Symlink protection: warn + skip if realpath doesn't match.
+		// Symlink protection: skip entries whose realpath escapes the
+		// resolved root. Compare against the *expected* child path under the
+		// resolved root so a parent that is itself a symlink (macOS tmp,
+		// /home → /usr/home on BSD, etc.) does not falsely flag every entry.
 		try {
 			const real = fs.realpathSync(absChild);
-			if (real !== absChild) {
+			const expected = path.join(rootReal, name);
+			if (real !== expected) {
 				console.warn(`[repo-scan] Skipping symlinked entry: ${absChild} -> ${real}`);
 				continue;
 			}

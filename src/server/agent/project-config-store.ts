@@ -9,6 +9,12 @@ import yaml from "yaml";
 // caller create or clobber files outside the project's declared rootPath.
 export function isSafeRelPath(p: string): boolean {
 	if (path.isAbsolute(p)) return false;
+	// Cross-platform absolute-path detection: POSIX `path.isAbsolute` does NOT
+	// flag Windows-style paths like `C:\Windows` or `\\server\share` on a
+	// POSIX host. Reject those explicitly so we behave consistently regardless
+	// of where the gateway is running.
+	if (/^[A-Za-z]:[\\/]/.test(p)) return false;   // C:\, c:/
+	if (p.startsWith("\\\\")) return false;          // UNC \\server\share
 	if (p.includes("\0")) return false;
 	const parts = p.split(/[\\/]+/).filter(s => s.length > 0);
 	return !parts.some(seg => seg === "..");
