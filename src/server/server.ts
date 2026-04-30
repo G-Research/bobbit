@@ -825,8 +825,18 @@ export function createGateway(config: GatewayConfig) {
 	server.requestTimeout = 0;
 	server.headersTimeout = 0;
 
-	// WebSocket server (noServer mode — we handle upgrade manually)
-	const wss = new WebSocketServer({ noServer: true });
+	// WebSocket server (noServer mode — we handle upgrade manually).
+	//
+	// `perMessageDeflate: false` disables per-message compression. The `ws`
+	// library's default enables it, which on loopback (where bandwidth is
+	// not the bottleneck) can stall the server's WS write loop under bursty
+	// JSON event traffic — zlib serialises sends through a single thread,
+	// and during a streaming turn we emit dozens of small frames per second.
+	// Empirically this contributed to a 'Reconnecting to server…' E2E flake
+	// cluster (RP-18, CT-01-d, S-02) where the WS would briefly disconnect
+	// during high-volume mock-agent event bursts. Loopback never benefits
+	// from compression in production either, so this is a strict win.
+	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
 	// Broadcast a message to WebSocket clients belonging to a specific goal
 	function broadcastToGoal(goalId: string, event: any): void {
@@ -911,6 +921,18 @@ export function createGateway(config: GatewayConfig) {
 	}
 
 	teamManager.setBroadcastToGoal(broadcastToGoal);
+	// Push a session_removed broadcast to ALL clients on terminate/archive/purge
+	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
+	// for a documented class of races (e.g. clicking a stale sidebar entry just
+	// after another tab archived the session).
+	sessionManager.addTerminationListener((sessionId, info) => {
+		try {
+			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
+		} catch (err) {
+			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
+		}
+	});
+
 	sessionManager.setOnPrCreationDetected((session) => {
 		const goalId = session.goalId || session.teamGoalId;
 		if (!goalId) return;
