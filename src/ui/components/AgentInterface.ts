@@ -958,7 +958,9 @@ export class AgentInterface extends LitElement {
 		const thinkingTitle = fullLabels[(state.thinkingLevel as keyof typeof fullLabels) ?? "off"] ?? fullLabels.off;
 
 		const thinkingSelect = supportsThinking && this.enableThinkingSelector
-			? html`<span class="thinking-select-compact [&_button]:!gap-1 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
+			// Outer button gap (label → chevron) tightened to 2px; inner span gap
+			// (brain icon → label) stays at 4px so the icon doesn't crowd the text.
+			? html`<span class="thinking-select-compact [&_button]:!gap-0.5 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
 				value: state.thinkingLevel,
 				placeholder: fullLabels.off,
 				options: [
@@ -991,9 +993,11 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-0.5">${state.model.id}</span>
+					<span class="ml-0 sm:ml-0.5">${state.model.id}</span>
 				`,
-				className: "h-6 text-xs truncate",
+				// Mobile: tighten gap (4px) and horizontal padding so the sparkles
+				// icon sits closer to the model name. ! beats Button's defaults.
+				className: "h-6 text-xs truncate !gap-1 sm:!gap-2 !px-1.5 sm:!px-3",
 			})
 			: "";
 
