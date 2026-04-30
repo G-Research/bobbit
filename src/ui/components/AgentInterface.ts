@@ -4,7 +4,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { streamSimple, type ToolResultMessage, type Usage } from "@mariozechner/pi-ai";
 import { html, LitElement, nothing } from "lit";
-import { customElement, property, query } from "lit/decorators.js";
+import { customElement, property, query, state } from "lit/decorators.js";
 import { ArrowDown, Brain, Image as ImageIcon, Sparkles } from "lucide";
 import { ModelSelector } from "../dialogs/ModelSelector.js";
 import { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
@@ -214,10 +214,29 @@ export class AgentInterface extends LitElement {
 	private _settleWindowActive = false;
 	private _settleWindowDeadline = 0;
 	private _lastSettleScrollHeight = -1;
+	// Counts consecutive ResizeObserver ticks where scrollHeight has been
+	// stable AND we re-pinned successfully. The window exits early once we
+	// hit two such ticks, but width-only reflows / no-op ticks no longer
+	// short-circuit it (the previous logic exited as soon as two ticks
+	// reported the same height, which fired before any real growth).
+	private _settleQuietTickCount = 0;
 
 	// Change 5 — Jump-to-bottom button visibility. True when the viewport is
 	// more than half a screen from the bottom. Recomputed in `_handleScroll`.
 	private _showJumpToBottom = false;
+	// Timestamp (performance.now ms) until which `_handleScroll` must NOT
+	// re-show the jump button. Set when the user clicks the button so the
+	// echo of the programmatic scroll — plus any content-growth race during
+	// the subsequent re-render — can't briefly flip _showJumpToBottom back
+	// to true before _scrollToBottom's rAF re-pins the bottom.
+	private _suppressJumpUntilTs = 0;
+
+	// Measured height (px) of the pill strip floating above the composer. The
+	// jump-to-bottom button uses this to position itself just above the strip
+	// so stacked / wrapped bash_bg pills don't obscure it on mobile. 0 when
+	// no strip is rendered.
+	@state() private _pillStripHeight = 0;
+	private _pillStripObserver?: ResizeObserver;
 
 	// --- Pill overflow collapsing state ---
 	/** Number of pills visible before overflow (rest collapse into "More") */
@@ -310,11 +329,25 @@ export class AgentInterface extends LitElement {
 				if (this._settleWindowActive) {
 					if (performance.now() > this._settleWindowDeadline) {
 						this._settleWindowActive = false;
+						this._settleQuietTickCount = 0;
 					} else if (this._lastSettleScrollHeight === newScrollHeight) {
-						// Two consecutive ticks at the same scrollHeight → settled.
-						this._settleWindowActive = false;
+						// Same height as last tick — stable. Re-pin (defensively) and
+						// require two consecutive stable ticks before exiting so a
+						// width-only reflow followed by real growth doesn't fool us.
+						if (this._stickToBottom) {
+							this._scrollToBottom();
+							this._lastScrollHeight = newScrollHeight;
+						}
+						this._settleQuietTickCount++;
+						if (this._settleQuietTickCount >= 2) {
+							this._settleWindowActive = false;
+							this._settleQuietTickCount = 0;
+						}
+						return;
 					} else {
+						// Height changed — reset quiet-tick counter and re-pin.
 						this._lastSettleScrollHeight = newScrollHeight;
+						this._settleQuietTickCount = 0;
 						if (this._stickToBottom) {
 							this._scrollToBottom();
 							this._lastScrollHeight = newScrollHeight;
@@ -432,15 +465,47 @@ export class AgentInterface extends LitElement {
 		}
 		if (!this.session) return;
 
-		// Reset scroll state for new session and scroll to bottom once rendered
+		// Reset scroll state for new session and scroll to bottom once rendered.
+		// Also clear the jump-to-bottom button — a leftover `true` from the
+		// previous session would render the button on session navigate even
+		// though we're at the bottom (the next scroll event would clear it,
+		// but if the session is already short enough that no scroll fires,
+		// the stale state lingers).
 		this._stickToBottom = true;
 		this._wasAtBottomAtLastUserScroll = true;
-		this.updateComplete.then(() => this._scrollToBottom());
+		if (this._showJumpToBottom) {
+			this._showJumpToBottom = false;
+			// _showJumpToBottom isn't @state(), so mutating it doesn't trigger a
+			// re-render on its own. _handleScroll calls requestUpdate() after
+			// changing it, but on session navigate we may never get a scroll
+			// event (e.g. short session that already fits in the viewport),
+			// so the stale `true` from the previous session would linger.
+			this.requestUpdate();
+		}
+		// Re-pin to the bottom across multiple frames. updateComplete only
+		// awaits Lit's first render — async content (lazy markdown, syntax
+		// highlighting, image dimensions, hydrated tool-content blocks) lands
+		// over subsequent frames, growing scrollHeight after our initial pin.
+		// Three rAF passes catch the common cases without the cost of a long
+		// timer; the ResizeObserver settle window below is the safety net for
+		// later growth.
+		this.updateComplete.then(() => {
+			this._scrollToBottom();
+			requestAnimationFrame(() => {
+				this._scrollToBottom();
+				requestAnimationFrame(() => this._scrollToBottom());
+			});
+		});
 
-		// Change 4 — arm the settle window for this session load.
+		// Change 4 — arm the settle window for this session load. Bumped to
+		// 3 s (was 2 s) and the early-exit condition tightened in the observer
+		// to require two consecutive *quiet* ticks rather than two same-height
+		// ticks (a width-only reflow + a growth tick used to close the window
+		// prematurely on session navigate).
 		this._settleWindowActive = true;
-		this._settleWindowDeadline = performance.now() + 2000;
+		this._settleWindowDeadline = performance.now() + 3000;
 		this._lastSettleScrollHeight = -1;
+		this._settleQuietTickCount = 0;
 
 		// Set default streamFn with proxy support if not already set
 		if (this.session.streamFn === streamSimple) {
@@ -579,6 +644,16 @@ export class AgentInterface extends LitElement {
 
 	private _scrollToBottom() {
 		this._stickToBottom = true;
+		// We're definitionally at the bottom now — hide the jump button.
+		// Necessary because a browser clamp scroll event (e.g. content swap on
+		// session navigate) can flip _showJumpToBottom back to true between
+		// content render and this call. After our programmatic scrollTop write,
+		// the echo latch consumes the next scroll event so _handleScroll won't
+		// re-evaluate — leaving a stale `true` that keeps the button visible.
+		if (this._showJumpToBottom) {
+			this._showJumpToBottom = false;
+			this.requestUpdate();
+		}
 		if (this._scrollContainer) {
 			const sh = this._scrollContainer.scrollHeight;
 			const target = sh - this._scrollContainer.clientHeight;
@@ -594,6 +669,10 @@ export class AgentInterface extends LitElement {
 				this._lastProgrammaticScrollTop = target;
 				this._lastProgrammaticScrollHeight = sh;
 				this._scrollContainer.scrollTop = sh;
+			}
+			if (this._showJumpToBottom) {
+				this._showJumpToBottom = false;
+				this.requestUpdate();
 			}
 		});
 	}
@@ -636,7 +715,13 @@ export class AgentInterface extends LitElement {
 		// rounding and small jitter without losing stick-to-bottom.
 		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 10;
 		// Change 5 — Jump-to-bottom visibility (more than half a screen from bottom).
-		const nextShow = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
+		let nextShow = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
+		// Honour the post-click suppression window: the user just asked us to
+		// jump, so we don't want a transient height-growth race to re-show the
+		// button before the rAF/ResizeObserver re-pins to the bottom.
+		if (nextShow && performance.now() < this._suppressJumpUntilTs) {
+			nextShow = false;
+		}
 		if (nextShow !== this._showJumpToBottom) {
 			this._showJumpToBottom = nextShow;
 			this.requestUpdate();
@@ -672,6 +757,11 @@ export class AgentInterface extends LitElement {
 
 	// Change 5 — Jump-to-bottom click handler.
 	private _handleJumpToBottomClick = () => {
+		// Open a 600 ms suppression window during which _handleScroll cannot
+		// re-show the button. _scrollToBottom + the size-observer's stick-to-
+		// bottom re-pin both run within that window, so by the time it expires
+		// the geometry is genuinely at the bottom and `nextShow` evaluates false.
+		this._suppressJumpUntilTs = performance.now() + 600;
 		this._scrollToBottom();
 		this._stickToBottom = true;
 		this._wasAtBottomAtLastUserScroll = true;
@@ -1193,12 +1283,12 @@ export class AgentInterface extends LitElement {
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html`
 						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
-							<!-- Layer 0: Glow shadows only — no content, no interaction -->
-							<div class="flex items-center gap-1.5 flex-wrap justify-end pointer-events-none" aria-hidden="true" style="position:absolute;inset:0;z-index:0">
-								${this._renderGlowLayer()}
-							</div>
-							<!-- Layer 1: Real interactive pills -->
-							<div data-pill-content class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1">
+							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow
+							     follows the actual rendered shape per-element, so wrapping or
+							     differently-sized children (git-status-widget vs bash_bg pills)
+							     stay aligned on every viewport — unlike the previous parallel
+							     glow-placeholder layer which mismatched on mobile. -->
+							<div data-pill-content class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1;filter:drop-shadow(0 0 4px var(--background)) drop-shadow(0 0 8px var(--background))">
 							${this._renderPillStrip()}
 							${this.gitRepoKnown !== 'no' ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
@@ -1326,13 +1416,19 @@ export class AgentInterface extends LitElement {
 	// where it was hidden by the git-status widget / pill strip on mobile.
 	private _renderJumpToBottom() {
 		const show = this._showJumpToBottom;
+		// Base offset matches the pill strip's bottom-edge gap (1rem). When the
+		// strip is rendered, lift the button above its measured height plus an
+		// 8px breathing gap so wrapped/stacked pills don't obscure it.
+		const baseOffsetPx = 16;
+		const stripGapPx = this._pillStripHeight > 0 ? this._pillStripHeight + 8 : 0;
+		const bottomPx = baseOffsetPx + stripGapPx;
 		return html`
 			<button
 				type="button"
 				data-testid="jump-to-bottom"
 				aria-label="Jump to bottom"
-				class="absolute bottom-10 left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
-				style="opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out"
+				class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
+				style="bottom:${bottomPx}px;opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, bottom 150ms ease-out"
 				tabindex="${show ? "0" : "-1"}"
 				@click=${this._handleJumpToBottomClick}
 			>
@@ -1409,42 +1505,12 @@ export class AgentInterface extends LitElement {
 		this.onAskAgentPr?.();
 	}
 
-	// --- Pill glow layer ---
-
-	/**
-	 * Render invisible pill-shaped shadows that sit behind the real pills.
-	 * Same flex layout ensures alignment; transparent content means only the box-shadow is visible.
-	 */
-	private _renderGlowLayer() {
-		const sorted = this._getSortedProcesses();
-		if (sorted.length === 0) return nothing;
-
-		const count = Math.min(this._visiblePillCount, sorted.length);
-		let visibleCount = Math.max(1, count);
-		let hiddenCount = sorted.length - visibleCount;
-		if (hiddenCount === 1) { visibleCount++; hiddenCount = 0; }
-
-		const glowStyle = "height:var(--pill-h, auto); border-radius:9999px; box-shadow:0 0 12px 8px var(--background), 0 0 4px 2px var(--background); background:transparent; border:1px solid transparent";
-
-		const glowPills = [];
-
-		// "N more" glow placeholder
-		if (hiddenCount > 0) {
-			glowPills.push(html`<div style="${glowStyle}; position:relative; top:1px"><span class="inline-flex items-center px-1.5 py-0.5 text-[11px] font-mono" style="visibility:hidden">${hiddenCount} more<span style="min-width:16px"></span></span></div>`);
-		}
-
-		// Visible pill glow placeholders
-		for (const p of sorted.slice(hiddenCount)) {
-			glowPills.push(html`<div style="${glowStyle}; position:relative; top:1px"><span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-mono" style="visibility:hidden"><span>●</span>${p.name || p.id}<span style="min-width:16px"></span></span></div>`);
-		}
-
-		// Git status glow placeholder
-		if (this.gitRepoKnown !== 'no') {
-			glowPills.push(html`<div style="${glowStyle}"><span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px]" style="visibility:hidden">⎇ ${this.gitStatus?.branch ?? ''}</span></div>`);
-		}
-
-		return glowPills;
-	}
+	// Glow effect now lives on the real pill content layer via a CSS
+	// `filter: drop-shadow()` set inline in the render template. The previous
+	// parallel-render approach used hidden placeholder pills with box-shadow
+	// to fake the glow but the placeholders couldn't match the real shapes
+	// (e.g. git-status-widget's PR badges + unpushed dots) so the layers
+	// drifted apart on mobile when flex-wrap kicked in.
 
 	// --- Pill overflow collapsing & animation ---
 
@@ -1738,6 +1804,31 @@ export class AgentInterface extends LitElement {
 			if (this._pillResizeObserver) {
 				this._pillResizeObserver.disconnect();
 				this._pillResizeObserver = undefined;
+			}
+		}
+
+		// Track pill-strip height so the jump-to-bottom button can sit above it.
+		// The strip wraps to multiple rows on mobile when stacked bash_bg pills
+		// don't fit — we want the button to lift correspondingly.
+		const stripEl = this.querySelector('[data-pill-strip]') as HTMLElement | null;
+		if (stripEl) {
+			if (!this._pillStripObserver) {
+				this._pillStripObserver = new ResizeObserver((entries) => {
+					const h = entries[0]?.contentRect?.height ?? 0;
+					if (Math.abs(h - this._pillStripHeight) >= 1) {
+						this._pillStripHeight = h;
+					}
+				});
+			}
+			this._pillStripObserver.observe(stripEl);
+			// Also pick up the initial height synchronously — RO fires async.
+			const h = stripEl.offsetHeight;
+			if (Math.abs(h - this._pillStripHeight) >= 1) this._pillStripHeight = h;
+		} else {
+			if (this._pillStripHeight !== 0) this._pillStripHeight = 0;
+			if (this._pillStripObserver) {
+				this._pillStripObserver.disconnect();
+				this._pillStripObserver = undefined;
 			}
 		}
 	}
