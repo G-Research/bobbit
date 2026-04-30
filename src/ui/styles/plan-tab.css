@@ -1,0 +1,215 @@
+/*
+ * Plan tab styles — DAG SVG layout + node card.
+ *
+ * See docs/design/nested-goals.md §10.2.
+ *
+ * Imported by src/app/goal-dashboard.ts. Kept intentionally small — the
+ * dashboard's existing CSS in src/app/goal-dashboard.css already provides
+ * tab-panel, button, and card primitives we reuse where possible.
+ */
+
+.plan-tab {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	padding: 12px 16px 16px;
+	min-width: 0;
+}
+
+.plan-tab-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.plan-tab-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-primary, var(--foreground));
+}
+
+.plan-tab-status {
+	font-size: 12px;
+	color: var(--text-tertiary, var(--muted-foreground));
+}
+
+.plan-tab-status .frozen {
+	color: var(--text-secondary, var(--muted-foreground));
+}
+
+.plan-tab-status .editable {
+	color: oklch(0.65 0.15 145);
+}
+
+.plan-edit-btn {
+	font-size: 12px;
+	padding: 4px 10px;
+	border-radius: 6px;
+	border: 1px solid var(--border);
+	background: var(--background);
+	color: var(--text-primary, var(--foreground));
+	cursor: pointer;
+}
+.plan-edit-btn:hover { background: var(--muted); }
+.plan-edit-btn[aria-pressed="true"] {
+	background: oklch(0.62 0.15 250 / 0.12);
+	border-color: oklch(0.62 0.15 250 / 0.4);
+	color: oklch(0.72 0.15 250);
+}
+
+.plan-svg-wrap {
+	overflow-x: auto;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--card, var(--background));
+	padding: 8px;
+}
+
+.plan-svg {
+	display: block;
+	min-width: 100%;
+}
+
+.plan-svg .phase-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	fill: var(--text-tertiary, var(--muted-foreground));
+}
+
+.plan-svg .plan-node-rect {
+	fill: var(--card, var(--background));
+	stroke: var(--border);
+	stroke-width: 1;
+	cursor: pointer;
+	transition: stroke 120ms, fill 120ms;
+}
+.plan-svg .plan-node-rect:hover { stroke: var(--ring, oklch(0.62 0.15 250)); }
+
+.plan-svg .plan-node[data-selected="true"] .plan-node-rect {
+	stroke: oklch(0.62 0.15 250);
+	stroke-width: 2;
+}
+
+.plan-svg .plan-node[data-state="pending"] .plan-node-rect {
+	fill: var(--card, var(--background));
+}
+.plan-svg .plan-node[data-state="running"] .plan-node-rect {
+	stroke: oklch(0.62 0.15 250);
+	fill: oklch(0.62 0.15 250 / 0.08);
+}
+.plan-svg .plan-node[data-state="passed"] .plan-node-rect,
+.plan-svg .plan-node[data-state="complete"] .plan-node-rect {
+	stroke: oklch(0.65 0.15 145);
+	fill: oklch(0.65 0.15 145 / 0.08);
+}
+.plan-svg .plan-node[data-state="failed"] .plan-node-rect {
+	stroke: oklch(0.70 0.14 30);
+	fill: oklch(0.70 0.14 30 / 0.08);
+}
+
+.plan-svg .plan-node-title {
+	font-size: 12px;
+	font-weight: 600;
+	fill: var(--text-primary, var(--foreground));
+	pointer-events: none;
+}
+
+.plan-svg .plan-node-meta {
+	font-size: 10px;
+	fill: var(--text-tertiary, var(--muted-foreground));
+	pointer-events: none;
+}
+
+.plan-svg .plan-node-state-badge {
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+}
+.plan-svg .plan-node[data-state="pending"] .plan-node-state-badge { fill: var(--text-tertiary, var(--muted-foreground)); }
+.plan-svg .plan-node[data-state="running"] .plan-node-state-badge { fill: oklch(0.72 0.15 250); }
+.plan-svg .plan-node[data-state="passed"] .plan-node-state-badge,
+.plan-svg .plan-node[data-state="complete"] .plan-node-state-badge { fill: oklch(0.55 0.15 145); }
+.plan-svg .plan-node[data-state="failed"] .plan-node-state-badge { fill: oklch(0.55 0.15 30); }
+
+.plan-svg .plan-edge {
+	stroke: var(--border);
+	stroke-width: 1.5;
+	fill: none;
+	pointer-events: none;
+}
+
+/* ── Per-node detail card (rendered below the SVG when a node is selected) ── */
+
+.plan-node-card {
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--card, var(--background));
+	padding: 14px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.plan-node-card-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.plan-node-card-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-primary, var(--foreground));
+}
+
+.plan-node-card-close {
+	font-size: 11px;
+	background: transparent;
+	border: none;
+	cursor: pointer;
+	color: var(--text-tertiary, var(--muted-foreground));
+}
+.plan-node-card-close:hover { color: var(--text-primary, var(--foreground)); }
+
+.plan-node-card-meta {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 4px 12px;
+	font-size: 12px;
+}
+
+.plan-node-card-meta dt {
+	color: var(--text-tertiary, var(--muted-foreground));
+	font-weight: 500;
+}
+
+.plan-node-card-meta dd {
+	margin: 0;
+	color: var(--text-primary, var(--foreground));
+	overflow-wrap: anywhere;
+}
+
+.plan-node-card-spec {
+	font-size: 12px;
+	white-space: pre-wrap;
+	max-height: 220px;
+	overflow-y: auto;
+	border-radius: 6px;
+	background: var(--muted);
+	padding: 8px 10px;
+	color: var(--text-primary, var(--foreground));
+}
+
+.plan-tab .tab-empty {
+	padding: 24px 16px;
+	color: var(--text-tertiary, var(--muted-foreground));
+	font-size: 13px;
+	text-align: center;
+}

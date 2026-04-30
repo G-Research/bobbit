@@ -1,4 +1,4 @@
-import { html, nothing, type TemplateResult } from "lit";
+import { html, nothing, svg, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "../ui/components/VerificationOutputModal.js";
 import "../ui/components/CostPopover.js";
@@ -1778,13 +1778,284 @@ function renderCommitsTab(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: PLAN TAB (skeleton — task 4.1)
+// RENDER: PLAN TAB (task 4.2 — docs/design/nested-goals.md §10.2)
 // ============================================================================
 
-/** Plan tab body. 4.1 ships only the skeleton; 4.2 fills in the DAG SVG
- *  per docs/design/nested-goals.md §10.2. */
+/** Subgoal verify-step shape we read from `goal.workflow.gates[execution].verify[]`.
+ *  Mirrors `SubgoalStepParams` from src/server/agent/workflow-store.ts; we keep
+ *  this loose to stay decoupled from the server type at the UI boundary. */
+export interface PlanStep {
+	name: string;
+	type: "command" | "llm-review" | "agent-qa" | "subgoal";
+	phase?: number;
+	subgoal?: {
+		title: string;
+		spec: string;
+		workflowId?: string;
+		suggestedRole?: string;
+		planId: string;
+		phase?: number;
+		childGoalId?: string;
+	};
+}
+
+/** Pure helper: extract subgoal verify steps from a goal snapshot.
+ *  Returns [] when the workflow / execution gate / verify array is missing
+ *  or contains only non-subgoal steps. */
+export function extractPlanSteps(goal: Goal | null | undefined): PlanStep[] {
+	const exec = goal?.workflow?.gates.find(g => g.id === "execution");
+	const verify = (exec?.verify ?? []) as PlanStep[];
+	return verify.filter(s => s && s.type === "subgoal" && s.subgoal && typeof s.subgoal.planId === "string");
+}
+
+/** Pure helper: group plan steps into topological columns by `phase`. Within
+ *  a column, nodes are sorted by `subgoal.title` (case-insensitive) for a
+ *  stable rendering. Phase numbers may be sparse — we render columns for
+ *  every distinct phase value, sorted ascending. */
+export function computePlanColumns(steps: PlanStep[]): Array<{ phase: number; nodes: PlanStep[] }> {
+	const byPhase = new Map<number, PlanStep[]>();
+	for (const s of steps) {
+		const p = (s.phase ?? s.subgoal?.phase ?? 0) | 0;
+		let arr = byPhase.get(p);
+		if (!arr) { arr = []; byPhase.set(p, arr); }
+		arr.push(s);
+	}
+	const columns: Array<{ phase: number; nodes: PlanStep[] }> = [];
+	for (const phase of [...byPhase.keys()].sort((a, b) => a - b)) {
+		const nodes = byPhase.get(phase)!.slice().sort((a, b) => {
+			const at = (a.subgoal?.title || a.name || "").toLowerCase();
+			const bt = (b.subgoal?.title || b.name || "").toLowerCase();
+			return at < bt ? -1 : at > bt ? 1 : 0;
+		});
+		columns.push({ phase, nodes });
+	}
+	return columns;
+}
+
+/** Pure helper: is the plan currently editable for this goal?
+ *
+ *  Editable iff the goal-plan gate has NOT been signalled (i.e. its `status`
+ *  is anything other than `"passed"`), OR the goal is paused. See
+ *  docs/design/nested-goals.md §10.2. */
+export function isPlanEditable(
+	goal: { paused?: boolean } | null | undefined,
+	gateStates: Array<{ gateId: string; status: "pending" | "passed" | "failed" }> = [],
+): boolean {
+	if (!goal) return false;
+	if (goal.paused === true) return true;
+	const gp = gateStates.find(g => g.gateId === "goal-plan");
+	return (gp?.status ?? "pending") !== "passed";
+}
+
+/** Resolve a plan node's display state by joining `subgoal.childGoalId`
+ *  against the goal snapshot. Falls back to "pending" when the child has
+ *  not been spawned yet. */
+function resolvePlanNodeState(step: PlanStep, goals: Goal[]): "pending" | "running" | "passed" | "failed" {
+	const childId = step.subgoal?.childGoalId;
+	if (!childId) return "pending";
+	const child = goals.find(g => g.id === childId);
+	if (!child) return "pending";
+	if (child.archived) return "failed";
+	switch (child.state) {
+		case "complete": return "passed";
+		case "in-progress": return "running";
+		case "shelved": return "failed";
+		case "todo":
+		default: return "pending";
+	}
+}
+
+function planNodeStateLabel(s: "pending" | "running" | "passed" | "failed"): string {
+	switch (s) {
+		case "pending": return "Pending";
+		case "running": return "Running";
+		case "passed": return "Passed";
+		case "failed": return "Failed";
+	}
+}
+
+/** Currently expanded plan node (by planId). Module-local so tab navigation
+ *  preserves the selection — the tab content is destroyed/recreated on tab
+ *  switch but the component-level state survives. */
+let selectedPlanNodeId: string | null = null;
+let planEditMode = false;
+
+function togglePlanNode(planId: string): void {
+	selectedPlanNodeId = selectedPlanNodeId === planId ? null : planId;
+	renderApp();
+}
+
+function togglePlanEditMode(): void {
+	planEditMode = !planEditMode;
+	renderApp();
+}
+
+// ── SVG layout constants ──────────────────────────────────────────────
+const PLAN_COL_W = 240;
+const PLAN_ROW_H = 96;
+const PLAN_NODE_W = 200;
+const PLAN_NODE_H = 72;
+const PLAN_PAD = 24;
+const PLAN_HEADER_H = 28;
+
+/** Render a single plan node as an SVG group at the given column/row. */
+function renderPlanNode(
+	step: PlanStep,
+	colIdx: number,
+	rowIdx: number,
+	stateLabel: "pending" | "running" | "passed" | "failed",
+	isSelected: boolean,
+) {
+	const x = PLAN_PAD + colIdx * PLAN_COL_W + (PLAN_COL_W - PLAN_NODE_W) / 2;
+	const y = PLAN_PAD + PLAN_HEADER_H + rowIdx * PLAN_ROW_H;
+	const sg = step.subgoal!;
+	const title = sg.title || step.name || "(untitled)";
+	const truncatedTitle = title.length > 28 ? title.slice(0, 27) + "\u2026" : title;
+	const metaParts: string[] = [];
+	if (sg.workflowId) metaParts.push(sg.workflowId);
+	if (sg.suggestedRole) metaParts.push(sg.suggestedRole);
+	const meta = metaParts.join(" \u00B7 ");
+	const badgeText = planNodeStateLabel(stateLabel);
+
+	return svg`
+		<g class="plan-node"
+			data-testid="plan-node"
+			data-plan-id="${sg.planId}"
+			data-state="${stateLabel}"
+			data-phase="${(step.phase ?? sg.phase ?? 0) | 0}"
+			data-selected="${isSelected ? "true" : "false"}"
+			transform="translate(${x}, ${y})"
+			@click=${() => togglePlanNode(sg.planId)}>
+			<rect class="plan-node-rect" width="${PLAN_NODE_W}" height="${PLAN_NODE_H}" rx="6" ry="6"></rect>
+			<text class="plan-node-title" x="12" y="22">${truncatedTitle}</text>
+			${meta ? svg`<text class="plan-node-meta" x="12" y="40">${meta}</text>` : nothing}
+			<text class="plan-node-state-badge" x="12" y="${PLAN_NODE_H - 12}">${badgeText}</text>
+		</g>
+	`;
+}
+
+/** Render an arrow connector for a phase-to-phase transition. We draw one
+ *  short orthogonal connector per node in the destination column: the
+ *  per-node detail (which step depends on which) is implicit in the phase
+ *  ordering — phase N+1 starts strictly after every phase N node finishes. */
+function renderEdgeColumn(fromColIdx: number, toRows: number) {
+	const x1 = PLAN_PAD + fromColIdx * PLAN_COL_W + PLAN_COL_W / 2 + PLAN_NODE_W / 2;
+	const x2 = PLAN_PAD + (fromColIdx + 1) * PLAN_COL_W + (PLAN_COL_W - PLAN_NODE_W) / 2;
+	const edges: ReturnType<typeof svg>[] = [];
+	for (let r = 0; r < toRows; r++) {
+		const y = PLAN_PAD + PLAN_HEADER_H + r * PLAN_ROW_H + PLAN_NODE_H / 2;
+		edges.push(svg`<path class="plan-edge" d="M ${x1} ${y} L ${x2} ${y}"></path>`);
+	}
+	return edges;
+}
+
+function renderPlanNodeCard(step: PlanStep, stateLabel: string): TemplateResult {
+	const sg = step.subgoal!;
+	const phase = (step.phase ?? sg.phase ?? 0) | 0;
+	const editable = planEditMode;
+	const spec = sg.spec || "(no spec)";
+	return html`
+		<div class="plan-node-card" data-testid="plan-node-card" data-plan-id="${sg.planId}">
+			<div class="plan-node-card-header">
+				<span class="plan-node-card-title">${sg.title}</span>
+				<button class="plan-node-card-close" title="Close" @click=${() => togglePlanNode(sg.planId)}>✕</button>
+			</div>
+			<dl class="plan-node-card-meta">
+				<dt>State</dt><dd>${stateLabel}${sg.childGoalId ? html` · <a href="#/goal/${sg.childGoalId}">view child</a>` : nothing}</dd>
+				<dt>Phase</dt><dd>${phase}</dd>
+				<dt>Workflow</dt><dd>${sg.workflowId || html`<em>default</em>`}</dd>
+				${sg.suggestedRole ? html`<dt>Role</dt><dd>${sg.suggestedRole}</dd>` : nothing}
+				<dt>Plan id</dt><dd><code>${sg.planId}</code></dd>
+			</dl>
+			<div class="plan-node-card-spec" data-testid="plan-node-card-spec">${spec}</div>
+			${editable ? html`
+				<div style="font-size:11px;color:var(--text-tertiary);">
+					Inline editing of plan-node fields will land in a follow-up task. Use the
+					<code>goal_plan_propose</code> tool or <code>PATCH /api/goals/:id/plan</code>
+					for now.
+				</div>
+			` : nothing}
+		</div>
+	`;
+}
+
+/** Plan tab body. Hand-rolled SVG layout with topological columns by phase.
+ *  See docs/design/nested-goals.md §10.2. */
 function renderPlanTab(): TemplateResult {
-	return html`<div class="tab-panel-inner" data-testid="plan-tab-stub"><p>Plan tab — coming in 4.2</p></div>`;
+	const goal = currentGoal;
+	if (!goal) return html`<div class="tab-empty">No goal loaded.</div>`;
+
+	const steps = extractPlanSteps(goal);
+	const editable = isPlanEditable(goal, gates);
+
+	if (steps.length === 0) {
+		return html`
+			<div class="plan-tab" data-testid="plan-tab">
+				<div class="plan-tab-header">
+					<span class="plan-tab-title">Plan</span>
+					<span class="plan-tab-status ${editable ? "editable" : "frozen"}">${editable ? "Editable" : "Frozen"}</span>
+				</div>
+				<div class="tab-empty" data-testid="plan-tab-empty">
+					No plan yet — the team-lead will propose one once the charter passes.
+				</div>
+			</div>
+		`;
+	}
+
+	const columns = computePlanColumns(steps);
+	const maxRows = Math.max(...columns.map(c => c.nodes.length));
+	const W = PLAN_PAD * 2 + columns.length * PLAN_COL_W;
+	const H = PLAN_PAD * 2 + PLAN_HEADER_H + maxRows * PLAN_ROW_H;
+
+	const selected = selectedPlanNodeId
+		? steps.find(s => s.subgoal?.planId === selectedPlanNodeId) || null
+		: null;
+	const selectedState = selected ? resolvePlanNodeState(selected, state.goals) : null;
+
+	return html`
+		<div class="plan-tab" data-testid="plan-tab">
+			<div class="plan-tab-header">
+				<span class="plan-tab-title">Plan — ${steps.length} subgoal${steps.length === 1 ? "" : "s"} across ${columns.length} phase${columns.length === 1 ? "" : "s"}</span>
+				<div style="display:flex;gap:8px;align-items:center;">
+					<span class="plan-tab-status ${editable ? "editable" : "frozen"}" data-testid="plan-tab-status">
+						${editable ? (goal.paused ? "Paused — editable" : "Editable — plan not yet approved") : "Frozen — plan approved"}
+					</span>
+					${editable ? html`
+						<button class="plan-edit-btn"
+							data-testid="plan-edit-btn"
+							aria-pressed="${planEditMode ? "true" : "false"}"
+							@click=${togglePlanEditMode}>
+							${planEditMode ? "Done editing" : "Edit"}
+						</button>
+					` : nothing}
+				</div>
+			</div>
+			<div class="plan-svg-wrap">
+				<svg class="plan-svg" data-testid="plan-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+					${columns.map((col, ci) => svg`
+						<g class="plan-column" data-testid="plan-column" data-phase="${col.phase}" data-col-index="${ci}">
+							<text class="phase-label"
+								x="${PLAN_PAD + ci * PLAN_COL_W + PLAN_COL_W / 2}"
+								y="${PLAN_PAD + 14}"
+								text-anchor="middle">Phase ${col.phase}</text>
+							${col.nodes.map((step, ri) => renderPlanNode(
+								step,
+								ci,
+								ri,
+								resolvePlanNodeState(step, state.goals),
+								step.subgoal?.planId === selectedPlanNodeId,
+							))}
+						</g>
+					`)}
+					${columns.slice(0, -1).map((_col, ci) => {
+						const nextRows = columns[ci + 1].nodes.length;
+						return renderEdgeColumn(ci, nextRows);
+					})}
+				</svg>
+			</div>
+			${selected && selectedState ? renderPlanNodeCard(selected, planNodeStateLabel(selectedState)) : nothing}
+		</div>
+	`;
 }
 
 // ============================================================================
