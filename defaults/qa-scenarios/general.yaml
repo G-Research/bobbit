@@ -1,0 +1,9 @@
+# Default smoke scenarios for the `general` workflow's implementation gate
+# integration-test step. See feature.yaml for runner contract.
+scenarios:
+  - name: health-endpoint
+    type: http
+    method: GET
+    url: "http://127.0.0.1:${PORT}/api/health"
+    expect_status: 200
+    timeout: 10

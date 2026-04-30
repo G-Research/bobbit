@@ -1,0 +1,16 @@
+# Default smoke scenarios run by the integration-test step in the
+# implementation gate of the `feature` workflow.
+#
+# These are deliberately project-agnostic and minimal — anything
+# project-specific should override via .bobbit/config/qa-scenarios.yaml.
+#
+# The runner spawns qa_start_command, polls qa_health_check (or /health
+# / /api/health on the published port), then executes scenarios in order.
+# Variables: ${PORT} substitutes from the spawn output.
+scenarios:
+  - name: health-endpoint
+    type: http
+    method: GET
+    url: "http://127.0.0.1:${PORT}/api/health"
+    expect_status: 200
+    timeout: 10
