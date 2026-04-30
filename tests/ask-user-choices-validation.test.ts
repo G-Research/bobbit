@@ -5,7 +5,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateQuestions } from "../src/server/agent/ask-user-choices-validation.ts";
+import { validateQuestions, crossValidate } from "../src/server/agent/ask-user-choices-validation.ts";
 
 describe("validateQuestions — tab_label", () => {
 	it("accepts a single-question ask without tab_label", () => {
@@ -76,5 +76,76 @@ describe("validateQuestions — tab_label", () => {
 		]);
 		assert.ok(err);
 		assert.match(err!, /tab_label/);
+	});
+});
+
+describe("validateQuestions — always-on Other", () => {
+	it("accepts a payload without allow_other (Other is automatic)", () => {
+		const err = validateQuestions([
+			{ question: "Q1", options: ["a", "b"] },
+		]);
+		assert.equal(err, null);
+	});
+
+	it("silently accepts stale allow_other=true (backward-compat)", () => {
+		const err = validateQuestions([
+			{ question: "Q1", options: ["a", "b"], allow_other: true } as any,
+		]);
+		assert.equal(err, null);
+	});
+
+	it("silently accepts stale allow_other=false (backward-compat)", () => {
+		const err = validateQuestions([
+			{ question: "Q1", options: ["a", "b"], allow_other: false } as any,
+		]);
+		assert.equal(err, null);
+	});
+
+	it("silently accepts stale allow_other set to a non-boolean value (ignored)", () => {
+		const err = validateQuestions([
+			{ question: "Q1", options: ["a", "b"], allow_other: "yes" } as any,
+		]);
+		assert.equal(err, null);
+	});
+
+	it("multi-select min/max boundary considers options.length + 1 (Other counts)", () => {
+		// 2 options + Other = 3 max. min=3 should be accepted.
+		const ok = validateQuestions([
+			{ question: "Pick", options: ["a", "b"], multi: true, min: 3, max: 3 },
+		]);
+		assert.equal(ok, null);
+		// min=4 exceeds (2 options + Other = 3) and is rejected.
+		const err = validateQuestions([
+			{ question: "Pick", options: ["a", "b"], multi: true, min: 4 },
+		]);
+		assert.ok(err);
+		assert.match(err!, /min/);
+	});
+});
+
+describe("crossValidate — always-on Other", () => {
+	it("accepts a single-select 'Other' answer when question did not pass allow_other", () => {
+		const err = crossValidate(
+			[{ question: "Q1", options: ["a", "b"] }],
+			[{ question: "Q1", selected: "Other", other_text: "freeform" }],
+		);
+		assert.equal(err, null);
+	});
+
+	it("requires non-empty other_text when 'Other' is selected", () => {
+		const err = crossValidate(
+			[{ question: "Q1", options: ["a", "b"] }],
+			[{ question: "Q1", selected: "Other", other_text: "" }],
+		);
+		assert.ok(err);
+		assert.match(err!, /other_text/);
+	});
+
+	it("accepts multi-select with all options + Other (max = options.length + 1)", () => {
+		const err = crossValidate(
+			[{ question: "Pick", options: ["a", "b"], multi: true }],
+			[{ question: "Pick", selected: ["a", "b", "Other"], other_text: "x" }],
+		);
+		assert.equal(err, null);
 	});
 });

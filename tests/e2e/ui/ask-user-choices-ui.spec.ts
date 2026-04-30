@@ -4,7 +4,8 @@
  * Covers:
  *  - Agent fires ask_user_choices → widget renders inline.
  *  - User clicks options across tabs (auto-advance verified).
- *  - allow_other: text input appears, no auto-advance.
+ *  - "Other" is always rendered (no allow_other knob) with an always-visible
+ *    text input; selecting Other does not auto-advance.
  *  - Submit enables only when every question answered.
  *  - After Submit, widget is read-only and the tool result lands in chat.
  *  - Cross-client finalization: a second tab showing the same session flips
@@ -39,8 +40,11 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
 
-		// Q2 has allow_other. Pick "Other" — should NOT auto-advance off the last tab anyway,
-		// and should reveal the free-text input.
+		// "Other" is rendered for the active panel; the free-text input is always
+		// visible — even before Other is checked. (Only the active panel is in DOM.)
+		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
+		await expect(widget.locator(".ask-other-input")).toBeVisible();
+		// Pick "Other" on Q2 — last tab, no advance, input already visible.
 		await widget.locator('label:has(input[value="__OTHER__"])').click();
 		await expect(widget.locator(".ask-other-input")).toBeVisible({ timeout: 5_000 });
 
@@ -61,6 +65,63 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		// Switch back to Q1 tab, confirm "blue" is shown as the final answer.
 		await widget.locator('[role="tab"][data-tab-index="0"]').click();
 		await expect(widget.locator('input[type="radio"][value="blue"]')).toBeChecked();
+	});
+
+	test("persistence across reload — Other still rendered with always-visible input", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices");
+
+		const widget = page.locator("ask-user-choices-widget").first();
+		await expect(widget).toBeVisible({ timeout: 20_000 });
+		// Pre-submit: Other rendered on the active panel; text input visible.
+		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
+		await expect(widget.locator(".ask-other-input")).toBeVisible();
+		// Switch to Q2; Other still rendered, input still visible.
+		await widget.locator('[role="tab"][data-tab-index="1"]').click();
+		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
+		await expect(widget.locator(".ask-other-input")).toBeVisible();
+
+		// Reload the page mid-flow.
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
+
+		// Widget re-renders; Other row + always-visible text input survive on the active panel.
+		const restored = page.locator("ask-user-choices-widget").first();
+		await expect(restored).toBeVisible({ timeout: 20_000 });
+		await expect(restored.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
+		await expect(restored.locator(".ask-other-input")).toBeVisible();
+	});
+
+	test("cleanup — Escape clears the always-visible Other text input", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices");
+
+		const widget = page.locator("ask-user-choices-widget").first();
+		await expect(widget).toBeVisible({ timeout: 20_000 });
+
+		// Type into Other input speculatively (without selecting Other).
+		const input = widget.locator(".ask-other-input");
+		await input.fill("abc");
+		await expect(input).toHaveValue("abc");
+		// Other radio not yet checked.
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
+			.not.toBeChecked();
+
+		// Click Other to check it, then press Escape on the active tab to clear.
+		await widget.locator('label:has(input[value="__OTHER__"])').first().click();
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first()).toBeChecked();
+		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
+		await page.keyboard.press("Escape");
+
+		// After Escape: text empty, Other unchecked, input still rendered.
+		await expect(input).toHaveValue("");
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
+			.not.toBeChecked();
+		await expect(input).toBeVisible();
 	});
 
 	test("reload → widget restored read-only from persisted tool result", async ({ page }) => {
