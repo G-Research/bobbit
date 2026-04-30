@@ -711,9 +711,26 @@ export class AgentInterface extends LitElement {
 		// flips `_stickToBottom` false in the next line still gets honoured by
 		// the `state_update` branch.
 		this._wasAtBottomAtLastUserScroll = this._stickToBottom;
-		// Change 2 — widen tail tolerance from < 5 to < 10 to absorb HiDPI
-		// rounding and small jitter without losing stick-to-bottom.
-		this._stickToBottom = scrollHeight - scrollTop - clientHeight < 10;
+		// Stick-to-bottom grace: 10% of viewport height (min 10 px). If the
+		// user is within that band of the bottom, treat new content as
+		// continued tailing rather than "they've scrolled up". The 10 px floor
+		// preserves the original HiDPI-jitter tolerance for very short viewports.
+		const stickGracePx = Math.max(10, clientHeight * 0.1);
+		const geometricallyAtBottom = scrollHeight - scrollTop - clientHeight < stickGracePx;
+		// During the session-load settle window, browser-emitted scroll events
+		// from the DOM swap (old session content unmounted, new session content
+		// rendering with async markdown / syntax highlighting growth) can
+		// transiently report `scrollTop` lagging behind a freshly-grown
+		// `scrollHeight`. Geometry alone would flip `_stickToBottom` to false,
+		// breaking the subsequent ResizeObserver re-pin and leaving the user
+		// stranded mid-scroll. Only allow geometry-driven false during the
+		// settle window — explicit user intent (wheel/touchstart/keydown)
+		// continues to release stickiness via _handleUserIntent.
+		if (this._settleWindowActive && !geometricallyAtBottom) {
+			// Don't change _stickToBottom — keep it true so the observer re-pins.
+		} else {
+			this._stickToBottom = geometricallyAtBottom;
+		}
 		// Change 5 — Jump-to-bottom visibility (more than half a screen from bottom).
 		let nextShow = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
 		// Honour the post-click suppression window: the user just asked us to
