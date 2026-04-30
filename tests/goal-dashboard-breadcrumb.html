@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Goal Dashboard Parent Breadcrumb — unit tests</title>
+</head>
+<body>
+<script>
+/**
+ * Pure logic mirror of src/app/goal-dashboard.ts (the parent-breadcrumb
+ * helpers added in Phase 1 task 1.6) for unit testing the ancestor walk
+ * and the depth-cap truncation rule.
+ *
+ * Mirrors `buildAncestorChainFrom` and `computeBreadcrumbVisible` byte-for-
+ * byte while staying pure (no DOM, no lit, no module-level state) so tests
+ * can drive it with synthetic goal trees.
+ */
+
+const BREADCRUMB_MAX_DEPTH = 5;
+
+/** Walk the ancestor chain. Returns root → … → immediate-parent. Cycle-safe.
+ *  Stops early on dangling parentGoalId. Caps at 100 hops. */
+function buildAncestorChainFrom(goal, goals) {
+  const byId = new Map();
+  for (const g of goals) byId.set(g.id, g);
+  const chain = [];
+  const seen = new Set([goal.id]);
+  let cur = goal.parentGoalId ? byId.get(goal.parentGoalId) : undefined;
+  let hops = 0;
+  while (cur && !seen.has(cur.id) && hops < 100) {
+    chain.unshift(cur);
+    seen.add(cur.id);
+    cur = cur.parentGoalId ? byId.get(cur.parentGoalId) : undefined;
+    hops++;
+  }
+  return chain;
+}
+
+/** Compute the visible slice of an ancestor chain, plus whether truncation
+ *  occurred. If truncated, the caller renders a leading `…`. */
+function computeBreadcrumbVisible(chain, max) {
+  const cap = typeof max === "number" ? max : BREADCRUMB_MAX_DEPTH;
+  if (chain.length <= cap) return { truncated: false, visible: chain.slice() };
+  return { truncated: true, visible: chain.slice(chain.length - cap) };
+}
+
+/** Build a linear chain of `depth` goals: goal-0 → goal-1 → … → goal-{depth-1},
+ *  where goal-i's parent is goal-{i-1}. Returns goals in id order. */
+function buildLinearChain(depth) {
+  const goals = [];
+  for (let i = 0; i < depth; i++) {
+    goals.push({
+      id: `goal-${i}`,
+      title: `G${i}`,
+      createdAt: i,
+      parentGoalId: i === 0 ? undefined : `goal-${i - 1}`,
+      archived: false,
+    });
+  }
+  return goals;
+}
+
+window.BREADCRUMB_MAX_DEPTH = BREADCRUMB_MAX_DEPTH;
+window.buildAncestorChainFrom = buildAncestorChainFrom;
+window.computeBreadcrumbVisible = computeBreadcrumbVisible;
+window.buildLinearChain = buildLinearChain;
+</script>
+</body>
+</html>

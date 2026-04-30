@@ -1096,6 +1096,71 @@ const svgArchive = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="no
 const svgDoc = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>`;
 
 // ============================================================================
+// RENDER: PARENT BREADCRUMB (nested-goals §10 — task 1.6)
+// ============================================================================
+
+/** Maximum number of ancestor links shown inline in the breadcrumb. Anything
+ *  deeper is collapsed to a single leading `…` ellipsis. Matches the spec in
+ *  docs/design/nested-goals.md §10 (task 1.6 — full breadcrumb up to depth 5,
+ *  truncate above with `…`). */
+export const BREADCRUMB_MAX_DEPTH = 5;
+
+/** Walk the ancestor chain of `goal` using `goals` as the snapshot. Returns
+ *  ancestors ordered root → … → immediate-parent (immediate parent is last).
+ *  Excludes `goal` itself. Cycle-safe via a visited set; caps the walk at
+ *  100 hops as a defensive guard against malformed snapshots. Stops early if
+ *  the parent reference dangles (parent goal not present in the array). */
+export function buildAncestorChainFrom(goal: { id: string; parentGoalId?: string }, goals: Goal[]): Goal[] {
+	const byId = new Map<string, Goal>();
+	for (const g of goals) byId.set(g.id, g);
+	const chain: Goal[] = [];
+	const seen = new Set<string>([goal.id]);
+	let cur: Goal | undefined = goal.parentGoalId ? byId.get(goal.parentGoalId) : undefined;
+	let hops = 0;
+	while (cur && !seen.has(cur.id) && hops < 100) {
+		chain.unshift(cur);
+		seen.add(cur.id);
+		cur = cur.parentGoalId ? byId.get(cur.parentGoalId) : undefined;
+		hops++;
+	}
+	return chain;
+}
+
+/** Compute the slice of the ancestor chain that should render inline. If the
+ *  chain is longer than `max`, the leading entries are dropped and the caller
+ *  is told to render a leading `…` ellipsis instead. Pure / no DOM. */
+export function computeBreadcrumbVisible(
+	chain: Goal[],
+	max: number = BREADCRUMB_MAX_DEPTH,
+): { truncated: boolean; visible: Goal[] } {
+	if (chain.length <= max) return { truncated: false, visible: chain.slice() };
+	return { truncated: true, visible: chain.slice(chain.length - max) };
+}
+
+function renderParentBreadcrumb(goal: Goal): TemplateResult | typeof nothing {
+	if (!goal.parentGoalId) return nothing;
+	const chain = buildAncestorChainFrom(goal, state.goals);
+	if (chain.length === 0) return nothing;
+	const { truncated, visible } = computeBreadcrumbVisible(chain);
+	return html`
+		<div class="goal-breadcrumb" data-testid="goal-breadcrumb" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 16px 0;font-size:12px;color:var(--text-tertiary);">
+			${truncated ? html`<span class="goal-breadcrumb-ellipsis" title="Earlier ancestors hidden">…</span>` : nothing}
+			${visible.map((a) => html`
+				<span class="goal-breadcrumb-arrow" aria-hidden="true">←</span>
+				<a
+					class="goal-breadcrumb-link"
+					href="#/goal/${a.id}"
+					title="Go to parent goal: ${a.title}"
+					style="color:var(--text-secondary);text-decoration:none;"
+					@mouseover=${(e: Event) => { (e.currentTarget as HTMLElement).style.textDecoration = "underline"; }}
+					@mouseout=${(e: Event) => { (e.currentTarget as HTMLElement).style.textDecoration = "none"; }}
+				>${a.title}</a>
+			`)}
+		</div>
+	`;
+}
+
+// ============================================================================
 // RENDER: NAV BAR
 // ============================================================================
 
@@ -2151,6 +2216,7 @@ export function renderGoalDashboard(): TemplateResult {
 
 	return html`
 		<div class="dashboard-container">
+			${renderParentBreadcrumb(currentGoal)}
 			${renderNavBar(currentGoal)}
 			${isArchived ? html`
 				<div style="margin:0 16px 8px;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--muted);color:var(--muted-foreground);font-size:13px;">
