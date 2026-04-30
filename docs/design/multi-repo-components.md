@@ -886,7 +886,7 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 - **Order of merging:** (1) MD guide + validator + Component types (no behavior change). (2) Inline workflow loader with migration of `.bobbit/config/workflows/`. (3) Pool-set + sweeper + goal-through-pool + session temp-branch rename. (4) Multi-repo plumbing in git/sandbox/server/UI. (5) Delete `defaults/workflows/*.yaml`.
 - **Risk areas:** sandbox volume layout change for multi-repo (existing single-repo projects unaffected because `repo === "."` collapses to today's paths); pool degraded-mode on Windows file locks; `git worktree move` requires git ≥ 2.17 (already a hard prerequisite).
 - **Backwards compatibility:** every existing single-repo project continues to work after one-shot migration. Goal/task records get a one-time migration to per-repo handoff for multi-repo only.
-- **Out of scope:** normalizing `sandbox_tokens`/`qa_env`/`config_directories` to native YAML — tracked separately. <suggest_goal/>
+- **Out of scope:** normalizing `sandbox_tokens`/`qa_env`/`config_directories` to native YAML — **completed** in a follow-up goal; see `docs/internals.md` → "Native-YAML project.yaml fields".
 
 ---
 

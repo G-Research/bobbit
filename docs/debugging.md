@@ -338,6 +338,13 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
 - **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
 
+## Legacy JSON-string project.yaml field rejected
+
+- **Symptom**: `PUT /api/projects/:id/config` (or `/api/project-config`) returns 400 when setting `config_directories`, `qa_env`, `sandbox_tokens`, `qa_max_duration_minutes`, or `qa_max_scenarios`.
+- **Cause**: these five fields are native YAML on disk and structured on the wire end-to-end. Sending a JSON-encoded string (e.g. `"[{\"path\":...}]"`) or a quoted number (`"10"`) for these keys is rejected to prevent regression to the old encoding.
+- **Fix**: send structured payloads — arrays of mappings for `config_directories` / `sandbox_tokens`, a `Record<string, string>` for `qa_env`, and real numbers for the two `qa_max_*` keys. The settings UI, `propose_project`, and `acceptProjectProposal` already do this; only hand-rolled API callers should hit the 400.
+- **On-disk legacy form is still tolerated**: `ProjectConfigStore` parses legacy JSON-string and quoted-numeric values transparently via the typed accessors (`getConfigDirectories`, `getQaEnv`, `getSandboxTokens`, `getQaMaxDurationMinutes`, `getQaMaxScenarios`) and rewrites the file in native form on the next save. Only the wire format is strict. See [docs/internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields).
+
 ## Gate re-signal cancellation
 
 - `cancelStaleVerifications()` in `verification-harness.ts` terminates old reviewer sessions and persists `status: "failed"` to the gate store
