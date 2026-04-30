@@ -82,6 +82,22 @@ export const VERIFICATION_RESULT_REMINDER =
 	"This is REQUIRED — the verification system only receives results through this tool.";
 
 /**
+ * Maximum number of reminders sent to a reviewer/QA session that goes idle
+ * without calling `verification_result`. After this many reminders the gate
+ * fails with `reviewer_did_not_call_verification_result`. Defence in depth:
+ * even when the tool is correctly registered (the primary fix for this class
+ * of bug), the harness must not stay stuck if the model refuses to invoke it.
+ */
+export const MAX_VERIFICATION_REMINDERS = 3;
+
+/**
+ * Final failure summary recorded on a gate signal step when the agent never
+ * called `verification_result`. Tested against in mission-tools-extension-guard
+ * tests and goal regression tests so the tag stays grep-able.
+ */
+export const REVIEWER_DID_NOT_CALL_TAG = "reviewer_did_not_call_verification_result";
+
+/**
  * The `verification_result` tool is now a standard goal tool registered in
  * `.bobbit/config/tools/tasks/extension.ts` — no generated extension needed.
  * It calls POST /api/internal/verification-result using the same api() helper
@@ -2000,7 +2016,7 @@ export class VerificationHarness {
 			await session.rpcClient.prompt(kickoff);
 
 			// Race: tool result vs idle-without-result
-			const result = await Promise.race([
+			let result = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
 			]);
@@ -2011,24 +2027,29 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId };
 			}
 
-			// Agent went idle without calling the tool — if the last turn hit a
-			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
-			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
-			await session.rpcClient.prompt(reminderPrompt);
-			const result2 = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-			]);
-
-			if (result2.type === "result") {
-				return { passed: result2.verdict, output: result2.summary, sessionId };
+			// Agent went idle without calling the tool. Send up to MAX_VERIFICATION_REMINDERS
+			// reminders before giving up. Defence in depth so a stuck reviewer never
+			// silently parks the gate forever (mission gates included — same path).
+			for (let attempt = 1; attempt <= MAX_VERIFICATION_REMINDERS; attempt++) {
+				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
+				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
+				console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder ${attempt}/${MAX_VERIFICATION_REMINDERS}`);
+				await session.rpcClient.prompt(reminderPrompt);
+				result = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+				]);
+				if (result.type === "result") {
+					return { passed: result.verdict, output: result.summary, sessionId };
+				}
 			}
 
-			// Hard failure
-			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId };
+			// Hard failure after MAX_VERIFICATION_REMINDERS reminders.
+			return {
+				passed: false,
+				output: `${REVIEWER_DID_NOT_CALL_TAG}: Agent did not call verification_result after ${MAX_VERIFICATION_REMINDERS} reminders.`,
+				sessionId,
+			};
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
@@ -2250,27 +2271,34 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId: qaSessionId, artifact };
 			}
 
-			// Agent went idle without calling the tool — if the last turn hit a
-			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
-			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
-			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
-			await session.rpcClient.prompt(qaReminderPrompt);
-			const result2 = await Promise.race([
-				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
-				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
-			]);
-
-			if (result2.type === "result") {
-				const artifact = result2.reportHtml
-					? { content: result2.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
-					: undefined;
-				return { passed: result2.verdict, output: result2.summary, sessionId: qaSessionId, artifact };
+			// Agent went idle without calling the tool. Same up-to-N reminder loop
+			// as runLlmReviewViaSession. Defence in depth: even with correct tool
+			// registration, the harness must not stay stuck if the model refuses
+			// to invoke verification_result.
+			let qaResult: { type: "result"; verdict: boolean; summary: string; reportHtml?: string } | { type: "idle" } = { type: "idle" };
+			for (let attempt = 1; attempt <= MAX_VERIFICATION_REMINDERS; attempt++) {
+				const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
+				const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
+				console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder ${attempt}/${MAX_VERIFICATION_REMINDERS}`);
+				await session.rpcClient.prompt(qaReminderPrompt);
+				qaResult = await Promise.race([
+					resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+					this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
+				]);
+				if (qaResult.type === "result") {
+					const artifact = qaResult.reportHtml
+						? { content: qaResult.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+						: undefined;
+					return { passed: qaResult.verdict, output: qaResult.summary, sessionId: qaSessionId, artifact };
+				}
 			}
 
-			// Hard failure
-			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId: qaSessionId };
+			// Hard failure after MAX_VERIFICATION_REMINDERS reminders.
+			return {
+				passed: false,
+				output: `${REVIEWER_DID_NOT_CALL_TAG}: QA agent did not call verification_result after ${MAX_VERIFICATION_REMINDERS} reminders.`,
+				sessionId: qaSessionId,
+			};
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
