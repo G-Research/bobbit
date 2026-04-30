@@ -3,6 +3,8 @@
 **Goal**: Fix live-streaming message duplication and reordering.
 **Scope**: Live streaming only (not reload-replay). Agent execution is correct; this is a transport/rendering bug.
 
+> **Related, parallel pattern.** A separate but structurally similar duplication bug affects the gate verification event family (`gate_verification_*`), which fan-outs across all session WSs in a goal team. The fix mirrors this one — server-stamped monotonic `seq`, plus a client-side dedupe funnel (`src/app/verification-event-bus.ts`). See [docs/internals.md — Verification event dedupe](../internals.md#verification-event-dedupe) and [docs/debugging.md — Verification log duplicated Nx](../debugging.md#verification-log-duplicated-nx).
+
 ---
 
 ## 1. Reproduction
