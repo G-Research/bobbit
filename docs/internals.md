@@ -140,6 +140,36 @@ The verification system is split into two modules:
 - **`verification-harness.ts`** — orchestration: session lifecycle, WS event broadcasting, process spawning, retry logic, persistence. Also implements the **blocking-tool** contract used by `verification_result`: a tool extension POSTs a verdict, which resolves the Promise registered when the gate signal started verification. See [docs/blocking-tools.md](blocking-tools.md) for the pattern. The `ask_user_choices` tool uses a different, non-blocking shape — see [docs/non-blocking-ask.md](non-blocking-ask.md).
 - **`verification-logic.ts`** — pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps` (cache reuse for same-commit re-signals), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests/verification-logic.test.ts` (~65 tests, <1s) without requiring a running server.
 
+#### Reviewer `kind` & restart resume
+
+Reviewer (and QA) sub-sessions are owned by `VerificationHarness`, but the harness needs them persisted in the team store so a server restart can rebind a running gate signal to the still-alive agent process. `TeamManager.registerReviewerSession()` writes the reviewer's `sessionId` into `entry.agents` for that goal; `unregisterReviewerSession()` removes it on completion.
+
+The persisted-agent shape (`PersistedTeamEntry.agents[]` in `team-store.ts`) carries a `kind: "worker" | "reviewer"` discriminator. Worker entries (regular team agents dispatched via `dispatchToRole`) are nudged on `agent_end` so the team lead learns that a delegate has finished; reviewer entries must never produce that nudge — the verification harness alone interprets reviewer completion. Two enforcement points:
+
+- `resubscribeTeamEvents()` skips agents with `kind === "reviewer"` when re-attaching the `agent_end → notifyTeamLead()` listener after a restart. Pre-fix this listener was attached unconditionally and the live (non-restart) path never noticed because it subscribes only to `tool_execution_end`.
+- `notifyTeamLead()` performs the same check before firing, so even a stray subscription cannot deliver a steer.
+
+Back-compat: `team-state.json` entries written before the field existed have `kind === undefined` after load. The harness treats `undefined` as `"worker"` (the safer default for old records, all of which were workers in practice), but the defensive guard in both sites also accepts `role === "reviewer"` as a fallback discriminator. A persisted reviewer entry that was missing `kind` after a cross-version restart still gets correctly skipped.
+
+Key files: `src/server/agent/team-manager.ts`, `src/server/agent/team-store.ts`. Regression test: `tests/team-manager-reviewer-resume.test.ts`.
+
+#### Reminder race after restart-resume
+
+When a server restart interrupts an in-flight reviewer turn, the harness tries to resume from the existing session rather than spawning a fresh one (`_tryResumeFromSession` in `verification-harness.ts`). Resume sends a reminder prompt asking the agent to call `verification_result`, then races the eventual tool call against an idle-detector so a stuck agent eventually fails rather than hanging the gate.
+
+The race uses two `SessionManager` helpers:
+
+- `waitForIdle(sessionId, timeoutMs)` — resolves when the session transitions to `idle` (or **synchronously** if it is already idle). This is the failure-detector edge of the race: "agent went quiet without calling `verification_result`".
+- `waitForStreaming(sessionId, timeoutMs = 10_000)` — mirror of `waitForIdle` that resolves on `agent_start` (or rejects on `process_exit` / timeout). This confirms the prompt was actually picked up and a new turn has begun.
+
+Both are needed because, after a restart, the resumed session is in `status === "idle"` at the moment the reminder is dispatched. `rpcClient.prompt()` is fire-and-forget on the RPC channel; the session does not synchronously transition to `streaming`. Without `waitForStreaming`, the `waitForIdle` half of the race resolves immediately on the *current* idle, the harness declares failure, and the `finally` block terminates the session before the agent has read the reminder — the user-visible signature is a reviewer archived within tens of milliseconds of restart, with the error string `"Agent did not call verification_result after server restart and reminder."`
+
+The pattern is now applied at all four reminder sites in `verification-harness.ts`: `_tryResumeFromSession` (the original repro), `runLlmReviewViaSession`, the QA-tester reminder, and the legacy direct-`RpcBridge` reminder. The legacy site has no `SessionManager` injected and so reproduces the shape inline with an `agent_start` listener and the same 10s timeout. A `.catch(() => {})` on every `waitForStreaming` call ensures that an unresponsive agent still falls through to the existing `waitForIdle` race rather than blocking forever — the helper raises the floor without lowering the ceiling.
+
+The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern.
+
+Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
