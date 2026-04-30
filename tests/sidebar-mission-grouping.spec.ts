@@ -241,6 +241,47 @@ test.describe("Sidebar mission grouping", () => {
 		expect(result).toEqual(["live-rev"]);
 	});
 
+	test("Archived mission-direct sessions surface under the mission row when showArchived is on", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			const state = {
+				gatewaySessions: [],
+				archivedSessions: [
+					{ id: "archived-rev-1", missionId: "m1", archived: true, lastActivity: 100 },
+					// teamGoalId-set archived rows belong under their child goal, not
+					// the mission row.
+					{ id: "archived-team", missionId: "m1", teamGoalId: "g1", archived: true, lastActivity: 200 },
+					// delegate-of rows nest under their parent, not the mission row.
+					{ id: "archived-deleg", missionId: "m1", delegateOf: "some-parent", archived: true, lastActivity: 300 },
+					// commanderSessionId — also excluded (commander has its own slot).
+					{ id: "archived-cmdr", missionId: "m1", archived: true, lastActivity: 400 },
+				],
+				goals: [],
+				missions: [{ id: "m1", state: "in-progress", archived: false, projectId: "p1", commanderSessionId: "archived-cmdr" }],
+				staffList: [],
+				showArchived: true,
+			};
+			return (window as any).__missionGrouping.missionArchivedDirectSessions(state, state.missions[0]).map((s: any) => s.id);
+		});
+		expect(result).toEqual(["archived-rev-1"]);
+	});
+
+	test("Archived mission-direct sessions are hidden when showArchived is off", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			const state = {
+				gatewaySessions: [],
+				archivedSessions: [
+					{ id: "archived-rev-1", missionId: "m1", archived: true, lastActivity: 100 },
+				],
+				goals: [],
+				missions: [{ id: "m1", state: "in-progress", archived: false, projectId: "p1" }],
+				staffList: [],
+				showArchived: false,
+			};
+			return (window as any).__missionGrouping.missionArchivedDirectSessions(state, state.missions[0]);
+		});
+		expect(result).toEqual([]);
+	});
+
 	test("isMissionOwnedSession: plain session with no goalId/missionId returns false", async ({ page }) => {
 		const result = await page.evaluate(() => {
 			const goalsById = new Map();
