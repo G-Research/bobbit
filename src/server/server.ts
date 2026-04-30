@@ -3314,6 +3314,52 @@ async function handleApiRoute(
 		if (req.method === "GET") {
 			const goal = getGoalAcrossProjects(id);
 			if (!goal) { json({ error: "Goal not found" }, 404); return; }
+			// `?include=tree` projection — see docs/design/nested-goals.md §8.
+			// Returns `{ goal, descendants: PersistedGoal[], gatesByGoal }`.
+			// `descendants` is the flat tree of all goals where
+			// `rootGoalId === id`, sorted by `(parentGoalId nulls-first,
+			// createdAt ASC)` for stable UI rendering. The starting goal is
+			// included as the first entry. `gatesByGoal` keys by goalId and
+			// returns the same shape as GET /api/goals/:goalId/gates (no signal
+			// content bodies — drilling uses `gate_inspect` / `?view=summary`).
+			if (url.searchParams.get("include") === "tree") {
+				const rootId = goal.rootGoalId ?? goal.id;
+				const treeCtx = projectContextManager.getContextForGoal(id);
+				if (!treeCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+				const rawDescendants = treeCtx.goalStore.getDescendants(rootId);
+				// Sort: nulls-first on parentGoalId, then createdAt ASC. The
+				// root (parentGoalId === undefined) lands first regardless of
+				// createdAt, then immediate children, etc.
+				const descendants = rawDescendants.slice().sort((a, b) => {
+					const ap = a.parentGoalId ?? "";
+					const bp = b.parentGoalId ?? "";
+					if (ap === "" && bp !== "") return -1;
+					if (ap !== "" && bp === "") return 1;
+					return a.createdAt - b.createdAt;
+				});
+				const gatesByGoal: Record<string, unknown[]> = {};
+				for (const d of descendants) {
+					const dCtx = projectContextManager.getContextForGoal(d.id);
+					if (!dCtx) continue;
+					const gates = dCtx.gateStore.getGatesForGoal(d.id);
+					// Strip signal content bodies — keep summary fields only.
+					const slim = gates.map(g => {
+						const def = d.workflow?.gates.find(wg => wg.id === g.gateId);
+						return {
+							gateId: g.gateId,
+							goalId: g.goalId,
+							status: g.status,
+							name: def?.name,
+							dependsOn: def?.dependsOn ?? [],
+							signalCount: g.signals.length,
+							updatedAt: g.updatedAt,
+						};
+					});
+					gatesByGoal[d.id] = slim;
+				}
+				json({ goal, descendants, gatesByGoal });
+				return;
+			}
 			json(goal);
 			return;
 		}
@@ -5757,6 +5803,108 @@ async function handleApiRoute(
 		resumeCtx.goalStore.update(goalId, { paused: false });
 		json({ paused: false });
 		broadcastToGoal(goalId, { type: "goal_resumed", goalId });
+		return;
+	}
+
+	// GET /api/goals/:id/plan?gateId=execution — narrow plan projection (§5.3).
+	//
+	// Returns the verify[] of the named gate filtered to subgoal steps, plus
+	// per-step `child` state joined from the goal store and per-step
+	// `dependsOnPlanIds` inferred from phase ordering (every plan step at
+	// phase < this.phase is a logical dep within the same gate).
+	const planGetMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
+	if (planGetMatch && req.method === "GET") {
+		const goalId = planGetMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!goal.workflow) { json({ error: "Goal has no snapshotted workflow" }, 400); return; }
+		const planCtx = projectContextManager.getContextForGoal(goalId);
+		if (!planCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateId = url.searchParams.get("gateId") || "execution";
+		const gate = goal.workflow.gates.find(g => g.id === gateId);
+		if (!gate) { json({ error: `Gate "${gateId}" not found in goal workflow` }, 404); return; }
+		const frozen = gate.metadata?.frozen === "true";
+		const replanCount = goal.replanCount ?? 0;
+		const rawSteps: VerifyStep[] = (gate.verify ?? []) as VerifyStep[];
+		// Filter to subgoal steps only; non-subgoal verify entries are
+		// orchestration noise from the plan-projection point of view.
+		const subgoalSteps = rawSteps.filter(s => s && s.type === "subgoal" && s.subgoal && typeof s.subgoal.planId === "string");
+
+		// dependsOnPlanIds: every step with phase < this.phase (within the
+		// same gate) is a logical dep. Materialise so the consumer doesn't
+		// have to recompute. `phase` defaults to 0 when unset.
+		const phaseOf = (s: VerifyStep) => (typeof s.phase === "number" ? s.phase : 0) | 0;
+		const byPhase = new Map<number, string[]>();
+		for (const s of subgoalSteps) {
+			const p = phaseOf(s);
+			let arr = byPhase.get(p);
+			if (!arr) { arr = []; byPhase.set(p, arr); }
+			if (s.subgoal?.planId) arr.push(s.subgoal.planId);
+		}
+
+		const planSteps = subgoalSteps.map(s => {
+			const sg = s.subgoal!;
+			const phase = phaseOf(s);
+			const dependsOnPlanIds: string[] = [];
+			for (const [p, ids] of byPhase) {
+				if (p < phase) dependsOnPlanIds.push(...ids);
+			}
+			dependsOnPlanIds.sort();
+			const out: Record<string, unknown> = {
+				planId: sg.planId,
+				title: sg.title,
+				spec: sg.spec,
+				phase,
+				dependsOnPlanIds,
+			};
+			if (sg.workflowId) out.workflowId = sg.workflowId;
+			if (sg.suggestedRole) out.suggestedRole = sg.suggestedRole;
+
+			// Resolve childGoalId for this plan step. Prefer the in-memory
+			// active record, fall back to the persisted GateSignalStep —
+			// mirrors verification-harness::executeSubgoalStep.
+			let childGoalId: string | undefined;
+			const gateState = planCtx.gateStore.getGate(goalId, gateId);
+			if (gateState) {
+				// Walk signals newest-first so the most recent spawn wins.
+				for (let i = gateState.signals.length - 1; i >= 0; i--) {
+					const sig = gateState.signals[i];
+					const hit = sig.verification.steps.find(
+						st => st.type === "subgoal" && (st as any).subgoal?.planId === sg.planId,
+					);
+					const rec = (hit as any)?.subgoal as { planId: string; childGoalId?: string } | undefined;
+					if (rec?.childGoalId) {
+						childGoalId = rec.childGoalId;
+						break;
+					}
+				}
+			}
+			if (childGoalId) {
+				const childCtx = projectContextManager.getContextForGoal(childGoalId);
+				const child = childCtx?.goalStore.get(childGoalId);
+				if (child) {
+					const childRtm = childCtx!.gateStore.getGate(childGoalId, "ready-to-merge");
+					let lastVerificationVerdict: "passed" | "failed" | "running" | undefined;
+					if (childRtm) {
+						const latest = childRtm.signals[childRtm.signals.length - 1];
+						const v = latest?.verification.status;
+						if (v === "passed" || v === "failed" || v === "running") {
+							lastVerificationVerdict = v;
+						}
+					}
+					const childOut: Record<string, unknown> = {
+						goalId: child.id,
+						state: child.state,
+					};
+					if (child.branch) childOut.branch = child.branch;
+					if (lastVerificationVerdict) childOut.lastVerificationVerdict = lastVerificationVerdict;
+					out.child = childOut;
+				}
+			}
+			return out;
+		});
+
+		json({ gateId, frozen, replanCount, planSteps });
 		return;
 	}
 

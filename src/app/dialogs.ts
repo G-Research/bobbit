@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, render } from "lit";
+import { html, nothing, render } from "lit";
 import { WandSparkles } from "lucide";
 import { cwdCombobox } from "./cwd-combobox.js";
 import QRCode from "qrcode";
@@ -968,6 +968,10 @@ export interface NewGoalDialogResult {
 	title: string;
 	spec: string;
 	workflowId: string;
+	/** When the dialog was opened as a child-goal flow, the parent's id
+	 *  is echoed back to the caller so it can pass it through to
+	 *  `createGoal`. Undefined for top-level goal creation. */
+	parentGoalId?: string;
 	divergencePolicy: "strict" | "balanced" | "autonomous";
 	maxConcurrentChildren: number;
 	/**
@@ -994,6 +998,12 @@ interface ShowNewGoalDialogOpts {
 	initialTitle?: string;
 	initialSpec?: string;
 	initialWorkflowId?: string;
+	/** When set, the dialog runs as the "Add child goal" flow:
+	 *   - `parentGoalId` is round-tripped on the result
+	 *   - the project picker is locked (no project switching from the dialog)
+	 *   - default workflow is `feature` unless `initialWorkflowId` overrides
+	 *  See docs/design/nested-goals.md §10.4. */
+	parentGoalId?: string;
 }
 
 /**
@@ -1017,7 +1027,9 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 
 		let titleValue = opts.initialTitle ?? "";
 		let specValue = opts.initialSpec ?? "";
-		let workflowId = opts.initialWorkflowId ?? "general";
+		// Child-goal flow: default to `feature` workflow per design §10.4.
+		// Top-level: stay on `general` (legacy default).
+		let workflowId = opts.initialWorkflowId ?? (opts.parentGoalId ? "feature" : "general");
 		let divergencePolicy: "strict" | "balanced" | "autonomous" = "strict";
 		let maxConcurrentChildren = 3;
 		let inlineWorkflowYaml = "";
@@ -1087,6 +1099,7 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 				title: trimmed,
 				spec: specValue,
 				workflowId,
+				parentGoalId: opts.parentGoalId,
 				divergencePolicy,
 				maxConcurrentChildren,
 				inlineWorkflow: inlineWorkflowParsed,
@@ -1170,7 +1183,16 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 						${DialogContent({
 							className: "overflow-y-auto",
 							children: html`
-								${DialogHeader({ title: "New Goal" })}
+								${DialogHeader({ title: opts.parentGoalId ? "Add Child Goal" : "New Goal" })}
+								${opts.parentGoalId ? html`
+									<div
+										data-testid="new-goal-parent-banner"
+										class="mt-2 rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs text-muted-foreground">
+										This goal will be a child of
+										<code data-testid="new-goal-parent-id">${opts.parentGoalId}</code>.
+										Its branch will merge into the parent's; project is locked.
+									</div>
+								` : nothing}
 								<div class="mt-4 flex flex-col gap-4">
 									<div>
 										<label class="text-xs text-muted-foreground mb-1 block">Title</label>
@@ -1339,6 +1361,68 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 
 		renderDialog();
 	});
+}
+
+/**
+ * Open the New Goal dialog as the "Add child goal" flow on the current
+ * goal dashboard. Routes through `showNewGoalDialog` with `parentGoalId`
+ * pre-filled and project locked, then hands the result to
+ * `createGoal()` (REST POST /api/goals). Navigates to the new child
+ * dashboard on success.
+ *
+ * Project resolution: callers should pass `projectId` whenever the parent
+ * goal carries one. When omitted, falls back to the parent goal's
+ * `cwd`-derived project. The dialog rejects opens against unknown
+ * projects, so this is a soft contract — we resolve `cwd` from
+ * `state.projects` when present.
+ */
+export async function showNewGoalDialogForChild(opts: {
+	parentGoalId: string;
+	projectId?: string;
+}): Promise<void> {
+	const projects = state.projects;
+	let projectId = opts.projectId;
+	if (!projectId) {
+		// Resolve from the parent's persisted projectId if it exists in state.
+		const parent = state.goals.find(g => g.id === opts.parentGoalId);
+		if (parent?.projectId) projectId = parent.projectId;
+	}
+	if (!projectId) {
+		// Last-ditch fallback: use the only project in the workspace.
+		if (projects.length === 1) projectId = projects[0].id;
+	}
+	if (!projectId || !projects.find(p => p.id === projectId)) {
+		showConnectionError(
+			"Unable to add child goal",
+			"Could not resolve the parent's project. Open the goal page and try again.",
+		);
+		return;
+	}
+	const project = projects.find(p => p.id === projectId);
+	if (!project) return;
+
+	const result = await showNewGoalDialog({
+		projectId,
+		parentGoalId: opts.parentGoalId,
+		initialWorkflowId: "feature",
+	});
+	if (!result) return;
+
+	const { createGoal } = await import("./api.js");
+	const { setHashRoute } = await import("./routing.js");
+	const goal = await createGoal(result.title, project.rootPath, {
+		spec: result.spec,
+		workflowId: result.workflowId,
+		projectId,
+		parentGoalId: result.parentGoalId,
+		inlineWorkflow: result.inlineWorkflow,
+		inlineRoles: result.inlineRoles,
+		divergencePolicy: result.divergencePolicy,
+		maxConcurrentChildren: result.maxConcurrentChildren,
+	});
+	if (goal) {
+		setHashRoute("goal-dashboard", goal.id);
+	}
 }
 
 async function createGoalAssistantSession(projectId?: string): Promise<void> {
