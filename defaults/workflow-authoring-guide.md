@@ -79,6 +79,46 @@ componentRoot = <branch-container> / (component.repo === "." ? "" : component.re
 
 In single-repo, `<branch-container>` *is* the repo's worktree, so `componentRoot` collapses to `<branch-container>` (with optional `relative_path` appended). In multi-repo, the branch container is a sibling-repo container directory.
 
+### Monorepo subprojects
+
+A **monorepo** is one git repo at `rootPath` containing multiple workspace packages (pnpm/npm/yarn workspaces, Nx, Turbo, Lerna, Cargo workspace, Go workspace, Gradle multi-module). Model each workspace package as its own component, all sharing `repo: "."` with distinct `relative_path` values. The project-assistant scaffolding scan auto-detects these manifests and feeds candidate package paths into the assistant's prompt.
+
+Key rules:
+
+- Every component has `repo: "."` (one git repo for all of them).
+- `relative_path` is the workspace package's path inside the repo (e.g. `packages/api`, `apps/web`, `crates/server`).
+- The component `name` is a slugified version of the package name (`@acme/api` → `api`).
+- `commands` invoke the workspace tool with the package selector — **not** raw `npm run build` from the package directory, because most workspace tools need to be invoked from the repo root with a filter so they pick up shared dependencies and incremental caches.
+- A `worktree_setup_command` is typically only needed once at the root (e.g. `pnpm install --frozen-lockfile`); set it on a single component rather than duplicating across every package.
+
+```yaml
+# pnpm workspace example: 3 components, all repo: ".", distinct relative_path.
+components:
+  - name: api
+    repo: "."
+    relative_path: packages/api
+    worktree_setup_command: pnpm install --frozen-lockfile --prefer-offline
+    commands:
+      build: pnpm --filter @acme/api build
+      test:  pnpm --filter @acme/api test
+      check: pnpm --filter @acme/api check
+  - name: web
+    repo: "."
+    relative_path: apps/web
+    commands:
+      build: pnpm --filter @acme/web build
+      test:  pnpm --filter @acme/web test
+      e2e:   pnpm --filter @acme/web exec playwright test
+  - name: shared
+    repo: "."
+    relative_path: packages/shared
+    commands:
+      build: pnpm --filter @acme/shared build
+      test:  pnpm --filter @acme/shared test
+```
+
+Because `components.length > 1`, the assistant's workflow-suggestion checklist will pre-check the per-component flows and the all-components fan-out flow — those are the right defaults for a monorepo.
+
 ## 3. Workflow gates
 
 ```yaml

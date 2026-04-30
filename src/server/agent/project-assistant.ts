@@ -39,6 +39,48 @@ function loadWorkflowAuthoringGuide(): string {
 
 const WORKFLOW_AUTHORING_GUIDE = loadWorkflowAuthoringGuide();
 
+const MONOREPO_GUIDANCE = `
+### Monorepo subprojects (single repo, many components)
+
+Distinguish three project shapes:
+
+1. **Single-repo, single-component** — one \`.git\`, one buildable thing. Emit one component with \`repo: "."\` whose name MATCHES the project name.
+2. **Multi-repo** — \`rootPath\` is a container holding sibling git repos one level deep. Emit one component per repo with \`repo: "<subfolder>"\` (each is its own \`.git\`).
+3. **Monorepo with subprojects** — one \`.git\` at \`rootPath\`, but the repo contains multiple workspace packages (pnpm/npm/yarn workspaces, Nx, Turbo, Lerna, Cargo workspace, Go workspace, Gradle multi-module). Emit one component per workspace package, all sharing \`repo: "."\` with distinct \`relative_path\` values.
+
+**How to detect a monorepo** (during the exploration step, before proposing):
+
+- \`pnpm-workspace.yaml\` (parse the \`packages:\` glob list).
+- \`package.json\` with a \`"workspaces"\` field — string array OR \`{ packages: [...] }\`.
+- \`nx.json\` at root → expect packages under \`apps/*\`, \`libs/*\`, \`packages/*\`.
+- \`turbo.json\` at root (Turbo reuses the npm/yarn \`workspaces\` field).
+- \`lerna.json\` (legacy but still seen).
+- \`Cargo.toml\` with a \`[workspace]\` section + \`members = [...]\`.
+- \`go.work\` file with \`use\` directives.
+- \`settings.gradle\` / \`settings.gradle.kts\` with \`include\` calls.
+
+The Add-Project flow runs a server-side scan (\`POST /api/projects/scan\`) that returns a \`monorepo\` block alongside \`repos\`. When present, that block tells you the detected frameworks and the candidate subproject paths (relative to \`rootPath\`). **Use that list as your starting point** — don't blindly walk \`packages/\` or include \`node_modules/\` / \`target/\` / \`dist/\` / etc.
+
+**Emitting components for a monorepo:**
+
+- One component per workspace package.
+- \`repo: "."\` for every component.
+- \`relative_path: <workspace-relative-path>\` (e.g. \`packages/api\`, \`apps/web\`, \`crates/server\`).
+- \`name\` is a slugified version of the package name (e.g. \`@acme/api\` → \`api\`; \`@scope/web-ui\` → \`web-ui\`). Must be unique within the project and match \`[a-z0-9][a-z0-9-]*\`.
+- \`commands\` invoke the workspace tool with the package selector:
+  - **pnpm**: \`pnpm --filter <pkg-name> build\` / \`pnpm --filter <pkg-name> test\`.
+  - **npm/yarn workspaces**: \`npm run build -w <pkg-name>\` / \`yarn workspace <pkg-name> build\`.
+  - **Nx**: \`nx run <project>:build\` / \`nx test <project>\`.
+  - **Turbo**: \`turbo run build --filter=<pkg-name>\` / \`turbo run test --filter=<pkg-name>\`.
+  - **Lerna**: \`lerna run build --scope <pkg-name>\`.
+  - **Cargo workspace**: \`cargo build -p <crate-name>\` / \`cargo test -p <crate-name>\`.
+  - **Go workspace**: \`go build ./...\` from the package's \`relative_path\`.
+  - **Gradle**: \`./gradlew :<module>:build\` / \`./gradlew :<module>:test\`.
+- \`worktree_setup_command\` is usually only needed once at the root (e.g. \`pnpm install --frozen-lockfile\`) — set it on a single component (typically the first one) rather than duplicating across every package.
+
+Because monorepos produce \`components.length > 1\`, the workflow checklist below will automatically pre-check the per-component flows and the all-components flow — recommend them to the user.
+`;
+
 const WORKFLOW_GUIDANCE_SECTIONS = `
 ### Proposing workflows: the checklist flow
 
@@ -80,6 +122,7 @@ panel — including the new components and workflows visualisations. So iterate 
 emit a first proposal, listen for feedback, emit a revised proposal. The user sees
 each revision instantly. You don't need to over-explain in chat what changed; the
 panel diff view shows it.
+${MONOREPO_GUIDANCE}
 `;
 
 const WORKFLOW_AUTHORING_REFERENCE = `
