@@ -2991,6 +2991,68 @@ async function handleApiRoute(
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
 			}
+
+			// ── nested-goals fields (design §1.1, §3.1, §8) ──
+			// Pass-through with shape validation. Cross-project / archived-parent /
+			// cycle invariants are enforced inside `goalManager.createGoal` and
+			// surface here as thrown errors → 400 in the catch below.
+			let parentGoalId: string | undefined;
+			if (body.parentGoalId !== undefined) {
+				if (typeof body.parentGoalId !== "string" || !body.parentGoalId) {
+					json({ error: "parentGoalId must be a non-empty string" }, 400);
+					return;
+				}
+				parentGoalId = body.parentGoalId;
+			}
+			let inlineWorkflow: any | undefined;
+			if (body.inlineWorkflow !== undefined) {
+				if (!body.inlineWorkflow || typeof body.inlineWorkflow !== "object" || Array.isArray(body.inlineWorkflow)) {
+					json({ error: "inlineWorkflow must be an object" }, 400);
+					return;
+				}
+				inlineWorkflow = body.inlineWorkflow;
+			}
+			let inlineRoles: Record<string, any> | undefined;
+			if (body.inlineRoles !== undefined) {
+				if (!body.inlineRoles || typeof body.inlineRoles !== "object" || Array.isArray(body.inlineRoles)) {
+					json({ error: "inlineRoles must be an object" }, 400);
+					return;
+				}
+				for (const [k, v] of Object.entries(body.inlineRoles)) {
+					if (!v || typeof v !== "object" || Array.isArray(v)) {
+						json({ error: `inlineRoles.${k} must be an object` }, 400);
+						return;
+					}
+				}
+				inlineRoles = body.inlineRoles;
+			}
+			let divergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
+			if (body.divergencePolicy !== undefined) {
+				if (body.divergencePolicy !== "strict" && body.divergencePolicy !== "balanced" && body.divergencePolicy !== "autonomous") {
+					json({ error: "divergencePolicy must be one of: strict, balanced, autonomous" }, 400);
+					return;
+				}
+				divergencePolicy = body.divergencePolicy;
+			}
+			let maxConcurrentChildren: number | undefined;
+			if (body.maxConcurrentChildren !== undefined) {
+				if (typeof body.maxConcurrentChildren !== "number"
+					|| !Number.isInteger(body.maxConcurrentChildren)
+					|| body.maxConcurrentChildren < 1
+					|| body.maxConcurrentChildren > 8) {
+					json({ error: "maxConcurrentChildren must be an integer in [1, 8]" }, 400);
+					return;
+				}
+				maxConcurrentChildren = body.maxConcurrentChildren;
+			}
+			let baseBranch: string | undefined;
+			if (body.baseBranch !== undefined) {
+				if (typeof body.baseBranch !== "string" || !body.baseBranch) {
+					json({ error: "baseBranch must be a non-empty string" }, 400);
+					return;
+				}
+				baseBranch = body.baseBranch;
+			}
 			// Resolve target project — explicit projectId or cwd-match. No fallback.
 			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
 			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
@@ -3023,6 +3085,12 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				parentGoalId,
+				inlineWorkflow,
+				inlineRoles,
+				divergencePolicy,
+				maxConcurrentChildren,
+				baseBranch,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
