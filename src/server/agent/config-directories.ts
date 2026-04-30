@@ -29,12 +29,18 @@ export interface CustomDirEntry {
 /** Minimal interface for reading project config values. */
 export interface ProjectConfigReader {
 	get(key: string): string | undefined;
+	/** Optional native-YAML accessor; when present, used instead of parsing
+	 *  the legacy JSON-string returned by `get("config_directories")`. */
+	getConfigDirectories?(): Array<{ path: string; types: string[] }>;
 }
 
 /** Extended interface that also supports writing. */
 export interface ProjectConfigWriter extends ProjectConfigReader {
 	set(key: string, value: string): void;
 	remove(key: string): void;
+	/** Optional native-YAML setter; when present, used instead of stringifying
+	 *  through `set("config_directories", JSON.stringify(...))`. */
+	setConfigDirectories?(dirs: Array<{ path: string; types: string[] }>): void;
 }
 
 /** Expand ~ to home directory and resolve the path. */
@@ -78,31 +84,41 @@ export function parseCustomDirectories(
 		}
 	}
 
-	// 2. Parse config_directories (new unified key) — overwrites on conflict
-	const configDirsRaw = projectConfigStore.get("config_directories");
-	if (configDirsRaw) {
-		try {
-			const parsed = JSON.parse(configDirsRaw);
-			if (Array.isArray(parsed)) {
-				for (const entry of parsed) {
-					if (
-						typeof entry === "object" && entry !== null &&
-						typeof entry.path === "string" && entry.path.trim().length > 0 &&
-						Array.isArray(entry.types) && entry.types.length > 0
-					) {
-						const resolved = expandPath(entry.path);
-						const types = entry.types.filter(
-							(t: unknown): t is ConfigType =>
-								t === "skills" || t === "mcp" || t === "tools" || t === "agents",
-						);
-						if (types.length > 0) {
-							byPath.set(resolved, { path: resolved, types });
-						}
-					}
+	// 2. Parse config_directories (new unified key) — overwrites on conflict.
+	//    Prefer the native typed accessor; fall back to the legacy JSON-string for
+	//    test mocks that don't implement it.
+	let entries: Array<{ path: string; types: string[] }> | null = null;
+	if (typeof projectConfigStore.getConfigDirectories === "function") {
+		try { entries = projectConfigStore.getConfigDirectories(); }
+		catch { entries = null; }
+	}
+	if (!entries) {
+		const configDirsRaw = projectConfigStore.get("config_directories");
+		if (configDirsRaw) {
+			try {
+				const parsed = JSON.parse(configDirsRaw);
+				if (Array.isArray(parsed)) entries = parsed;
+			} catch (err) {
+				console.warn("[config-directories] Invalid config_directories JSON, ignoring:", err);
+			}
+		}
+	}
+	if (entries) {
+		for (const entry of entries) {
+			if (
+				typeof entry === "object" && entry !== null &&
+				typeof entry.path === "string" && entry.path.trim().length > 0 &&
+				Array.isArray(entry.types) && entry.types.length > 0
+			) {
+				const resolved = expandPath(entry.path);
+				const types = entry.types.filter(
+					(t: unknown): t is ConfigType =>
+						t === "skills" || t === "mcp" || t === "tools" || t === "agents",
+				);
+				if (types.length > 0) {
+					byPath.set(resolved, { path: resolved, types });
 				}
 			}
-		} catch (err) {
-			console.warn("[config-directories] Invalid config_directories JSON, ignoring:", err);
 		}
 	}
 
@@ -252,6 +268,10 @@ export function saveCustomDirectories(
 		path: d.path,
 		types: d.types,
 	}));
-	projectConfigStore.set("config_directories", JSON.stringify(serializable));
+	if (typeof projectConfigStore.setConfigDirectories === "function") {
+		projectConfigStore.setConfigDirectories(serializable);
+	} else {
+		projectConfigStore.set("config_directories", JSON.stringify(serializable));
+	}
 	projectConfigStore.remove("skill_directories");
 }

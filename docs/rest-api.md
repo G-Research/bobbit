@@ -192,7 +192,7 @@ Per-project overrides (recommended — scoped to a registered project):
 | `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. |
 | `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. |
 
-`PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
+`PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. Five fields (`config_directories`, `qa_env`, `sandbox_tokens`, `qa_max_duration_minutes`, `qa_max_scenarios`) are sent as structured native types (arrays of mappings, mappings, numbers); legacy JSON-string or quoted-numeric payloads for these keys are rejected with 400. See [internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields). This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
 
 Server-level fallback (applied when no project override is set):
 
@@ -231,14 +231,18 @@ Server-level fallback (applied when no project override is set):
 
 ### Workflows
 
+Workflows are **project-scoped only** — there is no cascade and no system-scope layer. All mutations require `projectId`; reads without `projectId` return an empty list / 404 (intentionally lenient so the Workflows page doesn't crash during scope transitions). See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) for the rationale.
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/workflows` | List all workflow templates |
-| `GET` | `/api/workflows/:id` | Get full workflow detail |
-| `POST` | `/api/workflows` | Create a workflow |
-| `PUT` | `/api/workflows/:id` | Update a workflow |
-| `DELETE` | `/api/workflows/:id` | Delete (blocked if in-use by active goals) |
-| `POST` | `/api/workflows/:id/clone` | Deep-copy a workflow with a new ID |
+| `GET` | `/api/workflows?projectId=X` | List workflows for a project. Without `projectId`, returns `{ workflows: [] }`. |
+| `GET` | `/api/workflows/:id?projectId=X` | Get full workflow detail. Without `projectId`, returns 404. |
+| `POST` | `/api/workflows?projectId=X` | Create a workflow. **Requires `projectId`** — 400 otherwise. |
+| `PUT` | `/api/workflows/:id?projectId=X` | Update a workflow. **Requires `projectId`** — 400 otherwise. |
+| `DELETE` | `/api/workflows/:id?projectId=X` | Delete (blocked if in-use by active goals). **Requires `projectId`** — 400 otherwise. |
+| `POST` | `/api/workflows/:id/clone?projectId=X` | Deep-copy a workflow with a new ID. **Requires `projectId`** — 400 otherwise. |
+
+There is no `?scope=server` parameter on workflow endpoints — it was removed when the system-scope workflow layer was eliminated.
 
 ### Preferences
 

@@ -189,6 +189,16 @@ function token(): string {
 const PROJECT_INJECT_ROUTES = /^\/api\/(sessions|goals|staff)(\?|$|\/)/;
 
 /**
+ * Routes where workflow mutations need projectId. Workflows are now project-scoped
+ * only — POST /api/workflows requires projectId in the body; PUT/DELETE/customize/
+ * override on /api/workflows/:id require projectId as a query param. The harness
+ * auto-injects the default project so existing tests don't need updating; tests
+ * that deliberately exercise the 400 path use rawApiFetch.
+ */
+const WORKFLOWS_BODY_INJECT = /^\/api\/workflows(\?|$)/;
+const WORKFLOWS_QUERY_INJECT = /^\/api\/workflows\/[^/]+(\/customize|\/override)?(\?|$)/;
+
+/**
  * Parse a JSON body (string or already-object), inject projectId when missing,
  * and return a string suitable for a fetch body. Returns the original body
  * unchanged if it's not a JSON object we can read.
@@ -217,11 +227,29 @@ export async function injectDefaultProjectId(body: unknown): Promise<unknown> {
 
 async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<RequestInit> {
 	const method = (opts.method || "GET").toUpperCase();
-	if (method !== "POST") return opts;
-	if (!PROJECT_INJECT_ROUTES.test(path)) return opts;
-	const newBody = await injectDefaultProjectId(opts.body as unknown);
-	if (newBody === opts.body) return opts;
-	return { ...opts, body: newBody as BodyInit };
+	if (method === "POST" && (PROJECT_INJECT_ROUTES.test(path) || WORKFLOWS_BODY_INJECT.test(path))) {
+		const newBody = await injectDefaultProjectId(opts.body as unknown);
+		if (newBody === opts.body) return opts;
+		return { ...opts, body: newBody as BodyInit };
+	}
+	return opts;
+}
+
+/**
+ * Append projectId as a query param when missing, for routes that read it from
+ * the URL (workflow customize/override/PUT/DELETE on /:id). Returns the path
+ * unchanged if it already carries projectId or no default project is registered.
+ */
+async function maybeInjectProjectIdQuery(path: string, method: string): Promise<string> {
+	// /api/workflows root GET also needs projectId now (returns [] without one).
+	// /api/workflows/:id and /:id/customize|/override require projectId on every method.
+	const rootGet = method === "GET" && WORKFLOWS_BODY_INJECT.test(path);
+	const idRoute = WORKFLOWS_QUERY_INJECT.test(path) && (method === "GET" || method === "POST" || method === "PUT" || method === "DELETE");
+	if (!rootGet && !idRoute) return path;
+	if (/[?&]projectId=/.test(path)) return path;
+	const pid = await defaultProjectId();
+	if (!pid) return path;
+	return path + (path.includes("?") ? "&" : "?") + "projectId=" + encodeURIComponent(pid);
 }
 
 /**
@@ -303,9 +331,10 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 	const injected = await maybeInjectProjectId(path, opts);
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
+	const finalPath = await maybeInjectProjectIdQuery(path, method);
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
-			const resp = await fetch(`${base()}${path}`, {
+			const resp = await fetch(`${base()}${finalPath}`, {
 				...injected,
 				headers: {
 					"Content-Type": "application/json",

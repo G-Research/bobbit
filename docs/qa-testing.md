@@ -25,9 +25,9 @@ Add `qa_*` keys at the **top level** of `.bobbit/config/project.yaml`. Only `qa_
 | `qa_start_command` | **Yes** | — | Command to start an isolated server. Receives `$PORT`, `$WORK_DIR`, and `$TOKEN` as environment variables |
 | `qa_health_check` | No | `""` | URL to poll for server readiness. Use `$PORT` placeholder (e.g. `http://127.0.0.1:$PORT/api/health`) |
 | `qa_browser_entry` | No | `""` | URL to open in the browser. Use `$PORT` and `$TOKEN` placeholders |
-| `qa_env` | No | `{}` | JSON object of extra environment variables for the server process |
-| `qa_max_duration_minutes` | No | `10` | Hard time budget — server is killed after this many minutes |
-| `qa_max_scenarios` | No | `5` | Maximum number of scenarios to run before stopping |
+| `qa_env` | No | `{}` | Mapping of extra environment variables for the server process (native YAML mapping) |
+| `qa_max_duration_minutes` | No | `10` | Hard time budget — server is killed after this many minutes (native YAML number) |
+| `qa_max_scenarios` | No | `5` | Maximum number of scenarios to run before stopping (native YAML number) |
 
 ### Bobbit's own config
 
@@ -42,9 +42,12 @@ qa_start_command: >-
   --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR
 qa_health_check: http://127.0.0.1:$PORT/api/health
 qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
-qa_env: '{"BOBBIT_NO_OPEN":"1","BOBBIT_LLM_REVIEW_SKIP":"1","BOBBIT_SKIP_NPM_CI":"1"}'
-qa_max_duration_minutes: "10"
-qa_max_scenarios: "5"
+qa_env:
+  BOBBIT_NO_OPEN: "1"
+  BOBBIT_LLM_REVIEW_SKIP: "1"
+  BOBBIT_SKIP_NPM_CI: "1"
+qa_max_duration_minutes: 10
+qa_max_scenarios: 5
 ```
 
 Key points for the start command:
@@ -61,7 +64,7 @@ For a Node.js web app:
 qa_start_command: "PORT=$PORT node dist/server.js"
 qa_health_check: "http://127.0.0.1:$PORT/healthz"
 qa_browser_entry: "http://127.0.0.1:$PORT"
-qa_max_scenarios: "3"
+qa_max_scenarios: 3
 ```
 
 ### REST endpoint

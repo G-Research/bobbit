@@ -1,5 +1,18 @@
 @import "../ui/app.css";
 
+/*
+ * Override mini-lit's Input selection styling. The component applies
+ * `selection:bg-primary selection:text-primary-foreground`, which produces
+ * a low-contrast green-on-green highlight against the bobbit palette and
+ * is inconsistent with the browser-default selection used elsewhere in
+ * the app. Reset to a neutral, high-contrast accent.
+ */
+input::selection,
+textarea::selection {
+	background-color: var(--accent);
+	color: var(--accent-foreground);
+}
+
 /* Match theme-toggle button color to adjacent QR code button */
 theme-toggle button {
 	color: var(--color-muted-foreground) !important;

@@ -338,6 +338,13 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
 - **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
 
+## Legacy JSON-string project.yaml field rejected
+
+- **Symptom**: `PUT /api/projects/:id/config` (or `/api/project-config`) returns 400 when setting `config_directories`, `qa_env`, `sandbox_tokens`, `qa_max_duration_minutes`, or `qa_max_scenarios`.
+- **Cause**: these five fields are native YAML on disk and structured on the wire end-to-end. Sending a JSON-encoded string (e.g. `"[{\"path\":...}]"`) or a quoted number (`"10"`) for these keys is rejected to prevent regression to the old encoding.
+- **Fix**: send structured payloads — arrays of mappings for `config_directories` / `sandbox_tokens`, a `Record<string, string>` for `qa_env`, and real numbers for the two `qa_max_*` keys. The settings UI, `propose_project`, and `acceptProjectProposal` already do this; only hand-rolled API callers should hit the 400.
+- **On-disk legacy form is still tolerated**: `ProjectConfigStore` parses legacy JSON-string and quoted-numeric values transparently via the typed accessors (`getConfigDirectories`, `getQaEnv`, `getSandboxTokens`, `getQaMaxDurationMinutes`, `getQaMaxScenarios`) and rewrites the file in native form on the next save. Only the wire format is strict. See [docs/internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields).
+
 ## Gate re-signal cancellation
 
 - `cancelStaleVerifications()` in `verification-harness.ts` terminates old reviewer sessions and persists `status: "failed"` to the gate store
@@ -417,6 +424,16 @@ git ls-remote origin | grep -oE 'refs/heads/(session|goal|staff)[^[:space:]]*' |
 5. Pre-existing backlog (predates the fix): drain with a one-shot script. Out of scope for the runtime cleanup contract.
 
 Full design + bug archaeology in [docs/design/orphan-remote-branch-cleanup.md](design/orphan-remote-branch-cleanup.md). Architecture summary: [docs/internals.md — Remote branch cleanup](internals.md#remote-branch-cleanup).
+
+## `models.json` stale / missing `x-opencode-session` header after gateway upgrade
+
+Symptom: a new aigw-side model isn't selectable, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the `x-opencode-session` feature.
+
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+
+`BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
+
+See [docs/internals.md — Startup refresh of models.json](internals.md#startup-refresh-of-modelsjson).
 
 ## Review/naming model mismatch under AI Gateway
 

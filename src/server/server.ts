@@ -34,8 +34,6 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
-import { WorkflowStore } from "./agent/workflow-store.js";
-import { WorkflowManager } from "./agent/workflow-manager.js";
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
@@ -462,22 +460,33 @@ export function createGateway(config: GatewayConfig) {
 	for (const p of projectRegistry.list()) {
 		const ctx = projectContextManager.getOrCreate(p.id);
 		if (!ctx) continue;
+		const tokens = ctx.projectConfigStore.getSandboxTokens();
+		// getSandboxTokens() never includes `value` (typed accessor strips it).
+		// We need the raw values, which are still on the in-memory side-table
+		// after load() but only accessible via the back-compat flat get().
 		const tokensRaw = ctx.projectConfigStore.get("sandbox_tokens");
 		if (!tokensRaw) continue;
 		try {
 			const arr = JSON.parse(tokensRaw);
 			if (!Array.isArray(arr)) continue;
 			const hasValues = arr.some((e: any) => e.value);
-			if (!hasValues) continue;
+			if (!hasValues) {
+				// No inline values to migrate, but if the on-disk format is legacy
+				// JSON-string we still want to rewrite to native YAML on next save.
+				// setSandboxTokens() triggers save() which performs the rewrite.
+				ctx.projectConfigStore.setSandboxTokens(tokens);
+				continue;
+			}
 			// Move values to secrets store
 			const secretUpdates: Record<string, string> = {};
 			for (const e of arr) {
 				if (e.value) secretUpdates[e.key] = e.value;
 			}
 			ctx.secretsStore.update(secretUpdates);
-			// Strip values from config
-			ctx.projectConfigStore.set("sandbox_tokens",
-				JSON.stringify(arr.map((e: any) => ({ key: e.key, enabled: e.enabled }))));
+			// Strip values from config (write structured form, no JSON-encoded string).
+			ctx.projectConfigStore.setSandboxTokens(
+				arr.map((e: any) => ({ key: e.key, enabled: e.enabled !== false })),
+			);
 			console.log(`[migration] Moved ${Object.keys(secretUpdates).length} token secret(s) to secrets.json for project ${ctx.project.id}`);
 		} catch { /* ignore parse errors */ }
 	}
@@ -496,7 +505,6 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	const workflowStore = new WorkflowStore(projectConfigStore);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
@@ -504,7 +512,6 @@ export function createGateway(config: GatewayConfig) {
 		colorStore,
 		roleManager,
 		toolManager,
-		workflowStore,
 		preferencesStore,
 		projectConfigStore,
 		groupPolicyStore,
@@ -523,24 +530,19 @@ export function createGateway(config: GatewayConfig) {
 	}
 	const builtinConfigProvider = new BuiltinConfigProvider();
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
-	// Direct store lookups (roleStore.get(), workflowStore.get()) transparently
-	// fall back to builtins, so no seeding to disk is needed.
+	// Direct store lookups (roleStore.get()) transparently fall back to
+	// builtins, so no seeding to disk is needed. Workflows are project-
+	// scoped only — no system layer, no builtin layer.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
-	// Workflow builtins were removed — workflows now live inline in each
-	// project's project.yaml::workflows block. The provider returns [] so
-	// nothing is seeded here. Projects must declare their own workflows.
-	workflowStore.setBuiltins(builtinConfigProvider.getWorkflows());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
-		getWorkflows: () => workflowStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
-	const workflowManager = new WorkflowManager(workflowStore, projectConfigStore);
 	const staffManager = new StaffManager(projectContextManager);
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
 	triggerEngine.start();
@@ -641,7 +643,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, workflowManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, workflowStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1219,21 +1221,17 @@ function isSetupComplete(): boolean {
 	}
 }
 
-/** Redact token values in sandbox config for API responses. Never send real secrets to the browser. */
-function redactSandboxSecrets(config: Record<string, string>): Record<string, string> {
-	const result = { ...config };
-	if (result.sandbox_tokens) {
-		try {
-			const arr = JSON.parse(result.sandbox_tokens);
-			if (Array.isArray(arr)) {
-				result.sandbox_tokens = JSON.stringify(arr.map((e: any) => ({
-					...e,
-					value: e.value ? "__REDACTED__" : "",
-				})));
-			}
-		} catch { /* leave as-is */ }
+/** Redact token values in sandbox config for API responses. Never send real secrets to the browser.
+ *  `sandbox_tokens` is a structured array (post-native-YAML); other fields stay flat strings. */
+function redactSandboxSecrets(config: Record<string, unknown>): Record<string, unknown> {
+	const result: Record<string, unknown> = { ...config };
+	if (Array.isArray(result.sandbox_tokens)) {
+		result.sandbox_tokens = (result.sandbox_tokens as Array<any>).map((e: any) => ({
+			...e,
+			value: e.value ? "__REDACTED__" : "",
+		}));
 	}
-	if (result.sandbox_credentials) {
+	if (typeof result.sandbox_credentials === "string" && result.sandbox_credentials) {
 		try {
 			const obj = JSON.parse(result.sandbox_credentials);
 			if (typeof obj === "object" && obj !== null) {
@@ -1248,25 +1246,23 @@ function redactSandboxSecrets(config: Record<string, string>): Record<string, st
 	return result;
 }
 
-/** Redact token values in resolved config (with source annotations). */
-function redactSandboxSecretsResolved(config: Record<string, { value: string; source: string }>): Record<string, { value: string; source: string }> {
+/** Redact token values in resolved config (with source annotations).
+ *  `sandbox_tokens.value` is now a structured array; sandbox_credentials remains a JSON string. */
+function redactSandboxSecretsResolved(config: Record<string, { value: unknown; source: string }>): Record<string, { value: unknown; source: string }> {
 	const result = { ...config };
-	for (const key of ["sandbox_tokens", "sandbox_credentials"] as const) {
+	if (result.sandbox_tokens && Array.isArray(result.sandbox_tokens.value)) {
+		result.sandbox_tokens = {
+			...result.sandbox_tokens,
+			value: (result.sandbox_tokens.value as Array<any>).map((e: any) => ({
+				...e,
+				value: e.value ? "__REDACTED__" : "",
+			})),
+		};
+	}
+	for (const key of ["sandbox_credentials"] as const) {
 		if (!result[key]) continue;
 		const entry = { ...result[key] };
-		if (key === "sandbox_tokens" && entry.value) {
-			try {
-				const arr = JSON.parse(entry.value);
-				if (Array.isArray(arr)) {
-					entry.value = JSON.stringify(arr.map((e: any) => ({
-						...e,
-						value: e.value ? "__REDACTED__" : "",
-					})));
-					result[key] = entry;
-				}
-			} catch { /* leave as-is */ }
-		}
-		if (key === "sandbox_credentials" && entry.value) {
+		if (key === "sandbox_credentials" && typeof entry.value === "string" && entry.value) {
 			try {
 				const obj = JSON.parse(entry.value);
 				if (typeof obj === "object" && obj !== null) {
@@ -1283,65 +1279,50 @@ function redactSandboxSecretsResolved(config: Record<string, { value: string; so
 	return result;
 }
 
-/** Merge secrets into sandbox_tokens for GET responses (adds value from SecretsStore). */
-function mergeSecretsIntoTokens(config: Record<string, string>, secretsStore: import("./agent/secrets-store.js").SecretsStore): void {
-	if (config.sandbox_tokens) {
-		try {
-			const arr = JSON.parse(config.sandbox_tokens);
-			if (Array.isArray(arr)) {
-				const secrets = secretsStore.getAll();
-				config.sandbox_tokens = JSON.stringify(arr.map((e: any) => ({
-					...e,
-					// Prefer secrets store, fall back to value in config (pre-migration)
-					value: secrets[e.key] || e.value || "",
-				})));
+/** Merge secrets into sandbox_tokens for GET responses (adds value from SecretsStore).
+ *  Operates on a config object whose `sandbox_tokens` is the structured array (or absent). */
+function mergeSecretsIntoTokens(config: Record<string, unknown>, secretsStore: import("./agent/secrets-store.js").SecretsStore): void {
+	const tokens = config.sandbox_tokens;
+	if (!Array.isArray(tokens)) return;
+	const secrets = secretsStore.getAll();
+	config.sandbox_tokens = (tokens as Array<any>).map((e: any) => ({
+		...e,
+		value: secrets[e.key] || e.value || "",
+	}));
+}
+
+/** Strip redacted sentinel from incoming structured sandbox_tokens, persisting real values
+ *  to the SecretsStore. Returns the structured array suitable for setSandboxTokens(). */
+function mergeSandboxTokensStructured(
+	incoming: Array<{ key: string; enabled?: boolean; value?: string }>,
+	secretsStore?: import("./agent/secrets-store.js").SecretsStore | null,
+): Array<{ key: string; enabled: boolean }> {
+	if (secretsStore) {
+		const updates: Record<string, string> = {};
+		for (const e of incoming) {
+			if (!e || typeof e.key !== "string") continue;
+			if (e.value === "__REDACTED__") {
+				// Keep existing
+			} else if (e.value) {
+				updates[e.key] = e.value;
+			} else {
+				updates[e.key] = "";
 			}
-		} catch { /* leave as-is */ }
+		}
+		secretsStore.update(updates);
 	}
+	return incoming
+		.filter(e => e && typeof e.key === "string")
+		.map(e => ({ key: e.key, enabled: e.enabled !== false }));
 }
 
 /** Merge redacted sentinel values with existing stored values before saving. */
 function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore, secretsStore?: import("./agent/secrets-store.js").SecretsStore | null): void {
-	if (updates.sandbox_tokens) {
-		try {
-			const incoming: any[] = JSON.parse(updates.sandbox_tokens);
-
-			if (secretsStore) {
-				// New path: extract values into SecretsStore, strip from config
-				const secretUpdates: Record<string, string> = {};
-
-				for (const entry of incoming) {
-					if (entry.value === "__REDACTED__") {
-						// Keep existing secret — don't touch secretsStore for this key
-					} else if (entry.value) {
-						// New explicit value — save to secrets
-						secretUpdates[entry.key] = entry.value;
-					} else {
-						// Empty value — remove from secrets (will resolve from host)
-						secretUpdates[entry.key] = "";
-					}
-				}
-
-				secretsStore.update(secretUpdates);
-
-				// Strip values from tokens before saving to config
-				updates.sandbox_tokens = JSON.stringify(
-					incoming.map((e: any) => ({ key: e.key, enabled: e.enabled }))
-				);
-			} else {
-				// Legacy path (no secretsStore): merge redacted values from config
-				const existingRaw = configStore.get("sandbox_tokens") || "";
-				let existing: any[] = [];
-				try { existing = existingRaw ? JSON.parse(existingRaw) : []; } catch { /* ignore */ }
-				const existingMap = new Map(existing.map((e: any) => [e.key, e.value]));
-				const merged = incoming.map((e: any) => ({
-					...e,
-					value: e.value === "__REDACTED__" ? (existingMap.get(e.key) || "") : e.value,
-				}));
-				updates.sandbox_tokens = JSON.stringify(merged);
-			}
-		} catch { /* leave as-is */ }
-	}
+	// sandbox_tokens is now handled via mergeSandboxTokensStructured at the
+	// migrated-fields layer in the PUT handler. This helper only handles the
+	// remaining legacy flat sandbox_credentials key.
+	void configStore;
+	void secretsStore;
 	if (updates.sandbox_credentials) {
 		try {
 			const incoming = JSON.parse(updates.sandbox_credentials) as Record<string, string>;
@@ -1372,7 +1353,6 @@ async function handleApiRoute(
 	projectContextManager: ProjectContextManager,
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
-	workflowManager: WorkflowManager,
 	verificationHarness: VerificationHarness,
 	preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
@@ -1387,12 +1367,10 @@ async function handleApiRoute(
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
-	workflowStore?: WorkflowStore,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
-	const serverWorkflowStore = workflowStore!;
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -1906,6 +1884,22 @@ async function handleApiRoute(
 						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
 					}
 				}
+				// Seed default workflows when none were provided. Workflows are
+				// project-scoped only (no system layer), so without this seed a
+				// freshly-created project would have zero workflows and goal
+				// creation against it would fail. Skip if caller already provided
+				// workflows or the project already has any (idempotent on upsert).
+				if (Object.keys(newCtx.projectConfigStore.getWorkflows() ?? {}).length === 0) {
+					try {
+						const { buildDefaultWorkflows } = await import("./state-migration/seed-default-workflows.js");
+						const comps = newCtx.projectConfigStore.getComponents();
+						const componentName = comps[0]?.name || project.name;
+						const defaults = buildDefaultWorkflows(componentName);
+						newCtx.projectConfigStore.setWorkflows(defaults as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+					} catch (err) {
+						console.warn("[projects] Failed to seed default workflows:", err);
+					}
+				}
 			}
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
@@ -2039,7 +2033,14 @@ async function handleApiRoute(
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
 
 		if (req.method === "GET" && !suffix) {
-			const config = ctx.projectConfigStore.getAll();
+			const flat = ctx.projectConfigStore.getAll();
+			// Upgrade migrated keys to native structured form for the wire response.
+			const config: Record<string, unknown> = { ...flat };
+			config.config_directories = ctx.projectConfigStore.getConfigDirectories();
+			config.qa_env = ctx.projectConfigStore.getQaEnv();
+			config.sandbox_tokens = ctx.projectConfigStore.getSandboxTokens();
+			config.qa_max_duration_minutes = ctx.projectConfigStore.getQaMaxDurationMinutes();
+			config.qa_max_scenarios = ctx.projectConfigStore.getQaMaxScenarios();
 			mergeSecretsIntoTokens(config, ctx.secretsStore);
 			json(redactSandboxSecrets(config));
 			return;
@@ -2050,7 +2051,7 @@ async function handleApiRoute(
 		}
 		if (req.method === "GET" && suffix === "resolved") {
 			const defaults = ctx.projectConfigStore.getDefaults();
-			const result: Record<string, { value: string; source: string }> = {};
+			const result: Record<string, { value: unknown; source: string }> = {};
 			// Include all default keys
 			for (const key of Object.keys(defaults)) {
 				result[key] = resolveScalarConfig(key, ctx.projectConfigStore, projectConfigStore, null, defaults);
@@ -2069,10 +2070,20 @@ async function handleApiRoute(
 					result[key] = { value: serverRaw[key], source: "server" };
 				}
 			}
-			// Merge secrets into sandbox_tokens for the resolved response
-			if (result.sandbox_tokens) {
-				const tokensVal = result.sandbox_tokens.value;
-				const tempConfig: Record<string, string> = { sandbox_tokens: tokensVal };
+			// Override migrated fields with structured values (resolveScalarConfig returns flat strings).
+			const migratedSource = (key: string): string => {
+				return (rawConfig[key] !== undefined && rawConfig[key] !== "") ? "project"
+					: (serverRaw[key] !== undefined && serverRaw[key] !== "") ? "server"
+					: "default";
+			};
+			result.config_directories = { value: ctx.projectConfigStore.getConfigDirectories(), source: migratedSource("config_directories") };
+			result.qa_env = { value: ctx.projectConfigStore.getQaEnv(), source: migratedSource("qa_env") };
+			result.sandbox_tokens = { value: ctx.projectConfigStore.getSandboxTokens(), source: migratedSource("sandbox_tokens") };
+			result.qa_max_duration_minutes = { value: ctx.projectConfigStore.getQaMaxDurationMinutes(), source: migratedSource("qa_max_duration_minutes") };
+			result.qa_max_scenarios = { value: ctx.projectConfigStore.getQaMaxScenarios(), source: migratedSource("qa_max_scenarios") };
+			// Merge secrets into sandbox_tokens (structured) for the resolved response.
+			if (Array.isArray(result.sandbox_tokens.value)) {
+				const tempConfig: Record<string, unknown> = { sandbox_tokens: result.sandbox_tokens.value };
 				mergeSecretsIntoTokens(tempConfig, ctx.secretsStore);
 				result.sandbox_tokens = { value: tempConfig.sandbox_tokens, source: result.sandbox_tokens.source };
 			}
@@ -2167,14 +2178,114 @@ async function handleApiRoute(
 				}
 			}
 
-			// All keys valid — merge secrets then write
+			// Native-YAML migrated fields: reject legacy string payloads (must be structured
+			// types or null/empty to clear). For sandbox_tokens we still need to merge
+			// redacted values via mergeSandboxSecrets; the merge helper now operates on
+			// structured arrays.
+			const migratedExtracted: Record<string, unknown> = {};
+			const MIGRATED_FIELDS = [
+				{ key: "config_directories", expect: "array" as const },
+				{ key: "qa_env", expect: "object" as const },
+				{ key: "sandbox_tokens", expect: "array" as const },
+				{ key: "qa_max_duration_minutes", expect: "number" as const },
+				{ key: "qa_max_scenarios", expect: "number" as const },
+			];
+			for (const { key, expect } of MIGRATED_FIELDS) {
+				if (!(key in body)) continue;
+				const v = (body as Record<string, unknown>)[key];
+				if (v === null || v === "") {
+					migratedExtracted[key] = null;
+					delete (body as Record<string, unknown>)[key];
+					continue;
+				}
+				if (typeof v === "string") {
+					json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
+					return;
+				}
+				if (expect === "array" && !Array.isArray(v)) {
+					json({ error: `Field "${key}" must be an array` }, 400);
+					return;
+				}
+				if (expect === "object" && (Array.isArray(v) || typeof v !== "object" || v === null)) {
+					json({ error: `Field "${key}" must be an object` }, 400);
+					return;
+				}
+				if (expect === "number" && typeof v !== "number") {
+					json({ error: `Field "${key}" must be a number` }, 400);
+					return;
+				}
+				migratedExtracted[key] = v;
+				delete (body as Record<string, unknown>)[key];
+			}
+
+			// Merge secrets for migrated structured sandbox_tokens, and for any legacy
+			// keys that still carry inline credentials (sandbox_credentials).
+			if (Array.isArray(migratedExtracted.sandbox_tokens)) {
+				migratedExtracted.sandbox_tokens = mergeSandboxTokensStructured(
+					migratedExtracted.sandbox_tokens as Array<{ key: string; enabled?: boolean; value?: string }>,
+					ctx.secretsStore,
+				);
+			}
 			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
+
+			// Write legacy flat keys.
 			for (const [key, value] of Object.entries(body)) {
 				if (value === null || value === "") {
 					ctx.projectConfigStore.remove(key);
 				} else if (typeof value === "string") {
 					ctx.projectConfigStore.set(key, value);
 				}
+			}
+
+			// Apply migrated structured fields via typed setters.
+			if ("config_directories" in migratedExtracted) {
+				const v = migratedExtracted.config_directories;
+				if (v === null) {
+					ctx.projectConfigStore.remove("config_directories");
+				} else if (Array.isArray(v)) {
+					ctx.projectConfigStore.setConfigDirectories(
+						v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
+							path: String(e.path),
+							types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
+						})),
+					);
+				}
+			}
+			if ("qa_env" in migratedExtracted) {
+				const v = migratedExtracted.qa_env;
+				if (v === null) {
+					ctx.projectConfigStore.remove("qa_env");
+				} else if (v && typeof v === "object" && !Array.isArray(v)) {
+					const env: Record<string, string> = {};
+					for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+						if (typeof val === "string") env[k] = val;
+						else if (typeof val === "number" || typeof val === "boolean") env[k] = String(val);
+					}
+					ctx.projectConfigStore.setQaEnv(env);
+				}
+			}
+			if ("sandbox_tokens" in migratedExtracted) {
+				const v = migratedExtracted.sandbox_tokens;
+				if (v === null) {
+					ctx.projectConfigStore.remove("sandbox_tokens");
+				} else if (Array.isArray(v)) {
+					ctx.projectConfigStore.setSandboxTokens(
+						v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
+							key: String(e.key),
+							enabled: e.enabled !== false,
+						})),
+					);
+				}
+			}
+			if ("qa_max_duration_minutes" in migratedExtracted) {
+				const v = migratedExtracted.qa_max_duration_minutes;
+				if (v === null) ctx.projectConfigStore.remove("qa_max_duration_minutes");
+				else if (typeof v === "number") ctx.projectConfigStore.setQaMaxDurationMinutes(v);
+			}
+			if ("qa_max_scenarios" in migratedExtracted) {
+				const v = migratedExtracted.qa_max_scenarios;
+				if (v === null) ctx.projectConfigStore.remove("qa_max_scenarios");
+				else if (typeof v === "number") ctx.projectConfigStore.setQaMaxScenarios(v);
 			}
 
 			// Persist structured fields if provided.
@@ -2889,7 +3000,7 @@ async function handleApiRoute(
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
-				workflowStore: workflowManager.store,
+				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
@@ -3377,11 +3488,37 @@ async function handleApiRoute(
 		return;
 	}
 
-	// PUT /api/project-config — update project config fields
+	// PUT /api/project-config — update server-scope project config fields
 	if (url.pathname === "/api/project-config" && req.method === "PUT") {
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		for (const [key, value] of Object.entries(body)) {
+		const bodyMap = body as Record<string, unknown>;
+
+		// Native-YAML migrated fields: must be sent as structured types.
+		const MIGRATED_FIELDS = [
+			{ key: "config_directories", expect: "array" as const },
+			{ key: "qa_env", expect: "object" as const },
+			{ key: "sandbox_tokens", expect: "array" as const },
+			{ key: "qa_max_duration_minutes", expect: "number" as const },
+			{ key: "qa_max_scenarios", expect: "number" as const },
+		];
+		const migratedExtracted: Record<string, unknown> = {};
+		for (const { key, expect } of MIGRATED_FIELDS) {
+			if (!(key in bodyMap)) continue;
+			const v = bodyMap[key];
+			if (v === null || v === "") { migratedExtracted[key] = null; delete bodyMap[key]; continue; }
+			if (typeof v === "string") {
+				json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
+				return;
+			}
+			if (expect === "array" && !Array.isArray(v)) { json({ error: `Field "${key}" must be an array` }, 400); return; }
+			if (expect === "object" && (Array.isArray(v) || typeof v !== "object" || v === null)) { json({ error: `Field "${key}" must be an object` }, 400); return; }
+			if (expect === "number" && typeof v !== "number") { json({ error: `Field "${key}" must be a number` }, 400); return; }
+			migratedExtracted[key] = v;
+			delete bodyMap[key];
+		}
+
+		for (const [key, value] of Object.entries(bodyMap)) {
 			if (key.includes(".")) {
 				json({ error: `Config key "${key}" must not contain dots` }, 400);
 				return;
@@ -3392,6 +3529,54 @@ async function handleApiRoute(
 				projectConfigStore.set(key, value);
 			}
 		}
+
+		// Apply migrated structured fields via typed setters.
+		if ("config_directories" in migratedExtracted) {
+			const v = migratedExtracted.config_directories;
+			if (v === null) projectConfigStore.remove("config_directories");
+			else if (Array.isArray(v)) {
+				projectConfigStore.setConfigDirectories(
+					v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
+						path: String(e.path),
+						types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
+					})),
+				);
+			}
+		}
+		if ("qa_env" in migratedExtracted) {
+			const v = migratedExtracted.qa_env;
+			if (v === null) projectConfigStore.remove("qa_env");
+			else if (v && typeof v === "object" && !Array.isArray(v)) {
+				const env: Record<string, string> = {};
+				for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+					if (typeof val === "string") env[k] = val;
+					else if (typeof val === "number" || typeof val === "boolean") env[k] = String(val);
+				}
+				projectConfigStore.setQaEnv(env);
+			}
+		}
+		if ("sandbox_tokens" in migratedExtracted) {
+			const v = migratedExtracted.sandbox_tokens;
+			if (v === null) projectConfigStore.remove("sandbox_tokens");
+			else if (Array.isArray(v)) {
+				projectConfigStore.setSandboxTokens(
+					v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
+						key: String(e.key), enabled: e.enabled !== false,
+					})),
+				);
+			}
+		}
+		if ("qa_max_duration_minutes" in migratedExtracted) {
+			const v = migratedExtracted.qa_max_duration_minutes;
+			if (v === null) projectConfigStore.remove("qa_max_duration_minutes");
+			else if (typeof v === "number") projectConfigStore.setQaMaxDurationMinutes(v);
+		}
+		if ("qa_max_scenarios" in migratedExtracted) {
+			const v = migratedExtracted.qa_max_scenarios;
+			if (v === null) projectConfigStore.remove("qa_max_scenarios");
+			else if (typeof v === "number") projectConfigStore.setQaMaxScenarios(v);
+		}
+
 		json({ ok: true });
 		return;
 	}
@@ -5482,6 +5667,26 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/generate-title — auto-generate a title from chat history.
+	// Works for live sessions (calls SessionManager.autoGenerateTitle) and archived
+	// sessions (parses .jsonl). Used by the rename dialog when the session is not
+	// the currently focused one (no live WebSocket).
+	const genTitleMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/generate-title$/);
+	if (genTitleMatch && req.method === "POST") {
+		const id = genTitleMatch[1];
+		try {
+			const title = await sessionManager.generateTitleForAnySession(id);
+			if (!title) {
+				json({ error: "Could not generate title (session not found or no messages)" }, 404);
+				return;
+			}
+			json({ title });
+		} catch (err) {
+			json({ error: String((err as Error)?.message ?? err) }, 500);
+		}
+		return;
+	}
+
 	// PUT /api/sessions/:id/title — legacy rename endpoint
 	const titleMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/title$/);
 	if (titleMatch && req.method === "PUT") {
@@ -6051,7 +6256,7 @@ async function handleApiRoute(
 
 	// ── Workflow endpoints ──────────────────────────────────────────
 
-	// GET /api/workflows (with cascade origin)
+	// GET /api/workflows — project-scoped only. Without projectId returns [].
 	const workflowsMatch = url.pathname === "/api/workflows";
 	if (workflowsMatch && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -6060,90 +6265,65 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/workflows (scope-aware)
+	// POST /api/workflows — requires projectId.
 	if (workflowsMatch && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
 		const targetProjectId = body?.projectId;
+		if (!targetProjectId) { json({ error: "projectId required" }, 400); return; }
 		try {
-			if (targetProjectId) {
-				const ctx = projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const now = Date.now();
-				const workflow = {
-					id: body.id as string,
-					name: (body.name as string) ?? body.id,
-					description: (body.description as string) ?? "",
-					gates: body.gates || [],
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-				ctx.workflowStore.put(workflow);
-				json(workflow, 201);
-			} else {
-				const workflow = workflowManager.createWorkflow({
-					id: body.id,
-					name: body.name,
-					description: body.description,
-					gates: body.gates || [],
-				});
-				json(workflow, 201);
-			}
+			const ctx = projectContextManager.getOrCreate(targetProjectId);
+			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			const now = Date.now();
+			const workflow = {
+				id: body.id as string,
+				name: (body.name as string) ?? body.id,
+				description: (body.description as string) ?? "",
+				gates: body.gates || [],
+				createdAt: now,
+				updatedAt: now,
+			};
+			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
+			ctx.workflowStore.put(workflow);
+			json(workflow, 201);
 		} catch (err: any) {
 			json({ error: err.message }, 400);
 		}
 		return;
 	}
 
-	// POST /api/workflows/:id/customize — copy resolved workflow to a target scope
+	// POST /api/workflows/:id/customize — copy resolved workflow into a project.
 	const workflowCustomizeMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/customize$/);
 	if (workflowCustomizeMatch && req.method === "POST") {
 		const id = decodeURIComponent(workflowCustomizeMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
 
 		const resolved = configCascade.resolveWorkflows(projectId);
 		const source = resolved.find(r => r.item.id === id);
 		if (!source) { json({ error: "Workflow not found" }, 404); return; }
 
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.workflowStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverWorkflowStore;
-		}
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 
 		const now = Date.now();
 		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		targetStore.put(copy);
+		ctx.workflowStore.put(copy);
 		json(copy, 201);
 		return;
 	}
 
-	// DELETE /api/workflows/:id/override — remove override at a scope
+	// DELETE /api/workflows/:id/override — remove project-level override.
 	const workflowOverrideMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/override$/);
 	if (workflowOverrideMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowOverrideMatch[1]);
-		const scope = url.searchParams.get("scope") || "server";
 		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
 
-		let targetStore;
-		if (scope === "project") {
-			if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			targetStore = ctx.workflowStore;
-		} else {
-			// scope === "server" (or unspecified) → system/server layer
-			targetStore = serverWorkflowStore;
-		}
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 
-		targetStore.remove(id);
+		ctx.workflowStore.remove(id);
 		json({ ok: true });
 		return;
 	}
@@ -6153,74 +6333,47 @@ async function handleApiRoute(
 	if (workflowMatch && req.method === "GET") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const resolved = configCascade.resolveWorkflows(qProjectId);
-			const found = resolved.find(r => r.item.id === id);
-			if (!found) { json({ error: "Workflow not found" }, 404); return; }
-			json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
-		} else {
-			const wf = workflowManager.getWorkflow(id);
-			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-			json(wf);
-		}
+		if (!qProjectId) { json({ error: "Workflow not found" }, 404); return; }
+		const resolved = configCascade.resolveWorkflows(qProjectId);
+		const found = resolved.find(r => r.item.id === id);
+		if (!found) { json({ error: "Workflow not found" }, 404); return; }
+		json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
 		return;
 	}
 
-	// PUT /api/workflows/:id (scope-aware)
+	// PUT /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const ctx = projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const existing = ctx.workflowStore.get(id);
-			if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-			const updated = {
-				...existing,
-				name: body.name ?? existing.name,
-				description: body.description ?? existing.description,
-				gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-				id,
-				updatedAt: Date.now(),
-			};
-			ctx.workflowStore.put(updated);
-			json(updated);
-		} else {
-			try {
-				const ok = workflowManager.updateWorkflow(id, body);
-				if (!ok) { json({ error: "Workflow not found" }, 404); return; }
-				const updated = workflowManager.getWorkflow(id);
-				json(updated);
-			} catch (err: any) {
-				json({ error: err.message }, 400);
-			}
-		}
+		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(qProjectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		const existing = ctx.workflowStore.get(id);
+		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
+		const updated = {
+			...existing,
+			name: body.name ?? existing.name,
+			description: body.description ?? existing.description,
+			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
+			id,
+			updatedAt: Date.now(),
+		};
+		ctx.workflowStore.put(updated);
+		json(updated);
 		return;
 	}
 
-	// DELETE /api/workflows/:id (scope-aware)
+	// DELETE /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "DELETE") {
 		const id = decodeURIComponent(workflowMatch[1]);
 		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (qProjectId) {
-			const ctx = projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			ctx.workflowStore.remove(id);
-			json({ ok: true });
-		} else {
-			const wf = workflowManager.getWorkflow(id);
-			if (!wf) { json({ error: "Workflow not found" }, 404); return; }
-			const allGoals = projectContextManager.getAllLiveGoals();
-			if (allGoals.some((g: any) => g.workflowId === id && g.state !== "complete")) {
-				json({ error: "Cannot delete: workflow is in use by active goals" }, 409);
-				return;
-			}
-			workflowManager.deleteWorkflow(id);
-			res.writeHead(204);
-			res.end();
-		}
+		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(qProjectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		ctx.workflowStore.remove(id);
+		json({ ok: true });
 		return;
 	}
 

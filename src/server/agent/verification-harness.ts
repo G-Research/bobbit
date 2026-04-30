@@ -1903,8 +1903,8 @@ export class VerificationHarness {
 		const combinedPrompt = sections.join("\n");
 
 		// Compute timeout: qa_max_duration_minutes + 5 min buffer
-		const projectVars = this.resolveProjectConfigStore(goalId)?.getWithDefaults() ?? {};
-		const qaMinutes = parseInt(projectVars["qa_max_duration_minutes"] || "10", 10) || 10;
+		const pcs = this.resolveProjectConfigStore(goalId);
+		const qaMinutes = pcs?.getQaMaxDurationMinutes() ?? 10;
 		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
 		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
 
