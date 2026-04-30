@@ -4760,31 +4760,26 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * when sandbox_tokens is not set.
  */
 function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
-	const tokensRaw = projectConfig?.get("sandbox_tokens") || "";
+	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
-	if (tokensRaw) {
+	if (entries.length > 0) {
 		const result: Record<string, string> = {};
-		try {
-			const entries: { key: string; value?: string; enabled: boolean }[] = JSON.parse(tokensRaw);
-			if (Array.isArray(entries)) {
-				const secrets = secretsStore?.getAll() || {};
-				for (const entry of entries) {
-					if (!entry.enabled || !entry.key) continue;
-					// Check secrets store first, then fall back to inline value (pre-migration)
-					const explicitValue = secrets[entry.key] || entry.value;
-					if (explicitValue) {
-						result[entry.key] = explicitValue;
-					} else {
-						// Empty value = resolve from host
-						const resolved = resolveHostTokenValue(entry.key, prefs);
-						if (resolved) {
-							result[entry.key] = resolved;
-						}
-					}
+		const secrets = secretsStore?.getAll() || {};
+		for (const entry of entries) {
+			if (!entry.enabled || !entry.key) continue;
+			// Check secrets store first, then fall back to inline value (pre-migration).
+			const explicitValue = secrets[entry.key] || entry.value;
+			if (explicitValue) {
+				result[entry.key] = explicitValue;
+			} else {
+				// Empty value = resolve from host.
+				const resolved = resolveHostTokenValue(entry.key, prefs);
+				if (resolved) {
+					result[entry.key] = resolved;
 				}
 			}
-		} catch { /* ignore parse errors */ }
+		}
 		return result;
 	}
 
