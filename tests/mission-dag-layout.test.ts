@@ -30,6 +30,11 @@ describe("layoutDag", () => {
 		const p = r.positions.get("a")!;
 		assert.equal(p.layer, 0);
 		assert.equal(p.indexInLayer, 0);
+		// Single-node plans must produce a non-zero canvas so the SVG is
+		// actually visible in the dashboard wrapper. Regression guard for
+		// the wrapper-stretch / hidden-DAG bug.
+		assert.ok(r.size.w >= 160, `expected width >= node width, got ${r.size.w}`);
+		assert.ok(r.size.h >= 56, `expected height >= node height, got ${r.size.h}`);
 	});
 
 	it("layers a linear chain a -> b -> c", () => {

@@ -20,7 +20,7 @@ export function renderMissionDagSvg(
 	if (!plan || plan.goals.length === 0) {
 		return html`
 			<div class="mission-dag-empty"
-				style="border:1px dashed var(--border);border-radius:8px;padding:24px;text-align:center;color:var(--muted-foreground);font-size:13px;"
+				style="border:1px dashed var(--border);border-radius:8px;padding:24px;text-align:center;color:var(--muted-foreground,#64748b);font-size:13px;"
 				data-testid="mission-dag-empty">
 				No plan yet. The Commander will propose a DAG once the charter passes.
 			</div>
@@ -33,7 +33,7 @@ export function renderMissionDagSvg(
 	const byId = new Map<string, PlannedGoal>(plan.goals.map(g => [g.planId, g]));
 
 	return html`
-		<div class="mission-dag-wrap" style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--background);">
+		<div class="mission-dag-wrap" style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--background);display:flex;justify-content:center;padding:8px;">
 			<svg
 				viewBox="0 0 ${layout.size.w} ${layout.size.h}"
 				width="${layout.size.w}"
