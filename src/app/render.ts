@@ -1824,6 +1824,17 @@ const PROJECT_STRUCTURED_FIELD_KEYS = new Set([
 	"components",
 	"workflows",
 ]);
+/** Fields managed exclusively in Settings → Project (not editable in the
+ *  proposal panel). Hidden from the panel even if the agent or current config
+ *  carries them. */
+const PROJECT_PANEL_HIDDEN_KEYS = new Set([
+	"sandbox",
+	"sandbox_image",
+	"sandbox_mounts",
+	"sandbox_credentials",
+	"sandbox_github_token",
+	"sandbox_host_token_overrides",
+]);
 const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 	{ key: "name", label: "Project Name" },
 	{ key: "qa_start_command", label: "QA Start Command" },
@@ -1887,6 +1898,7 @@ function projectProposalPanel() {
 		if (k === "root_path") continue;
 		if (PROJECT_LEGACY_COMMAND_KEYS.has(k)) continue;
 		if (PROJECT_STRUCTURED_FIELD_KEYS.has(k)) continue;
+		if (PROJECT_PANEL_HIDDEN_KEYS.has(k)) continue;
 		if (!knownKeys.has(k)) extraKeys.push(k);
 	}
 
@@ -1945,7 +1957,7 @@ function projectProposalPanel() {
 		`;
 	};
 
-	const settingsKeys: string[] = PROJECT_EDITABLE_FIELDS.map(f => f.key).concat(extraKeys);
+	const curatedKeys: string[] = PROJECT_EDITABLE_FIELDS.map(f => f.key);
 	const labelFor = (key: string): string => {
 		const known = PROJECT_EDITABLE_FIELDS.find(f => f.key === key);
 		return known?.label ?? key;
@@ -1966,7 +1978,20 @@ function projectProposalPanel() {
 					${fields.root_path || "—"}
 				</div>
 			</div>
-			${settingsKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
+			${curatedKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
+			${extraKeys.length > 0 ? html`
+				<details data-testid="other-settings-group" class="border-t border-border pt-3">
+					<summary class="text-xs text-muted-foreground cursor-pointer select-none font-medium">
+						Other settings (${extraKeys.length})
+					</summary>
+					<p class="text-[11px] text-muted-foreground mt-2 mb-3">
+						Non-standard project.yaml fields. The agent or a previous user added these; edit them here or remove the entry by clearing the value.
+					</p>
+					<div class="flex flex-col gap-4">
+						${extraKeys.map(k => renderRow(k, k))}
+					</div>
+				</details>
+			` : ""}
 		</div>
 	`;
 

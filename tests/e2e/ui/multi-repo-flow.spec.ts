@@ -188,23 +188,10 @@ test.describe("multi-repo flow (UI)", () => {
 		}
 	});
 
-	test("Settings → Components: Re-scan repos populates the detected list", async ({ page }) => {
-		test.setTimeout(60_000);
-		const project = await registerMultiRepoProject();
-		try {
-			await openApp(page);
-			await navigateToSettings(page, project.id, "components");
-
-			await page.locator('[data-testid="rescan-repos"]').click();
-			await expect(page.locator('[data-testid="rescan-results"]')).toBeVisible({ timeout: 15_000 });
-			const rows = page.locator('[data-testid="rescan-repo-row"]');
-			// api + web (the two real git repos). shared has no .git so it is skipped.
-			await expect(rows).toHaveCount(2);
-		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
-			project.cleanup();
-		}
-	});
+	// Re-scan-from-Settings flow was replaced with "Open Project Assistant";
+	// repo scanning now happens in the assistant's interactive flow rather than
+	// via a settings-page button. The underlying POST /api/projects/:id/rescan-repos
+	// endpoint is still covered by API-level tests.
 
 	test("Settings → Components: delete a component", async ({ page }) => {
 		test.setTimeout(60_000);
