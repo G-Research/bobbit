@@ -512,3 +512,117 @@ test.describe("Mission UI (mocked backend)", () => {
 		await expect(page.getByTestId("mission-dashboard-error")).toBeVisible({ timeout: 10_000 });
 	});
 });
+
+// ============================================================================
+// SIDEBAR MISSION/GOAL UX PARITY
+// ============================================================================
+//
+// The sidebar exposes parallel "New Goal" / "New Mission" entry points so
+// missions are first-class peers of goals (not a redundant subgroup):
+//   1. Global toolbar has both "New Goal" and "New Mission" buttons.
+//   2. Per-project header has both "+" goal and "+" mission buttons.
+//   3. Missions render inline with goals (no separate MISSIONS subgroup).
+
+test.describe("Sidebar Mission/Goal UX parity", () => {
+	test("global toolbar exposes 'New Mission' parallel to 'New Goal' @smoke", async ({ page }) => {
+		await waitForHealth();
+		await openApp(page);
+
+		const newGoalBtn = page.locator('[data-new-goal-trigger]').first();
+		const newMissionBtn = page.locator('[data-new-mission-trigger]').first();
+		await expect(newGoalBtn).toBeVisible({ timeout: 15_000 });
+		await expect(newMissionBtn).toBeVisible();
+		await expect(newGoalBtn).toContainText("New Goal");
+		await expect(newMissionBtn).toContainText("New Mission");
+	});
+
+	test("global 'New Mission' button triggers mission flow with single project", async ({ page }) => {
+		await waitForHealth();
+		// Single registered project should bypass the picker and post directly.
+		const rootPath = join(tmpdir(), `bobbit-toolbar-mission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(rootPath, { recursive: true });
+		const projResp = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `toolbar-mission-proj`, rootPath }),
+		});
+		expect(projResp.status).toBe(201);
+		const proj = await projResp.json();
+
+		try {
+			const seenBodies: string[] = [];
+			await page.route("**/api/sessions", async (route, request) => {
+				if (request.method() === "POST") {
+					seenBodies.push(request.postData() || "");
+				}
+				await route.continue();
+			});
+
+			await openApp(page);
+
+			const btn = page.locator('[data-new-mission-trigger]').first();
+			await expect(btn).toBeVisible({ timeout: 15_000 });
+			await btn.click();
+
+			await expect.poll(() => seenBodies.some(b => {
+				try { return JSON.parse(b)?.assistantType === "mission"; } catch { return false; }
+			}), { timeout: 10_000 }).toBeTruthy();
+		} finally {
+			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	test("per-project header has both '+' goal and '+' mission buttons @smoke", async ({ page }) => {
+		await waitForHealth();
+		const rootPath = join(tmpdir(), `bobbit-projhdr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(rootPath, { recursive: true });
+		const projResp = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `projhdr-proj`, rootPath }),
+		});
+		expect(projResp.status).toBe(201);
+		const proj = await projResp.json();
+
+		try {
+			await openApp(page);
+			const goalBtn = page.locator('[data-testid="new-goal-btn"]').first();
+			const missionBtn = page.locator('[data-testid="new-mission-btn"]').first();
+			await expect(goalBtn).toBeVisible({ timeout: 15_000 });
+			await expect(missionBtn).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	test("missions render inline with goals (no MISSIONS subgroup header)", async ({ page }) => {
+		await waitForHealth();
+		const rootPath = join(tmpdir(), `bobbit-inline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(rootPath, { recursive: true });
+		const projResp = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `inline-mission-proj`, rootPath }),
+		});
+		expect(projResp.status).toBe(201);
+		const proj = await projResp.json();
+
+		try {
+			const createResp = await apiFetch("/api/missions", {
+				method: "POST",
+				body: JSON.stringify({
+					projectId: proj.id,
+					title: "Inline mission",
+					spec: "Test inline rendering.",
+				}),
+			});
+			expect([200, 201]).toContain(createResp.status);
+
+			await openApp(page);
+			// The mission row should be visible.
+			const missionGroup = page.locator('[data-testid="mission-group"]').first();
+			await expect(missionGroup).toBeVisible({ timeout: 15_000 });
+			// The redundant MISSIONS subgroup must NOT be present.
+			await expect(page.locator('[data-testid="missions-subgroup"]')).toHaveCount(0);
+		} finally {
+			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+});
