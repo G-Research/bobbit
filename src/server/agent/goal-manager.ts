@@ -5,6 +5,8 @@ import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../sk
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
+import type { Role } from "./role-store.js";
+import { parseAcceptanceCriteria } from "./acceptance-criteria.js";
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -24,6 +26,12 @@ export class GoalManager {
 	private workflowStore?: WorkflowStore;
 	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
 	private _setupsInFlight = new Set<string>();
+	/**
+	 * Per-goal worktree base-branch override, set by createGoal and read by
+	 * _doSetupWorktree. Not persisted — the start-point is only relevant once
+	 * during initial worktree creation.
+	 */
+	private _setupBaseBranch = new Map<string, string>();
 	/**
 	 * Resolver that looks up the worktree pool for this goal's project.
 	 * Wired by the server at startup once SessionManager owns the pools.
@@ -101,12 +109,60 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string }): Promise<PersistedGoal> {
+	async createGoal(title: string, cwd: string, opts?: {
+		spec?: string;
+		workflowId?: string;
+		workflowStore?: WorkflowStore;
+		resolvedWorkflow?: Workflow;
+		sandboxed?: boolean;
+		enabledOptionalSteps?: string[];
+		projectId?: string;
+		// ── nested-goals additions (design §3.1) ──
+		parentGoalId?: string;
+		inlineWorkflow?: Workflow;
+		inlineRoles?: Record<string, Role>;
+		divergencePolicy?: "strict" | "balanced" | "autonomous";
+		maxConcurrentChildren?: number;
+		/** Override base branch for the worktree (defaults to remote primary
+		 *  for top-level goals; to parent.branch for child goals). */
+		baseBranch?: string;
+	}): Promise<PersistedGoal> {
 		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId } = opts ?? {};
+		const { parentGoalId, inlineWorkflow, inlineRoles, divergencePolicy, maxConcurrentChildren, baseBranch } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
 		const id = randomUUID();
+
+		// Resolve parent + invariants (design §3.1).
+		let parent: PersistedGoal | undefined;
+		if (parentGoalId) {
+			parent = this.store.get(parentGoalId);
+			if (!parent) {
+				throw new Error(`Parent goal not found: ${parentGoalId}`);
+			}
+			if (parent.archived) {
+				throw new Error(`Parent goal is archived: ${parentGoalId}`);
+			}
+			// Single-project tree (Decision #12).
+			if (projectId !== undefined && parent.projectId !== undefined && parent.projectId !== projectId) {
+				throw new Error(`Cross-project nesting is not supported (parent project ${parent.projectId} != ${projectId})`);
+			}
+			// Cycle defence — walk ancestor chain. Mathematically impossible at
+			// creation (the new id has no descendants yet) but guard against
+			// corrupt store state where the parent's chain would loop.
+			const ancestors = this.store.getAncestors(parentGoalId);
+			const seen = new Set<string>([parentGoalId]);
+			for (const a of ancestors) {
+				if (seen.has(a.id)) {
+					throw new Error(`Cycle detected in parent chain at goal ${a.id}`);
+				}
+				seen.add(a.id);
+			}
+			if (seen.has(id)) {
+				throw new Error(`Cycle detected: new goal id ${id} appears in parent chain`);
+			}
+		}
 
 		let worktreePath: string | undefined;
 		let branch: string | undefined;
@@ -137,6 +193,10 @@ export class GoalManager {
 			setupStatus = "preparing";
 		}
 
+		// Derive nested-goals fields (design §3.1 step 4 + 5).
+		const rootGoalId = parent ? (parent.rootGoalId ?? parent.id) : id;
+		const mergeTarget: "master" | "parent" = parent ? "parent" : "master";
+
 		const goal: PersistedGoal = {
 			id,
 			title,
@@ -151,7 +211,28 @@ export class GoalManager {
 			team,
 			setupStatus,
 			sandboxed,
+			rootGoalId,
+			mergeTarget,
 		};
+
+		if (parentGoalId) goal.parentGoalId = parentGoalId;
+		if (inlineWorkflow) goal.inlineWorkflow = JSON.parse(JSON.stringify(inlineWorkflow));
+		if (inlineRoles) goal.inlineRoles = JSON.parse(JSON.stringify(inlineRoles));
+		if (divergencePolicy) goal.divergencePolicy = divergencePolicy;
+		if (typeof maxConcurrentChildren === "number") {
+			goal.maxConcurrentChildren = maxConcurrentChildren;
+		}
+		const effectiveBaseBranch = baseBranch ?? parent?.branch;
+		if (effectiveBaseBranch) {
+			// In-memory only — _doSetupWorktree consumes it on first setup.
+			this._setupBaseBranch.set(id, effectiveBaseBranch);
+		}
+
+		// Acceptance-criteria parsed once at creation (design §3.1 step 6).
+		const criteria = parseAcceptanceCriteria(spec);
+		if (criteria.length > 0) {
+			goal.acceptanceCriteria = criteria;
+		}
 
 		if (enabledOptionalSteps?.length) {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
@@ -216,6 +297,7 @@ export class GoalManager {
 			await this._doSetupWorktree(goal);
 		} finally {
 			this._setupsInFlight.delete(goalId);
+			this._setupBaseBranch.delete(goalId);
 		}
 	}
 
@@ -224,10 +306,24 @@ export class GoalManager {
 		// worktreePath (repo root level) and goal.cwd (which may include offset).
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
 
+		// Resolve the per-goal base-branch override (set by createGoal for
+		// children of a parent goal, or via opts.baseBranch). Top-level goals
+		// without an override fall through to createWorktree's default of
+		// `origin/<primary>`.
+		const startPoint = this._setupBaseBranch.get(goal.id);
+
 		// Pool-first (Phase 3): claim a pre-built worktree if one is available.
 		// On success this is observably as fast as session start (~tens of ms).
 		// On failure or empty pool we fall through to the legacy createWorktree path.
-		const pool = this.poolResolver?.();
+		//
+		// Child goals MUST bypass the pool: pool worktrees branch off the project's
+		// primary, but children must branch off the parent's branch HEAD at spawn
+		// time so they observe the parent's commits (design §3.1 step 5, §3.0
+		// invariant 2). The presence of a baseBranch override is a sufficient
+		// signal: createGoal sets it for every child and for any caller-explicit
+		// override. Top-level pool path is unchanged.
+		const skipPool = !!startPoint || !!goal.parentGoalId;
+		const pool = skipPool ? null : this.poolResolver?.();
 		if (pool) {
 			try {
 				const claim = await pool.claim(goal.branch!);
@@ -267,7 +363,10 @@ export class GoalManager {
 				const worktreeRootOverride = goal.projectId && this.worktreeRootResolver
 					? this.worktreeRootResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
-					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride });
+					// Multi-repo passes baseBranch through to createWorktreeSet so all
+					// per-repo worktrees branch off the parent's tip when the goal is
+					// a child (design §3.0 invariant 2).
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, startPoint, { worktreeRoot: worktreeRootOverride });
 					// Per-component setup commands run after the worktree set lands.
 					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
 					try {
@@ -302,7 +401,7 @@ export class GoalManager {
 					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
 					return;
 				}
-				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride });
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint });
 				// Apply the subdirectory offset to the actual worktree path
 				const offsetCwd = preliminaryOffset && preliminaryOffset !== "."
 					? path.join(result.worktreePath, preliminaryOffset)
@@ -332,6 +431,37 @@ export class GoalManager {
 			setupError: String(lastError),
 		});
 		throw lastError;
+	}
+
+	/**
+	 * Resolve the effective divergence policy for a goal by walking up its
+	 * parentGoalId chain. Returns the goal's own value, else the first
+	 * ancestor that defines one, else `"strict"`. Design §1.5.
+	 */
+	resolveDivergencePolicy(goalId: string): "strict" | "balanced" | "autonomous" {
+		const goal = this.store.get(goalId);
+		if (!goal) return "strict";
+		if (goal.divergencePolicy) return goal.divergencePolicy;
+		// getAncestors returns root-first; we want nearest-ancestor-first to
+		// honour "first set value wins" walking up the chain.
+		const ancestors = this.store.getAncestors(goalId).slice().reverse();
+		for (const a of ancestors) {
+			if (a.divergencePolicy) return a.divergencePolicy;
+		}
+		return "strict";
+	}
+
+	/**
+	 * Resolve the root goal's `maxConcurrentChildren`, clamped to [1, 8].
+	 * Default 3. Per design §1.5 only the root's value is honoured in v1
+	 * — sub-goal values are inert. The argument is the **root** goal id;
+	 * callers should pass `goal.rootGoalId ?? goal.id`.
+	 */
+	resolveRootMaxConcurrentChildren(rootGoalId: string): number {
+		const root = this.store.get(rootGoalId);
+		const raw = root?.maxConcurrentChildren;
+		if (typeof raw !== "number" || !Number.isFinite(raw)) return 3;
+		return Math.max(1, Math.min(8, Math.floor(raw)));
 	}
 
 	/**
