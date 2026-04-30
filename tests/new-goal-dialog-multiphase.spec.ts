@@ -225,3 +225,75 @@ Upgrade to embeddings.
 		await expect(page.locator("[data-testid='max-concurrent-slider']")).toHaveValue("3");
 	});
 });
+
+// Child-goal flow (F1) — docs/design/nested-goals.md §10.4. Verifies the
+// dialog rebrands as "Add Child Goal", surfaces a parent banner, defaults
+// the workflow picker to `feature`, and round-trips `parentGoalId` on the
+// resolved result.
+test.describe("New Goal dialog — Add child goal flow", () => {
+	test("opens with parent banner, 'Add Child Goal' header, and feature workflow default", async ({ page }) => {
+		await page.evaluate((projectId) => {
+			const p = (window as any).__showNewGoalDialog({ projectId, parentGoalId: "parent-abc" });
+			(window as any).__dialogPromise = p;
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+
+		// Header rebrands to "Add Child Goal".
+		await expect(page.locator("text=Add Child Goal")).toBeVisible();
+		// Parent context banner is visible and names the parent id.
+		await expect(page.locator("[data-testid='new-goal-parent-banner']")).toBeVisible();
+		await expect(page.locator("[data-testid='new-goal-parent-id']")).toHaveText("parent-abc");
+		// Workflow picker defaults to `feature` (children are usually leaf goals).
+		const wfValue = await page.locator("[data-testid='workflow-picker']").evaluate(
+			(el) => (el as HTMLSelectElement).value,
+		);
+		expect(wfValue).toBe("feature");
+	});
+
+	test("submitting Create round-trips parentGoalId on the result", async ({ page }) => {
+		await page.evaluate((projectId) => {
+			const p = (window as any).__showNewGoalDialog({ projectId, parentGoalId: "parent-xyz" });
+			(window as any).__dialogPromise = p.then((res: any) => {
+				(window as any).__dialogResult = res;
+				return res;
+			});
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+
+		// Title is required for Create to enable. The title @input handler
+		// intentionally does NOT call renderDialog (see dialogs.ts), so we
+		// trigger a re-render by also filling the spec textarea — same
+		// pattern used by inline-workflow-validation.spec.ts.
+		await page.locator("input[placeholder='Goal title']").first().fill("Child task");
+		await page.locator("[data-testid='goal-spec-textarea']").fill("x");
+
+		// Click Create.
+		await page.evaluate(() => {
+			const btns = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
+			for (const b of btns) {
+				if ((b.textContent || "").trim() === "Create") { b.click(); return; }
+			}
+		});
+		await page.waitForFunction(() => (window as any).__dialogResult !== undefined, null, { timeout: 5000 });
+		const result: any = await page.evaluate(() => (window as any).__dialogResult);
+		expect(result).not.toBeNull();
+		expect(result.parentGoalId).toBe("parent-xyz");
+		expect(result.workflowId).toBe("feature");
+		expect(result.title).toBe("Child task");
+	});
+
+	test("top-level (no parentGoalId) keeps legacy 'New Goal' header and 'general' default", async ({ page }) => {
+		await page.evaluate((projectId) => {
+			const p = (window as any).__showNewGoalDialog({ projectId });
+			(window as any).__dialogPromise = p;
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+
+		await expect(page.locator("text=New Goal")).toBeVisible();
+		await expect(page.locator("[data-testid='new-goal-parent-banner']")).toHaveCount(0);
+		const wfValue = await page.locator("[data-testid='workflow-picker']").evaluate(
+			(el) => (el as HTMLSelectElement).value,
+		);
+		expect(wfValue).toBe("general");
+	});
+});

@@ -321,3 +321,99 @@ test.describe("PATCH /api/goals/:id/plan", () => {
 		expect(resp.status).toBe(404);
 	});
 });
+
+// ============================================================================
+// GET /api/goals/:id/plan?gateId= — narrow plan projection (§5.3 / F1)
+// ============================================================================
+
+async function getPlan(goalId: string, gateId?: string): Promise<{ status: number; body: any }> {
+	const qs = gateId ? `?gateId=${encodeURIComponent(gateId)}` : "";
+	const resp = await apiFetch(`/api/goals/${goalId}/plan${qs}`);
+	const json = await resp.json().catch(() => ({}));
+	return { status: resp.status, body: json };
+}
+
+test.describe("GET /api/goals/:id/plan", () => {
+	test.beforeAll(async () => {
+		const pid = await defaultProjectId();
+		expect(pid).toBeTruthy();
+		await seedPlanWorkflows(pid!);
+	});
+
+	test("empty plan returns frozen=false, replanCount=0, planSteps=[]", async () => {
+		const goalId = await createGoal(PLAN_FRESH_WORKFLOW_ID);
+		try {
+			const { status, body } = await getPlan(goalId);
+			expect(status).toBe(200);
+			expect(body.gateId).toBe("execution");
+			expect(body.frozen).toBe(false);
+			expect(body.replanCount).toBe(0);
+			expect(Array.isArray(body.planSteps)).toBe(true);
+			expect(body.planSteps).toHaveLength(0);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("populated plan exposes per-step planId/title/spec/phase/dependsOnPlanIds", async () => {
+		const goalId = await createGoal(PLAN_FRESH_WORKFLOW_ID);
+		try {
+			// PATCH a 3-step plan across two phases (phase 0 + phase 1).
+			const step0 = fakeSubgoalStep("plan-A", "Build API client");
+			const step1 = fakeSubgoalStep("plan-B", "Wire UI");
+			const step2 = fakeSubgoalStep("plan-C", "E2E");
+			(step1 as any).phase = 1;
+			(step1 as any).subgoal.phase = 1;
+			(step2 as any).phase = 1;
+			(step2 as any).subgoal.phase = 1;
+			const patched = await patchPlan(goalId, { planSteps: [step0, step1, step2] });
+			expect(patched.status).toBe(200);
+
+			const { status, body } = await getPlan(goalId);
+			expect(status).toBe(200);
+			expect(body.gateId).toBe("execution");
+			expect(body.frozen).toBe(false);
+			expect(body.planSteps).toHaveLength(3);
+			const byId: Record<string, any> = {};
+			for (const s of body.planSteps) byId[s.planId] = s;
+			expect(byId["plan-A"].title).toBe("Build API client");
+			expect(byId["plan-A"].spec).toBe("Spec for Build API client.");
+			expect(byId["plan-A"].phase).toBe(0);
+			expect(byId["plan-A"].dependsOnPlanIds).toEqual([]);
+			expect(byId["plan-B"].phase).toBe(1);
+			// phase-1 steps depend on every phase-0 step.
+			expect(byId["plan-B"].dependsOnPlanIds).toEqual(["plan-A"]);
+			expect(byId["plan-C"].dependsOnPlanIds).toEqual(["plan-A"]);
+			expect(byId["plan-A"].child).toBeUndefined();
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("frozen workflow surfaces frozen=true", async () => {
+		const goalId = await createGoal(PLAN_FROZEN_WORKFLOW_ID);
+		try {
+			const { status, body } = await getPlan(goalId);
+			expect(status).toBe(200);
+			expect(body.frozen).toBe(true);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("unknown gateId → 404", async () => {
+		const goalId = await createGoal(PLAN_FRESH_WORKFLOW_ID);
+		try {
+			const { status, body } = await getPlan(goalId, "no-such-gate");
+			expect(status).toBe(404);
+			expect(body.error).toContain("no-such-gate");
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("nonexistent goal → 404", async () => {
+		const resp = await apiFetch(`/api/goals/no-such-goal/plan`);
+		expect(resp.status).toBe(404);
+	});
+});

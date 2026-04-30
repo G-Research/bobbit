@@ -848,8 +848,28 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam } = opts ?? {};
+export async function createGoal(
+	title: string,
+	cwd: string,
+	opts?: {
+		spec?: string;
+		workflowId?: string;
+		reattemptOf?: string;
+		sandboxed?: boolean;
+		projectId?: string;
+		enabledOptionalSteps?: string[];
+		autoStartTeam?: boolean;
+		parentGoalId?: string;
+		inlineWorkflow?: Record<string, unknown>;
+		inlineRoles?: Record<string, unknown>;
+		divergencePolicy?: "strict" | "balanced" | "autonomous";
+		maxConcurrentChildren?: number;
+	},
+): Promise<Goal | null> {
+	const {
+		spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam,
+		parentGoalId, inlineWorkflow, inlineRoles, divergencePolicy, maxConcurrentChildren,
+	} = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -858,6 +878,11 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (projectId) body.projectId = projectId;
 		if (enabledOptionalSteps?.length) body.enabledOptionalSteps = enabledOptionalSteps;
 		if (autoStartTeam !== undefined) body.autoStartTeam = autoStartTeam;
+		if (parentGoalId) body.parentGoalId = parentGoalId;
+		if (inlineWorkflow) body.inlineWorkflow = inlineWorkflow;
+		if (inlineRoles) body.inlineRoles = inlineRoles;
+		if (divergencePolicy) body.divergencePolicy = divergencePolicy;
+		if (typeof maxConcurrentChildren === "number") body.maxConcurrentChildren = maxConcurrentChildren;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -909,6 +934,72 @@ export async function deleteGoal(id: string): Promise<void> {
 		await refreshSessions();
 	} catch (err) {
 		showConnectionError("Failed to archive goal", err instanceof Error ? err.message : String(err));
+	}
+}
+
+// ── Goal plan + tree projections (nested-goals §5.3 / §8) ─────────────
+
+export interface GoalPlanStep {
+	planId: string;
+	title: string;
+	spec: string;
+	workflowId?: string;
+	suggestedRole?: string;
+	phase: number;
+	dependsOnPlanIds: string[];
+	child?: {
+		goalId: string;
+		state: "todo" | "in-progress" | "complete" | "shelved";
+		branch?: string;
+		lastVerificationVerdict?: "passed" | "failed" | "running";
+	};
+}
+
+export interface GoalPlanResponse {
+	gateId: string;
+	frozen: boolean;
+	replanCount: number;
+	planSteps: GoalPlanStep[];
+}
+
+/** Fetch the narrow plan projection for a goal's named gate (default `execution`).
+ *  Returns null on any non-200 — callers can show "plan unavailable". */
+export async function getGoalPlan(
+	goalId: string,
+	gateId: string = "execution",
+): Promise<GoalPlanResponse | null> {
+	try {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/plan?gateId=${encodeURIComponent(gateId)}`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
+		return null;
+	}
+}
+
+export interface GoalTreeResponse {
+	goal: Goal;
+	descendants: Goal[];
+	gatesByGoal: Record<string, Array<{
+		gateId: string;
+		goalId: string;
+		status: "pending" | "passed" | "failed";
+		name?: string;
+		dependsOn: string[];
+		signalCount: number;
+		updatedAt: number;
+	}>>;
+}
+
+/** Fetch the broad goal-tree projection (root + all descendants + per-goal
+ *  gate snapshots). See docs/design/nested-goals.md §8. */
+export async function getGoalTree(goalId: string): Promise<GoalTreeResponse | null> {
+	try {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}?include=tree`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
+		return null;
 	}
 }
 

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Children Tab — pure-logic unit tests</title>
+</head>
+<body>
+<script>
+/**
+ * Pure logic extracted from src/app/goal-dashboard.ts::renderChildrenTab
+ * (the F1 task — replace stub with the §10.3 card list). Mirrors the
+ * production helpers byte-for-byte so we can unit-test them without
+ * mounting lit / state / WebSocket plumbing.
+ *
+ * Production source: see `childCurrentGateLabel`, `childLastVerdictLabel`,
+ * `childAgentCount` in src/app/goal-dashboard.ts.
+ */
+
+function childCurrentGateLabel(child) {
+  const wfGates = (child.workflow && child.workflow.gates) || [];
+  if (wfGates.length === 0) return "—";
+  if (child.state === "complete") return "ready-to-merge passed";
+  if (child.state === "shelved") return "shelved";
+  if (child.state === "in-progress") {
+    const last = wfGates[wfGates.length - 1];
+    return (last && last.name) || "in progress";
+  }
+  return "pending";
+}
+
+function childLastVerdictLabel(child) {
+  if (child.state === "complete") return "passed";
+  if (child.state === "shelved") return "failed";
+  if (child.state === "in-progress") return "running";
+  return "—";
+}
+
+/** Count attached agents from the supplied snapshot. Production reads
+ *  state.gatewaySessions; here we accept the array explicitly. */
+function childAgentCount(childId, sessions) {
+  let n = 0;
+  for (const s of sessions) {
+    if (s.goalId === childId || s.teamGoalId === childId) n++;
+  }
+  return n;
+}
+
+function formatChildLastActivity(ts, now) {
+  if (!ts) return "—";
+  const diff = now - ts;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+window.childCurrentGateLabel = childCurrentGateLabel;
+window.childLastVerdictLabel = childLastVerdictLabel;
+window.childAgentCount = childAgentCount;
+window.formatChildLastActivity = formatChildLastActivity;
+</script>
+</body>
+</html>

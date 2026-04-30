@@ -6,11 +6,11 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, approveMutation, rejectMutation, type GateState, type GateSignal } from "./api.js";
-import { countDescendantsFrom } from "./render-helpers.js";
+import { countDescendantsFrom, getChildGoals } from "./render-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
-import { showGoalDialog } from "./dialogs.js";
+import { showGoalDialog, showNewGoalDialogForChild } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 
@@ -2169,13 +2169,127 @@ function renderPlanTab(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: CHILDREN TAB (skeleton — task 4.1)
+// RENDER: CHILDREN TAB — see docs/design/nested-goals.md §10.3
 // ============================================================================
 
-/** Children tab body. 4.1 ships only the skeleton; 4.3 fills in the card
- *  list per docs/design/nested-goals.md §10.3. */
+/** Resolve the human-facing "current gate" label for a child goal. The
+ *  rule (§10.3): show the latest non-passed gate's name, or
+ *  "ready-to-merge passed" if every gate has passed. Falls back to a
+ *  workflow-name string when no gate states are loaded yet. */
+export function childCurrentGateLabel(child: Goal): string {
+	const wfGates = child.workflow?.gates ?? [];
+	if (wfGates.length === 0) return "—";
+	// Walk the workflow gates in declaration order; the first non-passed
+	// is the current frontier. We don't have child-goal GateState in
+	// state.goals here — fall back to the goal's own state field.
+	// When the goal is `complete`, surface "ready-to-merge passed"; when
+	// in-progress, surface the workflow's last gate name as a hint;
+	// otherwise the goal state.
+	if (child.state === "complete") return "ready-to-merge passed";
+	if (child.state === "shelved") return "shelved";
+	if (child.state === "in-progress") {
+		const last = wfGates[wfGates.length - 1];
+		return last?.name || "in progress";
+	}
+	return "pending";
+}
+
+/** Resolve the last verification verdict for a child goal. Looks at the
+ *  most-recent gate signal across the child's workflow gates; "—" when
+ *  unknown. The child's gate state isn't usually loaded into the parent's
+ *  state, so this is best-effort — returns the running/passed/failed
+ *  badge derived from the goal record alone. */
+export function childLastVerdictLabel(child: Goal): "passed" | "failed" | "running" | "—" {
+	if (child.state === "complete") return "passed";
+	if (child.state === "shelved") return "failed";
+	if (child.state === "in-progress") return "running";
+	return "—";
+}
+
+/** Count team agents (non-archived sessions) attached to the child goal. */
+export function childAgentCount(childId: string): number {
+	let n = 0;
+	for (const s of state.gatewaySessions) {
+		if (s.goalId === childId || s.teamGoalId === childId) n++;
+	}
+	return n;
+}
+
+/** Format the child's last activity as a relative timestamp.
+ *  Local helper — the existing `formatRelativeTime` higher in the file
+ *  takes a string-or-number commit timestamp and is wired into git
+ *  status; this variant accepts `number | undefined` and avoids
+ *  collisions. */
+function formatChildLastActivity(ts: number | undefined): string {
+	if (!ts) return "—";
+	const diff = Date.now() - ts;
+	if (diff < 60_000) return "just now";
+	if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+	if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+	return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+/** Children tab body — a list of clickable cards per docs/design/nested-goals.md §10.3. */
 function renderChildrenTab(): TemplateResult {
-	return html`<div class="tab-panel-inner" data-testid="children-tab-stub"><p>Children tab — coming in 4.3</p></div>`;
+	const goal = currentGoal;
+	if (!goal) return html`<div class="tab-empty">No goal loaded.</div>`;
+	const children = getChildGoals(goal.id);
+
+	const onAddChild = () => {
+		showNewGoalDialogForChild({
+			parentGoalId: goal.id,
+			projectId: goal.projectId,
+		});
+	};
+
+	return html`
+		<div class="tab-panel-inner" data-testid="children-tab">
+			<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
+				<div style="font-size:13px;color:var(--muted-foreground);">
+					${children.length === 0
+						? html`<span data-testid="children-tab-empty">No children yet.</span>`
+						: html`${children.length} child goal${children.length === 1 ? "" : "s"}`}
+				</div>
+				<button
+					class="btn-secondary"
+					data-testid="add-child-goal-btn"
+					@click=${onAddChild}>
+					+ Add child goal
+				</button>
+			</div>
+			${children.length === 0 ? nothing : html`
+				<div class="children-tab" data-testid="children-tab-list" style="display:flex;flex-direction:column;gap:8px;">
+					${children.map(c => {
+						const gateLabel = childCurrentGateLabel(c);
+						const verdict = childLastVerdictLabel(c);
+						const agentCount = childAgentCount(c.id);
+						const lastActivity = formatChildLastActivity(c.updatedAt ?? c.createdAt);
+						return html`
+							<div
+								class="child-card"
+								data-testid="child-card"
+								role="button"
+								tabindex="0"
+								style="cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:10px 12px;background:var(--background);display:flex;flex-direction:column;gap:6px;"
+								@click=${() => setHashRoute("goal-dashboard", c.id)}
+								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setHashRoute("goal-dashboard", c.id); } }}>
+								<div class="child-title" data-testid="child-card-title" style="font-weight:500;color:var(--foreground);">${c.title}</div>
+								<div class="child-meta" style="display:flex;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--muted-foreground);">
+									<span data-testid="child-card-gate">Gate: ${gateLabel}</span>
+									<span>·</span>
+									<span data-testid="child-card-verdict">Last verdict: ${verdict}</span>
+									<span>·</span>
+									<span data-testid="child-card-agents">${agentCount} agent${agentCount === 1 ? "" : "s"}</span>
+									<span>·</span>
+									<span data-testid="child-card-activity">${lastActivity}</span>
+								</div>
+							</div>
+						`;
+					})}
+				</div>
+			`}
+		</div>
+	`;
 }
 
 // ============================================================================
