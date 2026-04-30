@@ -50,7 +50,6 @@ const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "general", label: "General" },
 	{ id: "project", label: "Commands" },
 	{ id: "components", label: "Components" },
-	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
 	{ id: "appearance", label: "Appearance" },
 ];
@@ -2295,7 +2294,7 @@ function renderProjectScopeTab(projectId: string) {
 	// canonical editor for component build/test commands. Showing them here would create
 	// two competing UIs. Migration auto-folds them into components[0].commands.{build,test,...}.
 	const HIDDEN_KEYS = new Set([
-		"default_thinking_level", "sandbox", "sandbox_image",
+		"sandbox", "sandbox_image",
 		"sandbox_tokens", "sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts",
 		"worktree_pool_size",
 		"config_directories", "skill_directories",
@@ -2905,21 +2904,6 @@ function renderProjectComponentsTab(projectId: string) {
 	`;
 }
 
-function renderProjectScopeModelsTab(_projectId: string) {
-	// For now, show a simplified models view indicating inheritance from system
-	return html`
-		<div class="flex flex-col gap-4">
-			<p class="text-sm text-muted-foreground">
-				Model preferences for this project. Currently inherits all settings from System.
-			</p>
-			<p class="text-xs text-muted-foreground">
-				Per-project model overrides will be available in a future update. Configure models in
-				<button class="text-primary hover:underline" @click=${() => setHashRoute("settings", "system/models", true)}>System &rarr; Models</button>.
-			</p>
-		</div>
-	`;
-}
-
 function renderProjectScopeDirectoriesTab(_projectId: string) {
 	return renderDirectoriesTab();
 }
@@ -3524,7 +3508,6 @@ export function renderSettingsPage() {
 						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
 						${currentTab === "project" ? renderProjectScopeTab(currentScope) : ""}
 						${currentTab === "components" ? renderProjectComponentsTab(currentScope) : ""}
-						${currentTab === "models" ? renderProjectScopeModelsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
 					` : html`
 						${currentTab === "general" ? renderGeneralTab() : ""}

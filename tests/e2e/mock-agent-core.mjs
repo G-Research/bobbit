@@ -142,6 +142,7 @@ export class MockAgentCore {
 					test_command: "npm test",
 					typecheck_command: "npm run check",
 					worktree_setup_command: "npm ci",
+					qa_start_command: "npm run dev",
 				},
 				output: "Project proposal submitted.",
 			};

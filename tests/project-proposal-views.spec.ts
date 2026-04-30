@@ -87,70 +87,26 @@ test("workflowsView renders one card per workflow with gate count", async ({ pag
 	await expect(page.locator('[data-testid="workflow-card-quick-fix"]')).toHaveCount(1);
 	// Gate nodes for the feature flow (3 gates).
 	await expect(page.locator('[data-testid="workflow-card-feature"] [data-testid^="gate-node-"]')).toHaveCount(3);
-	// Step badges by type.
-	await expect(page.locator('[data-testid="step-badge-llm-review"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="step-badge-command"]')).toHaveCount(2);
-	// Depends-on annotation — scope to feature card (quick-fix also has an `implementation` gate id).
-	await expect(page.locator('[data-testid="workflow-card-feature"] [data-testid="gate-node-implementation"]')).toContainText("depends on design-doc");
-	// Ralph-loop description surfaces on the impl gate.
-	await expect(page.locator('[data-testid="workflow-card-feature"] [data-testid="gate-node-implementation"]')).toContainText("Ralph loop");
+	// Depends-on pill on the impl gate references its upstream gate id.
+	await expect(page.locator('[data-testid="workflow-card-feature"] [data-testid="gate-node-implementation"]')).toContainText("design-doc");
 });
 
-test("diffView shows added / changed / removed sections for components and workflows", async ({ page }) => {
+test("viewTabs renders Components / Workflows / Settings", async ({ page }) => {
 	await page.evaluate(() => {
-		const prev = {
-			components: [{ name: "api", repo: "." }, { name: "old", repo: "old" }],
-			workflows: {
-				general: { id: "general", gates: [{ id: "design-doc" }, { id: "implementation" }] },
-				removed: { id: "removed", gates: [] },
-			},
-		};
-		const cur = {
-			components: [
-				{ name: "api", repo: ".", commands: { build: "npm run build" } }, // changed
-				{ name: "docs", repo: "docs" },                                    // added
-			],
-			workflows: {
-				general: { id: "general", gates: [{ id: "design-doc" }, { id: "implementation" }, { id: "ready-to-merge" }] }, // gate added
-				feature: { id: "feature", gates: [] }, // workflow added
-			},
-		};
-		const tpl = (window as any).diffView(prev, cur);
-		(window as any).renderInto("host", tpl);
-	});
-
-	// Components: 1 added (docs), 1 changed (api), 1 removed (old).
-	await expect(page.locator('[data-testid="diff-component-added"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="diff-component-changed"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="diff-component-removed"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="diff-component-added"]')).toContainText("docs");
-	await expect(page.locator('[data-testid="diff-component-removed"]')).toContainText("old");
-
-	// Workflows: 1 added (feature), 1 changed (general gate added), 1 removed (removed).
-	await expect(page.locator('[data-testid="diff-workflow-added"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="diff-workflow-changed"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="diff-workflow-removed"]')).toHaveCount(1);
-	await expect(page.locator('[data-testid="diff-workflow-added"]')).toContainText("feature");
-	await expect(page.locator('[data-testid="diff-workflow-removed"]')).toContainText("removed");
-	// Changed workflow expansion mentions the new gate id.
-	await expect(page.locator('[data-testid="diff-workflow-changed"]')).toContainText("ready-to-merge");
-});
-
-test("diffView empty state when previous is null", async ({ page }) => {
-	await page.evaluate(() => {
-		const tpl = (window as any).diffView(null, { components: [], workflows: {} });
-		(window as any).renderInto("host", tpl);
-	});
-	await expect(page.locator('[data-testid="diff-empty"]')).toContainText("first proposal");
-});
-
-test("viewTabs disables the Diff tab when no diff is available", async ({ page }) => {
-	await page.evaluate(() => {
-		const tpl = (window as any).viewTabs("components", () => {}, false);
+		const tpl = (window as any).viewTabs("components", () => {}, {});
 		(window as any).renderInto("host", tpl);
 	});
 	await expect(page.locator('[data-testid="view-tab-components"]')).toHaveCount(1);
 	await expect(page.locator('[data-testid="view-tab-workflows"]')).toHaveCount(1);
-	const diffDisabled = await page.locator('[data-testid="view-tab-diff"]').isDisabled();
-	expect(diffDisabled).toBe(true);
+	await expect(page.locator('[data-testid="view-tab-settings"]')).toHaveCount(1);
+	await expect(page.locator('[data-testid="view-tab-diff"]')).toHaveCount(0);
+});
+
+test("viewTabs renders count badges next to Components and Workflows", async ({ page }) => {
+	await page.evaluate(() => {
+		const tpl = (window as any).viewTabs("components", () => {}, { components: 3, workflows: 2 });
+		(window as any).renderInto("host", tpl);
+	});
+	await expect(page.locator('[data-testid="view-tab-count-components"]')).toContainText("3");
+	await expect(page.locator('[data-testid="view-tab-count-workflows"]')).toContainText("2");
 });

@@ -27,7 +27,7 @@ You populate these by calling \`propose_setup\` with the appropriate \`action\` 
 ## propose_setup tool parameters
 
 Call \`propose_setup\` with these parameters:
-- **action** (required): One of "stack", "commands", "system-prompt", "models"
+- **action** (required): One of "stack", "commands", "system-prompt"
 - **language**: (optional, for action "stack") Detected programming language
 - **framework**: (optional, for action "stack") Detected framework
 - **testing**: (optional, for action "stack") Detected testing framework
@@ -37,9 +37,6 @@ Call \`propose_setup\` with these parameters:
 - **test_unit_command**: (optional, for action "commands") Unit test command
 - **test_e2e_command**: (optional, for action "commands") E2E test command
 - **content**: (optional, for action "system-prompt") Markdown content for the project-specific system prompt
-- **session_model**: (optional, for action "models") Default session model
-- **review_model**: (optional, for action "models") Default review model
-- **naming_model**: (optional, for action "models") Default naming model
 
 ### 1. Stack detection — call after exploring the project:
 
@@ -52,10 +49,6 @@ Call \`propose_setup\` with action "commands" and the detected command fields. O
 ### 3. System prompt context — the project-specific markdown to append:
 
 Call \`propose_setup\` with action "system-prompt" and a \`content\` field containing the markdown.
-
-### 4. Models (optional — only if the user specifically asks):
-
-Call \`propose_setup\` with action "models" and the model fields.
 
 ## Workflow
 

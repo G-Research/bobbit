@@ -59,20 +59,32 @@ export interface ProposalWorkflow {
 	gates: ProposalGate[];
 }
 
-export type ViewMode = "components" | "workflows" | "diff";
+export type ViewMode = "components" | "workflows" | "settings";
 
 // ---------------------------------------------------------------------------
 // Tab nav
 // ---------------------------------------------------------------------------
 
-export function viewTabs(active: ViewMode, onChange: (m: ViewMode) => void, hasDiff: boolean): TemplateResult {
-	const tab = (mode: ViewMode, label: string, enabled = true) => {
+export interface ViewTabCounts {
+	components?: number;
+	workflows?: number;
+}
+
+export function viewTabs(
+	active: ViewMode,
+	onChange: (m: ViewMode) => void,
+	counts: ViewTabCounts = {},
+): TemplateResult {
+	const tab = (mode: ViewMode, label: string, count: number | undefined, enabled = true) => {
 		const isActive = active === mode;
 		const cls = [
-			"px-3 py-1.5 text-xs font-medium border-b-2 transition-colors select-none",
+			"flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium border-b-2 transition-colors select-none whitespace-nowrap",
 			isActive ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
 			enabled ? "cursor-pointer" : "opacity-40 cursor-not-allowed",
 		].join(" ");
+		const badgeCls = isActive
+			? "text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium"
+			: "text-[10px] px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground font-medium";
 		return html`
 			<button
 				type="button"
@@ -80,14 +92,17 @@ export function viewTabs(active: ViewMode, onChange: (m: ViewMode) => void, hasD
 				class=${cls}
 				?disabled=${!enabled}
 				@click=${() => { if (enabled) onChange(mode); }}
-			>${label}</button>
+			>
+				<span>${label}</span>
+				${typeof count === "number" ? html`<span class=${badgeCls} data-testid="view-tab-count-${mode}">${count}</span>` : ""}
+			</button>
 		`;
 	};
 	return html`
-		<div class="flex gap-1 px-5 border-b border-border shrink-0" role="tablist">
-			${tab("components", "Components")}
-			${tab("workflows", "Workflows")}
-			${tab("diff", "Diff", hasDiff)}
+		<div class="flex border-b border-border shrink-0 overflow-x-auto" role="tablist">
+			${tab("components", "Components", counts.components)}
+			${tab("workflows", "Workflows", counts.workflows)}
+			${tab("settings", "Settings", undefined)}
 		</div>
 	`;
 }
@@ -101,49 +116,76 @@ export function componentsView(components: ProposalComponent[]): TemplateResult 
 		return html`<div class="text-sm text-muted-foreground italic">No components proposed.</div>`;
 	}
 	return html`
-		<div class="flex flex-col gap-3">
-			${components.map(c => componentCard(c))}
+		<div class="wf-list">
+			${components.map(c => componentRow(c))}
 		</div>
 	`;
 }
 
-function componentCard(c: ProposalComponent): TemplateResult {
+function componentRow(c: ProposalComponent): TemplateResult {
 	const cmds = c.commands ? Object.entries(c.commands) : [];
 	const dataOnly = cmds.length === 0;
 	const componentId = `comp-${c.name}`;
+	// Path summary in the collapsed row: omit `.` (uninformative for single-repo).
+	const summaryParts: string[] = [];
+	if (c.repo && c.repo !== ".") summaryParts.push(c.repo);
+	if (c.relative_path) summaryParts.push(c.relative_path);
+	const pathSummary = summaryParts.join(" / ");
 	return html`
-		<div
+		<details
 			id=${componentId}
 			data-testid="component-card-${c.name}"
-			class="rounded-md border border-border bg-card p-3 flex flex-col gap-2"
+			class="wf-proposal-workflow"
 		>
-			<div class="flex items-center gap-2">
-				<span class="font-medium text-sm">${c.name}</span>
-				${dataOnly
-					? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground" data-testid="data-only-badge">data-only</span>`
-					: html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">${cmds.length} cmd${cmds.length === 1 ? "" : "s"}</span>`
-				}
-			</div>
-			${c.repo ? html`<div class="text-xs text-muted-foreground font-mono">repo: ${c.repo}</div>` : ""}
-			${c.relative_path ? html`<div class="text-xs text-muted-foreground font-mono">path: ${c.relative_path}</div>` : ""}
-			${cmds.length > 0 ? html`
-				<div class="flex flex-wrap gap-1">
-					${cmds.map(([name, cmd]) => html`
-						<span
-							id=${`comp-cmd-${c.name}-${name}`}
-							class="text-[11px] px-1.5 py-0.5 rounded bg-secondary font-mono"
-							title=${cmd}
-						>${name}</span>
-					`)}
+			<summary class="wf-row" style="list-style:none;">
+				<div class="wf-row-info">
+					<span class="wf-row-name">${c.name}</span>
+					${pathSummary ? html`<span class="wf-row-desc" style="font-family:var(--font-mono,monospace);">${pathSummary}</span>` : ""}
 				</div>
-			` : ""}
-			${c.worktree_setup_command ? html`
-				<details class="mt-1">
-					<summary class="text-[11px] text-muted-foreground cursor-pointer select-none">worktree setup</summary>
-					<pre class="text-[11px] mt-1 p-2 rounded bg-secondary/40 overflow-x-auto"><code>${c.worktree_setup_command}</code></pre>
-				</details>
-			` : ""}
-		</div>
+				<div class="wf-row-badges">
+					${dataOnly
+						? html`<span class="wf-badge" data-testid="data-only-badge">data-only</span>`
+						: html`<span class="wf-badge">${cmds.length} cmd${cmds.length === 1 ? "" : "s"}</span>`
+					}
+					${c.worktree_setup_command ? html`<span class="wf-badge">setup</span>` : ""}
+				</div>
+			</summary>
+			<div class="wf-proposal-gates">
+				<div class="wf-gate-card" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+					${c.repo ? html`
+						<div class="flex items-baseline gap-2">
+							<span class="text-[11px] text-muted-foreground" style="min-width:110px;">Git repo</span>
+							<span class="text-[12px] font-mono">${c.repo === "." ? html`<span class="text-muted-foreground">. (project root)</span>` : c.repo}</span>
+						</div>
+					` : ""}
+					${c.relative_path ? html`
+						<div class="flex items-baseline gap-2">
+							<span class="text-[11px] text-muted-foreground" style="min-width:110px;">Component path</span>
+							<span class="text-[12px] font-mono">${c.relative_path}</span>
+						</div>
+					` : ""}
+					${cmds.length > 0 ? html`
+						<div>
+							<div class="text-[11px] text-muted-foreground mb-1.5">Commands</div>
+							<div class="flex flex-col gap-1.5">
+								${cmds.map(([name, cmd]) => html`
+									<div class="flex items-baseline gap-2" id=${`comp-cmd-${c.name}-${name}`}>
+										<span class="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium font-mono" style="min-width:60px;text-align:center;flex-shrink:0;">${name}</span>
+										<code class="text-[12px] font-mono break-all">${cmd}</code>
+									</div>
+								`)}
+							</div>
+						</div>
+					` : ""}
+					${c.worktree_setup_command ? html`
+						<div>
+							<div class="text-[11px] text-muted-foreground mb-1.5">Worktree setup</div>
+							<pre class="text-[11px] m-0 p-2 rounded bg-secondary/40 overflow-x-auto"><code>${c.worktree_setup_command}</code></pre>
+						</div>
+					` : ""}
+				</div>
+			</div>
+		</details>
 	`;
 }
 
@@ -161,28 +203,28 @@ export function workflowsView(
 	}
 	const componentNames = new Set(components.map(c => c.name));
 	return html`
-		<div class="flex flex-col gap-3">
-			${ids.map(id => workflowCard(id, workflows[id], componentNames))}
+		<div class="wf-list">
+			${ids.map(id => workflowRow(id, workflows[id], componentNames))}
 		</div>
 	`;
 }
 
-function workflowCard(id: string, wf: ProposalWorkflow, componentNames: Set<string>): TemplateResult {
+function workflowRow(id: string, wf: ProposalWorkflow, componentNames: Set<string>): TemplateResult {
 	const gates = wf.gates ?? [];
 	const stepCount = gates.reduce((acc, g) => acc + (g.verify?.length ?? 0), 0);
 	return html`
-		<details
-			open
-			data-testid="workflow-card-${id}"
-			class="rounded-md border border-border bg-card"
-		>
-			<summary class="px-3 py-2 cursor-pointer select-none flex items-center gap-2">
-				<span class="font-medium text-sm">${wf.name ?? id}</span>
-				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">${gates.length} gate${gates.length === 1 ? "" : "s"}</span>
-				<span class="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">${stepCount} step${stepCount === 1 ? "" : "s"}</span>
+		<details data-testid="workflow-card-${id}" class="wf-proposal-workflow">
+			<summary class="wf-row" style="list-style:none;">
+				<div class="wf-row-info">
+					<span class="wf-row-name">${wf.name ?? id}</span>
+					${wf.description ? html`<span class="wf-row-desc">${wf.description}</span>` : ""}
+				</div>
+				<div class="wf-row-badges">
+					<span class="wf-badge">${gates.length} gate${gates.length === 1 ? "" : "s"}</span>
+					<span class="wf-badge">${stepCount} step${stepCount === 1 ? "" : "s"}</span>
+				</div>
 			</summary>
-			${wf.description ? html`<div class="px-3 pb-2 text-xs text-muted-foreground">${wf.description}</div>` : ""}
-			<div class="px-3 pb-3">${gateList(gates, componentNames)}</div>
+			<div class="wf-proposal-gates">${gateList(gates, componentNames)}</div>
 		</details>
 	`;
 }
@@ -217,220 +259,125 @@ function topoRows(gates: ProposalGate[]): ProposalGate[][] {
 
 function gateList(gates: ProposalGate[], componentNames: Set<string>): TemplateResult {
 	const rows = topoRows(gates);
+	let idx = 0;
 	return html`
 		<div class="flex flex-col gap-2">
 			${rows.map((row, rowIdx) => html`
 				<div class="flex flex-col gap-2" data-row-index=${rowIdx}>
-					${row.map(g => gateNode(g, componentNames))}
+					${row.map(g => gateNode(g, componentNames, idx++))}
 				</div>
 			`)}
 		</div>
 	`;
 }
 
-function gateNode(g: ProposalGate, componentNames: Set<string>): TemplateResult {
+function gateNode(g: ProposalGate, componentNames: Set<string>, idx: number): TemplateResult {
 	const deps = g.depends_on ?? [];
 	const steps = g.verify ?? [];
+	// Group verify steps by phase (default 0), preserving insertion order within each phase.
+	const byPhase = new Map<number, ProposalVerifyStep[]>();
+	for (const s of steps) {
+		const p = typeof s.phase === "number" ? s.phase : 0;
+		if (!byPhase.has(p)) byPhase.set(p, []);
+		byPhase.get(p)!.push(s);
+	}
+	const phases = Array.from(byPhase.keys()).sort((a, b) => a - b);
 	return html`
-		<div
+		<details
 			data-testid="gate-node-${g.id}"
 			data-gate-id=${g.id}
-			class="rounded border border-border bg-secondary/20 p-2 flex flex-col gap-1"
+			class="wf-gate-card"
 		>
-			<div class="flex items-center gap-2 flex-wrap">
-				<span class="font-medium text-xs">${g.name ?? g.id}</span>
-				<span class="text-[10px] font-mono text-muted-foreground">${g.id}</span>
-				${g.content ? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">content</span>` : ""}
-				${deps.length > 0 ? html`<span class="text-[10px] text-muted-foreground">↑ depends on ${deps.join(", ")}</span>` : ""}
+			<summary class="wf-gate-header" style="list-style:none;cursor:pointer;">
+				<span class="wf-gate-idx">${idx + 1}</span>
+				<span class="wf-gate-chevron">▸</span>
+				<span class="wf-gate-name">${g.name ?? g.id}</span>
+				${g.content ? html`<span class="wf-gate-pill">content</span>` : ""}
+				${deps.length > 0 ? html`<span class="wf-gate-pill">← ${deps.join(", ")}</span>` : ""}
+				${steps.length > 0 ? html`<span class="wf-gate-pill">${steps.length} step${steps.length === 1 ? "" : "s"}</span>` : ""}
+			</summary>
+			<div class="wf-gate-body">
+				<div class="wf-gate-body-inner">
+					<div class="text-[11px] font-mono text-muted-foreground">${g.id}</div>
+					${g.description ? html`<div class="text-[12px] text-muted-foreground">${g.description}</div>` : ""}
+					${steps.length > 0 ? html`
+						<div class="flex flex-col gap-2">
+							${phases.map(phase => html`
+								<div class="wf-phase-group">
+									<div class="wf-phase-header"><span>Phase ${phase}</span></div>
+									<div class="wf-phase-body">
+										${(byPhase.get(phase) ?? []).map(s => stepCard(s, componentNames))}
+									</div>
+								</div>
+							`)}
+						</div>
+					` : ""}
+				</div>
 			</div>
-			${g.description ? html`<div class="text-[11px] text-muted-foreground italic">${g.description}</div>` : ""}
-			${steps.length > 0 ? html`
-				<ul class="flex flex-col gap-1 mt-1">
-					${steps.map(s => html`<li>${stepBadge(s, componentNames)}</li>`)}
-				</ul>
-			` : ""}
-		</div>
+		</details>
 	`;
 }
 
-function stepBadge(step: ProposalVerifyStep, componentNames: Set<string>): TemplateResult {
+function stepCard(step: ProposalVerifyStep, componentNames: Set<string>): TemplateResult {
 	const type = step.type ?? "command";
-	const phase = typeof step.phase === "number" ? step.phase : null;
 	const isFailure = step.expect === "failure";
-	const colorClass = type === "llm-review"
-		? "bg-purple-500/15 text-purple-700 dark:text-purple-300"
-		: type === "agent-qa"
-		? "bg-blue-500/15 text-blue-700 dark:text-blue-300"
-		: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300";
+	return html`
+		<details class="wf-vstep-card">
+			<summary class="wf-vstep-collapsed-header" style="list-style:none;">
+				<span class="wf-vstep-chevron">▸</span>
+				<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
+				<span class="wf-vstep-sep">·</span>
+				<span class="wf-vstep-type-label">${type}</span>
+				${step.optional ? html`<span class="wf-gate-pill">optional</span>` : ""}
+				${isFailure ? html`<span class="wf-gate-pill" style="background:rgb(239 68 68 / 0.15);color:rgb(185 28 28);">must fail</span>` : ""}
+				<span class="wf-vstep-spacer"></span>
+			</summary>
+			<div class="wf-vstep-body"><div class="wf-vstep-fields">
+				${stepDetails(step, type, componentNames)}
+			</div></div>
+		</details>
+	`;
+}
 
-	let body: TemplateResult | string = "";
+function stepDetails(step: ProposalVerifyStep, type: string, componentNames: Set<string>): TemplateResult {
 	if (type === "command") {
 		if (step.component && step.command) {
 			const known = componentNames.has(step.component);
-			body = html`<span
-				class=${`text-[11px] font-mono ${known ? "underline decoration-dotted cursor-pointer" : ""}`}
-				data-link-comp=${step.component}
-				@click=${() => {
-					if (!known) return;
-					const el = document.getElementById(`comp-${step.component}`);
-					el?.scrollIntoView({ behavior: "smooth", block: "center" });
-				}}
-			>${step.component} → ${step.command}</span>`;
-		} else if (step.run) {
-			body = html`<code class="text-[11px] font-mono">${step.run}</code>`;
-		} else {
-			body = html`<span class="text-[11px] text-muted-foreground italic">(no command)</span>`;
+			return html`
+				<div class="text-[11px] text-muted-foreground">Component command</div>
+				<div class="text-[12px] font-mono">
+					<span class=${known ? "text-foreground" : "text-amber-600"}>${step.component}</span>
+					<span class="text-muted-foreground"> → </span>
+					<span class="text-foreground">${step.command}</span>
+				</div>
+				${!known ? html`<div class="text-[11px] text-amber-600">unknown component</div>` : ""}
+			`;
 		}
-	} else if (type === "llm-review") {
-		const promptPreview = (step.prompt ?? "").slice(0, 60);
-		body = html`
-			<span class="text-[11px]">
-				${step.role ? html`<span class="font-mono">${step.role}</span>` : ""}
-				${promptPreview ? html`<span class="text-muted-foreground"> — ${promptPreview}${(step.prompt ?? "").length > 60 ? "…" : ""}</span>` : ""}
-			</span>`;
-	} else if (type === "agent-qa") {
-		body = html`<span class="text-[11px]">${step.optional ? "opt-in" : ""}</span>`;
-	}
-
-	return html`
-		<span class="inline-flex items-center gap-1.5 flex-wrap">
-			<span
-				data-testid="step-badge-${type}"
-				class=${`text-[10px] px-1.5 py-0.5 rounded ${colorClass} font-medium`}
-			>${type}</span>
-			${phase != null ? html`<span class="text-[10px] text-muted-foreground">phase ${phase}</span>` : ""}
-			${isFailure ? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-700 dark:text-red-300 font-medium">must fail</span>` : ""}
-			<span class="text-[11px]">${step.name ?? ""}</span>
-			${body}
-		</span>
-	`;
-}
-
-// ---------------------------------------------------------------------------
-// Diff view
-// ---------------------------------------------------------------------------
-
-interface ComponentDiff {
-	added: ProposalComponent[];
-	removed: ProposalComponent[];
-	changed: { name: string; before: ProposalComponent; after: ProposalComponent }[];
-}
-
-interface WorkflowDiffEntry {
-	id: string;
-	addedGates: string[];
-	removedGates: string[];
-	changedGates: string[];
-}
-
-interface WorkflowDiff {
-	added: string[];
-	removed: string[];
-	changed: WorkflowDiffEntry[];
-}
-
-function diffComponents(prev: ProposalComponent[], cur: ProposalComponent[]): ComponentDiff {
-	const prevByName = new Map(prev.map(c => [c.name, c]));
-	const curByName = new Map(cur.map(c => [c.name, c]));
-	const added: ProposalComponent[] = [];
-	const removed: ProposalComponent[] = [];
-	const changed: { name: string; before: ProposalComponent; after: ProposalComponent }[] = [];
-	for (const c of cur) {
-		if (!prevByName.has(c.name)) added.push(c);
-		else if (JSON.stringify(prevByName.get(c.name)) !== JSON.stringify(c)) {
-			changed.push({ name: c.name, before: prevByName.get(c.name)!, after: c });
+		if (step.run) {
+			return html`
+				<div class="text-[11px] text-muted-foreground">Inline command</div>
+				<pre class="text-[11px] p-2 rounded bg-secondary/40 overflow-x-auto m-0"><code>${step.run}</code></pre>
+			`;
 		}
+		return html`<div class="text-[11px] text-muted-foreground italic">No command configured.</div>`;
 	}
-	for (const c of prev) if (!curByName.has(c.name)) removed.push(c);
-	return { added, removed, changed };
+	if (type === "llm-review") {
+		return html`
+			${step.role ? html`<div class="text-[11px]"><span class="text-muted-foreground">Role:</span> <span class="font-mono">${step.role}</span></div>` : ""}
+			${step.prompt ? html`<div>
+				<div class="text-[11px] text-muted-foreground mb-1">Prompt</div>
+				<pre class="text-[11px] p-2 rounded bg-secondary/40 overflow-x-auto whitespace-pre-wrap m-0">${step.prompt}</pre>
+			</div>` : html`<div class="text-[11px] text-muted-foreground italic">(default review prompt)</div>`}
+		`;
+	}
+	if (type === "agent-qa") {
+		return html`
+			${step.role ? html`<div class="text-[11px]"><span class="text-muted-foreground">Role:</span> <span class="font-mono">${step.role}</span></div>` : ""}
+			${step.label ? html`<div class="text-[11px]"><span class="text-muted-foreground">Label:</span> ${step.label}</div>` : ""}
+			${step.description ? html`<div class="text-[11px] text-muted-foreground">${step.description}</div>` : ""}
+		`;
+	}
+	return html``;
 }
 
-function diffWorkflows(prev: Record<string, ProposalWorkflow>, cur: Record<string, ProposalWorkflow>): WorkflowDiff {
-	const prevIds = new Set(Object.keys(prev));
-	const curIds = new Set(Object.keys(cur));
-	const added: string[] = [];
-	const removed: string[] = [];
-	const changed: WorkflowDiffEntry[] = [];
-	for (const id of curIds) {
-		if (!prevIds.has(id)) added.push(id);
-		else {
-			const p = prev[id];
-			const c = cur[id];
-			if (JSON.stringify(p) !== JSON.stringify(c)) {
-				const prevGates = new Map((p.gates ?? []).map(g => [g.id, g]));
-				const curGates = new Map((c.gates ?? []).map(g => [g.id, g]));
-				const addedGates: string[] = [];
-				const removedGates: string[] = [];
-				const changedGates: string[] = [];
-				for (const [gid, g] of curGates) {
-					if (!prevGates.has(gid)) addedGates.push(gid);
-					else if (JSON.stringify(prevGates.get(gid)) !== JSON.stringify(g)) changedGates.push(gid);
-				}
-				for (const gid of prevGates.keys()) if (!curGates.has(gid)) removedGates.push(gid);
-				changed.push({ id, addedGates, removedGates, changedGates });
-			}
-		}
-	}
-	for (const id of prevIds) if (!curIds.has(id)) removed.push(id);
-	return { added, removed, changed };
-}
 
-export function diffView(
-	previous: { components: ProposalComponent[]; workflows: Record<string, ProposalWorkflow> } | null,
-	current: { components: ProposalComponent[]; workflows: Record<string, ProposalWorkflow> },
-): TemplateResult {
-	if (!previous) {
-		return html`<div class="text-sm text-muted-foreground italic" data-testid="diff-empty">No diff (first proposal).</div>`;
-	}
-	const cd = diffComponents(previous.components, current.components);
-	const wd = diffWorkflows(previous.workflows, current.workflows);
-
-	return html`
-		<div class="flex flex-col gap-4">
-			<section data-testid="diff-components-section" class="flex flex-col gap-2">
-				<h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-					Components
-					<span class="ml-2 font-normal">
-						<span class="text-emerald-600">+${cd.added.length}</span>
-						<span class="text-amber-600 ml-1">~${cd.changed.length}</span>
-						<span class="text-red-600 ml-1">-${cd.removed.length}</span>
-					</span>
-				</h3>
-				${cd.added.length === 0 && cd.changed.length === 0 && cd.removed.length === 0
-					? html`<div class="text-xs text-muted-foreground italic">No component changes.</div>`
-					: html`
-						${cd.added.map(c => html`<div data-testid="diff-component-added" class="text-xs px-2 py-1 rounded bg-emerald-500/10 text-emerald-800 dark:text-emerald-300">+ ${c.name}</div>`)}
-						${cd.changed.map(c => html`<div data-testid="diff-component-changed" class="text-xs px-2 py-1 rounded bg-amber-500/10 text-amber-800 dark:text-amber-300">~ ${c.name}</div>`)}
-						${cd.removed.map(c => html`<div data-testid="diff-component-removed" class="text-xs px-2 py-1 rounded bg-red-500/10 text-red-800 dark:text-red-300">- ${c.name}</div>`)}
-					`}
-			</section>
-
-			<section data-testid="diff-workflows-section" class="flex flex-col gap-2">
-				<h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-					Workflows
-					<span class="ml-2 font-normal">
-						<span class="text-emerald-600">+${wd.added.length}</span>
-						<span class="text-amber-600 ml-1">~${wd.changed.length}</span>
-						<span class="text-red-600 ml-1">-${wd.removed.length}</span>
-					</span>
-				</h3>
-				${wd.added.length === 0 && wd.changed.length === 0 && wd.removed.length === 0
-					? html`<div class="text-xs text-muted-foreground italic">No workflow changes.</div>`
-					: html`
-						${wd.added.map(id => html`<div data-testid="diff-workflow-added" class="text-xs px-2 py-1 rounded bg-emerald-500/10 text-emerald-800 dark:text-emerald-300">+ ${id}</div>`)}
-						${wd.changed.map(entry => html`
-							<details data-testid="diff-workflow-changed" class="text-xs rounded bg-amber-500/10 text-amber-800 dark:text-amber-300">
-								<summary class="px-2 py-1 cursor-pointer select-none">~ ${entry.id}</summary>
-								<div class="px-3 py-1 flex flex-col gap-0.5">
-									${entry.addedGates.map(g => html`<div>+ gate ${g}</div>`)}
-									${entry.changedGates.map(g => html`<div>~ gate ${g}</div>`)}
-									${entry.removedGates.map(g => html`<div>- gate ${g}</div>`)}
-								</div>
-							</details>
-						`)}
-						${wd.removed.map(id => html`<div data-testid="diff-workflow-removed" class="text-xs px-2 py-1 rounded bg-red-500/10 text-red-800 dark:text-red-300">- ${id}</div>`)}
-					`}
-			</section>
-		</div>
-	`;
-}

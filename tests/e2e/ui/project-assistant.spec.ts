@@ -114,9 +114,12 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		await sendMessage(page, "PROJECT_PROPOSAL");
 		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
 
-		// Verify form fields are present
-		await expect(page.getByText("Project Name").first()).toBeVisible();
-		await expect(page.getByText("Root Path").first()).toBeVisible();
+		// Verify form fields are present — Project Name + Root Path live in the
+		// Settings tab of the proposal panel (Components is the default tab).
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await panel.locator('[data-testid="view-tab-settings"]').click();
+		await expect(panel.getByText("Project Name").first()).toBeVisible();
+		await expect(panel.getByText("Root Path").first()).toBeVisible();
 
 		// Click Accept
 		await page.getByText("Accept Project").first().click();

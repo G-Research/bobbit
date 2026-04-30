@@ -28,7 +28,46 @@ theme-toggle button {
 [data-mobile-header] agent-interface .overflow-y-auto > .max-w-5xl {
 	padding-top: var(--mobile-header-height, 60px) !important; /* header + breathing room */
 }
-[data-mobile-header] .goal-preview-panel > .overflow-y-auto {
+/* Project-proposal Workflows tab: read-only renders that reuse workflow-page
+ * styles. The list view uses .wf-row and the gate cards use .wf-gate-card,
+ * but those are <details>/<summary> here (vs. JS toggle on workflow-page).
+ * Patch the chevron rotation to use the native [open] attribute, and hide
+ * the default disclosure marker. */
+details.wf-gate-card[open] > summary .wf-gate-chevron {
+	transform: rotate(90deg);
+}
+details.wf-gate-card[open] > .wf-gate-body {
+	max-height: none;
+}
+details.wf-vstep-card[open] > summary .wf-vstep-chevron {
+	transform: rotate(90deg);
+}
+details.wf-vstep-card[open] > .wf-vstep-body {
+	max-height: none;
+}
+details.wf-vstep-card > summary::-webkit-details-marker { display: none; }
+details.wf-gate-card > summary::-webkit-details-marker,
+details.wf-proposal-workflow > summary::-webkit-details-marker {
+	display: none;
+}
+details.wf-proposal-workflow {
+	margin-bottom: 8px;
+}
+details.wf-proposal-workflow .wf-proposal-gates {
+	padding: 6px 0 0 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+/* Mobile: the fixed app-header overlays the top of #app-main. The chat
+ * scroll area handles this with its own padding-top rule above. The
+ * goal-preview-panel can have its own internal sticky header + tab strip
+ * (e.g. project proposal: name/path header + Components/Workflows/Settings
+ * tabs) sitting *above* its inner scroll, so padding the inner scroll alone
+ * leaves the panel's chrome hidden under the app-header. Push the whole
+ * panel down instead. */
+[data-mobile-header] .goal-preview-panel {
 	padding-top: var(--mobile-header-height, 60px) !important;
 }
 

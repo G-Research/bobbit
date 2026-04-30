@@ -171,13 +171,6 @@ export const state = {
 		 *  provisional:true (existing assistant flow). Registered = any other
 		 *  project (regular/goal/staff session pointing at a live project). */
 		mode?: "provisional" | "registered";
-		/** Current project snapshot + registry fields, loaded lazily after the
-		 *  panel mounts. `undefined` = not fetched yet (panel shows skeleton). */
-		currentConfig?: {
-			name: string;
-			rootPath: string;
-			config: Record<string, string>;
-		};
 	},
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */

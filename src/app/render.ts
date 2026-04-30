@@ -37,7 +37,7 @@ import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
-import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, diffView as projectDiffView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
+import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -1792,39 +1792,47 @@ function workflowPreviewPanel() {
 	`;
 }
 
-/** Editable field set rendered by projectProposalPanel's diff view.
- *  Legacy *_command keys remain in the list because back-compat proposal payloads
- *  still emit them; the server folds them into the default component on accept.
- *  The Components tab is the canonical editor for ongoing edits. */
+/** Editable scalars shown in the proposal panel's Settings tab.
+ *  Components are the canonical home for build/test/typecheck/setup commands —
+ *  those legacy keys are still accepted on the wire (back-compat) but hidden
+ *  from this panel to avoid duplication. They render via the Components tab. */
+const PROJECT_LEGACY_COMMAND_KEYS = new Set([
+	"build_command",
+	"test_command",
+	"typecheck_command",
+	"test_unit_command",
+	"test_e2e_command",
+	"worktree_setup_command",
+]);
+/** Native-YAML structured fields. Stored as objects/arrays/numbers, not
+ *  strings — the panel has no inline editor for them, so we hide them rather
+ *  than render `[object Object]`. They round-trip via the wire format on
+ *  accept (PUT /api/projects/:id/config) without panel involvement. */
+const PROJECT_STRUCTURED_FIELD_KEYS = new Set([
+	"config_directories",
+	"qa_env",
+	"sandbox_tokens",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+	"components",
+	"workflows",
+]);
 const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 	{ key: "name", label: "Project Name" },
-	{ key: "build_command", label: "Build Command (legacy)" },
-	{ key: "test_command", label: "Test Command (legacy)" },
-	{ key: "typecheck_command", label: "Type Check Command (legacy)" },
-	{ key: "test_unit_command", label: "Unit Test Command (legacy)" },
-	{ key: "test_e2e_command", label: "E2E Test Command (legacy)" },
-	{ key: "worktree_setup_command", label: "Worktree Setup Command (legacy)" },
 	{ key: "qa_start_command", label: "QA Start Command" },
-	{ key: "sandbox", label: "Sandbox" },
-	{ key: "session_model", label: "Session Model" },
-	{ key: "review_model", label: "Review Model" },
-	{ key: "naming_model", label: "Naming Model" },
+	{ key: "qa_build_command", label: "QA Build Command" },
+	{ key: "qa_health_check", label: "QA Health Check URL" },
+	{ key: "qa_browser_entry", label: "QA Browser Entry URL" },
+	{ key: "worktree_root", label: "Worktree Root" },
+	{ key: "worktree_pool_size", label: "Worktree Pool Size" },
 ];
 
-// Module-level state for the project proposal panel's three-tab UI.
+// Module-level state for the project proposal panel's tab UI.
 let _projectProposalView: ProjectViewMode = "components";
-let _projectProposalPrev: { components: ProposalComponent[]; workflows: Record<string, ProposalWorkflow> } | null = null;
-
-/** Capture a snapshot of the current proposal as the "previous" baseline for the
- *  diff view. Called by session-manager.ts before clearing an accepted proposal. */
-export function setProjectProposalPrev(snap: { components: ProposalComponent[]; workflows: Record<string, ProposalWorkflow> } | null): void {
-	_projectProposalPrev = snap;
-}
 
 /** Reset module-level proposal panel state. Called on session disconnect. */
 export function resetProjectProposalPanel(): void {
 	_projectProposalView = "components";
-	_projectProposalPrev = null;
 }
 
 function projectProposalPanel() {
@@ -1836,7 +1844,7 @@ function projectProposalPanel() {
 
 	if (!proposal) {
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal">
+			<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
 					Waiting for project analysis…
 				</div>
@@ -1863,28 +1871,16 @@ function projectProposalPanel() {
 		}
 	}
 	const mode = proposal.mode ?? "provisional";
-	const current = proposal.currentConfig;
 	const isRegistered = mode === "registered";
-	const loading = isRegistered && !current;
 
-	/** Get the current value for a given key (for diff comparison). */
-	const currentValueFor = (key: string): string => {
-		if (!current) return "";
-		if (key === "name") return current.name ?? "";
-		return current.config?.[key] ?? "";
-	};
-
-	/** Build union of keys to render: known editable + proposal fields + current config keys. */
+	/** Build union of keys to render: known editable + proposal fields. */
 	const knownKeys = new Set(PROJECT_EDITABLE_FIELDS.map(f => f.key));
 	const extraKeys: string[] = [];
 	for (const k of Object.keys(fields)) {
 		if (k === "root_path") continue;
+		if (PROJECT_LEGACY_COMMAND_KEYS.has(k)) continue;
+		if (PROJECT_STRUCTURED_FIELD_KEYS.has(k)) continue;
 		if (!knownKeys.has(k)) extraKeys.push(k);
-	}
-	if (current) {
-		for (const k of Object.keys(current.config || {})) {
-			if (!knownKeys.has(k) && !extraKeys.includes(k)) extraKeys.push(k);
-		}
 	}
 
 	const handleAccept = async () => {
@@ -1910,115 +1906,76 @@ function projectProposalPanel() {
 		renderApp();
 	};
 
-	const renderRow = (key: string, label: string, readOnly = false) => {
+	/** Per-field placeholders — concrete examples, not just the key name repeated. */
+	const PLACEHOLDERS: Record<string, string> = {
+		name: "my-project",
+		qa_start_command: "PORT=$PORT WORK_DIR=$WORK_DIR npm start",
+		qa_build_command: "npm run build",
+		qa_health_check: "http://127.0.0.1:$PORT/api/health",
+		qa_browser_entry: "http://127.0.0.1:$PORT/?token=$TOKEN",
+		worktree_root: "C:\\Users\\me\\my-project-wt   (default: <root>-wt)",
+		worktree_pool_size: "2",
+	};
+
+	const renderRow = (key: string, label: string) => {
 		const proposed = fields[key] ?? "";
-		const cur = currentValueFor(key);
-		const changed = isRegistered && current != null && proposed !== cur;
-		if (readOnly) {
-			return html`
-				<div data-field=${key}>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
-					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${proposed}>
-						${proposed || "—"}
-					</div>
-				</div>
-			`;
-		}
+		const placeholder = PLACEHOLDERS[key] ?? "";
+		const inputType = key === "worktree_pool_size" ? "number" : "text";
 		return html`
-			<div data-field=${key} data-changed=${changed ? "true" : "false"}>
-				<div class="flex items-center gap-2 mb-1.5">
-					<label class="text-xs text-muted-foreground block font-medium">${label}</label>
-					${changed ? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-400 font-medium" data-testid="changed-badge">Changed</span>` : ""}
-				</div>
-				${isRegistered && current != null ? html`
-					<div class="text-[11px] text-muted-foreground mb-1 font-mono truncate" title=${cur}>current: ${cur || "(unset)"}</div>
-				` : ""}
+			<div data-field=${key}>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
 				${Input({
-					type: "text",
+					type: inputType,
 					value: proposed,
-					placeholder: key === "name" ? "Project name" : `e.g. ${key}`,
+					placeholder,
 					onInput: (e: Event) => onFieldInput(key, (e.target as HTMLInputElement).value),
 				})}
 			</div>
 		`;
 	};
 
-	// Partition editable fields into changed vs unchanged (registered mode only).
-	const changedKeys: string[] = [];
-	const unchangedKeys: string[] = [];
-	for (const { key } of PROJECT_EDITABLE_FIELDS) {
-		const proposed = fields[key] ?? "";
-		const cur = currentValueFor(key);
-		if (isRegistered && current != null && proposed === cur) unchangedKeys.push(key);
-		else changedKeys.push(key);
-	}
-	for (const key of extraKeys) {
-		const proposed = fields[key] ?? "";
-		const cur = currentValueFor(key);
-		if (isRegistered && current != null && proposed === cur) unchangedKeys.push(key);
-		else changedKeys.push(key);
-	}
-
+	const settingsKeys: string[] = PROJECT_EDITABLE_FIELDS.map(f => f.key).concat(extraKeys);
 	const labelFor = (key: string): string => {
 		const known = PROJECT_EDITABLE_FIELDS.find(f => f.key === key);
 		return known?.label ?? key;
 	};
 
-	const diffCount = isRegistered && current != null ? changedKeys.filter(k => {
-		const proposed = fields[k] ?? "";
-		return proposed !== currentValueFor(k);
-	}).length : 0;
+	const acceptLabel = isRegistered ? "Apply Changes" : "Accept Project";
+	const acceptDisabled = !fields.name?.trim();
 
-	const acceptLabel = isRegistered
-		? (diffCount > 0 ? `Apply Changes (${diffCount})` : "Apply Changes")
-		: "Accept Project";
-
-	const acceptDisabled = !fields.name?.trim() || (isRegistered && diffCount === 0);
-
-	const hasDiff = _projectProposalPrev != null;
 	const activeView = _projectProposalView;
 	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
 
-	const legacyFieldsBlock = html`
-		<div class="shrink-0 px-5 py-3 border-t border-border max-h-[45vh] overflow-y-auto" data-testid="legacy-fields-group">
-			<div class="text-xs text-muted-foreground mb-3 font-medium">Project-level fields</div>
-			<div class="flex flex-col gap-4">
-				${loading ? html`<div class="text-sm text-muted-foreground" data-testid="loading-current-config">Loading current config…</div>` : ""}
-				${renderRow("name", "Project Name")}
-				<div data-field="root_path" data-readonly="true">
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
-					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || current?.rootPath || ""}>
-						${fields.root_path || current?.rootPath || "—"}
-					</div>
+	const settingsView = html`
+		<div data-testid="settings-view" class="flex flex-col gap-4">
+			${renderRow("name", "Project Name")}
+			<div data-field="root_path" data-readonly="true">
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
+				<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || ""}>
+					${fields.root_path || "—"}
 				</div>
-				${changedKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
-				${isRegistered && unchangedKeys.length > 0 ? html`
-					<details data-testid="unchanged-group">
-						<summary class="text-xs text-muted-foreground cursor-pointer select-none py-1">No changes (${unchangedKeys.length} fields)</summary>
-						<div class="flex flex-col gap-4 mt-3 pl-2">
-							${unchangedKeys.map(k => renderRow(k, labelFor(k)))}
-						</div>
-					</details>
-				` : ""}
 			</div>
+			${settingsKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
 		</div>
 	`;
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal" data-mode=${mode}>
-			<div class="shrink-0 px-5 pt-4 pb-2 flex flex-col gap-1">
-				<div class="text-sm font-medium">${fields.name || "(unnamed project)"}</div>
-				<div class="text-[11px] text-muted-foreground font-mono truncate" title=${fields.root_path || current?.rootPath || ""}>${fields.root_path || current?.rootPath || ""}</div>
+		<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-mode=${mode}>
+			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
+				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
+				<div class="text-[11px] text-muted-foreground font-mono truncate min-w-0" title=${fields.root_path || ""}>${fields.root_path || ""}</div>
 			</div>
-			${projectViewTabs(activeView, onView, hasDiff)}
+			${projectViewTabs(activeView, onView, {
+				components: structuredComponents.length,
+				workflows: Object.keys(structuredWorkflows).length,
+			})}
 			<div ${ref(projectOuterScrollRef)} class="flex-1 overflow-y-auto p-5 ${streaming ? STREAMING_BORDER : ""}">
 				${activeView === "components"
 					? projectComponentsView(structuredComponents)
 					: activeView === "workflows"
 					? projectWorkflowsView(structuredWorkflows, structuredComponents)
-					: projectDiffView(_projectProposalPrev, { components: structuredComponents, workflows: structuredWorkflows })}
+					: settingsView}
 			</div>
-			${legacyFieldsBlock}
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${streaming ? streamingBadge() : ""}
 				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}

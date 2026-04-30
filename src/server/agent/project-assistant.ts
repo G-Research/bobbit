@@ -171,7 +171,8 @@ Call the \`propose_project\` tool with:
 - **components**: array — one entry per repo or build target. **REQUIRED**.
 - **workflows**: inline workflow definitions keyed by id (\`general\`, \`feature\`, \`bug-fix\`, \`quick-fix\`, plus any custom flows). The server will seed defaults if you omit this; you only need to provide \`workflows\` when the project genuinely needs custom gates.
 - **worktree_root**: optional override for the worktree parent directory.
-- **qa_start_command** / **sandbox** / **session_model** / **review_model** / **naming_model**: optional project-level fields (unchanged).
+- **qa_start_command** / **qa_build_command** / **qa_health_check** / **qa_browser_entry**: optional QA harness configuration.
+- **worktree_root** / **worktree_pool_size**: optional worktree directory + pre-built pool size.
 
 ### Components
 
@@ -271,7 +272,7 @@ Call \`propose_project\` with:
 - **root_path**: absolute path
 - **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, worktree_setup_command? }\`.
 - **workflows**: optional. Server seeds defaults (general/feature/bug-fix/quick-fix) targeting the default component if you omit this.
-- **qa_start_command**, **sandbox**, **session_model** / **review_model** / **naming_model**: optional project-level fields.
+- **qa_start_command**, **qa_build_command**, **qa_health_check**, **qa_browser_entry**, **worktree_root**, **worktree_pool_size**: optional project-level fields.
 
 Legacy top-level \`build_command\` / \`test_command\` / \`typecheck_command\` / \`test_unit_command\` / \`test_e2e_command\` / \`worktree_setup_command\` are still accepted for back-compat and folded into a default component server-side, but **prefer the explicit \`components\` shape**.
 

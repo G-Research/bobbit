@@ -354,7 +354,7 @@ export interface SessionManagerOptions {
 	groupPolicyStore?: ToolGroupPolicyStore;
 	/** Preferences store for aigw auto-model detection */
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
-	/** Project config store for reading project defaults (e.g. default_thinking_level) */
+	/** Project config store for reading project defaults */
 	projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	/** Project context manager for per-project store resolution */
 	projectContextManager?: ProjectContextManager;
@@ -3051,7 +3051,7 @@ export class SessionManager {
 		}
 	}
 
-	/** Apply default_thinking_level from preferences (per-model) or project config (legacy). */
+	/** Apply default thinking level from preferences (per-model). */
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
 		// 0. Role override (highest non-explicit precedence). Failure is non-fatal
 		// — matches the existing thinking-level fallback behaviour.
@@ -3067,13 +3067,10 @@ export class SessionManager {
 			}
 		}
 
-		// Prefer per-model thinking preference, fall back to project config, then "medium"
+		// Use the per-model thinking preference (system-scope), default to "medium".
 		let level: string | undefined;
 		if (this.preferencesStore) {
 			level = this.preferencesStore.get("default.sessionThinkingLevel") as string | undefined;
-		}
-		if (!level && this.projectConfigStore) {
-			level = this.projectConfigStore.get("default_thinking_level");
 		}
 		// Default to "medium" when not configured — matches the Settings page
 		// display default and ensures team/delegate agents get an explicit level

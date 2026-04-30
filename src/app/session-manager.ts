@@ -1170,7 +1170,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const project = state.projects.find(p => p.id === session?.projectId);
 			const mode: "provisional" | "registered" = project?.provisional ? "provisional" : "registered";
 			const isFirstProposal = state.activeProjectProposal == null;
-			const prevCurrent = state.activeProjectProposal?.currentConfig;
 			// Bug C fix: shallow-merge structured side-tables (`components`,
 			// `workflows`) so a streaming partial that lacks one of them doesn't
 			// drop the prior structured value. Incoming flat fields still win.
@@ -1178,7 +1177,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const merged: Record<string, unknown> = { ...prevFields, ...fields };
 			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
 			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
-			state.activeProjectProposal = { sessionId, fields: merged, mode, currentConfig: prevCurrent };
+			state.activeProjectProposal = { sessionId, fields: merged, mode };
 			state.assistantHasProposal = true;
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				if (state.assistantTab === "chat" && !isDesktop()) {
@@ -1190,10 +1189,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
 				localStorage.removeItem(collapseKey);
 				if (!isDesktop()) state.previewPanelTab = "project";
-			}
-			// Lazy-load current config snapshot for registered-mode diff view.
-			if (mode === "registered" && session?.projectId && !prevCurrent) {
-				void loadCurrentProjectConfig(session.projectId, sessionId);
 			}
 			saveProjectDraft(sessionId);
 			renderApp();
@@ -1751,29 +1746,6 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // PROJECT PROPOSAL ACCEPTANCE
 // ============================================================================
 
-/** Lazily fetch current project registry + config and stash into activeProjectProposal.
- *  Exported so tests and render can trigger a refresh. */
-export async function loadCurrentProjectConfig(projectId: string, sessionId: string): Promise<void> {
-	const { gatewayFetch } = await import("./api.js");
-	try {
-		const [cfgRes, projRes] = await Promise.all([
-			gatewayFetch(`/api/projects/${projectId}/config`),
-			gatewayFetch(`/api/projects/${projectId}`),
-		]);
-		if (!cfgRes.ok || !projRes.ok) return;
-		const config = await cfgRes.json();
-		const proj = await projRes.json();
-		if (state.activeProjectProposal?.sessionId !== sessionId) return; // stale
-		state.activeProjectProposal.currentConfig = {
-			name: proj.name || "",
-			rootPath: proj.rootPath || proj.root_path || "",
-			config: (config && typeof config === "object") ? config : {},
-		};
-		saveProjectDraft(sessionId);
-		renderApp();
-	} catch { /* ignore */ }
-}
-
 export async function acceptProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
@@ -1787,7 +1759,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
 	const { fields, sessionId: propSessionId } = proposal;
-	captureProposalSnapshotForDiff(fields);
 
 	// Find the provisional project for this session
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
@@ -1867,41 +1838,22 @@ function safeParseJson(text: string): unknown {
 	try { return JSON.parse(text); } catch { return undefined; }
 }
 
-/** Snapshot the structured `components` / `workflows` from the about-to-be-cleared
- *  proposal so the next proposal's diff view has a baseline. */
-function captureProposalSnapshotForDiff(fields: Record<string, unknown>): void {
-	void (async () => {
-		try {
-			const { setProjectProposalPrev } = await import("./render.js");
-			const rawComponents = fields.components;
-			const rawWorkflows = fields.workflows;
-			const components = Array.isArray(rawComponents) ? (rawComponents as unknown[]).map(c => ({ ...(c as Record<string, unknown>) })) as any : [];
-			const workflows = (rawWorkflows && typeof rawWorkflows === "object" && !Array.isArray(rawWorkflows))
-				? JSON.parse(JSON.stringify(rawWorkflows))
-				: {};
-			setProjectProposalPrev({ components, workflows });
-		} catch { /* render module not loaded yet — fine */ }
-	})();
-}
-
-/** Registered-mode accept: apply diffed config fields to the live project
- *  without terminating or navigating away. */
+/** Registered-mode accept: apply the proposal's full config payload to the
+ *  live project without terminating or navigating away. The server diffs
+ *  against persisted state — we just send everything the proposal carries. */
 async function acceptRegisteredProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
-	const { fields, sessionId: propSessionId, currentConfig } = proposal;
-	captureProposalSnapshotForDiff(fields);
+	const { fields, sessionId: propSessionId } = proposal;
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
 	const projectId = session?.projectId;
 	if (!projectId) return;
 
 	const { gatewayFetch, fetchProjects } = await import("./api.js");
-	const currentName = currentConfig?.name ?? "";
-	const currentCfg = currentConfig?.config ?? {};
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 
-	// 1. Rename via PUT /api/projects/:id if name changed.
-	if (fieldNameStr && fieldNameStr !== currentName) {
+	// 1. Rename via PUT /api/projects/:id if a name is supplied.
+	if (fieldNameStr) {
 		try {
 			await gatewayFetch(`/api/projects/${projectId}`, {
 				method: "PUT",
@@ -1912,32 +1864,20 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 		}
 	}
 
-	// 2. Compute config diff — only fields that differ from currentConfig.config.
-	//    root_path never sent. name handled above. `components` and `workflows`
-	//    flow through as structured (non-string) fields when the proposal
-	//    carries them (Phase 4b — multi-repo proposals).
+	// 2. Send all proposal fields to the config endpoint. Server diffs against
+	//    persisted state; empty/null values are skipped client-side. Native-YAML
+	//    migrated fields ride through as structured payloads (server rejects
+	//    JSON-encoded strings) — parse if the agent supplied them as a string.
 	const diff: Record<string, unknown> = {};
-	// Native-YAML migrated fields ride through as structured payloads (server
-	// rejects JSON-encoded strings). If the agent supplied them as a string
-	// (e.g. via legacy tool invocation), parse before sending.
-	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios"]);
+	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios", "components", "workflows"]);
 	for (const [k, v] of Object.entries(fields)) {
 		if (k === "name" || k === "root_path") continue;
-		if (k === "components" || k === "workflows") {
-			// Always re-send structured fields when present — server diffs
-			// against persisted state, and we don't currently snapshot the
-			// structured side-tables in `currentConfig.config`.
-			if (v !== undefined && v !== null && v !== "") {
-				diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
-			}
-			continue;
-		}
+		if (v === undefined || v === null || v === "") continue;
 		if (NATIVE_FIELDS.has(k)) {
-			if (v === undefined || v === null || v === "") continue;
 			diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
-			continue;
+		} else {
+			diff[k] = v;
 		}
-		if ((currentCfg[k as string] ?? "") !== v) diff[k] = v;
 	}
 	if (Object.keys(diff).length > 0) {
 		try {

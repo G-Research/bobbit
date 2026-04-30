@@ -51,26 +51,19 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		// The panel renders with data-panel="project-proposal" in registered mode.
 		const panel = page.locator('[data-panel="project-proposal"]').first();
 		await expect(panel).toBeVisible({ timeout: 10_000 });
-		// Wait until registered-mode current-config lookup has completed
-		// (mode attribute is "registered" and loading placeholder cleared).
 		await expect(panel).toHaveAttribute("data-mode", "registered", { timeout: 10_000 });
-		await expect(panel.locator('[data-testid="loading-current-config"]')).toHaveCount(0, { timeout: 10_000 });
 
 		// Structured-tabs accessibility: the three view tabs must be present
-		// and clickable. Diff tab is enabled-or-disabled depending on whether
-		// a previous snapshot exists; we just assert it's present in the DOM.
+		// and clickable. Settings tab carries scalar field edits.
 		await expect(panel.locator('[data-testid="view-tab-components"]')).toBeVisible({ timeout: 5_000 });
 		await expect(panel.locator('[data-testid="view-tab-workflows"]')).toBeVisible();
-		await expect(panel.locator('[data-testid="view-tab-diff"]')).toBeVisible();
-		// Components and Workflows tabs are clickable.
+		await expect(panel.locator('[data-testid="view-tab-settings"]')).toBeVisible();
+		// All three tabs are clickable.
 		await panel.locator('[data-testid="view-tab-workflows"]').click();
 		await panel.locator('[data-testid="view-tab-components"]').click();
+		await panel.locator('[data-testid="view-tab-settings"]').click();
 
-		// At least one Changed badge should be visible (build_command changes
-		// from baseline-build -> npm run build, test_command changes too).
-		await expect(panel.locator('[data-testid="changed-badge"]').first()).toBeVisible({ timeout: 5_000 });
-
-		// The accept button should be labeled "Apply Changes" (with count).
+		// The accept button should be labeled "Apply Changes" (registered mode).
 		const acceptLabel = panel.locator('[data-testid="accept-label"]').first();
 		await expect(acceptLabel).toContainText("Apply Changes", { timeout: 5_000 });
 
