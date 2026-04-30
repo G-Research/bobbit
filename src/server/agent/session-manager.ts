@@ -2811,6 +2811,42 @@ export class SessionManager {
 	}
 
 	/**
+	 * Wait for a session to enter the streaming state.
+	 * Returns immediately if already streaming.
+	 * Rejects on timeout (callers typically `.catch(() => {})` to fall through).
+	 *
+	 * Symmetric to `waitForIdle` — used after dispatching a prompt to a resumed
+	 * session that is currently idle, so the caller can confirm the new turn
+	 * has actually started before racing against `waitForIdle` again.
+	 */
+	waitForStreaming(sessionId: string, timeoutMs = 10_000): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) return Promise.reject(new Error("Session not found"));
+		if (session.status === "streaming") return Promise.resolve();
+
+		return new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				unsub();
+				reject(new Error(`Timeout waiting for session ${sessionId} to start streaming`));
+			}, timeoutMs);
+
+			const unsub = session.rpcClient.onEvent((event: any) => {
+				if (event.type === "agent_start") {
+					clearTimeout(timer);
+					unsub();
+					resolve();
+				}
+				if (event.type === "process_exit") {
+					clearTimeout(timer);
+					unsub();
+					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
+				}
+			});
+		});
+	}
+
+	/**
 	 * Get the final assistant output from a session's messages.
 	 */
 	async getSessionOutput(sessionId: string): Promise<string> {
