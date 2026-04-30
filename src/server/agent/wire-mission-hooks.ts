@@ -29,6 +29,17 @@ export interface MissionHookSessionManager {
 export type MissionHookBroadcast = (msg: any) => void;
 
 /**
+ * Subset of `TeamManager` + `GoalManager` needed to drive a mission-spawned
+ * child goal's worktree setup + team-lead session start. Server passes in
+ * closures over the real instances; tests can pass mocks. When omitted,
+ * mission children are created but no team-lead spawns — they sit in `todo`.
+ */
+export interface MissionHookTeamStarter {
+	setupWorktreeAndStartTeam(goalId: string, startTeamFn: () => Promise<any>): Promise<void>;
+	startTeamForGoal(goalId: string): Promise<unknown>;
+}
+
+/**
  * Wire mission hooks. Safe to call repeatedly on the same context.
  * Replaces any previous hooks; preserves search-index hooks via chaining.
  */
@@ -36,6 +47,7 @@ export function wireMissionHooks(
 	ctx: ProjectContext | null | undefined,
 	sessionManager: MissionHookSessionManager,
 	broadcastToAll: MissionHookBroadcast,
+	teamStarter?: MissionHookTeamStarter,
 ): void {
 	if (!ctx) return;
 	const pc = ctx;
@@ -78,6 +90,32 @@ export function wireMissionHooks(
 				console.error(`[mission] tickMission(${goal.missionId}) failed:`, err));
 		}
 	};
+
+	// Wire team-lead startup for mission-spawned child goals. Without this
+	// the goal sits at `state: todo` with `teamLeadSessionId: null` forever.
+	// Idempotent — setTeamStarter just overwrites the deps fields.
+	if (teamStarter) {
+		pc.missionManager.setTeamStarter({
+			setupWorktreeAndStartTeam: teamStarter.setupWorktreeAndStartTeam.bind(teamStarter),
+			startTeamForGoal: teamStarter.startTeamForGoal.bind(teamStarter),
+			onChildTeamStarted: (goalId) => {
+				try { broadcastToAll({ type: "goal_setup_complete", goalId }); } catch (err) {
+					console.warn(`[mission] broadcast goal_setup_complete(${goalId}) failed:`, err);
+				}
+			},
+			onChildTeamStartFailed: (goalId, err) => {
+				try {
+					broadcastToAll({
+						type: "goal_setup_error",
+						goalId,
+						error: err.message ?? String(err),
+					});
+				} catch (cbErr) {
+					console.warn(`[mission] broadcast goal_setup_error(${goalId}) failed:`, cbErr);
+				}
+			},
+		});
+	}
 
 	pc.missionScheduler.setWakeCommander(async (sessionId, message) => {
 		try {

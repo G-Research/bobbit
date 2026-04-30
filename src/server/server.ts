@@ -572,8 +572,9 @@ function wireProjectContextHooksImpl(
 	ctx: ReturnType<ProjectContextManager["getOrCreate"]>,
 	sessionManager: { enqueuePrompt: (id: string, text: string, opts?: { isSteered?: boolean }) => Promise<void> | void },
 	broadcastToAll: (msg: any) => void,
+	teamStarter?: import("./agent/wire-mission-hooks.js").MissionHookTeamStarter,
 ): void {
-	wireMissionHooks(ctx, sessionManager, broadcastToAll);
+	wireMissionHooks(ctx, sessionManager, broadcastToAll, teamStarter);
 }
 
 export function createGateway(config: GatewayConfig) {
@@ -666,8 +667,14 @@ export function createGateway(config: GatewayConfig) {
 	// previously-blocking precondition for child spawning. Lives at module
 	// scope (see `wireProjectContextHooksImpl`) so handleApiRoute can call it
 	// when registering new projects.
+	// `teamStarter` closes over the (yet-to-be-constructed) teamManager via
+	// `targetGoalManager.setupWorktreeAndStartTeam` — we have to defer the
+	// reference because TeamManager is built a few lines below. Wire-in
+	// happens immediately after construction (see the
+	// `setMissionTeamStarter()` call below).
+	let pendingTeamStarter: import("./agent/wire-mission-hooks.js").MissionHookTeamStarter | undefined;
 	const wireProjectContextHooks = (ctx: ReturnType<typeof projectContextManager.getOrCreate>): void => {
-		wireProjectContextHooksImpl(ctx, sessionManager, broadcastToAll);
+		wireProjectContextHooksImpl(ctx, sessionManager, broadcastToAll, pendingTeamStarter);
 	};
 	for (const ctx of projectContextManager.all()) {
 		wireProjectContextHooks(ctx);
@@ -705,6 +712,26 @@ export function createGateway(config: GatewayConfig) {
 		projectContextManager,
 		toolManager,
 	});
+
+	// Mission-spawned child goals need a team-lead session, just like
+	// standalone goals (see POST /api/goals → setupWorktreeAndStartTeam).
+	// Without this wiring, mission child goals sit at `state: todo` with
+	// `teamLeadSessionId: null` forever. We resolve the per-project
+	// goalManager via the goal's owning context so worktree paths/configs
+	// are correct.
+	pendingTeamStarter = {
+		setupWorktreeAndStartTeam: async (goalId: string, startTeamFn: () => Promise<any>) => {
+			const owningCtx = projectContextManager.getContextForGoal(goalId);
+			const gm = owningCtx?.goalManager ?? firstCtxForInit?.goalManager;
+			if (!gm) throw new Error(`No GoalManager available to start team for goal ${goalId}`);
+			await gm.setupWorktreeAndStartTeam(goalId, startTeamFn);
+		},
+		startTeamForGoal: (goalId: string) => teamManager.startTeam(goalId),
+	};
+	// Re-wire all already-bootstrapped contexts now that we have the team starter.
+	for (const ctx of projectContextManager.all()) {
+		wireProjectContextHooks(ctx);
+	}
 	const bgProcessManager = new BgProcessManager((sessionId: string) => {
 		const session = sessionManager.getSession(sessionId);
 		return session?.clients;

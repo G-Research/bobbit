@@ -329,3 +329,148 @@ describe("MissionManager — spawnChild base branch", () => {
 		assert.equal(receivedBaseBranch, "mission/t-x");
 	});
 });
+
+describe("MissionManager — spawnChild auto-starts team-lead", () => {
+	it("invokes setupWorktreeAndStartTeam + startTeamForGoal with the spawned goalId", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const goals = new Map<string, PersistedGoal>();
+		const createdGoalIds: string[] = [];
+		const goalManager = {
+			createGoal: async (title: string, cwd: string, opts: any) => {
+				const id = `g-${Math.random().toString(36).slice(2, 8)}`;
+				createdGoalIds.push(id);
+				const goal: PersistedGoal = {
+					id, title, cwd, state: "todo", spec: opts?.spec ?? "",
+					createdAt: 1, updatedAt: 1,
+					branch: `goal/${title}-${id}`,
+					baseBranch: opts?.baseBranch,
+				};
+				goals.set(id, goal);
+				return goal;
+			},
+			updateGoal: async () => true,
+		} as unknown as GoalManager;
+		const goalStore = { get: (id: string) => goals.get(id) } as unknown as GoalStore;
+
+		// Track invocations of the team-starter callbacks.
+		const setupCalls: Array<{ goalId: string; startFnReturned: any }> = [];
+		const startCalls: string[] = [];
+		const startedBroadcasts: string[] = [];
+		const failedBroadcasts: Array<{ goalId: string; err: Error }> = [];
+
+		const startTeamForGoal = async (goalId: string) => {
+			startCalls.push(goalId);
+			return { sessionId: `session-${goalId}` };
+		};
+		const setupWorktreeAndStartTeam = async (goalId: string, fn: () => Promise<any>) => {
+			// Real goal-manager calls fn() after worktree setup; we mirror that.
+			const result = await fn();
+			setupCalls.push({ goalId, startFnReturned: result });
+		};
+
+		const mgr = new MissionManager(store, {
+			goalManager,
+			goalStore,
+			projectId: "p",
+			setupWorktreeAndStartTeam,
+			startTeamForGoal,
+			onChildTeamStarted: (goalId) => startedBroadcasts.push(goalId),
+			onChildTeamStartFailed: (goalId, err) => failedBroadcasts.push({ goalId, err }),
+		});
+
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+
+		const r = await mgr.spawnChild(m.id, "a");
+		assert.equal(r.ok, true);
+		if (!r.ok) return;
+		const spawnedId = r.goal.id;
+		assert.equal(createdGoalIds[0], spawnedId);
+
+		// spawnChild must NOT block on team-lead start — it's fire-and-forget.
+		// Drain microtasks until the chain resolves.
+		for (let i = 0; i < 10 && (setupCalls.length === 0 || startedBroadcasts.length === 0); i++) {
+			await new Promise(resolve => setImmediate(resolve));
+		}
+
+		assert.equal(setupCalls.length, 1, "setupWorktreeAndStartTeam called once");
+		assert.equal(setupCalls[0].goalId, spawnedId, "setup called with spawned goalId");
+		assert.equal(startCalls.length, 1, "startTeamForGoal called once");
+		assert.equal(startCalls[0], spawnedId, "start called with spawned goalId");
+		assert.deepEqual(startedBroadcasts, [spawnedId], "onChildTeamStarted fired exactly once");
+		assert.equal(failedBroadcasts.length, 0, "onChildTeamStartFailed should not fire on success");
+	});
+
+	it("setTeamStarter wires the callbacks post-construction", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const goals = new Map<string, PersistedGoal>();
+		const goalManager = {
+			createGoal: async (title: string, cwd: string, opts: any) => {
+				const id = "g1";
+				const goal: PersistedGoal = {
+					id, title, cwd, state: "todo", spec: opts?.spec ?? "",
+					createdAt: 1, updatedAt: 1,
+					branch: `goal/${title}-${id}`,
+				};
+				goals.set(id, goal);
+				return goal;
+			},
+			updateGoal: async () => true,
+		} as unknown as GoalManager;
+		const goalStore = { get: (id: string) => goals.get(id) } as unknown as GoalStore;
+
+		const mgr = new MissionManager(store, {
+			goalManager, goalStore, projectId: "p",
+		});
+
+		let started = false;
+		mgr.setTeamStarter({
+			setupWorktreeAndStartTeam: async (_goalId, fn) => { await fn(); },
+			startTeamForGoal: async () => { started = true; return {}; },
+		});
+
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+		await mgr.spawnChild(m.id, "a");
+
+		for (let i = 0; i < 10 && !started; i++) {
+			await new Promise(resolve => setImmediate(resolve));
+		}
+		assert.equal(started, true, "setTeamStarter must wire callbacks used by spawnChild");
+	});
+
+	it("updateGoal is called with autoStartTeam:true for mission children", async () => {
+		const dir = tmpDir();
+		const store = new MissionStore(dir);
+		const goals = new Map<string, PersistedGoal>();
+		const updateCalls: Array<{ id: string; updates: any }> = [];
+		const goalManager = {
+			createGoal: async (title: string, cwd: string, opts: any) => {
+				const id = "g1";
+				const goal: PersistedGoal = {
+					id, title, cwd, state: "todo", spec: opts?.spec ?? "",
+					createdAt: 1, updatedAt: 1, branch: "goal/x",
+				};
+				goals.set(id, goal);
+				return goal;
+			},
+			updateGoal: async (id: string, updates: any) => {
+				updateCalls.push({ id, updates });
+				return true;
+			},
+		} as unknown as GoalManager;
+		const goalStore = { get: (id: string) => goals.get(id) } as unknown as GoalStore;
+		const mgr = new MissionManager(store, { goalManager, goalStore, projectId: "p" });
+		const m = await mgr.createMission({ title: "T", projectId: "p", spec: "" });
+		await mgr.proposePlan(m.id, PLAN);
+		mgr.freezePlan(m.id);
+		await mgr.spawnChild(m.id, "a");
+		assert.equal(updateCalls.length, 1);
+		assert.equal(updateCalls[0].updates.autoStartTeam, true, "mission children must be flagged autoStartTeam:true");
+		assert.equal(updateCalls[0].updates.projectId, "p");
+	});
+});

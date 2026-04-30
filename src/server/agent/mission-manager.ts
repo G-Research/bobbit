@@ -50,6 +50,22 @@ export interface MissionManagerDeps {
 	gateStore?: GateStore;
 	/** Optional MissionGit for child integration. */
 	missionGit?: MissionGit;
+	/**
+	 * Drive worktree provisioning + team-lead startup for a child goal.
+	 * Wired post-construction (server owns TeamManager). The wrapper closes
+	 * over `() => teamManager.startTeam(goalId)` so MissionManager doesn't
+	 * need to know about TeamManager directly. Fire-and-forget — `spawnChild`
+	 * does NOT await this; it broadcasts/logs out-of-band on completion.
+	 * When unset (e.g. unit tests), child goals are created but no team-lead
+	 * session is spawned (legacy behaviour pre-fix).
+	 */
+	setupWorktreeAndStartTeam?: (goalId: string, startTeamFn: () => Promise<any>) => Promise<void>;
+	/** Start the team-lead session for a goal. See `setupWorktreeAndStartTeam`. */
+	startTeamForGoal?: (goalId: string) => Promise<unknown>;
+	/** Optional broadcast hook fired once team-lead start succeeds for a child. */
+	onChildTeamStarted?: (goalId: string) => void;
+	/** Optional broadcast hook fired when team-lead start fails for a child. */
+	onChildTeamStartFailed?: (goalId: string, err: Error) => void;
 }
 
 const DEFAULT_MAX_CONCURRENT = 3;
@@ -84,6 +100,24 @@ export class MissionManager {
 	/** Wire/replace the resolved mission workflow snapshot post-construction. */
 	setResolvedMissionWorkflow(wf: Workflow | undefined): void {
 		this.deps.resolvedMissionWorkflow = wf;
+	}
+
+	/**
+	 * Wire the team-lead start callbacks post-construction. Server owns the
+	 * TeamManager, so the wrappers are passed in after `MissionManager` is
+	 * built. Without these, `spawnChild` creates a goal record with a
+	 * worktree but no team-lead session — the goal is wedged in `todo`.
+	 */
+	setTeamStarter(opts: {
+		setupWorktreeAndStartTeam: (goalId: string, startTeamFn: () => Promise<any>) => Promise<void>;
+		startTeamForGoal: (goalId: string) => Promise<unknown>;
+		onChildTeamStarted?: (goalId: string) => void;
+		onChildTeamStartFailed?: (goalId: string, err: Error) => void;
+	}): void {
+		this.deps.setupWorktreeAndStartTeam = opts.setupWorktreeAndStartTeam;
+		this.deps.startTeamForGoal = opts.startTeamForGoal;
+		this.deps.onChildTeamStarted = opts.onChildTeamStarted;
+		this.deps.onChildTeamStartFailed = opts.onChildTeamStartFailed;
 	}
 
 	getMission(id: string): PersistedMission | undefined {
@@ -369,9 +403,14 @@ export class MissionManager {
 			baseBranch,
 		});
 
-		// Tag the goal with the project + mission linkage.
+		// Tag the goal with the project + mission linkage. Mission-spawned
+		// children always auto-start their team-lead — the mission scheduler
+		// expects forward progress without manual intervention. Setting the
+		// flag is also defensive: any future retry/recovery code that gates
+		// on `goal.autoStartTeam` will treat mission children correctly.
 		await this.deps.goalManager.updateGoal(goal.id, {
 			projectId: m.projectId,
+			autoStartTeam: true,
 		});
 
 		this.store.attachGoalToPlanNode(m.id, planId, goal.id);
@@ -379,6 +418,30 @@ export class MissionManager {
 			state: goal.state,
 			spawnedAt: Date.now(),
 		});
+
+		// Fire-and-forget: drive worktree setup + team-lead session start.
+		// Without this, the child goal sits at `state: todo` with
+		// `teamLeadSessionId: null` forever — no agent will ever pick it up.
+		// Mirrors the `goal.autoStartTeam` branch in server.ts::POST /api/goals
+		// for standalone goals.
+		const { setupWorktreeAndStartTeam, startTeamForGoal, onChildTeamStarted, onChildTeamStartFailed } = this.deps;
+		if (setupWorktreeAndStartTeam && startTeamForGoal) {
+			const goalId = goal.id;
+			setupWorktreeAndStartTeam(goalId, () => startTeamForGoal(goalId))
+				.then(() => {
+					try { onChildTeamStarted?.(goalId); } catch (err) {
+						console.warn(`[mission-manager] onChildTeamStarted callback threw for ${goalId}:`, err);
+					}
+				})
+				.catch(err => {
+					console.error(`[mission-manager] team-lead start failed for child goal ${goalId}:`, err);
+					try { onChildTeamStartFailed?.(goalId, err instanceof Error ? err : new Error(String(err))); } catch (cbErr) {
+						console.warn(`[mission-manager] onChildTeamStartFailed callback threw for ${goalId}:`, cbErr);
+					}
+				});
+		} else {
+			console.warn(`[mission-manager] no team-starter wired — child goal ${goal.id} will sit in todo until manually started`);
+		}
 
 		return { ok: true, goal, alreadySpawned: false };
 	}
