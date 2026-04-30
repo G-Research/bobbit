@@ -17,7 +17,8 @@ import {
 	type Goal,
 	type GoalState,
 } from "./state.js";
-import { gatewayFetch, updateGoal } from "./api.js";
+import { gatewayFetch, updateGoal, fetchWorkflows, type Workflow } from "./api.js";
+import { isMultiPhaseSpec, isMultiPhaseBannerDismissed, dismissMultiPhaseBanner } from "./dialog-helpers.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
@@ -949,6 +950,309 @@ export function showGoalDialog(existingGoal?: Goal, projectId?: string): void {
 	} else {
 		createGoalAssistantSession(projectId);
 	}
+}
+
+// ============================================================================
+// NEW GOAL DIALOG (with Advanced disclosure + multi-phase suggestion banner)
+// ============================================================================
+
+/**
+ * Result type for `showNewGoalDialog`. Mirrors `createGoal()` opts plus the
+ * nested-goals fields gathered from the Advanced disclosure. The caller is
+ * responsible for forwarding these to the goal-creation REST call.
+ *
+ * See `docs/design/nested-goals.md` §10.4.
+ */
+export interface NewGoalDialogResult {
+	title: string;
+	spec: string;
+	workflowId: string;
+	divergencePolicy: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren: number;
+	/** Free-text YAML; server validates (task 6.3 — out of scope here). */
+	inlineWorkflowYaml: string;
+	/** Free-text YAML; server validates (task 6.3 — out of scope here). */
+	inlineRolesYaml: string;
+}
+
+interface ShowNewGoalDialogOpts {
+	projectId: string;
+	initialTitle?: string;
+	initialSpec?: string;
+	initialWorkflowId?: string;
+}
+
+/**
+ * Render the New Goal dialog with inline form, Advanced disclosure, and
+ * (when `isMultiPhaseSpec(spec)` returns true) a non-blocking suggestion
+ * banner promoting the `parent` workflow. Resolves with the user's input
+ * on Create, or `null` on Cancel.
+ *
+ * The dialog does **not** call `createGoal` — the caller composes the
+ * result with project context. This keeps the dialog testable in a
+ * file:// fixture without a live gateway.
+ *
+ * Workflow picker is **never** auto-selected from the banner; clicking
+ * "Use Parent Goal" only suggests `parent` and expands Advanced with the
+ * recommended defaults (concurrency=3, policy=balanced).
+ */
+export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalDialogResult | null> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		let titleValue = opts.initialTitle ?? "";
+		let specValue = opts.initialSpec ?? "";
+		let workflowId = opts.initialWorkflowId ?? "general";
+		let divergencePolicy: "strict" | "balanced" | "autonomous" = "strict";
+		let maxConcurrentChildren = 3;
+		let inlineWorkflowYaml = "";
+		let inlineRolesYaml = "";
+		let advancedOpen = false;
+		let bannerDismissedThisSession = false;
+		let workflows: Workflow[] = [];
+
+		// Best-effort load of project workflows so the picker has options.
+		// File:// fixtures stub `fetchWorkflows()` — we tolerate failure.
+		fetchWorkflows().then((wfs) => { workflows = wfs; renderDialog(); }).catch(() => { /* ignore */ });
+
+		const cleanup = (result: NewGoalDialogResult | null) => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const doCreate = () => {
+			const trimmed = titleValue.trim();
+			if (!trimmed) return;
+			cleanup({
+				title: trimmed,
+				spec: specValue,
+				workflowId,
+				divergencePolicy,
+				maxConcurrentChildren,
+				inlineWorkflowYaml,
+				inlineRolesYaml,
+			});
+		};
+
+		const applyParentSuggestion = () => {
+			workflowId = "parent";
+			advancedOpen = true;
+			divergencePolicy = "balanced";
+			maxConcurrentChildren = 3;
+			renderDialog();
+		};
+
+		const dismissBanner = () => {
+			bannerDismissedThisSession = true;
+			dismissMultiPhaseBanner(opts.projectId);
+			renderDialog();
+		};
+
+		const renderDialog = () => {
+			const bannerVisible = isMultiPhaseSpec(specValue)
+				&& !bannerDismissedThisSession
+				&& !isMultiPhaseBannerDismissed(opts.projectId);
+
+			const banner = bannerVisible ? html`
+				<div
+					class="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+					data-testid="multiphase-banner"
+				>
+					<div class="text-foreground">
+						<strong>This looks like a multi-phase delivery.</strong>
+						Consider the <strong>Parent Goal</strong> workflow — it adds a
+						planning gate that decomposes the work into child goals you can
+						run in parallel.
+					</div>
+					<div class="flex gap-2">
+						${Button({
+							variant: "default",
+							size: "sm" as any,
+							onClick: applyParentSuggestion,
+							children: "Use Parent Goal",
+						})}
+						${Button({
+							variant: "ghost",
+							size: "sm" as any,
+							onClick: dismissBanner,
+							children: "Keep current",
+						})}
+					</div>
+				</div>
+			` : "";
+
+			// Fallback options when fetchWorkflows() failed or hasn't returned
+			// (file:// fixtures, network errors). Always include `parent` so the
+			// banner's "Use Parent Goal" action has a valid select option.
+			const fallbackOptions: Array<{ id: string; name: string }> = [
+				{ id: "general", name: "General" },
+				{ id: "parent", name: "Parent Goal" },
+			];
+			const sourceOptions: Array<{ id: string; name: string }> = workflows.length > 0
+				? workflows
+				: fallbackOptions;
+			// Ensure the currently-selected workflowId is always present.
+			const workflowOptions: Array<{ id: string; name: string }> = sourceOptions.some((w) => w.id === workflowId)
+				? sourceOptions
+				: [...sourceOptions, { id: workflowId, name: workflowId }];
+
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => cleanup(null),
+					width: "min(560px, 92vw)",
+					height: "auto",
+					className: "max-h-[90vh]",
+					backdropClassName: "bg-black/50 backdrop-blur-sm",
+					children: html`
+						${DialogContent({
+							className: "overflow-y-auto",
+							children: html`
+								${DialogHeader({ title: "New Goal" })}
+								<div class="mt-4 flex flex-col gap-4">
+									<div>
+										<label class="text-xs text-muted-foreground mb-1 block">Title</label>
+										${Input({
+											type: "text",
+											value: titleValue,
+											placeholder: "Goal title",
+											onInput: (e: Event) => { titleValue = (e.target as HTMLInputElement).value; },
+											onKeyDown: (e: KeyboardEvent) => {
+												if (e.key === "Escape") cleanup(null);
+											},
+										})}
+									</div>
+									<div>
+										<label class="text-xs text-muted-foreground mb-1 block">Spec (Markdown)</label>
+										<textarea
+											data-testid="goal-spec-textarea"
+											class="w-full min-h-[140px] max-h-[320px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+											placeholder="Describe the goal, acceptance criteria, constraints…"
+											.value=${specValue}
+											@input=${(e: Event) => { specValue = (e.target as HTMLTextAreaElement).value; renderDialog(); }}
+										></textarea>
+									</div>
+									${banner}
+									<div>
+										<label class="text-xs text-muted-foreground mb-1 block">Workflow</label>
+										<select
+											data-testid="workflow-picker"
+											class="w-full text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+											.value=${workflowId}
+											@change=${(e: Event) => { workflowId = (e.target as HTMLSelectElement).value; renderDialog(); }}
+										>
+											${workflowOptions.map((w) => html`
+												<option value=${w.id} ?selected=${workflowId === w.id}>${w.name}</option>
+											`)}
+										</select>
+									</div>
+									<details
+										data-testid="advanced-disclosure"
+										?open=${advancedOpen}
+										@toggle=${(e: Event) => { advancedOpen = (e.target as HTMLDetailsElement).open; }}
+										class="rounded-md border border-border"
+									>
+										<summary class="cursor-pointer select-none px-3 py-2 text-sm font-medium text-foreground hover:bg-secondary/40">
+											Advanced
+										</summary>
+										<div class="flex flex-col gap-4 px-3 py-3 border-t border-border">
+											<div>
+												<div class="text-xs text-muted-foreground mb-1.5">Divergence policy</div>
+												<div class="flex flex-col gap-1.5" data-testid="divergence-policy-radio">
+													${(
+														[
+															["strict", "Strict — every off-plan change prompts the user."],
+															["balanced", "Balanced — leaf-level fix-ups auto-approve; expansions prompt."],
+															["autonomous", "Autonomous — fix-ups auto-approve; expansions still prompt with a notification."],
+														] as Array<["strict" | "balanced" | "autonomous", string]>
+													).map(([value, label]) => html`
+														<label class="flex items-start gap-2 text-sm cursor-pointer">
+															<input
+																type="radio"
+																name="divergence-policy"
+																value=${value}
+																data-testid=${`policy-${value}`}
+																class="mt-0.5 shrink-0"
+																.checked=${divergencePolicy === value}
+																@change=${() => { divergencePolicy = value; renderDialog(); }}
+															/>
+															<span class="text-foreground/90">${label}</span>
+														</label>
+													`)}
+												</div>
+											</div>
+											<div>
+												<div class="text-xs text-muted-foreground mb-1.5">
+													Max concurrent children:
+													<span class="text-foreground font-medium" data-testid="max-concurrent-value">${maxConcurrentChildren}</span>
+												</div>
+												<input
+													type="range"
+													data-testid="max-concurrent-slider"
+													min="1"
+													max="8"
+													step="1"
+													.value=${String(maxConcurrentChildren)}
+													@input=${(e: Event) => {
+														maxConcurrentChildren = Number((e.target as HTMLInputElement).value);
+														renderDialog();
+													}}
+													class="w-full"
+												/>
+											</div>
+											<div>
+												<label class="text-xs text-muted-foreground mb-1 block">Inline workflow YAML (optional)</label>
+												<textarea
+													data-testid="inline-workflow-yaml"
+													rows="8"
+													class="w-full p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+													placeholder=${`# id: my-workflow\n# gates:\n#   - id: charter\n#   - id: ready-to-merge\n#     dependsOn: [charter]`}
+													.value=${inlineWorkflowYaml}
+													@input=${(e: Event) => { inlineWorkflowYaml = (e.target as HTMLTextAreaElement).value; }}
+												></textarea>
+												<p class="text-[10px] text-muted-foreground mt-1">Validated by the server on submit.</p>
+											</div>
+											<div>
+												<label class="text-xs text-muted-foreground mb-1 block">Inline roles YAML (optional)</label>
+												<textarea
+													data-testid="inline-roles-yaml"
+													rows="6"
+													class="w-full p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+													placeholder=${`# coder:\n#   prompt: |\n#     You are a coder…`}
+													.value=${inlineRolesYaml}
+													@input=${(e: Event) => { inlineRolesYaml = (e.target as HTMLTextAreaElement).value; }}
+												></textarea>
+												<p class="text-[10px] text-muted-foreground mt-1">Map of <code>name → role</code>. Validated by the server on submit.</p>
+											</div>
+										</div>
+									</details>
+								</div>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup(null), children: "Cancel" })}
+									${Button({
+										variant: "default",
+										onClick: doCreate,
+										disabled: !titleValue.trim(),
+										children: "Create",
+									})}
+								</div>
+							`,
+						})}
+					`,
+				}),
+				container,
+			);
+		};
+
+		renderDialog();
+	});
 }
 
 async function createGoalAssistantSession(projectId?: string): Promise<void> {
