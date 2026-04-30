@@ -216,6 +216,16 @@ export class RemoteAgent {
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
 	/** Callback fired when server detects PR creation and busts the cache. */
 	onPrStatusChanged?: (goalId: string) => void;
+	/** Called when ANY session anywhere is terminated/archived/purged —
+	 * server pushes a `session_removed` broadcast and we forward it here so
+	 * sidebars and dashboards can update without waiting for a polling tick. */
+	onSessionRemoved?: (sessionId: string, reason: string) => void;
+	/** Called after a NON-INITIAL WS reconnect's auth_ok. Use this to re-fire
+	 * session-scoped hydration that runs once on initial connect (annotations,
+	 * git status, bg processes, etc). Without it, a client whose WS dropped
+	 * during a streaming turn keeps its stale local copy of these caches —
+	 * the dominant 'badge stuck after Reconnecting' E2E flake. */
+	onReconnect?: () => void;
 	private _title = "New session";
 
 	constructor() {
@@ -383,6 +393,15 @@ export class RemoteAgent {
 								this.requestMessages();
 							}
 							this.send({ type: "get_state" });
+							// Re-fire session-scoped REST hydration that the initial
+							// connect ran. The `resume` path replays only buffered
+							// events and skips the snapshot-driven hydration in the
+							// 'messages' handler — so without this, caches like
+							// annotations, git status, and bg-processes go stale
+							// after a transient WS drop.
+							try { this.onReconnect?.(); } catch (err) {
+								console.warn("[RemoteAgent] onReconnect handler threw:", err);
+							}
 							// Retry get_state after 3s if we still don't have real model info
 							if (this._stateRetryTimer) clearTimeout(this._stateRetryTimer);
 							this._stateRetryTimer = setTimeout(() => {
@@ -1187,6 +1206,17 @@ export class RemoteAgent {
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
+
+			case "session_removed": {
+				// Server-pushed event: a session somewhere was terminated/archived/purged.
+				// Update local lists immediately so the sidebar / dashboard reflect it
+				// without waiting for the 5s refreshSessions polling tick.
+				const removedId = (msg as any).sessionId as string | undefined;
+				const reason = (msg as any).reason as string | undefined;
+				if (!removedId) break;
+				this.onSessionRemoved?.(removedId, reason ?? "archived");
+				break;
+			}
 
 			case "tool_permission_needed": {
 				const perm = msg as any;

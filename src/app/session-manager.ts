@@ -900,6 +900,42 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onWorkflowUpdate = () => { if (activeSessionId() === sessionId) renderApp(); };
 
+		// On WS reconnect, re-fire session-scoped REST hydration that ran on
+		// initial connect. Without this, caches like git status, bg processes,
+		// and review annotations go stale across a transient WS drop — the
+		// dominant 'badge stuck after Reconnecting' E2E flake cluster (RP-18,
+		// CT-01-d, S-02). Cheap, idempotent, runs only on non-initial connects.
+		remote.onReconnect = async () => {
+			try { refreshGitStatusForSession(sessionId); } catch { /* ignore */ }
+			try { refreshBgProcessesForSession(sessionId); } catch { /* ignore */ }
+			try {
+				const { initAnnotationStore } = await import("../ui/components/review/AnnotationStore.js");
+				initAnnotationStore(sessionId).catch(() => { /* best-effort */ });
+			} catch { /* AnnotationStore module load failed — keep going */ }
+		};
+
+		// Server broadcasts session_removed when ANY session is terminated/archived/
+		// purged. Update local lists instantly instead of waiting for the 5s
+		// refreshSessions tick. If the removed session is the one we're viewing,
+		// route to landing.
+		remote.onSessionRemoved = (removedId: string, _reason: string) => {
+			const beforeLen = state.gatewaySessions.length;
+			state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== removedId);
+			const changed = state.gatewaySessions.length !== beforeLen;
+			if (activeSessionId() === removedId) {
+				setHashRoute("landing");
+				state.appView = "authenticated";
+				state.selectedSessionId = null;
+				if (state.remoteAgent) {
+					state.remoteAgent.disconnect();
+					state.remoteAgent = null;
+				}
+				renderApp();
+			} else if (changed) {
+				renderApp();
+			}
+		};
+
 		remote.onGoalSetupEvent = async () => {
 			// Refresh sessions and goals to pick up setupStatus changes
 			refreshSessions();
