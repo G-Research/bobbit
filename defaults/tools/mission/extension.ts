@@ -16,6 +16,49 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
+// ── MissionPlan TypeBox schema ───────────────────────────────────────
+// Mirror of `MissionPlan` / `PlannedGoal` / `PlanEdge` in
+// src/server/agent/mission-store.ts. We intentionally express the full shape
+// (instead of Type.Any) so that:
+//   1. The model sees the field structure in the tool spec and emits a real
+//      object literal instead of a JSON string. The Anthropic SDK has been
+//      observed to wrap unstructured Type.Any() args as JSON-encoded strings,
+//      which then fail validatePlan() on the server with a useless
+//      "Plan must have goals[] and dependencies[]" error.
+//   2. The pi-coding-agent argument-validation pass rejects malformed plans
+//      before they reach the handler, with a clear field-level message.
+const PlannedGoalSchema = Type.Object({
+	planId: Type.String({ description: "ULID, stable across re-plans" }),
+	title: Type.String({ description: "Short title (2-5 words)" }),
+	spec: Type.String({ description: "Markdown spec body for the child goal" }),
+	workflowId: Type.Optional(Type.String({ description: "Workflow id (e.g. 'general'); defaults to 'general' if omitted" })),
+	suggestedRole: Type.Optional(Type.String({ description: "Hint for the team-lead about which role to assign" })),
+	enabledOptionalSteps: Type.Optional(Type.Array(Type.String(), {
+		description: "Optional workflow steps to enable for this child goal",
+	})),
+});
+
+const PlanEdgeSchema = Type.Object({
+	from: Type.String({ description: "planId of the upstream node (must exist in goals[])" }),
+	to: Type.String({ description: "planId of the dependent node (must exist in goals[])" }),
+});
+
+const MissionPlanSchema = Type.Object({
+	goals: Type.Array(PlannedGoalSchema, {
+		description: "Plan nodes — every child goal the mission needs to complete",
+	}),
+	dependencies: Type.Array(PlanEdgeSchema, {
+		description: "Edges from→to. The graph must be acyclic; from/to must reference existing planIds",
+	}),
+	rationale: Type.String({ description: "Prose explanation of the plan: scope, decomposition, risks" }),
+	estimatedConcurrency: Type.Number({
+		description: "Maximum parallel goals at any DAG level (informational)",
+	}),
+	version: Type.Number({
+		description: "Plan version. Bump on every edit (start at 1)",
+	}),
+});
+
 export default function (pi: ExtensionAPI) {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const missionId = process.env.BOBBIT_MISSION_ID;
@@ -116,10 +159,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "mission_plan_propose",
 		label: "Mission Plan Propose",
-		description: "Propose or update the mission plan (DAG of child goals). Server validates DAG; rejects if plan is frozen unless mission is paused with a replan_reason.",
+		description: "Propose or update the mission plan (DAG of child goals). Pass `plan` as a structured object literal — never as a JSON-encoded string. Server validates DAG (no cycles, no dangling deps); rejects if plan is frozen unless mission is paused with a replan_reason.",
 		promptSnippet: "Write or update the mission plan.",
 		parameters: Type.Object({
-			plan: Type.Any({ description: "MissionPlan: { goals[], dependencies[], rationale, estimatedConcurrency, version }" }),
+			plan: MissionPlanSchema,
 			replan_reason: Type.Optional(Type.String({ description: "Required when re-proposing a frozen plan; mission must be paused" })),
 		}),
 		async execute(_id, params) {
