@@ -16,6 +16,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
+import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -1623,6 +1624,7 @@ async function handleApiRoute(
 		if (!session) { json({ error: "session not found" }, 404); return; }
 		const entries = session.eventBuffer.getAll() as any[];
 		let replayed = 0;
+		const deadline = Date.now() + PACE_TIMEOUT_MS;
 		for (const entry of entries) {
 			// Accept both raw-event shape (pre-fix) and {seq,ts,event} (post-fix).
 			const isWrapped = entry && typeof entry === "object" && "event" in entry && ("seq" in entry || "ts" in entry);
@@ -1631,7 +1633,7 @@ async function handleApiRoute(
 				: { type: "event" as const, data: entry };
 			const data = JSON.stringify(framePayload);
 			for (const client of session.clients) {
-				if ((client as any).readyState === 1) (client as any).send(data);
+				await paceAndSend(client as any, data, deadline);
 			}
 			replayed++;
 		}
