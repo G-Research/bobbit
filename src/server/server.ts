@@ -1699,8 +1699,10 @@ async function handleApiRoute(
 		if (!fs.existsSync(dirPath)) { json({ error: "Path not found" }, 404); return; }
 		try {
 			const { scanRepos } = await import("./agent/repo-scan.js");
+			const { scanMonorepo } = await import("./agent/monorepo-scan.js");
 			const repos = await scanRepos(dirPath);
-			json({ repos });
+			const monorepo = scanMonorepo(dirPath);
+			json({ repos, monorepo });
 		} catch (err: any) {
 			json({ error: err?.message || String(err) }, 500);
 		}
@@ -1731,8 +1733,10 @@ async function handleApiRoute(
 		if (!project) { json({ error: "Project not found" }, 404); return; }
 		try {
 			const { scanRepos } = await import("./agent/repo-scan.js");
+			const { scanMonorepo } = await import("./agent/monorepo-scan.js");
 			const repos = await scanRepos(project.rootPath);
-			json({ repos, rootPath: project.rootPath });
+			const monorepo = scanMonorepo(project.rootPath);
+			json({ repos, monorepo, rootPath: project.rootPath });
 		} catch (err: any) {
 			json({ error: err?.message || String(err) }, 500);
 		}

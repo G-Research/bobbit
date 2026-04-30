@@ -32,6 +32,31 @@ test("provisional mode: no changed badges, no collapse group, Accept Project lab
 	expect(await page.locator('[data-testid="unchanged-group"]').count()).toBe(0);
 	expect(await page.locator('[data-testid="accept-label"]').innerText()).toBe("Accept Project");
 	expect(await page.locator('[data-field="root_path"][data-readonly="true"]').count()).toBe(1);
+	// Legacy fields now live under a collapsible group.
+	expect(await page.locator('[data-testid="legacy-fields-group"]').count()).toBe(1);
+	// All field rows are nested INSIDE the legacy group.
+	expect(await page.locator('[data-testid="legacy-fields-group"] [data-field="name"]').count()).toBe(1);
+	expect(await page.locator('[data-testid="legacy-fields-group"] [data-field="root_path"]').count()).toBe(1);
+});
+
+test("components and workflows are partitioned out of legacy fields", async ({ page }) => {
+	await page.evaluate(() => (window as any).renderProposal({
+		sessionId: "s1",
+		mode: "provisional",
+		fields: {
+			name: "P",
+			root_path: "/tmp/x",
+			components: [{ name: "app", repo: "." }, { name: "docs", repo: "docs" }],
+			workflows: { feature: { id: "feature", name: "Feature", gates: [] } },
+		},
+	}));
+	// Components rendered as cards in their own view.
+	expect(await page.locator('[data-testid="component-card-app"]').count()).toBe(1);
+	expect(await page.locator('[data-testid="component-card-docs"]').count()).toBe(1);
+	expect(await page.locator('[data-testid="workflow-card-feature"]').count()).toBe(1);
+	// And NOT rendered as legacy <input data-input="components"> rows.
+	expect(await page.locator('[data-input="components"]').count()).toBe(0);
+	expect(await page.locator('[data-input="workflows"]').count()).toBe(0);
 });
 
 test("registered mode: diff partitions into changed + unchanged groups with badges", async ({ page }) => {
