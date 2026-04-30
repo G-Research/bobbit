@@ -25,7 +25,7 @@ function mockStore(initial: Store = {}) {
 // ── parseCustomDirectories ──────────────────────────────────────────
 
 describe("parseCustomDirectories", () => {
-	it("parses config_directories only", () => {
+	it("parses config_directories only (legacy JSON-string)", () => {
 		const store = mockStore({
 			config_directories: JSON.stringify([
 				{ path: "/shared/tools", types: ["tools"] },
@@ -35,6 +35,26 @@ describe("parseCustomDirectories", () => {
 		const result = parseCustomDirectories(store);
 		assert.equal(result.length, 2);
 		assert.deepEqual(result[0].types, ["tools"]);
+		assert.deepEqual(result[1].types, ["skills", "mcp"]);
+	});
+
+	it("parses config_directories via native typed accessor", () => {
+		// Mimics the production ProjectConfigStore: native getConfigDirectories()
+		// is preferred over the legacy JSON-string form.
+		const store = {
+			get(_k: string) { return undefined; },
+			set() {},
+			remove() {},
+			getConfigDirectories() {
+				return [
+					{ path: "/native/tools", types: ["tools"] },
+					{ path: "/native/skills", types: ["skills", "mcp"] },
+				];
+			},
+		};
+		const result = parseCustomDirectories(store);
+		assert.equal(result.length, 2);
+		assert.equal(result[0].path, path.resolve("/native/tools"));
 		assert.deepEqual(result[1].types, ["skills", "mcp"]);
 	});
 
@@ -216,6 +236,23 @@ describe("getAllConfigDirectories", () => {
 // ── saveCustomDirectories ───────────────────────────────────────────
 
 describe("saveCustomDirectories", () => {
+	it("prefers native setConfigDirectories() when available", () => {
+		const calls: Array<{ method: string; arg: unknown }> = [];
+		const store = {
+			get(_k: string) { return undefined; },
+			set(k: string, v: string) { calls.push({ method: `set:${k}`, arg: v }); },
+			remove(k: string) { calls.push({ method: `remove:${k}`, arg: undefined }); },
+			setConfigDirectories(arr: Array<{ path: string; types: string[] }>) {
+				calls.push({ method: "setConfigDirectories", arg: arr });
+			},
+		};
+		saveCustomDirectories(store, [{ path: "/x", types: ["skills"] }]);
+		const native = calls.find(c => c.method === "setConfigDirectories");
+		assert.ok(native, "native typed setter should be used when available");
+		const legacy = calls.find(c => c.method === "set:config_directories");
+		assert.equal(legacy, undefined, "legacy JSON-string set should NOT be called");
+	});
+
 	it("writes config_directories and removes skill_directories", () => {
 		const store = mockStore({
 			skill_directories: JSON.stringify([{ path: "/old" }]),

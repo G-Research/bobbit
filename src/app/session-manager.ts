@@ -1891,6 +1891,10 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	//    flow through as structured (non-string) fields when the proposal
 	//    carries them (Phase 4b — multi-repo proposals).
 	const diff: Record<string, unknown> = {};
+	// Native-YAML migrated fields ride through as structured payloads (server
+	// rejects JSON-encoded strings). If the agent supplied them as a string
+	// (e.g. via legacy tool invocation), parse before sending.
+	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios"]);
 	for (const [k, v] of Object.entries(fields)) {
 		if (k === "name" || k === "root_path") continue;
 		if (k === "components" || k === "workflows") {
@@ -1900,6 +1904,11 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 			if (v !== undefined && v !== null && v !== "") {
 				diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
 			}
+			continue;
+		}
+		if (NATIVE_FIELDS.has(k)) {
+			if (v === undefined || v === null || v === "") continue;
+			diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
 			continue;
 		}
 		if ((currentCfg[k as string] ?? "") !== v) diff[k] = v;
