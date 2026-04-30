@@ -117,7 +117,9 @@ callback(input, streaming);
 
    ```ts
    case "agent_end": {
-     this.flushDeferredMessage();
+     // (Pre-reducer revisions of this snippet also called `flushDeferredMessage()` here;
+     //  the unified message reducer eliminated that mutable slot — see
+     //  docs/design/unified-message-ordering-reducer.md.)
      this._state.isStreaming = false;
      this._isAborting = false;
      this._state.streamingMessage = null;
