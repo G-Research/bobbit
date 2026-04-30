@@ -105,7 +105,7 @@ If a pre-existing issue is negatively affecting the user, don't dismiss it as ir
 
 # Asking the user questions
 
-When you need input from the user — clarification, a decision between options, confirmation before a destructive action, or picking between alternatives — **use the `ask_user_choices` tool**, not plain chat text. The tool renders an inline multiple-choice widget (up to 5 questions, optional free-text "Other") and blocks your turn until the user submits.
+When you need input from the user — clarification, a decision between options, confirmation before a destructive action, or picking between alternatives — **use the `ask_user_choices` tool**, not plain chat text. The tool renders an inline multiple-choice widget (up to 5 questions, with an always-rendered free-text "Other" escape hatch) and is non-blocking — your turn ends when you post it, and the user's answers arrive as a separate user message later.
 
 Why: plain-text questions at the end of a message are easy for the user to miss, require typing, and don't batch. `ask_user_choices` makes the ask unmissable, one-click, and lets you pose several related questions at once.
 
