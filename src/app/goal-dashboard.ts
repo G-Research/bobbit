@@ -5,7 +5,7 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, approveMutation, rejectMutation, type GateState, type GateSignal } from "./api.js";
 import { countDescendantsFrom } from "./render-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { setHashRoute } from "./routing.js";
@@ -558,6 +558,31 @@ function stopGatePolling(): void {
 function handleLiveVerificationEvent(e: Event) {
 	const detail = (e as CustomEvent).detail;
 	if (!detail || detail.goalId !== currentGoalId) return;
+
+	// Plan-mutation banner events (§10.5). These arrive on the same dashboard
+	// WS as the gate-verification stream. Banner state lives on `state.pendingMutation`.
+	if (detail.type === "goal_mutation_pending") {
+		state.pendingMutation = {
+			goalId: detail.goalId,
+			requestId: detail.requestId,
+			classification: detail.classification,
+			summary: detail.summary || "",
+			addedNodes: Array.isArray(detail.addedNodes) ? detail.addedNodes : undefined,
+			removedNodes: Array.isArray(detail.removedNodes) ? detail.removedNodes : undefined,
+			droppedCriteria: Array.isArray(detail.droppedCriteria) ? detail.droppedCriteria : undefined,
+			changedDeps: detail.changedDeps,
+			receivedAt: Date.now(),
+		};
+		renderApp();
+		return;
+	}
+	if (detail.type === "goal_mutation_resolved") {
+		if (state.pendingMutation?.requestId === detail.requestId) {
+			state.pendingMutation = undefined;
+			renderApp();
+		}
+		return;
+	}
 
 	const key = `${detail.gateId}:${detail.signalId}`;
 
@@ -1537,6 +1562,91 @@ export function shouldShowPlanTab(goal: Goal | null | undefined): boolean {
 export function shouldShowChildrenTab(goal: Goal | null | undefined, goals: Goal[]): boolean {
 	if (!goal) return false;
 	return countDescendantsFrom(goal.id, goals) > 0;
+}
+
+/** Pending plan-mutation banner (§10.5).
+ *
+ *  Renders directly above the tab bar when `state.pendingMutation` is set
+ *  for the active goal. Approve/Reject post to
+ *  `POST /api/goals/:id/mutation/:requestId/decision`; the server fans out
+ *  `goal_mutation_resolved` which clears the banner via
+ *  `handleLiveVerificationEvent`. We also clear locally on a 404 (stale
+ *  request) so a duplicate click on a stale buffer can't strand the UI.
+ */
+async function decideMutation(decision: "approve" | "reject"): Promise<void> {
+	const pending = state.pendingMutation;
+	if (!pending) return;
+	if (!currentGoalId || pending.goalId !== currentGoalId) return;
+	const result = decision === "approve"
+		? await approveMutation(pending.goalId, pending.requestId)
+		: await rejectMutation(pending.goalId, pending.requestId);
+	if (!result.ok && result.status === 404) {
+		// Stale buffer — clear locally; another viewer already decided.
+		if (state.pendingMutation?.requestId === pending.requestId) {
+			state.pendingMutation = undefined;
+			renderApp();
+		}
+	}
+	// On 200 the WS broadcast clears the banner via the existing handler.
+	// On any other failure we leave the banner up so the user can retry.
+}
+
+function renderMutationBanner(): TemplateResult | typeof nothing {
+	const pending = state.pendingMutation;
+	if (!pending || !currentGoalId || pending.goalId !== currentGoalId) return nothing;
+	const classification = pending.classification;
+	const added = pending.addedNodes ?? [];
+	const removed = pending.removedNodes ?? [];
+	const dropped = pending.droppedCriteria ?? [];
+	return html`
+		<div
+			class="mutation-banner mutation-banner-${classification}"
+			data-testid="mutation-banner"
+			data-request-id="${pending.requestId}"
+			role="alert"
+			style="margin: 0 16px 8px; padding: 10px 14px; border-radius: 8px;
+				border: 1px solid var(--border); background: var(--muted);
+				color: var(--foreground); font-size: 13px;
+				display: flex; flex-direction: column; gap: 8px;"
+		>
+			<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+				<strong>Plan mutation pending:</strong>
+				<span data-testid="mutation-banner-summary">${pending.summary || "(no summary provided)"}</span>
+				<span
+					class="mutation-banner-tag"
+					data-testid="mutation-banner-classification"
+					style="margin-left:auto;padding:2px 8px;border-radius:999px;
+						border:1px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;"
+				>${classification}</span>
+			</div>
+			<div style="display:flex;gap:8px;align-items:center;">
+				<button
+					data-testid="mutation-banner-approve"
+					@click=${() => decideMutation("approve")}
+					style="padding:6px 14px;border-radius:6px;border:1px solid var(--border);
+						background:var(--primary, #2563eb);color:var(--primary-foreground, #fff);
+						font-size:13px;cursor:pointer;"
+				>Approve</button>
+				<button
+					data-testid="mutation-banner-reject"
+					@click=${() => decideMutation("reject")}
+					style="padding:6px 14px;border-radius:6px;border:1px solid var(--border);
+						background:transparent;color:var(--foreground);
+						font-size:13px;cursor:pointer;"
+				>Reject</button>
+			</div>
+			<details>
+				<summary style="cursor:pointer;font-size:12px;color:var(--muted-foreground);">Details</summary>
+				<ul style="margin:6px 0 0 18px;padding:0;font-size:12px;color:var(--muted-foreground);">
+					<li>Classification: <code>${classification}</code></li>
+					<li>Added: ${added.length > 0 ? added.join(", ") : html`<em>none</em>`}</li>
+					<li>Removed: ${removed.length > 0 ? removed.join(", ") : html`<em>none</em>`}</li>
+					<li>Dropped criteria: ${dropped.length > 0 ? dropped.join(", ") : html`<em>none</em>`}</li>
+					${pending.changedDeps ? html`<li>Dependencies changed</li>` : nothing}
+				</ul>
+			</details>
+		</div>
+	`;
 }
 
 function renderTabBar(): TemplateResult {
@@ -2547,6 +2657,7 @@ export function renderGoalDashboard(): TemplateResult {
 			${renderSetupBanner(currentGoal)}
 			${renderMetaRows(currentGoal)}
 			${renderGatePipeline()}
+			${renderMutationBanner()}
 			${renderTabBar()}
 			<div class="tab-content">
 				<div class="tab-panel ${activeTab === "spec" ? "active" : ""}">${activeTab === "spec" ? renderSpecTab() : nothing}</div>

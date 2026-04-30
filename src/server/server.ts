@@ -5630,6 +5630,82 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/goals/:id/mutation/:requestId/decision — Phase 4 task 4.3.
+	//
+	// Apply or drop a server-buffered plan mutation, identified by
+	// `requestId`. Body: `{ decision: "approve" | "reject" }`.
+	// Response: `200 { resolved: true, applied?: { plan?, childGoalId? } }`
+	//           `404 { error: "unknown-or-stale-request" }`
+	// Broadcasts `goal_mutation_resolved` per §9.
+	//
+	// Phase 4 only owns the **endpoint** + GoalManager storage. Phase 5
+	// task 5.2 will populate `pendingMutations` from the classifier; the
+	// endpoint here works against any buffered entry regardless of how it
+	// got there, so 5.2 can wire end-to-end without touching this route.
+	const mutationDecisionMatch = url.pathname.match(
+		/^\/api\/goals\/([^/]+)\/mutation\/([^/]+)\/decision$/,
+	);
+	if (mutationDecisionMatch && req.method === "POST") {
+		const goalId = mutationDecisionMatch[1];
+		const requestId = mutationDecisionMatch[2];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const body = await readBody(req).catch(() => ({}));
+		const decision = body?.decision;
+		if (decision !== "approve" && decision !== "reject") {
+			json({ error: "decision must be 'approve' or 'reject'" }, 400);
+			return;
+		}
+		const gm = getGoalManagerForGoal(goalId);
+		const buffered = gm.getBufferedMutation(requestId);
+		if (!buffered || buffered.goalId !== goalId) {
+			json({ error: "unknown-or-stale-request" }, 404);
+			return;
+		}
+		if (decision === "reject") {
+			gm.rejectBufferedMutation(requestId);
+			json({ resolved: true });
+			broadcastToGoal(goalId, {
+				type: "goal_mutation_resolved",
+				goalId,
+				requestId,
+				decision: "reject",
+			});
+			return;
+		}
+		// approve: apply via GoalManager. Surface 500 on internal failure so
+		// the buffer state is still consistent (apply already removes the
+		// entry on entry; throw paths just leave it dropped).
+		try {
+			const applied = gm.applyBufferedMutation(requestId);
+			json({ resolved: true, applied });
+			broadcastToGoal(goalId, {
+				type: "goal_mutation_resolved",
+				goalId,
+				requestId,
+				decision: "approve",
+			});
+			// If the applied mutation rewrote a plan, surface a
+			// `goal_plan_proposed` broadcast in lockstep so the dashboard
+			// refreshes the SVG without a manual re-fetch (mirrors PATCH
+			// /plan's behaviour).
+			if (buffered.kind === "plan-replace" && applied.plan) {
+				const refreshed = getGoalAcrossProjects(goalId);
+				broadcastToGoal(goalId, {
+					type: "goal_plan_proposed",
+					goalId,
+					gateId: buffered.gateId,
+					planSteps: applied.plan,
+					replanCount: refreshed?.replanCount ?? 0,
+				});
+			}
+		} catch (err) {
+			console.error(`[mutation-decision] applyBufferedMutation failed for ${goalId}/${requestId}:`, err);
+			json({ error: err instanceof Error ? err.message : String(err) }, 500);
+		}
+		return;
+	}
+
 	// Routes with :id parameter
 	const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (sessionMatch) {
