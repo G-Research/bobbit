@@ -60,20 +60,21 @@ export function isInherited(origin?: ConfigOrigin): boolean {
 // SCOPE ROW
 // ============================================================================
 
-/** Render the project scope row for a config page. Call `onScopeChange` when scope changes. */
-export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope: string) => void): TemplateResult | string {
+/** Render the project scope row for a config page. Call `onScopeChange` when scope changes.
+ *  When `excludeSystem` is true, the System tab is omitted (used by Workflows page). */
+export function renderConfigScopeRow(currentScope: string, onScopeChange: (scope: string) => void, excludeSystem?: boolean): TemplateResult | string {
 	const projects = state.projects || [];
 	if (projects.length === 0) return "";
 
 	return html`
 		<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto" style="scrollbar-width:thin;">
-			<button
+			${excludeSystem ? "" : html`<button
 				class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
 					${currentScope === "system"
 					? "bg-background text-foreground shadow-sm border border-border"
 					: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 				@click=${() => onScopeChange("system")}
-			>System</button>
+			>System</button>`}
 			${projects.map((project: any) => {
 				const isActive = currentScope === project.id;
 				const isDark = document.documentElement.classList.contains("dark");

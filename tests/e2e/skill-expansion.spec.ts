@@ -53,10 +53,11 @@ ${SKILL_MARKER}
 	const project = await projResp.json();
 	secondProjectId = project.id;
 
-	// 4. Set config_directories on the second project to include our custom skill dir
-	const configDirs = JSON.stringify([
+	// 4. Set config_directories on the second project to include our custom skill dir.
+	//    Native-YAML migration: send structured array (server rejects JSON-strings).
+	const configDirs = [
 		{ path: join(secondProjectCwd, "custom-config"), types: ["skills"] },
-	]);
+	];
 	const putResp = await apiFetch(`/api/projects/${secondProjectId}/config`, {
 		method: "PUT",
 		body: JSON.stringify({ config_directories: configDirs }),

@@ -158,7 +158,9 @@ Two resolution modes:
 
 ### Config cascade
 
-The config cascade handles resolution of named config entities (roles, tools, workflows, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+
+> **Workflows are NOT in the cascade.** Workflows live exclusively inline in each registered project's `project.yaml::workflows` block — there is no system-scope or builtin workflow layer. `ConfigCascade.resolveWorkflows(projectId)` reads only the project layer; without a `projectId` it returns `[]`. See [Workflows are project-scoped only](#workflows-are-project-scoped-only) below for the rationale.
 
 #### Why a cascade?
 
@@ -175,7 +177,7 @@ Two modules implement this:
 
 - **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, etc.).
 
-- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveWorkflows()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`.
+- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`. `resolveWorkflows()` exists for shape compat but only reads the project layer (see callout above).
 
 Each returned item is a `ResolvedItem<T>` with:
 - `item: T` — the config object
@@ -184,9 +186,23 @@ Each returned item is a `ResolvedItem<T>` with:
 
 #### Resolution rules
 
-For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top. Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
+For each cascaded config type (roles, tools, tool-group-policies), items are merged by a unique key (roles by `name`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top.
 
-**System-scope writes** (role / workflow customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `workflowStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles and workflows because the server stores are independent of `ProjectContextManager`.
+Workflows are not cascaded — `resolveWorkflows(projectId)` reads only the project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`.
+
+**System-scope writes** (role customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles because the server stores are independent of `ProjectContextManager`. Workflow mutations have no system-scope path — they always require a `projectId`.
+
+#### Workflows are project-scoped only
+
+Workflows are inlined per-project (in `project.yaml::workflows`) rather than cascaded because (a) every workflow step references project-specific `(component, command)` pairs that have no meaning outside the owning project, and (b) the project assistant generates a bespoke workflow set per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md) — there is no useful "system default workflow" to inherit. A cascade would just be ceremony around an empty upper layer.
+
+Consequences:
+
+- `BuiltinConfigProvider.getWorkflows()` returns `[]` (kept only for `ServerStores` shape compat).
+- No system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. `<server-cwd>/.bobbit/config/project.yaml::workflows` is **not** read at runtime.
+- All `/api/workflows*` mutations require a `projectId` (400 otherwise — no `?scope=server` parameter).
+- `GET /api/workflows` (no `projectId`) returns `{ workflows: [] }`; `GET /api/workflows/:id` (no `projectId`) returns 404. Reads are intentionally lenient (don't 400) to keep the Workflows page from crashing during scope transitions.
+- New projects get a default seed (`general`, `feature`, `bug-fix`, `quick-fix`) inlined into `project.yaml::workflows` at `POST /api/projects` time when no workflows are provided. Legacy `<project>/.bobbit/config/workflows/*.yaml` files are folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
 
 #### Server stores decoupling
 
@@ -194,11 +210,11 @@ For each config type, items are merged by a unique key (roles by `name`, workflo
 
 #### Builtin seeding
 
-On server startup, standalone stores are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores (e.g. `createGoal()` looking up workflows) work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding.
+On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope at all — they're seeded per-project at project-create time (see [Workflows are project-scoped only](#workflows-are-project-scoped-only)).
 
 #### Scaffolding
 
-`scaffoldBobbitDir()` creates empty `config/roles/`, `config/workflows/` directories. These config types resolve at runtime via the cascade — no files are copied. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
 
 #### Session setup integration
 
@@ -211,16 +227,18 @@ Config list endpoints accept `?projectId=` for project-scoped resolution:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles?projectId=X` | Resolved roles with `origin` and `overrides` fields |
-| `GET` | `/api/workflows?projectId=X` | Resolved workflows |
+| `GET` | `/api/workflows?projectId=X` | Project workflows (returns `[]` without `projectId`) |
 | `GET` | `/api/tools?projectId=X` | Resolved tools |
 | `POST` | `/api/roles/:name/customize?scope=project&projectId=X` | Copy resolved item to target scope for editing |
 | `DELETE` | `/api/roles/:name/override?scope=project&projectId=X` | Remove override, revert to inherited |
 
-The customize/override endpoints follow the same pattern for workflows (`:id`). CRUD endpoints (`POST`, `PUT`, `DELETE`) accept optional `projectId` for scope-aware operations.
+The customize/override endpoints follow the same pattern for roles. Workflow CRUD endpoints (`POST`, `PUT`, `DELETE /api/workflows[/:id]`) **require** `projectId` (400 otherwise) — there is no system-scope path for workflows.
 
 #### UI
 
-The four config pages (Roles, Tools, Skills, Workflows) display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`.
+The Roles, Tools, and Skills config pages display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`; the row accepts an optional `excludeSystem` flag.
+
+The Workflows page is a special case — it has **no System tab** because workflows are project-scoped only. The page passes `excludeSystem: true` to the scope row, and visiting `/workflows` while the global scope is `system` auto-switches to the first registered project (or shows an empty state if none).
 
 ### Project assistant
 
@@ -265,6 +283,26 @@ Each registered project can override system-level settings (from `project.yaml`)
 - **Registered** (new path): `PUT /api/projects/:id/config` for project.yaml fields and `PUT /api/projects/:id` for the project name if it changed. The session stays connected and the agent continues where it left off — no navigation, no termination.
 
 The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, plus project-defined custom keys. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+
+### Native-YAML project.yaml fields
+
+Five fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings or quoted numbers:
+
+| Field | Shape |
+|---|---|
+| `config_directories` | `{ path: string; types: string[] }[]` |
+| `qa_env` | `Record<string, string>` |
+| `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (the secret `value` is split into `SecretsStore` on PUT — unchanged) |
+| `qa_max_duration_minutes` | `number` |
+| `qa_max_scenarios` | `number` |
+
+The motivation is editability and diff-friendliness: hand-editing a JSON-string-inside-YAML field is painful and produces noisy diffs in `propose_project` previews and PRs.
+
+**Lazy-migration loader.** `ProjectConfigStore` accepts both the native shape and the legacy form (JSON-string for the array/map fields, quoted numeric strings for the two numeric fields). Legacy values are parsed transparently into structured side-tables; malformed legacy strings log a warning and fall back to the default. The store sets `isDirty()` on legacy load so the next save rewrites the file in native form — no separate migration step.
+
+**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()`, `getQaEnv()`, `getSandboxTokens()`, `getQaMaxDurationMinutes()`, and `getQaMaxScenarios()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store.
+
+**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these five keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form.
 
 ### Per-project palette
 
@@ -400,7 +438,7 @@ If the `workflows:` block is empty or missing, goal creation surfaces a clear er
 
 **Removed runtime concepts:**
 
-- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant now generates a bespoke inline `workflows:` block per project from the MD authoring guide. The legacy YAML files are scheduled for deletion (see follow-up note at the bottom of this doc); while they remain on disk during the migration window, `BuiltinConfigProvider.loadWorkflows()` keeps reading them so existing tests that reference workflow IDs by name (`general`, `feature`, `bug-fix`, `quick-fix`, `test-fast`) keep working. New projects do not depend on these IDs being shipped.
+- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant generates a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` also seeds the four canonical workflows (`general`, `feature`, `bug-fix`, `quick-fix`) into a new project's `project.yaml::workflows` when none are provided. `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime — there is no system-scope or builtin workflow layer.
 - **`.bobbit/config/workflows/`** is no longer a runtime concept. `InlineWorkflowStore` reads only from `project.yaml::workflows`. The `migrate-project-yaml.ts` step folds any pre-existing per-project workflow files into the inline block on first boot and removes the directory.
 
 ### Session worktrees
@@ -864,6 +902,12 @@ When Bobbit talks to an on-prem model through the AI Gateway, the gateway's toke
 
 Provider-level (not per-model) is deliberate — it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
 
+### Startup refresh of `models.json`
+
+On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `~/.bobbit/agent/models.json` doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` — which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
+
+If the gateway is unreachable at startup (network error / HTTP failure / timeout), the function logs `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json` and leaves the file untouched — staleness is preferred to wiping a working file with a stub. The `BOBBIT_SKIP_AIGW_DISCOVERY=1` test/CI escape hatch skips only the network call: when aigw is already configured, the Bedrock env vars are still applied and the existing `models.json` is kept as-is. The not-configured branch (auto-probing for a local gateway) is unchanged.
+
 ### Resolver semantics (pi-coding-agent contract surface)
 
 The pi-coding-agent CLI evaluates header values via `resolveConfigValue` (in `dist/core/resolve-config-value.js`):
@@ -1038,12 +1082,14 @@ Per-session toggle overrides the project default.
 
 Bobbit scans multiple directories for skills, MCP servers, tools, and agent files. Manage via Settings → Config Directories tab or `config_directories` in `project.yaml`.
 
-Storage format:
+Storage format (native YAML):
 ```yaml
-config_directories: '[{"path":"~/my-config","types":["skills","mcp"]}]'
+config_directories:
+  - path: ~/my-config
+    types: [skills, mcp]
 ```
 
-Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority.
+Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority. Legacy JSON-string form (`config_directories: '[…]'`) still parses but is rewritten in native form on next save — see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields).
 
 **Per-project scoping:** Config directories are resolved per-project. Each project's `config_directories` in its `project.yaml` affects only that project's sessions — a session in project B uses project B's custom directories for skill, MCP, and agent file discovery. Projects never inherit each other's config directories. The API endpoints (`/api/config-directories`, `/api/slash-skills`, `/api/slash-skills/details`) accept a `?projectId=` query parameter to resolve directories for a specific project.
 
@@ -1957,7 +2003,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `system-prompt.md` | `cli.ts` | Global system prompt template |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
-| `workflows/*.yaml` | `WorkflowStore` | Built-in workflow templates |
+| `workflows/*.yaml` | (legacy) | Default workflow seeds copied into new projects' `project.yaml::workflows`. Not read by `BuiltinConfigProvider` at runtime — see [Workflows are project-scoped only](#workflows-are-project-scoped-only). |
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 
@@ -1969,7 +2015,6 @@ Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs`. 
 |---|---|---|
 | `project.yaml` | `ProjectConfigStore` | Project settings |
 | `roles/*.yaml` | `RoleStore` | Server/project role overrides |
-| `workflows/*.yaml` | `WorkflowStore` | Server/project workflow overrides |
 | `tools/<group>/*.yaml` | `ToolManager` | Server/project tool overrides |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Server/project policy overrides |
 | `mcp.json` | `McpManager` | MCP server overrides |

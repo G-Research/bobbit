@@ -353,10 +353,11 @@ function renderMobileLanding() {
 // GOAL PREVIEW PANEL (goal assistant split-screen)
 // ============================================================================
 
-/** Cached workflows for goal creation dropdown. */
+/** Cached workflows for goal creation dropdown — keyed per-project (workflows are project-scoped). */
 import { fetchWorkflows, type Workflow } from "./api.js";
+const _workflowCacheByProject = new Map<string, Workflow[]>();
+const _workflowsLoadingByProject = new Set<string>();
 let _cachedWorkflows: Workflow[] = [];
-let _workflowsLoaded = false;
 let _selectedWorkflowId = "general";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
@@ -368,10 +369,26 @@ export function setSelectedWorkflowId(id: string): void {
 	_selectedWorkflowId = id;
 }
 
-function ensureWorkflowsLoaded(): void {
-	if (_workflowsLoaded) return;
-	_workflowsLoaded = true;
-	fetchWorkflows().then((wfs) => { _cachedWorkflows = wfs; renderApp(); });
+function ensureWorkflowsLoaded(projectId?: string): void {
+	// Workflows are project-scoped (no system layer). Without a project we can't
+	// resolve any — leave the cache empty so the goal form falls back gracefully.
+	if (!projectId) {
+		_cachedWorkflows = [];
+		return;
+	}
+	const cached = _workflowCacheByProject.get(projectId);
+	if (cached) {
+		_cachedWorkflows = cached;
+		return;
+	}
+	if (_workflowsLoadingByProject.has(projectId)) return;
+	_workflowsLoadingByProject.add(projectId);
+	fetchWorkflows(projectId).then((wfs) => {
+		_workflowCacheByProject.set(projectId, wfs);
+		_workflowsLoadingByProject.delete(projectId);
+		_cachedWorkflows = wfs;
+		renderApp();
+	});
 }
 
 let _sandboxStatusFetching = false;
@@ -687,7 +704,7 @@ function renderGoalForm(config: GoalFormConfig) {
 }
 
 function goalPreviewPanel() {
-	ensureWorkflowsLoaded();
+	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
 	const handleCreateGoal = async () => {
@@ -2023,7 +2040,7 @@ function syncProposalFormState(): void {
 
 function goalProposalPanel() {
 	syncProposalFormState();
-	ensureWorkflowsLoaded();
+	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
 	const handleCreateGoal = async () => {

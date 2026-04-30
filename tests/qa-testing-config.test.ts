@@ -94,6 +94,26 @@ describe("QaTestingConfig", () => {
 		assert.equal(config.buildCommand, "cargo build --release");
 	});
 
+	it("parses native-YAML qa_* keys (post-migration)", () => {
+		const yaml = [
+			"name: test",
+			"build_command: npm run build",
+			'qa_start_command: "node server.js"',
+			"qa_env:",
+			"  FOO: bar",
+			"  BAZ: qux",
+			"qa_max_duration_minutes: 15",
+			"qa_max_scenarios: 3",
+		].join("\n");
+		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml);
+		const store = new ProjectConfigStore(tmpDir);
+		const config = store.getQaTestingConfig();
+		assert.ok(config);
+		assert.deepEqual(config.env, { FOO: "bar", BAZ: "qux" });
+		assert.equal(config.maxDurationMinutes, 15);
+		assert.equal(config.maxScenarios, 3);
+	});
+
 	it("uses defaults for optional fields", () => {
 		const yaml = 'qa_start_command: "node server.js"\n';
 		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml);

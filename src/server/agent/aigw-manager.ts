@@ -399,6 +399,18 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	if (existingUrl) {
 		console.log("[aigw] AI Gateway already configured:", existingUrl);
 		setBedrockEnvVars(existingUrl);
+		if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
+			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
+			return true;
+		}
+		try {
+			const models = await discoverAigwModels(existingUrl);
+			writeAigwModelsJson(existingUrl, models);
+			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
+		} catch (err: any) {
+			const msg = err?.message || String(err);
+			console.warn(`[aigw] gateway unreachable on startup (${msg}), keeping existing models.json`);
+		}
 		return true;
 	}
 

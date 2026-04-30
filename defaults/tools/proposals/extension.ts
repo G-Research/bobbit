@@ -149,6 +149,18 @@ export default function (pi: ExtensionAPI) {
 				commands: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Flat name → shell. Absent ⇒ data-only." })),
 			}), { description: "Project components. Single-repo: one component with repo='.'." })),
 			workflows: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Inline workflows keyed by id; structurally validated server-side." })),
+			config_directories: Type.Optional(Type.Array(Type.Object({
+				path: Type.String(),
+				types: Type.Array(Type.String()),
+			}), { description: "Custom config directories scanned for skills/mcp/tools/agents." })),
+			qa_env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Environment-variable overrides for the QA harness." })),
+			sandbox_tokens: Type.Optional(Type.Array(Type.Object({
+				key: Type.String(),
+				enabled: Type.Boolean(),
+				value: Type.Optional(Type.String()),
+			}), { description: "Sandbox token list. Server strips `value` to SecretsStore on PUT." })),
+			qa_max_duration_minutes: Type.Optional(Type.Number({ description: "Max QA session duration in minutes." })),
+			qa_max_scenarios: Type.Optional(Type.Number({ description: "Max number of QA scenarios to run." })),
 		}),
 		async execute() { return ack(); },
 	});

@@ -16,6 +16,8 @@ Goals can run in **team mode**, where a Team Lead agent orchestrates multiple ro
 
 A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows live **inline in `project.yaml::workflows`** — the project assistant generates a bespoke block per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD authoring guide is the single source of truth for workflow patterns; the runtime never reads it.
 
+Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New projects get a default seed (`general`, `feature`, `bug-fix`, `quick-fix`) inlined into `project.yaml::workflows` at create time. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only).
+
 When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time.
 
 Goals without workflows still work fine — workflows are optional.
@@ -450,14 +452,16 @@ Here's the typical flow for a team goal with a workflow:
 
 ### Workflows
 
+All mutations require `projectId` (400 otherwise). Reads without `projectId` return `[]` / 404. See [rest-api.md — Workflows](rest-api.md#workflows) for the full contract.
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/workflows` | List all workflow templates |
-| `GET` | `/api/workflows/:id` | Get full workflow detail |
-| `POST` | `/api/workflows` | Create a workflow |
-| `PUT` | `/api/workflows/:id` | Update a workflow |
-| `DELETE` | `/api/workflows/:id` | Delete (blocked if in-use by active goals) |
-| `POST` | `/api/workflows/:id/clone` | Deep-copy a workflow with a new ID |
+| `GET` | `/api/workflows?projectId=X` | List workflows for a project |
+| `GET` | `/api/workflows/:id?projectId=X` | Get full workflow detail |
+| `POST` | `/api/workflows?projectId=X` | Create a workflow |
+| `PUT` | `/api/workflows/:id?projectId=X` | Update a workflow |
+| `DELETE` | `/api/workflows/:id?projectId=X` | Delete (blocked if in-use by active goals) |
+| `POST` | `/api/workflows/:id/clone?projectId=X` | Deep-copy a workflow with a new ID |
 
 ### Gates
 

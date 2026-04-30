@@ -352,8 +352,6 @@ export interface SessionManagerOptions {
 	toolManager?: ToolManager;
 	/** Group policy store for resolving group-level default tool grant policies */
 	groupPolicyStore?: ToolGroupPolicyStore;
-	/** Workflow store for injecting into GoalManager */
-	workflowStore?: import("./workflow-store.js").WorkflowStore;
 	/** Preferences store for aigw auto-model detection */
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	/** Project config store for reading project defaults (e.g. default_thinking_level) */
@@ -379,7 +377,6 @@ export class SessionManager {
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
-	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
@@ -558,7 +555,6 @@ export class SessionManager {
 		this.toolManager = options?.toolManager;
 		this.groupPolicyStore = options?.groupPolicyStore;
 		this.preferencesStore = options?.preferencesStore;
-		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		if (this.projectContextManager) {
@@ -570,7 +566,7 @@ export class SessionManager {
 			this._testStore = new SessionStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
-			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
 	}
@@ -771,7 +767,7 @@ export class SessionManager {
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
-			buildWorkflowList: () => this._buildWorkflowList(),
+			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 		};
 	}
 
@@ -1013,8 +1009,14 @@ export class SessionManager {
 	}
 
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
-	private _buildWorkflowList(): string {
-		const workflows = this.workflowStore?.getAll();
+	private _buildWorkflowList(projectId?: string): string {
+		let workflows: import("./workflow-store.js").Workflow[] = [];
+		if (projectId && this.configCascade) {
+			workflows = this.configCascade.resolveWorkflows(projectId).map(r => r.item);
+		} else if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) workflows = ctx.workflowStore.getAll();
+		}
 		if (!workflows || workflows.length === 0) {
 			return 'Use **general** as a safe default.';
 		}
@@ -1152,7 +1154,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(session.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.resolveStoreForSession(session.id).get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
@@ -2376,7 +2378,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
 					const origGoal = this.resolveGoal(ps.reattemptGoalId);
@@ -3769,6 +3771,55 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Generate a title for any session by id — live or archived. Returns the
+	 * generated title, or null if no messages were available. Persists the
+	 * title and broadcasts to any connected clients (live sessions only).
+	 * Used by `POST /api/sessions/:id/generate-title` for the rename dialog
+	 * when the user is editing a non-focused session.
+	 */
+	async generateTitleForAnySession(id: string): Promise<string | null> {
+		const live = this.sessions.get(id);
+		if (live && live.status !== "terminated") {
+			const msgsResp = await live.rpcClient.getMessages();
+			if (!msgsResp.success) return null;
+			const messages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(messages) || messages.length === 0) return null;
+			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
+			if (!title) return null;
+			live.title = title;
+			this.resolveStoreForSession(live.id).update(live.id, { title });
+			broadcast(live.clients, { type: "session_title", sessionId: live.id, title });
+			return title;
+		}
+
+		// Archived or dormant — read messages from .jsonl without restoring the agent.
+		const store = this.resolveStoreForId(id);
+		const ps = store?.get(id);
+		if (!ps || !ps.agentSessionFile) return null;
+		let messages: unknown[] = [];
+		try {
+			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			if (content) {
+				for (const line of content.trim().split("\n")) {
+					if (!line.trim()) continue;
+					try {
+						const entry = JSON.parse(line);
+						if (entry.type === "message" && entry.message) messages.push(entry.message);
+					} catch { /* skip malformed */ }
+				}
+			}
+		} catch {
+			messages = [];
+		}
+		if (messages.length === 0) return null;
+		const title = await generateSessionTitle(messages as any[], this.getTitleGenOptions());
+		if (!title) return null;
+		store?.update(id, { title });
+		return title;
+	}
+
 	async autoGenerateTitle(session: SessionInfo): Promise<void> {
 		try {
 			const msgsResp = await session.rpcClient.getMessages();
@@ -4758,31 +4809,26 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * when sandbox_tokens is not set.
  */
 function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
-	const tokensRaw = projectConfig?.get("sandbox_tokens") || "";
+	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
-	if (tokensRaw) {
+	if (entries.length > 0) {
 		const result: Record<string, string> = {};
-		try {
-			const entries: { key: string; value?: string; enabled: boolean }[] = JSON.parse(tokensRaw);
-			if (Array.isArray(entries)) {
-				const secrets = secretsStore?.getAll() || {};
-				for (const entry of entries) {
-					if (!entry.enabled || !entry.key) continue;
-					// Check secrets store first, then fall back to inline value (pre-migration)
-					const explicitValue = secrets[entry.key] || entry.value;
-					if (explicitValue) {
-						result[entry.key] = explicitValue;
-					} else {
-						// Empty value = resolve from host
-						const resolved = resolveHostTokenValue(entry.key, prefs);
-						if (resolved) {
-							result[entry.key] = resolved;
-						}
-					}
+		const secrets = secretsStore?.getAll() || {};
+		for (const entry of entries) {
+			if (!entry.enabled || !entry.key) continue;
+			// Check secrets store first, then fall back to inline value (pre-migration).
+			const explicitValue = secrets[entry.key] || entry.value;
+			if (explicitValue) {
+				result[entry.key] = explicitValue;
+			} else {
+				// Empty value = resolve from host.
+				const resolved = resolveHostTokenValue(entry.key, prefs);
+				if (resolved) {
+					result[entry.key] = resolved;
 				}
 			}
-		} catch { /* ignore parse errors */ }
+		}
 		return result;
 	}
 
