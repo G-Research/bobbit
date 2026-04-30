@@ -119,7 +119,7 @@ Do NOT use `ask_user_choices` for:
 - Status updates or confirmations of completed work.
 - Rhetorical framing.
 
-Set `allow_other: true` when the option list may be incomplete. Keep option labels short.
+Keep option labels short. The widget always offers an "Other" free-text escape hatch automatically.
 
 # Output style
 

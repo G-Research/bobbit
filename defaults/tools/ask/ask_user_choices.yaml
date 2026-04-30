@@ -20,21 +20,21 @@ detail_docs: |
     "questions": [
       {
         "question": "Which layout do you prefer?",
-        "options": ["Grid", "List", "Masonry"],
-        "allow_other": true
+        "options": ["Grid", "List", "Masonry"]
       },
       ...
     ]
   }
   ```
 
+  An "Other" free-text option is always rendered automatically — you do not need to (and cannot) opt out.
+
   - **questions**: 1–5 questions
   - Each question has a **question** string, an **options** array (2–8 items), and these
     optional fields:
     - **tab_label** (string, 2–4 words, ≤24 chars) — short topical summary shown as the tab title when there are multiple questions. **Required** when `questions.length > 1`; ignored for single-question asks. Example: `"User behavior"`, `"Follow-up timing"`.
-    - **allow_other** (boolean) — adds an "Other" free-text choice.
     - **multi** (boolean) — allow multiple selections; `selected` is returned as an array.
-    - **min** / **max** (integers) — min/max selections when `multi` is true (defaults: 1 and options.length).
+    - **min** / **max** (integers) — min/max selections when `multi` is true (defaults: 1 and options.length+1, since Other is always present).
 
   ## Tab labels (multi-question asks)
 
