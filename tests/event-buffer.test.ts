@@ -203,3 +203,40 @@ test("EventBuffer.canResumeFrom on empty buffer allows only caught-up clients", 
 	assert.equal(buf.canResumeFrom(0), true);  // lastSeq=0, client caught up
 	assert.equal(buf.canResumeFrom(5), false); // client ahead of us → mismatch
 });
+
+// ── Unified-message-ordering-reducer additions (design §3.1) ────────────────
+
+test("EventBuffer.pushFrame stamps a fresh seq+ts but does NOT retain", () => {
+	const buf = new EventBuffer();
+	const a = buf.push({ type: "x" });             // seq 1, retained
+	const f = buf.pushFrame();                      // seq 2, NOT retained
+	const b = buf.push({ type: "y" });             // seq 3, retained
+	assert.equal(a.seq, 1);
+	assert.equal(f.seq, 2);
+	assert.equal(b.seq, 3);
+	assert.equal(buf.lastSeq, 3);
+	assert.equal(buf.size, 2);                       // pushFrame did not add
+	assert.deepEqual(buf.getAll().map(e => e.seq), [1, 3]);
+	assert.ok(typeof f.ts === "number" && f.ts > 0);
+});
+
+test("EventBuffer.pushFrame seqs are monotonic and consumed even with no pushes", () => {
+	const buf = new EventBuffer();
+	const a = buf.pushFrame();
+	const b = buf.pushFrame();
+	const c = buf.pushFrame();
+	assert.equal(a.seq, 1);
+	assert.equal(b.seq, 2);
+	assert.equal(c.seq, 3);
+	assert.equal(buf.size, 0);
+	assert.equal(buf.lastSeq, 3);
+});
+
+test("EventBuffer.SNAPSHOT_ORDER_FLOOR is strictly less than every live seq", () => {
+	assert.equal(EventBuffer.SNAPSHOT_ORDER_FLOOR, -1_000_000_000);
+	const buf = new EventBuffer();
+	// Live seq starts at 1, snapshot floor is -1e9 — invariant holds even
+	// after a million pushes.
+	const e = buf.push({ type: "x" });
+	assert.ok(EventBuffer.SNAPSHOT_ORDER_FLOOR < e.seq);
+});
