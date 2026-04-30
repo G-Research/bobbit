@@ -57,6 +57,13 @@ gates:
         phase: 1
         timeout: 900
         run: "{{project.test_e2e_command}}"
+      - name: "Integration smoke"
+        type: integration-test
+        phase: 1
+        timeout: 300
+        optional: true
+        label: "Run integration smoke"
+        description: "Boot the project's qa_start_command and exercise a small set of black-box smoke scenarios (healthcheck + per-workflow scenarios from defaults/qa-scenarios/feature.yaml or .bobbit/config/qa-scenarios.yaml). Skipped with a warning if qa_start_command is not configured."
       - name: "Gap analysis"
         type: llm-review
         role: spec-auditor
@@ -179,8 +186,10 @@ gates:
              engineer around it.
 
           Focus on testing the user-facing changes described in the goal spec.
-          If the project does not have qa_start_command configured, call
-          `verification_result(verdict="pass", summary="QA testing is not configured for this project.")`.
+          If qa_start_command is missing AND you cannot stand up the system any other way,
+          call
+          `verification_result(verdict="fail", summary="qa_environment_unavailable: QA testing is required but qa_start_command is not configured. Add it to project.yaml and re-run.")`.
+          Do NOT default to pass.
 
           After completing all scenarios, call `verification_result` to submit your results:
           - `verdict`: "pass" or "fail" based on test results

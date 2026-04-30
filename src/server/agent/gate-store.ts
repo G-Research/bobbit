@@ -17,7 +17,7 @@ export type GateOwnerKind = "goal" | "mission";
 
 export interface GateSignalStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "integration-test";
 	passed: boolean;
 	skipped?: boolean;
 	output: string;

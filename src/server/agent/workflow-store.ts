@@ -2,9 +2,11 @@ import { YamlStore } from "./yaml-store.js";
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "integration-test";
 	run?: string;
 	prompt?: string;
+	/** For integration-test: scenarios file path (project-relative or absolute). */
+	scenarios?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
 	phase?: number;
@@ -66,10 +68,11 @@ function normalizeGate(data: Record<string, unknown>): WorkflowGate {
 function normalizeVerifyStep(data: Record<string, unknown>): VerifyStep {
 	const step: VerifyStep = {
 		name: (data.name as string) ?? "",
-		type: (data.type as "command" | "llm-review" | "agent-qa") ?? "command",
+		type: (data.type as "command" | "llm-review" | "agent-qa" | "integration-test") ?? "command",
 	};
 	if (typeof data.run === "string") step.run = data.run;
 	if (typeof data.prompt === "string") step.prompt = data.prompt;
+	if (typeof data.scenarios === "string") step.scenarios = data.scenarios;
 	if (data.expect === "success" || data.expect === "failure") step.expect = data.expect;
 	if (typeof data.timeout === "number") step.timeout = data.timeout;
 	if (typeof data.phase === "number") step.phase = data.phase;
@@ -117,6 +120,7 @@ function serializeWorkflow(workflow: Workflow): Record<string, unknown> {
 					const s: Record<string, unknown> = { name: v.name, type: v.type };
 					if (v.run) s.run = v.run;
 					if (v.prompt) s.prompt = v.prompt;
+					if (v.scenarios) s.scenarios = v.scenarios;
 					if (v.expect) s.expect = v.expect;
 					if (v.timeout) s.timeout = v.timeout;
 					if (v.phase) s.phase = v.phase;
