@@ -366,7 +366,7 @@ export class VerificationHarness {
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
 	/** Limits concurrent LLM review / QA sessions across all goals. */
-	private reviewSemaphore = new Semaphore(6);
+	private reviewSemaphore = new Semaphore(20);
 
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
