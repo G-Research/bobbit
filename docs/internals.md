@@ -842,6 +842,50 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 
 ---
 
+## AI Gateway per-session header (`x-opencode-session`)
+
+When Bobbit talks to an on-prem model through the AI Gateway, the gateway's token caches are keyed per upstream caller. Without a per-session discriminator every Bobbit session would share one cache bucket, so cache hits collapse and the gen-AI team's routing loses its signal. To partition cleanly, every aigw request carries an `x-opencode-session: <bobbit-session-id>` header — or, when no session id is available, **no header at all**. A constant fallback would defeat the whole point: it would re-collapse buckets onto a single key.
+
+### Where it's emitted
+
+`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `~/.bobbit/agent/models.json`. The `aigw` provider entry now carries a provider-level `headers` block:
+
+- Key: `x-opencode-session`.
+- Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
+
+Provider-level (not per-model) is deliberate — it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
+
+### Resolver semantics (pi-coding-agent contract surface)
+
+The pi-coding-agent CLI evaluates header values via `resolveConfigValue` (in `dist/core/resolve-config-value.js`):
+
+- A plain string `"X"` falls back to `process.env["X"] || "X"` — i.e. it can leak the literal key name. **Unsafe for our requirement.**
+- A `"!cmd"` string runs `cmd` via `child_process.exec` (shell-interpreted) and returns the trimmed stdout, or `undefined` when stdout is empty.
+- `resolveHeaders` (in `dist/core/model-registry.js`) drops any header whose resolved value is falsy.
+
+So the `!node -e ...` form gives us exactly "send the header iff `BOBBIT_SESSION_ID` is set to a non-empty value, otherwise omit it." That is the only behaviour we want.
+
+### Per-session env injection
+
+Every agent-CLI spawn path (`session-setup.ts`, `session-manager.ts`, the rpc-bridge child spawn) injects `BOBBIT_SESSION_ID=<sessionId>` into the subprocess env. Each Bobbit session owns its own subprocess with its own env, so values are correctly partitioned at the OS level and never leak across sessions.
+
+### Performance: one shell exec per session, not per request
+
+`resolveConfigValue` caches `!cmd` results in a module-level `commandResultCache` `Map` keyed by the command string. The first LLM request in a session pays a one-time ~50 ms `node -e` startup; every subsequent request in that same subprocess reuses the cached value. Because each Bobbit session spawns its own agent subprocess, the cache is naturally per-session — no cross-contamination, no repeated process spawns within a session.
+
+### Cross-shell quoting
+
+`child_process.exec` runs the command through `cmd.exe` on Windows and `/bin/sh` on POSIX. The chosen quoting — outer `"` for the JS argument, inner `'` for the empty-string default — is interpreted identically by both shells (cmd.exe and sh both treat `''` as an empty string literal in this position). The JSON-encoded value in `models.json` is `"!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""`.
+
+### Out of scope
+
+- The `/api/aigw/v1/*` passthrough proxy used for UI model-list/test calls — it never carries a session id and isn't on the request path that needs cache routing.
+- The title generator and other one-shot gateway calls — single-call, no cache benefit.
+- Bedrock/Claude routing — driver ignores `model.headers`, and on-prem models don't route to Bedrock anyway.
+- Custom local providers configured outside the aigw block — the `headers` block is scoped to the `aigw` provider entry only.
+
+---
+
 ## Semantic search
 
 Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
