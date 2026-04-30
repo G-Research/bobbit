@@ -6,6 +6,7 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { countDescendantsFrom } from "./render-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
@@ -148,8 +149,13 @@ let dashboardWs: WebSocket | null = null;
 let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let dashboardWsIntentionalClose = false;
 
-/** Current dashboard tab */
-let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
+/** Current dashboard tab. Plan + Children added in nested-goals task 4.1 — see
+ *  docs/design/nested-goals.md §10.2 / §10.3. The Plan tab is conditional on
+ *  the goal's workflow exposing a `goal-plan` gate; the Children tab is
+ *  conditional on the goal having any (transitive) child goals. The 4.2 / 4.3
+ *  tasks fill in the actual SVG / card content. */
+export type DashboardTab = "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children";
+let dashboardTab: DashboardTab = "gates";
 
 /** Role picker dropdown state */
 let roleDropdownOpen = false;
@@ -1510,9 +1516,27 @@ function toggleSignalExpand(signalId: string): void {
 // RENDER: TAB BAR
 // ============================================================================
 
-function setTab(tab: typeof dashboardTab): void {
+function setTab(tab: DashboardTab): void {
 	dashboardTab = tab;
 	renderApp();
+}
+
+/** Pure predicate: should the Plan tab be visible for this goal?
+ *  True iff the goal's (snapshotted) workflow includes a `goal-plan` gate.
+ *  See docs/design/nested-goals.md §10.2. */
+export function shouldShowPlanTab(goal: Goal | null | undefined): boolean {
+	const gates = goal?.workflow?.gates;
+	if (!gates || gates.length === 0) return false;
+	return gates.some(g => g.id === "goal-plan");
+}
+
+/** Pure predicate: should the Children tab be visible for this goal?
+ *  True iff the goal has any (transitive) non-archived descendants. The
+ *  `goals` array is supplied so the predicate stays pure / testable. See
+ *  docs/design/nested-goals.md §10.3. */
+export function shouldShowChildrenTab(goal: Goal | null | undefined, goals: Goal[]): boolean {
+	if (!goal) return false;
+	return countDescendantsFrom(goal.id, goals) > 0;
 }
 
 function renderTabBar(): TemplateResult {
@@ -1520,11 +1544,17 @@ function renderTabBar(): TemplateResult {
 	const passedCount = gates.filter(g => g.status === "passed").length;
 	const gateCountStr = wfTotal > 0 ? `${passedCount}/${wfTotal}` : String(gates.length);
 
-	const tabs: Array<{ id: typeof dashboardTab; label: string; icon: TemplateResult; countStr: string }> = [
+	const showPlan = shouldShowPlanTab(currentGoal);
+	const showChildren = shouldShowChildrenTab(currentGoal, state.goals);
+	const childCountStr = showChildren ? String(countDescendantsFrom(currentGoal!.id, state.goals)) : "";
+
+	const tabs: Array<{ id: DashboardTab; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
+		...(showPlan ? [{ id: "plan" as DashboardTab, label: "Plan", icon: svgGate, countStr: "" }] : []),
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
 		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && (state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") || state.archivedSessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")) ? 1 : 0)) },
+		...(showChildren ? [{ id: "children" as DashboardTab, label: "Children", icon: svgAgents, countStr: childCountStr }] : []),
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
@@ -1745,6 +1775,26 @@ function renderCommitsTab(): TemplateResult {
 			</div>
 		</div>
 	`;
+}
+
+// ============================================================================
+// RENDER: PLAN TAB (skeleton — task 4.1)
+// ============================================================================
+
+/** Plan tab body. 4.1 ships only the skeleton; 4.2 fills in the DAG SVG
+ *  per docs/design/nested-goals.md §10.2. */
+function renderPlanTab(): TemplateResult {
+	return html`<div class="tab-panel-inner" data-testid="plan-tab-stub"><p>Plan tab — coming in 4.2</p></div>`;
+}
+
+// ============================================================================
+// RENDER: CHILDREN TAB (skeleton — task 4.1)
+// ============================================================================
+
+/** Children tab body. 4.1 ships only the skeleton; 4.3 fills in the card
+ *  list per docs/design/nested-goals.md §10.3. */
+function renderChildrenTab(): TemplateResult {
+	return html`<div class="tab-panel-inner" data-testid="children-tab-stub"><p>Children tab — coming in 4.3</p></div>`;
 }
 
 // ============================================================================
@@ -2230,8 +2280,10 @@ export function renderGoalDashboard(): TemplateResult {
 			<div class="tab-content">
 				<div class="tab-panel ${activeTab === "spec" ? "active" : ""}">${activeTab === "spec" ? renderSpecTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "gates" ? "active" : ""}">${activeTab === "gates" ? renderGatesTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "plan" ? "active" : ""}">${activeTab === "plan" ? renderPlanTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "tasks" ? "active" : ""}">${activeTab === "tasks" ? renderTasksTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "agents" ? "active" : ""}">${activeTab === "agents" ? renderAgentsTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "children" ? "active" : ""}">${activeTab === "children" ? renderChildrenTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "commits" ? "active" : ""}">${activeTab === "commits" ? renderCommitsTab() : nothing}</div>
 			</div>
 		</div>

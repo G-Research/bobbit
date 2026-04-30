@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Goal Dashboard — conditional Plan/Children tabs (task 4.1)</title>
+</head>
+<body>
+<script>
+/**
+ * Pure logic mirror of the conditional-tab predicates added to
+ * src/app/goal-dashboard.ts in nested-goals task 4.1
+ * (see docs/design/nested-goals.md §10.2 + §10.3).
+ *
+ * Mirrors:
+ *   - shouldShowPlanTab(goal): true iff goal.workflow.gates contains an
+ *     entry with id === "goal-plan".
+ *   - shouldShowChildrenTab(goal, goals): true iff `goal` has any
+ *     transitive non-archived descendant in `goals`.
+ *   - countDescendantsFrom(goalId, goals): cycle-safe BFS count of
+ *     non-archived descendants (helper from src/app/render-helpers.ts —
+ *     mirrored byte-for-byte so the predicate test stays self-contained).
+ *
+ * The Tabs builder (`computeVisibleTabs`) below is the same skeleton the
+ * dashboard's `renderTabBar` walks: it produces an ordered list of tab IDs
+ * a test can assert on without spinning up the full UI.
+ */
+
+function countDescendantsFrom(goalId, goals) {
+  const byParent = new Map();
+  for (const g of goals) {
+    if (g.archived) continue;
+    if (!g.parentGoalId) continue;
+    let arr = byParent.get(g.parentGoalId);
+    if (!arr) { arr = []; byParent.set(g.parentGoalId, arr); }
+    arr.push(g);
+  }
+  const seen = new Set();
+  let count = 0;
+  const stack = [goalId];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    const kids = byParent.get(id);
+    if (!kids) continue;
+    for (const k of kids) {
+      if (seen.has(k.id)) continue;
+      seen.add(k.id);
+      count++;
+      stack.push(k.id);
+    }
+  }
+  return count;
+}
+
+function shouldShowPlanTab(goal) {
+  const gates = goal && goal.workflow && goal.workflow.gates;
+  if (!gates || gates.length === 0) return false;
+  return gates.some(g => g.id === "goal-plan");
+}
+
+function shouldShowChildrenTab(goal, goals) {
+  if (!goal) return false;
+  return countDescendantsFrom(goal.id, goals) > 0;
+}
+
+/** Build the ordered list of tab ids for a given goal + snapshot, matching
+ *  `renderTabBar` in src/app/goal-dashboard.ts. The tester only cares about
+ *  ids + ordering — not about icons or count strings. */
+function computeVisibleTabs(goal, goals) {
+  const showPlan = shouldShowPlanTab(goal);
+  const showChildren = shouldShowChildrenTab(goal, goals);
+  const ids = ["spec", "gates"];
+  if (showPlan) ids.push("plan");
+  ids.push("tasks", "agents");
+  if (showChildren) ids.push("children");
+  ids.push("commits");
+  return ids;
+}
+
+window.shouldShowPlanTab = shouldShowPlanTab;
+window.shouldShowChildrenTab = shouldShowChildrenTab;
+window.countDescendantsFrom = countDescendantsFrom;
+window.computeVisibleTabs = computeVisibleTabs;
+</script>
+</body>
+</html>
