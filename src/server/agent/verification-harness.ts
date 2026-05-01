@@ -1405,13 +1405,32 @@ export class VerificationHarness {
 		if (!notable) return;
 
 		const parentVerb = status === "passed" ? "PASSED" : "FAILED";
+
+		// EAGER AUTO-MERGE: when a child's `ready-to-merge` passes, fire the
+		// merge-and-archive path immediately rather than waiting for the
+		// parent's execution-gate verifyGateSignal loop to poll. Live test
+		// (PR #409): the parent's execution-gate runs ONCE at goal-plan
+		// freeze; if a child's ready-to-merge passes AFTER that single run
+		// has terminated (which it always does once any subgoal step
+		// completes), nothing was watching, so the merge never fired.
+		//
+		// We trigger the eager merge fire-and-forget so the notifyTeamLead
+		// call returns quickly. The child has its own team-lead session
+		// reading the gate-pass notification in parallel; the parent's team-
+		// lead reads the bubble notification + sees the merge complete via
+		// the existing post-merge auto-archive path (c95f8f60).
+		let shouldEagerMerge = false;
+		if (gateId === "ready-to-merge" && status === "passed" && this.projectContextManager) {
+			shouldEagerMerge = true;
+		}
+
 		// For child failures, include the same failed-step detail in the
 		// parent's notification so the parent can intervene without first
 		// calling goal_inspect_child. Reuse the detail string we built above.
 		const parentMsg =
 			`Child goal "${child.title}" (${goalId}) gate verification ${parentVerb}: "${gateId}".${status === "failed" ? detail : ""} ` +
 			(gateId === "ready-to-merge" && status === "passed"
-				? "The parent harness will now perform the local merge."
+				? "The parent harness is firing the local merge now (eager-merge path)."
 				: status === "failed"
 				? "The child's team-lead has been notified directly. Watch for the next gate signal; if the child stays stuck, intervene via goal_inspect_child / WS-prompt the child's team-lead, or archive via goal_archive_child."
 				: "Use goal_plan_status / goal_list_children to see the latest tree state.");
@@ -1419,6 +1438,70 @@ export class VerificationHarness {
 			this.notifyTeamLeadFn(child.parentGoalId, parentMsg);
 		} catch (err) {
 			console.warn(`[verification] Failed to notify parent ${child.parentGoalId} of child ${goalId} ${gateId} ${status}:`, err);
+		}
+
+		if (shouldEagerMerge) {
+			const parentId = child.parentGoalId;
+			const childId = goalId;
+			const pcm2 = this.projectContextManager!;
+			const parentCtx = pcm2.getContextForGoal(parentId);
+			const parentGoalRecord = parentCtx?.goalStore.get(parentId);
+			if (parentCtx && parentGoalRecord) {
+				(async () => {
+					try {
+						// Idempotency guard: if the child is already archived,
+						// the merge already happened (auto-archive at c95f8f60
+						// fires only after a clean merge). Don't double-merge.
+						const childRecord = parentCtx.goalStore.get(childId);
+						if (childRecord?.archived) {
+							console.log(`[verification] Eager-merge skipped for child ${childId}: already archived (presumably already merged).`);
+							return;
+						}
+
+						console.log(`[verification] Eager-merge firing for child ${childId} into parent ${parentId} branch ${parentGoalRecord.branch}.`);
+						const mergeResult = await parentCtx.goalManager.mergeChild(parentId, childId);
+						if (mergeResult.merged) {
+							// Mirror the post-merge auto-archive from runSubgoalStep.
+							if (this.teamManager) {
+								await this.teamManager.teardownTeam(childId).catch(err => {
+									console.warn(`[verification] Eager-merge teardownTeam failed for child ${childId} (best-effort):`, err);
+								});
+							}
+							await parentCtx.goalManager.archiveGoal(childId).catch(err => {
+								console.warn(`[verification] Eager-merge archiveGoal failed for child ${childId} (best-effort):`, err);
+							});
+							console.log(`[verification] Eager-merge completed: child ${childId} merged into parent ${parentId} (commit ${mergeResult.commitSha ?? "unknown"}); child team torn down + archived.`);
+
+							// Notify the parent team-lead that the merge succeeded
+							// and they may need to re-signal execution to advance to
+							// the next phase. (The harness can't auto-spawn the next
+							// phase because verifyGateSignal already terminated.)
+							if (this.notifyTeamLeadFn) {
+								try {
+									this.notifyTeamLeadFn(
+										parentId,
+										`Eager-merge complete: child "${child.title}" (${childId}) merged into your branch (commit ${mergeResult.commitSha ?? "unknown"}) and archived. ` +
+										`If this child completes a phase that unblocks downstream planSteps, **re-signal the execution gate** to drive the harness to spawn the next phase — verifyGateSignal terminates per signal, so subsequent child completions need a fresh execution signal to advance the DAG. ` +
+										`Use goal_plan_status to inspect remaining planSteps; if any have phase > current and dependencies satisfied, signal execution.`,
+									);
+								} catch { /* best-effort */ }
+							}
+						} else {
+							console.warn(`[verification] Eager-merge produced a CONFLICT for child ${childId} into parent ${parentId}: ${mergeResult.output ?? "no output"}`);
+							if (this.notifyTeamLeadFn) {
+								try {
+									this.notifyTeamLeadFn(
+										parentId,
+										`Eager-merge CONFLICT: child "${child.title}" (${childId})'s branch could not be cleanly merged into your branch. Output:\n${mergeResult.output ?? "no output"}\n\nResolve manually: \`git merge --abort\` if needed, inspect both branches, then call goal_merge_child(${childId}) after fixing, OR escalate to the user.`,
+									);
+								} catch { /* best-effort */ }
+							}
+						}
+					} catch (err) {
+						console.error(`[verification] Eager-merge threw for child ${childId} into parent ${parentId}:`, err);
+					}
+				})();
+			}
 		}
 	}
 
