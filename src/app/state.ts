@@ -172,6 +172,23 @@ export const state = {
 		 *  project (regular/goal/staff session pointing at a live project). */
 		mode?: "provisional" | "registered";
 	},
+	/**
+	 * Slice D: unified proposal slot table keyed by ProposalType. Slice E will
+	 * remove the legacy per-type slots (`activeGoalProposal`, `activeProjectProposal`,
+	 * `activeRoleProposal`, `activeStaffProposal`) once the call sites are migrated.
+	 * For now this lives ALONGSIDE the legacy fields — additive only.
+	 * See `src/app/proposal-registry.ts` for `ProposalSlot`.
+	 */
+	activeProposals: {} as Partial<Record<
+		"goal" | "project" | "workflow" | "role" | "tool" | "staff",
+		{
+			sessionId: string;
+			fields: Record<string, unknown>;
+			streaming: boolean;
+			mode?: "provisional" | "registered";
+			rev: number;
+		}
+	>>,
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
