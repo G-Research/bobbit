@@ -26,8 +26,8 @@ cat .bobbit/config/project.yaml
 
 Each component in `components[]` may carry an opaque `config:` map. The component you want is the one whose `config.qa_start_command` is set. Pick it as follows:
 
-1. If multiple components have `config.qa_start_command`, prefer the one matching the gate's `agent-qa` step `component:` field (passed in your prompt context).
-2. Else use the component whose `name` matches the project name.
+1. **Look for a `[QA-TEST CONTEXT]\ncomponent: <name>` block near the top of your kickoff message.** When the verification harness invokes you for an `agent-qa` step that declares a `component:` field, it prepends this context block to your prompt. If present, prefer that component.
+2. Else, if multiple components have `config.qa_start_command`, use the component whose `name` matches the project name.
 3. Else use the first component with `config.qa_start_command`.
 
 From that component's `config:` map, read these keys:

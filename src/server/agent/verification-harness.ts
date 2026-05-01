@@ -850,7 +850,7 @@ export class VerificationHarness {
 				return { name: stepName, type: "agent-qa", passed: false, output: `Aborted: goal is ${goalCheck.state}`, duration_ms: Date.now() - startedAt };
 			}
 			result = await this.runAgentQaStep(
-				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role, component: stepDef.component },
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
 			);
@@ -1884,6 +1884,43 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Build the kickoff message sent to a QA-tester sub-agent. Exposed as a
+	 * static helper so unit tests can assert that the resolved component name
+	 * is threaded into a `[QA-TEST CONTEXT]` block. The /qa-test skill reads
+	 * this block in Step 1 to disambiguate when multiple components carry
+	 * `config.qa_start_command`.
+	 */
+	static buildQaKickoffMessage(args: {
+		stepName: string;
+		prompt?: string;
+		branch?: string;
+		commit?: string;
+		componentName?: string;
+	}): string {
+		const contextBlock = args.componentName
+			? `[QA-TEST CONTEXT]\ncomponent: ${args.componentName}\n\n`
+			: "";
+		return [
+			`Perform QA testing for: "${args.stepName}".`,
+			`Your working directory is on branch \`${args.branch || "HEAD"}\` at commit \`${args.commit || "HEAD"}\`.`,
+			"",
+			`${contextBlock}${args.prompt || ""}`,
+			"",
+			"## Screenshots",
+			"When taking screenshots for the report, call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its absolute path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src=\"file:///<path>\">` — never paste base64 strings into the report (they bloat the transcript and burn tokens). For smaller files you can also pass `format: \"jpeg\", quality: 75`.",
+			"",
+			"## Submitting Results",
+			"After completing all scenarios, call `verification_result` to submit your results:",
+			'- `verdict`: "pass" or "fail"',
+			"- `summary`: detailed markdown summary — headings, bullet lists, specific findings with file references",
+			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the server reads it directly, so large reports with embedded base64 screenshots work without hitting tool output limits). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
+			"- `report_html`: inline HTML report string (only for small reports; for reports with screenshots, always use report_html_file instead)",
+			"",
+			"This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.",
+		].join("\n");
+	}
+
+	/**
 	 * Spawn a one-shot test-engineer sub-agent to perform QA testing.
 	 * Similar to runLlmReviewViaSession() but with test-engineer role and QA-specific prompt.
 	 */
@@ -1937,26 +1974,17 @@ export class VerificationHarness {
 		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
 		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
 
-		// Build kickoff message
-		const kickoff = [
-			`Perform QA testing for: "${step.name}".`,
-			`Your working directory is on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`.`,
-			"",
-			step.prompt || "",
-			"",
-			"## Screenshots",
-			"When taking screenshots for the report, call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its absolute path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src=\"file:///<path>\">` — never paste base64 strings into the report (they bloat the transcript and burn tokens). For smaller files you can also pass `format: \"jpeg\", quality: 75`.",
-			"",
-			"## Submitting Results",
-			"After completing all scenarios, call `verification_result` to submit your results:",
-			'- `verdict`: "pass" or "fail"',
-			"- `summary`: detailed markdown summary — headings, bullet lists, specific findings with file references",
-			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the server reads it directly, so large reports with embedded base64 screenshots work without hitting tool output limits). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
-			"- `report_html`: inline HTML report string (only for small reports; for reports with screenshots, always use report_html_file instead)",
-			"",
-			"This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.",
-		].join("\n");
-
+		// Build kickoff message via the testable static helper. Threads the
+		// resolved `componentName` into a `[QA-TEST CONTEXT]` block when present,
+		// so the /qa-test skill picks the correct component (see
+		// .claude/skills/qa-test/SKILL.md Step 1).
+		const kickoff = VerificationHarness.buildQaKickoffMessage({
+			stepName: step.name,
+			prompt: step.prompt,
+			branch: builtinVars.branch,
+			commit: builtinVars.commit,
+			componentName,
+		});
 		let qaSessionId: string | undefined;
 		let qaLastErroredToolOutput: string | null = null;
 		let qaErrListenerUnsub: (() => void) | undefined;

@@ -232,6 +232,101 @@ test.describe("Component config map (REST API)", () => {
 		}
 	});
 
+	test("PUT rejects components[].config with non-string values", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-nonstring-${Date.now()}`);
+		try {
+			const res = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", config: { qa_max_scenarios: 5 } }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/must be string/);
+			expect(body.error).toContain("qa_max_scenarios");
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("PUT rejects components[].config with empty key", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-emptykey-${Date.now()}`);
+		try {
+			const res = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", config: { "": "v" } }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/empty key/);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("PUT rejects components[].config with > 100 entries", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-toomany-${Date.now()}`);
+		try {
+			const cfg: Record<string, string> = {};
+			for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
+			const res = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", config: cfg }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/too many entries/);
+			expect(body.error).toMatch(/got 101/);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("POST /api/projects rejects components[].config with non-string values", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-bad-"));
+		try {
+			const res = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `comp-cfg-post-bad-${Date.now()}`,
+					rootPath: dir,
+					components: [{ name: "web", repo: ".", config: { qa_max_scenarios: 5 } }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/must be string/);
+		} finally {
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	});
+
+	test("POST /api/projects rejects components[].config with > 100 entries", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-toomany-"));
+		try {
+			const cfg: Record<string, string> = {};
+			for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
+			const res = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `comp-cfg-post-toomany-${Date.now()}`,
+					rootPath: dir,
+					components: [{ name: "web", repo: ".", config: cfg }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/too many entries/);
+		} finally {
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	});
+
 	test("GET /api/projects/:id/config strips legacy top-level qa_* keys", async () => {
 		const { id, cleanup } = await registerTmpProject(`comp-cfg-strip-${Date.now()}`);
 		try {

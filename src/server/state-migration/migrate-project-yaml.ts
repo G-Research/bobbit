@@ -66,14 +66,28 @@ function migrateLegacyQaToComponent(
 	components: Array<Record<string, unknown>>,
 	projectName: string,
 ): { changed: boolean } {
-	const present = LEGACY_QA_KEYS.filter(k => {
+	// Detect every legacy key that exists on `raw` *at all* — even empty
+	// strings or empty objects — so they get cleaned up. Acceptance: no
+	// top-level qa_* after boot. We split detection from emission below.
+	const keysOnRaw = LEGACY_QA_KEYS.filter(k => k in raw);
+	if (keysOnRaw.length === 0) return { changed: false };
+
+	// Subset that should actually be emitted into the target component's
+	// `config:` map (non-empty values only).
+	const present = keysOnRaw.filter(k => {
 		const v = raw[k];
 		if (v === undefined || v === null) return false;
 		if (typeof v === "string" && v.length === 0) return false;
 		if (typeof v === "object" && v !== null && !Array.isArray(v) && Object.keys(v).length === 0) return false;
 		return true;
 	});
-	if (present.length === 0) return { changed: false };
+
+	// If there are only empty legacy keys (nothing to emit), still delete
+	// them so the on-disk shape is clean.
+	if (present.length === 0) {
+		for (const k of keysOnRaw) delete raw[k];
+		return { changed: true };
+	}
 
 	// Pick target component:
 	//   (1) component referenced by the first agent-qa step in any inline workflow
@@ -345,10 +359,10 @@ function maybeSeedWorkflowsOnly(args: {
 	// main path so the dir is removed and content is preserved). If neither inline
 	// nor dir, seed defaults. If only legacy top-level qa_* keys remain, fall through
 	// so they get migrated onto the appropriate component's config.
-	const hasLegacyQaTopLevel = LEGACY_QA_KEYS.some(k => {
-		const v = raw[k];
-		return v !== undefined && v !== null && (typeof v !== "string" || v.length > 0);
-	});
+	// Any presence of a legacy qa_* top-level key triggers a write — even
+	// empty values get deleted to satisfy the "no top-level qa_* after boot"
+	// acceptance criterion.
+	const hasLegacyQaTopLevel = LEGACY_QA_KEYS.some(k => k in raw);
 	if (hasInlineWorkflows && !hasWorkflowsDir && !hasLegacyQaTopLevel) {
 		return { migrated: false };
 	}

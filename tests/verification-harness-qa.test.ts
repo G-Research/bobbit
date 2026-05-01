@@ -116,6 +116,75 @@ test("resolveDefaultQaComponentName returns undefined when there are no componen
 	assert.equal(name, undefined);
 });
 
+test("buildQaKickoffMessage prepends [QA-TEST CONTEXT] when componentName is provided", () => {
+	const msg = VerificationHarness.buildQaKickoffMessage({
+		stepName: "e2e",
+		prompt: "Verify login flow",
+		branch: "goal/foo",
+		commit: "abc123",
+		componentName: "web",
+	});
+	assert.match(msg, /\[QA-TEST CONTEXT\]\ncomponent: web\n/);
+	// The original prompt body must still be present, after the context block.
+	assert.match(msg, /Verify login flow/);
+	assert.match(msg, /branch `goal\/foo`/);
+	assert.match(msg, /commit `abc123`/);
+});
+
+test("buildQaKickoffMessage omits the context block when componentName is empty/missing", () => {
+	const msg = VerificationHarness.buildQaKickoffMessage({
+		stepName: "e2e",
+		prompt: "Verify",
+		branch: "x",
+		componentName: "",
+	});
+	assert.equal(msg.includes("[QA-TEST CONTEXT]"), false);
+	const msg2 = VerificationHarness.buildQaKickoffMessage({ stepName: "e2e", prompt: "Verify", branch: "x" });
+	assert.equal(msg2.includes("[QA-TEST CONTEXT]"), false);
+});
+
+test("_rerunAgentQaStep threads stepDef.component into runAgentQaStep", async () => {
+	// Build a harness with mocked dependencies that capture the args passed
+	// to runAgentQaStep. We verify the rerun path is symmetric with the
+	// primary path, which already passes step.component.
+	const components: Component[] = [
+		{ name: "web", repo: ".", config: { qa_start_command: "x" } },
+	];
+	const pcm = makeContextManager("goal-1", "myproject", components);
+	const harness = makeHarness(pcm) as any;
+
+	const captured: { component?: string }[] = [];
+	harness.runAgentQaStep = async (step: { component?: string }) => {
+		captured.push({ component: step.component });
+		return { passed: true, output: "ok", sessionId: "s1", artifact: undefined };
+	};
+
+	// Stub the lookup helpers used by _rerunAgentQaStep.
+	harness._findStepDefinition = () => ({
+		name: "qa",
+		type: "agent-qa",
+		prompt: "do qa",
+		timeout: 60,
+		role: "qa-tester",
+		component: "web",
+	});
+	harness._gatherRerunContext = async () => ({
+		cwd: "/tmp",
+		builtinVars: { branch: "b", commit: "c" },
+		signal: { metadata: {}, content: "" },
+		goalSpec: "",
+		allGateStates: new Map(),
+	});
+	harness.substituteVars = (s: string) => s;
+	harness.resolveProjectConfigStore = () => ({ getWithDefaults: () => ({}) });
+	harness.projectContextManager = pcm;
+
+	await harness._rerunAgentQaStep("goal-1", "impl", "sig-1", "qa");
+
+	assert.equal(captured.length, 1, "runAgentQaStep should be called exactly once");
+	assert.equal(captured[0].component, "web", "rerun path must thread stepDef.component into runAgentQaStep");
+});
+
 test("getQaMaxDurationMinutes(componentName) reads the declared component's config", () => {
 	const components: Component[] = [
 		{ name: "web", repo: ".", config: { qa_start_command: "x", qa_max_duration_minutes: "20" } },

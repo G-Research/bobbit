@@ -349,6 +349,40 @@ const LEGACY_QA_TOP_LEVEL_KEYS = [
 	"qa_max_scenarios",
 ] as const;
 
+/**
+ * Validate the per-component `config:` map (post-migration, opaque
+ * key→string). Rules mirror the propose_project tool's runtime validator:
+ *   - keys must be non-empty strings
+ *   - values must be strings
+ *   - max 100 entries per component
+ *
+ * Returns null on success, or a string error message suitable for HTTP 400.
+ */
+function validateComponentsConfig(components: unknown): string | null {
+	if (!Array.isArray(components)) return null;
+	for (const c of components) {
+		if (!c || typeof c !== "object") continue;
+		const cfg = (c as { config?: unknown }).config;
+		if (cfg === undefined || cfg === null) continue;
+		if (typeof cfg !== "object" || Array.isArray(cfg)) {
+			return `components[${(c as { name?: unknown }).name ?? "?"}].config: must be an object`;
+		}
+		const entries = Object.entries(cfg as Record<string, unknown>);
+		if (entries.length > 100) {
+			return `components[${(c as { name?: unknown }).name ?? "?"}].config: too many entries (max 100, got ${entries.length})`;
+		}
+		for (const [k, v] of entries) {
+			if (typeof k !== "string" || k.length === 0) {
+				return `components[${(c as { name?: unknown }).name ?? "?"}].config: empty key`;
+			}
+			if (typeof v !== "string") {
+				return `components[${(c as { name?: unknown }).name ?? "?"}].config.${k}: must be string, got ${typeof v}`;
+			}
+		}
+	}
+	return null;
+}
+
 async function getGitDiff(cwd: string, file?: string, containerId?: string): Promise<string> {
 	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
 	let hasHead = true;
@@ -1824,6 +1858,11 @@ async function handleApiRoute(
 			json({ error: "Missing name or rootPath" }, 400);
 			return;
 		}
+		// Validate components[].config eagerly (mirrors propose_project tool).
+		{
+			const err = validateComponentsConfig((body as Record<string, unknown>).components);
+			if (err) { json({ error: err }, 400); return; }
+		}
 		try {
 			const upsert = body.upsert === true;
 			const color = typeof body.color === "string" ? body.color : undefined;
@@ -2122,6 +2161,12 @@ async function handleApiRoute(
 					json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
 					return;
 				}
+			}
+
+			// Validate components[].config eagerly (mirrors propose_project tool).
+			{
+				const err = validateComponentsConfig((body as Record<string, unknown>).components);
+				if (err) { json({ error: err }, 400); return; }
 			}
 
 			// Extract structured fields (components / workflows) before flat-key validation.

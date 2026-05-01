@@ -409,6 +409,49 @@ describe("migrateProjectYaml", () => {
 		assert.equal((comps[0].config as Record<string, string>).qa_start_command, "node server.js");
 	});
 
+	it("deletes empty legacy qa_* keys even when nothing is emitted to component config", () => {
+		// Synthesis path: components is missing, but qa_start_command is empty
+		// and qa_env is {}. Migration must still strip them from the top level.
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			qa_start_command: "",
+			qa_env: {},
+			qa_max_scenarios: "",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "clean" });
+
+		const out = readYaml(yamlFile);
+		assert.equal((out as Record<string, unknown>).qa_start_command, undefined, "empty qa_start_command must be deleted");
+		assert.equal((out as Record<string, unknown>).qa_env, undefined, "empty qa_env must be deleted");
+		assert.equal((out as Record<string, unknown>).qa_max_scenarios, undefined, "empty qa_max_scenarios must be deleted");
+		const comps = out.components as any[];
+		assert.equal(comps[0].name, "clean");
+		// No config emitted because every legacy value was empty.
+		assert.equal(comps[0].config, undefined);
+	});
+
+	it("deletes empty legacy qa_* keys via the seed-only path (components already present)", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "web", repo: "." }],
+			workflows: {
+				feature: { id: "feature", name: "Feature", gates: [] },
+			},
+			// All present but empty.
+			qa_start_command: "",
+			qa_env: {},
+			qa_max_duration_minutes: "",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "web" });
+
+		const out = readYaml(yamlFile);
+		assert.equal((out as Record<string, unknown>).qa_start_command, undefined);
+		assert.equal((out as Record<string, unknown>).qa_env, undefined);
+		assert.equal((out as Record<string, unknown>).qa_max_duration_minutes, undefined);
+	});
+
 	it("handles empty file with no legacy commands by writing a data-only default component", () => {
 		const yamlFile = path.join(configDir, "project.yaml");
 		fs.writeFileSync(yamlFile, "");
