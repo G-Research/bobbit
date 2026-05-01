@@ -76,15 +76,6 @@ export interface PersistedSession {
 	sandboxed?: boolean;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
-	/**
-	 * Discriminator for session-restore branching. Sibling of
-	 * `TeamAgent.kind` (PR #406). Pre-`kind` records are inferred via
-	 * `resolveSessionKind()` in `delegate-harness.ts`:
-	 * `kind ?? (delegateOf ? "delegate" : "worker")`. Reviewer sessions set
-	 * this explicitly at creation time. See
-	 * `docs/design/delegate-restart-resilience.md` §4.1.
-	 */
-	kind?: "delegate" | "worker" | "reviewer";
 }
 
 /**
@@ -129,7 +120,6 @@ export type UpdatableSessionFields = Pick<
 	| "sandboxed"
 	| "projectId"
 	| "repoWorktrees"
-	| "kind"
 >;
 
 /**
