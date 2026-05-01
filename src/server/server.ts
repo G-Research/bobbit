@@ -4847,8 +4847,12 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		const signalSessionId = body?.sessionId || "unknown";
 
-		// Validate dependencies are met
-		for (const depId of gateDef.dependsOn) {
+		// Validate dependencies are met. `dependsOn` defaults to [] via
+		// `normalizeGate`/`normalizeWorkflow`, but we guard defensively here
+		// because a future code path that bypasses normalization (e.g. a
+		// hand-built workflow snapshot) shouldn't crash the gate-signal route.
+		const gateDeps: string[] = Array.isArray(gateDef.dependsOn) ? gateDef.dependsOn : [];
+		for (const depId of gateDeps) {
 			const depGate = gateStore.getGate(goalId, depId);
 			if (!depGate || depGate.status !== "passed") {
 				const depDef = goal.workflow.gates.find(g => g.id === depId);

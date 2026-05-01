@@ -203,7 +203,15 @@ function normalizeGate(raw: unknown): WorkflowGate {
 	return gate;
 }
 
-function normalizeWorkflow(raw: unknown, idHint: string): Workflow | null {
+/**
+ * Normalize a raw workflow value (any source: project.yaml, builtin
+ * seeds, REST PUT body) into the canonical `Workflow` shape used at
+ * runtime. Coerces snake_case → camelCase (`depends_on` → `dependsOn`,
+ * `inject_downstream` → `injectDownstream`, etc.) and fills in defaults
+ * (e.g. `dependsOn: []` rather than `undefined`) so consumers don't
+ * need to defensively guard. Returns `null` if the input is unusable.
+ */
+export function normalizeWorkflow(raw: unknown, idHint: string): Workflow | null {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : null;
 	if (!r) return null;
 	const id = typeof r.id === "string" && r.id ? r.id : idHint;

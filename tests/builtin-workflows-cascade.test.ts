@@ -52,6 +52,58 @@ describe("BuiltinConfigProvider.getWorkflows()", () => {
 		assert.deepEqual(ids, ["bug-fix", "feature", "general", "parent", "quick-fix"]);
 	});
 
+	// Pinned regression: the seeded workflows in `seed-default-workflows.ts`
+	// use snake_case fields (`depends_on`, `inject_downstream`) on their
+	// `SeededGate` shape. Before the fix at HEAD <next>, getWorkflows() cast
+	// `wf.gates as Workflow["gates"]` directly, leaving `depends_on` in place
+	// and `dependsOn` as `undefined` on the runtime gate. The gate-signal
+	// route in `server.ts` then crashed with
+	//   `TypeError: gateDef.dependsOn is not iterable`
+	// the first time anyone signalled a gate from a project that used the
+	// builtin `parent` workflow (e.g. agent-memory's v0.1 foundation child).
+	it("every gate has dependsOn as an Array (camelCase, never undefined)", () => {
+		const provider = new BuiltinConfigProvider();
+		for (const wf of provider.getWorkflows()) {
+			for (const gate of wf.gates) {
+				assert.ok(Array.isArray(gate.dependsOn),
+					`workflow=${wf.id} gate=${gate.id} — dependsOn must be an Array, got ${typeof gate.dependsOn}`);
+			}
+		}
+	});
+
+	it("`parent` workflow specifically: every gate has the right dependsOn array", () => {
+		const provider = new BuiltinConfigProvider();
+		const parent = provider.getWorkflows().find(w => w.id === "parent");
+		assert.ok(parent);
+		const byId = new Map(parent!.gates.map(g => [g.id, g]));
+		assert.deepEqual(byId.get("charter")!.dependsOn, []);
+		assert.deepEqual(byId.get("plan-review")!.dependsOn, ["charter"]);
+		assert.deepEqual(byId.get("goal-plan")!.dependsOn, ["plan-review"]);
+		assert.deepEqual(byId.get("execution")!.dependsOn, ["goal-plan"]);
+		assert.deepEqual(byId.get("integration")!.dependsOn, ["execution"]);
+		// `ready-to-merge` depended on "documentation" in the standard helper;
+		// the parent workflow patches it to depend on "integration" since
+		// parent has no documentation gate.
+		assert.deepEqual(byId.get("ready-to-merge")!.dependsOn, ["integration"]);
+	});
+
+	it("`feature` workflow specifically: depends_on → dependsOn coercion (the agent-memory case)", () => {
+		// agent-memory's child of a `parent`-workflow parent uses the
+		// `feature` workflow. Its ready-to-merge canonically depends on
+		// "documentation" — must show up as a camelCase array, not
+		// undefined or as snake_case `depends_on`.
+		const provider = new BuiltinConfigProvider();
+		const feature = provider.getWorkflows().find(w => w.id === "feature");
+		assert.ok(feature);
+		const rtm = feature!.gates.find(g => g.id === "ready-to-merge");
+		assert.ok(rtm);
+		assert.ok(Array.isArray(rtm!.dependsOn));
+		assert.deepEqual(rtm!.dependsOn, ["documentation"]);
+		// And confirm snake_case is gone post-normalization.
+		assert.equal((rtm as any).depends_on, undefined,
+			"normalizeWorkflow must drop the snake_case alias — only camelCase survives");
+	});
+
 	it("each built-in has a non-empty name and at least one gate", () => {
 		const provider = new BuiltinConfigProvider();
 		const wfs = provider.getWorkflows();

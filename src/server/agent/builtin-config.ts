@@ -17,6 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
+import { normalizeWorkflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import { buildDefaultWorkflows } from "../state-migration/seed-default-workflows.js";
 
@@ -65,14 +66,14 @@ export class BuiltinConfigProvider {
 		const seeded = buildDefaultWorkflows("app");
 		const out: Workflow[] = [];
 		for (const [id, wf] of Object.entries(seeded)) {
-			out.push({
-				id,
-				name: wf.name,
-				description: wf.description ?? "",
-				gates: wf.gates as Workflow["gates"],
-				createdAt: 0,
-				updatedAt: 0,
-			});
+			// Route through `normalizeWorkflow` so the seed's snake_case fields
+			// (`depends_on`, `inject_downstream`) are coerced to the canonical
+			// camelCase runtime shape with `dependsOn: []` defaulted in. Without
+			// this, `gateDef.dependsOn` reads `undefined` at the gate-signal
+			// dependency-validation site (server.ts handleApiRoute) and crashes
+			// with `gateDef.dependsOn is not iterable`.
+			const normalized = normalizeWorkflow(wf, id);
+			if (normalized) out.push(normalized);
 		}
 		return out;
 	}
