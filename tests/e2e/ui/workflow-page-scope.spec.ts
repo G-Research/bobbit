@@ -1,13 +1,20 @@
 /**
  * Workflows page scope behaviour — UI E2E.
  *
- * Pins the UI side of "Remove system-level workflows":
- *   - The Workflows page omits the "System" tab from its scope row.
- *   - Entering the page in System scope auto-switches to the first project.
- *   - The project's workflows render; no system-level entries leak in.
- *   - The empty-state path is exercised in a dedicated test using
- *     forceDeleteAllProjects() so it doesn't disturb the other suites'
- *     shared default project.
+ * The Workflows page now lives inside the Settings dialog as a project-scoped
+ * tab (commits 0fd63978, 2fd9ad2b). Workflows have no system layer, so the
+ * "Workflows" tab only appears when Settings is in a project scope. The
+ * standalone `#/workflows` route is preserved as a redirect into the active
+ * project's Workflows tab.
+ *
+ * This file pins the UI side of "Remove system-level workflows":
+ *   - The System scope tab list does NOT include "Workflows".
+ *   - Project scope tab list DOES include "Workflows".
+ *   - The standalone `#/workflows` route redirects to
+ *     `#/settings/<projectId>/workflows`.
+ *   - The active project's workflows render via the `.wf-row` rows, no
+ *     system-level entries leak in (workflows have no `builtin`/`server`
+ *     origin badges).
  *
  * Canonical pattern: tests/e2e/ui/settings.spec.ts
  *                    tests/e2e/ui/config-scope.spec.ts

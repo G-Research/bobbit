@@ -1187,6 +1187,28 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const merged: Record<string, unknown> = { ...prevFields, ...fields };
 			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
 			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
+			// Per-component shallow merge: when both prev and incoming carry
+			// `components`, merge entries by name so a partial component update
+			// (e.g. only `commands`) doesn't clobber the previously-proposed
+			// `config` (or vice versa) on that component.
+			if (Array.isArray(fields.components) && Array.isArray((prevFields as Record<string, unknown>).components)) {
+				const prevComps = (prevFields as Record<string, unknown>).components as Array<Record<string, unknown>>;
+				const prevByName = new Map<string, Record<string, unknown>>();
+				for (const pc of prevComps) {
+					if (pc && typeof pc === "object" && typeof pc.name === "string") prevByName.set(pc.name, pc);
+				}
+				merged.components = (fields.components as Array<Record<string, unknown>>).map(c => {
+					if (!c || typeof c !== "object" || typeof c.name !== "string") return c;
+					const prev = prevByName.get(c.name);
+					if (!prev) return c;
+					return {
+						...prev,
+						...c,
+						commands: c.commands ?? prev.commands,
+						config: c.config ?? prev.config,
+					};
+				});
+			}
 			state.activeProjectProposal = { sessionId, fields: merged, mode };
 			state.assistantHasProposal = true;
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
@@ -1794,11 +1816,11 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	if (!promoted) return;
 
 	// Write config fields. Forward every proposed field — including structured
-	// `components` / `workflows` and the native-YAML keys — to the config
-	// endpoint, mirroring the registered-mode accept path. Without this, the
-	// provisional accept silently drops the assistant's proposed workflows
-	// and components, so a freshly accepted multi-component project lands
-	// with zero workflows.
+	// `components` / `workflows` — to the config endpoint via the shared
+	// `buildProjectConfigDiff` helper. Mirrors the registered-mode accept path
+	// so the provisional accept doesn't silently drop the assistant's proposed
+	// workflows and components. Per-component QA config (`config.qa_start_command`
+	// etc.) rides through inside `components[].config`.
 	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
 	if (Object.keys(diff).length > 0) {
 		try {

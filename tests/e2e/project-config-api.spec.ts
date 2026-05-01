@@ -20,7 +20,6 @@ const CONFIG_FIELDS = {
 	test_unit_command: "npm run test:unit",
 	test_e2e_command: "npm run test:e2e",
 	worktree_setup_command: "npm ci",
-	qa_start_command: "npm run qa",
 	sandbox: "docker",
 	session_model: "anthropic/claude-3-5-sonnet-latest",
 	review_model: "anthropic/claude-3-5-haiku-latest",

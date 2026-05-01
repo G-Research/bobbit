@@ -1,15 +1,15 @@
 /**
  * Unit tests for native-YAML migration in ProjectConfigStore.
  *
- * Verifies that the five migrated fields:
+ * Verifies that the remaining two migrated fields:
  *   - config_directories
- *   - qa_env
  *   - sandbox_tokens
- *   - qa_max_duration_minutes
- *   - qa_max_scenarios
  *
- * are stored as native YAML on disk; legacy JSON-string / numeric-string
- * forms are still accepted on load and lazily rewritten on next save.
+ * are stored as native YAML on disk; legacy JSON-string forms are still
+ * accepted on load and lazily rewritten on next save.
+ *
+ * (qa_env / qa_max_duration_minutes / qa_max_scenarios used to be migrated
+ *  fields but moved into per-component `config:` maps — see qa-testing-config.test.ts.)
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -88,38 +88,6 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 		});
 	});
 
-	describe("qa_env", () => {
-		it("loads native YAML form", () => {
-			writeYaml(["qa_env:", "  FOO: bar", "  BAZ: qux"].join("\n") + "\n");
-			const store = new ProjectConfigStore(tmpDir);
-			assert.deepEqual(store.getQaEnv(), { FOO: "bar", BAZ: "qux" });
-			assert.equal(store.isDirty(), false);
-		});
-
-		it("loads legacy JSON-string form, then rewrites native", () => {
-			writeYaml(`qa_env: '{"FOO":"bar"}'\n`);
-			const store = new ProjectConfigStore(tmpDir);
-			assert.equal(store.isDirty(), true);
-			assert.deepEqual(store.getQaEnv(), { FOO: "bar" });
-			store.setQaEnv(store.getQaEnv());
-			const reloaded = readYaml();
-			assert.ok(reloaded.qa_env && typeof reloaded.qa_env === "object" && !Array.isArray(reloaded.qa_env));
-		});
-
-		it("malformed legacy form falls back to default", () => {
-			writeYaml("qa_env: '{not json'\n");
-			const store = new ProjectConfigStore(tmpDir);
-			assert.deepEqual(store.getQaEnv(), {});
-		});
-
-		it("round-trip set/save/load", () => {
-			const store = new ProjectConfigStore(tmpDir);
-			store.setQaEnv({ FOO: "bar" });
-			const reloaded = new ProjectConfigStore(tmpDir);
-			assert.deepEqual(reloaded.getQaEnv(), { FOO: "bar" });
-		});
-	});
-
 	describe("sandbox_tokens", () => {
 		it("loads native YAML form", () => {
 			writeYaml([
@@ -166,50 +134,6 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 		});
 	});
 
-	describe("qa_max_duration_minutes / qa_max_scenarios", () => {
-		it("loads native number form", () => {
-			writeYaml("qa_max_duration_minutes: 15\nqa_max_scenarios: 7\n");
-			const store = new ProjectConfigStore(tmpDir);
-			assert.equal(store.getQaMaxDurationMinutes(), 15);
-			assert.equal(store.getQaMaxScenarios(), 7);
-			assert.equal(store.isDirty(), false);
-		});
-
-		it("loads legacy quoted-numeric form, marks dirty, native after save", () => {
-			writeYaml(`qa_max_duration_minutes: "20"\nqa_max_scenarios: "3"\n`);
-			const store = new ProjectConfigStore(tmpDir);
-			assert.equal(store.getQaMaxDurationMinutes(), 20);
-			assert.equal(store.getQaMaxScenarios(), 3);
-			assert.equal(store.isDirty(), true);
-			store.setQaMaxDurationMinutes(store.getQaMaxDurationMinutes());
-			const reloaded = readYaml();
-			assert.equal(typeof reloaded.qa_max_duration_minutes, "number");
-		});
-
-		it("malformed legacy form falls back to default", () => {
-			writeYaml("qa_max_duration_minutes: notanumber\n");
-			const store = new ProjectConfigStore(tmpDir);
-			assert.equal(store.getQaMaxDurationMinutes(), 10); // default
-		});
-
-		it("does NOT emit defaults on save when never explicitly set", () => {
-			const store = new ProjectConfigStore(tmpDir);
-			store.set("build_command", "npm run build"); // triggers save
-			const written = readYaml();
-			assert.equal(written.qa_max_duration_minutes, undefined);
-			assert.equal(written.qa_max_scenarios, undefined);
-		});
-
-		it("round-trip", () => {
-			const store = new ProjectConfigStore(tmpDir);
-			store.setQaMaxDurationMinutes(42);
-			store.setQaMaxScenarios(9);
-			const reloaded = new ProjectConfigStore(tmpDir);
-			assert.equal(reloaded.getQaMaxDurationMinutes(), 42);
-			assert.equal(reloaded.getQaMaxScenarios(), 9);
-		});
-	});
-
 	describe("back-compat surface (get/getAll)", () => {
 		it("get('config_directories') returns JSON-stringified form", () => {
 			const store = new ProjectConfigStore(tmpDir);
@@ -226,36 +150,17 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 			const onDisk = readYaml();
 			assert.ok(Array.isArray(onDisk.config_directories));
 		});
-
-		it("getWithDefaults() includes JSON-stringified migrated values for legacy callers", () => {
-			const store = new ProjectConfigStore(tmpDir);
-			store.setQaMaxDurationMinutes(15);
-			const all = store.getWithDefaults();
-			assert.equal(all.qa_max_duration_minutes, "15");
-		});
-
-		it("set('qa_max_duration_minutes', '15') accepts numeric string", () => {
-			const store = new ProjectConfigStore(tmpDir);
-			store.set("qa_max_duration_minutes", "15");
-			assert.equal(store.getQaMaxDurationMinutes(), 15);
-		});
 	});
 
 	describe("on-disk integrity", () => {
 		it("native YAML output contains zero JSON-encoded strings for migrated fields", () => {
 			const store = new ProjectConfigStore(tmpDir);
 			store.setConfigDirectories([{ path: "/a", types: ["skills"] }]);
-			store.setQaEnv({ FOO: "bar" });
 			store.setSandboxTokens([{ key: "GITHUB_TOKEN", enabled: true }]);
-			store.setQaMaxDurationMinutes(15);
-			store.setQaMaxScenarios(3);
 			const text = fs.readFileSync(yamlPath(), "utf-8");
 			// No escaped JSON: e.g. `"[{\"path\":...}]"`
 			assert.equal(/\[\{\\"/.test(text), false, "no escaped JSON found in YAML");
 			assert.equal(/'\{\\"/.test(text), false, "no escaped JSON found in YAML");
-			// qa_max_duration_minutes is NOT a quoted string
-			assert.equal(/qa_max_duration_minutes:\s*"\d+"/.test(text), false, "numeric must not be quoted");
-			assert.equal(/qa_max_duration_minutes:\s*\d+/.test(text), true, "numeric must be a real number");
 		});
 	});
 });

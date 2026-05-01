@@ -88,9 +88,17 @@ test.beforeAll(async () => {
 	const projects = await projectsResp.json();
 	if (!Array.isArray(projects) || projects.length === 0) return;
 	const projectId = projects[0].id;
+	// QA settings live on a component's `config` map now (not top-level).
+	// Read existing components, set qa_start_command on the first, write back.
+	const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`).catch(() => null);
+	if (!structuredResp || !structuredResp.ok) return;
+	const data = await structuredResp.json();
+	const comps = Array.isArray(data.components) ? data.components : [];
+	if (comps.length === 0) return;
+	comps[0].config = { ...(comps[0].config || {}), qa_start_command: "echo ready" };
 	await apiFetch(`/api/projects/${projectId}/config`, {
 		method: "PUT",
-		body: JSON.stringify({ qa_start_command: "echo ready" }),
+		body: JSON.stringify({ components: comps }),
 	}).catch(() => {});
 });
 

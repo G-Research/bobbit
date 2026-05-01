@@ -62,10 +62,11 @@ async function deleteTestWorkflow(id?: string): Promise<void> {
 /** Navigate to the workflow edit page and expand the first gate. */
 async function navigateToEditAndExpandGate(page: import("@playwright/test").Page): Promise<void> {
 	// Navigate directly to the harness-default project's Settings → Workflows tab.
-	// (Don't rely on the #/workflows redirect — it can pick a different project.)
-	// Wait for the GET /api/workflows fetch that loadWorkflowPageData() kicks off
-	// after the embedded tab mounts, so the .wf-row poll below isn't racing the
-	// network round-trip on slow workers.
+	// Workflows is now an embedded tab inside Settings; don't rely on the
+	// #/workflows redirect — it can pick a different project under parallel
+	// harness reuse. Wait for the GET /api/workflows fetch that
+	// loadWorkflowPageData() kicks off after the embedded tab mounts, so the
+	// .wf-row poll below isn't racing the network round-trip on slow workers.
 	const hash = await workflowsTabHash();
 	const workflowsLoaded = page.waitForResponse(
 		resp => /\/api\/workflows(\?|$)/.test(resp.url()) && resp.request().method() === "GET" && resp.ok(),

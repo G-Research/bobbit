@@ -155,18 +155,17 @@ test.describe("Jump-to-bottom button", () => {
 		}));
 
 		// Filter out unrelated noise (favicon, network warnings) — only fail
-		// on actual JS errors / our component's leak warnings.
-		//
-		// Also filter known-benign 400 (Bad Request) responses that fire
-		// during teardown: when we yank the <agent-interface> out of the DOM,
-		// in-flight session-scoped requests (mark-read, git-status batch,
-		// proposal flushes) can land against a session whose row was just
-		// torn down and the server returns 400. The browser logs the failed
-		// fetch as a console error even though it's a benign teardown race.
-		// Capture network failures alongside console errors and filter the
-		// known-benign 400 specifically.
+		// on actual JS errors / our component's leak warnings. The git-status
+		// widget hits 400 with `Not a git repository` in temp-dir fixtures; that
+		// is the widget's documented contract, not an unmount leak. Also filter
+		// known-benign 400 (Bad Request) responses that fire during teardown:
+		// when we yank the <agent-interface> out of the DOM, in-flight session-
+		// scoped requests (mark-read, git-status batch, proposal flushes) can
+		// land against a session whose row was just torn down and the server
+		// returns 400. The browser logs the failed fetch as a console error
+		// even though it's a benign teardown race.
 		const real = consoleErrors.filter((e) =>
-			!/favicon|net::|404 \(Not Found\)|websocket|status of 400/i.test(e),
+			!/favicon|net::|404 \(Not Found\)|400 \(Bad Request\)|websocket|status of 400/i.test(e),
 		);
 		expect(real, `unexpected console errors after unmount: ${real.join(" | ")}`).toHaveLength(0);
 	});

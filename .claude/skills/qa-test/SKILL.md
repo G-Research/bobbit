@@ -14,26 +14,31 @@ You are running QA testing for a goal. This protocol stands up an isolated copy 
 - **Available native browser tools:** `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_eval`, `browser_wait`, `browser_snapshot`, `browser_console_messages`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_resize`
 - **`browser_snapshot`** is the best way to understand page structure — it returns an ARIA accessibility tree with element roles, names, and refs. Use it instead of screenshots when you need to find interactive elements or verify page content.
 - **`browser_console_messages`** captures JS console output. Call with `level="error"` after each navigation to catch silent errors.
-- The project must have `qa_*` keys in `.bobbit/config/project.yaml`
+- At least one component in `.bobbit/config/project.yaml` must carry `config.qa_start_command`
 
 ## Step 1: Read Configuration
 
-Read the project config to get the QA testing settings:
+Read the project config to discover the component(s) with QA testbed configuration:
 
 ```bash
 cat .bobbit/config/project.yaml
 ```
 
-Look for these keys:
-- `qa_build_command` — how to build the project (falls back to `build_command`)
-- `qa_start_command` — how to start an isolated server (REQUIRED — if missing, stop)
-- `qa_health_check` — URL to poll for readiness
-- `qa_browser_entry` — URL to open in the browser
-- `qa_env` — JSON object of extra environment variables
-- `qa_max_duration_minutes` — time budget (default: 10)
-- `qa_max_scenarios` — scenario budget (default: 5)
+Each component in `components[]` may carry an opaque `config:` map. The component you want is the one whose `config.qa_start_command` is set. Pick it as follows:
 
-If `qa_start_command` is not set, report "No QA testing configured for this project" and stop.
+1. **Look for a `[QA-TEST CONTEXT]\ncomponent: <name>` block near the top of your kickoff message.** When the verification harness invokes you for an `agent-qa` step that declares a `component:` field, it prepends this context block to your prompt. If present, prefer that component.
+2. Else, if multiple components have `config.qa_start_command`, use the component whose `name` matches the project name.
+3. Else use the first component with `config.qa_start_command`.
+
+From that component's `config:` map, read these keys:
+- `qa_start_command` — **REQUIRED**. Start command. Env vars are already inlined by the project author (e.g. `PORT=$PORT NODE_ENV=test npm start`). There is no separate `qa_env` field.
+- `qa_build_command` — optional; falls back to the component's `commands.build`.
+- `qa_health_check` — URL to poll for readiness.
+- `qa_browser_entry` — URL to open in the browser.
+- `qa_max_duration_minutes` — time budget (default: 10).
+- `qa_max_scenarios` — scenario budget (default: 5).
+
+If no component has `config.qa_start_command`, report "No QA testing configured for this project" and stop.
 
 ## Step 2: Create Isolated Environment
 
@@ -81,8 +86,10 @@ FREE_PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1
 
 Start the server using `bash_bg` (NEVER use `bash` with `&`):
 ```bash
-bash_bg(action="create", command="cd <repo_dir> && PORT=<free_port> WORK_DIR=<work_dir> BOBBIT_DIR=<work_dir>/.bobbit <qa_env vars> eval '<qa_start_command>'")
+bash_bg(action="create", command="cd <repo_dir> && PORT=<free_port> WORK_DIR=<work_dir> BOBBIT_DIR=<work_dir>/.bobbit eval '<qa_start_command>'")
 ```
+
+Any other environment variables the project needs (e.g. `NODE_ENV`, `BOBBIT_NO_OPEN`) are already inlined by the project author into `qa_start_command` itself. Do NOT add a `qa_env` substitution — that field has been removed.
 
 Record the background process ID for later cleanup.
 

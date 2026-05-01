@@ -58,35 +58,50 @@ describe("buildProjectConfigDiff", () => {
 			build_command: "",
 			test_command: undefined,
 			typecheck_command: null,
-			qa_start_command: "npm start",
+			sandbox: "docker",
 		});
-		assert.deepEqual(out, { qa_start_command: "npm start" });
+		assert.deepEqual(out, { sandbox: "docker" });
 	});
 
-	it("preserves all native-YAML fields as structured payloads", () => {
-		const qaEnv = { PORT: "3000", TOKEN: "abc" };
+	it("preserves remaining native-YAML fields as structured payloads", () => {
+		// `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios` are no longer
+		// native-YAML top-level fields — they live inside components[].config
+		// and the server rejects them at the top level with HTTP 400 (component-config-map).
 		const sandboxTokens = [{ key: "GITHUB_TOKEN", enabled: true }];
 		const configDirs = [{ path: ".bobbit/config", types: ["roles"] }];
 		const out = buildProjectConfigDiff({
-			qa_env: qaEnv,
 			sandbox_tokens: sandboxTokens,
 			config_directories: configDirs,
-			qa_max_duration_minutes: 5,
-			qa_max_scenarios: 10,
 		});
-		assert.deepEqual(out.qa_env, qaEnv);
 		assert.deepEqual(out.sandbox_tokens, sandboxTokens);
 		assert.deepEqual(out.config_directories, configDirs);
-		assert.equal(out.qa_max_duration_minutes, 5);
-		assert.equal(out.qa_max_scenarios, 10);
+	});
+
+	it("drops the seven legacy top-level qa_* keys (server rejects them with 400)", () => {
+		// component-config-map: qa_* settings have moved into components[].config.
+		// The server rejects all seven legacy keys at the top level with HTTP 400
+		// + a migration message. Filter them out client-side so an older agent
+		// that still emits them doesn't make Apply Changes fail.
+		const out = buildProjectConfigDiff({
+			qa_start_command: "npm start",
+			qa_build_command: "npm run build",
+			qa_health_check: "http://localhost",
+			qa_browser_entry: "http://localhost/?token=x",
+			qa_env: { PORT: "3000" },
+			qa_max_duration_minutes: 5,
+			qa_max_scenarios: 10,
+			build_command: "npm run build",
+		});
+		assert.deepEqual(out, { build_command: "npm run build" });
 	});
 
 	it("keeps a malformed JSON-string native field as the original string (server will 400)", () => {
-		// Defensive: if the agent sends garbage, we don't silently turn it into
-		// `undefined`. The server's strict validator will then reject it with
-		// 400 and the user sees the error, rather than the field being dropped.
-		const out = buildProjectConfigDiff({ qa_env: "{not json" });
-		assert.equal(out.qa_env, "{not json");
+		// Defensive: if the agent sends garbage in a structured field, we don't
+		// silently turn it into `undefined`. The server's strict validator will
+		// reject it with 400 and the user sees the error, rather than the field
+		// being dropped.
+		const out = buildProjectConfigDiff({ sandbox_tokens: "{not json" });
+		assert.equal(out.sandbox_tokens, "{not json");
 	});
 
 	it("forwards legacy command fields (build/test/typecheck/...) untouched", () => {

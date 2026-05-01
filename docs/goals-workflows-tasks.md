@@ -45,7 +45,7 @@ interface VerifyStep {
   phase?: number;     // Execution phase (default 0). See "Phased verification" below.
   optional?: boolean; // If true, step runs only when enabled per-goal. See "Optional verify steps".
   label?: string;     // Human-readable label for the toggle in goal creation UI.
-  description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when qa_start_command is missing.
+  description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
 }
 
 interface WorkflowGate {
@@ -249,7 +249,7 @@ interface GateSignalStep {
 
 #### Optional verify steps
 
-Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when the project lacks `qa_start_command`, and the tooltip is overridden with a configuration hint.
+Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when no component in the project has `config.qa_start_command` set (driven by `isQaConfiguredOnAnyComponent()` via `GET /api/projects/:id/qa-testing-config`), and the tooltip is overridden with a configuration hint.
 
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
@@ -285,7 +285,7 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 4. If the agent includes `report_html`, the HTML is stored as the step's artifact with `contentType: "text/html"`.
 5. If the agent goes idle without calling the tool, the harness sends a reminder prompt. If idle again, the step fails.
 
-**Timeout:** Reads `qa_max_duration_minutes` from project config (default 10) plus a 5-minute buffer for setup/teardown.
+**Timeout:** Reads `qa_max_duration_minutes` from the owning component's `config:` map (default 10) plus a 5-minute buffer for setup/teardown. The verification harness resolves the component name via the step's `component:` field, falling back to the first component with `config.qa_start_command`, then a name-match against the project. See [docs/qa-testing.md](qa-testing.md) for the full per-component config layout.
 
 **Retry logic:** Up to 3 attempts with backoff on transient failures (same pattern as `llm-review`).
 
