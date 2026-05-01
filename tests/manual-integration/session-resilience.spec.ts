@@ -26,8 +26,34 @@ import {
 	cpSync,
 } from "node:fs";
 import { join, resolve, normalize } from "node:path";
+import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
+
+/**
+ * Build a `propose_project`-style registration body that includes the
+ * canonical components + workflows. The server no longer seeds default
+ * workflows; the project assistant (or a registration call) is responsible.
+ * This helper mimics what `propose_project` would supply.
+ */
+function projectRegistrationBody(name: string, rootPath: string, opts: { upsert?: boolean } = {}) {
+	// Component must declare every command name referenced by the seeded
+	// workflows (build/check/unit/e2e), otherwise validateAllWorkflows rejects
+	// the registration. Stub them with `echo ok` — these tests never run them
+	// to completion, only check goal creation and team start.
+	const components = [{
+		name,
+		repo: ".",
+		commands: {
+			build: "echo build ok",
+			check: "echo check ok",
+			unit: "echo unit ok",
+			e2e: "echo e2e ok",
+		},
+	}];
+	const workflows = buildDefaultWorkflows(name);
+	return { name, rootPath, components, workflows, ...opts };
+}
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
 const RESULTS_DIR = join(PROJECT_ROOT, "test-results", "manual-integration");
 const WANT_SCREENSHOTS = !!process.env.SCREENSHOTS;
@@ -575,9 +601,11 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		console.log(`  Gateway :${port}  cwd=${dir}  docker=${HAS_DOCKER}`);
 
 		// Register a project at the gateway cwd — replaces the old auto-registration.
+		// Include components + workflows so workflowId:"feature" is resolvable
+		// (server no longer auto-seeds default workflows).
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "default", rootPath: dir, upsert: true }),
+			body: JSON.stringify(projectRegistrationBody("default", dir, { upsert: true })),
 		});
 		if (regRes.status !== 201 && regRes.status !== 200) {
 			throw new Error(`Failed to register default project: ${regRes.status}`);
@@ -711,10 +739,12 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		execFileSync("git", ["add", "."], { cwd: proj2Dir, stdio: "ignore" });
 		execFileSync("git", ["commit", "-m", "init second project"], { cwd: proj2Dir, stdio: "ignore" });
 
-		// 2. Register the second project via API
+		// 2. Register the second project via API.
+		// Supply components + workflows the same way `propose_project` would, so
+		// the goal below can request workflowId:"feature".
 		const regRes = await api(gw, "/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "Second Project", rootPath: proj2Dir }),
+			body: JSON.stringify(projectRegistrationBody("Second Project", proj2Dir)),
 		});
 		expect(regRes.status).toBe(201);
 		const regBody = await regRes.json() as any;
