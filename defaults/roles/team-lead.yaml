@@ -12,6 +12,7 @@ toolPolicies:
   gate_signal: always-allow
   gate_status: always-allow
   gate_inspect: always-allow
+  Children: allow
 createdAt: 1773875507369
 updatedAt: 1775088361805
 promptTemplate: |

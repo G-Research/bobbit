@@ -17,3 +17,9 @@ mcp__playwright: never
 # Banana/Gemini. The external nano-banana MCP hard-codes provider behavior and
 # can drift from the configured session image model.
 mcp__nano-banana: never
+# Children group: gates the nested-goals tools (goal_spawn_child,
+# goal_plan_propose, goal_plan_status, goal_merge_child, goal_pause,
+# goal_resume). Default to `ask` so a user is prompted before any role can
+# spawn a child goal or mutate a plan; team-leads opt back in via their role's
+# `toolPolicies: { Children: allow }`. Other roles never see these tools.
+Children: ask
