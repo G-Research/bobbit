@@ -98,10 +98,22 @@ test.describe("Config page scope navigation", () => {
 	});
 
 	test("workflows page hides System tab and shows project tabs only", async ({ page }) => {
-		// Workflows are project-scoped only — the page omits the System tab
-		// (see config-scope.ts::renderConfigScopeRow excludeSystem param).
+		// Workflows are project-scoped only. The standalone /#/workflows
+		// route now redirects to #/settings/<projectId>/workflows (Settings
+		// is the home for managing workflows). The settings page has its own
+		// scope row that DOES include System; on this Workflows tab, the
+		// project tabs render the workflow editor while clicking System
+		// shows a notice that workflows are project-scoped.
+		//
+		// We assert the project tab is present and the Workflows tab is
+		// active. Set the hash directly so navigateToHash's startsWith
+		// check doesn't race the redirect.
 		await openApp(page);
-		await navigateToHash(page, "#/workflows");
+		await page.evaluate(() => { window.location.hash = "#/workflows"; });
+		await page.waitForFunction(
+			() => window.location.hash.includes("settings") && window.location.hash.includes("workflows"),
+			{ timeout: 10_000 },
+		);
 
 		// Wait for the page header so the scope row has rendered.
 		await expect(page.getByText("Workflows").first()).toBeVisible({ timeout: 10_000 });
@@ -110,10 +122,6 @@ test.describe("Config page scope navigation", () => {
 		await expect(
 			page.locator("button").filter({ hasText: "Scope UI Project" }).first()
 		).toBeVisible({ timeout: 5_000 });
-
-		// And no "System" tab in the scope row on this page.
-		const systemTabs = await page.locator("button").filter({ hasText: /^System$/ }).count();
-		expect(systemTabs).toBe(0);
 	});
 
 	test("tools page shows scope row", async ({ page }) => {

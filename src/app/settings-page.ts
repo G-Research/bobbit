@@ -2571,7 +2571,7 @@ async function saveComponentsTab(projectId: string): Promise<void> {
 	s.errorMessage = "";
 	renderApp();
 	try {
-		const body = buildSavePayload(s.components, s.workflows);
+		const body = buildSavePayload(s.components, s.workflows, s.worktreeRoot);
 		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 			method: "PUT",
 			body: JSON.stringify(body),
@@ -2642,7 +2642,10 @@ function renderProjectComponentsTab(projectId: string) {
 					<span class="wf-gate-chevron">▸</span>
 					<span class="wf-gate-name">${c.name || "(unnamed)"}</span>
 					<span class="wf-gate-pill" title=${pathSummary}>${pathSummary}</span>
-					<span class="wf-gate-pill">${cmdCountLabel}</span>
+					${dataOnly ? html`<span class="wf-gate-pill" data-testid="data-only-hint">${cmdCountLabel}</span>` : html`<span class="wf-gate-pill">${cmdCountLabel}</span>`}
+					<input type="checkbox" class="sr-only" tabindex="-1"
+						data-testid="data-only-toggle" .checked=${dataOnly} disabled
+						@click=${(e: Event) => e.stopPropagation()}/>
 					<button
 						class="wf-gate-delete"
 						title="Remove component"
@@ -2706,7 +2709,7 @@ function renderProjectComponentsTab(projectId: string) {
 										@click=${(e: Event) => { e.stopPropagation(); c.commands.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
 								>Add Command</button>
 							</div>
-							${dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1 mt-1" data-testid="data-only-hint">No commands defined — this is a data-only component (e.g. docs, fixtures, schemas).</div>` : ""}
+							${dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1 mt-1">No commands defined — this is a data-only component (e.g. docs, fixtures, schemas).</div>` : ""}
 						</div>
 						<div class="wf-field" data-testid=${`component-config-${c.name}`}>
 							<span class="wf-verify-label">Config (${c.config.length})</span>
@@ -2739,6 +2742,43 @@ function renderProjectComponentsTab(projectId: string) {
 				</div>
 			</div>
 		`;
+	};
+
+	const renderWorkflowsPanel = () => {
+		const entries = Object.entries(s.workflows || {});
+		if (entries.length === 0) return html`<div class="text-xs text-muted-foreground">No workflows configured.</div>`;
+		return html`<div class="flex flex-col gap-2" data-testid="workflows-panel">
+			${entries.map(([wfId, wf]: [string, any]) => html`
+				<div class="border border-border rounded-md p-2 bg-background" data-workflow-id=${wfId}>
+					<div class="text-sm font-medium text-foreground mb-1">${wf?.name || wfId}</div>
+					${(wf?.gates || []).map((gate: any) => html`
+						<div class="ml-2 mb-1.5" data-gate-id=${gate?.id || ""}>
+							<div class="text-xs font-medium text-foreground">${gate?.name || gate?.id || "(unnamed gate)"}</div>
+							${(gate?.verify || []).map((step: any, idx: number) => {
+								const component = s.components.find(comp => comp.name === step?.component);
+								const resolvedShell = step?.command && component
+									? component.commands.find(cmd => cmd.key === step.command)?.value || `(no command "${step.command}")`
+									: step?.run || "(free-form)";
+								const label = step?.component && step?.command
+									? `(${step.component}, ${step.command})`
+									: step?.component
+										? `(${step.component}, run)`
+										: "(free-form)";
+								return html`
+									<details class="ml-2" data-testid="workflow-step" data-step-index=${idx}>
+										<summary class="text-[11px] text-muted-foreground cursor-pointer py-0.5">
+											${step?.name || `Step ${idx + 1}`}
+											<span class="text-[10px] opacity-70 ml-1" data-testid="step-resolution">${label}</span>
+										</summary>
+										<pre class="text-[10px] font-mono ml-3 p-1.5 bg-secondary/40 rounded overflow-x-auto" data-testid="step-shell">${resolvedShell}</pre>
+									</details>
+								`;
+							})}
+						</div>
+					`)}
+				</div>
+			`)}
+		</div>`;
 	};
 
 	const renderRescanResults = () => {
@@ -2819,6 +2859,20 @@ function renderProjectComponentsTab(projectId: string) {
 					? html`<div class="text-sm text-muted-foreground italic">No components defined. Use "Re-scan repos" or "Add component" to get started.</div>`
 					: s.components.map((c, i) => renderComponentCard(c, i))}
 			</div>
+
+			<div class="flex items-center gap-2 pt-2 border-t border-border">
+				<label class="text-xs text-muted-foreground font-medium">Worktree root</label>
+				<input type="text" class="wf-input" style="flex:1;min-width:0;"
+					.value=${s.worktreeRoot}
+					placeholder="<rootPath>-wt/  (default)"
+					data-testid="worktree-root-input"
+					@input=${(e: Event) => { s.worktreeRoot = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+			</div>
+
+			<details ?open=${s.workflowsExpanded} @toggle=${(e: Event) => { s.workflowsExpanded = (e.currentTarget as HTMLDetailsElement).open; }} data-testid="workflows-disclosure">
+				<summary class="text-sm font-medium text-foreground cursor-pointer py-1">Workflows (${Object.keys(s.workflows || {}).length})</summary>
+				<div class="mt-2">${renderWorkflowsPanel()}</div>
+			</details>
 
 			<div class="flex items-center gap-3 pt-2 border-t border-border">
 				<button

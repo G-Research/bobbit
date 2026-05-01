@@ -1923,9 +1923,18 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	//    migrated fields ride through as structured payloads (server rejects
 	//    JSON-encoded strings) — parse if the agent supplied them as a string.
 	const diff: Record<string, unknown> = {};
-	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios", "components", "workflows"]);
+	const NATIVE_FIELDS = new Set(["config_directories", "sandbox_tokens", "components", "workflows"]);
+	// Legacy top-level QA keys are rejected at the wire (HTTP 400) — they live
+	// inside components[].config[] now. Drop them client-side so an older mock
+	// agent that still emits e.g. top-level `qa_start_command` doesn't make
+	// the entire Apply Changes flow fail.
+	const REJECTED_LEGACY_QA_KEYS = new Set([
+		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
+		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
+	]);
 	for (const [k, v] of Object.entries(fields)) {
 		if (k === "name" || k === "root_path") continue;
+		if (REJECTED_LEGACY_QA_KEYS.has(k)) continue;
 		if (v === undefined || v === null || v === "") continue;
 		if (NATIVE_FIELDS.has(k)) {
 			diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;

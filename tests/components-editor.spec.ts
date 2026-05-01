@@ -98,7 +98,7 @@ test("editStateToComponent defaults missing repo to '.'", async ({ page }) => {
 	expect(result.repo).toBe(".");
 });
 
-test("buildSavePayload composes the structured PUT body (no worktree_root — General tab owns it)", async ({ page }) => {
+test("buildSavePayload composes the structured PUT body (components only — workflows owned by Workflows tab, worktree_root by General tab)", async ({ page }) => {
 	const result = await page.evaluate(() => (window as any).buildSavePayload(
 		[
 			{ name: "main", repo: ".", commands: [{ key: "build", value: "npm run build" }] },
@@ -109,7 +109,10 @@ test("buildSavePayload composes the structured PUT body (no worktree_root — Ge
 	expect(result.components).toHaveLength(2);
 	expect(result.components[0]).toEqual({ name: "main", repo: ".", commands: { build: "npm run build" } });
 	expect(result.components[1]).toEqual({ name: "fixtures", repo: "fixtures" });
-	expect(result.workflows).toEqual({ general: { name: "General", gates: [] } });
+	// Components save no longer ships workflows: re-sending unchanged workflows would
+	// trip the server's structural validator against components without commands
+	// (a common state for fresh projects). The Workflows tab has its own save path.
+	expect(result.workflows).toBeUndefined();
 	expect(result.worktree_root).toBeUndefined();
 });
 

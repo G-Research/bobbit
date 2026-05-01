@@ -71,15 +71,28 @@ export function editStateToComponent(e: ComponentEditState): Record<string, unkn
 
 /**
  * Build the PUT body the Components tab sends to /api/projects/:id/config.
- * Pure — takes a list of edit-state components and the inline workflows map.
- * `worktree_root` is owned by the General tab and is not sent from here.
+ * Pure — takes a list of edit-state components and an optional `worktree_root`.
+ *
+ * NOTE: We deliberately do NOT include `workflows` here. The server validates
+ * inline workflows against the supplied components when both are present.
+ * Re-sending the unchanged workflow set on every component-only edit can
+ * therefore reject a save against components that don't yet have commands
+ * defined (a common state for a fresh project where the default-seeded
+ * workflows reference build/test/check/e2e commands). The Workflows tab
+ * has its own save path.
+ *
+ * `worktree_root` IS sent because the Components tab owns the Worktree-root
+ * input on the per-project Settings page (the multi-repo flow E2E exercises
+ * it). Empty string is sent verbatim so the user can clear it.
  */
 export function buildSavePayload(
 	components: ComponentEditState[],
-	workflows: Record<string, unknown>,
+	_workflows?: Record<string, unknown>,
+	worktreeRoot?: string,
 ): Record<string, unknown> {
-	return {
+	const body: Record<string, unknown> = {
 		components: components.map(editStateToComponent),
-		workflows,
 	};
+	if (worktreeRoot !== undefined) body.worktree_root = worktreeRoot;
+	return body;
 }
