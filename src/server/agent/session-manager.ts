@@ -2931,8 +2931,21 @@ export class SessionManager {
 			}
 		}
 
-		// Send delegate prompt with 30s timeout
-		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
+		// Send delegate prompt with 30s timeout. If the prompt send throws
+		// (spawn crash, child timeout, etc.), the parent's createDelegateSession
+		// caller propagates the error and never POSTs `/api/internal/delegate/wait`.
+		// We must clean up the shell entry we recorded above, otherwise a future
+		// restart would try to eager-restore an abandoned delegate lifecycle.
+		try {
+			await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
+		} catch (err) {
+			if (this._delegateHarness && opts.toolUseId) {
+				try {
+					this._delegateHarness.cancel(parentSessionId, opts.toolUseId, "delegate spawn failed");
+				} catch { /* best-effort */ }
+			}
+			throw err;
+		}
 
 		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
 		return session;

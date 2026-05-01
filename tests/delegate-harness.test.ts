@@ -198,6 +198,48 @@ describe("DelegateHarness", () => {
 		assert.equal(h.acknowledge("nope", "none"), false);
 	});
 
+	it("register-after-acknowledge: returns idempotent already-delivered payload, does not park forever", async () => {
+		// Regression test for the high-severity finding from code-review #6:
+		// register() used to clear `completed` first, so a retried /wait after
+		// the server-side acknowledge() would park a fresh resolver no future
+		// submit could satisfy — wedging the retried request until timeout.
+		const h = new DelegateHarness(stateDir);
+		const pending = h.register(makeActive());
+		h.submit("parent-1", "tu_1", { status: "completed", output: "x" });
+		await pending;
+		h.acknowledge("parent-1", "tu_1");
+
+		// Retried /wait against the same key after ack — must NOT park.
+		const retry = h.register(makeActive());
+		// Race: must resolve synchronously (Promise.resolve), not park.
+		let settled: { status: string; error?: string } | null = null;
+		retry.then(r => { settled = r; });
+		// Yield microtasks once — a parked Promise would still be null after one tick.
+		await Promise.resolve();
+		assert.notEqual(settled, null, "retry must resolve, not park");
+		assert.equal(settled!.status, "completed");
+		assert.match(settled!.error || "", /already.delivered|idempotent.retry/i);
+	});
+
+	it("recordActive after acknowledge clears completed mark (key recycle)", async () => {
+		// A parent that legitimately re-uses a tool_use_id should get a fresh
+		// lifecycle, not a synthetic already-delivered payload.
+		const h = new DelegateHarness(stateDir);
+		const pending = h.register(makeActive());
+		h.submit("parent-1", "tu_1", { status: "completed", output: "first" });
+		await pending;
+		h.acknowledge("parent-1", "tu_1");
+
+		// Recycle the key with fresh metadata.
+		h.recordActive(makeActive({ title: "second-call" }));
+		// New submit should latch on the fresh shell, not be dropped as
+		// duplicate.
+		const drained = h.submit("parent-1", "tu_1", { status: "completed", output: "second" });
+		assert.equal(drained, false);
+		const result = await h.register(makeActive());
+		assert.equal(result.output, "second", "key recycle delivered fresh result");
+	});
+
 	it("durability across simulated restart: submit → _loadFromDisk → register drains latch", async () => {
 		const a = new DelegateHarness(stateDir);
 		const pending = a.register(makeActive());

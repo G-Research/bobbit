@@ -152,6 +152,10 @@ export class DelegateHarness {
 		const key = delegateKey(active.parentSessionId, active.toolUseId);
 		if (this.pending.has(key)) return;
 		if (this.shells.has(key)) return;
+		// Recording a fresh delegate metadata clears any prior
+		// idempotency mark for the key (a parent tool extension that
+		// re-uses a tool_use_id legitimately wants a fresh lifecycle).
+		this.completed.delete(key);
 		this.shells.set(key, active);
 		this._persist();
 	}
@@ -167,10 +171,22 @@ export class DelegateHarness {
 	register(active: ActiveDelegate): Promise<DelegateResultPayload> {
 		const key = delegateKey(active.parentSessionId, active.toolUseId);
 
-		// Recycling a previously-completed key (e.g. parent makes a fresh
-		// `delegate` tool call after the previous one resolved) clears the
-		// idempotency mark so the new lifecycle behaves as a clean slate.
-		this.completed.delete(key);
+		// Idempotency-after-ack: the key has already had its terminal result
+		// delivered AND `acknowledge()`d, so there is nothing left to drain.
+		// A retried `/wait` from a network-confused parent must not park a
+		// fresh resolver — that would hang until timeout. Return a
+		// structured "already-delivered" payload so the caller observes the
+		// retry as a clean (idempotent) no-op rather than a wedge.
+		// `completed` is wiped by `_loadFromDisk()` (so a real restart
+		// re-opens the key) and by `recordActive()` when a fresh delegate
+		// metadata is recorded for the same key (key recycle).
+		if (this.completed.has(key) && !this.latched.has(key)) {
+			return Promise.resolve({
+				status: "completed",
+				output: "",
+				error: "delegate result already delivered (idempotent retry)",
+			});
+		}
 
 		// Drain any latched result first — submit-before-register is supported
 		// (and is the whole point of restart-survival). Clear any shell at the
