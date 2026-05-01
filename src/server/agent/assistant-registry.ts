@@ -21,7 +21,6 @@ import { GOAL_ASSISTANT_PROMPT } from "./goal-assistant.js";
 import { ROLE_ASSISTANT_PROMPT } from "./role-assistant.js";
 import { TOOL_ASSISTANT_PROMPT } from "./tool-assistant.js";
 import { STAFF_ASSISTANT_PROMPT } from "./staff-assistant.js";
-import { SETUP_ASSISTANT_PROMPT } from "./setup-assistant.js";
 import { WORKFLOW_ASSISTANT_PROMPT } from "./workflow-assistant.js";
 import { PROJECT_ASSISTANT_PROMPT, PROJECT_ASSISTANT_SCAFFOLDING_PROMPT } from "./project-assistant.js";
 
@@ -57,12 +56,6 @@ const FALLBACK_DEFAULTS: Record<string, AssistantDef> = {
 		title: "Staff Assistant",
 		promptTitle: "Staff Agent Creation Assistant",
 		prompt: STAFF_ASSISTANT_PROMPT,
-	},
-	setup: {
-		type: "setup",
-		title: "Setup Wizard",
-		promptTitle: "Project Setup Assistant",
-		prompt: SETUP_ASSISTANT_PROMPT,
 	},
 	workflow: {
 		type: "workflow",

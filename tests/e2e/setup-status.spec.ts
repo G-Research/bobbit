@@ -8,7 +8,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { base, bobbitDir, apiFetch, nonGitCwd, deleteSession } from "./e2e-setup.js";
+import { base, bobbitDir, apiFetch } from "./e2e-setup.js";
 
 // Run tests serially — dismiss test modifies shared state (sentinel file)
 test.describe.configure({ mode: "serial" });
@@ -114,46 +114,3 @@ test.describe("GET /api/health — setupComplete field", () => {
 	});
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 4. Session creation with assistantType: "setup"
-// ═══════════════════════════════════════════════════════════════════════════
-
-test.describe("Setup assistant session", () => {
-	let sessionId: string | undefined;
-
-	test.afterEach(async () => {
-		if (sessionId) {
-			await deleteSession(sessionId);
-			sessionId = undefined;
-		}
-	});
-
-	test("creating a session with assistantType setup succeeds", async () => {
-		const resp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd(), assistantType: "setup" }),
-		});
-		expect(resp.status).toBe(201);
-		const data = await resp.json();
-		sessionId = data.id;
-		expect(data.id).toBeTruthy();
-		expect(data.assistantType).toBe("setup");
-	});
-
-	test("session metadata includes assistantType setup", async () => {
-		// Create session
-		const createResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd(), assistantType: "setup" }),
-		});
-		expect(createResp.status).toBe(201);
-		const created = await createResp.json();
-		sessionId = created.id;
-
-		// Fetch session detail
-		const detailResp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(detailResp.status).toBe(200);
-		const detail = await detailResp.json();
-		expect(detail.assistantType).toBe("setup");
-	});
-});

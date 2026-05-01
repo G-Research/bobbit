@@ -2,7 +2,7 @@
  * Proposal tool extensions for Bobbit.
  *
  * Registers one tool per proposal type (goal, role, tool, staff,
- * setup, workflow, project). Each tool simply acknowledges the call — the real
+ * workflow, project). Each tool simply acknowledges the call — the real
  * processing happens on the UI side when it sees the tool_use block in the
  * assistant message.
  *
@@ -81,30 +81,6 @@ export default function (pi: ExtensionAPI) {
 		async execute() { return ack(); },
 	});
 
-	// ── propose_setup ─────────────────────────────────────────────────
-	pi.registerTool({
-		name: "propose_setup",
-		label: "Propose Setup",
-		description: "Submit a project setup proposal for user review. Call this when you have determined the project configuration.",
-		promptSnippet: "Propose setup with action and optional command/model fields.",
-		parameters: Type.Object({
-			action: Type.String({ description: "Setup action type" }),
-			content: Type.Optional(Type.String({ description: "Setup content" })),
-			language: Type.Optional(Type.String({ description: "Primary programming language" })),
-			framework: Type.Optional(Type.String({ description: "Framework in use" })),
-			testing: Type.Optional(Type.String({ description: "Testing framework" })),
-			build_command: Type.Optional(Type.String({ description: "Build command" })),
-			test_command: Type.Optional(Type.String({ description: "Test command" })),
-			typecheck_command: Type.Optional(Type.String({ description: "Type-check command" })),
-			test_unit_command: Type.Optional(Type.String({ description: "Unit test command" })),
-			test_e2e_command: Type.Optional(Type.String({ description: "E2E test command" })),
-			session_model: Type.Optional(Type.String({ description: "Session model ID" })),
-			review_model: Type.Optional(Type.String({ description: "Review model ID" })),
-			naming_model: Type.Optional(Type.String({ description: "Naming model ID" })),
-		}),
-		async execute() { return ack(); },
-	});
-
 	// ── propose_workflow ──────────────────────────────────────────────
 	pi.registerTool({
 		name: "propose_workflow",
@@ -165,5 +141,5 @@ export default function (pi: ExtensionAPI) {
 		async execute() { return ack(); },
 	});
 
-	console.log("[proposal-tools] Registered 8 proposal tools");
+	console.log("[proposal-tools] Registered 6 proposal tools");
 }

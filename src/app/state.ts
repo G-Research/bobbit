@@ -313,25 +313,6 @@ export const state = {
 	workflowPreviewDescription: "",
 	workflowPreviewGates: "",
 
-	// Setup assistant preview state — form fields populated by setup_proposal XML
-	setupPreviewAction: "",
-	setupFormStack: { language: "", framework: "", testing: "" },
-	setupFormCommands: {
-		build_command: "",
-		test_command: "",
-		typecheck_command: "",
-		test_unit_command: "",
-		test_e2e_command: "",
-
-	} as Record<string, string>,
-	setupFormModels: { session_model: "", review_model: "", naming_model: "" },
-	setupFormSystemPrompt: "",
-	setupFormSystemPromptEdited: false,
-	setupFormCommandsEdited: {} as Record<string, boolean>,
-	setupFormModelsEdited: {} as Record<string, boolean>,
-	setupFormSaving: false,
-	setupFormSaved: false,
-
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,
 	/** Whether the new-session role picker dropdown is open */
@@ -344,7 +325,7 @@ export const state = {
 	 *  delta carrying a propose_<tag> block and the matching block-finish event.
 	 *  Keyed by the `tag` from PROPOSAL_PARSERS — i.e. "goal_proposal",
 	 *  "project_proposal", "role_proposal", "tool_proposal", "staff_proposal",
-	 *  "workflow_proposal", "setup_proposal".
+	 *  "workflow_proposal".
 	 *  Owner: state.ts. Sole writer: RemoteAgent. Readers: render.ts panels
 	 *  via isProposalStreaming(tag). */
 	proposalStreamingByTag: {} as Record<string, boolean>,
