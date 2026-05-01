@@ -590,7 +590,7 @@ This means crash recovery doesn't require the user to manually clean up pool det
 | Normal (assistant) | `POST /api/sessions` for assistant types (goal/project/tool) | No | No |
 | Worktree | `POST /api/sessions` for non-goal, non-assistant sessions in a git repo | Yes (auto) | No |
 | Delegate | Parent session spawns a child via the `delegate` tool | Inherits parent cwd | No |
-| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | Yes — archived transcript |
+| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | No — agent CLI rehydrates from a clone of the source `.jsonl` (no system-prompt injection) |
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
@@ -694,23 +694,34 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 
 **Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, no `assistantType`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. See [docs/rest-api.md — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table.
 
-**Seed context**: The archived transcript (loaded via `sessionManager.getArchivedMessages()`) is rendered by `buildSeedContext()` in `src/server/agent/continue-archived.ts`:
+**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB — any non-trivial session was truncated. The endpoint now clones the source `.jsonl` byte-for-byte and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Full transcript fidelity, no byte budget, no system-prompt section, no Summary vs Full distinction. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
-- **Full mode**: `renderMessagesAsText()` flattens each message to `### <role>\n\n<body>`, rendering tool calls/results inline, dropping internal thinking blocks and base64 images. The output is capped at 128 KB (`SEED_TOTAL_BUDGET`).
-- **Summary mode**: The transcript (capped at 60 KB input for the model call) is sent to the configured naming model with a bullet-point prompt covering goal, decisions, files touched, open threads. On model failure the helper falls back to full mode — users never get an empty seed.
+**Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
-The resulting string is passed to `createSession()` as `opts.seedContext` (with `seedContextSourceId` for attribution) and flows through `SessionSetupPlan.seedContext` → `PromptParts.seedContext` → `assembleSystemPrompt()` in `src/server/agent/system-prompt.ts`, which emits it under a `## Prior Session Transcript` heading with an instruction telling the agent the text is context-only and not an implicit request to act. The same content appears in the system-prompt tokens view (labeled `Prior Session Transcript` with a `Continued from archived session <id>` source) so users can see token cost impact.
+1. Resolve the source `agentSessionFile` from `getPersistedSession(archivedId)`. Falls back to `sessionManager.recoverSessionFile(ps)` (promoted to public) for legacy persisted rows that never carried the field. Missing on both paths → **404**.
+2. Compute the destination path via `formatAgentSessionFilePath(cwd, createdAtMs, sessionId)` in `src/server/agent/agent-session-path.ts`. Format matches the agent CLI's own naming — `<globalAgentDir()>/sessions/--<cwd-slug>--/<isoTs>_<uuid>.jsonl` — so the path round-trips through `recoverSessionFile`'s parser regex.
+3. Copy via `sessionFileCopy(srcCtx, srcPath, dstCtx, dstPath, mgr)` in `src/server/agent/session-fs.ts`. Two-tier dispatch mirroring `sessionFileDelete`:
+   - **host↔host**: `fs.copyFileSync` after `mkdirSync({recursive:true})`.
+   - **same-project sandboxed↔same-project sandboxed**: `docker exec cp` inside the container.
+   - **host↔sandbox** or **cross-project sandboxed**: throws `CrossRealmCopyError` → handler returns **422**.
+   Other copy failures unlink the destination and return **500** with cleanup.
+4. Best-effort `copyToolContentDirIfPresent(srcId, dstId, stateDir)` recursively copies `<stateDir>/tool-content/<srcId>/` if present. The directory does not exist on disk today — `GET /api/sessions/:id/tool-content/:mi/:bi` reads through `rpcClient.getMessages()` from the JSONL — but the helper is shipped as defensive forward-compat for any future on-disk cache.
+5. Build `createSession` opts with `preExistingAgentSessionFile: <destPath>`. The `seedContext` / `seedContextSourceId` opts have been removed entirely — they had no other callers.
+6. Inside the session-setup pipeline (`src/server/agent/session-setup.ts`), `persistOnce` writes the cloned path as `agentSessionFile` on the `PersistedSession` row **before** spawn, so a hard kill between persist and spawn cannot strand the clone. After `rpcClient.start()` succeeds and before `persistSessionMetadata`, the pipeline issues `{type: "switch_session", sessionPath: plan.preExistingAgentSessionFile}` — the same RPC restart-resume uses (`session-manager.ts::restoreSession`). The agent CLI loads the cloned transcript before the user's first prompt.
 
-**Title**: The new session is titled `Continued: <original title>` and the title is marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
+**Title**: The new session is titled `Continued: <original title>` and marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
 
 **Key files:**
 
-- `src/server/agent/continue-archived.ts` — seed-context builder (rendering + summarization + budgets)
-- `src/server/server.ts` — `POST /api/sessions/:archivedId/continue` handler (scope gate, settings extraction, session creation)
-- `src/server/agent/session-setup.ts` — `SessionSetupPlan.seedContext` + `seedContextSourceId` fields
-- `src/server/agent/system-prompt.ts` — `Prior Session Transcript` section assembly
-- `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`
-- `src/ui/components/ContinueSessionChooser.ts` — mode chooser dialog (Summary vs Full, with large-transcript warning)
+- `src/server/agent/continue-archived.ts` — trimmed to `copyToolContentDirIfPresent` + `cleanupFailedContinue`. All transcript-stringification helpers (`buildSeedContext`, `formatFullTranscript`, `summarizeTranscript`, `renderMessagesAsText`, `truncateStringToBudget`, `callNamingModel`, `SEED_TOTAL_BUDGET`, `SUMMARY_INPUT_BUDGET`) are gone.
+- `src/server/agent/agent-session-path.ts` — `formatAgentSessionFilePath`, sibling to `recoverSessionFile`'s parser regex.
+- `src/server/agent/session-fs.ts` — `sessionFileCopy` with the four-row dispatch matrix and `CrossRealmCopyError`.
+- `src/server/server.ts` — `POST /api/sessions/:archivedId/continue` handler (scope gate, copy, session creation, cleanup-on-failure).
+- `src/server/agent/session-manager.ts` — `recoverSessionFile` is public; `createSession` opts carry `preExistingAgentSessionFile?: string` (no `seedContext` plumbing).
+- `src/server/agent/session-setup.ts` — `SessionSetupPlan.preExistingAgentSessionFile`; both `spawnAgent` and `executeWorktreeAsync` issue `switch_session` after `rpcClient.start()` succeeds, before `persistSessionMetadata`. `persistOnce` writes the path up front.
+- `src/server/agent/system-prompt.ts` — `seedContext` / `seedContextSource` and the `## Prior Session Transcript` section have been removed from `PromptParts`.
+- `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`.
+- `src/ui/components/ContinueSessionChooser.ts` — confirm-only modal (no mode radio, no large-transcript warning, empty POST body).
 
 ### Archived session WS handshake
 
