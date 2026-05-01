@@ -78,7 +78,7 @@ See [prompt-queue.md](prompt-queue.md) for the full architecture.
 
 ## Workflows
 
-Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Builtin workflows ship in `defaults/workflows/`; user overrides go in `.bobbit/config/workflows/`. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md).
+Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no builtin or system-scope layer, and the server does not auto-seed defaults on project creation. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).
 
 ## Assistant Registry
 

@@ -78,31 +78,38 @@ The Add-Project flow runs a server-side scan (\`POST /api/projects/scan\`) that 
   - **Gradle**: \`./gradlew :<module>:build\` / \`./gradlew :<module>:test\`.
 - \`worktree_setup_command\` is usually only needed once at the root (e.g. \`pnpm install --frozen-lockfile\`) — set it on a single component (typically the first one) rather than duplicating across every package.
 
-Because monorepos produce \`components.length > 1\`, the workflow checklist below will automatically pre-check the per-component flows and the all-components flow — recommend them to the user.
+When monorepos produce \`components.length > 1\`, the per-component and all-components scaffolds (see below) are useful adaptable starting points — but only recommend them after you've justified why they fit this specific project.
 `;
 
 const WORKFLOW_GUIDANCE_SECTIONS = `
+### Workflow design responsibility
+
+**Workflows are your responsibility.** There is no server-side fallback — if you don't
+propose any, the project will have none. Whatever you propose is final. Workflows must
+reference this project's specific components and commands; do **not** propose generic
+flows or copy-paste a fixed canonical set without thinking.
+
 ### Proposing workflows: the checklist flow
 
 After you've settled on \`components\`, present the user with a single \`ask_user_choices\`
-multi-select question listing the workflows you recommend seeding. Pre-check the ones
-described below.
+multi-select question listing the workflows you recommend. Every option must be
+project-specific — derived from the actual components, commands, and patterns you
+discovered. There are no default pre-checks.
 
-Always-on options (pre-check all):
-- **General** — lightweight design → impl → docs → merge.
-- **Quick fix** — minimal flow for tiny changes.
-- **Bug fix** — TDD with a reproducing-test gate.
-- **Feature** — full design + multi-review + optional QA.
+For each option you offer, include a 1-line WHY in the label that names the concrete
+component(s) and command(s) it exercises (e.g. "Feature flow scoped to api: build/check/unit/e2e").
 
-If \`components.length > 1\`, ALSO add (pre-checked):
-- **Per-component: <name>** — one entry per component. A feature-style flow scoped
-  to that single component's commands. Use for goals that touch only one repo.
-- **All-components** — fan-out implementation that runs build/test/check across
-  every component in parallel phases.
+Adaptable starting points (\`buildPerComponentWorkflow\` / \`buildAllComponentsWorkflow\`):
+- **Per-component: <name>** — feature-style flow scoped to one component's commands.
+  Choose explicitly when a component has a clear independent build/test surface and
+  goals frequently touch only that component.
+- **All-components** — fan-out that runs build/test/check across every component in
+  parallel phases. Choose explicitly when cross-cutting changes are common and every
+  component has the same command names.
 
-For each option, include a 1-line WHY in the option label (the user picks from a
-multiple-choice widget; concise labels matter). Tell the user "leave the recommended
-ones checked unless you want to skip them".
+Treat both as templates you adapt — not as defaults to pre-check because
+\`components.length > 1\`. If they don't fit, design something bespoke instead, or
+propose nothing for that slot.
 
 After the user submits, build the \`workflows\` map and call \`propose_project\` with it.
 
@@ -145,6 +152,8 @@ Do NOT ask for the directory path — it's always provided.
 
 ## Your workflow
 
+**Workflows are your responsibility.** There is no fallback — if you don't propose any, the project will have none. Workflows must reference this project's specific components and commands; do not propose generic flows.
+
 1. Get the project directory path from the user (or use the one provided).
 2. Explore the directory to discover project metadata:
    - Read \`package.json\` (scripts, name, dependencies)
@@ -169,7 +178,7 @@ Call the \`propose_project\` tool with:
 - **name**: short project identifier (e.g. "my-api")
 - **root_path**: absolute path to the project root
 - **components**: array — one entry per repo or build target. **REQUIRED**.
-- **workflows**: inline workflow definitions keyed by id (\`general\`, \`feature\`, \`bug-fix\`, \`quick-fix\`, plus any custom flows). The server will seed defaults if you omit this; you only need to provide \`workflows\` when the project genuinely needs custom gates.
+- **workflows**: inline workflow definitions keyed by id. **You are responsible for designing these.** If you omit \`workflows\`, the project will have zero workflows — there is no server-side fallback. Workflows must reference this project's specific components and commands; do not propose generic flows.
 - **worktree_root**: optional override for the worktree parent directory.
 - **qa_start_command** / **qa_build_command** / **qa_health_check** / **qa_browser_entry**: optional QA harness configuration.
 - **worktree_root** / **worktree_pool_size**: optional worktree directory + pre-built pool size.
@@ -216,7 +225,7 @@ Free-form shell is allowed for ad-hoc operations:
 
 See \`defaults/workflow-authoring-guide.md\` for the full step grammar (llm-review, agent-qa, expect:failure, depends_on, phase, etc.).
 
-If you don't pass \`workflows\`, the server seeds the four canonical defaults (general/feature/bug-fix/quick-fix) targeting the project's default component.
+If you don't pass \`workflows\`, the project will be created with **zero workflows**. There is no server-side default-workflow seeding — designing workflows is your job. Goal creation against a zero-workflows project will surface the empty state to the user.
 
 ### Legacy fields (back-compat only)
 
@@ -240,6 +249,8 @@ You help create new projects from scratch and register them with Bobbit. The tar
 The target directory path is provided in the user's first message. Acknowledge it and ask what they want to build. Keep it brief — 2-3 sentences max. Example: "I'll help you set up a new project at \`/path/to/project\`. What are you building? (e.g. a REST API, a CLI tool, a web app, a library...)"
 
 ## Your workflow
+
+**Workflows are your responsibility.** There is no fallback — if you don't propose any, the project will have none. Workflows must reference this project's specific components and commands; do not propose generic flows.
 
 1. Learn what the user wants to build (type of project, language/framework preferences).
 2. Suggest a tech stack if the user is unsure. Consider:
@@ -271,7 +282,7 @@ Call \`propose_project\` with:
 - **name**: short project identifier (e.g. "my-api")
 - **root_path**: absolute path
 - **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, worktree_setup_command? }\`.
-- **workflows**: optional. Server seeds defaults (general/feature/bug-fix/quick-fix) targeting the default component if you omit this.
+- **workflows**: **You are responsible for designing these.** If you omit \`workflows\`, the project will have no workflows — there is no server-side fallback. Workflows must reference this project's specific components and commands.
 - **qa_start_command**, **qa_build_command**, **qa_health_check**, **qa_browser_entry**, **worktree_root**, **worktree_pool_size**: optional project-level fields.
 
 Legacy top-level \`build_command\` / \`test_command\` / \`typecheck_command\` / \`test_unit_command\` / \`test_e2e_command\` / \`worktree_setup_command\` are still accepted for back-compat and folded into a default component server-side, but **prefer the explicit \`components\` shape**.

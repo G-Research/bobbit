@@ -16,7 +16,7 @@ Goals can run in **team mode**, where a Team Lead agent orchestrates multiple ro
 
 A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows live **inline in `project.yaml::workflows`** — the project assistant generates a bespoke block per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD authoring guide is the single source of truth for workflow patterns; the runtime never reads it.
 
-Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New projects get a default seed (`general`, `feature`, `bug-fix`, `quick-fix`) inlined into `project.yaml::workflows` at create time. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only).
+Workflows are **project-scoped only** — there is no system-scope or builtin layer and no config cascade. New projects do **not** receive any default seed; the project assistant designs workflows from the discovered components and commands, and a project may legitimately persist with zero workflows. Every step references project-specific `(component, command)` pairs that have no meaning outside the owning project, so cascading would be ceremony around an empty upper layer. See [internals.md — Workflows are project-scoped only](internals.md#workflows-are-project-scoped-only) and [No default workflow scaffold](internals.md#no-default-workflow-scaffold).
 
 When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time.
 
@@ -25,7 +25,7 @@ Goals without workflows still work fine — workflows are optional.
 **Removed runtime concepts:**
 
 - `.bobbit/config/workflows/<id>.yaml` is no longer read at runtime. The first-boot migration in `migrate-project-yaml.ts` folds any pre-existing files into the inline `workflows:` block and removes the directory.
-- `defaults/workflows/*.yaml` is the legacy shipped-builtins location. New projects do not depend on these IDs being shipped — the project assistant generates project-specific workflows from the MD guide. The legacy YAMLs are scheduled for deletion (see follow-up note in [docs/internals.md — Multi-repo & components](internals.md#multi-repo--components)); during the transition window they are still loaded by `BuiltinConfigProvider` so existing tests that reference workflow IDs by name keep working.
+- `defaults/workflows/*.yaml` no longer exists. There is no shipped-builtins location for workflows; `BuiltinConfigProvider.getWorkflows()` returns `[]`. The project assistant generates project-specific workflows from the MD guide on creation. See [No default workflow scaffold](internals.md#no-default-workflow-scaffold).
 
 #### Workflow data model
 
@@ -518,4 +518,4 @@ State is per-project — each project has its own copies of these files in `<pro
 | `defaults/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `gate_inspect`, `task_create` |
 | `defaults/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
 | `defaults/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |
-| `defaults/workflows/general.yaml` | Seed workflow: general-purpose lifecycle |
+| `src/server/state-migration/seed-default-workflows.ts` | Internal workflow templates (used by per-component scaffolds; not seeded into new projects) |

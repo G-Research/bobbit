@@ -129,10 +129,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-03: Deep links to all view types
 	// ---------------------------------------------------------------
 
-	test.skip("N-03: Deep links to all view types @smoke", async () => {
-		// Quarantined: pre-existing flake reproducible in goal worktrees. Passes on
-		// master worktree with byte-identical sources. See
-		// goal/delegates--32db56b9 implementation gate notes.
+	test("N-03: Deep links to all view types @smoke", async () => {
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
@@ -181,12 +178,16 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await expect(s.page.getByText("Tools").first())
 			.toBeVisible({ timeout: 10_000 });
 
-		// Deep link: workflows
+		// Deep link: workflows. #/workflows redirects synchronously to
+		// #/settings/<projectId>/workflows (master commit 0fd63978); accept
+		// either form so the predicate matches before and after redirect.
 		s.act();
 		await navigateToHash(s.page, "#/workflows");
 		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/workflows"), { timeout: 5_000 });
+		await s.page.waitForFunction(() => {
+			const h = window.location.hash;
+			return h.startsWith("#/workflows") || /^#\/settings\/[^/]+\/workflows/.test(h);
+		}, { timeout: 5_000 });
 		await expect(s.page.getByText("Workflows").first())
 			.toBeVisible({ timeout: 10_000 });
 
@@ -502,10 +503,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-10: Settings sub-navigation
 	// ---------------------------------------------------------------
 
-	test.skip("N-10: Settings sub-navigation", async () => {
-		// Quarantined: pre-existing flake reproducible in goal worktrees. Passes on
-		// master worktree with byte-identical sources. See
-		// goal/delegates--32db56b9 implementation gate notes.
+	test("N-10: Settings sub-navigation", async () => {
 		s.begin(STORY_N10);
 
 		await s.createTestSession("A");
