@@ -538,8 +538,7 @@ claims one" assertion sequence with a stepwise lifecycle assertion:
 //
 //   expect(persisted.branch).toBe(<branch from step 2>);
 //
-// I.e. the branch name is byte-equal to what step 2 saw — no ren
-ame
+// I.e. the branch name is byte-equal to what step 2 saw — no rename
 // occurred. Also assert no `git branch -m` ran (probe via session log
 // scrape for the absence of the legacy "Renaming pool worktree" log
 // line that renameSessionFromPool used to emit).
