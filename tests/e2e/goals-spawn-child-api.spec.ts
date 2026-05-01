@@ -601,3 +601,156 @@ test.describe("spawn-child — canonical builtins available regardless of projec
 		}
 	});
 });
+
+// User-feedback regression (PR #409 live integration test, agent-memory
+// v0.1-foundation team-lead): pre-freeze children spawned via
+// goal_spawn_child(planId) were structurally orphaned from their
+// planStep counterparts after plan freeze. Phase 2 children never
+// auto-spawned because the harness couldn't see the Phase 1 child.
+test.describe("spawnedFromPlanId — pre-freeze child re-binds to planStep", () => {
+	test("goal_spawn_child(planId=X) persists spawnedFromPlanId on the child", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `Pre-Freeze Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		try {
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Phase-1 leaf",
+					spec: "first leaf",
+					workflowId: "general",
+					planId: "phase-1-leaf-A",
+				}),
+			});
+			expect(spawnResp.status).toBe(201);
+			const spawn = await spawnResp.json();
+
+			const child = await getGoal(spawn.childGoalId);
+			expect(child.spawnedFromPlanId).toBe("phase-1-leaf-A");
+
+			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("GET /api/goals/:id/plan populates planSteps[].child via spawnedFromPlanId fallback", async () => {
+		const projectId = await defaultProjectId();
+
+		// Use the `feature` workflow so the parent goal's snapshotted workflow
+		// has an `execution`-like gate the team-manager dispatcher recognises;
+		// however we want the `parent` workflow to exercise the planStep
+		// resolution. Use `parent` so /plan?gateId=execution is meaningful.
+		const parentResp = await createGoalRaw({
+			title: `Plan-Linkage Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		try {
+			// Spawn a child PRE-freeze with planId.
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Pre-freeze child",
+					spec: "early",
+					workflowId: "feature",
+					planId: "phase-1-leaf-A",
+				}),
+			});
+			expect(spawnResp.status).toBe(201);
+			const spawn = await spawnResp.json();
+
+			// PATCH the plan with a planStep matching the same planId. (Pre-freeze
+			// patches don't engage the classifier matrix; we just want a frozen-
+			// shape verify[].)
+			const patchResp = await apiFetch(`/api/goals/${parent.id}/plan`, {
+				method: "PATCH",
+				body: JSON.stringify({
+					gateId: "execution",
+					planSteps: [{
+						name: "Phase-1 leaf A",
+						type: "subgoal",
+						phase: 1,
+						subgoal: {
+							title: "Phase-1 leaf A",
+							spec: "early",
+							planId: "phase-1-leaf-A",
+						},
+					}],
+				}),
+			});
+			expect(patchResp.status).toBe(200);
+
+			// Now GET /plan and verify planSteps[0].child is populated by the
+			// spawnedFromPlanId fallback (no execution-gate signal has run yet,
+			// so no GateSignalStep linkage exists).
+			const planResp = await apiFetch(`/api/goals/${parent.id}/plan?gateId=execution`);
+			expect(planResp.status).toBe(200);
+			const plan = await planResp.json();
+			expect(plan.planSteps.length).toBe(1);
+			const step = plan.planSteps[0];
+			expect(step.planId).toBe("phase-1-leaf-A");
+			expect(step.child).toBeTruthy();
+			expect(step.child.goalId).toBe(spawn.childGoalId);
+
+			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("goal_spawn_child without planId leaves spawnedFromPlanId undefined", async () => {
+		// Sanity: ad-hoc decomposition (no planId) shouldn't fabricate a
+		// synthetic value on the child record.
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `Ad-Hoc Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		try {
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Ad-hoc",
+					spec: "no-plan",
+					workflowId: "general",
+					// no planId
+				}),
+			});
+			expect(spawnResp.status).toBe(201);
+			const spawn = await spawnResp.json();
+
+			const child = await getGoal(spawn.childGoalId);
+			expect(child.spawnedFromPlanId).toBeUndefined();
+
+			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+});

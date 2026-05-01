@@ -5028,6 +5028,7 @@ async function handleApiRoute(
 		// freeze flag lives on the goal's snapshotted workflow — not on
 		// the canonical builtin. Idempotent: a second call leaves the
 		// original `frozenAt` intact.
+		let shouldAutoSignalExecution = false;
 		if (gateId === "goal-plan" && goal.workflow) {
 			const execGate = goal.workflow.gates.find(g => g.id === "execution");
 			if (execGate) {
@@ -5044,6 +5045,14 @@ async function handleApiRoute(
 						gateId: execGate.id,
 						frozenAt,
 					});
+					// Once the plan is frozen, auto-signal the execution gate so
+					// the verification harness picks up the subgoal verify steps
+					// and starts spawning / re-binding children. Without this, the
+					// team-lead has to manually signal `execution` after
+					// approving the plan, which violates the design contract
+					// ("the harness automatically spawns the planned children at
+					// the right phases"). See PR #409 live integration test.
+					shouldAutoSignalExecution = true;
 				}
 			}
 		}
@@ -5076,6 +5085,54 @@ async function handleApiRoute(
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
 		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
+
+		// Auto-signal execution after goal-plan freezes the plan. Fire-and-
+		// forget after the response is sent. Mirrors the structure of a normal
+		// gate signal: synthesize a signal record + invoke verifyGateSignal.
+		// The harness's `runSubgoalStep` then drives the planSteps' subgoals,
+		// reusing pre-freeze-spawned children via `spawnedFromPlanId` linkage.
+		if (shouldAutoSignalExecution) {
+			const execGateDef = goal.workflow!.gates.find(g => g.id === "execution");
+			if (execGateDef) {
+				(async () => {
+					try {
+						let execCommitSha = "unknown";
+						try { execCommitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown"); } catch { /* ignore */ }
+						const execSignal = {
+							id: randomUUID(),
+							gateId: "execution",
+							goalId,
+							sessionId: "auto-execution-on-freeze",
+							timestamp: Date.now(),
+							commitSha: execCommitSha,
+							verification: { status: "running" as const, steps: [] },
+						};
+						gateStore.recordSignal(execSignal);
+						broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId: "execution", signalId: execSignal.id });
+
+						// Refresh gate-state map for execution context.
+						const execAllGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
+						for (const gs of gateStore.getGatesForGoal(goalId)) {
+							const def = goal.workflow?.gates?.find((g: any) => g.id === gs.gateId);
+							execAllGateStates.set(gs.gateId, {
+								metadata: gs.currentMetadata,
+								content: gs.currentContent,
+								status: gs.status,
+								injectDownstream: def?.injectDownstream,
+							});
+						}
+
+						const execPrimary = await detectPrimaryBranch(goal.cwd).catch(() => "master");
+						await verificationHarness.verifyGateSignal(
+							execSignal, execGateDef, goal.cwd, goal.branch, execPrimary, execAllGateStates, goal.spec,
+						);
+						console.log(`[goal-plan] Auto-signalled execution for goal ${goalId}`);
+					} catch (err) {
+						console.error(`[goal-plan] Auto-signal of execution failed for goal ${goalId}:`, err);
+					}
+				})();
+			}
+		}
 		return;
 	}
 
@@ -5916,6 +5973,14 @@ async function handleApiRoute(
 			child.projectId = targetProjectId;
 			targetGoalManager.updateGoal(child.id, { autoStartTeam: true });
 			child.autoStartTeam = true;
+			// Persist the planId linkage on the child so the harness can later
+			// re-bind a planStep to a pre-freeze child without re-spawning. See
+			// `goal-store.ts::PersistedGoal.spawnedFromPlanId` for the
+			// reconciliation contract.
+			if (planId) {
+				targetGoalManager.updateGoal(child.id, { spawnedFromPlanId: planId });
+				child.spawnedFromPlanId = planId;
+			}
 			if (child.workflow) {
 				targetCtx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
 			}
@@ -6104,9 +6169,16 @@ async function handleApiRoute(
 			if (sg.workflowId) out.workflowId = sg.workflowId;
 			if (sg.suggestedRole) out.suggestedRole = sg.suggestedRole;
 
-			// Resolve childGoalId for this plan step. Prefer the in-memory
-			// active record, fall back to the persisted GateSignalStep —
-			// mirrors verification-harness::executeSubgoalStep.
+			// Resolve childGoalId for this plan step. Three-tier lookup:
+			//   1. Persisted GateSignalStep — produced when the harness ran the
+			//      subgoal step (i.e. execution gate was signalled).
+			//   2. (NEW) `spawnedFromPlanId` on a child goal record — produced
+			//      by `POST /api/goals/:id/spawn-child` whenever a `planId` was
+			//      supplied. Covers the pre-freeze spawn case (child created
+			//      before the plan was frozen, so the harness never ran the
+			//      execution gate to record the linkage).
+			// The two paths are complementary; either one populating `child`
+			// is enough.
 			let childGoalId: string | undefined;
 			const gateState = planCtx.gateStore.getGate(goalId, gateId);
 			if (gateState) {
@@ -6121,6 +6193,16 @@ async function handleApiRoute(
 						childGoalId = rec.childGoalId;
 						break;
 					}
+				}
+			}
+			// Fallback: lookup by `spawnedFromPlanId` on a non-archived child.
+			if (!childGoalId) {
+				for (const child of planCtx.goalStore.getAll()) {
+					if (child.parentGoalId !== goalId) continue;
+					if (child.archived) continue;
+					if (child.spawnedFromPlanId !== sg.planId) continue;
+					childGoalId = child.id;
+					break;
 				}
 			}
 			if (childGoalId) {

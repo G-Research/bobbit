@@ -119,6 +119,28 @@ export interface PersistedGoal {
 	acceptanceCriteria?: string[];
 
 	/**
+	 * For child goals spawned via `goal_spawn_child`: the `planId` of the
+	 * parent goal's `execution.verify[]` subgoal step that this child was
+	 * spawned to fulfil. Set at child-creation time when `body.planId` is
+	 * provided on POST /api/goals/:id/spawn-child.
+	 *
+	 * Used by:
+	 *   - GET /api/goals/:id/plan to populate `planSteps[].child` when the
+	 *     gate signal record's `subgoal.childGoalId` linkage hasn't been
+	 *     produced yet (e.g. the child was spawned BEFORE the goal-plan
+	 *     gate was frozen, so no execution-gate signal has run
+	 *     `runSubgoalStep` to record the linkage).
+	 *   - Verification harness `runSubgoalStep` idempotency check: before
+	 *     spawning a new child for a planStep, look for an existing child
+	 *     goal with matching `(parentGoalId, spawnedFromPlanId)` and
+	 *     re-bind to it instead of spawning a duplicate.
+	 *
+	 * Optional: standalone child goals spawned without a planId (ad-hoc
+	 * decomposition on a non-plan-frozen workflow) leave this undefined.
+	 */
+	spawnedFromPlanId?: string;
+
+	/**
 	 * Number of post-freeze plan mutations applied to this goal.
 	 * Bumped on every successful goal_plan_propose / goal_spawn_child
 	 * after the goal-plan gate has been signalled. When > 5 the goal

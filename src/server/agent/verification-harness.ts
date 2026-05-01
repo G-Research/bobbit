@@ -2130,8 +2130,15 @@ export class VerificationHarness {
 			return { passed: false, output: `Parent goal ${signal.goalId} not found.` };
 		}
 
-		// 1. Idempotency check — prefer the in-memory active record, fall
-		//    back to the persisted GateSignalStep (post-restart).
+		// 1. Idempotency check — three tiers:
+		//    (a) the in-memory active record (current verification)
+		//    (b) the persisted GateSignalStep (post-restart re-bind)
+		//    (c) (NEW) a child goal whose `spawnedFromPlanId` matches — covers
+		//        pre-freeze children spawned via `goal_spawn_child` BEFORE the
+		//        execution gate ever signalled. Without this, when the team-
+		//        lead pre-spawns children and only later signals goal-plan +
+		//        execution, the harness would re-spawn duplicates instead of
+		//        reusing the already-running children.
 		let childGoalId: string | undefined = active.steps[stepIndex]?.subgoal?.childGoalId;
 		if (!childGoalId) {
 			const gateState = gateStore.getGate(signal.goalId, signal.gateId);
@@ -2141,6 +2148,22 @@ export class VerificationHarness {
 			);
 			if (persistedStep?.subgoal?.childGoalId) {
 				childGoalId = persistedStep.subgoal.childGoalId;
+			}
+		}
+		if (!childGoalId && typeof (parentCtx.goalStore as any).getAll === "function") {
+			for (const c of (parentCtx.goalStore as any).getAll() as Array<{ id: string; parentGoalId?: string; archived?: boolean; spawnedFromPlanId?: string }>) {
+				if (c.parentGoalId !== signal.goalId) continue;
+				if (c.archived) continue;
+				if (c.spawnedFromPlanId !== sg.planId) continue;
+				childGoalId = c.id;
+				// Persist the linkage on the active record so subsequent
+				// re-entries take the cheap (a) path.
+				const av = this.activeVerifications.get(signal.id);
+				if (av && av.steps[stepIndex]) {
+					av.steps[stepIndex].subgoal = { planId: sg.planId, childGoalId };
+					this._persistActive();
+				}
+				break;
 			}
 		}
 
