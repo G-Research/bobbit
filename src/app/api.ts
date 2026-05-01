@@ -887,7 +887,21 @@ export async function createGoal(
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) throw new Error(`Failed to create goal: ${res.status}`);
+		if (!res.ok) {
+			// Surface the server's error message body when present rather than a
+			// bare `Failed to create goal: 400`. Common causes: project has no
+			// workflows seeded (post #413 "No default workflow scaffold"), invalid
+			// workflowId, or shape-validation failure on inlineWorkflow/inlineRoles.
+			let detail = "";
+			try {
+				const body = await res.json();
+				if (body && typeof body === "object") {
+					if (typeof body.error === "string") detail = body.error;
+					else detail = JSON.stringify(body);
+				}
+			} catch { /* not JSON; ignore */ }
+			throw new Error(detail ? `Failed to create goal: ${res.status} — ${detail}` : `Failed to create goal: ${res.status}`);
+		}
 		const goal = await res.json();
 		await refreshSessions();
 		expandedGoals.add(goal.id);

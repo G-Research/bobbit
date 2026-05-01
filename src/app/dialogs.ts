@@ -1138,7 +1138,16 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 
 		// Best-effort load of project workflows so the picker has options.
 		// File:// fixtures stub `fetchWorkflows()` — we tolerate failure.
-		fetchWorkflows().then((wfs) => { workflows = wfs; renderDialog(); }).catch(() => { /* ignore */ });
+		fetchWorkflows().then((wfs) => {
+			workflows = wfs;
+			// Coerce workflowId to one that exists — brand-new projects (post #413
+			// "No default workflow scaffold") may not have `general` or `feature`
+			// available. Without this, Create yields a 400 "Workflow not found".
+			if (workflows.length > 0 && !workflows.some(w => w.id === workflowId)) {
+				workflowId = workflows[0].id;
+			}
+			renderDialog();
+		}).catch(() => { /* ignore */ });
 
 		const cleanup = (result: NewGoalDialogResult | null) => {
 			render(html``, container);
@@ -1149,6 +1158,11 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 		const doCreate = () => {
 			const trimmed = titleValue.trim();
 			if (!trimmed) return;
+			if (workflows.length === 0) {
+				// Project has no workflows — surface a clear error rather than a 400.
+				alert("This project has no workflows configured. Create at least one under Settings → project tab → Workflows before creating a goal.");
+				return;
+			}
 			// Re-parse on submit as a defence in depth (the input handler keeps the
 			// caches fresh, but a programmatic .value mutation could bypass it).
 			const wf = parseInlineYaml(inlineWorkflowYaml, "inlineWorkflow");

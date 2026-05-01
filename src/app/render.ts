@@ -2088,11 +2088,31 @@ function goalProposalPanel() {
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
+	// Coerce the proposal's workflowId to one that actually exists in this
+	// project. Brand-new projects (post #413 "No default workflow scaffold")
+	// can have any subset of workflows — the proposal panel may have been
+	// constructed with `workflow: "general"` from the assistant before the
+	// project's workflows finished loading. Without this coercion the user
+	// gets a 400 "Workflow not found: general" on Create.
+	if (_cachedWorkflows.length > 0) {
+		const exists = _cachedWorkflows.some(w => w.id === _proposalWorkflowId);
+		if (!exists) {
+			_proposalWorkflowId = _cachedWorkflows[0].id;
+		}
+	}
+
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
 		if (!trimmedTitle || _proposalSaving) return;
 		if (!state.previewProjectId) {
 			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
+			return;
+		}
+		if (_cachedWorkflows.length === 0) {
+			showConnectionError(
+				"This project has no workflows configured",
+				"Create at least one workflow under Settings → project tab → Workflows before accepting this goal proposal.",
+			);
 			return;
 		}
 		_proposalSaving = true;
