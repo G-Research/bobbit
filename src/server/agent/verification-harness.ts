@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
+import { resolvePlanStepChild } from "./resolve-plan-step-child.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
@@ -2378,11 +2379,20 @@ export class VerificationHarness {
 			}
 		}
 		if (!childGoalId && typeof (parentCtx.goalStore as any).getAll === "function") {
-			for (const c of (parentCtx.goalStore as any).getAll() as Array<{ id: string; parentGoalId?: string; archived?: boolean; spawnedFromPlanId?: string }>) {
-				if (c.parentGoalId !== signal.goalId) continue;
-				if (c.archived) continue;
-				if (c.spawnedFromPlanId !== sg.planId) continue;
-				childGoalId = c.id;
+			// Walk by spawnedFromPlanId via the shared resolvePlanStepChild
+			// helper. Includes archived children — "archived" here means
+			// "merged + auto-archived". Skipping archived would cause the
+			// step to think there's no child at all and either re-spawn a
+			// duplicate or stall on dep-sat. Live test (PR #409 team-lead-
+			// 317cdb83): after Phase 2 trio merged + auto-archived, planSteps
+			// lost their child linkage and Phase 3 didn't auto-spawn.
+			const best = resolvePlanStepChild(
+				signal.goalId,
+				sg.planId,
+				(parentCtx.goalStore as any).getAll() as Array<{ id: string; parentGoalId?: string; archived?: boolean; spawnedFromPlanId?: string; createdAt?: number }>,
+			);
+			if (best) {
+				childGoalId = best.id;
 				// Persist the linkage on the active record so subsequent
 				// re-entries take the cheap (a) path.
 				const av = this.activeVerifications.get(signal.id);
@@ -2390,7 +2400,6 @@ export class VerificationHarness {
 					av.steps[stepIndex].subgoal = { planId: sg.planId, childGoalId };
 					this._persistActive();
 				}
-				break;
 			}
 		}
 
@@ -2443,6 +2452,28 @@ export class VerificationHarness {
 				}
 			} catch (err: any) {
 				return { passed: false, output: `Failed to spawn subgoal child: ${err.message ?? String(err)}` };
+			}
+		}
+
+		// EARLY-PASS short-circuit: if the resolved child is already
+		// archived AND its state is complete, the merge already happened
+		// (one of the four auto-archive paths fired; archived+complete
+		// is the success terminal state per c95f8f60). Return passed
+		// immediately rather than waiting on its now-archived gate state
+		// or attempting to re-merge an already-integrated branch. Live
+		// test (PR #409 team-lead-317cdb83): after Phase 2 trio merged +
+		// auto-archived, planSteps lost their child linkage and Phase 3
+		// didn't auto-spawn because runSubgoalStep had no fast-path for
+		// already-resolved planSteps on re-signal.
+		{
+			const resolvedChild = parentCtx.goalStore.get(childGoalId);
+			if (resolvedChild?.archived && resolvedChild.state === "complete") {
+				return {
+					passed: true,
+					output: `Subgoal ${sg.title} already merged + archived (re-signal short-circuit).`,
+					childGoalId,
+					mergedAt: resolvedChild.archivedAt ?? Date.now(),
+				};
 			}
 		}
 

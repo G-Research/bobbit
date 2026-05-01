@@ -21,6 +21,7 @@ import { handleApiError } from "./api-error-handler.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
+import { resolvePlanStepChild } from "./agent/resolve-plan-step-child.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
@@ -6400,15 +6401,16 @@ async function handleApiRoute(
 					}
 				}
 			}
-			// Fallback: lookup by `spawnedFromPlanId` on a non-archived child.
+			// Fallback: lookup by `spawnedFromPlanId` (resolvePlanStepChild).
+			// Includes archived children — "archived" in this context means
+			// "merged + cleaned up" (one of c95f8f60 / e39a5b53 / 658f2da7 /
+			// 6aaee3aa fired). Without including archived, post-merge
+			// planSteps drop their child linkage and dependency satisfaction
+			// goes blind — BUG-3 partial fix (cef6257f) had this gap; live
+			// test (PR #409 team-lead-317cdb83) surfaced it after Phase 2.
 			if (!childGoalId) {
-				for (const child of planCtx.goalStore.getAll()) {
-					if (child.parentGoalId !== goalId) continue;
-					if (child.archived) continue;
-					if (child.spawnedFromPlanId !== sg.planId) continue;
-					childGoalId = child.id;
-					break;
-				}
+				const best = resolvePlanStepChild(goalId, sg.planId, planCtx.goalStore.getAll());
+				if (best) childGoalId = best.id;
 			}
 			if (childGoalId) {
 				const childCtx = projectContextManager.getContextForGoal(childGoalId);
@@ -6428,6 +6430,8 @@ async function handleApiRoute(
 						state: child.state,
 					};
 					if (child.branch) childOut.branch = child.branch;
+					if (child.archived === true) childOut.archived = true;
+					if (child.archivedAt) childOut.archivedAt = child.archivedAt;
 					if (lastVerificationVerdict) childOut.lastVerificationVerdict = lastVerificationVerdict;
 					out.child = childOut;
 				}
