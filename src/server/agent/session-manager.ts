@@ -185,19 +185,11 @@ export interface SessionInfo {
 		originalText: string;
 		skillExpansions: SkillExpansion[];
 	}>;
-	/**
-	 * Pool ID assigned when this session claimed a temporary worktree from the
-	 * worktree pool. Set on creation, cleared after the first-prompt rename.
-	 * Phase 3 multi-repo design §5.4.
-	 */
-	poolId?: string;
-	/** Repo path (cached from worktree provisioning) so the rename can run in the right cwd. */
+	/** Repo path (cached from worktree provisioning). */
 	repoPath?: string;
-	/** Active branch name. Mirrors persisted store; updated by the first-prompt rename. */
+	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
 	branch?: string;
-	/** True when on target branch but dir still at the pool path (degraded fallback). */
-	worktreeDegraded?: boolean;
-	/** Multi-repo: per-repo worktree paths from the pool claim. Updated by first-prompt rename. */
+	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 }
 
@@ -386,7 +378,6 @@ export class SessionManager {
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
-	private _delegateHarness?: import("./delegate-harness.js").DelegateHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
@@ -403,130 +394,6 @@ export class SessionManager {
 
 	setVerificationHarness(harness: import("./verification-harness.js").VerificationHarness): void {
 		this._verificationHarness = harness;
-	}
-
-	/** Wire the DelegateHarness so createDelegateSession can register parked Promises
-	 * and restoreSessions can decide which delegates to eager-restore. */
-	setDelegateHarness(harness: import("./delegate-harness.js").DelegateHarness): void {
-		this._delegateHarness = harness;
-	}
-
-	getDelegateHarness(): import("./delegate-harness.js").DelegateHarness | undefined {
-		return this._delegateHarness;
-	}
-
-	/**
-	 * Subscribe to the child delegate session's RpcBridge so that when it goes
-	 * terminal (agent_end / process_exit) we submit a structured result back to
-	 * the parent's parked Promise via DelegateHarness.submit. Idempotent — a
-	 * second event for the same key is a no-op in the harness.
-	 *
-	 * Used by both the live path (createDelegateSession) and the restart-resume
-	 * path (server.ts after restoreSessions); see
-	 * docs/design/delegate-restart-resilience.md §6.3.
-	 */
-	attachDelegateCompletionListener(childSessionId: string, parentSessionId: string, toolUseId: string, opts?: { resumeFallback?: boolean }): void {
-		const harness = this._delegateHarness;
-		if (!harness) return;
-		const child = this.sessions.get(childSessionId);
-		if (!child) {
-			// Caller is responsible for handling the missing-child case (synthesizes a failure result).
-			return;
-		}
-		let submitted = false;
-		const submitOnce = (result: import("./delegate-harness.js").DelegateResultPayload) => {
-			if (submitted) return;
-			submitted = true;
-			try { unsub(); } catch { /* ignore */ }
-			// Drop the global termination listener too — leaving it in
-			// _terminationListeners would accumulate one dead closure per
-			// completed delegate, which is a slow leak on long-running gateways
-			// (every future session termination scans the array).
-			const idx = this._terminationListeners.indexOf(termFn);
-			if (idx >= 0) this._terminationListeners.splice(idx, 1);
-			try { harness.submit(parentSessionId, toolUseId, result); } catch (err) {
-				console.error(`[delegate-harness] submit failed for ${parentSessionId}:${toolUseId}:`, err);
-			}
-		};
-		const unsub = child.rpcClient.onEvent((event: any) => {
-			if (submitted) return;
-			if (event?.type === "agent_end") {
-				void (async () => {
-					let output = "";
-					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
-					submitOnce({ status: "completed", output });
-				})();
-			} else if (event?.type === "process_exit") {
-				void (async () => {
-					let output = "";
-					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
-					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
-					submitOnce({
-						status: event.code === 0 ? "completed" : "failed",
-						output,
-						error: event.code === 0 ? undefined : `Agent process exited (${reason})`,
-					});
-				})();
-			}
-		});
-		// Termination (archive/terminate) is observed via the global termination
-		// listener wired in server.ts; that path also fires submit if the
-		// agent_end/process_exit listener didn't get there first.
-		const termFn = (terminatedId: string, info: { reason: "terminated" | "archived" | "purged" }) => {
-			if (terminatedId !== childSessionId) return;
-			void (async () => {
-				let output = "";
-				try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
-				submitOnce({
-					status: "terminated",
-					output,
-					error: info.reason === "archived" ? "Delegate archived" : "Delegate terminated",
-				});
-			})();
-		};
-		this._terminationListeners.push(termFn);
-
-		// Race protection — RESTART-RESUME PATH ONLY. The resumed agent
-		// may finish its continuation turn (firing `agent_end`) BEFORE this
-		// listener was attached. Without this fallback, the delegate would
-		// sit idle forever and the parent's `/wait` would time out.
-		//
-		// We deliberately gate this on `opts.resumeFallback === true`
-		// because the LIVE path attaches this listener BEFORE
-		// `sendDelegatePrompt()` runs, so a slow spawn / sandbox start /
-		// model warm-up that takes >5s to emit `agent_start` would
-		// otherwise be (mis-)treated as terminal idle, completing the
-		// parent's wait with empty output before the delegate has actually
-		// done any work.
-		//
-		// On the resume path we use `waitForStreaming` (sibling of
-		// `waitForIdle`, resolves on `agent_start`) with a short budget,
-		// then treat sustained idleness afterwards as proof the turn ran
-		// and ended before our listener attached.
-		//
-		// submitOnce() guarantees at-most-once delivery either way, so a
-		// real `agent_end` firing through the listener mid-poll is safe —
-		// first to land wins.
-		if (opts?.resumeFallback) {
-			void (async () => {
-				try {
-					await this.waitForStreaming(childSessionId, 5_000);
-					return; // listener will catch agent_end
-				} catch { /* fall through */ }
-				if (submitted) return;
-				const current = this.sessions.get(childSessionId);
-				if (!current) {
-					submitOnce({ status: "failed", output: "", error: "Delegate session disappeared" });
-					return;
-				}
-				if (current.status === "idle") {
-					let output = "";
-					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
-					submitOnce({ status: "completed", output });
-				}
-				// Else status is streaming/terminated/etc — listener handles it.
-			})();
-		}
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
@@ -2213,28 +2080,6 @@ export class SessionManager {
 	 * Restore sessions from disk on startup.
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
-	/**
-	 * Snapshot the set of session ids whose `wasStreaming` flag is true on
-	 * disk. Must be called BEFORE `restoreSessions()` because that path
-	 * synchronously flips the flag back to false on disk for any restored
-	 * session it re-prompts to continue. Used by the delegate-resume loop
-	 * (server.ts) to distinguish "idle because finished cleanly" from
-	 * "idle because we're mid-resume of an interrupted turn". Routes
-	 * through projectContextManager so multi-project (per-project session
-	 * stores under each project root's `.bobbit/state`) is handled
-	 * correctly — not via filesystem path-guessing.
-	 */
-	getPreRestoreWasStreaming(): Set<string> {
-		const out = new Set<string>();
-		const persisted = this.projectContextManager
-			? [...this.projectContextManager.getAllLiveSessions()]
-			: (this._testStore?.getLive() ?? []);
-		for (const ps of persisted) {
-			if (ps.wasStreaming) out.add(ps.id);
-		}
-		return out;
-	}
-
 	async restoreSessions(): Promise<void> {
 		// Initialize search service (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the service and wires callbacks)
@@ -2267,22 +2112,7 @@ export class SessionManager {
 		const regular = persisted.filter(ps => !ps.delegateOf);
 		const delegates = persisted.filter(ps => !!ps.delegateOf);
 
-		// Eager-restore delegates whose parent has a registered wait in the
-		// DelegateHarness (active-delegates.json). Archived delegates and
-		// delegates whose parent finished cleanly stay dormant. See
-		// docs/design/delegate-restart-resilience.md §4.
-		const activeDelegateIds = this._delegateHarness?.getActiveDelegateSessionIds() ?? new Set<string>();
-		const eagerDelegates: PersistedSession[] = [];
-		const dormantDelegates: PersistedSession[] = [];
-		for (const ps of delegates) {
-			if (!ps.archived && ps.agentSessionFile && activeDelegateIds.has(ps.id)) {
-				eagerDelegates.push(ps);
-			} else {
-				dormantDelegates.push(ps);
-			}
-		}
-
-		console.log(`[session-manager] Restoring ${regular.length} session(s) + ${eagerDelegates.length} active delegate(s), deferring ${dormantDelegates.length} dormant delegate(s)...`);
+		console.log(`[session-manager] Restoring ${regular.length} session(s), deferring ${delegates.length} delegate(s)...`);
 
 		// Restore regular sessions in parallel (batched concurrency)
 		const CONCURRENCY = 5;
@@ -2291,16 +2121,8 @@ export class SessionManager {
 			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
 		}
 
-		// Eager-restore active delegates through the same code path as regular
-		// sessions — keeps `BOBBIT_SESSION_ID` injection (PR #397), `lastActivity`
-		// preservation (PR #385), and sandbox handling identical.
-		for (let i = 0; i < eagerDelegates.length; i += CONCURRENCY) {
-			const batch = eagerDelegates.slice(i, i + CONCURRENCY);
-			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
-		}
-
-		// Dormant delegate sessions: restored on-demand via addClient()
-		for (const ps of dormantDelegates) {
+		// Delegate sessions: dormant entries only — restored on-demand via addClient()
+		for (const ps of delegates) {
 			if (!ps.agentSessionFile) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
@@ -2449,14 +2271,6 @@ export class SessionManager {
 		}
 		if (ps.staffId) {
 			bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId;
-		}
-		// Recursive-delegation guard. The `delegate` tool extension short-
-		// circuits when this env var is set on the agent subprocess; without
-		// it, an eager-restored delegate session would have the `delegate`
-		// tool registered and could spawn its own children. Restoration MUST
-		// preserve this guard. See defaults/tools/agent/extension.ts.
-		if (ps.delegateOf) {
-			bridgeOptions.env.BOBBIT_DELEGATE_OF = ps.delegateOf;
 		}
 
 		// ── Restore Docker sandbox wiring ──
@@ -2644,10 +2458,8 @@ export class SessionManager {
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
-			poolId: ps.poolId,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
-			worktreeDegraded: ps.worktreeDegraded,
 			repoWorktrees: ps.repoWorktrees && ps.repoPath
 				? Object.entries(ps.repoWorktrees).map(([repo, worktreePath]) => ({
 					repo,
@@ -2744,25 +2556,23 @@ export class SessionManager {
 			const uuid8 = id.slice(0, 8);
 			const wtRoot = path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`);
 
-			// Phase 3: try to claim a temporary pool worktree up-front. The branch
-			// stays as `pool/_pool-<id>` until the first prompt arrives, at which
-			// point we generate a real title and rename via `git branch -m` +
-			// `git worktree move`. This avoids persisting a `new-session-<id>`
-			// placeholder branch on disk that would never be cleaned up.
+			// Compute the final branch name up front. Both warm-pool and cold-pool
+			// paths produce `session/<id8>` — unified namespace, no first-prompt
+			// rename. See docs/design/remove-session-worktree-rename.md.
 			//
-			// Sandboxed sessions skip the pool path: they create their worktree
+			// Sandboxed sessions skip the host-side pool: they create their worktree
 			// inside the container via ProjectSandbox.createWorktree, and the
 			// host-side worktree pool isn't reachable from the container.
+			const targetBranch = `session/${uuid8}`;
 			const poolForCreate = (!opts?.sandboxed && projectId) ? this.worktreePools.get(projectId) : undefined;
-			const unnamed = poolForCreate ? poolForCreate.claimUnnamed() : null;
+			const claimed = poolForCreate ? await poolForCreate.claim(targetBranch).catch((err) => {
+				console.warn(`[session-manager] pool.claim failed for ${id}, falling back to createWorktree: ${err instanceof Error ? err.message : err}`);
+				return null;
+			}) : null;
 
-			// Fallback path (no pool warmth): synthesise a `session/new-session-<id>`
-			// branch up front. This matches pre-Phase-3 behaviour and is the only
-			// path the legacy createWorktree flow knows how to satisfy.
-			const fallbackSlug = `session/new-session-${uuid8}`;
-			const branch = unnamed ? unnamed.branchName : fallbackSlug;
-			const safeName = branch.replace(/\//g, "-");
-			const worktreePath = unnamed ? unnamed.worktreePath : path.join(wtRoot, safeName);
+			const safeName = targetBranch.replace(/\//g, "-");
+			const branch = targetBranch;
+			const worktreePath = claimed ? claimed.worktreePath : path.join(wtRoot, safeName);
 
 			const now = Date.now();
 			const session: SessionInfo = {
@@ -2789,12 +2599,15 @@ export class SessionManager {
 				promptQueue: new PromptQueue(),
 			};
 
-			// Phase 3: stash the pool ID and repo path for the first-prompt rename.
-			if (unnamed) {
-				session.poolId = unnamed.poolId;
-				if (unnamed.worktrees && unnamed.worktrees.length > 0) {
-					session.repoWorktrees = unnamed.worktrees.map(w => ({ ...w }));
-				}
+			if (claimed && claimed.worktrees && claimed.worktrees.length > 0) {
+				// Re-derive per-repo `repoPath` from the project's components: the pool
+				// claim only carries `repo` + `worktreePath`. For session-manager we need
+				// each repo's *primary* path so cleanup-on-archive can run git ops there.
+				session.repoWorktrees = claimed.worktrees.map(w => ({
+					repo: w.repo,
+					repoPath: w.repo === "." ? repoPath : path.join(repoPath, w.repo),
+					worktreePath: w.worktreePath,
+				}));
 			}
 			session.repoPath = repoPath;
 			session.branch = branch;
@@ -2833,17 +2646,15 @@ export class SessionManager {
 
 			// Persist immediately with all known structural fields
 			persistOnce(session, plan, ctx.store);
-			if (session.poolId) {
-				const patch: { poolId?: string; repoWorktrees?: Record<string, string> } = { poolId: session.poolId };
-				if (session.repoWorktrees && session.repoWorktrees.length > 0) {
-					patch.repoWorktrees = Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath]));
-				}
-				ctx.store.update(session.id, patch);
+			if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+				ctx.store.update(session.id, {
+					repoWorktrees: Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath])),
+				});
 			}
 
 			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
 			// pass its path so executeWorktreeAsync skips createWorktree.
-			executeWorktreeAsync(plan, session, ctx, unnamed?.worktreePath).then(() => {
+			executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
 				// here is redundant but kept as a safety net for re-attempts where the
@@ -2909,17 +2720,6 @@ export class SessionManager {
 		cwd: string;
 		title?: string;
 		context?: Record<string, string>;
-		/**
-		 * Tool-use id of the parent's `delegate` tool call. When supplied, the
-		 * harness registers a parked Promise keyed by `(parent, toolUseId)` and
-		 * the live-path completion listener submits the structured result back
-		 * when the child reaches a terminal state. Required for restart-survival
-		 * — callers without a `toolUseId` (legacy) get the old fire-and-forget
-		 * behaviour and must continue to use POST /api/sessions/:id/wait.
-		 */
-		toolUseId?: string;
-		/** Per-call timeout budget for the harness (ms). Default 600_000. */
-		timeoutMs?: number;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
@@ -2953,7 +2753,6 @@ export class SessionManager {
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
-			kind: "delegate",
 			sandboxed: delegateSandboxed || undefined,
 			instructions: opts.instructions,
 			context: opts.context,
@@ -2970,50 +2769,8 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		}).finally(() => { session.pendingMetadataPersist = undefined; });
 
-		// Persist the delegate metadata BEFORE sending the prompt so the
-		// active-delegates.json entry exists on disk before any failure window
-		// (spawn crash, gateway crash). We use `recordActive()` rather than
-		// `register()`: `register()` would create a fire-and-forget pending
-		// Promise that the live-path completion listener (attached below) would
-		// resolve into, consuming the result before the parent's `/wait` POST
-		// arrives — leaving the real awaiter to hang. With `recordActive()`
-		// the harness has a metadata-only "shell"; if the child completes fast,
-		// `submit()` against a shell-only key latches the result and the
-		// parent's later `register()` drains the latch.
-		if (this._delegateHarness && opts.toolUseId) {
-			try {
-				this._delegateHarness.recordActive({
-					parentSessionId,
-					toolUseId: opts.toolUseId,
-					delegateSessionId: id,
-					cwd: opts.cwd,
-					title: titleSummary,
-					sandboxed: delegateSandboxed || undefined,
-					instructions: opts.instructions,
-					timeoutMs: opts.timeoutMs ?? 600_000,
-					createdAt: Date.now(),
-				});
-				this.attachDelegateCompletionListener(id, parentSessionId, opts.toolUseId);
-			} catch (err) {
-				console.error(`[session-manager] Failed to record delegate ${id} with harness:`, err);
-			}
-		}
-
-		// Send delegate prompt with 30s timeout. If the prompt send throws
-		// (spawn crash, child timeout, etc.), the parent's createDelegateSession
-		// caller propagates the error and never POSTs `/api/internal/delegate/wait`.
-		// We must clean up the shell entry we recorded above, otherwise a future
-		// restart would try to eager-restore an abandoned delegate lifecycle.
-		try {
-			await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
-		} catch (err) {
-			if (this._delegateHarness && opts.toolUseId) {
-				try {
-					this._delegateHarness.cancel(parentSessionId, opts.toolUseId, "delegate spawn failed");
-				} catch { /* best-effort */ }
-			}
-			throw err;
-		}
+		// Send delegate prompt with 30s timeout
+		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
 
 		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
 		return session;
@@ -3598,11 +3355,6 @@ export class SessionManager {
 		if (opts?.markGenerated) session.titleGenerated = true;
 		this.resolveStoreForSession(id).update(id, { title });
 		broadcast(session.clients, { type: "session_title", sessionId: id, title });
-		// Phase 3: explicit title-set is also a chance to flip a still-temporary
-		// pool worktree onto its real `session/<slug>-<id>` branch.
-		this.renameSessionFromPool(session, title).catch((err) => {
-			console.warn(`[session-manager] Pool rename failed for ${id}:`, err);
-		});
 		return true;
 	}
 
@@ -3853,195 +3605,6 @@ export class SessionManager {
 			session.title = title;
 			this.resolveStoreForSession(session.id).update(session.id, { title });
 			broadcast(session.clients, { type: "session_title", sessionId: session.id, title });
-			// Phase 3: if we're still on a temporary pool branch, rename to the
-			// real `session/<slug>-<id>` now that we have a meaningful title.
-			this.renameSessionFromPool(session, title).catch((err) => {
-				console.warn(`[session-manager] Pool rename failed for ${session.id}:`, err);
-			});
-		}
-	}
-
-	/**
-	 * Phase 3 helper: rename a session that's still on a `pool/_pool-<id>`
-	 * branch onto its real `session/<slug>-<id>` branch + matching dir.
-	 *
-	 * No-op when:
-	 *   - session has no `poolId` (created via fallback createWorktree)
-	 *   - session is sandboxed (host has no on-disk worktree to rename)
-	 *   - session has no repoPath (couldn't run git there anyway)
-	 *
-	 * Failures are logged and the session continues on the pool branch —
-	 * the agent is fully usable either way.
-	 */
-	private async renameSessionFromPool(session: SessionInfo, title: string): Promise<void> {
-		if (!session.poolId) return;
-		if (session.sandboxed) return;
-		if (!session.repoPath) return;
-		if (!session.worktreePath) return;
-		if (!session.branch || !session.branch.startsWith("pool/")) return;
-
-		const { execFile: execFileCb } = await import("node:child_process");
-		const { promisify } = await import("node:util");
-		const execFile = promisify(execFileCb);
-
-		// Sanitize title into a branch slug (matches goal-manager.toBranchName).
-		const slug = title
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-|-$/g, "")
-			.slice(0, 24) || "session";
-		const targetBranch = `session/${slug}-${session.id.slice(0, 8)}`;
-		const oldBranch = session.branch;
-		const oldPath = session.worktreePath;
-		const wtRoot = path.dirname(oldPath);
-		const newPath = path.join(wtRoot, targetBranch.replace(/\//g, "-"));
-
-		console.log(`[session-manager] Renaming pool worktree for session ${session.id}: ${oldBranch} → ${targetBranch}`);
-
-		// Multi-repo: per-repo branch rename + container dir rename + worktree repair, all parallel.
-		if (session.repoWorktrees && session.repoWorktrees.length > 0) {
-			await this._renameSessionFromPoolMultiRepo(session, targetBranch, newPath);
-			return;
-		}
-
-		// 1. Branch rename — fast, local ref op.
-		try {
-			await execFile("git", ["branch", "-m", oldBranch, targetBranch], { cwd: oldPath, timeout: 10_000 });
-		} catch (err) {
-			console.warn(`[session-manager] git branch -m failed for ${session.id}:`, err);
-			return;
-		}
-
-		let finalPath = oldPath;
-		let degraded = false;
-		if (newPath !== oldPath) {
-			try {
-				const { moveWorktree } = await import("../skills/git.js");
-				await moveWorktree(session.repoPath, oldPath, newPath);
-				finalPath = newPath;
-			} catch (err) {
-				degraded = true;
-				console.warn(`[session-manager] git worktree move failed for ${session.id}; staying at ${oldPath}:`, err instanceof Error ? err.message : err);
-			}
-		}
-
-		// Update in-memory + persisted state.
-		const oldCwd = session.cwd;
-		let newCwd = oldCwd;
-		if (finalPath !== oldPath && oldCwd && oldCwd.startsWith(oldPath)) {
-			newCwd = finalPath + oldCwd.slice(oldPath.length);
-		}
-		session.branch = targetBranch;
-		session.worktreePath = finalPath;
-		session.cwd = newCwd;
-		session.poolId = undefined;
-		session.worktreeDegraded = degraded;
-
-		// Refresh the RpcBridge cwd for sandboxless sessions; the bridge holds
-		// an absolute path and would otherwise keep using the stale one.
-		if (!session.sandboxed) {
-			try {
-				(session.rpcClient as any)?.setCwd?.(newCwd);
-			} catch { /* best-effort — the bridge may not expose setCwd */ }
-		}
-
-		const store = this.resolveStoreForSession(session.id);
-		store.update(session.id, {
-			branch: targetBranch,
-			worktreePath: finalPath,
-			cwd: newCwd,
-			poolId: undefined,
-			worktreeDegraded: degraded || undefined,
-		});
-
-		// Push the renamed branch in the background — same as pool.claim does.
-		if (process.env.BOBBIT_TEST_NO_PUSH !== "1") {
-			execFile("git", ["push", "-u", "origin", targetBranch], { cwd: finalPath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
-		}
-	}
-
-	/**
-	 * Multi-repo session rename: rename the container dir, then `Promise.all`
-	 * per-repo branch-rename + worktree-repair so each repo's admin pointer
-	 * tracks the new path. Per-repo failures are independent (degraded mode
-	 * for that repo only).
-	 */
-	private async _renameSessionFromPoolMultiRepo(session: SessionInfo, targetBranch: string, newContainer: string): Promise<void> {
-		const { execFile: execFileCb } = await import("node:child_process");
-		const { promisify } = await import("node:util");
-		const execFile = promisify(execFileCb);
-		const fsm = await import("node:fs");
-
-		const oldBranch = session.branch!;
-		const oldContainer = session.worktreePath!;
-		const worktrees = session.repoWorktrees!;
-
-		let containerDegraded = false;
-		let finalContainer = oldContainer;
-		if (newContainer !== oldContainer) {
-			try {
-				fsm.renameSync(oldContainer, newContainer);
-				finalContainer = newContainer;
-			} catch (err) {
-				containerDegraded = true;
-				console.warn(`[session-manager] multi-repo container rename failed for ${session.id}; staying at ${oldContainer}: ${err instanceof Error ? err.message : err}`);
-			}
-		}
-
-		const perRepo = await Promise.all(worktrees.map(async (w) => {
-			const newWtPath = finalContainer === oldContainer
-				? w.worktreePath
-				: path.join(finalContainer, path.relative(oldContainer, w.worktreePath));
-			let renamed = false;
-			try {
-				await execFile("git", ["branch", "-m", oldBranch, targetBranch], { cwd: newWtPath, timeout: 10_000 });
-				renamed = true;
-			} catch (err) {
-				console.warn(`[session-manager] multi-repo git branch -m failed for ${session.id} repo ${w.repo}:`, err instanceof Error ? err.message : err);
-			}
-			if (finalContainer !== oldContainer) {
-				try {
-					await execFile("git", ["worktree", "repair", newWtPath], { cwd: w.repoPath, timeout: 15_000 });
-				} catch (err) {
-					console.warn(`[session-manager] multi-repo git worktree repair failed for ${session.id} repo ${w.repo}:`, err instanceof Error ? err.message : err);
-				}
-			}
-			return { repo: w.repo, repoPath: w.repoPath, worktreePath: newWtPath, renamed };
-		}));
-
-		const degraded = containerDegraded || perRepo.some(r => !r.renamed);
-
-		const oldCwd = session.cwd;
-		let newCwd = oldCwd;
-		if (finalContainer !== oldContainer && oldCwd && oldCwd.startsWith(oldContainer)) {
-			newCwd = finalContainer + oldCwd.slice(oldContainer.length);
-		}
-
-		session.branch = targetBranch;
-		session.worktreePath = finalContainer;
-		session.cwd = newCwd;
-		session.poolId = undefined;
-		session.worktreeDegraded = degraded;
-		session.repoWorktrees = perRepo.map(r => ({ repo: r.repo, repoPath: r.repoPath, worktreePath: r.worktreePath }));
-
-		if (!session.sandboxed) {
-			try { (session.rpcClient as any)?.setCwd?.(newCwd); } catch { /* best-effort */ }
-		}
-
-		const store = this.resolveStoreForSession(session.id);
-		store.update(session.id, {
-			branch: targetBranch,
-			worktreePath: finalContainer,
-			cwd: newCwd,
-			poolId: undefined,
-			worktreeDegraded: degraded || undefined,
-			repoWorktrees: Object.fromEntries(perRepo.map(r => [r.repo, r.worktreePath])),
-		});
-
-		if (process.env.BOBBIT_TEST_NO_PUSH !== "1") {
-			for (const r of perRepo) {
-				execFile("git", ["push", "-u", "origin", targetBranch], { cwd: r.worktreePath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
-			}
 		}
 	}
 

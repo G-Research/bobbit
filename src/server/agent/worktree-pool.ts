@@ -8,17 +8,16 @@
  *
  * If the pool is empty, callers fall back to the normal `createWorktree()` path.
  *
- * Phase 3 changes (multi-repo):
- *   - Pool branch naming changed from `session/_pool-<id>` → `pool/_pool-<id>`
- *     so the orphan-cleanup logic in session-manager (which scans
- *     `session/*` branches) doesn't trip on pool entries.
- *   - `claim()` uses `git worktree move` after the branch rename so the
- *     directory matches the new branch slug. On move failure (typically
- *     Windows file locks) we record a degraded entry and continue —
- *     the branch rename succeeded so the agent is fully usable.
+ * Branch naming:
+ *   - Pool fill creates `pool/_pool-<id>` so session-manager's `session/*`
+ *     orphan scans don't trip on in-flight pool entries.
+ *   - `claim(targetBranch)` is the only claim entry point and renames the
+ *     pool branch + directory to their final names synchronously before
+ *     returning. On directory-rename failure the call returns null and
+ *     the caller falls back to `createWorktree`. There is no persisted
+ *     "degraded" state — see `docs/design/remove-session-worktree-rename.md`.
  *   - The fetch + reset + push that used to block claim now run in the
- *     background after returning the worktree to the caller — claim is
- *     now O(1) git ops + a few hundred ms of disk move.
+ *     background after returning the worktree to the caller.
  *   - `setComponents()` accepts the project's component list. When the
  *     components imply multi-repo, `_fill()` builds multi-repo pool sets
  *     via `createWorktreeSet` and `claim()` parallelises rename + move
@@ -30,7 +29,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePush, moveWorktree, createWorktreeSet, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, createWorktreeSet, type WorktreeResult } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import type { Component } from "./project-config-store.js";
 
@@ -45,30 +44,20 @@ interface PoolEntry {
 	createdAt: number;
 }
 
-/** Result of a pool claim — extends the legacy WorktreeResult with degraded-mode info. */
+/** Result of a pool claim. */
 export interface PoolClaimResult extends WorktreeResult {
 	/**
-	 * True when the branch was renamed but the directory could not be moved
-	 * (typically Windows file locks on `git worktree move`). The worktree is
-	 * fully usable; callers may choose to surface this to the UI.
+	 * Transient claim-result signal: in multi-repo, a per-repo `git branch -m`
+	 * failed even though the container rename succeeded. The worktree is
+	 * usable; callers may surface a warning. Single-repo claims never set
+	 * this — a directory-rename failure causes `claim()` to return null and
+	 * the caller falls back to `createWorktree`. Not persisted to disk.
 	 */
 	degraded?: boolean;
 	/** Multi-repo: per-repo worktree entries. Absent for single-repo entries. */
 	worktrees?: Array<{ repo: string; worktreePath: string }>;
 	/** Multi-repo: the per-branch container directory (`<wtRoot>/<branchSlug>`). */
 	container?: string;
-}
-
-/** Result of an unnamed claim — the pool entry handed to the caller as-is. */
-export interface UnnamedClaim {
-	/** The opaque pool ID embedded in branch + path (`_pool-<8hex>`). */
-	poolId: string;
-	/** Current branch name (`pool/_pool-<id>`). */
-	branchName: string;
-	/** Current worktree path (under `<repo>-wt/pool-_pool-<id>/`). For multi-repo this is the per-branch container. */
-	worktreePath: string;
-	/** Multi-repo: per-repo entries (absent for single-repo). */
-	worktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 }
 
 /** Component descriptor reserved for Phase 4 multi-repo pool sets. */
@@ -90,6 +79,24 @@ export function isPoolBranch(branch: string): boolean {
 /** Flatten a branch name into a directory-safe slug (matches createWorktree's convention). */
 function branchToSlug(branch: string): string {
 	return branch.replace(/\//g, "-");
+}
+
+/**
+ * Move a worktree directory to a new path using `git worktree move`.
+ *
+ * `git worktree move` (added in git 2.17) atomically updates both the
+ * worktree's `.git` pointer and the admin entry under `<repo>/.git/worktrees/`,
+ * unlike a plain `mv` which leaves git tracking the old path.
+ *
+ * Inlined here from `skills/git.ts`: `pool.claim()` is now the sole caller
+ * post-rename-removal, so this no longer needs to be a public skill export.
+ */
+async function moveWorktree(repoPath: string, oldPath: string, newPath: string): Promise<void> {
+	if (oldPath === newPath) return;
+	await execFile("git", ["worktree", "move", oldPath, newPath], {
+		cwd: repoPath,
+		timeout: 30_000,
+	});
 }
 
 export class WorktreePool {
@@ -165,13 +172,18 @@ export class WorktreePool {
 	 *
 	 * Steps performed synchronously (the caller awaits the rename):
 	 *   1. `git branch -m pool/_pool-<id> <targetBranch>`
-	 *   2. `git worktree move <oldPath> <newPath>` — degraded fallback if it fails
+	 *   2. `git worktree move <oldPath> <newPath>` — on failure the call
+	 *      returns null (caller falls back to `createWorktree`). No persistent
+	 *      "degraded" state is emitted: post-refactor (see
+	 *      `docs/design/remove-session-worktree-rename.md`) we never persist a
+	 *      session whose dir name doesn't match its branch.
 	 *
 	 * Steps performed in the background (caller does NOT await):
 	 *   3. `git fetch origin` + `git reset --hard <remote-primary>`
 	 *   4. `git push -u origin <targetBranch>` (skipped under BOBBIT_TEST_NO_PUSH=1)
 	 *
-	 * Returns null if the pool is empty (caller falls back to createWorktree).
+	 * Returns null if the pool is empty, or if the directory rename fails
+	 * (caller falls back to createWorktree).
 	 */
 	async claim(targetBranch: string): Promise<PoolClaimResult | null> {
 		const entry = this.pool.shift();
@@ -200,29 +212,39 @@ export class WorktreePool {
 			return null;
 		}
 
-		// 2. Move worktree directory to match the new branch slug. Degraded fallback
-		//    on failure — the branch rename succeeded so the agent can still work;
-		//    only the dir name is stale. The boot sweeper will reclaim it later.
+		// 2. Move worktree directory to match the new branch slug. On failure we
+		//    return null so the caller falls back to `createWorktree` — there is
+		//    no persistent half-renamed state. (The branch rename in step 1 has
+		//    already succeeded; we revert it here before bailing.)
 		const targetSlug = branchToSlug(targetBranch);
 		const wtRoot = path.dirname(entry.worktreePath);
 		const newPath = path.join(wtRoot, targetSlug);
 		let finalPath = entry.worktreePath;
-		let degraded = false;
 		if (newPath !== entry.worktreePath) {
 			try {
 				await moveWorktree(this.repoPath, entry.worktreePath, newPath);
 				finalPath = newPath;
 			} catch (err) {
-				degraded = true;
-				console.warn(`[worktree-pool] degraded: dir kept at ${entry.worktreePath} (move to ${newPath} failed: ${err instanceof Error ? err.message : err})`);
+				console.warn(`[worktree-pool] claim aborted: move ${entry.worktreePath} → ${newPath} failed: ${err instanceof Error ? err.message : err}`);
+				// Revert the branch rename so the worktree's branch matches its dir again,
+				// then clean up so the caller can fall back to createWorktree without
+				// stepping on a half-renamed entry.
+				try {
+					await execFile("git", ["branch", "-m", targetBranch, entry.branchName], {
+						cwd: entry.worktreePath,
+						timeout: 10_000,
+					});
+				} catch { /* best-effort */ }
+				cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true).catch(() => {});
+				return null;
 			}
 		}
 
 		// 3 + 4. Background freshen + push. Don't await — caller gets the worktree now.
 		this.freshenInBackground(finalPath, targetBranch);
 
-		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${finalPath}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
-		const result: PoolClaimResult = { worktreePath: finalPath, branchName: targetBranch, degraded };
+		console.log(`[worktree-pool] Claimed worktree: ${targetBranch} at ${finalPath} (pool: ${this.pool.length}/${this.targetSize})`);
+		const result: PoolClaimResult = { worktreePath: finalPath, branchName: targetBranch, degraded: false };
 		return result;
 	}
 
@@ -232,7 +254,7 @@ export class WorktreePool {
 	 * tracks the new path. Per-repo failures are independent — a repo where
 	 * the move fails ends up degraded for that repo only.
 	 */
-	private async _claimMultiRepo(entry: PoolEntry, targetBranch: string): Promise<PoolClaimResult> {
+	private async _claimMultiRepo(entry: PoolEntry, targetBranch: string): Promise<PoolClaimResult | null> {
 		const targetSlug = branchToSlug(targetBranch);
 		const wtRoot = path.dirname(entry.worktreePath);
 		const newContainer = path.join(wtRoot, targetSlug);
@@ -242,15 +264,19 @@ export class WorktreePool {
 		//    atomic on the same filesystem). Each repo's admin entry inside the
 		//    parent repo's `.git/worktrees/<slug>/gitdir` still points at the old
 		//    path; we fix that with `git worktree repair` after the move.
-		let containerDegraded = false;
+		//    On failure: clean up and return null so the caller falls back to
+		//    createWorktreeSet — no half-state is persisted.
 		let finalContainer = entry.worktreePath;
 		if (newContainer !== entry.worktreePath) {
 			try {
 				fs.renameSync(entry.worktreePath, newContainer);
 				finalContainer = newContainer;
 			} catch (err) {
-				containerDegraded = true;
-				console.warn(`[worktree-pool] multi-repo: container rename failed; staying at ${entry.worktreePath}: ${err instanceof Error ? err.message : err}`);
+				console.warn(`[worktree-pool] multi-repo claim aborted: container rename ${entry.worktreePath} → ${newContainer} failed: ${err instanceof Error ? err.message : err}`);
+				for (const w of worktrees) {
+					cleanupWorktree(w.repoPath, w.worktreePath, entry.branchName, true).catch(() => {});
+				}
+				return null;
 			}
 		}
 
@@ -289,7 +315,7 @@ export class WorktreePool {
 			this.freshenInBackground(r.worktreePath, targetBranch);
 		}
 
-		const degraded = containerDegraded || perRepo.some(r => !r.renamed);
+		const degraded = perRepo.some(r => !r.renamed);
 		console.log(`[worktree-pool] Claimed multi-repo worktree set: ${targetBranch} at ${finalContainer}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
 		return {
 			worktreePath: finalContainer,
@@ -298,34 +324,6 @@ export class WorktreePool {
 			worktrees: perRepo.map(r => ({ repo: r.repo, worktreePath: r.worktreePath })),
 			container: finalContainer,
 		};
-	}
-
-	/**
-	 * Take a pool entry as-is, without renaming branch or directory.
-	 *
-	 * Used by the session creation path: the session lives on the temporary
-	 * `pool/_pool-<id>` branch until the user sends their first prompt, at
-	 * which point session-manager calls a separate rename helper.
-	 *
-	 * Returns null if the pool is empty.
-	 */
-	claimUnnamed(): UnnamedClaim | null {
-		const entry = this.pool.shift();
-		if (!entry) return null;
-		this.replenish();
-		// Strip the leading `pool/` (or legacy `session/`) ref-namespace, keeping the
-		// `_pool-<8hex>` opaque id that callers thread through session metadata.
-		const poolId = entry.branchName.startsWith("pool/")
-			? entry.branchName.slice("pool/".length)
-			: entry.branchName.startsWith("session/")
-				? entry.branchName.slice("session/".length)
-				: entry.branchName;
-		console.log(`[worktree-pool] Claimed (unnamed): ${entry.branchName} at ${entry.worktreePath} (pool: ${this.pool.length}/${this.targetSize})`);
-		const result: UnnamedClaim = { poolId, branchName: entry.branchName, worktreePath: entry.worktreePath };
-		if (entry.worktrees && entry.worktrees.length > 0) {
-			result.worktrees = entry.worktrees.map(w => ({ ...w }));
-		}
-		return result;
 	}
 
 	/** Resolve the remote primary branch (e.g. origin/master). */

@@ -58,7 +58,7 @@ describe("sandbox branch reconciliation", () => {
 		const result = reconcileSandboxBranch({
 			sessionId: "sess-1",
 			sandboxed: true,
-			branch: "session/new-session-620e30c0",
+			branch: "session/620e30c0",
 			sandboxBranch: "goal-my-goal-coder-abc123",
 			storeUpdate: (id, fields) => calls.push({ id, fields }),
 		});
@@ -90,12 +90,12 @@ describe("sandbox branch reconciliation", () => {
 		const result = reconcileSandboxBranch({
 			sessionId: "sess-3",
 			sandboxed: false,
-			branch: "session/new-session-620e30c0",
+			branch: "session/620e30c0",
 			sandboxBranch: "goal-my-goal-coder-abc123",
 			storeUpdate: (id, fields) => calls.push({ id, fields }),
 		});
 
-		assert.equal(result.branch, "session/new-session-620e30c0");
+		assert.equal(result.branch, "session/620e30c0");
 		assert.equal(result.updateCalled, false);
 		assert.equal(calls.length, 0);
 	});
@@ -105,12 +105,12 @@ describe("sandbox branch reconciliation", () => {
 		const result = reconcileSandboxBranch({
 			sessionId: "sess-4",
 			sandboxed: true,
-			branch: "session/new-session-620e30c0",
+			branch: "session/620e30c0",
 			sandboxBranch: undefined,
 			storeUpdate: (id, fields) => calls.push({ id, fields }),
 		});
 
-		assert.equal(result.branch, "session/new-session-620e30c0");
+		assert.equal(result.branch, "session/620e30c0");
 		assert.equal(result.updateCalled, false);
 		assert.equal(calls.length, 0);
 	});
@@ -120,12 +120,12 @@ describe("sandbox branch reconciliation", () => {
 		const result = reconcileSandboxBranch({
 			sessionId: "sess-5",
 			sandboxed: true,
-			branch: "session/new-session-620e30c0",
+			branch: "session/620e30c0",
 			sandboxBranch: "",
 			storeUpdate: (id, fields) => calls.push({ id, fields }),
 		});
 
-		assert.equal(result.branch, "session/new-session-620e30c0");
+		assert.equal(result.branch, "session/620e30c0");
 		assert.equal(result.updateCalled, false);
 		assert.equal(calls.length, 0);
 	});
