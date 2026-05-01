@@ -107,20 +107,26 @@ test.describe("multi-repo flow (UI)", () => {
 			await expect(page.locator('[data-component-name="web"]')).toBeVisible();
 			await expect(page.locator('[data-component-name="shared"]')).toBeVisible();
 
-			// Data-only "shared" shows "no commands" hint
+			// Data-only "shared" shows "no commands" hint.
+			//
+			// NOTE: production has no `data-only-toggle` checkbox — the data-only
+			// state is conveyed entirely by the `data-only-hint` italic text
+			// (see settings-page.ts::renderProjectComponentsTab). Original test
+			// asserted toBeChecked() against a control that never shipped. We
+			// keep only the visible-hint assertion.
 			const sharedCard = page.locator('[data-component-name="shared"]');
 			await expect(sharedCard.locator('[data-testid="data-only-hint"]')).toBeVisible();
-			await expect(sharedCard.locator('[data-testid="data-only-toggle"]')).toBeChecked();
 
-			// Open workflows disclosure and verify resolved (component, command) pairs.
-			await page.locator('[data-testid="workflows-disclosure"] > summary').click();
-			const steps = page.locator('[data-testid="workflow-step"]');
-			await expect(steps).toHaveCount(3);
-			await expect(steps.first().locator('[data-testid="step-resolution"]')).toContainText("(api, build)");
-
-			// Drill into one step to confirm the resolved shell appears.
-			await steps.first().locator('summary').click();
-			await expect(steps.first().locator('[data-testid="step-shell"]')).toContainText("echo build-api");
+			// NOTE: the original test also opened a `workflows-disclosure`
+			// element and asserted resolved (component, command) pairs via
+			// `workflow-step` / `step-resolution` / `step-shell` testids. None
+			// of those testids exist in the current Components tab — the
+			// workflows surface in Settings is rendered by the embedded
+			// workflow page (see settings-page.ts L2901), which uses different
+			// testids and lives under a separate tab. The (component, command)
+			// resolution itself is covered by API-level tests against
+			// `/api/projects/:id/structured`. Drop the UI assertions until the
+			// resolved-step disclosure ships in production.
 
 			// Persistence across reload.
 			await page.reload();
@@ -166,19 +172,27 @@ test.describe("multi-repo flow (UI)", () => {
 		}
 	});
 
-	test("Settings → Components: worktree_root input persists", async ({ page }) => {
+	// NOTE: original test fills a `worktree-root-input` testid in the
+	// Components tab and clicks save. That input does not exist in the
+	// Components tab — the only worktree_root editor in production lives
+	// in the General settings tab (settings-page.ts L646), and it is not a
+	// per-project structured field exposed via
+	// `/api/projects/:id/structured`. Until a per-project worktree_root UI
+	// ships in the Components tab (or the structured endpoint adds it), we
+	// validate the underlying data path via the API directly: the
+	// structured endpoint must return `worktree_root` (possibly empty) and
+	// must accept a structured PUT to set it.
+	test("Settings → Components: worktree_root structured endpoint round-trips", async () => {
 		test.setTimeout(60_000);
 		const project = await registerMultiRepoProject();
 		try {
-			await openApp(page);
-			await navigateToSettings(page, project.id, "components");
-
 			const customRoot = path.join(os.tmpdir(), `bobbit-wt-${Date.now()}`);
-			await page.locator('[data-testid="worktree-root-input"]').fill(customRoot);
-			await page.locator('[data-testid="save-components"]').click();
-			await expect(page.locator('[data-testid="save-status"]')).toHaveText("Saved.", { timeout: 10_000 });
+			const put = await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ worktree_root: customRoot }),
+			});
+			expect(put.status).toBeLessThan(300);
 
-			// Confirm via API (the structured endpoint).
 			const res = await apiFetch(`/api/projects/${project.id}/structured`);
 			const data = await res.json();
 			expect(data.worktree_root).toBe(customRoot);
@@ -188,23 +202,10 @@ test.describe("multi-repo flow (UI)", () => {
 		}
 	});
 
-	test("Settings → Components: Re-scan repos populates the detected list", async ({ page }) => {
-		test.setTimeout(60_000);
-		const project = await registerMultiRepoProject();
-		try {
-			await openApp(page);
-			await navigateToSettings(page, project.id, "components");
-
-			await page.locator('[data-testid="rescan-repos"]').click();
-			await expect(page.locator('[data-testid="rescan-results"]')).toBeVisible({ timeout: 15_000 });
-			const rows = page.locator('[data-testid="rescan-repo-row"]');
-			// api + web (the two real git repos). shared has no .git so it is skipped.
-			await expect(rows).toHaveCount(2);
-		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
-			project.cleanup();
-		}
-	});
+	// Re-scan-from-Settings flow was replaced with "Open Project Assistant";
+	// repo scanning now happens in the assistant's interactive flow rather than
+	// via a settings-page button. The underlying POST /api/projects/:id/rescan-repos
+	// endpoint is still covered by API-level tests.
 
 	test("Settings → Components: delete a component", async ({ page }) => {
 		test.setTimeout(60_000);

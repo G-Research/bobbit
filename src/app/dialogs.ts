@@ -1624,7 +1624,7 @@ export function showProjectDialog(): void {
 	renderDialog();
 }
 
-async function createProjectAssistantSession(dirPath: string, scaffolding: boolean): Promise<void> {
+export async function createProjectAssistantSession(dirPath: string, scaffolding: boolean, opts?: { projectId?: string }): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
@@ -1633,6 +1633,10 @@ async function createProjectAssistantSession(dirPath: string, scaffolding: boole
 			assistantType: scaffolding ? "project-scaffolding" : "project",
 			cwd: dirPath,
 		};
+		// When attaching to an existing registered project, pass the projectId
+		// so the server doesn't spin up a new provisional project at the same
+		// rootPath (which would surface as a duplicate in the sidebar).
+		if (opts?.projectId) bodyObj.projectId = opts.projectId;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(bodyObj),

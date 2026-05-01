@@ -24,8 +24,6 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 
-import { buildDefaultWorkflows } from "./seed-default-workflows.js";
-
 interface MigrateOpts {
 	configDir: string;
 	projectName: string;
@@ -37,9 +35,6 @@ interface MigrateResult {
 	commandKeys?: string[];
 	workflowsMigrated?: number;
 	workflowsDirRemoved?: boolean;
-	/** True if `workflows:` was missing AND no project-local workflows dir existed,
-	 *  and the migration seeded the four canonical default workflows. */
-	workflowsSeeded?: boolean;
 }
 
 /** Legacy top-level QA keys that move into `components[*].config[]`. */
@@ -260,7 +255,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 	// Migrate `<configDir>/workflows/*.yaml` files into the inline block.
 	let workflowsMigrated = 0;
 	let workflowsDirRemoved = false;
-	let workflowsSeeded = false;
 	const preExistingInlineWorkflows = (raw.workflows && typeof raw.workflows === "object" && !Array.isArray(raw.workflows))
 		? { ...(raw.workflows as Record<string, unknown>) }
 		: {};
@@ -290,14 +284,8 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		}
 	}
 
-	// Seed default workflows if NONE are present (no inline workflows, no project-local dir).
-	// After Follow-up A deleted defaults/workflows/*.yaml, projects with no workflow source
-	// at all would be left with zero workflows — breaking goal creation entirely.
-	if (Object.keys(inlineWorkflows).length === 0) {
-		const defaults = buildDefaultWorkflows(opts.projectName);
-		for (const [id, wf] of Object.entries(defaults)) inlineWorkflows[id] = wf;
-		workflowsSeeded = true;
-	}
+	// No default-workflow seeding. Workflows are the project assistant's
+	// responsibility; a project may legitimately have zero workflows.
 	if (Object.keys(inlineWorkflows).length > 0) {
 		next.workflows = inlineWorkflows;
 	}
@@ -330,7 +318,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		commandKeys: Object.keys(commands),
 		workflowsMigrated,
 		workflowsDirRemoved,
-		workflowsSeeded,
 	};
 }
 
@@ -357,11 +344,11 @@ function maybeSeedWorkflowsOnly(args: {
 
 	// If a workflows dir is present, migrate it into the inline block (mirrors the
 	// main path so the dir is removed and content is preserved). If neither inline
-	// nor dir, seed defaults. If only legacy top-level qa_* keys remain, fall through
-	// so they get migrated onto the appropriate component's config.
-	// Any presence of a legacy qa_* top-level key triggers a write — even
+	// nor dir, this is a no-op — no default seeding. If only legacy top-level qa_*
+	// keys remain, fall through so they get migrated onto the appropriate component's
+	// config (any presence of a legacy qa_* top-level key triggers a write — even
 	// empty values get deleted to satisfy the "no top-level qa_* after boot"
-	// acceptance criterion.
+	// acceptance criterion).
 	const hasLegacyQaTopLevel = LEGACY_QA_KEYS.some(k => k in raw);
 	if (hasInlineWorkflows && !hasWorkflowsDir && !hasLegacyQaTopLevel) {
 		return { migrated: false };
@@ -400,21 +387,14 @@ function maybeSeedWorkflowsOnly(args: {
 		}
 	}
 
-	let workflowsSeeded = false;
-	if (Object.keys(inlineWorkflows).length === 0) {
-		const defaults = buildDefaultWorkflows(componentName);
-		for (const [id, wf] of Object.entries(defaults)) inlineWorkflows[id] = wf;
-		workflowsSeeded = true;
-	}
-
 	// Migrate any legacy top-level qa_* keys onto the appropriate component's config.
 	// The components array is mutated in place; the same reference is then re-emitted in `next`.
 	const nextComponents = (components ?? []).map(c => ({ ...c }));
 	const nextRaw: Record<string, unknown> = { ...raw, components: nextComponents, workflows: inlineWorkflows };
 	const qaResult = migrateLegacyQaToComponent(nextRaw, nextComponents, projectName);
 
-	if (!workflowsSeeded && workflowsMigrated === 0 && !qaResult.changed) {
-		// Nothing changed.
+	if (workflowsMigrated === 0 && !qaResult.changed) {
+		// Nothing changed (no inline dir to migrate, no default seeding, no QA migration).
 		return { migrated: false };
 	}
 
@@ -429,9 +409,6 @@ function maybeSeedWorkflowsOnly(args: {
 		return { migrated: false };
 	}
 
-	if (workflowsSeeded) {
-		console.log(`[migrate] project.yaml: seeded default workflows for ${projectName} (component=${componentName})`);
-	}
 	if (workflowsMigrated > 0) {
 		console.log(`[migrate] project.yaml: inlined ${workflowsMigrated} workflow files for ${projectName}`);
 	}
@@ -441,7 +418,6 @@ function maybeSeedWorkflowsOnly(args: {
 		componentName,
 		workflowsMigrated,
 		workflowsDirRemoved,
-		workflowsSeeded,
 	};
 }
 

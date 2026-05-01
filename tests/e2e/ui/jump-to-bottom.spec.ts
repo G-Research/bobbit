@@ -60,9 +60,33 @@ test.describe("Jump-to-bottom button", () => {
 			const b = document.querySelector('[data-testid="jump-to-bottom"]') as HTMLElement | null;
 			if (!b) return false;
 			return b.style.pointerEvents === "none" && b.style.opacity === "0";
-		}, null, { timeout: 5_000 });
+		}, null, { timeout: 10_000 });
 
 		// 2. Scroll up by clientHeight * 0.6 → button must become visible.
+		//
+		// Use a real mouse wheel via Playwright so the `wheel` listener on
+		// the scroll container fires `_handleUserIntent`, which immediately
+		// cancels the session-load settle window (3 s after
+		// setupSessionSubscription) and the stick-to-bottom flag. Without an
+		// explicit user-intent gesture, the ResizeObserver re-pin tick during
+		// the settle window can race the test's scroll-up and snap us back
+		// to the bottom, hiding the jump-to-bottom button — visible as a
+		// Windows timeout flake.
+		const clientHeight = await page.evaluate((sel) => {
+			const el = document.querySelector(sel) as HTMLElement;
+			const rect = el.getBoundingClientRect();
+			(globalThis as any).__sclSel = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+			return el.clientHeight;
+		}, scrollSel);
+		expect(clientHeight).toBeGreaterThan(0);
+		const pos = await page.evaluate(() => (globalThis as any).__sclSel);
+		await page.mouse.move(pos.x, pos.y);
+		await page.mouse.wheel(0, -Math.floor(clientHeight * 0.7));
+		// Belt-and-braces: also pin scrollTop programmatically in case the
+		// trusted wheel event doesn't translate into the desired scroll delta
+		// on this platform's scroll-step granularity. The wheel event itself
+		// has already cleared _stickToBottom and the settle window via
+		// _handleUserIntent.
 		const scrollMetrics = await page.evaluate((sel) => {
 			const el = document.querySelector(sel) as HTMLElement;
 			const ch = el.clientHeight;
@@ -71,12 +95,13 @@ test.describe("Jump-to-bottom button", () => {
 			return { ch, sh: el.scrollHeight, st: el.scrollTop };
 		}, scrollSel);
 		expect(scrollMetrics.ch).toBeGreaterThan(0);
+		expect(scrollMetrics.sh - scrollMetrics.st - scrollMetrics.ch).toBeGreaterThan(scrollMetrics.ch * 0.5);
 
 		await page.waitForFunction(() => {
 			const b = document.querySelector('[data-testid="jump-to-bottom"]') as HTMLElement | null;
 			if (!b) return false;
 			return b.style.opacity === "1" && b.style.pointerEvents === "auto";
-		}, null, { timeout: 5_000 });
+		}, null, { timeout: 10_000 });
 
 		// 3. Scroll down within clientHeight * 0.4 of bottom → button hidden again.
 		await page.evaluate((sel) => {
@@ -89,7 +114,7 @@ test.describe("Jump-to-bottom button", () => {
 			const b = document.querySelector('[data-testid="jump-to-bottom"]') as HTMLElement | null;
 			if (!b) return false;
 			return b.style.opacity === "0" && b.style.pointerEvents === "none";
-		}, null, { timeout: 5_000 });
+		}, null, { timeout: 10_000 });
 
 		// 4. Scroll up again, click the button, assert it lands within 5 px
 		//    of the bottom and stickToBottom is true.
@@ -132,9 +157,15 @@ test.describe("Jump-to-bottom button", () => {
 		// Filter out unrelated noise (favicon, network warnings) — only fail
 		// on actual JS errors / our component's leak warnings. The git-status
 		// widget hits 400 with `Not a git repository` in temp-dir fixtures; that
-		// is the widget's documented contract, not an unmount leak.
+		// is the widget's documented contract, not an unmount leak. Also filter
+		// known-benign 400 (Bad Request) responses that fire during teardown:
+		// when we yank the <agent-interface> out of the DOM, in-flight session-
+		// scoped requests (mark-read, git-status batch, proposal flushes) can
+		// land against a session whose row was just torn down and the server
+		// returns 400. The browser logs the failed fetch as a console error
+		// even though it's a benign teardown race.
 		const real = consoleErrors.filter((e) =>
-			!/favicon|net::|404 \(Not Found\)|400 \(Bad Request\)|websocket/i.test(e),
+			!/favicon|net::|404 \(Not Found\)|400 \(Bad Request\)|websocket|status of 400/i.test(e),
 		);
 		expect(real, `unexpected console errors after unmount: ${real.join(" | ")}`).toHaveLength(0);
 	});

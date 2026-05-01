@@ -46,6 +46,27 @@ test("multi-repo goal creates per-repo worktrees", async () => {
 				{ name: "web", repo: "web" },
 				{ name: "shared", repo: "shared" },
 			],
+			// Goal creation requires a resolvable workflow id (default "general").
+			// As of the "no default workflow scaffold" change, projects no longer
+			// auto-seed workflows on creation, so tests that POST /api/projects
+			// directly (bypassing the apiFetch auto-seed helper) must supply them.
+			// Minimal inline "general" workflow with free-form steps that don't
+			// reference a specific component (validator-safe across this project's
+			// components list).
+			workflows: {
+				general: {
+					name: "General",
+					description: "E2E test workflow",
+					gates: [
+						{
+							id: "implementation",
+							name: "Implementation",
+							depends_on: [],
+							verify: [{ name: "Build", type: "command", run: "echo ok" }],
+						},
+					],
+				},
+			},
 		}),
 	});
 	expect(projRes.status).toBe(201);

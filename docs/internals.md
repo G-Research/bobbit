@@ -232,7 +232,23 @@ Consequences:
 - No system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. `<server-cwd>/.bobbit/config/project.yaml::workflows` is **not** read at runtime.
 - All `/api/workflows*` mutations require a `projectId` (400 otherwise — no `?scope=server` parameter).
 - `GET /api/workflows` (no `projectId`) returns `{ workflows: [] }`; `GET /api/workflows/:id` (no `projectId`) returns 404. Reads are intentionally lenient (don't 400) to keep the Workflows page from crashing during scope transitions.
-- New projects get a default seed (`general`, `feature`, `bug-fix`, `quick-fix`) inlined into `project.yaml::workflows` at `POST /api/projects` time when no workflows are provided. Legacy `<project>/.bobbit/config/workflows/*.yaml` files are folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
+- New projects do **not** receive any default seed at `POST /api/projects` time — a `propose_project` call that omits `workflows` results in a project with zero workflows. The project assistant is solely responsible for designing the workflow set from the discovered components and commands. See [No default workflow scaffold](#no-default-workflow-scaffold). Legacy `<project>/.bobbit/config/workflows/*.yaml` files are still folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
+
+#### No default workflow scaffold
+
+Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback** — there is no path that silently seeds a canonical workflow set into a project. The previous fallback produced generic gates targeting a synthetic default component — gates that didn't match the project's real commands and which the assistant would have to redesign anyway, so the fallback hid rather than helped the design step. A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill, no error banner from this layer).
+
+**Removed seed sites** (all three previously seeded `general` / `feature` / `bug-fix` / `quick-fix` targeting a synthetic default component):
+
+- `src/server/server.ts` after `POST /api/projects` when the proposal omitted `workflows`.
+- `src/server/state-migration/migrate-project-yaml.ts::migrateProjectYaml` during the v1→v2 migration.
+- `src/server/state-migration/migrate-project-yaml.ts::maybeSeedWorkflowsOnly` secondary pass; now a no-op for v2 projects with no workflows dir and no inline workflows. (The function still inlines a legacy `workflows/` dir on first boot — that path is unaffected.)
+
+**`buildDefaultWorkflows`** (in `src/server/state-migration/seed-default-workflows.ts`) was kept but is **internal-only**. The only caller is `per-component-workflows.ts::buildPerComponentWorkflow`, which clones the `feature` shape and rewrites step refs to point at a specific component. No callsite invokes `buildDefaultWorkflows` as a fallback.
+
+**Project assistant prompt** (`src/server/agent/project-assistant.ts`) carries a "Workflows are your responsibility" statement in both `PROJECT_ASSISTANT_PROMPT` and `PROJECT_ASSISTANT_SCAFFOLDING_PROMPT`. The G2 workflow-suggestion checklist no longer pre-checks generic options by component count — the assistant must justify every workflow it proposes against the project's actual components and commands. Per-component / all-components scaffolds (`buildPerComponentWorkflow`, `buildAllComponentsWorkflow`) remain available as adaptable starting points the assistant chooses explicitly.
+
+**Tests:** `tests/e2e/projects-no-default-workflows.spec.ts` covers (a) `POST /api/projects` without `workflows` persists with no `workflows:` block, (b) supplied `workflows` is kept verbatim with no defaults merged in, (c) zero-workflows projects don't gain workflows from downstream side-effects. The migration test suite (`tests/migrate-project-yaml.test.ts`) asserts no seeding occurs in either migration path.
 
 #### Server stores decoupling
 
@@ -240,7 +256,7 @@ Consequences:
 
 #### Builtin seeding
 
-On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope at all — they're seeded per-project at project-create time (see [Workflows are project-scoped only](#workflows-are-project-scoped-only)).
+On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope at all, and (since the **No default workflow scaffold** change) they're no longer seeded at project-create time either — the project assistant designs them. See [No default workflow scaffold](#no-default-workflow-scaffold).
 
 #### Scaffolding
 
@@ -328,18 +344,9 @@ The legacy field block at the bottom keeps the original editable-input rows (`na
 
 **Live-update guarantee.** Across repeated `propose_project` calls in one session, the panel must always reflect the latest payload. The mechanism is a shallow-merge in `session-manager.ts::onProjectProposal`: incoming flat fields win, but `components` and `workflows` carry over from the prior proposal when the new payload omits them (a streaming partial may not include both). The render path treats `components`/`workflows` as structured side-tables, never as legacy `Input` rows — `onFieldInput` early-returns for those two keys to prevent a stray keystroke from clobbering the structured value (Bug B), and the proposal tool's serialisation never JSON-stringifies them onto the flat field map (Bug A). The shallow-merge is Bug C's fix.
 
-**Workflow-suggestion checklist (G2).** After the assistant has settled on the components, the project-assistant prompt instructs it to present a single `ask_user_choices` multi-select with the seeded workflows as options. Pre-check logic:
+**Workflow-suggestion checklist (G2).** After the assistant has settled on the components, the project-assistant prompt instructs it to present a single `ask_user_choices` multi-select of workflows it has designed for this specific project. **No options are pre-checked by component count or by canonical name** — the assistant must justify each suggestion against the discovered components and commands. The per-component and all-components scaffolds (`buildPerComponentWorkflow(componentName, allComponents)` and `buildAllComponentsWorkflow(components)` in `src/server/state-migration/per-component-workflows.ts`) are offered as adaptable starting points the assistant chooses explicitly when they fit; they reuse the canonical helpers and prompt strings (`readyToMergeGate()`, `DESIGN_REVIEW_PROMPT`, `GAP_ANALYSIS_DESIGN_PROMPT`, `GAP_ANALYSIS_IMPL_PROMPT`, `CODE_REVIEW_PROMPT`, `DOC_PROMPT`, `RALPH_LOOP_DESCRIPTION`) exported from `seed-default-workflows.ts` so gate semantics stay in one place. `buildDefaultWorkflows()` itself is internal to that module — no caller invokes it as a fallback. See [No default workflow scaffold](#no-default-workflow-scaffold).
 
-| Suggestion | Pre-checked when |
-|---|---|
-| `general` / `quick-fix` / `bug-fix` | always |
-| `feature` | always |
-| Per-component flow (one entry per component) | `components.length > 1` |
-| All-components fan-out flow | `components.length > 1` |
-
-The canonical four come from `buildDefaultWorkflows()` in `src/server/state-migration/seed-default-workflows.ts`. The two derived families come from `buildPerComponentWorkflow(componentName, allComponents)` and `buildAllComponentsWorkflow(components)` in `src/server/state-migration/per-component-workflows.ts`, which reuse the canonical helpers and prompt strings (`readyToMergeGate()`, `DESIGN_REVIEW_PROMPT`, `GAP_ANALYSIS_DESIGN_PROMPT`, `GAP_ANALYSIS_IMPL_PROMPT`, `CODE_REVIEW_PROMPT`, `DOC_PROMPT`, `RALPH_LOOP_DESCRIPTION`) so `buildDefaultWorkflows()` stays the single source of truth for gate semantics.
-
-**Ralph-loop framing.** The `implementation` gate's `verify` list is the agent's loop body: failures circle back to the implementing agent, which fixes and re-signals until verification passes. The `description` field on seeded `implementation` gates carries `RALPH_LOOP_DESCRIPTION` so the gate cards in both the proposal panel and the goal dashboard remind reviewers it's a loop, not a checkpoint. `general`, `feature`, and per-component flows include gap-analysis steps at design-time (in `design-doc`) AND post-implementation (`implementation` phase 2) to bracket the loop — design-time catches missing requirements before iteration burn, post-impl catches drift between design and code. `quick-fix` skips both. Full authoring rules and worked examples live in [`defaults/workflow-authoring-guide.md`](../defaults/workflow-authoring-guide.md) §3.1 / §6.
+**Ralph-loop framing.** The `implementation` gate's `verify` list is the agent's loop body: failures circle back to the implementing agent, which fixes and re-signals until verification passes. The `description` field on `implementation` gates produced by the canonical helpers carries `RALPH_LOOP_DESCRIPTION` so the gate cards in both the proposal panel and the goal dashboard remind reviewers it's a loop, not a checkpoint. The `general`, `feature`, and per-component templates in the authoring guide include gap-analysis steps at design-time (in `design-doc`) AND post-implementation (`implementation` phase 2) to bracket the loop — design-time catches missing requirements before iteration burn, post-impl catches drift between design and code. `quick-fix` skips both. Full authoring rules and worked examples live in [`defaults/workflow-authoring-guide.md`](../defaults/workflow-authoring-guide.md) §3.1 / §6.
 
 **Monorepo subproject scan.** `src/server/agent/monorepo-scan.ts` detects workspace manifests at the candidate root path and expands their globs (one level deep) into a list of subprojects. Recognised manifests: `pnpm-workspace.yaml`, `package.json` `workspaces`, `nx.json`, `turbo.json`, `lerna.json`, `Cargo.toml` `[workspace]`, `go.work`, Gradle `settings.gradle[.kts]` `include(...)`. Output is capped at `MAX_CANDIDATES = 30` with an alphabetical truncation marker; pure detection — no network, no shell. The scan result is added to `POST /api/projects/scan` and consumed by the project-assistant prompt, which is instructed to emit one component per workspace package with `repo: "."` + distinct `relative_path` values (see authoring guide §2 "Monorepo subprojects").
 
@@ -503,7 +510,7 @@ If the `workflows:` block is empty or missing, goal creation surfaces a clear er
 
 **Removed runtime concepts:**
 
-- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant generates a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` also seeds the four canonical workflows (`general`, `feature`, `bug-fix`, `quick-fix`) into a new project's `project.yaml::workflows` when none are provided. `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime — there is no system-scope or builtin workflow layer.
+- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant generates a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` does **not** seed defaults when `workflows` is omitted (a project may persist with zero workflows — see [No default workflow scaffold](#no-default-workflow-scaffold)). `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime — there is no system-scope or builtin workflow layer.
 - **`.bobbit/config/workflows/`** is no longer a runtime concept. `InlineWorkflowStore` reads only from `project.yaml::workflows`. The `migrate-project-yaml.ts` step folds any pre-existing per-project workflow files into the inline block on first boot and removes the directory.
 
 ### Session worktrees
@@ -2077,7 +2084,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `system-prompt.md` | `cli.ts` | Global system prompt template |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
-| `workflows/*.yaml` | (legacy) | Default workflow seeds copied into new projects' `project.yaml::workflows`. Not read by `BuiltinConfigProvider` at runtime — see [Workflows are project-scoped only](#workflows-are-project-scoped-only). |
+| `workflows/*.yaml` | (legacy) | Historical default workflow seeds. No longer copied into new projects — the server seeds nothing; the project assistant designs workflows. Not read by `BuiltinConfigProvider` at runtime. See [No default workflow scaffold](#no-default-workflow-scaffold). |
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 

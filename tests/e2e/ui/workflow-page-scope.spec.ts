@@ -72,64 +72,59 @@ test.describe("Workflows page (project-scoped)", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	test("System scope omits Workflows tab; project scope includes it @smoke", async ({ page }) => {
-		// System scope: open a non-workflows tab and check the tab bar.
+	test("entering /workflows in System scope auto-switches to a project @smoke", async ({ page }) => {
+		// Fresh app load → in-memory config scope is "system" by default.
+		// The standalone /workflows route now redirects synchronously in main.ts
+		// to #/settings/<projectId>/workflows — the auto-switch is what proves
+		// System was rejected as a workflow scope (the redirect picks
+		// state.activeProjectId || projects[0], never "system").
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
 
-		// The Settings tab bar is the second `border-b` row (scope row first,
-		// tabs second). Looking up by role+name across the page is fragile
-		// because the scope row may also contain a "Workflow Scope Project"
-		// project pill. Assert exclusively against the Settings tab list:
-		// Workflows must not be among System tabs.
-		// We treat the tab bar as the set of buttons that are siblings of
-		// known system-only tabs ("Models", "Shortcuts", "Color Palette").
-		const modelsTab = page.locator("button").filter({ hasText: /^Models$/ }).first();
-		await expect(modelsTab).toBeVisible({ timeout: 5_000 });
-		const tabBar = modelsTab.locator("..");
-		// Workflows is NOT a tab in System scope.
-		await expect(tabBar.locator("button").filter({ hasText: /^Workflows$/ })).toHaveCount(0);
+		// Wait for the embedded Workflows tab to render.
+		await expect(page.locator("[data-testid='workflows-tab']").first())
+			.toBeVisible({ timeout: 10_000 });
 
-		// Switch to the seeded project's scope by clicking its scope-row pill.
-		const projectPill = page.locator("button").filter({ hasText: "Workflow Scope Project" }).first();
-		await projectPill.click();
-		// In project scope, Workflows IS a tab.
-		await expect(
-			page.locator("button").filter({ hasText: /^Workflows$/ }).first(),
-		).toBeVisible({ timeout: 5_000 });
-	});
+		// Hash must land on a real project id, never the literal "system".
+		const hash1 = await page.evaluate(() => window.location.hash);
+		expect(hash1).toMatch(/^#\/settings\/[^/]+\/workflows/);
+		expect(hash1).not.toMatch(/^#\/settings\/system\//);
 
-	test("standalone /workflows route redirects to Settings → Workflows tab", async ({ page }) => {
-		await openApp(page);
-		// Navigate to legacy /workflows. The app should redirect to
-		// #/settings/<activeProjectId>/workflows.
-		await page.evaluate(() => { window.location.hash = "#/workflows"; });
-		// Wait for the redirect to take effect.
-		await page.waitForFunction(
-			() => window.location.hash.startsWith("#/settings/") && window.location.hash.endsWith("/workflows"),
-			null,
-			{ timeout: 10_000 },
-		);
-		// Settings page renders, Workflows tab content is present.
-		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator("[data-testid='workflows-tab']")).toBeVisible({ timeout: 5_000 });
+		// Reload — the UI re-mounts with config scope reset to "system" again,
+		// and the redirect must still auto-switch to a project.
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first())
+			.toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/workflows");
+		await expect(page.locator("[data-testid='workflows-tab']").first())
+			.toBeVisible({ timeout: 10_000 });
+		const hash2 = await page.evaluate(() => window.location.hash);
+		expect(hash2).toMatch(/^#\/settings\/[^/]+\/workflows/);
+		expect(hash2).not.toMatch(/^#\/settings\/system\//);
 	});
 
 	test("workflow list shows the active project's entries (no system-level leak)", async ({ page }) => {
 		await openApp(page);
+		// Navigate directly to the test project's settings/workflows surface
+		// rather than relying on the #/workflows redirect picking the right
+		// project. The redirect uses state.activeProjectId || projects[0] and
+		// can land on the harness default project (which doesn't have our
+		// seeded "Scope-only Workflow" entry).
 		await navigateToHash(page, `#/settings/${projectId}/workflows`);
-		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator("[data-testid='workflows-tab']")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("[data-testid='workflows-tab']").first())
+			.toBeVisible({ timeout: 10_000 });
 
-		// The project's seeded workflow is visible.
-		await expect(page.getByText("Scope-only Workflow").first()).toBeVisible({ timeout: 10_000 });
+		// The project's seeded workflow is visible inside the workflows tab.
+		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab.getByText("Scope-only Workflow").first())
+			.toBeVisible({ timeout: 10_000 });
 
-		// Sanity check: workflows are project-scoped only — no origin badges
-		// should advertise a builtin/server layer. The embedded view drops
-		// origin badges entirely (commit 0fd63978), but assert defensively
-		// in case any leak past — only "project" is acceptable.
-		const badges = await page.locator(".config-origin-badge").allTextContents();
+		// Sanity check: no "system" origin badge inside the workflows tab
+		// (workflows have no server/builtin layer anymore — origin must be
+		// "project"). Scope to the workflows tab so we don't pick up Settings
+		// page badges from other tabs.
+		const badges = await tab.locator(".config-origin-badge").allTextContents();
 		for (const txt of badges) {
 			const t = (txt || "").trim().toLowerCase();
 			if (t.length > 0) {

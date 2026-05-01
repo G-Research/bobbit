@@ -1070,7 +1070,15 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
-		<p class="text-sm text-muted-foreground mb-6" style="max-width: 600px; margin-inline: auto;">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
+		<div style="max-width: 600px; margin: 0 auto 16px;" class="flex items-start gap-4">
+			<p class="text-sm text-muted-foreground flex-1 m-0">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
+			<div class="shrink-0">${Button({
+				variant: "default",
+				size: "sm",
+				onClick: createWorkflowAssistantSession,
+				children: html`<span class="inline-flex items-center gap-1.5 font-semibold">${icon(Plus, "sm")} New Workflow</span>`,
+			})}</div>
+		</div>
 		<div class="wf-list">
 			${workflows.map((wf) => renderWorkflowRow(wf))}
 		</div>

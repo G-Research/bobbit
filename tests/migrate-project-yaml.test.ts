@@ -102,43 +102,41 @@ describe("migrateProjectYaml", () => {
 		assert.equal(after1, after2, "file must be byte-identical after no-op migration");
 	});
 
-	it("skips component synthesis when components: already present, but seeds default workflows if missing", () => {
+	it("v2 project with components: present and no workflows dir is a no-op (no default seeding)", () => {
 		const yamlFile = path.join(configDir, "project.yaml");
 		fs.writeFileSync(yamlFile, yaml.stringify({
 			components: [{ name: "preset", repo: "." }],
 			build_command: "should-not-move",
 		}));
 
+		const before = fs.readFileSync(yamlFile, "utf-8");
 		const result = migrateProjectYaml({ configDir, projectName: "different-name" });
-		// First pass seeds default workflows because none were present — see Issue 1
-		// of the multi-repo follow-up.
-		assert.equal(result.migrated, true);
-		assert.equal(result.workflowsSeeded, true);
-		assert.equal(result.componentName, "preset", "workflow component refs use existing components[0].name, not the projectName arg");
+		// maybeSeedWorkflowsOnly is now a no-op for projects with no inline
+		// workflows and no workflows/ directory — there is no default fallback.
+		assert.equal(result.migrated, false, "no-op when components present but no workflows source");
+		const after = fs.readFileSync(yamlFile, "utf-8");
+		assert.equal(before, after, "file must be byte-identical when migration is a no-op");
 
 		const out = readYaml(yamlFile);
-		const components = out.components as any[];
-		assert.equal(components[0].name, "preset", "existing components[] must be left alone");
-		assert.equal(out.build_command, "should-not-move", "legacy command keys are preserved when skipping component synthesis");
-
-		// Default workflows seeded with structural refs to the existing component.
-		const wf = out.workflows as Record<string, any>;
-		assert.ok(wf.general && wf.feature && wf["bug-fix"] && wf["quick-fix"], "all four default workflows must be seeded");
-		// Spot-check: the implementation gate's Build step targets components[0].name.
-		const impl = wf.general.gates.find((g: any) => g.id === "implementation");
-		const build = impl.verify.find((s: any) => s.name === "Build");
-		assert.equal(build.component, "preset");
-		assert.equal(build.command, "build");
-
-		// Idempotent: second run is a no-op.
-		const before = fs.readFileSync(yamlFile, "utf-8");
-		const result2 = migrateProjectYaml({ configDir, projectName: "different-name" });
-		assert.equal(result2.migrated, false);
-		const after = fs.readFileSync(yamlFile, "utf-8");
-		assert.equal(before, after);
+		assert.ok(out.workflows === undefined || (typeof out.workflows === "object" && Object.keys(out.workflows as object).length === 0),
+			"no workflows: block should be added");
 	});
 
-	it("seeds default workflows for legacy projects with no inline workflows and no workflows dir", () => {
+	it("v2 project with empty workflows: {} mapping and no workflows dir is a no-op", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "preset", repo: "." }],
+			workflows: {},
+		}));
+
+		const before = fs.readFileSync(yamlFile, "utf-8");
+		const result = migrateProjectYaml({ configDir, projectName: "p" });
+		assert.equal(result.migrated, false, "empty workflows mapping with no dir must be a no-op");
+		const after = fs.readFileSync(yamlFile, "utf-8");
+		assert.equal(before, after, "file must not be rewritten");
+	});
+
+	it("legacy projects with no inline workflows and no workflows dir migrate without seeding defaults", () => {
 		const yamlFile = path.join(configDir, "project.yaml");
 		fs.writeFileSync(yamlFile, yaml.stringify({
 			build_command: "npm run build",
@@ -146,21 +144,19 @@ describe("migrateProjectYaml", () => {
 		}));
 
 		const result = migrateProjectYaml({ configDir, projectName: "myapp" });
+		// Schema migration still happens (v1→v2 component synthesis), but no
+		// workflows are seeded — there is no server-side default fallback.
 		assert.equal(result.migrated, true);
-		assert.equal(result.workflowsSeeded, true);
 
 		const out = readYaml(yamlFile);
-		const wf = out.workflows as Record<string, any>;
-		assert.deepEqual(
-			Object.keys(wf).sort(),
-			["bug-fix", "feature", "general", "quick-fix"],
-		);
-		// Default-component name == project name, and structural refs point at it.
+		// Component synthesis still works.
 		assert.equal((out.components as any[])[0].name, "myapp");
-		const featureImpl = wf.feature.gates.find((g: any) => g.id === "implementation");
-		const featureBuild = featureImpl.verify.find((s: any) => s.name === "Build");
-		assert.equal(featureBuild.component, "myapp");
-		assert.equal(featureBuild.command, "build");
+		// No workflows: block (or it's an empty mapping).
+		assert.ok(
+			out.workflows === undefined
+				|| (typeof out.workflows === "object" && Object.keys(out.workflows as object).length === 0),
+			"workflows: must be absent or empty — no defaults are seeded",
+		);
 
 		// Idempotent.
 		const before = fs.readFileSync(yamlFile, "utf-8");
@@ -170,7 +166,7 @@ describe("migrateProjectYaml", () => {
 		assert.equal(before, after);
 	});
 
-	it("does NOT overwrite existing inline workflows when seeding", () => {
+	it("does NOT overwrite existing inline workflows during migration", () => {
 		const yamlFile = path.join(configDir, "project.yaml");
 		fs.writeFileSync(yamlFile, yaml.stringify({
 			build_command: "npm run build",
@@ -184,7 +180,7 @@ describe("migrateProjectYaml", () => {
 		const out = readYaml(yamlFile);
 		const wf = out.workflows as Record<string, any>;
 		assert.equal(wf.custom.name, "Custom", "existing custom workflow preserved");
-		assert.equal(wf.general, undefined, "defaults NOT seeded when any workflow already exists");
+		assert.equal(wf.general, undefined, "no default workflows are ever seeded");
 	});
 
 	it("migrates .bobbit/config/workflows/*.yaml into inline workflows: block and removes the dir", () => {

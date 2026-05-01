@@ -182,12 +182,14 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// redirects to #/settings/<projectId>/workflows (workflows are
 		// project-scoped). navigateToHash() asserts startsWith("#/workflows")
 		// which would race the redirect, so set the hash directly and wait
-		// for the redirected hash + Workflows panel to render.
+		// for either the pre- or post-redirect form.
 		s.act();
 		await s.page.evaluate(() => { window.location.hash = "#/workflows"; });
 		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.includes("workflows"), { timeout: 10_000 });
+		await s.page.waitForFunction(() => {
+			const h = window.location.hash;
+			return h.startsWith("#/workflows") || /^#\/settings\/[^/]+\/workflows/.test(h);
+		}, { timeout: 10_000 });
 		await expect(s.page.getByText("Workflows").first())
 			.toBeVisible({ timeout: 10_000 });
 

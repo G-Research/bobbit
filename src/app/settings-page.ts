@@ -1,7 +1,7 @@
 // Phase 4b: per-project Components tab — see docs/design/multi-repo-components.md §8.2.
-// `renderProjectComponentsTab()` below covers components, worktree_root, and an
-// expandable workflows panel; "Re-scan repos" calls `POST /api/projects/:id/rescan-repos`
-// and "Regenerate workflows" routes through the project assistant.
+// `renderProjectComponentsTab()` below covers the components list with inline
+// edit. Repo scanning + workflow regeneration happen via the project assistant
+// (opened by the "Open Project Assistant" button in the components header).
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
@@ -105,6 +105,8 @@ const projectScopeConfigCache = new Map<string, {
 
 let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
 const _projectScopePending = new Map<string, Record<string, any>>();
+/** Per-project transient state for the "Add custom key" composer in the Project tab. */
+const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
 
 function loadProjectScopeConfig(projectId: string): void {
 	const cached = projectScopeConfigCache.get(projectId);
@@ -632,19 +634,20 @@ function renderWorktreeSection(
 			</div>
 			<p class="text-[11px] text-muted-foreground -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">Custom parent directory for goal/session worktrees. Absolute or relative to rootPath.</p>
 
-			<div class="flex items-center gap-3">
+			<div class="flex items-center gap-3 flex-wrap">
 				<span class="${labelClass}">Pool Size</span>
 				<input
 					type="number"
 					min="0"
-					class="${inputClass} max-w-32"
+					class="px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+					style="width: 5rem;"
 					placeholder="2"
 					.value=${pendingChanges.worktree_pool_size ?? resolved.worktree_pool_size?.value ?? ""}
 					@input=${(e: Event) => {
 						pendingChanges.worktree_pool_size = (e.target as HTMLInputElement).value;
 					}}
 				/>
-				<span class="text-xs text-muted-foreground">Pre-built worktrees (0 = disable). Changes take effect on gateway restart.</span>
+				<span class="text-xs text-muted-foreground" style="max-width: 18rem;">Pre-built worktrees (0 = disable). Changes take effect on gateway restart.</span>
 			</div>
 
 			<div class="flex items-center gap-3">
@@ -2311,7 +2314,6 @@ function renderProjectScopeTab(projectId: string) {
 		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
 	]);
 
-	const commandKeys = Object.keys(resolved).filter(k => !HIDDEN_KEYS.has(k));
 	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
 	const inputClass = `w-full min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
 		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
@@ -2320,6 +2322,14 @@ function renderProjectScopeTab(projectId: string) {
 	if (!_projectScopePending.has(projectId)) _projectScopePending.set(projectId, {});
 	const pendingChanges = _projectScopePending.get(projectId)!;
 
+	// "Other Commands" section iterates resolved ∪ pendingChanges so that custom
+	// keys added via the "Add custom key" composer below show up immediately,
+	// not just after Save.
+	const commandKeys = Array.from(new Set([
+		...Object.keys(resolved),
+		...Object.keys(pendingChanges).filter(k => !k.startsWith("_")),
+	])).filter(k => !HIDDEN_KEYS.has(k)).sort();
+
 	return html`
 		<div class="flex flex-col gap-4">
 			${commandKeys.length > 0 ? html`<div class="flex flex-col gap-2">
@@ -2327,9 +2337,11 @@ function renderProjectScopeTab(projectId: string) {
 				<div class="text-xs text-muted-foreground">Build, test, and lint commands now live on each component — see the <strong>Components</strong> tab.</div>
 				${commandKeys.map((key) => {
 					const entry = resolved[key];
-					if (!entry) return "";
-					const isInherited = entry.source !== "project";
-					const displayValue = raw[key] ?? "";
+					const isInherited = entry ? entry.source !== "project" : false;
+					// Pending value wins over saved raw value (so the user sees what
+					// they're about to commit). For a pending-only custom key, raw is
+					// empty and pendingChanges[key] is the value they typed.
+					const displayValue = pendingChanges[key] ?? raw[key] ?? "";
 					return html`
 						<div class="flex items-center gap-3">
 							<span class="${labelClass}">${projectKeyLabel(key)}</span>
@@ -2345,11 +2357,17 @@ function renderProjectScopeTab(projectId: string) {
 								/>
 								${isInherited ? html`<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
 							</div>
-							${!isInherited ? html`
+							${entry && !isInherited ? html`
 								<button
 									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 									title="Reset to inherited value"
 									@click=${() => resetProjectScopeField(projectId, key)}
+								>${icon(X, "xs")}</button>
+							` : !entry ? html`
+								<button
+									class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+									title="Discard pending key"
+									@click=${() => { delete pendingChanges[key]; renderApp(); }}
 								>${icon(X, "xs")}</button>
 							` : html`<div class="w-7 shrink-0"></div>`}
 						</div>
@@ -2358,6 +2376,59 @@ function renderProjectScopeTab(projectId: string) {
 			</div>` : ""}
 
 
+
+			<!-- Custom keys: lets users add arbitrary project.yaml fields without -->
+			<!-- editing the file by hand. Keeps the legacy KV editing surface alive. -->
+			${(() => {
+				if (!_projectScopeNewKey.has(projectId)) _projectScopeNewKey.set(projectId, { key: "", value: "" });
+				const nk = _projectScopeNewKey.get(projectId)!;
+				const trimmedKey = nk.key.trim();
+				const keyValid = /^[a-z][a-z0-9_]*$/i.test(trimmedKey);
+				const keyExists = trimmedKey in resolved || trimmedKey in pendingChanges;
+				const canAdd = keyValid && !keyExists;
+				return html`
+						<details data-testid="custom-key-composer" class="border-t border-border pt-3">
+							<summary class="text-xs text-muted-foreground cursor-pointer select-none font-medium">Add custom key</summary>
+							<p class="text-[11px] text-muted-foreground mt-2 mb-3">Add an arbitrary <code class="font-mono">project.yaml</code> field. The new row will appear in the section above; click <strong>Save</strong> to persist.</p>
+							<div class="flex items-center gap-3">
+								<input
+									type="text"
+									class="${inputClass} text-foreground"
+									style="width: 11rem; flex: 0 0 auto;"
+									placeholder="key_name"
+									data-testid="custom-key-name"
+									.value=${nk.key}
+									@input=${(e: Event) => { nk.key = (e.target as HTMLInputElement).value; renderApp(); }}
+								/>
+								<div class="flex-1 min-w-0">
+									<input
+										type="text"
+										class="${inputClass} text-foreground"
+										placeholder="value"
+										data-testid="custom-key-value"
+										.value=${nk.value}
+										@input=${(e: Event) => { nk.value = (e.target as HTMLInputElement).value; renderApp(); }}
+										@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && canAdd) { pendingChanges[trimmedKey] = nk.value; nk.key = ""; nk.value = ""; renderApp(); } }}
+									/>
+								</div>
+								<button
+									class="p-1 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors shrink-0 disabled:opacity-30 disabled:pointer-events-none"
+									data-testid="custom-key-add"
+									title="Add field"
+									?disabled=${!canAdd}
+									@click=${() => {
+										pendingChanges[trimmedKey] = nk.value;
+										nk.key = "";
+										nk.value = "";
+										renderApp();
+									}}
+								>${icon(Plus, "sm")}</button>
+							</div>
+							${trimmedKey && !keyValid ? html`<p class="text-[11px] text-destructive mt-2">Key must start with a letter and contain only letters, digits, and underscores.</p>` : ""}
+							${keyValid && keyExists ? html`<p class="text-[11px] text-amber-600 mt-2">A field named <code class="font-mono">${trimmedKey}</code> already exists. Edit it above.</p>` : ""}
+						</details>
+					`;
+			})()}
 
 			<!-- Save -->
 			<div class="flex items-center gap-3 pt-2 border-t border-border">
@@ -2504,8 +2575,6 @@ interface ComponentsTabState {
 	saving: "" | "saving" | "saved" | "error";
 	errorMessage: string;
 	workflowsExpanded: boolean;
-	rescanResult: Array<{ folder: string; hasGit: boolean; detectedCommands: Record<string, string> }> | null;
-	rescanLoading: boolean;
 	/** Indices of components currently expanded in the list view. */
 	expanded: Set<number>;
 }
@@ -2522,8 +2591,6 @@ function emptyComponentsTabState(): ComponentsTabState {
 		saving: "",
 		errorMessage: "",
 		workflowsExpanded: false,
-		rescanResult: null,
-		rescanLoading: false,
 		expanded: new Set<number>(),
 	};
 }
@@ -2592,28 +2659,6 @@ async function saveComponentsTab(projectId: string): Promise<void> {
 		s.saving = "error";
 		s.errorMessage = err?.message || String(err);
 	}
-	renderApp();
-}
-
-async function rescanRepos(projectId: string): Promise<void> {
-	const s = _componentsTabState.get(projectId);
-	if (!s) return;
-	s.rescanLoading = true;
-	renderApp();
-	try {
-		const res = await gatewayFetch(`/api/projects/${projectId}/rescan-repos`, { method: "POST" });
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			s.errorMessage = data?.error || `Rescan failed (${res.status})`;
-		} else {
-			const data = await res.json();
-			s.rescanResult = data.repos || [];
-			s.errorMessage = "";
-		}
-	} catch (err: any) {
-		s.errorMessage = err?.message || String(err);
-	}
-	s.rescanLoading = false;
 	renderApp();
 }
 
@@ -2744,135 +2789,48 @@ function renderProjectComponentsTab(projectId: string) {
 		`;
 	};
 
-	const renderWorkflowsPanel = () => {
-		const entries = Object.entries(s.workflows || {});
-		if (entries.length === 0) return html`<div class="text-xs text-muted-foreground">No workflows configured.</div>`;
-		return html`<div class="flex flex-col gap-2" data-testid="workflows-panel">
-			${entries.map(([wfId, wf]: [string, any]) => html`
-				<div class="border border-border rounded-md p-2 bg-background" data-workflow-id=${wfId}>
-					<div class="text-sm font-medium text-foreground mb-1">${wf?.name || wfId}</div>
-					${(wf?.gates || []).map((gate: any) => html`
-						<div class="ml-2 mb-1.5" data-gate-id=${gate?.id || ""}>
-							<div class="text-xs font-medium text-foreground">${gate?.name || gate?.id || "(unnamed gate)"}</div>
-							${(gate?.verify || []).map((step: any, idx: number) => {
-								const component = s.components.find(comp => comp.name === step?.component);
-								const resolvedShell = step?.command && component
-									? component.commands.find(cmd => cmd.key === step.command)?.value || `(no command "${step.command}")`
-									: step?.run || "(free-form)";
-								const label = step?.component && step?.command
-									? `(${step.component}, ${step.command})`
-									: step?.component
-										? `(${step.component}, run)`
-										: "(free-form)";
-								return html`
-									<details class="ml-2" data-testid="workflow-step" data-step-index=${idx}>
-										<summary class="text-[11px] text-muted-foreground cursor-pointer py-0.5">
-											${step?.name || `Step ${idx + 1}`}
-											<span class="text-[10px] opacity-70 ml-1" data-testid="step-resolution">${label}</span>
-										</summary>
-										<pre class="text-[10px] font-mono ml-3 p-1.5 bg-secondary/40 rounded overflow-x-auto" data-testid="step-shell">${resolvedShell}</pre>
-									</details>
-								`;
-							})}
-						</div>
-					`)}
-				</div>
-			`)}
-		</div>`;
-	};
-
-	const renderRescanResults = () => {
-		if (!s.rescanResult) return "";
-		if (s.rescanResult.length === 0) {
-			return html`<div class="text-xs text-muted-foreground italic mt-1" data-testid="rescan-empty">No repos detected.</div>`;
-		}
-		return html`
-			<div class="flex flex-col gap-1 mt-1 p-2 border border-border rounded-md bg-secondary/30" data-testid="rescan-results">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Detected repos</div>
-				${s.rescanResult.map(r => {
-					const already = s.components.some(c => c.repo === r.folder);
-					const cmdCount = Object.keys(r.detectedCommands || {}).length;
-					return html`
-						<div class="flex items-center gap-2 text-xs" data-testid="rescan-repo-row" data-repo-folder=${r.folder}>
-							<code class="font-mono text-foreground">${r.folder}</code>
-							<span class="text-muted-foreground">${r.hasGit ? ".git" : "manifest"} · ${cmdCount} cmd${cmdCount === 1 ? "" : "s"}</span>
-							${already
-								? html`<span class="text-[10px] text-muted-foreground italic">already a component</span>`
-								: html`<button class="text-[10px] text-primary hover:underline"
-									data-testid="rescan-add-component"
-									@click=${() => {
-										const name = r.folder === "." ? "main" : r.folder;
-										s.components.push({
-											name,
-											repo: r.folder,
-											relative_path: "",
-											worktree_setup_command: "",
-											commands: Object.entries(r.detectedCommands || {}).map(([k, v]) => ({ key: k, value: v as string })),
-											config: [],
-										});
-										markComponentsDirty(projectId);
-										renderApp();
-									}}
-								>+ Add as component</button>`}
-						</div>
-					`;
-				})}
-			</div>
-		`;
-	};
-
 	return html`
 		<div class="flex flex-col gap-5" data-testid="components-tab">
 			${s.errorMessage ? html`<div class="text-sm text-destructive whitespace-pre-wrap" data-testid="components-error">${s.errorMessage}</div>` : ""}
 
-			<div class="flex items-center justify-between gap-3">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Components (${s.components.length})</div>
-				<div class="flex items-center gap-2">
-					<button
-						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary"
-						?disabled=${s.rescanLoading}
-						data-testid="rescan-repos"
-						@click=${() => rescanRepos(projectId)}
-					>${s.rescanLoading ? "Scanning…" : "Re-scan repos"}</button>
-					<button
-						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary inline-flex items-center gap-1"
-						data-testid="add-component"
-						@click=${() => {
-							s.components.push({
-								name: `component-${s.components.length + 1}`,
-								repo: ".",
-								relative_path: "",
-								worktree_setup_command: "",
-								commands: [],
-								config: [],
-							});
-							markComponentsDirty(projectId);
-							renderApp();
-						}}
-					>${icon(Plus, "xs")} Add component</button>
+			<div class="flex items-start gap-4">
+				<p class="text-sm text-muted-foreground flex-1 m-0">Components are the build targets in this project — each one has its own commands (build, test, check) and may live in its own git repo or sub-path. Workflow steps reference these commands so they stay in sync as the project evolves.</p>
+				<div class="flex items-center gap-2 shrink-0">
+					${Button({
+						variant: "default",
+						size: "sm",
+						onClick: async () => {
+							const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
+							if (!project?.rootPath) return;
+							const { createProjectAssistantSession } = await import("./dialogs.js");
+							await createProjectAssistantSession(project.rootPath, false, { projectId });
+						},
+						children: html`<span class="inline-flex items-center gap-1.5 font-semibold" data-testid="open-project-assistant">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
+					})}
 				</div>
 			</div>
-			${renderRescanResults()}
-
 			<div class="flex flex-col gap-3">
 				${s.components.length === 0
-					? html`<div class="text-sm text-muted-foreground italic">No components defined. Use "Re-scan repos" or "Add component" to get started.</div>`
+					? html`<div class="text-sm text-muted-foreground italic">No components defined. Use "Re-scan repos" or "Add Component" to get started.</div>`
 					: s.components.map((c, i) => renderComponentCard(c, i))}
+				<button
+					class="wf-add-card-btn"
+					data-testid="add-component"
+					@click=${() => {
+						s.components.push({
+							name: `component-${s.components.length + 1}`,
+							repo: ".",
+							relative_path: "",
+							worktree_setup_command: "",
+							commands: [],
+							config: [],
+						});
+						s.expanded.add(s.components.length - 1);
+						markComponentsDirty(projectId);
+						renderApp();
+					}}
+				>${icon(Plus, "sm")}<span>Add Component</span></button>
 			</div>
-
-			<div class="flex items-center gap-2 pt-2 border-t border-border">
-				<label class="text-xs text-muted-foreground font-medium">Worktree root</label>
-				<input type="text" class="wf-input" style="flex:1;min-width:0;"
-					.value=${s.worktreeRoot}
-					placeholder="<rootPath>-wt/  (default)"
-					data-testid="worktree-root-input"
-					@input=${(e: Event) => { s.worktreeRoot = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-			</div>
-
-			<details ?open=${s.workflowsExpanded} @toggle=${(e: Event) => { s.workflowsExpanded = (e.currentTarget as HTMLDetailsElement).open; }} data-testid="workflows-disclosure">
-				<summary class="text-sm font-medium text-foreground cursor-pointer py-1">Workflows (${Object.keys(s.workflows || {}).length})</summary>
-				<div class="mt-2">${renderWorkflowsPanel()}</div>
-			</details>
 
 			<div class="flex items-center gap-3 pt-2 border-t border-border">
 				<button
@@ -3501,10 +3459,12 @@ export function renderSettingsPage() {
 					>${tab.label}</button>
 				`)}
 			</div>
-			<!-- Tab content -->
+			<!-- Tab content — every tab gets the same centered max-width column for
+			     visual consistency, matching the Workflows tab feel. Workflows itself
+			     self-centers via .wf-list so a wider outer wrapper is fine. -->
 			<div class="flex-1 overflow-y-auto">
-			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${currentTab === "project" || currentTab === "directories" || currentTab === "workflows" ? "" : currentTab === "palette" || currentTab === "shortcuts" || currentTab === "appearance" || currentTab === "maintenance" ? "max-w-3xl" : "max-w-xl"}">
+			 <div class="max-w-3xl mx-auto p-2 sm:p-4">
+				<div>
 					${isProjectScope ? html`
 						${currentTab === "general" ? renderProjectGeneralTab(currentScope) : ""}
 						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
