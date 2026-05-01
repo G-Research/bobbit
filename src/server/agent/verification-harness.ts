@@ -1339,6 +1339,33 @@ export class VerificationHarness {
 						? firstOutput.slice(0, 600) + "…"
 						: firstOutput;
 					detail = ` Failed step(s): ${names}.${snippet ? `\n\n--- ${failedSteps[0].name} ---\n${snippet}` : ""}`;
+
+					// Append a merge-gap-diagnostic hint for any command-step
+					// failure. From PR #409 live test: when an agent's sub-branch
+					// isn't merged into the goal branch, command verifications fail
+					// with confusing errors that point at files from sibling
+					// branches/phases. The team-lead can usually spot the gap by
+					// running `git log --oneline -5` on the goal branch — we surface
+					// the hint in the prompt rather than running git inline (which
+					// would require async-cascading through several callers and
+					// importing execGitSafe from server.ts).
+					const hasCommandFailure = failedSteps.some(s => s.type === "command");
+					if (hasCommandFailure) {
+						try {
+							const pcm = this.projectContextManager;
+							const goal = pcm?.getContextForGoal(goalId)?.goalStore.get(goalId);
+							if (goal?.branch && goal?.cwd) {
+								detail += `\n\n--- Git context (merge-gap diagnostic) ---`;
+								detail += `\nGoal branch: \`${goal.branch}\` (worktree: \`${goal.cwd}\`)`;
+								detail += `\n\nIf the failure references files or modules from a sibling phase, you likely have a merge gap. Verify with:`;
+								detail += `\n  git log --oneline -5 ${goal.branch}    # what's on the goal branch`;
+								detail += `\n  git for-each-ref --sort=-committerdate --count=8 refs/heads/goal-goal-*    # recent agent sub-branches`;
+								detail += `\nIf an agent sub-branch carries commits NOT in the goal branch HEAD, run \`git merge <sub-branch>\` then \`git push\` from the goal worktree, verify with \`git log --oneline -5\`, then re-signal the gate.`;
+							}
+						} catch (err) {
+							console.warn(`[verification] Failed to capture git-context hint for ${goalId}/${gateId} (best-effort):`, err);
+						}
+					}
 				}
 			} catch (err) {
 				console.warn(`[verification] Failed to load failure detail for ${goalId}/${gateId}:`, err);
@@ -1347,7 +1374,7 @@ export class VerificationHarness {
 
 		const actionHint = status === "passed"
 			? "Downstream work for this gate can now proceed."
-			: "Read the failed step output above, fix the underlying issue (don't just re-spawn the same reviewers), then re-signal the gate. If the failure is unfixable, surface to the user via ask_user_choices.";
+			: "Read the failed step output above, fix the underlying issue (don't just re-spawn the same reviewers), then re-signal the gate. **If the failure references files or modules from other goals/phases, the most likely cause is that an agent's sub-branch wasn't merged — see the Git context block above.** If the failure is unfixable, surface to the user via ask_user_choices.";
 		this.notifyTeamLeadFn(goalId, `Gate verification ${verb}: "${gateId}".${detail} ${actionHint}`);
 
 		// Bubble notable child-gate transitions UP to the parent team-lead so

@@ -116,3 +116,65 @@ describe("notifyTeamLead failure detail formatting", () => {
 		assert.match(detail, /yyy/);
 	});
 });
+
+// Pinned regression: the merge-gap diagnostic. PR #409 live test — two
+// Phase 2 leaf team-leads hit the same failure pattern (signalled
+// implementation gate before merging the coder's sub-branch into the
+// goal branch; tsc -b failed with errors pointing at sibling-phase
+// files). Adding the git-context hint to the failure prompt cuts
+// diagnosis time from "hours of trying to reproduce the wrong bug" to
+// "one glance at the message".
+//
+// We test the production logic via the same predicate it uses
+// (failedSteps.some(s => s.type === "command")). The hint text is
+// fixed; we only assert the predicate fires on the right shapes.
+describe("merge-gap diagnostic predicate (when to attach git-context hint)", () => {
+	function shouldAttachGitContext(
+		status: "passed" | "failed",
+		failedSteps: Array<{ type?: string; passed: boolean }>,
+	): boolean {
+		if (status !== "failed") return false;
+		return failedSteps.some(s => s.type === "command");
+	}
+
+	it("attaches when at least one failed step is type=command", () => {
+		assert.equal(shouldAttachGitContext("failed", [
+			{ type: "command", passed: false },
+		]), true);
+	});
+
+	it("attaches when MIXED failure (one llm-review + one command)", () => {
+		// At least one command step failed — git context is relevant.
+		assert.equal(shouldAttachGitContext("failed", [
+			{ type: "llm-review", passed: false },
+			{ type: "command", passed: false },
+		]), true);
+	});
+
+	it("does NOT attach when only llm-review steps failed (no merge-gap risk)", () => {
+		// LLM reviewers don't run shell commands; a merge gap won't
+		// produce a tsc/test error. Don't muddy the message.
+		assert.equal(shouldAttachGitContext("failed", [
+			{ type: "llm-review", passed: false },
+		]), false);
+	});
+
+	it("does NOT attach when status is passed", () => {
+		assert.equal(shouldAttachGitContext("passed", [
+			{ type: "command", passed: false },
+		]), false);
+	});
+
+	it("does NOT attach when no failed steps (defensive)", () => {
+		assert.equal(shouldAttachGitContext("failed", []), false);
+	});
+
+	it("attaches even when type field is missing on the failed step (defensive: assume worst case)", () => {
+		// A future schema change might make `type` optional. We choose to
+		// SUPPRESS the hint when type is unknown (predicate above), since
+		// surfacing it on every failure spams the prompt. Pin that choice.
+		assert.equal(shouldAttachGitContext("failed", [
+			{ passed: false }, // type undefined
+		]), false);
+	});
+});

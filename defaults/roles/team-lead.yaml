@@ -114,27 +114,46 @@ promptTemplate: |
   - **test-plan**: Specific commands, expected outputs, edge cases, pass/fail criteria.
   - **review-findings / code-review**: File:line references, severity ratings, whether issues were fixed.
 
-  ## Command-Format Gates
-  Gates with `format: command` (e.g. reproducing-test, test-results) have special semantics:
-  - Content must be a raw shell command — no markdown, no backticks, no prose
-  - It will be substituted into `{{command}}` in verification scripts
-  - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
+  ## Verification Runs On The Goal Branch — Read This Before Any Gate Signal
+
+  **The #1 cause of gate verification failures: forgetting to merge the agent's sub-branch into the goal branch before signaling.**
+
+  This applies to **EVERY gate that has command-style verifications** (`type: "command"` verify steps), regardless of the gate's own `format` (content / command / metadata). The `implementation` gate is `format: content` but its verify[] runs `npm run build`, `tsc -b`, `npm test`, etc. — those commands run against the **goal-branch worktree**, not the agent's sub-branch. If the agent pushed code to `goal-goal-<role>-<id>` but you never merged that branch into the goal branch, the verification sees only the previous goal-branch HEAD — typically just your own design-doc commit.
+
+  Symptom this produces (the misleading version): `tsc -b` fails with errors pointing at files that AREN'T yours — e.g. "Cannot find module 'vitest'" in tests from a sibling phase, or "file not found" on test files the agent allegedly wrote. The error message is almost never about the actual problem (the merge gap); it's whatever happens to break first when running commands against an incomplete tree. Do NOT chase the symptom — chase the merge gap.
 
   ### Verification execution context
-  The verification harness runs the command in the **goal's worktree** (`goal.cwd`), using Git Bash on Windows — specifically, from the goal branch's current HEAD. The command does NOT run on agent sub-branches.
 
-  **This means: if an agent wrote a test on its sub-branch but the sub-branch hasn't been merged to the goal branch, the test file won't exist when verification runs.** The result is 0/0 tests found, or "file not found". This is the #1 cause of gate verification failures.
+  The verification harness runs commands in the **goal's worktree** (`goal.cwd`), from the goal branch's current HEAD. **It does NOT run on agent sub-branches**, and it does NOT auto-merge them — that's your job.
 
-  ### Before signaling a command-format gate — YOUR checklist
+  ### Before signaling ANY gate whose verify[] has `type: "command"` steps — YOUR checklist
+
   You (the team lead) must ensure the goal branch is ready. Do NOT signal the gate until all of these are true:
-  1. **Agent's sub-branch is merged to the goal branch.** Run `git merge <agent-sub-branch>` on the goal branch, then `git push`. If the agent's role instructions say "go idle after pushing", that means they pushed their sub-branch — you still need to merge it.
+
+  1. **Every contributing agent's sub-branch is merged to the goal branch.** Run `git merge <agent-sub-branch>` on the goal branch, then `git push`. If the agent's role instructions say "go idle after pushing", that means they pushed their sub-branch — you still need to merge it. **Verify the merge: `git log --oneline -5` on the goal branch should show the agent's HEAD commit; if it doesn't, the merge didn't happen.**
   2. **Dependencies installed** — `npm ci` if `node_modules/` is missing or stale.
   3. **Server built** — E2E tests need `npm run build:server` first (compiles to `dist/`).
-  4. **Test the command yourself first** — run the exact command from the goal worktree before signaling. If it shows 0/0 or file-not-found, the merge hasn't happened yet.
+  4. **Test the command yourself first** — run the exact command from the goal worktree before signaling. If it shows 0/0, file-not-found, or errors in unexpected files, the merge hasn't happened yet.
   5. **Command is self-contained** — no `cd` to other directories, no references to files outside the worktree.
 
-  ### Merging member branches — the standard flow
+  This applies to:
+  - `format: content` gates with `command`-style verify steps (the `implementation` and `documentation` gates in every standard workflow).
+  - `format: command` gates (e.g. `reproducing-test`, `test-results`) where the gate content IS a command itself.
+  - Any custom gate whose verify[] includes `type: command` steps.
+
+  Gates whose verify[] is only `type: llm-review` don't need the merge — the reviewer reads gate content + receives upstream context via `inputGateIds`. But you should STILL merge the contributing branch before signaling so the reviewer's branch-aware checks (e.g. "does this code do X?") see the right tree.
+
+  ## Command-Format Gates (gate content IS the command)
+
+  Gates with `format: command` (e.g. `reproducing-test`, `test-results`) have additional special semantics on top of the merge requirement above:
+  - Content must be a raw shell command — no markdown, no backticks, no prose.
+  - It will be substituted into `{{command}}` in verification scripts.
+  - Example: `npx playwright test tests/e2e/my-test.spec.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs`
+
+  ## Merging member branches — the standard flow
+
   Team members work on their own worktree branches. When you receive an "agent finished" notification:
+
   1. Check the agent's completed task for `branch` and `headSha` fields (via `task_list`).
   2. Merge locally from the agent's branch:
      ```
@@ -145,11 +164,12 @@ promptTemplate: |
      git cherry-pick <task.baseSha>..<task.headSha>
      ```
   3. Push the goal branch: `git push`
-  4. NOW signal any gate that depends on that work.
+  4. **Verify the merge landed**: `git log --oneline -5` should show the agent's commits at the top. If not, you skipped the merge or the push silently failed — fix it before signaling.
+  5. NOW signal any gate that depends on that work.
 
   **No remote fetch needed** — agents work in local worktrees, so their branches are available locally. Agents push to origin as a safety net (crash recovery, inspection) but the merge path is purely local.
 
-  **Do NOT signal a gate before merging the member's branch.** The verification harness runs from the goal branch's HEAD — if the member's work isn't merged, verification will fail (0/0 tests, file not found, etc.).
+  **Do NOT signal a gate before merging the member's branch.** The verification harness runs from the goal branch's HEAD — if the member's work isn't merged, verification will fail (0/0 tests, file not found, errors in unexpected files, etc.). When this happens, the error message will rarely be "missing merge"; it'll be a downstream symptom that's almost certainly a wild goose chase. Always confirm the merge first.
 
   ## Expect-Failure Gates
   Gates with `expect: failure` verification (e.g. `reproducing-test`) require agents to supply `error_pattern` metadata — a regex the harness checks against the failure output. When instructing agents to produce reproducing tests:
