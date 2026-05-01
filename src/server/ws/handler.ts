@@ -121,38 +121,6 @@ function sendImageModelState(ws: WebSocket, sessionManager: SessionManager, sess
 	if (imageModel) send(ws, { type: "state", data: { imageGenerationModel: imageModel } });
 }
 
-/**
- * Build a `state` payload for an archived session: archived metadata plus the
- * persisted model and image-generation model. Without this, the client falls
- * back to its hardcoded default placeholder model (e.g. claude-opus-4-6) until
- * the user reconnects, because archived sessions never receive a live
- * `getState()` push.
- */
-function buildArchivedStateData(
-	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string },
-	sessionManager: SessionManager,
-	sessionId: string,
-): Record<string, unknown> {
-	const data: Record<string, unknown> = {
-		archived: true,
-		archivedAt: archived.archivedAt,
-		title: archived.title,
-	};
-	if (archived.modelProvider && archived.modelId) {
-		const meta = inferMeta(archived.modelId);
-		data.model = {
-			provider: archived.modelProvider,
-			id: archived.modelId,
-			contextWindow: meta.contextWindow,
-			maxTokens: meta.maxTokens,
-			reasoning: meta.reasoning,
-		};
-	}
-	const imageModel = sessionManager.getImageModelForSession(sessionId);
-	if (imageModel) data.imageGenerationModel = imageModel;
-	return data;
-}
-
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
 	for (const client of clients) {
@@ -259,12 +227,6 @@ export function handleWebSocketConnection(
 					send(ws, { type: "auth_ok" });
 					send(ws, { type: "session_status", status: "archived", archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
-					// Push persisted model + image model immediately. Without this, the
-					// client renders its hardcoded default model (claude-opus-4-6) in
-					// the footer picker until the user reconnects (which retriggers
-					// `get_state`). The archived `get_state` handler below produces
-					// the same payload — keep them in sync via buildArchivedStateData.
-					send(ws, { type: "state", data: buildArchivedStateData(archived, sessionManager, sessionId) });
 					return;
 				}
 				send(ws, { type: "error", message: "Session not found", code: "SESSION_NOT_FOUND" });
@@ -339,7 +301,12 @@ export function handleWebSocketConnection(
 				case "get_state": {
 					const archived = sessionManager.getArchivedSession(sessionId);
 					if (archived) {
-						send(ws, { type: "state", data: buildArchivedStateData(archived, sessionManager, sessionId) });
+						const archivedData: Record<string, unknown> = { archived: true, archivedAt: archived.archivedAt, title: archived.title };
+						if (archived.modelProvider && archived.modelId) {
+							const archivedMeta = inferMeta(archived.modelId);
+							archivedData.model = { provider: archived.modelProvider, id: archived.modelId, reasoning: archivedMeta.reasoning };
+						}
+						send(ws, { type: "state", data: archivedData });
 					}
 					break;
 				}
