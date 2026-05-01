@@ -2732,11 +2732,20 @@ async function handleApiRoute(
 			}
 			try {
 				const cwd = body.cwd || config.defaultCwd;
+				// toolUseId / timeoutMs are threaded through from the `delegate` tool
+				// extension (defaults/tools/agent/extension.ts). When present, the
+				// SessionManager registers a parked Promise on the DelegateHarness
+				// keyed by (parent, toolUseId) and installs the live-path completion
+				// listener via attachDelegateCompletionListener — see
+				// docs/design/delegate-restart-resilience.md §3.3 / §6.3. Legacy
+				// callers without toolUseId fall back to the fire-and-forget path.
 				const session = await sessionManager.createDelegateSession(body.delegateOf, {
 					instructions: body.instructions,
 					cwd,
 					title: body.title,
 					context: body.context,
+					toolUseId: typeof body.toolUseId === "string" ? body.toolUseId : undefined,
+					timeoutMs: typeof body.timeoutMs === "number" && body.timeoutMs > 0 ? body.timeoutMs : undefined,
 				});
 				// Register delegate as child in parent's sandbox scope
 				if (sandboxScope && sandboxTokenStore) {

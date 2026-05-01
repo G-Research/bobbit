@@ -2,9 +2,10 @@
 
 Some builtin tools need to pause the agent turn and wait for something another subsystem must produce before the tool can return. Bobbit implements these via a **harness** pattern: the tool extension makes a blocking HTTP call to an internal endpoint, the server parks a Promise keyed by `(sessionId, toolUseId)`, and a later HTTP call resolves that Promise so the original response can carry the result back to the agent.
 
-The canonical example is:
+The canonical examples are:
 
 - `verification_result` — a reviewer/QA agent submits a verdict; the signal that originally triggered verification resolves with the result. When a QA agent submits a report via `report_html_file`, the server automatically rewrites `<img src="file://...">` references under the session cwd (including the `.bobbit-qa/` subtree) to inline base64 data URIs, with a 20 MB cumulative cap. See [docs/qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
+- `delegate` — a parent agent spawns one or more child sessions and blocks on each child's terminal status. The `DelegateHarness` (`src/server/agent/delegate-harness.ts`) parks Promises keyed by `(parentSessionId, toolUseId)` (with `${toolUseId}#${i}` for parallel slots), persists in-flight entries to `<stateDir>/active-delegates.json`, and is resumed after server restart by `resumeInterruptedDelegates()`. The tool extension POSTs `/api/internal/delegate/wait` instead of the legacy `/api/sessions/:id/wait`, and fires `/api/internal/delegate/cancel` on `AbortSignal` abort. Full design: [docs/design/delegate-restart-resilience.md](design/delegate-restart-resilience.md).
 
 Blocking is the right shape here because **another agent is actively doing work** (running reviews, executing QA steps) while the requesting agent waits. The requesting agent genuinely cannot make progress until the verdict lands.
 
