@@ -267,6 +267,7 @@ test("subgoal step happy path: spawn child, wait for ready-to-merge=passed, merg
 	const goalStore = new FakeGoalStore();
 	const gateStore = new FakeGateStore();
 	const goalManager = new FakeGoalManager(goalStore, gateStore);
+	const teamManager = new FakeTeamManager();
 
 	const parent = makeParentGoal("parent-happy");
 	const subgoalStep = makeSubgoalStep("PLAN-A", "child-A");
@@ -274,7 +275,7 @@ test("subgoal step happy path: spawn child, wait for ready-to-merge=passed, merg
 	goalStore.put(parent);
 	gateStore.initGatesForGoal(parent.id, ["execution"]);
 
-	const { harness, broadcasts } = buildHarness({ goalStore, gateStore, goalManager });
+	const { harness, broadcasts } = buildHarness({ goalStore, gateStore, goalManager, teamManager });
 
 	const signal = makeSignal(parent.id, [subgoalStep]);
 	gateStore.recordSignal(signal);
@@ -310,6 +311,15 @@ test("subgoal step happy path: spawn child, wait for ready-to-merge=passed, merg
 	assert.equal(goalManager.createCalls.length, 1, "child goal should have been spawned exactly once");
 	assert.equal(goalManager.mergeCalls.length, 1, "mergeChild should have been called once");
 	assert.deepEqual(goalManager.mergeCalls[0], [parent.id, "child-1"]);
+
+	// Auto-archive on successful merge: child must be torn-down + archived.
+	// Mirrors the agent-finished archival pattern; once the child's branch
+	// is merged into the parent and the parent's verify step has accepted,
+	// the child's worktree + team-lead session have served their purpose.
+	assert.equal(teamManager.teardownCalls.length, 1, "team should be torn down post-merge");
+	assert.deepEqual(teamManager.teardownCalls[0], "child-1");
+	assert.equal(goalManager.archiveCalls.length, 1, "merged child should be archived");
+	assert.deepEqual(goalManager.archiveCalls[0], "child-1");
 
 	const completes = broadcasts.filter(e => e.type === "gate_verification_complete");
 	assert.equal(completes.length, 1);
@@ -575,4 +585,48 @@ test("in-flight append (§6.2): mid-run subgoal verify step is detected, default
 	const completes = broadcasts.filter(e => e.type === "gate_verification_complete");
 	assert.equal(completes.length, 1);
 	assert.equal(completes[0].status, "passed");
+});
+
+// ---------------------------------------------------------------------------
+
+test("subgoal step does NOT archive the child when mergeChild fails (conflict)", async () => {
+	// Pinned regression: auto-archive only fires on a clean merge. A merge
+	// conflict leaves the child live so the team-lead can inspect, fix,
+	// and retry. Without this guard, a merge conflict would archive the
+	// child + lose the work-in-progress.
+	const goalStore = new FakeGoalStore();
+	const gateStore = new FakeGateStore();
+	const goalManager = new FakeGoalManager(goalStore, gateStore);
+	goalManager.mergeResult = { merged: false, conflict: true, output: "CONFLICT" };
+	const teamManager = new FakeTeamManager();
+	const { harness } = buildHarness({ goalStore, gateStore, goalManager, teamManager });
+
+	const verifySteps = [makeSubgoalStep("PLAN-CONFLICT")];
+	const parent = makeParentGoal("parent-conflict", verifySteps);
+	goalStore.put(parent);
+	gateStore.initGatesForGoal(parent.id, ["execution"]);
+	const signal = makeSignal(parent.id, verifySteps);
+	gateStore.recordSignal(signal);
+
+	const verifyPromise = harness.verifyGateSignal(
+		signal, parent.workflow!.gates[0], parent.cwd, parent.branch!, "master", undefined, undefined,
+	);
+
+	const flipper = setTimeout(() => {
+		gateStore.updateGateStatus("child-1", "ready-to-merge", "passed");
+	}, 50);
+	const interval = setInterval(() => {
+		gateStore.updateGateStatus("child-1", "ready-to-merge", "passed");
+	}, 30);
+
+	await verifyPromise;
+	clearTimeout(flipper);
+	clearInterval(interval);
+
+	assert.equal(goalManager.mergeCalls.length, 1);
+	// Critically: NO archive, NO teardown. Child stays live for retry.
+	assert.equal(goalManager.archiveCalls.length, 0,
+		"merge conflict must NOT archive the child — work-in-progress preserved for retry");
+	assert.equal(teamManager.teardownCalls.length, 0,
+		"merge conflict must NOT tear down the child team");
 });

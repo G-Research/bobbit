@@ -2345,6 +2345,25 @@ export class VerificationHarness {
 			const mergeResult = await goalManager.mergeChild(signal.goalId, childGoalId);
 			if (mergeResult.merged) {
 				const mergedAt = Date.now();
+				// Auto-archive the merged child (best-effort). Mirrors the
+				// agent-finished archival pattern: once the child's branch is
+				// merged into the parent and the parent has accepted, the
+				// child's worktree + team-lead session have served their
+				// purpose. Leaving them live clutters the dashboard and pins
+				// disk + memory. Tear down the team first so any in-flight
+				// reviewer/coder gets a clean shutdown, then archive the goal
+				// record. Idempotent if the merge step re-runs (already-archived
+				// goals are skipped by the spawnedFromPlanId fallback so this
+				// can't accidentally archive a fresh re-spawn).
+				if (this.teamManager) {
+					await this.teamManager.teardownTeam(childGoalId).catch(err => {
+						console.warn(`[verification] post-merge teardownTeam failed for child ${childGoalId} (best-effort):`, err);
+					});
+				}
+				await goalManager.archiveGoal(childGoalId).catch(err => {
+					console.warn(`[verification] post-merge archiveGoal failed for child ${childGoalId} (best-effort):`, err);
+				});
+				console.log(`[verification] Auto-archived child ${childGoalId} after successful merge into parent ${signal.goalId}`);
 				return {
 					passed: true,
 					output: mergeResult.output || `Subgoal ${sg.title} merged cleanly into parent branch.`,
