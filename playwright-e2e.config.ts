@@ -11,9 +11,9 @@
  */
 import { defineConfig } from "@playwright/test";
 
-// Tier 2.5 video reporter — opt-in via TIER25=1. When unset, the reporter
-// file is never loaded → zero overhead. See docs/testing-tier-2-5.md.
-const tier25Reporters: Array<[string]> = process.env.TIER25 === "1"
+// Tier 2.5 video reporter — opt-in via RECORDSCREEN=1. When unset, the
+// reporter file is never loaded → zero overhead. See docs/testing-tier-2-5.md.
+const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
@@ -36,7 +36,7 @@ export default defineConfig({
 	workers: 4,
 	reporter: [
 		["list"],
-		...tier25Reporters,
+		...recordScreenReporters,
 	],
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",

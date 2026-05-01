@@ -9,10 +9,10 @@
  * `tier-2-5-reporter.ts` reporter walks at end-of-run to encode videos and
  * thumbnails.
  *
- * Off-switch: when `process.env.TIER25 !== "1"`, every method returns
+ * Off-switch: when `process.env.RECORDSCREEN !== "1"`, every method returns
  * immediately with **zero** filesystem activity. This is the "zero cost
  * when off" guarantee — tests that import the fixture but run without
- * `TIER25=1` see no perf or artifact difference vs current master.
+ * `RECORDSCREEN=1` see no perf or artifact difference vs current master.
  *
  * Ported from `tests/prototype/scenario-runner.spec.ts::class BeatRecorder`,
  * with the `Scenario` coupling stripped (testInfo.outputDir is the new
@@ -33,7 +33,7 @@ export interface BeatRecord {
 	ms: number;
 }
 
-const TIER25_ON = process.env.TIER25 === "1";
+const RECORDSCREEN_ON = process.env.RECORDSCREEN === "1";
 
 export class BeatRecorder {
 	private readonly page: Page;
@@ -55,10 +55,10 @@ export class BeatRecorder {
 	 * try/catch (page may be navigating mid-test); silently skips on error,
 	 * mirroring the prototype's behaviour.
 	 *
-	 * No-op when TIER25 !== "1".
+	 * No-op when RECORDSCREEN !== "1".
 	 */
 	async capture(label: string): Promise<void> {
-		if (!TIER25_ON) return;
+		if (!RECORDSCREEN_ON) return;
 		const idx = this.beats.length;
 		const stem = String(idx).padStart(4, "0");
 		const png = join(this.beatsDir, `${stem}.png`);
@@ -86,10 +86,10 @@ export class BeatRecorder {
 	 * `<testInfo.outputDir>/beats.jsonl`. Auto-called by the fixture teardown
 	 * in `fixtures.ts`.
 	 *
-	 * No-op when TIER25 !== "1" or when no beats were captured.
+	 * No-op when RECORDSCREEN !== "1" or when no beats were captured.
 	 */
 	async flush(): Promise<void> {
-		if (!TIER25_ON) return;
+		if (!RECORDSCREEN_ON) return;
 		if (this.beats.length === 0) return;
 		const jsonlPath = join(this.testInfo.outputDir, "beats.jsonl");
 		const body = this.beats.map((b) => JSON.stringify(b)).join("\n") + "\n";

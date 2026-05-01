@@ -9,11 +9,11 @@
  *   4. Click jumps to bottom and re-arms stickToBottom.
  *   5. Unmount produces no console errors.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { openApp, createSessionViaUI } from "./ui-helpers.js";
 
 test.describe("Jump-to-bottom button", () => {
-	test("appears on scroll-up, hides at bottom, click jumps + sets stickToBottom; unmount clean", async ({ page }) => {
+	test("appears on scroll-up, hides at bottom, click jumps + sets stickToBottom; unmount clean", async ({ page, rec }) => {
 		const consoleErrors: string[] = [];
 		page.on("console", (msg) => {
 			if (msg.type() === "error") consoleErrors.push(msg.text());
@@ -21,6 +21,7 @@ test.describe("Jump-to-bottom button", () => {
 
 		await openApp(page);
 		await createSessionViaUI(page);
+		await rec.capture("Session created — idle composer");
 
 		// Wait for the agent-interface to mount
 		const ai = page.locator("agent-interface").first();
@@ -61,6 +62,7 @@ test.describe("Jump-to-bottom button", () => {
 			if (!b) return false;
 			return b.style.pointerEvents === "none" && b.style.opacity === "0";
 		}, null, { timeout: 10_000 });
+		await rec.capture("At bottom — jump-to-bottom hidden");
 
 		// 2. Scroll up by clientHeight * 0.6 → button must become visible.
 		//
@@ -102,6 +104,7 @@ test.describe("Jump-to-bottom button", () => {
 			if (!b) return false;
 			return b.style.opacity === "1" && b.style.pointerEvents === "auto";
 		}, null, { timeout: 10_000 });
+		await rec.capture("Scrolled up — jump-to-bottom visible");
 
 		// 3. Scroll down within clientHeight * 0.4 of bottom → button hidden again.
 		await page.evaluate((sel) => {
@@ -115,6 +118,7 @@ test.describe("Jump-to-bottom button", () => {
 			if (!b) return false;
 			return b.style.opacity === "0" && b.style.pointerEvents === "none";
 		}, null, { timeout: 10_000 });
+		await rec.capture("Scrolled near bottom — button hidden again");
 
 		// 4. Scroll up again, click the button, assert it lands within 5 px
 		//    of the bottom and stickToBottom is true.
@@ -136,6 +140,7 @@ test.describe("Jump-to-bottom button", () => {
 			const el = document.querySelector(sel) as HTMLElement;
 			return el.scrollHeight - el.scrollTop - el.clientHeight <= 5;
 		}, scrollSel, { timeout: 5_000 });
+		await rec.capture("Clicked button — jumped to bottom");
 
 		const stickAfter = await page.evaluate(() => {
 			const ai = document.querySelector("agent-interface") as any;
@@ -168,5 +173,6 @@ test.describe("Jump-to-bottom button", () => {
 			!/favicon|net::|404 \(Not Found\)|400 \(Bad Request\)|websocket|status of 400/i.test(e),
 		);
 		expect(real, `unexpected console errors after unmount: ${real.join(" | ")}`).toHaveLength(0);
+		await rec.capture("Unmounted — no console errors");
 	});
 });
