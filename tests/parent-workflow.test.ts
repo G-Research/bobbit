@@ -136,14 +136,29 @@ describe("buildDefaultWorkflows() — `parent` workflow", () => {
 		assert.match(review.prompt!, /natural decomposition/);
 	});
 
-	it("integration verify[] runs build/check/unit/e2e + code review", () => {
+	it("integration verify[] enumerates the full CI superset (issue 9 fix — prune at per-project seeding handles missing commands)", () => {
+		// Live test PR #409 team-lead-317cdb83: the parent.integration
+		// gate's 4-step minimum was too thin to catch merge regressions —
+		// the project's leaves all ran 8+ CI commands but the rollup only
+		// ran 4. Solution: enumerate the full CI superset; per-project
+		// substitute-builtin-component prunes any command not declared on
+		// the project's primary component, so projects without an e2e
+		// suite (or contract / fault-injection / etc.) still get a clean
+		// integration gate without false-positive failures.
 		const wfs = buildDefaultWorkflows("bobbit");
 		const integ = wfs.parent.gates.find(g => g.id === "integration")!;
 		const names = (integ.verify ?? []).map(s => s.name);
 		assert.deepEqual(names, [
 			"Build",
 			"Type check",
+			"Lint",
+			"Boundaries",
 			"Unit tests",
+			"Contract tests",
+			"Integration tests",
+			"Eval tests",
+			"Fault-injection tests",
+			"Replay tests",
 			"E2E tests",
 			"Code quality review",
 		]);

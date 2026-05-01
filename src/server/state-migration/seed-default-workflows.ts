@@ -461,13 +461,26 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				id: "integration",
 				name: "Integration",
 				depends_on: ["execution"],
-				description: "Run typecheck/build/tests on this goal's branch after all children have merged. Catches integration issues that per-child verification couldn't see.",
+				description: "Run the project's full CI suite on this goal's branch after all children have merged. Catches integration issues that per-child verification couldn't see. The verify[] enumerates a superset of common CI commands (build, check, lint, boundaries, format, unit, contract, integration, eval, fault-injection, replay, e2e); the per-project workflow-store seeding (substitute-builtin-component.ts) PRUNES any step whose command is not declared on the project's primary component. Projects can override `parent.integration.verify[]` in project.yaml::workflows for opinionated rollups beyond this default.",
 				verify: [
+					// Phase 0: build first — fastest fail signal, gates everything.
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					// Phase 1: static checks — parallel, no shared state.
 					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
-					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Lint", type: "command", phase: 1, component: c, command: "lint" },
+					{ name: "Boundaries", type: "command", phase: 1, component: c, command: "boundaries" },
+					// Phase 2: test tiers — parallel where the project supports it.
+					// Each one is dropped at seed time if the project doesn't
+					// declare the matching command.
+					{ name: "Unit tests", type: "command", phase: 2, component: c, command: "unit" },
+					{ name: "Contract tests", type: "command", phase: 2, component: c, command: "contract" },
+					{ name: "Integration tests", type: "command", phase: 2, component: c, command: "integration" },
+					{ name: "Eval tests", type: "command", phase: 2, component: c, command: "eval" },
+					{ name: "Fault-injection tests", type: "command", phase: 2, component: c, command: "fault-injection" },
+					{ name: "Replay tests", type: "command", phase: 2, component: c, command: "replay" },
+					{ name: "E2E tests", type: "command", phase: 2, timeout: 900, component: c, command: "e2e" },
+					// Phase 3: LLM review of the rolled-up branch.
+					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 3, prompt: CODE_REVIEW_PROMPT },
 				],
 			},
 			// readyToMergeGate() helper hardcodes depends_on: ["documentation"];
