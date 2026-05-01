@@ -2852,7 +2852,7 @@ function renderProjectComponentsTab(projectId: string) {
 							const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
 							if (!project?.rootPath) return;
 							const { createProjectAssistantSession } = await import("./dialogs.js");
-							await createProjectAssistantSession(project.rootPath, false, { projectId });
+							await createProjectAssistantSession(project.rootPath, false, { projectId, existingProjectName: project.name || "" });
 						},
 						children: html`<span class="inline-flex items-center gap-1.5 font-semibold" data-testid="open-project-assistant">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
 					})}
