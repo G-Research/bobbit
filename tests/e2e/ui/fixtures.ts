@@ -11,7 +11,7 @@
  *
  * The test signature gains a `rec: BeatRecorder` parameter; sprinkle
  * `await rec.capture("label")` calls at user-visible UX moments. Run with
- * `TIER25=1` to actually capture screenshots and produce a video report;
+ * `RECORDSCREEN=1` to actually capture screenshots and produce a video report;
  * without the env var, every recorder method is a no-op and the cursor
  * overlay is not injected. Behaviour matches the bare gateway-harness
  * import in that case.
@@ -24,7 +24,7 @@ import { CURSOR_OVERLAY_SCRIPT } from "./cursor-overlay.js";
 
 export const test = baseTest.extend<{ rec: BeatRecorder }>({
 	rec: async ({ page }, use, testInfo) => {
-		if (process.env.TIER25 === "1") {
+		if (process.env.RECORDSCREEN === "1") {
 			// addInitScript re-runs on every navigation — this is what we want
 			// so the red cursor dot survives hash-route changes too.
 			await page.addInitScript(CURSOR_OVERLAY_SCRIPT);
