@@ -937,6 +937,28 @@ export class VerificationHarness {
 		return this.projectConfigStore;
 	}
 
+	/**
+	 * Pick a component to source `config.qa_*` from when an agent-qa step
+	 * does not declare `component:` explicitly. Preference order:
+	 *   1. First component whose `config.qa_start_command` is set.
+	 *   2. Component whose `name` matches the project name.
+	 *   3. `components[0]`.
+	 * Returns undefined when no components are configured.
+	 */
+	private resolveDefaultQaComponentName(goalId: string): string | undefined {
+		const pcs = this.resolveProjectConfigStore(goalId);
+		if (!pcs) return undefined;
+		const comps = pcs.getComponents();
+		const hit = comps.find(c => c.config?.qa_start_command);
+		if (hit) return hit.name;
+		const projectName = this.projectContextManager?.getContextForGoal(goalId)?.project?.name;
+		if (projectName) {
+			const nameMatch = comps.find(c => c.name === projectName);
+			if (nameMatch) return nameMatch.name;
+		}
+		return comps[0]?.name;
+	}
+
 	private resolveGateStore(goalId: string): GateStore {
 		if (this.projectContextManager) {
 			const ctx = this.projectContextManager.getContextForGoal(goalId);
@@ -1456,7 +1478,7 @@ export class VerificationHarness {
 								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 									if (active.cancelled) break;
 									const qaResult = await this.runAgentQaStep(
-										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, stepSessionId,
@@ -1866,7 +1888,7 @@ export class VerificationHarness {
 	 * Similar to runLlmReviewViaSession() but with test-engineer role and QA-specific prompt.
 	 */
 	private async runAgentQaStep(
-		step: { name: string; prompt?: string; timeout?: number; role?: string },
+		step: { name: string; prompt?: string; timeout?: number; role?: string; component?: string },
 		cwd: string,
 		goalId: string,
 		builtinVars: Record<string, string>,
@@ -1902,9 +1924,16 @@ export class VerificationHarness {
 		}
 		const combinedPrompt = sections.join("\n");
 
-		// Compute timeout: qa_max_duration_minutes + 5 min buffer
+		// Compute timeout: qa_max_duration_minutes + 5 min buffer.
+		// `qa_max_duration_minutes` lives on the owning component's `config`
+		// map. Most agent-qa steps now declare `component:` explicitly; for
+		// legacy gates without it, fall back to the first component carrying
+		// `qa_start_command`, then a project-name match, then `components[0]`.
 		const pcs = this.resolveProjectConfigStore(goalId);
-		const qaMinutes = pcs?.getQaMaxDurationMinutes() ?? 10;
+		const componentName = step.component
+			?? this.resolveDefaultQaComponentName(goalId)
+			?? "";
+		const qaMinutes = pcs?.getQaMaxDurationMinutes(componentName) ?? 10;
 		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
 		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
 
