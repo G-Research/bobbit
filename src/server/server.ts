@@ -6176,6 +6176,26 @@ async function handleApiRoute(
 					childGoalId,
 					commitSha: result.commitSha,
 				});
+				// Auto-archive on successful merge: same pattern as the
+				// verification-harness's runSubgoalStep post-merge cleanup
+				// (c95f8f60). Without this, a team-lead calling goal_merge_child
+				// directly (the MCP tool path, e.g. when the eager-merge IIFE
+				// at e39a5b53 hasn't fired yet) leaves the child goal record
+				// `state: complete` but `archived: false` — cluttering the
+				// dashboard and pinning disk + memory. Best-effort, fire-and-
+				// forget so the route's response isn't blocked. Idempotent on
+				// already-archived children.
+				const alreadyArchived = !!child.archived;
+				if (!alreadyArchived) {
+					teamManager.teardownTeam(childGoalId).catch(err => {
+						console.warn(`[integrate-child] post-merge teardownTeam failed for child ${childGoalId} (best-effort):`, err);
+					});
+					goalMgr.archiveGoal(childGoalId).catch(err => {
+						console.warn(`[integrate-child] post-merge archiveGoal failed for child ${childGoalId} (best-effort):`, err);
+					}).then(() => {
+						console.log(`[integrate-child] Auto-archived child ${childGoalId} after successful manual merge into parent ${parentGoalId}`);
+					});
+				}
 			} else {
 				json({ merged: false, conflict: true, output: result.output }, 409);
 				// Broadcast `goal_merge_conflict` (§9) so dashboard viewers
