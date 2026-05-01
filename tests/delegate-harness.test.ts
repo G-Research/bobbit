@@ -162,6 +162,55 @@ describe("DelegateHarness", () => {
 		assert.deepEqual(persistedB, { pending: [], latched: [] });
 	});
 
+	it("submit on pending: durability — result is latched on disk before resolving the awaiter", async () => {
+		// Regression test for the durability gap: if the gateway crashes
+		// between submit() and the parent's HTTP-response-finished, the
+		// terminal result must remain on disk so a retried /wait can drain it.
+		const h = new DelegateHarness(stateDir);
+		const pending = h.register(makeActive());
+		const drained = h.submit("parent-1", "tu_1", { status: "completed", output: "durable" });
+		assert.equal(drained, true, "resolved a pending awaiter");
+		const got = await pending;
+		assert.deepEqual(got, { status: "completed", output: "durable" });
+		// Latch still on disk — not yet acknowledged.
+		const persisted = JSON.parse(fs.readFileSync(persistPath, "utf-8"));
+		assert.equal(persisted.latched.length, 1, "latch retained until acknowledge");
+		assert.equal(persisted.latched[0].result.output, "durable");
+	});
+
+	it("acknowledge clears the latch and locks future submits to no-op", async () => {
+		const h = new DelegateHarness(stateDir);
+		const pending = h.register(makeActive());
+		h.submit("parent-1", "tu_1", { status: "completed", output: "x" });
+		await pending;
+		const ackHad = h.acknowledge("parent-1", "tu_1");
+		assert.equal(ackHad, true);
+		const persisted = JSON.parse(fs.readFileSync(persistPath, "utf-8"));
+		assert.equal(persisted.latched.length, 0);
+		// Subsequent submit for same key is a no-op (completed mark).
+		const dup = h.submit("parent-1", "tu_1", { status: "failed", output: "" });
+		assert.equal(dup, false);
+		assert.equal(JSON.parse(fs.readFileSync(persistPath, "utf-8")).latched.length, 0);
+	});
+
+	it("acknowledge is idempotent and a no-op on unknown key", () => {
+		const h = new DelegateHarness(stateDir);
+		assert.equal(h.acknowledge("nope", "none"), false);
+	});
+
+	it("durability across simulated restart: submit → _loadFromDisk → register drains latch", async () => {
+		const a = new DelegateHarness(stateDir);
+		const pending = a.register(makeActive());
+		pending.catch(() => { /* A's closure is dead after restart */ });
+		a.submit("parent-1", "tu_1", { status: "completed", output: "survives-restart" });
+		await pending;
+		// "Crash" mid-HTTP-write: don't acknowledge.
+		// New harness instance reads disk and finds the latch.
+		const b = new DelegateHarness(stateDir);
+		const result = await b.register(makeActive());
+		assert.deepEqual(result, { status: "completed", output: "survives-restart" });
+	});
+
 	it("submit twice for the same key is idempotent (second call is a no-op)", () => {
 		const h = new DelegateHarness(stateDir);
 		const r1 = h.submit("parent-1", "tu_1", { status: "completed", output: "first" });

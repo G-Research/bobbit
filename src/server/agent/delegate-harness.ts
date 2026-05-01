@@ -246,8 +246,16 @@ export class DelegateHarness {
 		if (this.completed.has(key) || this.latched.has(key)) return false;
 		const entry = this.pending.get(key);
 		if (entry) {
+			// Durability: write the latch to disk BEFORE resolving the
+			// awaiter, so a crash between `_persist()` and the parent's
+			// HTTP-response-finished can be recovered — the on-disk latch
+			// is the source of truth until the parent's `/wait` POST drains
+			// it via `acknowledge()` (called from `register()` on a recycled
+			// key, or from the `/wait` handler success path). Without this,
+			// a delegate that completed during the restart window would be
+			// lost (acceptance criterion AC2).
 			this.pending.delete(key);
-			this.completed.add(key);
+			this.latched.set(key, result);
 			this._persist();
 			try { entry.resolve(result); } catch { /* swallow consumer errors */ }
 			return true;
@@ -257,6 +265,26 @@ export class DelegateHarness {
 		this.latched.set(key, result);
 		this._persist();
 		return false;
+	}
+
+	/**
+	 * Confirm the parent has received the result for `(parentSessionId,
+	 * toolUseId)`. Removes the latched entry from disk and marks the key
+	 * as fully completed (any straggler `submit()` for the same key is a
+	 * no-op). Idempotent.
+	 *
+	 * Called from the `/api/internal/delegate/wait` handler after the
+	 * HTTP response has been written, and from `register()` on a recycled
+	 * key (parent's tool extension reconnects with a fresh delegate).
+	 */
+	acknowledge(parentSessionId: string, toolUseId: string): boolean {
+		const key = delegateKey(parentSessionId, toolUseId);
+		const had = this.latched.delete(key);
+		if (had) {
+			this.completed.add(key);
+			this._persist();
+		}
+		return had;
 	}
 
 	/**

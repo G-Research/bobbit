@@ -2385,6 +2385,14 @@ export class SessionManager {
 		if (ps.staffId) {
 			bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId;
 		}
+		// Recursive-delegation guard. The `delegate` tool extension short-
+		// circuits when this env var is set on the agent subprocess; without
+		// it, an eager-restored delegate session would have the `delegate`
+		// tool registered and could spawn its own children. Restoration MUST
+		// preserve this guard. See defaults/tools/agent/extension.ts.
+		if (ps.delegateOf) {
+			bridgeOptions.env.BOBBIT_DELEGATE_OF = ps.delegateOf;
+		}
 
 		// ── Restore Docker sandbox wiring ──
 		if (ps.sandboxed) {

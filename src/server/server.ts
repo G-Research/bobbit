@@ -1198,8 +1198,21 @@ export function createGateway(config: GatewayConfig) {
 						});
 						continue;
 					}
-					// Live (idle or streaming): wire the completion listener so when
-					// the child reaches a terminal state, the harness gets the result.
+					// Idle session: the child has already finished its turn (the
+					// `agent_end` event was replayed during `restoreSession` BEFORE
+					// we got here, so attaching a fresh listener would never see it).
+					// Drain a synthetic `completed` result rather than parking forever.
+					if (child.status === "idle") {
+						let output = "";
+						try { output = await sessionManager.getSessionOutput(entry.delegateSessionId); } catch { /* ignore */ }
+						delegateHarness.submit(entry.parentSessionId, entry.toolUseId, {
+							status: "completed",
+							output,
+						});
+						continue;
+					}
+					// Streaming: wire the completion listener so when the child
+					// reaches a terminal state, the harness gets the result.
 					sessionManager.attachDelegateCompletionListener(
 						entry.delegateSessionId,
 						entry.parentSessionId,
@@ -7291,7 +7304,20 @@ async function handleApiRoute(
 
 		try {
 			const result = await delegateHarness.register(active);
-			res.end(JSON.stringify(result));
+			// Wait for the response body to flush before ack'ing the harness.
+			// If the gateway crashes between submit() and HTTP-finished, the
+			// latched result on disk lets a retried /wait drain it. Once the
+			// response has flushed, we know the parent received it and can
+			// safely clear the latch. Use res.end(callback) for the flush
+			// signal; handle synchronous-write errors via try/catch.
+			await new Promise<void>((resolve) => {
+				try {
+					res.end(JSON.stringify(result), () => resolve());
+				} catch {
+					resolve();
+				}
+			});
+			try { delegateHarness.acknowledge(active.parentSessionId, active.toolUseId); } catch { /* ignore */ }
 		} catch (err) {
 			const payload: DelegateResultPayload = timedOut
 				? { status: "timeout", output: "", error: "delegate wait timed out" }
