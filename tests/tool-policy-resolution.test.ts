@@ -12,8 +12,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const { resolveGrantPolicy } = await import("../dist/server/agent/tool-activation.js");
-const { ToolGroupPolicyStore } = await import("../dist/server/agent/tool-group-policy-store.js");
+const { resolveGrantPolicy } = await import("../src/server/agent/tool-activation.ts");
+const { ToolGroupPolicyStore } = await import("../src/server/agent/tool-group-policy-store.ts");
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

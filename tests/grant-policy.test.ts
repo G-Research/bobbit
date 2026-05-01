@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { computeEffectiveAllowedTools, computeToolActivationArgs, resolveGrantPolicy, writeMcpProxyExtensions } = await import("../dist/server/agent/tool-activation.js");
+const { computeEffectiveAllowedTools, computeToolActivationArgs, resolveGrantPolicy, writeMcpProxyExtensions } = await import("../src/server/agent/tool-activation.ts");
 
 // Minimal mock ToolManager — only needs getToolByName()
 function mockToolManager(tools: Record<string, { grantPolicy?: string }>) {

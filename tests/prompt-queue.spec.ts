@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { PromptQueue } from "../dist/server/agent/prompt-queue.js";
+import { PromptQueue } from "../src/server/agent/prompt-queue.ts";
 
 test.describe("PromptQueue", () => {
 	test("enqueue basics: adds messages, toArray returns in order, length/isEmpty correct", () => {
