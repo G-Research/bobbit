@@ -6,7 +6,7 @@
 	"inline-workflow-goal-flow.spec.ts": 1,
 	"mcp-tool-permission.spec.ts": 1,
 	"multi-repo-goal.spec.ts": 1,
-	"multi-repo-pool.spec.ts": 2,
+	"multi-repo-pool.spec.ts": 1,
 	"multi-repo-project.spec.ts": 1,
 	"pool-flow.spec.ts": 4,
 	"thinking-level.spec.ts": 1,

@@ -170,27 +170,6 @@ The live llm-review path is not actually affected by the bug (the kickoff prompt
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
 
-#### Delegate restart resilience
-
-Delegate sessions (spawned via the `delegate` tool in `defaults/tools/agent/extension.ts`) survive server restart through the same blocking-tool harness pattern as verification — see [docs/blocking-tools.md](blocking-tools.md) for the pattern and [docs/design/delegate-restart-resilience.md](design/delegate-restart-resilience.md) for the full design.
-
-Key moving parts:
-
-- **`DelegateHarness`** (`src/server/agent/delegate-harness.ts`) parks Promises keyed by `(parentSessionId, toolUseId)` and persists in-flight entries to `<stateDir>/active-delegates.json` on every mutation. Parallel delegates use slot keys `${toolUseId}#${i}` so independent waits never collide. Submit-before-register latches the result; the parent's next `register()` drains immediately. On reload, persisted entries become metadata-only **shells** — the original closures are gone, so subsequent submits latch instead of resolving dead resolvers, and the parent's re-POST drains the latch.
-- **Three internal endpoints** (allow-listed in `sandbox-guard.ts`):
-  - `POST /api/internal/delegate/wait` — chunked-heartbeat long-poll, mirrors `/api/sessions/:id/wait`.
-  - `POST /api/internal/delegate/submit` — idempotent (second arrival returns `drained: false`).
-  - `POST /api/internal/delegate/cancel` — parent-abort path; submits a `terminated` result and the parent then archives the child via `DELETE /api/sessions/:id`.
-- **`SessionManager.attachDelegateCompletionListener`** subscribes to the child's `RpcBridge` (`agent_end` / `process_exit`) plus the global termination listener and submits a structured result back to the harness exactly once. Used by both the live path (`createDelegateSession`) and the restart-resume path (server.ts after `restoreSessions`). The two paths attach the listener with different options:
-  - **Live path** — attaches WITHOUT `resumeFallback`. Listener installs *before* `sendDelegatePrompt()` runs, so a slow agent spawn / sandbox start / model warm-up that takes >5s to emit `agent_start` must not be (mis-)treated as terminal idle. Live waits rely purely on the RPC events firing.
-  - **Resume path** — attaches WITH `resumeFallback: true`. The resumed agent may finish its continuation turn (firing `agent_end`) BEFORE the listener was attached, leaving the delegate idle forever. The fallback waits up to 5s for `agent_start` (via `waitForStreaming`); if no streaming starts and the child is still `idle`, that is taken as proof the turn already ran and ended, and a synthetic `completed` result is drained from the persisted output. `submitOnce()` makes a real `agent_end` arriving mid-poll safe — first-write-wins.
-- **Pre-restore `wasStreaming` snapshot.** Before calling `restoreSessions()`, server.ts captures `sessionManager.getPreRestoreWasStreaming()` — the set of session ids whose `wasStreaming` flag was true on disk. `restoreSession` then clears that flag as part of the resume path, so the snapshot must be taken first. The resume loop uses this set to distinguish *idle because the delegate finished cleanly before the gateway crashed* (drain a synthetic `completed` immediately) from *idle because the continuation re-prompt is still in flight* (attach the listener and wait for the resumed turn to actually end). Without the pre-restore snapshot, the latter case would deliver stale pre-restart output and ignore the resumed work.
-- **Eager-restore branch** in `SessionManager.restoreSessions()` consults `delegateHarness.getActiveDelegateSessionIds()`: archived delegates and delegates whose parent finished cleanly stay dormant; in-flight delegates flow through the same `restoreOneSession` path as workers, preserving `BOBBIT_SESSION_ID` injection (PR #397) and `lastActivity` (PR #385). A new `kind: "delegate" | "worker" | "reviewer"` discriminator on `PersistedSession` (sibling of `TeamAgent.kind` from PR #406) is set at create time; legacy records cascade through `resolveSessionKind()` in `delegate-harness.ts`.
-
-Termination semantics: a parent terminate/archive triggers `rejectAllForSession(parentSessionId)`, which rejects every parked Promise for that prefix and returns the list of child session ids the server then cascade-terminates. Each cascade-terminate fires the global listener which submits a `terminated` result — redundant against the already-rejected Promise, but the harness's idempotency contract (first-write-wins) makes that safe.
-
-Tests: `tests/delegate-harness.test.ts` (unit, persistence round-trip + idempotency), `tests/e2e/delegate-restart.spec.ts` (API D-RST-01..07 covering single+parallel restart, downtime completion, parent cascade, idempotent submit, cancel). Browser-level coverage (DUI-01..04 in `tests/e2e/ui/delegate-restart.spec.ts`) is skipped in standard E2E because the in-process gateway harness has no restart hook — deferred to `npm run test:manual` (same precedent as `tests/e2e/ui/stories-resilience.spec.ts`).
-
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
@@ -545,8 +524,8 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 
 | Session type | Worktree? | Branch pattern |
 |---|---|---|
-| Pool pre-build (any session type) | Yes | `pool/_pool-{uuid8}` (temp; renamed on claim) |
-| Regular (host, after pool claim) | Yes | `session/<slug>-{uuid8}` after first prompt |
+| Pool pre-build (any session type) | Yes | `pool/_pool-{uuid8}` (temp; renamed at claim time) |
+| Regular (host, after pool claim) | Yes | `session/<uuid8>` (immediately on claim — no first-prompt rename; see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)) |
 | Regular (sandbox) | Yes | `session/s-{uuid8}` |
 | Goal sessions | Yes | `goal/<branch-name>` |
 | Team agent sessions | Yes | Per-agent branch within goal |
@@ -575,7 +554,7 @@ The agent's cwd in multi-repo mode is the per-branch container, mirroring the pr
 **Pool claim sequence (sessions and goals).** Both flows route through `WorktreePool.claim()`:
 
 1. `git branch -m pool/_pool-<id> <target>` — atomic, ~10ms.
-2. `git worktree move <pool-path> <target-path>` — atomic, updates both gitdir pointers (git ≥ 2.17). Falls back to a branch-rename-only **degraded mode** (logged) when the move fails (e.g. Windows file lock); in that case the directory stays at the pool path.
+2. `git worktree move <pool-path> <target-path>` — atomic, updates both gitdir pointers (git ≥ 2.17). On directory-rename failure (e.g. Windows file lock) for **single-repo** sessions, `claim()` reverts the branch rename and returns null; the caller falls back to a fresh `createWorktree`. (Multi-repo claims may surface a transient `degraded` warning when only one of N repos fails to move — see `PoolClaimResult.degraded`.)
 3. `git fetch origin` + `git reset --hard <remote-primary>` — backgrounded after handoff, so claim itself is fast.
 4. `git push -u origin <target>` — fire-and-forget, non-blocking.
 
@@ -583,19 +562,22 @@ Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per
 
 **Goal flow (Phase 3 fix).** `goal-manager.setupWorktree()` calls `pool.claim(goal.branch)` first and falls back to `createWorktree` only if the pool is empty. Multi-repo goals get the worktree set in one claim. Previously goals bypassed the pool entirely and were observably slower than session start — they now share the same warm-pool benefit.
 
-**Session flow (Phase 3 fix).** Sessions are provisioned eagerly with the temp `pool/_pool-<id>` branch and **renamed on first prompt** to `session/<slug>-<id>` (or `goal/<slug>` for goal sessions promoted from a regular session). The rename uses the same branch+worktree-move sequence as pool claim. If the session is archived without ever sending a prompt, cleanup uses the temp branch name (no rename needed). This keeps the warm-pool benefit (instant session start) while ending up with meaningful branch and directory names. Pre-Phase 3 sessions wasted pool slots on a `"new-session"` placeholder branch.
+**Session flow.** Pool entries pre-build on `pool/_pool-<id>`. On claim, `pool.claim(targetBranch)` runs the single branch-rename + worktree-move to the final `session/<id8>` name and the session is persisted with that name immediately. There is no first-prompt rename. The display title is independent of the git ref — `PUT /api/sessions/:id/title` updates metadata only. Archive cleanup operates on the final branch. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) for the full rationale and the test plan.
 
-**Boot sweeper (Phase 3).** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
+**Boot sweeper.** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
 
-- Renamed-but-orphaned worktrees (server died between rename and persist) — cleaned up.
 - `pool/_pool-<id>` worktrees not in the in-memory pool — reclaimed.
 - Legacy `session/_pool-*` entries (pre-Phase 3) — also recognised.
+- Orphaned `session-<id8>/` directories not owned by any persisted, non-archived session — scheduled for cleanup.
+- Legacy `session-<slug>-<id8>/` and `session-new-session-<id8>/` directories left over from pre-rename-removal sessions — tolerated while a live session row still references them, otherwise treated as orphans (back-compat for sessions that survive an upgrade).
+
+The pre-refactor "renamed-but-orphaned" branch (server died between branch-rename and row-persist) is gone — that race no longer exists because the rename happens synchronously inside `pool.claim()` before the session row is published. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) §13 for the full classification table.
 
 This means crash recovery doesn't require the user to manually clean up pool detritus.
 
 **Lifecycle:**
 
-1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
+1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal/staff branch as appropriate). **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
 2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
@@ -614,7 +596,7 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs **per-component** `worktree_setup_command` hooks (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh — their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
 
-**Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or session-first-prompt rename), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
+**Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or staff wake refresh), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
 **Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. Three invocation points fan out from `runComponentSetups()`:
 
@@ -842,22 +824,39 @@ Existing users have a `bobbit-session-visited` map in `localStorage` from before
 
 ### `lastActivity` preservation across restart
 
-`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but `restoreSession()` re-issues every historical rpc event into the session as part of replay. Without a guard, every replayed event would call `session.lastActivity = Date.now()` and clobber the persisted value with restore time — making every session look like it was just active.
+`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but three paths in `session-manager.ts` install rpc-event listeners that mutate `session.lastActivity` after re-attaching to a fresh `RpcBridge`:
 
-`restoreSession()` already keeps a `restoring` flag (used to suppress cost tracking during replay). The `lastActivity` bump is gated on the same flag — replay-phase rpc events are observed for transcript reconstruction but do not update the timestamp. The first event after `restoring` flips to `false` is the first one that bumps `lastActivity`, so the persisted timestamp survives intact until genuine new activity occurs. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+- `restoreSession()` — server startup restores persisted sessions concurrently (CONCURRENCY=5).
+- The role-restart path — swaps the bridge after a role change.
+- The abort-restart path (`restoreFromAbort`) — swaps the bridge after a force-abort.
+
+All three bridges emit `switch_session` history replay frames followed by lifecycle frames on resume (`agent_start`, `agent_idle`, `connection_state`, `state`, `session_title`, etc.). Without a guard, every one of those frames would call `session.lastActivity = Date.now()` and clobber the persisted value. The original guard — a `restoring` / `switchingSession` flag flipped to `false` after `switch_session` resolves — was insufficient because lifecycle frames continue to fire after the flag clears, and under concurrent restore every restored session ended up clustered at restart time with identical timestamps.
+
+**Single source of truth**: the exported helper `isUserVisibleActivity(event)` at the top of `src/server/agent/session-manager.ts`. It returns `true` only for events that represent real new turn activity:
+
+- `message_update`
+- `message_end`
+- `tool_execution_start`
+- `tool_execution_end`
+- `agent_end`
+
+Everything else returns `false`, including all lifecycle frames, `auto_compaction_*`, `process_exit`, container `died`/`recovered` events, and `gate_verification_*` frames. All three rpc-event listeners now wrap the `session.lastActivity = Date.now()` bump in `if (isUserVisibleActivity(event))`. The pre-existing `restoring` / `switchingSession` flags are retained for cost-tracking but no longer relied on for `lastActivity`. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+
+Locked by `tests/session-restore-last-activity.test.ts` — source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
 
 ### Key files
 
 | File | Role |
 |---|---|
 | `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
-| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `restoring`-flag gate on `lastActivity` |
+| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `isUserVisibleActivity()` filter applied at `restoreSession`, role-restart, and abort-restart event listeners |
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
+| `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
 | `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
 
 ---
@@ -1569,7 +1568,7 @@ Sandboxed agents use standard git worktrees inside the project container — the
 1. Removes the worktree via `git worktree remove --force`
 2. Called during session termination
 
-**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 — it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence and rename-on-first-prompt mechanics. Pools are **per-project** — `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` — sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
+**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 — it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence (single rename at claim time, no first-prompt rename — see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)). Pools are **per-project** — `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` — sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
 
 **Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the remote primary branch before being assigned to a session. This prevents stale worktrees when the primary branch has advanced since the pool entry was created. The remote primary branch is resolved dynamically via `git symbolic-ref refs/remotes/origin/HEAD` (falls back to `origin/master` if the ref is not set). The fetch+reset is non-fatal — if it fails, the worktree is still usable but may be behind.
 

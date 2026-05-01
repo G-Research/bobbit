@@ -90,6 +90,33 @@ describe("worktree-sweeper.classifyWorktrees", () => {
 		assert.equal(all.some(w => w.path === REPO), false, "primary worktree must not appear");
 	});
 
+	it("legacy session-<slug>-<id8> dirs owned by live records stay active; unowned ones go to orphan", () => {
+		// Design §13 (post-rename-removal): pre-existing legacy dir layouts owned
+		// by still-live persisted sessions are tolerated indefinitely. Once the
+		// legacy session archives, its dir flips to orphan and gets cleaned.
+		const legacyPorcelain = `worktree /tmp/repo-wt/session-old-slug-cafebabe
+branch refs/heads/session/old-slug-cafebabe
+
+worktree /tmp/repo-wt/session-new-session-deadbeef
+branch refs/heads/session/new-session-deadbeef
+`;
+		const out = classifyWorktrees({
+			porcelainStdout: legacyPorcelain,
+			repoPath: REPO,
+			goals: [],
+			sessions: [
+				// Live session still owns the legacy slug-style branch.
+				{ id: "s1", branch: "session/old-slug-cafebabe", worktreePath: "/tmp/repo-wt/session-old-slug-cafebabe" },
+				// `session/new-session-*` has no live owner — must be orphaned.
+			],
+			staff: [],
+		});
+		assert.equal(out.active.length, 1);
+		assert.equal(out.active[0].branch, "session/old-slug-cafebabe");
+		assert.equal(out.orphan.length, 1);
+		assert.equal(out.orphan[0].branch, "session/new-session-deadbeef");
+	});
+
 	it("treats archived records as if absent (their worktrees become orphans)", () => {
 		const out = classifyWorktrees({
 			porcelainStdout: `worktree /tmp/repo-wt/session-arch-deadbeef\nbranch refs/heads/session/arch-deadbeef\n`,

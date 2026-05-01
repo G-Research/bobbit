@@ -102,42 +102,6 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	return stdout.toString().trim();
 }
 
-/**
- * Thrown when `git worktree move` fails. Surfaces the underlying git error
- * so the worktree pool can decide whether to fall back to degraded mode
- * (branch renamed, dir kept at the old path).
- */
-export class WorktreeMoveError extends Error {
-	constructor(message: string, readonly cause?: unknown) {
-		super(message);
-		this.name = "WorktreeMoveError";
-	}
-}
-
-/**
- * Move a worktree directory to a new path using `git worktree move`.
- *
- * `git worktree move` (added in git 2.17) atomically updates both the
- * worktree's `.git` pointer and the admin entry under `<repo>/.git/worktrees/`,
- * unlike a plain `mv` which leaves git tracking the old path.
- *
- * @throws WorktreeMoveError on failure (e.g. file locks on Windows). Callers
- *   in the worktree pool fall back to degraded mode (branch renamed only,
- *   directory stays at the old path).
- */
-export async function moveWorktree(repoPath: string, oldPath: string, newPath: string): Promise<void> {
-	if (oldPath === newPath) return;
-	try {
-		await execFile("git", ["worktree", "move", oldPath, newPath], {
-			cwd: repoPath,
-			timeout: 30_000,
-		});
-	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		throw new WorktreeMoveError(`git worktree move failed: ${oldPath} -> ${newPath}: ${msg}`, err);
-	}
-}
-
 export interface WorktreeResult {
 	worktreePath: string;
 	branchName: string;

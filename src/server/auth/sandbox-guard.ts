@@ -18,12 +18,6 @@ export function isSandboxAllowed(
 	// MCP calls are blocked — sandbox agents must not trigger host-side execution.
 	// if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
 	if (pathname === "/api/internal/verification-result" && m === "POST") return true;
-	// Delegate restart-resilience harness (docs/design/delegate-restart-resilience.md §3.2).
-	// Same justification as the legacy /api/sessions/:id/wait — sandboxed agents need
-	// to register, submit, and cancel parked Promises against their own delegate calls.
-	if (pathname === "/api/internal/delegate/wait" && m === "POST") return true;
-	if (pathname === "/api/internal/delegate/submit" && m === "POST") return true;
-	if (pathname === "/api/internal/delegate/cancel" && m === "POST") return true;
 	// /api/internal/user-question/submit is called from UI widgets (not the
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.

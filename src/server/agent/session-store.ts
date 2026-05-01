@@ -74,25 +74,8 @@ export interface PersistedSession {
 	imageModelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
-	/**
-	 * Opaque pool ID set when the session claimed a temporary worktree from the
-	 * pool but has not yet been renamed onto a `session/<slug>-<id>` branch.
-	 * Cleared when the rename succeeds (Phase 3, multi-repo design).
-	 */
-	poolId?: string;
-	/** True when the session is on its target branch but the worktree dir is still at the pool path. */
-	worktreeDegraded?: boolean;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
-	/**
-	 * Discriminator for session-restore branching. Sibling of
-	 * `TeamAgent.kind` (PR #406). Pre-`kind` records are inferred via
-	 * `resolveSessionKind()` in `delegate-harness.ts`:
-	 * `kind ?? (delegateOf ? "delegate" : "worker")`. Reviewer sessions set
-	 * this explicitly at creation time. See
-	 * `docs/design/delegate-restart-resilience.md` §4.1.
-	 */
-	kind?: "delegate" | "worker" | "reviewer";
 }
 
 /**
@@ -136,10 +119,7 @@ export type UpdatableSessionFields = Pick<
 	| "imageModelId"
 	| "sandboxed"
 	| "projectId"
-	| "poolId"
-	| "worktreeDegraded"
 	| "repoWorktrees"
-	| "kind"
 >;
 
 /**
@@ -258,10 +238,10 @@ export class SessionStore {
 	 */
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
-		"repoWorktrees", "poolId", "archived", "archivedAt",
+		"repoWorktrees", "archived", "archivedAt",
 		"sandboxed", "projectId", "goalId", "delegateOf",
 		"role", "assistantType", "taskId", "staffId",
-		"teamGoalId", "teamLeadSessionId", "worktreeDegraded",
+		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId",
 	];
 

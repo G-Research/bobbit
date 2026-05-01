@@ -195,19 +195,23 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	console.log(`  [boot] plain idle. cwd=${plainPre.cwd} branch=${plainPre.branch ?? "(none)"}`);
 	console.log(`  [boot] wt idle.    cwd=${wtPre.cwd}    branch=${wtPre.branch ?? "(none)"}`);
 
-	// Send a prompt to the worktree session so it transitions off the pool branch.
-	// `setTitle` triggers `renameSessionFromPool` which renames pool/_pool-<id> →
-	// session/<slug>-<id> and moves the worktree dir. Sessions that have been
-	// renamed in this way must also survive a hard-kill restart.
+	// Setting a title is metadata-only post-rename-removal: the worktree session
+	// already has its final `session/<id8>` branch from claim time and must not
+	// rename when the title changes. Verify the branch is byte-stable across
+	// the title update — and that this stable session still survives restart.
+	const wtPreTitle = await (await api(gw, `/api/sessions/${wtId}`)).json() as any;
+	const branchBeforeTitle = wtPreTitle.branch;
+	expect(branchBeforeTitle).toMatch(/^session\/[a-f0-9]{8}$/);
 	const titleRes = await api(gw, `/api/sessions/${wtId}`, {
 		method: "PATCH",
 		body: JSON.stringify({ title: "Renamed Pool Worktree" }),
 	});
 	expect(titleRes.status).toBe(200);
-	// Give the rename a moment — it's fire-and-forget but very fast.
+	// Give any (unwanted) async work a moment to land before re-asserting.
 	await new Promise(r => setTimeout(r, 1_500));
 	const wtAfterRename = await (await api(gw, `/api/sessions/${wtId}`)).json() as any;
-	console.log(`  [boot] wt post-rename. cwd=${wtAfterRename.cwd} branch=${wtAfterRename.branch}`);
+	console.log(`  [boot] wt post-title. cwd=${wtAfterRename.cwd} branch=${wtAfterRename.branch}`);
+	expect(wtAfterRename.branch).toBe(branchBeforeTitle);
 	expect(wtAfterRename.branch).not.toMatch(/^pool\//);
 
 	// No artificial wait — the gateway must guarantee that any session it

@@ -15,7 +15,10 @@
  *
  * The sweeper runs once at startup, before pool fill, so renamed-but-
  * orphaned worktrees from a crashed prior instance are reclaimed
- * cleanly. See docs/design/multi-repo-components.md §5.5.
+ * cleanly. See docs/design/multi-repo-components.md §5.5 (historical) and
+ * docs/design/remove-session-worktree-rename.md §13 (current post-upgrade
+ * sweeper patterns: live `session-<id8>`, pool `pool-_pool-<id>`, legacy
+ * `session-<slug>-<id8>` / `session-new-session-<id8>` orphan handling).
  */
 
 import { execFile as execFileCb } from "node:child_process";
