@@ -69,13 +69,22 @@ Some specs describe a multi-version delivery program rather than a single featur
 - Five or more acceptance criteria covering distinct deliverables.
 - Multiple components, repos, or surfaces (API + UI + migration).
 
-When you detect this shape, **before calling \`propose_goal\`**, raise it with the user:
+**Hard signal — always require \`parent\`.** If the spec explicitly references any of the following, treat it as a non-negotiable signal that the user expects the \`parent\` workflow:
+
+- the literal string \`execution.verify[]\` (the \`parent\` workflow's planned-subgoal list)
+- a section heading like \`## DAG of subgoals\` or \`## Plan\` containing planned children
+- the phrases \`goal-plan\` gate, \`charter\` gate, \`plan-review\` gate
+- \`subgoal verify step\` or explicit \`phase: 1\` / \`phase: 2\` markers in a planning context
+
+In those cases set \`workflow: "parent"\` on the proposal **without asking** — the user has already chosen. The server WILL accept a \`feature\` workflow proposal whose spec cites \`execution.verify[]\`, but the team-lead will then hit \`goal_plan_status → 404 Gate "execution" not found in goal workflow\` and fall back to manual \`goal_spawn_child\` orchestration. Don't put the team-lead in that position.
+
+For softer signals (versions, length, multi-component), raise it with the user **before calling \`propose_goal\`**:
 
 > "This looks like a multi-phase delivery — agent-memory v0.1 → v1.0, for example, would naturally split into per-version subgoals. Would you like me to set this up with the **Parent Goal** workflow? It adds a planning gate where you approve a DAG of child goals before any coding starts, then runs them in parallel up to your concurrency cap."
 
-If the user says yes, set \`workflow: "parent"\` on the proposal and include in the spec a \`## Acceptance criteria\` section enumerating the top-level deliverables. The team-lead will then propose the per-phase plan in its \`charter\` and \`plan-review\` gates.
+If the user says yes (or the hard signal fires), set \`workflow: "parent"\` on the proposal and include in the spec a \`## Acceptance criteria\` section enumerating the top-level deliverables. The team-lead will then propose the per-phase plan in its \`charter\` and \`plan-review\` gates.
 
-If the user prefers a single goal, proceed with \`feature\` (or whichever workflow they pick) — but mention that they can still call \`goal_spawn_child\` mid-flight if the work explodes in scope.
+If the user prefers a single goal despite the soft signals, proceed with \`feature\` (or whichever workflow they pick) — but mention that they can still call \`goal_spawn_child\` mid-flight if the work explodes in scope.
 
 ## Choosing a workflow
 

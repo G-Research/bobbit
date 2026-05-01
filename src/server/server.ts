@@ -6029,7 +6029,21 @@ async function handleApiRoute(
 		if (!planCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const gateId = url.searchParams.get("gateId") || "execution";
 		const gate = goal.workflow.gates.find(g => g.id === gateId);
-		if (!gate) { json({ error: `Gate "${gateId}" not found in goal workflow` }, 404); return; }
+		if (!gate) {
+			// Surface the available gates so a team-lead can immediately see
+			// whether to retry against e.g. `implementation` or whether the
+			// workflow simply has no plannable gate at all (e.g. a `feature`
+			// workflow goal expecting `execution`). The structured shape lets
+			// tool extensions parse the response without regex on the prose.
+			const availableGateIds = goal.workflow.gates.map(g => g.id);
+			const hint = `Available gates: ${availableGateIds.join(", ")}.`;
+			json({
+				error: `Gate "${gateId}" not found in goal workflow. ${hint}`,
+				gateId,
+				availableGateIds,
+			}, 404);
+			return;
+		}
 		const frozen = gate.metadata?.frozen === "true";
 		const replanCount = goal.replanCount ?? 0;
 		const rawSteps: VerifyStep[] = (gate.verify ?? []) as VerifyStep[];
@@ -6139,7 +6153,18 @@ async function handleApiRoute(
 		const body = await readBody(req).catch(() => ({}));
 		const gateId = typeof body?.gateId === "string" && body.gateId ? body.gateId : "execution";
 		const gate = goal.workflow.gates.find(g => g.id === gateId);
-		if (!gate) { json({ error: `Gate "${gateId}" not found in goal workflow` }, 404); return; }
+		if (!gate) {
+			// Mirror the GET /api/goals/:id/plan 404 shape so callers can
+			// uniformly read `availableGateIds` from any plan-route 404.
+			const availableGateIds = goal.workflow.gates.map(g => g.id);
+			const hint = `Available gates: ${availableGateIds.join(", ")}.`;
+			json({
+				error: `Gate "${gateId}" not found in goal workflow. ${hint}`,
+				gateId,
+				availableGateIds,
+			}, 404);
+			return;
+		}
 		if (!Array.isArray(body?.planSteps)) {
 			json({ error: "planSteps must be an array" }, 400);
 			return;

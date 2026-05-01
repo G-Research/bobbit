@@ -297,8 +297,9 @@ export function buildTopLevelTeamLeadStanza(opts: {
 		"   The spawned child branches off your branch HEAD, runs its own workflow\n" +
 		"   (default `feature`), and merges its branch back into yours when its\n" +
 		"   `ready-to-merge` gate passes. You stay in charge of integration.\n\n" +
-		"2. **Planned:** if your workflow is `parent` (or you switch to it via\n" +
-		"   `goal_plan_propose`), you have a structured planning loop:\n" +
+		"2. **Planned:** if your workflow is `parent` (the only built-in\n" +
+		"   workflow that ships with the `execution` gate `goal_plan_propose`\n" +
+		"   needs to anchor against), you have a structured planning loop:\n" +
 		"   - Signal **charter** with the user-visible outcome and acceptance\n" +
 		"     criteria.\n" +
 		"   - Signal **plan-review** with the proposed DAG of subgoals.\n" +
@@ -393,6 +394,17 @@ export function buildMidGoalNestingStanza(opts: { divergencePolicy?: "strict" | 
 	const policy = opts.divergencePolicy ?? "strict";
 	return (
 		"## Mid-Goal Decomposition\n\n" +
+		"**Workflow availability cheat sheet:**\n" +
+		"- `goal_spawn_child` works on **any workflow** — ad-hoc child spawning\n" +
+		"  is always available, regardless of whether your parent goal is on\n" +
+		"  `feature`, `general`, `parent`, or a custom workflow.\n" +
+		"- `goal_plan_propose` / `goal_plan_status` require a workflow with an\n" +
+		"  `execution` gate (currently only the built-in `parent` workflow). On\n" +
+		"  other workflows these tools 404 with `{availableGateIds: [...]}` so\n" +
+		"  you can see what gates DO exist. There is no in-flight workflow\n" +
+		"  migration tool — if you need planned decomposition on a goal that was\n" +
+		"  created with the wrong workflow, document the gap and fall back to\n" +
+		"  `goal_spawn_child` plus manual phase sequencing.\n\n" +
 		"You have **three** decomposition primitives. Pick the right one.\n\n" +
 		"- **`task_create`** — single tracked deliverable, no agent required (or\n" +
 		"  a single agent picks it up later). The most common choice.\n" +

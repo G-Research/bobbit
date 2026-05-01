@@ -653,3 +653,128 @@ test.describe("§4.3 decision matrix — POST /spawn-child", () => {
 		}
 	});
 });
+
+// User-feedback regression: a team-lead on a `feature`-workflow goal
+// who calls `goal_plan_status` against the default `execution` gateId
+// used to get the bare error `Gate "execution" not found in goal
+// workflow`. The new shape includes `availableGateIds` so the team-lead
+// can immediately see whether to retry against e.g. `implementation`
+// or surface a workflow mismatch.
+const FEATURE_NO_EXEC_WORKFLOW_ID = "feature-no-execution";
+
+test.describe("plan 404 — missing gate surfaces availableGateIds", () => {
+	test.beforeAll(async () => {
+		// Need the existing FROZEN/FRESH workflows AND a feature-style workflow
+		// without `execution` so we can hit the missing-gate branch.
+		const pid = await defaultProjectId();
+		expect(pid).toBeTruthy();
+		await seedWorkflows(pid!);
+
+		const featureLikeWorkflow = {
+			id: FEATURE_NO_EXEC_WORKFLOW_ID,
+			name: "Feature (no execution gate)",
+			description: "Mimics built-in feature workflow shape — design-doc, implementation, ready-to-merge; no execution.",
+			gates: [
+				{ id: "design-doc", name: "Design Document", dependsOn: [], content: true },
+				{ id: "implementation", name: "Implementation", dependsOn: ["design-doc"] },
+				{ id: "ready-to-merge", name: "Ready to Merge", dependsOn: ["implementation"] },
+			],
+		};
+		// Re-PUT the project config WITH the existing fixture workflows from
+		// `seedWorkflows` PLUS our new one. Mirrors the existing fixture's
+		// PUT shape so we don't drop FRESH/FROZEN.
+		const wfsResp = await apiFetch(`/api/workflows?projectId=${pid}`);
+		const wfsBody = await wfsResp.json().catch(() => ({ workflows: [] }));
+		const existing: any[] = Array.isArray(wfsBody.workflows) ? wfsBody.workflows : [];
+		const mergedRecord: Record<string, unknown> = {};
+		for (const w of existing) {
+			if (w.id !== FEATURE_NO_EXEC_WORKFLOW_ID) mergedRecord[w.id] = w;
+		}
+		mergedRecord[FEATURE_NO_EXEC_WORKFLOW_ID] = featureLikeWorkflow;
+		const putResp = await apiFetch(`/api/projects/${pid}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ components: [TEST_DEFAULT_COMPONENT], workflows: mergedRecord }),
+		});
+		expect(putResp.status).toBe(200);
+	});
+
+	test("GET /api/goals/:id/plan 404 includes structured availableGateIds list", async () => {
+		const goalId = await createGoal({
+			workflowId: FEATURE_NO_EXEC_WORKFLOW_ID,
+			divergencePolicy: "strict",
+			titleHint: "plan-404-get",
+		});
+		try {
+			const resp = await apiFetch(`/api/goals/${goalId}/plan`);
+			const body = await resp.json().catch(() => ({}));
+			expect(resp.status).toBe(404);
+			// Prose still names the missing gate.
+			expect(body.error).toContain('Gate "execution" not found in goal workflow');
+			// Prose embeds a hint listing the actual gates.
+			expect(body.error).toContain("Available gates:");
+			expect(body.error).toContain("design-doc");
+			expect(body.error).toContain("implementation");
+			expect(body.error).toContain("ready-to-merge");
+			// Structured fields let tool extensions parse without regex.
+			expect(body.gateId).toBe("execution");
+			expect(Array.isArray(body.availableGateIds)).toBe(true);
+			expect(body.availableGateIds).toEqual([
+				"design-doc",
+				"implementation",
+				"ready-to-merge",
+			]);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("PATCH /api/goals/:id/plan 404 mirrors the GET shape", async () => {
+		const goalId = await createGoal({
+			workflowId: FEATURE_NO_EXEC_WORKFLOW_ID,
+			divergencePolicy: "strict",
+			titleHint: "plan-404-patch",
+		});
+		try {
+			const resp = await apiFetch(`/api/goals/${goalId}/plan`, {
+				method: "PATCH",
+				body: JSON.stringify({ planSteps: [] }),
+			});
+			const body = await resp.json().catch(() => ({}));
+			expect(resp.status).toBe(404);
+			expect(body.error).toContain('Gate "execution" not found in goal workflow');
+			expect(body.error).toContain("Available gates:");
+			expect(body.gateId).toBe("execution");
+			expect(body.availableGateIds).toEqual([
+				"design-doc",
+				"implementation",
+				"ready-to-merge",
+			]);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("explicit ?gateId=foo on a workflow that doesn't have `foo` returns same shape", async () => {
+		// Sanity: the 404 path is gateId-agnostic. A team-lead targeting an
+		// arbitrary gate (e.g. `goal-plan` on a feature workflow) gets the
+		// same structured response.
+		const goalId = await createGoal({
+			workflowId: FEATURE_NO_EXEC_WORKFLOW_ID,
+			divergencePolicy: "strict",
+			titleHint: "plan-404-custom",
+		});
+		try {
+			const resp = await apiFetch(`/api/goals/${goalId}/plan?gateId=goal-plan`);
+			const body = await resp.json().catch(() => ({}));
+			expect(resp.status).toBe(404);
+			expect(body.gateId).toBe("goal-plan");
+			expect(body.availableGateIds).toEqual([
+				"design-doc",
+				"implementation",
+				"ready-to-merge",
+			]);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+});
