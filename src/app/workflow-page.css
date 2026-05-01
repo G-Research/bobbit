@@ -102,6 +102,33 @@
 	padding: 20px;
 }
 
+/* Embedded mode (workflows tab inside settings page).
+ * The outer settings-page wrapper already provides max-w-3xl + p-2/p-4 + auto
+ * scrolling, so the embedded container should not double up on padding or
+ * impose its own narrower list/header widths. This makes the workflows tab
+ * line up visually with the components tab. */
+.wf-container.wf-container-embedded {
+	overflow-y: visible;
+	background: transparent;
+}
+.wf-container.wf-container-embedded .wf-body {
+	padding: 0;
+	overflow-y: visible;
+}
+.wf-container.wf-container-embedded .wf-list,
+.wf-container.wf-container-embedded .wf-list-header,
+.wf-container.wf-container-embedded .wf-edit-container {
+	max-width: none;
+	margin-left: 0;
+	margin-right: 0;
+}
+
+/* Non-embedded standalone page keeps the centred 600px column. */
+.wf-list-header {
+	max-width: 600px;
+	margin: 0 auto 16px;
+}
+
 /* ============================================================================
  * LOADING / EMPTY — matches roles-loading / roles-empty
  * ============================================================================ */

@@ -1,6 +1,7 @@
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
@@ -1483,6 +1484,18 @@ export class SessionManager {
 		// arrive seconds apart. The dispatch is triggered by the tool_result
 		// event handler in _handleAgentEvent().
 		// If the agent is idle, they'll drain normally via drainQueue.
+		//
+		// SPECIAL CASE: bash_bg.wait. A wait long-poll has no natural tool
+		// boundary — it sits indefinitely until the bg process exits or the
+		// wait is aborted. Without intervention, a steer-on-queue while the
+		// agent is parked in wait would be deferred for the entire wait
+		// duration. Mirror deliverLiveSteer's behaviour: when the session is
+		// streaming and there is at least one active wait, abort all waits so
+		// the agent unblocks at once. The underlying bg process keeps
+		// running; only the wait long-poll is cancelled, which is exactly
+		// what the user expects from the Steer button.
+		const bg = (this as any).bgProcessManager;
+		if (bg && session.status === "streaming") bg.abortAllWaits(session.id);
 
 		this.broadcastQueue(session);
 		return true;
@@ -3916,6 +3929,12 @@ export class SessionManager {
 			const modelNameFile = path.join(bobbitStateDir(), "model-name-" + id + ".txt");
 			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
 		} catch { /* ignore */ }
+
+		// Clean up per-session proposal-drafts directory (fire-and-forget).
+		// Same pattern as eagerDeleteRemoteSessionBranch — never blocks; missing
+		// dir is harmless. See docs/design/editable-proposals.md §4.
+		fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", id), { recursive: true, force: true })
+			.catch(err => console.warn(`[session-manager] proposal-drafts cleanup failed for ${id}:`, err));
 
 		// Broadcast session_archived event before closing clients
 		const archivedAt = Date.now();

@@ -81,6 +81,15 @@ import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade } from "./agent/config-cascade.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
+import {
+	deleteProposalFile,
+	editProposalFile,
+	isProposalType,
+	parseProposalFile,
+	readProposalFile,
+	writeProposalFile,
+	type ProposalType,
+} from "./proposals/proposal-files.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -6787,6 +6796,132 @@ async function handleApiRoute(
 		const ok = sessionManager.markSessionRead(id);
 		if (!ok) { json({ error: "session not found" }, 404); return; }
 		json({ ok: true });
+		return;
+	}
+
+	// ── Editable proposals (file-on-disk source of truth) ──────────────
+	// docs/design/editable-proposals.md §6.4
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed)?$/);
+	if (proposalRouteMatch) {
+		const sessionId = proposalRouteMatch[1];
+		const typeStr = proposalRouteMatch[2];
+		const suffix = proposalRouteMatch[3] || "";
+		if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (!isProposalType(typeStr)) {
+			json({ error: `Unknown proposal type: ${typeStr}` }, 400);
+			return;
+		}
+		const proposalType = typeStr as ProposalType;
+		const proposalStateDir = bobbitStateDir();
+
+		// GET /api/sessions/:id/proposal/:type — read raw file
+		if (suffix === "" && req.method === "GET") {
+			try {
+				const content = await readProposalFile(proposalStateDir, sessionId, proposalType);
+				if (content === undefined) {
+					json({ ok: false, code: "FILE_NOT_FOUND", message: `No ${proposalType} proposal draft. Call propose_${proposalType} first.` }, 404);
+					return;
+				}
+				const contentType = proposalType === "goal" ? "text/markdown; charset=utf-8" : "application/yaml; charset=utf-8";
+				res.writeHead(200, { "Content-Type": contentType });
+				res.end(content);
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// DELETE /api/sessions/:id/proposal/:type
+		if (suffix === "" && req.method === "DELETE") {
+			try {
+				await deleteProposalFile(proposalStateDir, sessionId, proposalType);
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, { type: "proposal_cleared", sessionId, proposalType });
+				}
+				res.writeHead(204);
+				res.end();
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/:type/edit — surgical edit
+		if (suffix === "/edit" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") {
+				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
+				return;
+			}
+			const { old_text, new_text } = body as { old_text?: unknown; new_text?: unknown };
+			if (typeof old_text !== "string" || typeof new_text !== "string") {
+				json({ ok: false, code: "INVALID_BODY", message: "old_text and new_text must be strings" }, 400);
+				return;
+			}
+			try {
+				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
+				if (!result.ok) {
+					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
+					json(result, status);
+					return;
+				}
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: result.parsed.fields,
+						streaming: false,
+						source: "edit",
+					});
+				}
+				json({ ok: true, newContent: result.newContent });
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/:type/seed — called from propose_* execute()
+		if (suffix === "/seed" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") {
+				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
+				return;
+			}
+			const args = (body as { args?: unknown }).args;
+			if (!args || typeof args !== "object" || Array.isArray(args)) {
+				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
+				return;
+			}
+			try {
+				await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
+				if (!parsed.ok) {
+					json(parsed, 400);
+					return;
+				}
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: parsed.value.fields,
+						streaming: false,
+						source: "seed",
+					});
+				}
+				json({ ok: true });
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		json({ error: "Method not allowed" }, 405);
 		return;
 	}
 

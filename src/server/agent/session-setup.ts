@@ -594,18 +594,37 @@ export async function executeWorktreeAsync(
 		worktreeCwd = preBuiltWorktreePath;
 		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
 	} else {
-		// Resolve setup hook from the default (first) component when available.
 		// Multi-repo session creation goes through the worktree pool / sandbox
 		// path; this fallback handles the single-repo non-sandboxed path.
-		const defaultComponent = ctx.projectConfigStore?.getComponents()?.[0];
-		const setupCommand = defaultComponent?.worktreeSetupCommand || undefined;
 		worktreeCwd = await withRetry(
 			async () => {
-				const result = await createWorktree(plan.repoPath!, plan.branch!, { setupCommand });
+				const result = await createWorktree(plan.repoPath!, plan.branch!);
 				return result.worktreePath;
 			},
 			{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
 		);
+
+		// Per-component setup — non-fatal on failure. Routes through the canonical
+		// resolver so component.relativePath is honored.
+		const components = ctx.projectConfigStore?.getComponents() ?? [];
+		if (components.length > 0) {
+			try {
+				const { runComponentSetups } = await import("../skills/worktree-setup.js");
+				const { execFile } = await import("node:child_process");
+				const { promisify } = await import("node:util");
+				const pExecFile = promisify(execFile);
+				await runComponentSetups({
+					components,
+					branchContainer: worktreeCwd,
+					primaryWorktreeRoot: plan.repoPath!,
+					exec: async (cmd, cwd, env) => {
+						await pExecFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+					},
+				});
+			} catch (err) {
+				console.warn(`[session-setup] runComponentSetups failed for session ${session.id} (non-fatal):`, err);
+			}
+		}
 	}
 
 	// For sandboxed sessions, set sandboxBranch so applySandboxWiring() creates

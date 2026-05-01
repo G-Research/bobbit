@@ -2112,7 +2112,7 @@ export function showProjectDialog(): void {
 	renderDialog();
 }
 
-export async function createProjectAssistantSession(dirPath: string, scaffolding: boolean, opts?: { projectId?: string }): Promise<void> {
+export async function createProjectAssistantSession(dirPath: string, scaffolding: boolean, opts?: { projectId?: string; existingProjectName?: string }): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
@@ -2139,7 +2139,15 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 		setProjects(await fetchProjects());
 		const { connectToSession } = await import("./session-manager.js");
 		const actualType = scaffolding ? "project-scaffolding" : "project";
-		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath });
+		// Edit-mode is signalled solely by `projectId` (an already-registered
+		// project). `existingProjectName` is only a display hint; if it's empty we
+		// fall back to the project's id so the prompt still routes to the edit
+		// branch (otherwise the assistant would re-run new-project discovery on
+		// an already-registered project).
+		const projectEditContext = opts?.projectId
+			? { name: opts.existingProjectName || opts.projectId, rootPath: dirPath }
+			: undefined;
+		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath, projectEditContext });
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		showConnectionError("Failed to create project assistant", msg);

@@ -2,7 +2,6 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { resolveShell } from "../agent/shell-util.js";
 import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
@@ -111,20 +110,18 @@ export interface WorktreeResult {
  * Create a git worktree on a new branch from a given start-point (default HEAD).
  * The worktree is placed as a sibling directory to the repo.
  *
- * Fully async — the `git worktree add`, dependency setup, and `git push`
- * are all awaited without blocking the Node.js event loop.
+ * Fully async — the `git worktree add` and `git push` are all awaited
+ * without blocking the Node.js event loop.
  *
- * @param opts.setupCommand — explicit worktree setup command. If provided
- *   (and non-empty), runs this shell command in the worktree directory after
- *   `git worktree add` succeeds. Strictly opt-in: when undefined, NO setup
- *   runs. The canonical path for project worktrees is
- *   `components[*].worktreeSetupCommand` driven by `runComponentSetups()`
- *   in `worktree-setup.ts`; this option exists for callers (e.g. staff agent
- *   creation) that resolve the hook from the default component themselves.
+ * Per-component worktree setup is the responsibility of the caller —
+ * invoke `runComponentSetups()` from `worktree-setup.ts` after this
+ * function returns. `components[*].worktreeSetupCommand` is the single
+ * source of truth.
+ *
  * @param opts.startPoint — git ref to base the new branch on (default `"HEAD"`).
  *   Pass e.g. `origin/my-branch` to start from a remote tracking branch.
  */
-export async function createWorktree(repoPath: string, branchName: string, opts?: { setupCommand?: string; startPoint?: string; skipPush?: boolean; worktreeRoot?: string }): Promise<WorktreeResult> {
+export async function createWorktree(repoPath: string, branchName: string, opts?: { startPoint?: string; skipPush?: boolean; worktreeRoot?: string }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
@@ -197,15 +194,6 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 		});
 	}
 
-	// Set up dependencies in the new worktree — strictly opt-in via
-	// `opts.setupCommand`. The canonical multi-component path is
-	// `runComponentSetups()` invoked by the caller (worktree-pool, goal-manager,
-	// staff-manager, etc.) so `components[*].worktreeSetupCommand` is the
-	// single source of truth.
-	if (!process.env.BOBBIT_SKIP_NPM_CI && opts?.setupCommand) {
-		await setupWorktreeDeps(repoPath, worktreePath, opts.setupCommand);
-	}
-
 	// Push the new branch and set upstream tracking so git-status can report ahead/behind
 	// and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
 	if (!opts?.skipPush && !shouldSkipRemotePush()) {
@@ -241,6 +229,8 @@ export async function createWorktreeSet(
 	baseBranch?: string,
 	opts?: { worktreeRoot?: string },
 ): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
+	// Per-component worktree setup is the caller's responsibility — invoke
+	// `runComponentSetups()` after this function returns.
 	// Distinct repos in declared order.
 	const seen = new Set<string>();
 	const repos: string[] = [];
@@ -299,30 +289,6 @@ export async function createWorktreeSet(
 	}
 
 	return { container, worktrees: out };
-}
-
-/**
- * Run the worktree setup command (from project config `worktree_setup_command`).
- * If the command is empty, does nothing. The command always runs via `sh -c`
- * (Git Bash on Windows) for cross-platform consistency — since git is a hard
- * prerequisite for Bobbit, Git Bash is always available.
- * The SOURCE_REPO env var is set to the original repo path.
- */
-export async function setupWorktreeDeps(repoPath: string, worktreePath: string, setupCommand: string): Promise<void> {
-	if (!setupCommand) return;
-	try {
-		console.log(`[git] Running worktree setup command: ${setupCommand}`);
-		await execFile(resolveShell(), ["-c", setupCommand],
-			{
-				cwd: worktreePath,
-				timeout: 120_000,
-				env: { ...process.env, SOURCE_REPO: repoPath },
-			},
-		);
-		console.log(`[git] Worktree setup command completed`);
-	} catch (err) {
-		console.warn(`[git] Worktree setup command failed (non-fatal):`, err);
-	}
 }
 
 /**
@@ -391,7 +357,9 @@ export async function cleanupWorktree(
  *    to create one if it thinks the old one still exists)
  * 2. Fetch from origin to ensure we have the latest branch ref
  * 3. Re-create the worktree, checking out the existing branch
- * 4. Run the worktree setup command if configured
+ *
+ * Per-component setup is the caller's responsibility — invoke
+ * `runComponentSetups()` after this function returns.
  *
  * @returns The worktree path, or null if recovery failed
  */
@@ -399,7 +367,6 @@ export async function recoverWorktree(
 	repoPath: string,
 	branchName: string,
 	worktreePath: string,
-	opts?: { setupCommand?: string },
 ): Promise<string | null> {
 	if (!fs.existsSync(repoPath)) {
 		console.warn(`[git] Cannot recover worktree: repoPath does not exist: ${repoPath}`);
@@ -439,11 +406,6 @@ export async function recoverWorktree(
 					fs.writeFileSync(path.join(adminPath, "gitdir"), worktreePath.split(path.sep).join("/") + "/.git\n");
 					await execFile("git", ["worktree", "repair"], { cwd: repoPath });
 					console.log(`[git] Restored .git pointer and repaired worktree for branch "${branchName}" at ${worktreePath}`);
-
-					// Run setup command if configured
-					if (!process.env.BOBBIT_SKIP_NPM_CI && opts?.setupCommand) {
-						await setupWorktreeDeps(repoPath, worktreePath, opts.setupCommand);
-					}
 					return worktreePath;
 				} catch (repairErr) {
 					console.warn(`[git] Failed to repair worktree in-place for "${branchName}", falling back to recreate:`, repairErr);
@@ -505,11 +467,6 @@ export async function recoverWorktree(
 		} else {
 			// Create local branch tracking the remote
 			await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, `origin/${branchName}`], { cwd: repoPath });
-		}
-
-		// Run setup command if configured
-		if (!process.env.BOBBIT_SKIP_NPM_CI && opts?.setupCommand) {
-			await setupWorktreeDeps(repoPath, worktreePath, opts.setupCommand);
 		}
 
 		console.log(`[git] Recovered worktree for branch "${branchName}" at ${worktreePath}`);
