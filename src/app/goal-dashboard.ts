@@ -20,6 +20,7 @@ import {
 	shouldShowChildrenTab as _shouldShowChildrenTab,
 } from "./goal-dashboard-tab-visibility.js";
 export { hasChildGoals } from "./goal-dashboard-tab-visibility.js";
+import { planEdgePaths } from "./plan-edge-paths.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -2084,19 +2085,33 @@ function renderPlanNode(
 	`;
 }
 
-/** Render an arrow connector for a phase-to-phase transition. We draw one
- *  short orthogonal connector per node in the destination column: the
- *  per-node detail (which step depends on which) is implicit in the phase
- *  ordering — phase N+1 starts strictly after every phase N node finishes. */
-function renderEdgeColumn(fromColIdx: number, toRows: number) {
-	const x1 = PLAN_PAD + fromColIdx * PLAN_COL_W + PLAN_COL_W / 2 + PLAN_NODE_W / 2;
-	const x2 = PLAN_PAD + (fromColIdx + 1) * PLAN_COL_W + (PLAN_COL_W - PLAN_NODE_W) / 2;
-	const edges: ReturnType<typeof svg>[] = [];
-	for (let r = 0; r < toRows; r++) {
-		const y = PLAN_PAD + PLAN_HEADER_H + r * PLAN_ROW_H + PLAN_NODE_H / 2;
-		edges.push(svg`<path class="plan-edge" d="M ${x1} ${y} L ${x2} ${y}"></path>`);
-	}
-	return edges;
+/** Render arrow connectors for a phase-to-phase transition. The DAG
+ *  semantics: phase N+1 starts strictly after every phase N node
+ *  finishes, so EVERY destination node depends on EVERY source node.
+ *  We draw one orthogonal path per source→destination pair, sharing
+ *  a vertical mid-line in the gap between columns so the edges
+ *  visibly fan out from each source to each destination.
+ *
+ *  Live test (PR #409): the previous implementation drew straight
+ *  horizontal lines pinned to the destination row's y-coordinate from
+ *  the source column's right edge, so when the source column had
+ *  fewer nodes than the destination column, edges for destination
+ *  rows past the source's last row appeared to float in empty space
+ *  with no visible origin.
+ *
+ *  Pure path computation extracted to `plan-edge-paths.ts` for unit
+ *  testability. */
+function renderEdgeColumn(fromColIdx: number, fromRows: number, toRows: number) {
+	const layout = {
+		planPad: PLAN_PAD,
+		planColW: PLAN_COL_W,
+		planNodeW: PLAN_NODE_W,
+		planNodeH: PLAN_NODE_H,
+		planHeaderH: PLAN_HEADER_H,
+		planRowH: PLAN_ROW_H,
+	};
+	const paths = planEdgePaths(layout, fromColIdx, fromRows, toRows);
+	return paths.map(d => svg`<path class="plan-edge" d="${d}" fill="none"></path>`);
 }
 
 function renderPlanNodeCard(step: PlanStep, stateLabel: string): TemplateResult {
@@ -2205,9 +2220,10 @@ function renderPlanTab(): TemplateResult {
 							))}
 						</g>
 					`)}
-					${columns.slice(0, -1).map((_col, ci) => {
+					${columns.slice(0, -1).map((col, ci) => {
+						const fromRows = col.nodes.length;
 						const nextRows = columns[ci + 1].nodes.length;
-						return renderEdgeColumn(ci, nextRows);
+						return renderEdgeColumn(ci, fromRows, nextRows);
 					})}
 				</svg>
 			</div>
