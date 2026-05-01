@@ -188,6 +188,129 @@ test.describe("Nested-goals REST — spawn-child / integrate-child / pause / res
 		expect(resp.status).toBe(404);
 	});
 
+	test("spawn-child accepts a valid inlineWorkflow override", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `Inline-WF Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+		try {
+			const inlineWorkflow = {
+				id: "custom-inline",
+				name: "Custom Inline",
+				description: "Test inline workflow for spawn-child",
+				gates: [
+					{ id: "impl", name: "Implementation", dependsOn: [] },
+					{ id: "ready-to-merge", name: "Ready", dependsOn: ["impl"] },
+				],
+			};
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: `Child with inline workflow ${Date.now()}`,
+					spec: "child spec",
+					inlineWorkflow,
+					planId: "plan-inline-1",
+				}),
+			});
+			expect(spawnResp.status).toBe(201);
+			const spawn = await spawnResp.json();
+			expect(spawn.childGoalId).toBeTruthy();
+			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("spawn-child rejects malformed inlineWorkflow with structured 400 body", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `Bad-WF Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+		try {
+			// Case 1: gates is not an array.
+			const respGatesNotArray = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Bad child",
+					spec: "x",
+					inlineWorkflow: { id: "bad", name: "Bad", gates: "not-an-array" },
+				}),
+			});
+			expect(respGatesNotArray.status).toBe(400);
+			const body1 = await respGatesNotArray.json();
+			expect(body1.field).toBe("inlineWorkflow");
+			expect(typeof body1.error).toBe("string");
+			expect(body1.error.toLowerCase()).toContain("gates");
+
+			// Case 2: missing gate name.
+			const respMissingName = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Bad child 2",
+					spec: "x",
+					inlineWorkflow: { id: "bad2", gates: [{ id: "only-id" }] },
+				}),
+			});
+			expect(respMissingName.status).toBe(400);
+			const body2 = await respMissingName.json();
+			expect(body2.field).toBe("inlineWorkflow");
+			expect(typeof body2.error).toBe("string");
+
+			// Case 3: dependsOn references unknown gate.
+			const respUnknownDep = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Bad child 3",
+					spec: "x",
+					inlineWorkflow: {
+						id: "bad3",
+						gates: [
+							{ id: "a", name: "A", dependsOn: ["nonexistent"] },
+						],
+					},
+				}),
+			});
+			expect(respUnknownDep.status).toBe(400);
+			const body3 = await respUnknownDep.json();
+			expect(body3.field).toBe("inlineWorkflow");
+			expect(body3.error.toLowerCase()).toContain("unknown gate");
+
+			// Case 4: not an object at all (regression coverage for the
+			// pre-existing shallow check, which now also returns the structured
+			// shape).
+			const respNotObject = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Bad child 4",
+					spec: "x",
+					inlineWorkflow: ["not", "an", "object"],
+				}),
+			});
+			expect(respNotObject.status).toBe(400);
+			const body4 = await respNotObject.json();
+			expect(body4.field).toBe("inlineWorkflow");
+			expect(typeof body4.error).toBe("string");
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
 	test("spawn-child requires title — 400 when missing", async () => {
 		const projectId = await defaultProjectId();
 		const parentResp = await createGoalRaw({

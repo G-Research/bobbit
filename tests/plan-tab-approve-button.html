@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Plan tab — Approve plan button visibility (task F3)</title>
+</head>
+<body>
+<script>
+/**
+ * Pure logic mirror of the helpers added to
+ * src/app/goal-dashboard.ts in nested-goals task F3:
+ *   - shouldShowApprovePlanButton(editable, stepCount, paused)
+ *   - isPlanEditable(goal, gateStates)
+ *
+ * Mirrors the production rules byte-for-byte so the file:// fixture
+ * can drive them with synthetic state without spinning up the full
+ * UI bundle. See docs/design/nested-goals.md §10.2.
+ */
+
+function isPlanEditable(goal, gateStates) {
+  if (!goal) return false;
+  if (goal.paused === true) return true;
+  const gp = (gateStates || []).find(g => g.gateId === "goal-plan");
+  return ((gp && gp.status) || "pending") !== "passed";
+}
+
+function shouldShowApprovePlanButton(editable, stepCount, paused) {
+  return editable && stepCount > 0 && !paused;
+}
+
+/** Compose the visibility decision from a fixture `goal` + gate-states
+ *  array, the way `renderPlanTab` does in production. */
+function decideButtonVisible(goal, gateStates, stepCount) {
+  const editable = isPlanEditable(goal, gateStates);
+  return shouldShowApprovePlanButton(editable, stepCount, goal && goal.paused === true);
+}
+
+window.isPlanEditable = isPlanEditable;
+window.shouldShowApprovePlanButton = shouldShowApprovePlanButton;
+window.decideButtonVisible = decideButtonVisible;
+</script>
+</body>
+</html>
