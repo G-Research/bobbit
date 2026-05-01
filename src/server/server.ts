@@ -7875,7 +7875,18 @@ function serveStatic(pathname: string, staticDir: string, res: http.ServerRespon
 		const contentType = MIME_TYPES[ext] || "application/octet-stream";
 		const content = fs.readFileSync(filePath);
 
-		res.writeHead(200, { "Content-Type": contentType });
+		const headers: Record<string, string> = { "Content-Type": contentType };
+		// Service-worker file: never cache. Browsers byte-compare SWs for
+		// updates, but an intermediate proxy/CDN serving a stale copy would
+		// silently keep users on the old build's CACHE_NAME. Same goes for
+		// the SPA shell (index.html) — it references hashed bundle names
+		// that change every build.
+		const basename = path.basename(filePath);
+		if (basename === "sw.js" || basename === "index.html") {
+			headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+		}
+
+		res.writeHead(200, headers);
 		res.end(content);
 	} catch {
 		res.writeHead(500);
