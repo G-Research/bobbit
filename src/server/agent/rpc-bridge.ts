@@ -48,6 +48,18 @@ export interface RpcBridgeOptions {
 	containerId?: string;
 	/** Tool manager for resolving extension paths (optional — falls back to TOOLS_DIR). */
 	toolManager?: ToolManager;
+	/**
+	 * Pin the agent's model at spawn time via `--model <provider>/<modelId>`.
+	 * Avoids the redundant initial `model_change` event that pi-coding-agent
+	 * emits when booting with its hardcoded default before Bobbit calls
+	 * `setModel`. Silently ignored if malformed.
+	 */
+	initialModel?: string;
+	/**
+	 * Pin the agent's thinking level at spawn time via `--thinking <level>`.
+	 * Valid: off|minimal|low|medium|high. Silently ignored otherwise.
+	 */
+	initialThinkingLevel?: string;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -121,6 +133,21 @@ export class RpcBridge {
 		const cliPath = this.options.cliPath || findAgentCli();
 		const args = ["--mode", "rpc"];
 		if (this.options.systemPromptPath) args.push("--system-prompt", this.options.systemPromptPath);
+		// Pin model/thinking-level at spawn time to avoid redundant initial
+		// `model_change` events. Inserted BEFORE caller-supplied args so any
+		// explicit override in `this.options.args` wins.
+		if (this.options.initialModel) {
+			const slash = this.options.initialModel.indexOf("/");
+			if (slash > 0 && slash < this.options.initialModel.length - 1) {
+				args.push("--model", this.options.initialModel);
+			}
+		}
+		if (this.options.initialThinkingLevel) {
+			const valid = ["off", "minimal", "low", "medium", "high"];
+			if (valid.includes(this.options.initialThinkingLevel)) {
+				args.push("--thinking", this.options.initialThinkingLevel);
+			}
+		}
 		if (this.options.args) args.push(...this.options.args);
 
 		// Enable all built-in tools EXCEPT bash (which is provided by our custom extension)

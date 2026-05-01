@@ -135,6 +135,15 @@ export interface SessionInfo {
 	restoreError?: string;
 	/** In-flight persistSessionMetadata promise (awaited before terminate) */
 	pendingMetadataPersist?: Promise<void>;
+	/**
+	 * Model literal (`<provider>/<modelId>`) that was passed to pi-coding-agent
+	 * via `--model` at spawn time. When set, post-spawn `tryAutoSelectModel`
+	 * skips the redundant `setModel` RPC if it would bind the same model;
+	 * read-back verification still runs.
+	 */
+	spawnPinnedModel?: string;
+	/** Thinking level passed via `--thinking` at spawn time, if any. */
+	spawnPinnedThinkingLevel?: string;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
@@ -768,6 +777,8 @@ export class SessionManager {
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
 			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
+			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
+			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
 		};
 	}
 
@@ -2435,6 +2446,19 @@ export class SessionManager {
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
 
+		// Pin model + thinking level at spawn so pi-coding-agent doesn't emit a
+		// redundant initial `model_change` event with its hardcoded default.
+		// Prefer the persisted model if known (avoids surprising changes after
+		// restart); fall back to role/preference resolution.
+		if (ps.modelProvider && ps.modelId) {
+			bridgeOptions.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		} else {
+			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
+			if (initModel) bridgeOptions.initialModel = initModel;
+		}
+		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
+		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 
@@ -2553,7 +2577,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string; initialModel?: string; initialThinkingLevel?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -2649,6 +2673,8 @@ export class SessionManager {
 				skipAutoThinking: opts?.skipAutoThinking,
 				seedContext: opts?.seedContext,
 				seedContextSourceId: opts?.seedContextSourceId,
+				initialModel: opts?.initialModel,
+				initialThinkingLevel: opts?.initialThinkingLevel,
 				bridgeOptions: { cwd },
 			};
 
@@ -2702,6 +2728,8 @@ export class SessionManager {
 			skipAutoThinking: opts?.skipAutoThinking,
 			seedContext: opts?.seedContext,
 			seedContextSourceId: opts?.seedContextSourceId,
+			initialModel: opts?.initialModel,
+			initialThinkingLevel: opts?.initialThinkingLevel,
 			bridgeOptions: { cwd },
 		};
 
@@ -2958,7 +2986,73 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Resolve the model to pin at spawn time for a session, given its role &
+	 * project. Mirrors `tryAutoSelectModel`'s precedence: role override →
+	 * `default.sessionModel` pref. Returns `undefined` for the aigw-fallback
+	 * case so post-spawn discovery + setModel still runs.
+	 *
+	 * Public so verification-harness and respawn paths can use the same
+	 * resolution logic.
+	 */
+	resolveInitialModel(role: string | undefined, projectId: string | undefined): string | undefined {
+		// Role override
+		if (role && this.configCascade) {
+			try {
+				const resolved = this.configCascade.resolveRoles(projectId);
+				const m = resolved.find(r => r.item.name === role)?.item.model;
+				if (m && /^[^/]+\/.+$/.test(m)) return m;
+			} catch { /* fall through */ }
+		}
+		// default.sessionModel preference
+		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		return undefined;
+	}
+
+	/**
+	 * Resolve the thinking level to pin at spawn time for a session.
+	 * Mirrors `tryApplyDefaultThinkingLevel`: role override →
+	 * `default.sessionThinkingLevel` pref → "medium". Returns `undefined`
+	 * for invalid values so the agent's built-in default applies.
+	 */
+	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
+		const valid = ["off", "minimal", "low", "medium", "high"];
+		if (role && this.configCascade) {
+			try {
+				const resolved = this.configCascade.resolveRoles(projectId);
+				const t = resolved.find(r => r.item.name === role)?.item.thinkingLevel;
+				if (t && valid.includes(t)) return t;
+			} catch { /* fall through */ }
+		}
+		const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
+		if (pref && valid.includes(pref)) return pref;
+		return "medium";
+	}
+
+	/**
+	 * Resolve the review/QA model to pin at spawn time. Mirrors the
+	 * verification-harness precedence: role override → `default.reviewModel`.
+	 */
+	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
+		if (role && this.configCascade) {
+			try {
+				const resolved = this.configCascade.resolveRoles(projectId);
+				const m = resolved.find(r => r.item.name === role)?.item.model;
+				if (m && /^[^/]+\/.+$/.test(m)) return m;
+			} catch { /* fall through */ }
+		}
+		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
+		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		return undefined;
+	}
+
 	private async tryAutoSelectModel(session: SessionInfo): Promise<void> {
+		// If the agent was spawned with `--model <provider>/<modelId>` already,
+		// skip the redundant `setModel` RPC — read-back verification still runs
+		// and hard-fails on mismatch.
+		const spawnPinned = !!session.spawnPinnedModel;
+
 		// 0. Role override (highest non-explicit precedence). Hard-fail on mismatch,
 		// matching the contract used for review/QA sessions: if a user explicitly
 		// pinned a model on a role and it cannot be bound, surface the failure.
@@ -2969,6 +3063,7 @@ export class SessionManager {
 					sessionManager: this,
 					sessionId: session.id,
 					contextLabel: `role.${session.role}.model`,
+					skipSetModel: spawnPinned && session.spawnPinnedModel === roleModel,
 				});
 				this._writeModelNameFile(session.id, roleModel);
 				const slash = roleModel.indexOf("/");
@@ -2997,10 +3092,12 @@ export class SessionManager {
 				const provider = sessionModelPref.slice(0, slash);
 				const modelId = sessionModelPref.slice(slash + 1);
 				try {
-					await session.rpcClient.setModel(provider, modelId);
+					if (!(spawnPinned && session.spawnPinnedModel === sessionModelPref)) {
+						await session.rpcClient.setModel(provider, modelId);
+					}
 					this._writeModelNameFile(session.id, sessionModelPref);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}`);
+					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${spawnPinned && session.spawnPinnedModel === sessionModelPref ? " (spawn-pinned)" : ""}`);
 					broadcast(session.clients, {
 						type: "state",
 						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
@@ -3055,8 +3152,13 @@ export class SessionManager {
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
 		// 0. Role override (highest non-explicit precedence). Failure is non-fatal
 		// — matches the existing thinking-level fallback behaviour.
+		const spawnPinnedThinking = session.spawnPinnedThinkingLevel;
 		const roleThinking = this.resolveRoleThinkingLevel(session);
 		if (roleThinking) {
+			if (spawnPinnedThinking === roleThinking) {
+				console.log(`[session-manager] Role thinking level "${roleThinking}" already pinned at spawn for ${session.id}`);
+				return;
+			}
 			try {
 				await session.rpcClient.setThinkingLevel(roleThinking);
 				console.log(`[session-manager] Applied role thinking level "${roleThinking}" for session ${session.id} (role=${session.role})`);
@@ -3078,6 +3180,10 @@ export class SessionManager {
 		if (!level) level = "medium";
 		const valid = ["off", "minimal", "low", "medium", "high"];
 		if (!valid.includes(level)) return;
+		if (spawnPinnedThinking === level) {
+			console.log(`[session-manager] Default thinking level "${level}" already pinned at spawn for ${session.id}`);
+			return;
+		}
 		try {
 			await session.rpcClient.setThinkingLevel(level);
 			console.log(`[session-manager] Applied default thinking level "${level}" for session ${session.id}`);
@@ -3531,7 +3637,20 @@ export class SessionManager {
 		const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
 		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
+		// Pin model/thinking-level at spawn for the respawn (after role assignment).
+		const respawnPersisted = this.resolveStoreForSession(id).get(id);
+		if (respawnPersisted?.modelProvider && respawnPersisted?.modelId) {
+			bridgeOptions.initialModel = `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`;
+		} else {
+			const initModel = this.resolveInitialModel(role.name, session.projectId);
+			if (initModel) bridgeOptions.initialModel = initModel;
+		}
+		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
+		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+
 		const rpcClient = new RpcBridge(bridgeOptions);
+		session.spawnPinnedModel = bridgeOptions.initialModel;
+		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
@@ -4700,7 +4819,20 @@ export class SessionManager {
 			const toolArgs = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
 			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
+			// Pin model/thinking-level at spawn for the force-abort respawn.
+			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
+			if (forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId) {
+				bridgeOptions.initialModel = `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`;
+			} else {
+				const initModel = this.resolveInitialModel(session.role, session.projectId);
+				if (initModel) bridgeOptions.initialModel = initModel;
+			}
+			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
+			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+
 			const rpcClient = new RpcBridge(bridgeOptions);
+			session.spawnPinnedModel = bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 			let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
