@@ -460,6 +460,8 @@ All paths in `src/server/agent/{goal-manager,session-manager,session-setup,workt
 
 ## 5. Worktree pool fixes
 
+> **Superseded.** The deferred-rename design described in this section (§5.1–5.5) has been replaced. Sessions no longer get a temp `pool/_pool-<id>` branch with a first-prompt rename to `session/<slug>-<id>`. Instead, `pool.claim(targetBranch)` produces the final `session/<id8>` name with a single branch-rename + worktree-move at claim time. See [`docs/design/remove-session-worktree-rename.md`](remove-session-worktree-rename.md) for the current design, including the unified fallback naming, sweeper post-upgrade behaviour (§13), `moveWorktree` consolidation (§14), `PoolClaimResult.degraded` semantics (§15), and the E2E test plan (§16). The historical content below is preserved for reference.
+
 ### 5.1 Pool entry becomes a set
 
 `worktree-pool.ts`:
