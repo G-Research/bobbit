@@ -338,20 +338,43 @@ export class GoalManager {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
 		}
 
-		// Snapshot workflow onto goal. Resolution order:
-		//   1. Caller passed `resolvedWorkflow` (from config cascade) — use it.
-		//   2. Caller passed `workflowId` only — read from the inline workflow store.
-		//   3. Neither — fall back to "general".
+		// Snapshot workflow onto goal. Resolution order (per spec
+		// Decision #7 "Custom workflows + roles"):
+		//   1. Goal's OWN inlineWorkflow override (if caller passed one)
+		//   2. Walk up parentGoalId chain — first ancestor with an
+		//      inlineWorkflow wins. Lets a parent's inline workflow apply
+		//      to its descendants without each child re-specifying it.
+		//   3. Caller passed `resolvedWorkflow` (config cascade hit)
+		//   4. Caller passed `workflowId` only — read from the workflow store.
+		//   5. Neither — fall back to "general".
 		// If we can't resolve a workflow at all, throw a clear error so
 		// `POST /api/goals` surfaces a 400 instead of silently creating a
 		// gateless goal. See docs/design/multi-repo-components.md §3.4.
 		const NO_WORKFLOWS_MSG =
 			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
-		if (workflowId && resolvedWorkflow) {
-			// Use pre-resolved workflow (from config cascade)
+		const inheritedInlineWorkflow = !inlineWorkflow && parent
+			? this._findAncestorInlineWorkflow(parent.id)
+			: undefined;
+		if (inlineWorkflow) {
+			// Tier 1: goal's own inline override.
+			goal.workflowId = (inlineWorkflow as any).id ?? workflowId ?? "inline";
+			goal.workflow = JSON.parse(JSON.stringify(inlineWorkflow));
+		} else if (inheritedInlineWorkflow) {
+			// Tier 2: ancestor's inline override. Snapshot a deep copy so
+			// the child's snapshot is independent of any future ancestor
+			// edits (workflow snapshots are frozen at goal creation time).
+			goal.workflowId = (inheritedInlineWorkflow as any).id ?? workflowId ?? "inline";
+			goal.workflow = JSON.parse(JSON.stringify(inheritedInlineWorkflow));
+			// Mirror the ancestor's inlineWorkflow onto the child so further
+			// descendants see the override at depth-1 walk (avoids O(depth)
+			// climbs for deep trees and survives ancestor archival).
+			goal.inlineWorkflow = JSON.parse(JSON.stringify(inheritedInlineWorkflow));
+		} else if (workflowId && resolvedWorkflow) {
+			// Tier 3: pre-resolved workflow (from config cascade)
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(resolvedWorkflow));
 		} else if (workflowId && workflowStore) {
+			// Tier 4: workflow-id lookup
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {
 				// If the store has nothing at all, surface the canonical message.
@@ -363,7 +386,7 @@ export class GoalManager {
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(wf));
 		} else if (!workflowId && workflowStore) {
-			// Default to "general" workflow when none specified.
+			// Tier 5: default to "general".
 			const defaultWf = workflowStore.get("general");
 			if (defaultWf) {
 				goal.workflowId = "general";
@@ -569,6 +592,31 @@ export class GoalManager {
 			if (a.divergencePolicy) return a.divergencePolicy;
 		}
 		return "strict";
+	}
+
+	/**
+	 * Walk up `parentGoalId` from the given goal id, returning the first
+	 * ancestor's `inlineWorkflow` if any. Returns undefined if no ancestor
+	 * carries one. Cycle-safe via a visited set (defensive — createGoal
+	 * also rejects cycles, but defensive in case the store ever sees a
+	 * cycle from external mutation).
+	 *
+	 * Per spec Decision #7: a goal's workflow resolution walks up the
+	 * parentGoalId chain BEFORE falling back to project / server / builtin
+	 * cascade. This lets a parent define an inline workflow once and have
+	 * descendants inherit it without each having to re-specify it.
+	 */
+	private _findAncestorInlineWorkflow(startId: string): unknown | undefined {
+		const seen = new Set<string>();
+		let currentId: string | undefined = startId;
+		while (currentId && !seen.has(currentId)) {
+			seen.add(currentId);
+			const g = this.store.get(currentId);
+			if (!g) return undefined;
+			if (g.inlineWorkflow) return g.inlineWorkflow;
+			currentId = g.parentGoalId;
+		}
+		return undefined;
 	}
 
 	/**

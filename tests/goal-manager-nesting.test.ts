@@ -223,6 +223,131 @@ describe("GoalManager.createGoal — parent-aware", () => {
 // Lazy migration flushed on update
 // ────────────────────────────────────────────────────────────────────
 
+// ────────────────────────────────────────────────────────────────────
+// createGoal — inline-workflow ancestor-walk inheritance (spec Decision #7)
+// Live test (PR #409 gap-analysis): the resolveWorkflowForGoal
+// resolver was deleted in F7 cleanup as "never called", but the
+// SPEC required the ancestor walk to be applied at goal creation
+// time so a parent's inline workflow inherits to descendants.
+// ────────────────────────────────────────────────────────────────────
+
+describe("GoalManager.createGoal — inline-workflow ancestor-walk inheritance", () => {
+	const inlineWf = {
+		id: "inline-x",
+		name: "Inline X",
+		description: "",
+		gates: [{ id: "g1", name: "G1", dependsOn: [] }],
+		createdAt: 0,
+		updatedAt: 0,
+	};
+
+	it("goal's OWN inlineWorkflow is snapshotted as workflow (tier 1)", async () => {
+		const { gm } = makeManager();
+		const g = await gm.createGoal("g", tmpRoot, {
+			workflowId: "general",
+			inlineWorkflow: inlineWf as never,
+		});
+		assert.equal(g.workflow!.id, "inline-x");
+		assert.equal(g.workflow!.gates[0].id, "g1");
+	});
+
+	it("child without inlineWorkflow inherits parent's inline (tier 2)", async () => {
+		const { store, gm } = makeManager();
+		const parent = await gm.createGoal("parent", tmpRoot, {
+			workflowId: "general",
+			inlineWorkflow: inlineWf as never,
+		});
+		store.update(parent.id, { branch: "goal/parent-fake" });
+		const child = await gm.createGoal("child", tmpRoot, {
+			workflowId: "general",
+			parentGoalId: parent.id,
+		});
+		// Child's snapshotted workflow MUST be the parent's inline.
+		assert.equal(child.workflow!.id, "inline-x");
+		assert.equal(child.workflow!.gates[0].id, "g1");
+		// And the child mirrors the inline override on its own record so
+		// grandchildren walk depth-1, not depth-N.
+		assert.ok(child.inlineWorkflow);
+		assert.equal((child.inlineWorkflow as { id: string }).id, "inline-x");
+	});
+
+	it("grandchild inherits ancestor's inline at depth 2", async () => {
+		const { store, gm } = makeManager();
+		const root = await gm.createGoal("root", tmpRoot, {
+			workflowId: "general",
+			inlineWorkflow: inlineWf as never,
+		});
+		store.update(root.id, { branch: "goal/root-fake" });
+		const mid = await gm.createGoal("mid", tmpRoot, {
+			workflowId: "general",
+			parentGoalId: root.id,
+		});
+		store.update(mid.id, { branch: "goal/mid-fake" });
+		const grand = await gm.createGoal("grand", tmpRoot, {
+			workflowId: "general",
+			parentGoalId: mid.id,
+		});
+		assert.equal(grand.workflow!.id, "inline-x");
+	});
+
+	it("child's OWN inlineWorkflow overrides ancestor's (tier 1 beats tier 2)", async () => {
+		const { store, gm } = makeManager();
+		const parent = await gm.createGoal("parent", tmpRoot, {
+			workflowId: "general",
+			inlineWorkflow: inlineWf as never,
+		});
+		store.update(parent.id, { branch: "goal/parent-fake" });
+		const childInline = {
+			id: "inline-y",
+			name: "Inline Y",
+			description: "",
+			gates: [{ id: "g2", name: "G2", dependsOn: [] }],
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		const child = await gm.createGoal("child", tmpRoot, {
+			workflowId: "general",
+			parentGoalId: parent.id,
+			inlineWorkflow: childInline as never,
+		});
+		assert.equal(child.workflow!.id, "inline-y");
+		assert.equal(child.workflow!.gates[0].id, "g2");
+	});
+
+	it("falls through to workflowId lookup when no ancestor has an inline (tier 4)", async () => {
+		const { store, gm } = makeManager();
+		const parent = await gm.createGoal("parent", tmpRoot, { workflowId: "general" });
+		store.update(parent.id, { branch: "goal/parent-fake" });
+		const child = await gm.createGoal("child", tmpRoot, {
+			workflowId: "general",
+			parentGoalId: parent.id,
+		});
+		// No inline at any level — uses the "general" workflow from the store.
+		assert.equal(child.workflow!.id, "general");
+	});
+
+	it("snapshot is independent of future ancestor edits (deep-copy invariant)", async () => {
+		const { store, gm } = makeManager();
+		const parent = await gm.createGoal("parent", tmpRoot, {
+			workflowId: "general",
+			inlineWorkflow: inlineWf as never,
+		});
+		store.update(parent.id, { branch: "goal/parent-fake" });
+		const child = await gm.createGoal("child", tmpRoot, {
+			workflowId: "general",
+			parentGoalId: parent.id,
+		});
+		// Mutate parent's inlineWorkflow after the fact — child's
+		// snapshot must NOT change.
+		const parentRec = store.get(parent.id)!;
+		(parentRec.inlineWorkflow as { id: string }).id = "mutated";
+		(parentRec.workflow as { id: string }).id = "mutated";
+		store.put(parentRec);
+		const childAfter = store.get(child.id)!;
+		assert.equal(childAfter.workflow!.id, "inline-x", "child snapshot intact");
+	});
+});
+
 describe("Lazy migration flush on update", () => {
 	it("a pre-existing top-level goal lacking rootGoalId on disk gains rootGoalId === id after updateGoal()", async () => {
 		// Write a goals.json file with a legacy record (no rootGoalId).
