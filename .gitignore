@@ -12,6 +12,7 @@ Thumbs.db
 *.log
 bobbit2/
 test-results/
+tests/results/tier-2-5/
 bobbit-screenshot.png
 tests/fullstack/screenshots/
 tests/e2e/screenshots/
