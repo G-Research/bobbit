@@ -236,7 +236,7 @@ Consequences:
 
 #### No default workflow scaffold
 
-Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback** — there is no path that silently seeds a canonical workflow set into a project. A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill, no error banner from this layer).
+Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback** — there is no path that silently seeds a canonical workflow set into a project. The previous fallback produced generic gates targeting a synthetic default component — gates that didn't match the project's real commands and which the assistant would have to redesign anyway, so the fallback hid rather than helped the design step. A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill, no error banner from this layer).
 
 **Removed seed sites** (all three previously seeded `general` / `feature` / `bug-fix` / `quick-fix` targeting a synthetic default component):
 

@@ -117,7 +117,7 @@ components:
       test:  pnpm --filter @acme/shared test
 ```
 
-Because `components.length > 1`, the assistant's workflow-suggestion checklist will pre-check the per-component flows and the all-components fan-out flow — those are the right defaults for a monorepo.
+For a monorepo like this, the per-component and all-components fan-out scaffolds are often the right starting point — the assistant should consider them explicitly and recommend them when they fit, but they are not pre-checked by component count. The assistant must justify each workflow it proposes against the project's actual components and commands.
 
 ## 3. Workflow gates
 
