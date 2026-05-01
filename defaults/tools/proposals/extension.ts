@@ -305,5 +305,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log("[proposal-tools] Registered 9 proposal tools");
+	console.log("[proposal-tools] Registered 8 proposal tools");
 }

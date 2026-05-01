@@ -188,6 +188,25 @@ export async function loadProposalDraft(
 	}
 }
 
+/**
+ * Delete the on-disk proposal FILE for (sessionId, type) on the server.
+ * Distinct from `deleteProposalDraft` (which targets the per-session draft
+ * table). The proposal file is the source of truth for the editable
+ * proposals feature; called from accept paths so the file disappears once
+ * the user has committed the proposal. The server broadcasts
+ * `proposal_cleared` which the unified onProposal callback handles for the
+ * in-memory state cleanup. 404 is silently ignored — the file may already
+ * have been removed by a prior accept or session archive.
+ */
+export function deleteProposalFile(sessionId: string, type: ProposalType): Promise<void> {
+	return draftFetch(`/api/sessions/${sessionId}/proposal/${type}`, { method: "DELETE" })
+		.then(() => undefined)
+		.catch((err) => {
+			if (err instanceof DOMException && err.name === "AbortError") return;
+			console.error(`[${type}-proposal-file] Failed to delete proposal file:`, err);
+		});
+}
+
 /** Delete the persisted draft for (sessionId, type) and cancel any pending save. */
 export function deleteProposalDraft(sessionId: string, type: ProposalType): void {
 	const t = debounceTimers[type];

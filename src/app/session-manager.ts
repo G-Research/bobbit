@@ -1919,7 +1919,12 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	setProjects(await fetchProjects());
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
-	if (proposal.sessionId) deleteProjectDraft(proposal.sessionId);
+	if (proposal.sessionId) {
+		deleteProjectDraft(proposal.sessionId);
+		// Slice E: drop the on-disk proposal file once accepted.
+		const { deleteProposalFile } = await import("./proposal-helpers.js");
+		void deleteProposalFile(proposal.sessionId, "project");
+	}
 
 	// Terminate the project assistant session silently (no confirmation dialog)
 	try {
@@ -2017,6 +2022,9 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
 	deleteProjectDraft(propSessionId);
+	// Slice E: drop the on-disk proposal file once accepted.
+	const { deleteProposalFile } = await import("./proposal-helpers.js");
+	void deleteProposalFile(propSessionId, "project");
 	renderApp();
 }
 

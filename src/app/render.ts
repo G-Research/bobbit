@@ -24,6 +24,7 @@ import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStat
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
+import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
@@ -742,6 +743,9 @@ function goalPreviewPanel() {
 			autoStartTeam,
 		});
 
+		// Slice E: drop the on-disk proposal file once accepted.
+		if (sessionId && goal) void deleteProposalFile(sessionId, "goal");
+
 		// If this is a re-attempt, archive the old goal and link the new one
 		if (reattemptGoalId && goal) {
 			await gatewayFetch(`/api/goals/${reattemptGoalId}`, { method: "DELETE" });
@@ -765,7 +769,7 @@ function goalPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="goal-proposal">
 			${renderGoalForm({
 				title: state.previewTitle,
 				spec: state.previewSpec,
@@ -891,6 +895,9 @@ function rolePreviewPanel() {
 			accessory: state.rolePreviewAccessory,
 		});
 
+		// Slice E: drop the on-disk proposal file once accepted.
+		if (sessionId) void deleteProposalFile(sessionId, "role");
+
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
@@ -910,7 +917,7 @@ function rolePreviewPanel() {
 		.filter(Boolean);
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="role-proposal">
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1085,7 +1092,7 @@ function toolPreviewPanel() {
 	const total = checklistItems.length;
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="tool-proposal">
 			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Tool name header -->
 				<div>
@@ -1391,6 +1398,8 @@ function staffPreviewPanel() {
 			projectId: state.activeProjectId || undefined,
 			sandboxed,
 		});
+		// Slice E: drop the on-disk proposal file once accepted.
+		if (sessionId) void deleteProposalFile(sessionId, "staff");
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
@@ -1405,7 +1414,7 @@ function staffPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="staff-proposal">
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1540,6 +1549,7 @@ function workflowPreviewPanel() {
 			if (!ok) return;
 		}
 		const sessionId = activeSessionId();
+		if (sessionId) void deleteProposalFile(sessionId, "workflow");
 		if (state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
@@ -1559,7 +1569,7 @@ function workflowPreviewPanel() {
 
 	if (!_workflowPageModule) {
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="workflow-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading editor...</div>
 			</div>
 		`;
@@ -1568,7 +1578,7 @@ function workflowPreviewPanel() {
 	const { renderWorkflowEditPanel, isWorkflowSaving, canSaveWorkflow } = _workflowPageModule;
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="workflow-proposal">
 			<div ${ref(workflowEditWrapperRef)} class="flex-1 overflow-y-auto p-4 ${streaming ? STREAMING_BORDER : ""}">
 				${renderWorkflowEditPanel()}
 			</div>
