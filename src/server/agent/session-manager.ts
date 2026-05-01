@@ -1436,6 +1436,18 @@ export class SessionManager {
 		// arrive seconds apart. The dispatch is triggered by the tool_result
 		// event handler in _handleAgentEvent().
 		// If the agent is idle, they'll drain normally via drainQueue.
+		//
+		// SPECIAL CASE: bash_bg.wait. A wait long-poll has no natural tool
+		// boundary — it sits indefinitely until the bg process exits or the
+		// wait is aborted. Without intervention, a steer-on-queue while the
+		// agent is parked in wait would be deferred for the entire wait
+		// duration. Mirror deliverLiveSteer's behaviour: when the session is
+		// streaming and there is at least one active wait, abort all waits so
+		// the agent unblocks at once. The underlying bg process keeps
+		// running; only the wait long-poll is cancelled, which is exactly
+		// what the user expects from the Steer button.
+		const bg = (this as any).bgProcessManager;
+		if (bg && session.status === "streaming") bg.abortAllWaits(session.id);
 
 		this.broadcastQueue(session);
 		return true;
