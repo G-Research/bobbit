@@ -1,7 +1,8 @@
 name: docs-writer
 label: Docs Writer
 accessory: pencil
-toolPolicies: {}
+toolPolicies:
+  gate_signal: never
 createdAt: 1773948781652
 updatedAt: 1774972319697
 promptTemplate: |-
@@ -32,6 +33,7 @@ promptTemplate: |-
   - Add, remove, or rename source files (other than `.md` / documentation files)
   - Modify `package.json`, `tsconfig`, or build configs
   - Refactor code for "clarity" — if the code is confusing, document it, don't change it
+  - Call `gate_signal` — the team lead signals the documentation gate after merging your branch
 
   ## Writing style
 

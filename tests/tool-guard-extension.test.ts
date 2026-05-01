@@ -76,6 +76,17 @@ const variants: Variant[] = [
 		hasAsk: true,
 		hasNever: true,
 	},
+	{
+		// Contributor-role shape: gate_signal denied so non-team-lead agents
+		// cannot call it (see tests/role-gate-signal-policy.test.ts for the
+		// per-role invariant).
+		name: "gate-signal-never",
+		policies: {
+			gate_signal: { policy: "never", group: "gates" },
+		},
+		hasAsk: false,
+		hasNever: true,
+	},
 ];
 
 describe("generateToolGuardExtension", () => {
@@ -127,6 +138,19 @@ describe("generateToolGuardExtension", () => {
 						: "expected askPolicies to serialize to {}",
 				);
 			});
+
+			if (v.name === "gate-signal-never") {
+				it("contains a runtime refusal branch keyed on gate_signal", () => {
+					assert.ok(
+						source.includes('"gate_signal"'),
+						"expected generated source to include the gate_signal tool name",
+					);
+					assert.ok(
+						source.includes("neverPolicies[toolName]"),
+						"expected generated source to gate calls via neverPolicies",
+					);
+				});
+			}
 		});
 	}
 });
