@@ -364,3 +364,79 @@ test("child goal short-circuit only triggers on `ready-to-merge` gate id", async
 	assert.equal(recorded!.verification.steps.length, 0,
 		"short-circuit must only trigger for gateId === 'ready-to-merge'");
 });
+
+// User-feedback regression from the agent-memory live test: the
+// `feature` workflow's canonical `ready-to-merge` gate is master-
+// hardcoded ("Branch pushed" / "Master merged into branch" / "PR raised")
+// and the team-lead worried this would reject every nested child by
+// design. Confirms the short-circuit fires for the EXACT canonical
+// 3-step verify[] copied verbatim from
+// `seed-default-workflows.ts::readyToMergeGate()`. None of the master-
+// oriented steps run — the synthetic step records a pass and the
+// parent's harness handles the local merge.
+const CANONICAL_FEATURE_RTM_STEPS: VerifyStep[] = [
+	{
+		name: "Branch pushed to remote",
+		type: "command",
+		run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q .",
+	},
+	{
+		name: "Master merged into branch",
+		type: "command",
+		run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}",
+	},
+	{
+		name: "PR raised",
+		type: "command",
+		run: "gh pr list --head {{branch}} --base {{master}} --state open --json url -q '.[0].url' | grep -q .",
+	},
+];
+
+test("child on `feature` workflow short-circuits the canonical 3-step master-hardcoded ready-to-merge", async () => {
+	const goalStore = new FakeGoalStore();
+	const gateStore = new FakeGateStore();
+	const child: FakeGoal = {
+		id: "feature-child-1",
+		title: "Feature-workflow Child",
+		cwd: "/tmp/fchild",
+		state: "in-progress",
+		parentGoalId: "parent-1",
+		rootGoalId: "parent-1",
+		branch: "goal/feature-child-1",
+		worktreePath: "/tmp/wt/feature-child-1",
+		projectId: "proj-1",
+		mergeTarget: "parent",
+		workflow: { gates: [makeReadyToMergeGate(CANONICAL_FEATURE_RTM_STEPS)] },
+	};
+	goalStore.put(child);
+	gateStore.initGatesForGoal(child.id, ["ready-to-merge"]);
+
+	const { harness, broadcasts } = buildHarness({ goalStore, gateStore });
+	const signal = makeSignal(child.id);
+	gateStore.recordSignal(signal);
+
+	await harness.verifyGateSignal(
+		signal,
+		child.workflow!.gates[0],
+		child.cwd,
+		child.branch,
+		"master",
+		undefined,
+		undefined,
+	);
+
+	const gate = gateStore.getGate(child.id, "ready-to-merge");
+	assert.equal(gate?.status, "passed",
+		"short-circuit must auto-pass even with the canonical master-hardcoded verify[]");
+
+	const recorded = gate!.signals.find(s => s.id === signal.id);
+	assert.equal(recorded!.verification.steps.length, 1,
+		"none of the 3 master-hardcoded steps should run — only the synthetic short-circuit step");
+	assert.equal(recorded!.verification.steps[0].name, "Child ready-to-merge");
+	assert.equal(recorded!.verification.steps[0].passed, true);
+
+	// No per-step events for any of "Branch pushed", "Master merged...", "PR raised".
+	const stepEvents = broadcasts.filter(b => b.type === "gate_verification_step_started" || b.type === "gate_verification_step_completed");
+	assert.equal(stepEvents.length, 0,
+		"none of the canonical feature-workflow ready-to-merge steps should emit per-step events");
+});

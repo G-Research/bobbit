@@ -364,9 +364,16 @@ export function buildChildTeamLeadStanza(parentGoal: { title: string; branch: st
 		"  parent (or the root team-lead, transitively) handles the eventual PR\n" +
 		"  to `master`.\n" +
 		"- Do **not** run `gh pr create`, `gh pr merge`, or any command that\n" +
-		'  pushes to `master`. The `ready-to-merge` gate\'s "PR raised" verify\n' +
-		"  step is short-circuited for child goals — passing it requires only\n" +
-		"  that your branch is on origin and has no conflicts with the parent.\n\n" +
+		"  pushes to `master`. The **entire** `ready-to-merge` gate verify[] is\n" +
+		"  short-circuited for child goals (`mergeTarget === \"parent\"`) — the\n" +
+		"  master-oriented steps you may see in your workflow snapshot\n" +
+		"  (\"Branch pushed\", \"Master merged into branch\", \"PR raised\") DO NOT\n" +
+		"  run for you. Signalling `ready-to-merge` simply records a synthetic\n" +
+		"  pass step and hands control to the parent's verification harness,\n" +
+		"  which performs the local `git merge --no-ff` of your branch into\n" +
+		`  \`${parentGoal.branch}\`. So: don't try to satisfy those steps\n` +
+		"  yourself, don't worry that they look master-oriented — they're\n" +
+		"  inert for you.\n\n" +
 		"**Adherence:**\n\n" +
 		"The parent's acceptance criteria are sacred. Your spec is a slice of\n" +
 		"those criteria — never drop a criterion the parent assigned to you,\n" +
