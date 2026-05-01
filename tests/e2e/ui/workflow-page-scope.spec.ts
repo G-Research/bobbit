@@ -66,52 +66,57 @@ test.describe("Workflows page (project-scoped)", () => {
 	});
 
 	test("entering /workflows in System scope auto-switches to a project @smoke", async ({ page }) => {
-		// Fresh app load → in-memory config scope is "system" by default
-		// (config-scope.ts::_configScope = "system").
+		// Fresh app load → in-memory config scope is "system" by default.
+		// The standalone /workflows route now redirects synchronously in main.ts
+		// to #/settings/<projectId>/workflows — the auto-switch is what proves
+		// System was rejected as a workflow scope (the redirect picks
+		// state.activeProjectId || projects[0], never "system").
 		await openApp(page);
 		await navigateToHash(page, "#/workflows");
 
-		// Wait for page render.
-		await expect(page.getByText("Workflows").first()).toBeVisible({ timeout: 10_000 });
+		// Wait for the embedded Workflows tab to render.
+		await expect(page.locator("[data-testid='workflows-tab']").first())
+			.toBeVisible({ timeout: 10_000 });
 
-		// The "System" tab MUST NOT appear in the scope row on this page —
-		// renderConfigScopeRow is called with excludeSystem:true.
-		const systemButtons = await page.locator("button").filter({ hasText: /^System$/ }).count();
-		expect(systemButtons).toBe(0);
-
-		// At least one project tab is present in the scope row.
-		await expect(
-			page.locator("button").filter({ hasText: "Workflow Scope Project" }).first(),
-		).toBeVisible({ timeout: 5_000 });
+		// Hash must land on a real project id, never the literal "system".
+		const hash1 = await page.evaluate(() => window.location.hash);
+		expect(hash1).toMatch(/^#\/settings\/[^/]+\/workflows/);
+		expect(hash1).not.toMatch(/^#\/settings\/system\//);
 
 		// Reload — the UI re-mounts with config scope reset to "system" again,
-		// and loadWorkflowPageData() must auto-switch to a project.
+		// and the redirect must still auto-switch to a project.
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first())
 			.toBeVisible({ timeout: 15_000 });
 		await navigateToHash(page, "#/workflows");
-		await expect(page.getByText("Workflows").first()).toBeVisible({ timeout: 10_000 });
-		const systemButtonsAfter = await page.locator("button").filter({ hasText: /^System$/ }).count();
-		expect(systemButtonsAfter).toBe(0);
+		await expect(page.locator("[data-testid='workflows-tab']").first())
+			.toBeVisible({ timeout: 10_000 });
+		const hash2 = await page.evaluate(() => window.location.hash);
+		expect(hash2).toMatch(/^#\/settings\/[^/]+\/workflows/);
+		expect(hash2).not.toMatch(/^#\/settings\/system\//);
 	});
 
 	test("workflow list shows the active project's entries (no system-level leak)", async ({ page }) => {
 		await openApp(page);
-		await navigateToHash(page, "#/workflows");
-		await expect(page.getByText("Workflows").first()).toBeVisible({ timeout: 10_000 });
+		// Navigate directly to the test project's settings/workflows surface
+		// rather than relying on the #/workflows redirect picking the right
+		// project. The redirect uses state.activeProjectId || projects[0] and
+		// can land on the harness default project (which doesn't have our
+		// seeded "Scope-only Workflow" entry).
+		await navigateToHash(page, `#/settings/${projectId}/workflows`);
+		await expect(page.locator("[data-testid='workflows-tab']").first())
+			.toBeVisible({ timeout: 10_000 });
 
-		// Click the project's scope tab to make assertions deterministic.
-		const projectTab = page.locator("button").filter({ hasText: "Workflow Scope Project" }).first();
-		await projectTab.click();
+		// The project's seeded workflow is visible inside the workflows tab.
+		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab.getByText("Scope-only Workflow").first())
+			.toBeVisible({ timeout: 10_000 });
 
-		// The project's seeded workflow is visible.
-		await expect(page.getByText("Scope-only Workflow").first()).toBeVisible({ timeout: 10_000 });
-
-		// Sanity check: no "system" origin badge on this page (workflows have
-		// no server/builtin layer anymore — origin must be "project").
-		// Inspect every rendered workflow row's origin badge.
-		const badges = await page.locator(".config-origin-badge").allTextContents();
-		// All badges (if any) must be "project" — never "builtin" or "server".
+		// Sanity check: no "system" origin badge inside the workflows tab
+		// (workflows have no server/builtin layer anymore — origin must be
+		// "project"). Scope to the workflows tab so we don't pick up Settings
+		// page badges from other tabs.
+		const badges = await tab.locator(".config-origin-badge").allTextContents();
 		for (const txt of badges) {
 			const t = (txt || "").trim().toLowerCase();
 			if (t.length > 0) {
