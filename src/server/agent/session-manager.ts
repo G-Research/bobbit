@@ -438,6 +438,12 @@ export class SessionManager {
 			if (submitted) return;
 			submitted = true;
 			try { unsub(); } catch { /* ignore */ }
+			// Drop the global termination listener too — leaving it in
+			// _terminationListeners would accumulate one dead closure per
+			// completed delegate, which is a slow leak on long-running gateways
+			// (every future session termination scans the array).
+			const idx = this._terminationListeners.indexOf(termFn);
+			if (idx >= 0) this._terminationListeners.splice(idx, 1);
 			try { harness.submit(parentSessionId, toolUseId, result); } catch (err) {
 				console.error(`[delegate-harness] submit failed for ${parentSessionId}:${toolUseId}:`, err);
 			}

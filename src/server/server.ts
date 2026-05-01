@@ -7291,19 +7291,29 @@ async function handleApiRoute(
 			try { res.write("\n"); } catch { /* connection gone */ }
 		}, 60_000);
 
+		let timedOut = false;
 		const hardTimeout = setTimeout(() => {
-			try { res.end(JSON.stringify({ status: "timeout", output: "", error: "delegate wait timed out" } as DelegateResultPayload)); } catch { /* ignore */ }
+			timedOut = true;
+			// Cancel the harness entry so we don't leak a parked resolver and a
+			// stale `active-delegates.json` shell when this user-facing timeout
+			// fires. cancel() rejects the pending Promise with "timed out",
+			// which is caught below and translated into a structured timeout
+			// payload — the response body the original `/wait` contract
+			// promised on overrun.
+			try { delegateHarness.cancel(active.parentSessionId, active.toolUseId, "timed out"); } catch { /* ignore */ }
 		}, timeoutMs + 30_000);
 
 		try {
 			const result = await delegateHarness.register(active);
 			res.end(JSON.stringify(result));
 		} catch (err) {
-			const payload: DelegateResultPayload = {
-				status: "failed",
-				output: "",
-				error: err instanceof Error ? err.message : String(err),
-			};
+			const payload: DelegateResultPayload = timedOut
+				? { status: "timeout", output: "", error: "delegate wait timed out" }
+				: {
+					status: "failed",
+					output: "",
+					error: err instanceof Error ? err.message : String(err),
+				};
 			try { res.end(JSON.stringify(payload)); } catch { /* ignore */ }
 		} finally {
 			clearInterval(heartbeat);

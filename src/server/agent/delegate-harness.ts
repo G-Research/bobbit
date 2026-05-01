@@ -93,6 +93,14 @@ export class DelegateHarness {
 	private pending = new Map<DelegateKey, PendingEntry>();
 	private latched = new Map<DelegateKey, DelegateResultPayload>();
 	/**
+	 * Keys that have already had a terminal result delivered (resolved a
+	 * pending awaiter). Subsequent `submit()` calls for the same key are
+	 * dropped — first-write-wins idempotency. Bounded over time by
+	 * `register()` clearing the entry when a key is recycled (i.e. a brand
+	 * new tool_use_id is registered for the same parent + session).
+	 */
+	private completed = new Set<DelegateKey>();
+	/**
 	 * Persisted-but-no-awaiter entries reconstructed from disk on restart.
 	 * The original `register()` closures (resolve/reject) lived in v8 heap and
 	 * are gone, so calling resolve() on them after restart would dead-end. We
@@ -159,6 +167,11 @@ export class DelegateHarness {
 	register(active: ActiveDelegate): Promise<DelegateResultPayload> {
 		const key = delegateKey(active.parentSessionId, active.toolUseId);
 
+		// Recycling a previously-completed key (e.g. parent makes a fresh
+		// `delegate` tool call after the previous one resolved) clears the
+		// idempotency mark so the new lifecycle behaves as a clean slate.
+		this.completed.delete(key);
+
 		// Drain any latched result first — submit-before-register is supported
 		// (and is the whole point of restart-survival). Clear any shell at the
 		// same time: the latch is the result the shell was holding the slot for.
@@ -187,23 +200,58 @@ export class DelegateHarness {
 	}
 
 	/**
-	 * Submit a terminal result. Returns `true` if a pending Promise was
-	 * resolved; `false` if the result was latched for a future `register`
-	 * (or if it duplicates an already-latched result — second-arrival is a
-	 * no-op, mirroring `verification_result`'s idempotency contract).
+	 * Cancel a single pending wait without supplying a result. Used by the
+	 * `/api/internal/delegate/wait` hard-timeout path so a timed-out request
+	 * does not leak a parked resolver in `pending` or a stale shell in
+	 * `active-delegates.json`. Returns `true` if anything was cleaned up.
 	 */
-	submit(parentSessionId: string, toolUseId: string, result: DelegateResultPayload): boolean {
+	cancel(parentSessionId: string, toolUseId: string, reason = "cancelled"): boolean {
 		const key = delegateKey(parentSessionId, toolUseId);
+		let found = false;
 		const entry = this.pending.get(key);
 		if (entry) {
 			this.pending.delete(key);
+			try { entry.reject(new Error(reason)); } catch { /* ignore */ }
+			found = true;
+		}
+		if (this.shells.delete(key)) found = true;
+		if (this.latched.delete(key)) found = true;
+		this.completed.add(key); // suppress any racing submit after cancel
+		if (found) this._persist();
+		return found;
+	}
+
+	/**
+	 * Submit a terminal result. Returns `true` if a pending Promise was
+	 * resolved; `false` if the result was latched (submit-before-register)
+	 * OR if it was a no-op (duplicate against an already-completed key, or
+	 * duplicate against an already-latched result — first-write-wins,
+	 * mirroring `verification_result`'s idempotency contract).
+	 *
+	 * Idempotency contract: once a (parentSessionId, toolUseId) has
+	 * received a terminal result — whether by resolving a pending awaiter,
+	 * latching for a future register, or being explicitly cancelled — every
+	 * subsequent submit for that key is a no-op for the lifetime of the
+	 * harness instance. This prevents duplicate `agent_end`/`process_exit`
+	 * events or a retried `/api/internal/delegate/submit` from poisoning
+	 * `active-delegates.json` with a second result.
+	 */
+	submit(parentSessionId: string, toolUseId: string, result: DelegateResultPayload): boolean {
+		const key = delegateKey(parentSessionId, toolUseId);
+		// First-write-wins guard: if the key has already been resolved or
+		// latched, drop subsequent arrivals on the floor. This matches the
+		// verification_result idempotency contract and prevents resolved
+		// pending entries from being re-latched (which would later overwrite
+		// a freshly-registered awaiter with a stale result).
+		if (this.completed.has(key) || this.latched.has(key)) return false;
+		const entry = this.pending.get(key);
+		if (entry) {
+			this.pending.delete(key);
+			this.completed.add(key);
 			this._persist();
 			try { entry.resolve(result); } catch { /* swallow consumer errors */ }
 			return true;
 		}
-		// If there's already a latched result, second submit is a no-op
-		// (first-write-wins, matching the verification_result idempotency contract).
-		if (this.latched.has(key)) return false;
 		// Either a fresh submit-before-register, or a submit against a
 		// post-restart shell with no live awaiter — either way, latch.
 		this.latched.set(key, result);
@@ -222,16 +270,21 @@ export class DelegateHarness {
 		for (const [key, entry] of [...this.pending.entries()]) {
 			if (entry.active.parentSessionId !== parentSessionId) continue;
 			this.pending.delete(key);
+			this.completed.add(key);
 			killed.push(entry.active.delegateSessionId);
 			try { entry.reject(new Error(reason)); } catch { /* ignore */ }
 		}
 		for (const [key, active] of [...this.shells.entries()]) {
 			if (active.parentSessionId !== parentSessionId) continue;
 			this.shells.delete(key);
+			this.completed.add(key);
 			killed.push(active.delegateSessionId);
 		}
 		for (const key of [...this.latched.keys()]) {
-			if (key.startsWith(prefix)) this.latched.delete(key);
+			if (key.startsWith(prefix)) {
+				this.latched.delete(key);
+				this.completed.add(key);
+			}
 		}
 		this._persist();
 		return killed;
@@ -307,6 +360,10 @@ export class DelegateHarness {
 		this.pending.clear();
 		this.shells.clear();
 		this.latched.clear();
+		// `completed` is in-memory-only first-write-wins dedup; a restart
+		// (real or simulated) wipes it so post-restart submit-then-register
+		// flows the same way as a fresh delegate.
+		this.completed.clear();
 		try {
 			if (!fs.existsSync(this.persistPath)) return;
 			const raw = fs.readFileSync(this.persistPath, "utf-8");
