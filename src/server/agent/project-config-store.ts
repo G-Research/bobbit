@@ -46,6 +46,24 @@ function normalizeComponents(arr: unknown[]): Component[] {
 			}
 			if (Object.keys(cmds).length > 0) c.commands = cmds;
 		}
+		if (r.config && typeof r.config === "object" && !Array.isArray(r.config)) {
+			const cfg: Record<string, string> = {};
+			let count = 0;
+			for (const [k, v] of Object.entries(r.config as Record<string, unknown>)) {
+				if (!k) continue;
+				if (count >= 100) {
+					console.warn(`[project-config-store] Component "${r.name}": config truncated at 100 entries`);
+					break;
+				}
+				let str: string | undefined;
+				if (typeof v === "string") str = v;
+				else if (typeof v === "number" || typeof v === "boolean") str = String(v);
+				if (str === undefined || str === "") continue;
+				cfg[k] = str;
+				count++;
+			}
+			if (Object.keys(cfg).length > 0) c.config = cfg;
+		}
 		out.push(c);
 	}
 	return out;
@@ -56,6 +74,7 @@ function serializeComponent(c: Component): Record<string, unknown> {
 	if (c.relativePath) out.relative_path = c.relativePath;
 	if (c.worktreeSetupCommand) out.worktree_setup_command = c.worktreeSetupCommand;
 	if (c.commands && Object.keys(c.commands).length > 0) out.commands = { ...c.commands };
+	if (c.config && Object.keys(c.config).length > 0) out.config = { ...c.config };
 	return out;
 }
 
@@ -78,6 +97,7 @@ export interface Component {
 	relativePath?: string;              // optional sub-path inside the repo
 	worktreeSetupCommand?: string;      // per-component runtime hook
 	commands?: Record<string, string>;  // flat name → shell. Absent ⇒ data-only.
+	config?: Record<string, string>;    // opaque key→string map. Used by /qa-test skill etc.
 }
 
 export type CommandStepStructural = {
@@ -108,7 +128,7 @@ export type LlmReviewStep = {
 
 export type AgentQaStep = {
 	name: string; type: "agent-qa"; prompt: string;
-	role?: string; phase?: number; timeout?: number;
+	role?: string; component?: string; phase?: number; timeout?: number;
 	optional?: boolean; label?: string; description?: string;
 };
 
@@ -134,16 +154,6 @@ export interface InlineWorkflowDef {
 	gates: InlineWorkflowGate[];
 }
 
-export interface QaTestingConfig {
-	buildCommand: string;
-	startCommand: string;
-	healthCheck: string;
-	browserEntry: string;
-	env: Record<string, string>;
-	maxDurationMinutes: number;
-	maxScenarios: number;
-}
-
 // ── Native-YAML migrated fields (typed side-tables) ──────────────────
 //
 // These five fields used to be JSON-encoded strings (or numeric strings)
@@ -165,15 +175,9 @@ export interface SandboxTokenEntry {
 	value?: string;
 }
 
-const QA_MAX_DURATION_DEFAULT = 10;
-const QA_MAX_SCENARIOS_DEFAULT = 5;
-
 const MIGRATED_KEYS = new Set([
 	"config_directories",
-	"qa_env",
 	"sandbox_tokens",
-	"qa_max_duration_minutes",
-	"qa_max_scenarios",
 ]);
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
@@ -191,16 +195,6 @@ function normalizeConfigDirectories(raw: unknown): { value: ConfigDirectoryEntry
 			? typesRaw.filter((t): t is string => typeof t === "string")
 			: [];
 		out.push({ path: e.path, types });
-	}
-	return { value: out, ok: true };
-}
-
-function normalizeQaEnv(raw: unknown): { value: Record<string, string>; ok: boolean } {
-	if (!isPlainObject(raw)) return { value: {}, ok: false };
-	const out: Record<string, string> = {};
-	for (const [k, v] of Object.entries(raw)) {
-		if (typeof v === "string") out[k] = v;
-		else if (typeof v === "number" || typeof v === "boolean") out[k] = String(v);
 	}
 	return { value: out, ok: true };
 }
@@ -235,15 +229,8 @@ const DEFAULTS: Record<string, string> = {
 	sandbox_host_token_overrides: "",   // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"false","NPM_TOKEN":"false"}'
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 	worktree_pool_size: "2",            // Pre-built worktrees for instant session startup (0 = disable)
-	qa_start_command: "",               // How to start an isolated server for QA
-	qa_build_command: "",               // Build command for QA (defaults to build_command)
-	qa_health_check: "",                // URL to check server health
-	qa_browser_entry: "",               // Browser entry point URL
-	// Migrated to native YAML — defaults still surfaced through getWithDefaults() for back-compat:
-	qa_max_duration_minutes: String(QA_MAX_DURATION_DEFAULT),
-	qa_max_scenarios: String(QA_MAX_SCENARIOS_DEFAULT),
 	sandbox_tokens: "",                 // Native YAML array; flat get() returns JSON-stringified form.
-	// config_directories and qa_env have no string default — empty array/object.
+	// config_directories has no string default — empty array.
 };
 
 /**
@@ -270,17 +257,11 @@ export class ProjectConfigStore {
 
 	// ── Native-YAML migrated fields ──
 	private configDirectories: ConfigDirectoryEntry[] = [];
-	private qaEnv: Record<string, string> = {};
 	private sandboxTokens: SandboxTokenEntry[] = [];
-	private qaMaxDurationMinutes: number = QA_MAX_DURATION_DEFAULT;
-	private qaMaxScenarios: number = QA_MAX_SCENARIOS_DEFAULT;
 	/** Track whether each migrated field was explicitly present on disk. */
 	private present = {
 		config_directories: false,
-		qa_env: false,
 		sandbox_tokens: false,
-		qa_max_duration_minutes: false,
-		qa_max_scenarios: false,
 	};
 	/** Set when load() found legacy (string-encoded) shapes — triggers next save() to rewrite native. */
 	private dirty = false;
@@ -304,16 +285,10 @@ export class ProjectConfigStore {
 	private load(): void {
 		// Reset migrated fields to defaults before loading.
 		this.configDirectories = [];
-		this.qaEnv = {};
 		this.sandboxTokens = [];
-		this.qaMaxDurationMinutes = QA_MAX_DURATION_DEFAULT;
-		this.qaMaxScenarios = QA_MAX_SCENARIOS_DEFAULT;
 		this.present = {
 			config_directories: false,
-			qa_env: false,
 			sandbox_tokens: false,
-			qa_max_duration_minutes: false,
-			qa_max_scenarios: false,
 		};
 
 		try {
@@ -380,36 +355,6 @@ export class ProjectConfigStore {
 			}
 		}
 
-		// qa_env — Record<string,string>
-		if (raw.qa_env !== undefined && raw.qa_env !== null) {
-			const v = raw.qa_env;
-			if (typeof v === "string") {
-				if (v.length > 0) {
-					try {
-						const parsed = JSON.parse(v);
-						const norm = normalizeQaEnv(parsed);
-						if (norm.ok) {
-							this.qaEnv = norm.value;
-							this.present.qa_env = true;
-							this.dirty = true;
-						} else {
-							console.warn("[project-config-store] Failed to parse qa_env, treating as default");
-						}
-					} catch (err) {
-						console.warn("[project-config-store] Failed to parse qa_env, treating as default:", err);
-					}
-				}
-			} else {
-				const norm = normalizeQaEnv(v);
-				if (norm.ok) {
-					this.qaEnv = norm.value;
-					this.present.qa_env = true;
-				} else {
-					console.warn("[project-config-store] Failed to parse qa_env, treating as default");
-				}
-			}
-		}
-
 		// sandbox_tokens — array of {key, enabled, value?}
 		if (raw.sandbox_tokens !== undefined && raw.sandbox_tokens !== null) {
 			const v = raw.sandbox_tokens;
@@ -440,41 +385,6 @@ export class ProjectConfigStore {
 			}
 		}
 
-		// qa_max_duration_minutes — number
-		if (raw.qa_max_duration_minutes !== undefined && raw.qa_max_duration_minutes !== null) {
-			const v = raw.qa_max_duration_minutes;
-			if (typeof v === "number" && Number.isFinite(v)) {
-				this.qaMaxDurationMinutes = Math.trunc(v);
-				this.present.qa_max_duration_minutes = true;
-			} else if (typeof v === "string" && /^\d+$/.test(v.trim())) {
-				const n = parseInt(v.trim(), 10);
-				if (Number.isFinite(n)) {
-					this.qaMaxDurationMinutes = n;
-					this.present.qa_max_duration_minutes = true;
-					this.dirty = true;
-				}
-			} else {
-				console.warn("[project-config-store] Failed to parse qa_max_duration_minutes, treating as default");
-			}
-		}
-
-		// qa_max_scenarios — number
-		if (raw.qa_max_scenarios !== undefined && raw.qa_max_scenarios !== null) {
-			const v = raw.qa_max_scenarios;
-			if (typeof v === "number" && Number.isFinite(v)) {
-				this.qaMaxScenarios = Math.trunc(v);
-				this.present.qa_max_scenarios = true;
-			} else if (typeof v === "string" && /^\d+$/.test(v.trim())) {
-				const n = parseInt(v.trim(), 10);
-				if (Number.isFinite(n)) {
-					this.qaMaxScenarios = n;
-					this.present.qa_max_scenarios = true;
-					this.dirty = true;
-				}
-			} else {
-				console.warn("[project-config-store] Failed to parse qa_max_scenarios, treating as default");
-			}
-		}
 	}
 
 	private save(): void {
@@ -507,18 +417,9 @@ export class ProjectConfigStore {
 					types: [...e.types],
 				}));
 			}
-			if (this.present.qa_env || Object.keys(this.qaEnv).length > 0) {
-				out.qa_env = { ...this.qaEnv };
-			}
 			if (this.present.sandbox_tokens || this.sandboxTokens.length > 0) {
 				// Persisted form NEVER contains `value:` — secrets live in secrets.json.
 				out.sandbox_tokens = this.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
-			}
-			if (this.present.qa_max_duration_minutes) {
-				out.qa_max_duration_minutes = this.qaMaxDurationMinutes;
-			}
-			if (this.present.qa_max_scenarios) {
-				out.qa_max_scenarios = this.qaMaxScenarios;
 			}
 			// Clear dirty flag — file is now in native form.
 			this.dirty = false;
@@ -537,9 +438,6 @@ export class ProjectConfigStore {
 		if (this.present.config_directories || this.configDirectories.length > 0) {
 			out.config_directories = JSON.stringify(this.configDirectories);
 		}
-		if (this.present.qa_env || Object.keys(this.qaEnv).length > 0) {
-			out.qa_env = JSON.stringify(this.qaEnv);
-		}
 		if (this.present.sandbox_tokens || this.sandboxTokens.length > 0) {
 			out.sandbox_tokens = JSON.stringify(
 				this.sandboxTokens.map(e => {
@@ -548,12 +446,6 @@ export class ProjectConfigStore {
 					return o;
 				}),
 			);
-		}
-		if (this.present.qa_max_duration_minutes) {
-			out.qa_max_duration_minutes = String(this.qaMaxDurationMinutes);
-		}
-		if (this.present.qa_max_scenarios) {
-			out.qa_max_scenarios = String(this.qaMaxScenarios);
 		}
 		return out;
 	}
@@ -600,22 +492,6 @@ export class ProjectConfigStore {
 				}
 				break;
 			}
-			case "qa_env": {
-				try {
-					const parsed = JSON.parse(value);
-					const norm = normalizeQaEnv(parsed);
-					if (norm.ok) {
-						this.qaEnv = norm.value;
-						this.present.qa_env = true;
-						this.save();
-					} else {
-						throw new Error("Invalid qa_env shape");
-					}
-				} catch (err) {
-					throw new Error(`Failed to parse qa_env as JSON: ${(err as Error).message}`);
-				}
-				break;
-			}
 			case "sandbox_tokens": {
 				try {
 					const parsed = JSON.parse(value);
@@ -632,22 +508,6 @@ export class ProjectConfigStore {
 				}
 				break;
 			}
-			case "qa_max_duration_minutes": {
-				const n = parseInt(value, 10);
-				if (!Number.isFinite(n)) throw new Error("qa_max_duration_minutes must be a number");
-				this.qaMaxDurationMinutes = n;
-				this.present.qa_max_duration_minutes = true;
-				this.save();
-				break;
-			}
-			case "qa_max_scenarios": {
-				const n = parseInt(value, 10);
-				if (!Number.isFinite(n)) throw new Error("qa_max_scenarios must be a number");
-				this.qaMaxScenarios = n;
-				this.present.qa_max_scenarios = true;
-				this.save();
-				break;
-			}
 		}
 	}
 
@@ -657,21 +517,9 @@ export class ProjectConfigStore {
 				this.configDirectories = [];
 				this.present.config_directories = false;
 				break;
-			case "qa_env":
-				this.qaEnv = {};
-				this.present.qa_env = false;
-				break;
 			case "sandbox_tokens":
 				this.sandboxTokens = [];
 				this.present.sandbox_tokens = false;
-				break;
-			case "qa_max_duration_minutes":
-				this.qaMaxDurationMinutes = QA_MAX_DURATION_DEFAULT;
-				this.present.qa_max_duration_minutes = false;
-				break;
-			case "qa_max_scenarios":
-				this.qaMaxScenarios = QA_MAX_SCENARIOS_DEFAULT;
-				this.present.qa_max_scenarios = false;
 				break;
 		}
 		this.save();
@@ -715,16 +563,6 @@ export class ProjectConfigStore {
 		this.save();
 	}
 
-	getQaEnv(): Record<string, string> {
-		return { ...this.qaEnv };
-	}
-
-	setQaEnv(env: Record<string, string>): void {
-		this.qaEnv = { ...env };
-		this.present.qa_env = Object.keys(this.qaEnv).length > 0;
-		this.save();
-	}
-
 	getSandboxTokens(): SandboxTokenEntry[] {
 		return this.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
 	}
@@ -739,26 +577,24 @@ export class ProjectConfigStore {
 		this.save();
 	}
 
-	getQaMaxDurationMinutes(): number {
-		return this.qaMaxDurationMinutes;
+	/** Returns a defensive clone of the named component's `config` map (or {} if missing/unknown). */
+	getComponentConfig(name: string): Record<string, string> {
+		const c = this.components.find(x => x.name === name);
+		return c?.config ? { ...c.config } : {};
 	}
 
-	setQaMaxDurationMinutes(n: number): void {
-		if (!Number.isFinite(n)) throw new Error("qa_max_duration_minutes must be a finite number");
-		this.qaMaxDurationMinutes = Math.trunc(n);
-		this.present.qa_max_duration_minutes = true;
-		this.save();
+	/** Reads `components[name].config.qa_max_duration_minutes`, parses with Number(), falls back to 10. */
+	getQaMaxDurationMinutes(componentName: string): number {
+		const raw = this.getComponentConfig(componentName).qa_max_duration_minutes;
+		const n = raw == null ? NaN : Number(raw);
+		return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 10;
 	}
 
-	getQaMaxScenarios(): number {
-		return this.qaMaxScenarios;
-	}
-
-	setQaMaxScenarios(n: number): void {
-		if (!Number.isFinite(n)) throw new Error("qa_max_scenarios must be a finite number");
-		this.qaMaxScenarios = Math.trunc(n);
-		this.present.qa_max_scenarios = true;
-		this.save();
+	/** True iff any component has a non-empty `config.qa_start_command`. */
+	isQaConfiguredOnAnyComponent(): boolean {
+		return this.components.some(c =>
+			typeof c.config?.qa_start_command === "string" && c.config.qa_start_command.length > 0
+		);
 	}
 
 	// ── Component & workflow accessors (Phase 1) ─────────────────────
@@ -810,7 +646,11 @@ export class ProjectConfigStore {
 
 	/** Replace the components[] array. Persists immediately. */
 	setComponents(components: Component[]): void {
-		this.components = components.map(c => ({ ...c, commands: c.commands ? { ...c.commands } : undefined }));
+		this.components = components.map(c => ({
+			...c,
+			commands: c.commands ? { ...c.commands } : undefined,
+			config: c.config ? { ...c.config } : undefined,
+		}));
 		this.save();
 	}
 
@@ -830,30 +670,4 @@ export class ProjectConfigStore {
 		this.load();
 	}
 
-	/** Parse QA testing config from qa_* keys. Returns null if not configured (no qa_start_command). */
-	getQaTestingConfig(): QaTestingConfig | null {
-		const all = this.getWithDefaults();
-		if (!all.qa_start_command) return null;
-		return {
-			buildCommand: all.qa_build_command || this.firstComponentBuildCommand() || all.build_command || "npm run build",
-			startCommand: all.qa_start_command,
-			healthCheck: all.qa_health_check || "",
-			browserEntry: all.qa_browser_entry || "",
-			env: this.getQaEnv(),
-			maxDurationMinutes: this.getQaMaxDurationMinutes(),
-			maxScenarios: this.getQaMaxScenarios(),
-		};
-	}
-
-	/** First component-defined `build` command, falling back across components in
-	 *  declared order. Returns undefined if no component declares a build command.
-	 *  Used as the modern fallback for QA `buildCommand` after Follow-up A moved
-	 *  legacy top-level `build_command` into components. */
-	private firstComponentBuildCommand(): string | undefined {
-		for (const c of this.components) {
-			const v = c.commands?.build;
-			if (typeof v === "string" && v.length > 0) return v;
-		}
-		return undefined;
-	}
 }
