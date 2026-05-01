@@ -112,6 +112,14 @@ export interface Goal {
 	inlineWorkflow?: unknown;
 	/** Inline role overrides scoped to this goal-tree (name → role definition). */
 	inlineRoles?: Record<string, unknown>;
+	/** PlanId of the parent's plan step that spawned this child. Mirrors
+	 *  PersistedGoal.spawnedFromPlanId; the Plan tab uses this to map
+	 *  plan steps back to live child goals (see plan-node-state.ts). */
+	spawnedFromPlanId?: string;
+	/** Count of buffered plan mutations awaiting user approval. Drives
+	 *  the "needs-input" plan-node colour. Optional — server enriches it
+	 *  on the goal record when a mutation banner is open. */
+	pendingMutationCount?: number;
 	workflow?: {
 		id: string;
 		name: string;

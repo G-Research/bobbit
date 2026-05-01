@@ -99,16 +99,23 @@
 }
 .plan-svg .plan-node[data-state="running"] .plan-node-rect {
 	stroke: oklch(0.62 0.15 250);
-	fill: oklch(0.62 0.15 250 / 0.08);
+	stroke-width: 1.5;
+	fill: oklch(0.62 0.15 250 / 0.18);
 }
 .plan-svg .plan-node[data-state="passed"] .plan-node-rect,
 .plan-svg .plan-node[data-state="complete"] .plan-node-rect {
 	stroke: oklch(0.65 0.15 145);
-	fill: oklch(0.65 0.15 145 / 0.08);
+	stroke-width: 1.5;
+	fill: oklch(0.65 0.15 145 / 0.18);
 }
 .plan-svg .plan-node[data-state="failed"] .plan-node-rect {
 	stroke: oklch(0.70 0.14 30);
-	fill: oklch(0.70 0.14 30 / 0.08);
+	stroke-width: 1.5;
+	fill: oklch(0.70 0.14 30 / 0.18);
+}
+.plan-svg .plan-node[data-state="needs-input"] .plan-node-rect {
+	stroke: oklch(0.78 0.14 85);
+	fill: oklch(0.78 0.14 85 / 0.10);
 }
 
 .plan-svg .plan-node-title {
@@ -135,6 +142,7 @@
 .plan-svg .plan-node[data-state="passed"] .plan-node-state-badge,
 .plan-svg .plan-node[data-state="complete"] .plan-node-state-badge { fill: oklch(0.55 0.15 145); }
 .plan-svg .plan-node[data-state="failed"] .plan-node-state-badge { fill: oklch(0.55 0.15 30); }
+.plan-svg .plan-node[data-state="needs-input"] .plan-node-state-badge { fill: oklch(0.65 0.14 85); }
 
 .plan-svg .plan-edge {
 	stroke: var(--border);

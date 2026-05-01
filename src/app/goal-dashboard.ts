@@ -21,6 +21,7 @@ import {
 } from "./goal-dashboard-tab-visibility.js";
 export { hasChildGoals } from "./goal-dashboard-tab-visibility.js";
 import { planEdgePaths } from "./plan-edge-paths.js";
+import { resolvePlanNodeState as resolvePlanNodeStateFn } from "./plan-node-state.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -2001,27 +2002,17 @@ async function approvePlanClick(goalId: string): Promise<void> {
 /** Resolve a plan node's display state by joining `subgoal.childGoalId`
  *  against the goal snapshot. Falls back to "pending" when the child has
  *  not been spawned yet. */
-function resolvePlanNodeState(step: PlanStep, goals: Goal[]): "pending" | "running" | "passed" | "failed" {
-	const childId = step.subgoal?.childGoalId;
-	if (!childId) return "pending";
-	const child = goals.find(g => g.id === childId);
-	if (!child) return "pending";
-	if (child.archived) return "failed";
-	switch (child.state) {
-		case "complete": return "passed";
-		case "in-progress": return "running";
-		case "shelved": return "failed";
-		case "todo":
-		default: return "pending";
-	}
+function resolvePlanNodeState(step: PlanStep, goals: Goal[]): "pending" | "running" | "passed" | "failed" | "needs-input" {
+	return resolvePlanNodeStateFn(step, goals as any);
 }
 
-function planNodeStateLabel(s: "pending" | "running" | "passed" | "failed"): string {
+function planNodeStateLabel(s: "pending" | "running" | "passed" | "failed" | "needs-input"): string {
 	switch (s) {
 		case "pending": return "Pending";
 		case "running": return "Running";
 		case "passed": return "Passed";
 		case "failed": return "Failed";
+		case "needs-input": return "Needs Input";
 	}
 }
 
@@ -2054,7 +2045,7 @@ function renderPlanNode(
 	step: PlanStep,
 	colIdx: number,
 	rowIdx: number,
-	stateLabel: "pending" | "running" | "passed" | "failed",
+	stateLabel: "pending" | "running" | "passed" | "failed" | "needs-input",
 	isSelected: boolean,
 ) {
 	const x = PLAN_PAD + colIdx * PLAN_COL_W + (PLAN_COL_W - PLAN_NODE_W) / 2;
