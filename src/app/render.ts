@@ -1996,7 +1996,7 @@ function projectProposalPanel() {
 	`;
 
 	return html`
-		<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-mode=${mode}>
+		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode}>
 			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
 				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
 				<div class="text-[11px] text-muted-foreground font-mono truncate min-w-0" title=${fields.root_path || ""}>${fields.root_path || ""}</div>
@@ -2005,7 +2005,7 @@ function projectProposalPanel() {
 				components: structuredComponents.length,
 				workflows: Object.keys(structuredWorkflows).length,
 			})}
-			<div ${ref(projectOuterScrollRef)} class="flex-1 overflow-y-auto p-5 ${streaming ? STREAMING_BORDER : ""}">
+			<div ${ref(projectOuterScrollRef)} class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-5 ${streaming ? STREAMING_BORDER : ""}">
 				${activeView === "components"
 					? projectComponentsView(structuredComponents)
 					: activeView === "workflows"
