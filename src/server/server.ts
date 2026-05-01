@@ -5153,6 +5153,32 @@ async function handleApiRoute(
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
 		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
 
+		// Zombie-shell reconciliation: any existing child of this goal that
+		// is non-archived but has no workflow snapshot (i.e. was created
+		// pre-fix or by an interrupted spawn) is functionally inert. Archive
+		// these so they're filtered out of goal_list_children + the
+		// spawnedFromPlanId fallback. Idempotent on already-archived goals;
+		// fires once at goal-plan transition / re-signal time.
+		if (shouldAutoSignalExecution) {
+			const zombieIds: string[] = [];
+			for (const child of gateSignalCtx.goalStore.getAll()) {
+				if (child.parentGoalId !== goalId) continue;
+				if (child.archived) continue;
+				const hasGates = (child.workflow?.gates?.length ?? 0) > 0;
+				if (hasGates) continue;
+				// No workflow gates — zombie shell. Capture for archival.
+				zombieIds.push(child.id);
+			}
+			for (const zid of zombieIds) {
+				try {
+					await gateSignalCtx.goalManager.archiveGoal(zid);
+					console.log(`[goal-plan] Reconciled zombie child ${zid} (no workflow gates) on goal ${goalId}`);
+				} catch (err) {
+					console.warn(`[goal-plan] Failed to archive zombie child ${zid} on goal ${goalId} (best-effort):`, err);
+				}
+			}
+		}
+
 		// Auto-signal execution after goal-plan freezes the plan. Fire-and-
 		// forget after the response is sent. Mirrors the structure of a normal
 		// gate signal: synthesize a signal record + invoke verifyGateSignal.
