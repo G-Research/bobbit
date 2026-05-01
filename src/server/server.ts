@@ -1037,6 +1037,41 @@ export function createGateway(config: GatewayConfig) {
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
+			// Capture which sessions were mid-stream BEFORE restoreSessions
+			// clears the flag on disk. Used by the delegate-resume loop below
+			// to distinguish 'idle because finished cleanly' from 'idle because
+			// we just restored an interrupted-mid-turn session whose continuation
+			// re-prompt is still in flight'. Without this, an interrupted delegate
+			// would be reported as completed with stale pre-restart output before
+			// it actually resumed work.
+			const wasStreamingBeforeRestore = new Set<string>();
+			try {
+				const sessionsJsonPath = path.join(stateDir, "sessions.json");
+				if (fs.existsSync(sessionsJsonPath)) {
+					const raw = fs.readFileSync(sessionsJsonPath, "utf-8");
+					const rows = JSON.parse(raw) as Array<{ id?: string; wasStreaming?: boolean }>;
+					for (const r of rows) {
+						if (r && typeof r.id === "string" && r.wasStreaming) wasStreamingBeforeRestore.add(r.id);
+					}
+				}
+				// Per-project session stores live under stateDir/projects/<id>/sessions.json
+				const projectsDir = path.join(stateDir, "projects");
+				if (fs.existsSync(projectsDir)) {
+					for (const projectDir of fs.readdirSync(projectsDir)) {
+						const sf = path.join(projectsDir, projectDir, "sessions.json");
+						if (!fs.existsSync(sf)) continue;
+						try {
+							const rows = JSON.parse(fs.readFileSync(sf, "utf-8")) as Array<{ id?: string; wasStreaming?: boolean }>;
+							for (const r of rows) {
+								if (r && typeof r.id === "string" && r.wasStreaming) wasStreamingBeforeRestore.add(r.id);
+							}
+						} catch { /* ignore one-project parse failure */ }
+					}
+				}
+			} catch (err) {
+				console.warn("[delegate-harness] Failed to capture wasStreaming pre-restore flags:", err);
+			}
+
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 
@@ -1198,11 +1233,20 @@ export function createGateway(config: GatewayConfig) {
 						});
 						continue;
 					}
-					// Idle session: the child has already finished its turn (the
-					// `agent_end` event was replayed during `restoreSession` BEFORE
-					// we got here, so attaching a fresh listener would never see it).
-					// Drain a synthetic `completed` result rather than parking forever.
-					if (child.status === "idle") {
+					// Idle delegate that was NOT interrupted mid-turn:
+					// `agent_end` was already replayed during `restoreSession`
+					// (BEFORE we got here), so attaching a fresh listener
+					// would never see it. Drain a synthetic `completed` result.
+					//
+					// Idle BUT was streaming when the gateway crashed: the
+					// child's continuation re-prompt is in flight (see
+					// session-manager.ts::restoreSession ~L2657 — restore
+					// re-prompts mid-turn sessions to resume). Treating this
+					// as completed would deliver stale pre-restart output to
+					// the parent and ignore the resumed work. Attach the
+					// listener so the actual completion flows back when the
+					// resumed turn ends.
+					if (child.status === "idle" && !wasStreamingBeforeRestore.has(entry.delegateSessionId)) {
 						let output = "";
 						try { output = await sessionManager.getSessionOutput(entry.delegateSessionId); } catch { /* ignore */ }
 						delegateHarness.submit(entry.parentSessionId, entry.toolUseId, {
@@ -1211,8 +1255,9 @@ export function createGateway(config: GatewayConfig) {
 						});
 						continue;
 					}
-					// Streaming: wire the completion listener so when the child
-					// reaches a terminal state, the harness gets the result.
+					// Streaming OR resumed-mid-turn: wire the completion listener
+					// so when the child reaches a terminal state (real or
+					// post-resume), the harness gets the result.
 					sessionManager.attachDelegateCompletionListener(
 						entry.delegateSessionId,
 						entry.parentSessionId,
