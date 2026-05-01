@@ -1,0 +1,9 @@
+name: edit_proposal
+description: "Surgically edit the current proposal draft via exact-string replacement"
+summary: "Edit a proposal draft by replacing old_text with new_text. Same semantics as the builtin edit tool — old_text must match exactly and uniquely. Empty new_text deletes the matched span."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Proposals
+docs: >-
+  Parameters: type (required), old_text (required), new_text (required, may be empty). Failed edits do NOT modify the file on disk.
