@@ -86,11 +86,13 @@ describe("Children tool extension — registration", () => {
 		// `goal_plan_propose` and `goal_plan_status` were added in Phase 3.3;
 		// see tests/tool-extension-plan.test.ts for their dedicated coverage.
 		assert.deepEqual(names, [
+			"goal_decide_mutation",
 			"goal_merge_child",
 			"goal_pause",
 			"goal_plan_propose",
 			"goal_plan_status",
 			"goal_resume",
+			"goal_set_policy",
 			"goal_spawn_child",
 		]);
 	});

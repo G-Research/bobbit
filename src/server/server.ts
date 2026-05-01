@@ -3428,6 +3428,31 @@ async function handleApiRoute(
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			// Validate nested-goals knobs that may be patched post-creation:
+			// `divergencePolicy` and `maxConcurrentChildren`. These were previously
+			// settable only at goal-create time; the team-lead now also needs a
+			// way to upgrade an existing goal from the default `strict` to a
+			// looser policy when the charter explicitly says so. See
+			// docs/design/nested-goals.md §1.5.
+			let divergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
+			if (body.divergencePolicy !== undefined) {
+				if (body.divergencePolicy !== "strict" && body.divergencePolicy !== "balanced" && body.divergencePolicy !== "autonomous") {
+					json({ error: "divergencePolicy must be one of: strict, balanced, autonomous" }, 400);
+					return;
+				}
+				divergencePolicy = body.divergencePolicy;
+			}
+			let maxConcurrentChildren: number | undefined;
+			if (body.maxConcurrentChildren !== undefined) {
+				if (typeof body.maxConcurrentChildren !== "number"
+					|| !Number.isInteger(body.maxConcurrentChildren)
+					|| body.maxConcurrentChildren < 1
+					|| body.maxConcurrentChildren > 8) {
+					json({ error: "maxConcurrentChildren must be an integer in [1, 8]" }, 400);
+					return;
+				}
+				maxConcurrentChildren = body.maxConcurrentChildren;
+			}
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -3439,6 +3464,8 @@ async function handleApiRoute(
 				branch: body.branch,
 				prUrl: body.prUrl,
 				reattemptOf: body.reattemptOf,
+				...(divergencePolicy !== undefined ? { divergencePolicy } : {}),
+				...(maxConcurrentChildren !== undefined ? { maxConcurrentChildren } : {}),
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
 			json({ ok: true });
@@ -5895,6 +5922,23 @@ async function handleApiRoute(
 		if (execGate) {
 			const execFrozen = execGate.metadata?.frozen === "true";
 			const before: VerifyStep[] = (execGate.verify ?? []) as VerifyStep[];
+			// Instantiation short-circuit (Bug F): if the supplied `planId` already
+			// exists as a subgoal step in the frozen plan, this is the team-lead
+			// realising a planned step into a real child goal — NOT a plan
+			// mutation. The plan itself isn't changing; only an unspawned
+			// planStep is becoming a child. Skip the classifier entirely;
+			// criteria-drop adherence isn't relevant either since the plan
+			// shape is unchanged.
+			let isInstantiation = false;
+			if (planId) {
+				for (const s of before) {
+					if (s && s.type === "subgoal" && s.subgoal?.planId === planId) {
+						isInstantiation = true;
+						break;
+					}
+				}
+			}
+			if (!isInstantiation) {
 			// Synthetic subgoal step describing the proposed addition. The
 			// `planId` is taken from the body when supplied; otherwise we
 			// fabricate one for the diff (it doesn't get persisted on a
@@ -5949,6 +5993,7 @@ async function handleApiRoute(
 				return;
 			}
 			// decision.kind === "apply" — fall through to the createGoal flow.
+			} // end if (!isInstantiation)
 		}
 
 		try {

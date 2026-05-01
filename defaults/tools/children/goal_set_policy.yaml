@@ -1,0 +1,36 @@
+name: goal_set_policy
+description: |-
+  Set the divergence policy and/or `maxConcurrentChildren` on the current goal. Useful when the charter document specifies a non-default policy (e.g. `divergencePolicy: balanced`) but the goal was created without those knobs — the server defaults to `strict` and that's hard to change without restart-archive-recreate.
+
+  Resolution: the goal's own value beats the nearest ancestor's value, which beats the default `strict` (design §1.5). Both fields are optional; pass only the ones you want to change.
+summary: "Set divergencePolicy / maxConcurrentChildren on the current goal."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  PUTs to `PUT /api/goals/:id` with `{divergencePolicy?, maxConcurrentChildren?}`. Response: `200 {ok: true}`. The values flow through to subsequent classifier consultations on this goal and any descendants that don't override them.
+detail_docs: |-
+  ## Purpose
+
+  Sync charter intent into the goal record post-creation. The propose_goal flow doesn't currently accept divergencePolicy / maxConcurrentChildren, so a charter that says "balanced" produces a goal still running under the default `strict`. This tool closes that gap.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `divergencePolicy` | `"strict"` \| `"balanced"` \| `"autonomous"` | No | Policy for post-freeze plan mutations. `strict` prompts the user for every change; `balanced` auto-approves `fix-up`s; `autonomous` auto-approves `expansion`s too. `criteria-drop` is always rejected regardless of policy. |
+  | `maxConcurrentChildren` | number | No | Bound on parallel children spawned by the verification harness for this goal-tree. Integer in `[1, 8]`. Only the root goal's value is honoured in v1; sub-goal values are accepted on disk but inert. |
+
+  At least one of the two fields must be supplied.
+
+  ## When to use
+
+  - At the start of a `parent`-workflow goal whose charter specifies a non-default policy. Set it before signalling `goal-plan` so the freeze and any subsequent post-freeze mutations honour the charter.
+  - To temporarily relax a stuck goal: e.g. switch from `strict` to `balanced` if the user wants fix-ups to flow through without prompting.
+
+  ## Errors
+
+  - **400 divergencePolicy must be one of: strict, balanced, autonomous**
+  - **400 maxConcurrentChildren must be an integer in [1, 8]**
+  - **404 Goal not found** — the current goal was archived or otherwise unavailable.

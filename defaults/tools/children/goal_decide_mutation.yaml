@@ -1,0 +1,32 @@
+name: goal_decide_mutation
+description: |-
+  Approve or reject a buffered plan mutation by `requestId`. When `goal_spawn_child` or `goal_plan_propose` returns a 409 with `requestId` and `requiresApproval: true`, the server has buffered the proposed mutation and is waiting for a decision. The team-lead surfaces the classification to the user (e.g. via `ask_user_choices`) and then calls this tool with the user's decision.
+
+  On approve, the buffered spawn (or plan-replace) is applied; the response body carries `applied: { childGoalId? | plan? }`. On reject, the buffer entry is dropped and no further action is taken. Idempotent: a second call with a stale `requestId` returns `404 unknown-or-stale-request`.
+summary: "Approve or reject a buffered plan mutation by requestId."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  POSTs to `POST /api/goals/:id/mutation/:requestId/decision`. Body: `{ decision: "approve" | "reject" }`. Response: `200 { resolved: true, applied?: { plan?, childGoalId? } }` on approve, `200 { resolved: true }` on reject. `404 { error: "unknown-or-stale-request" }` if the buffered entry no longer exists. Broadcasts `goal_mutation_resolved` (and on plan-replace approves, also `goal_plan_proposed`) so dashboard banners clear automatically.
+detail_docs: |-
+  ## Purpose
+
+  Resolve a server-buffered plan mutation that was returned to the team-lead with `requiresApproval: true`. Without this tool, the only way to action a buffered mutation was a direct curl to `POST /api/goals/:id/mutation/:requestId/decision` — which the team-lead can't reach via MCP.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `requestId` | string | **Yes** | The `requestId` from the prior 409 response body. |
+  | `decision` | `"approve"` \| `"reject"` | **Yes** | Apply the mutation or drop it. |
+
+  ## When to use
+
+  Triggered by an `ask_user_choices` flow after the user picks a verdict on a buffered mutation. Don't approve mutations the user hasn't seen.
+
+  ## Errors
+
+  - **404 unknown-or-stale-request** — the buffered entry expired (e.g. another tool already resolved it, or the goal was archived). No retry path.
+  - **400 decision must be 'approve' or 'reject'** — invalid `decision` value.

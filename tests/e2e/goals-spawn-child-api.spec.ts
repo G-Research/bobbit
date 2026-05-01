@@ -716,6 +716,71 @@ test.describe("spawnedFromPlanId — pre-freeze child re-binds to planStep", () 
 		}
 	});
 
+	test("goal_spawn_child(planId=X) where X already exists in frozen plan: instantiation short-circuit", async () => {
+		// Pinned regression (Bug F): pre-fix, spawning with a planId that
+		// matched an existing planStep was misclassified as `restructure`
+		// because the synthetic step in the diff had phase=0 vs the real
+		// step's phase=N, tripping `changedDeps`. The intent is
+		// instantiation, not mutation — the plan itself isn't changing.
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `Instantiate Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		try {
+			// Seed a frozen plan with a phase=2 subgoal step.
+			const patchResp = await apiFetch(`/api/goals/${parent.id}/plan`, {
+				method: "PATCH",
+				body: JSON.stringify({
+					gateId: "execution",
+					planSteps: [{
+						name: "Phase-2 leaf",
+						type: "subgoal",
+						phase: 2,
+						subgoal: {
+							title: "Phase-2 leaf",
+							spec: "a",
+							planId: "phase-2-leaf-A",
+						},
+					}],
+				}),
+			});
+			expect(patchResp.status).toBe(200);
+
+			// Spawn a child with the same planId. The classifier MUST NOT
+			// engage; this is instantiation.
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Phase-2 leaf",
+					spec: "a",
+					workflowId: "feature",
+					planId: "phase-2-leaf-A",
+				}),
+			});
+			expect(spawnResp.status).toBe(201);
+			const spawn = await spawnResp.json();
+			expect(spawn.childGoalId).toBeTruthy();
+			expect(spawn.planId).toBe("phase-2-leaf-A");
+
+			// And the child carries spawnedFromPlanId so the linkage is correct.
+			const child = await getGoal(spawn.childGoalId);
+			expect(child.spawnedFromPlanId).toBe("phase-2-leaf-A");
+
+			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
 	test("goal_spawn_child without planId leaves spawnedFromPlanId undefined", async () => {
 		// Sanity: ad-hoc decomposition (no planId) shouldn't fabricate a
 		// synthetic value on the child record.
@@ -751,6 +816,153 @@ test.describe("spawnedFromPlanId — pre-freeze child re-binds to planStep", () 
 			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
 		} finally {
 			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+});
+
+// User-feedback regression (Bug E from team-lead-317cdb83): the
+// charter knob for `divergencePolicy` couldn't reach the goal record
+// post-creation. PUT /api/goals/:id now accepts both knobs.
+test.describe("PUT /api/goals/:id — divergencePolicy + maxConcurrentChildren", () => {
+	test("sets divergencePolicy on an existing goal", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `PUT-policy ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const goal = await parentResp.json();
+		expect(goal.divergencePolicy).toBeUndefined();
+
+		try {
+			const putResp = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ divergencePolicy: "balanced" }),
+			});
+			expect(putResp.status).toBe(200);
+
+			const refreshed = await getGoal(goal.id);
+			expect(refreshed.divergencePolicy).toBe("balanced");
+		} finally {
+			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("sets maxConcurrentChildren on an existing goal", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `PUT-maxConc ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const goal = await parentResp.json();
+
+		try {
+			const putResp = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ maxConcurrentChildren: 5 }),
+			});
+			expect(putResp.status).toBe(200);
+
+			const refreshed = await getGoal(goal.id);
+			expect(refreshed.maxConcurrentChildren).toBe(5);
+		} finally {
+			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("rejects invalid divergencePolicy with 400", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `PUT-bad-policy ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+		});
+		const goal = await parentResp.json();
+
+		try {
+			const putResp = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ divergencePolicy: "yolo" }),
+			});
+			expect(putResp.status).toBe(400);
+			const body = await putResp.json();
+			expect(body.error).toContain("divergencePolicy");
+		} finally {
+			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("rejects maxConcurrentChildren outside [1, 8] with 400", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `PUT-bad-max ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+		});
+		const goal = await parentResp.json();
+
+		try {
+			const tooHigh = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ maxConcurrentChildren: 9 }),
+			});
+			expect(tooHigh.status).toBe(400);
+			const tooLow = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ maxConcurrentChildren: 0 }),
+			});
+			expect(tooLow.status).toBe(400);
+		} finally {
+			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("PUT with neither knob leaves divergencePolicy unchanged", async () => {
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `PUT-noop ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "parent",
+			projectId,
+			autoStartTeam: false,
+			divergencePolicy: "autonomous",
+		});
+		const goal = await parentResp.json();
+		expect(goal.divergencePolicy).toBe("autonomous");
+
+		try {
+			const putResp = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ title: "renamed" }),
+			});
+			expect(putResp.status).toBe(200);
+
+			const refreshed = await getGoal(goal.id);
+			expect(refreshed.title).toBe("renamed");
+			expect(refreshed.divergencePolicy).toBe("autonomous");
+		} finally {
+			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => { });
 		}
 	});
 });

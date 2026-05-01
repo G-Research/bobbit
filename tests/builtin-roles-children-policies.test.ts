@@ -13,7 +13,8 @@
  * Fix: per-tool override `goal_plan_status: allow` on architect AND
  * spec-auditor roles. Only the read-only `goal_plan_status` is opened up;
  * the mutating tools (`goal_spawn_child`, `goal_plan_propose`,
- * `goal_merge_child`, `goal_pause`, `goal_resume`) stay team-lead-only.
+ * `goal_merge_child`, `goal_pause`, `goal_resume`, `goal_decide_mutation`,
+ * `goal_set_policy`) stay team-lead-only.
  *
  * Pinned cases:
  *   - architect.toolPolicies.goal_plan_status === "allow"
@@ -93,6 +94,8 @@ describe("architect role \u2014 goal_plan_status override", () => {
 			"goal_merge_child",
 			"goal_pause",
 			"goal_resume",
+			"goal_decide_mutation",
+			"goal_set_policy",
 		]) {
 			const policy = resolveGrantPolicy(tool, "Children", role as any, tm as any, gps as any);
 			assert.equal(policy, "ask",
@@ -133,6 +136,8 @@ describe("spec-auditor role \u2014 goal_plan_status override", () => {
 			"goal_merge_child",
 			"goal_pause",
 			"goal_resume",
+			"goal_decide_mutation",
+			"goal_set_policy",
 		]) {
 			const policy = resolveGrantPolicy(tool, "Children", role as any, tm as any, gps as any);
 			assert.equal(policy, "ask",

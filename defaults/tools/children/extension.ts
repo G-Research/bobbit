@@ -257,4 +257,72 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 	});
+
+	// ── goal_decide_mutation ──────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_decide_mutation",
+		label: "Decide Plan Mutation",
+		description: [
+			"Approve or reject a buffered plan mutation. When `goal_spawn_child` or `goal_plan_propose`",
+			"returns 409 with `requestId` and `requiresApproval: true`, the proposed mutation has been",
+			"buffered server-side and is awaiting a decision. The team-lead presents the classification",
+			"to the user (`ask_user_choices`) and then calls this tool with their decision. On approve,",
+			"the buffered spawn or plan-replace is applied and the response carries the resulting",
+			"`childGoalId` (for child-spawn) or `plan` (for plan-replace).",
+		].join(" "),
+		promptSnippet: "Approve or reject a buffered plan mutation by requestId.",
+		parameters: Type.Object({
+			requestId: Type.String({ description: "Mutation request id from the prior 409's body." }),
+			decision: Type.Union([Type.Literal("approve"), Type.Literal("reject")], { description: "Apply the mutation or drop it." }),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const result = await postJson(
+					`/api/goals/${goalId}/mutation/${encodeURIComponent(params.requestId)}/decision`,
+					{ decision: params.decision },
+				);
+				if (!result.ok) return err("goal_decide_mutation", result.status, result.data);
+				return ok(result.data);
+			} catch (e) {
+				return netErr("goal_decide_mutation", e);
+			}
+		},
+	});
+
+	// ── goal_set_policy ──────────────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_set_policy",
+		label: "Set Goal Policy",
+		description: [
+			"Set the divergence policy and/or maxConcurrentChildren on the current goal. Useful when",
+			"the charter document specifies `divergencePolicy: balanced` or similar but the goal was",
+			"created without those knobs (the field defaults to `strict` server-side). Resolution:",
+			"the goal's own value > nearest ancestor's value > default `strict`. Both fields are",
+			"optional; pass only the ones you want to change.",
+		].join(" "),
+		promptSnippet: "Set divergencePolicy / maxConcurrentChildren on the goal.",
+		parameters: Type.Object({
+			divergencePolicy: Type.Optional(Type.Union([
+				Type.Literal("strict"),
+				Type.Literal("balanced"),
+				Type.Literal("autonomous"),
+			], { description: "Policy for post-freeze plan mutations. strict prompts the user for every change; balanced auto-approves fix-ups; autonomous auto-approves expansions too." })),
+			maxConcurrentChildren: Type.Optional(Type.Number({ description: "Bound on parallel children spawned by the harness. Integer in [1, 8]. Only the root goal's value is honoured in v1." })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const body: Record<string, unknown> = {};
+				if (params.divergencePolicy !== undefined) body.divergencePolicy = params.divergencePolicy;
+				if (params.maxConcurrentChildren !== undefined) body.maxConcurrentChildren = params.maxConcurrentChildren;
+				if (Object.keys(body).length === 0) {
+					return err("goal_set_policy", null, { error: "At least one of divergencePolicy / maxConcurrentChildren must be supplied." });
+				}
+				const result = await requestJson("PUT", `/api/goals/${goalId}`, body);
+				if (!result.ok) return err("goal_set_policy", result.status, result.data);
+				return ok(result.data);
+			} catch (e) {
+				return netErr("goal_set_policy", e);
+			}
+		},
+	});
 }

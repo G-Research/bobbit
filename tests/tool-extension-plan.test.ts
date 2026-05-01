@@ -78,15 +78,17 @@ async function loadExtensionWithGoalId(goalId: string | undefined) {
 }
 
 describe("Children tool extension — goal_plan_* registration", () => {
-	it("registers all 6 Children tools when BOBBIT_GOAL_ID is present", async () => {
+	it("registers all Children tools when BOBBIT_GOAL_ID is present", async () => {
 		await loadExtensionWithGoalId(GOAL_ID);
 		const names = registered.map(t => t.name).sort();
 		assert.deepEqual(names, [
+			"goal_decide_mutation",
 			"goal_merge_child",
 			"goal_pause",
 			"goal_plan_propose",
 			"goal_plan_status",
 			"goal_resume",
+			"goal_set_policy",
 			"goal_spawn_child",
 		]);
 	});
