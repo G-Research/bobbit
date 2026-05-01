@@ -16,9 +16,11 @@
  * + helper directly with all four id-shapes (string / undefined / null /
  * numeric); this E2E covers the full WS pipeline + browser DOM end-to-end.
  *
- * The mock agent's `BG_WAIT:<ms>` trigger emits exactly the bug condition:
- * a single `bash_bg` `wait` toolCall in an assistant `message_end` with no
- * `id` field, then parks for <ms> ms with no further events.
+ * The mock agent's `BG_WAIT_NOID:<ms>` trigger emits exactly the bug
+ * condition: a single `bash_bg` `wait` toolCall in an assistant
+ * `message_end` with no `id` field, then parks for <ms> ms with no further
+ * events. (`BG_WAIT:<ms>` is now the real-bg-process trigger — different
+ * surface, see mock-agent-core.mjs header.)
  */
 import { test, expect } from "../gateway-harness.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
@@ -29,7 +31,7 @@ test.describe("bash_bg.wait — no dual-render when message_end has no id", () =
 		await createSessionViaUI(page);
 
 		// Trigger the id-less assistant message_end + parked wait.
-		await sendMessage(page, "BG_WAIT:2000 park the wait");
+		await sendMessage(page, "BG_WAIT_NOID:2000 park the wait");
 
 		// Wait for the toolCall card to render.
 		await page.waitForFunction(
