@@ -5,6 +5,7 @@ toolPolicies:
   edit: never
   bash_bg: never
   delegate: never
+  gate_signal: never
 createdAt: 1773875507369
 updatedAt: 1774972321972
 promptTemplate: |

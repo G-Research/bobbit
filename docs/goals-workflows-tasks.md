@@ -154,6 +154,8 @@ Agents signal gates via the `gate_signal` tool (or `POST /api/goals/:id/gates/:g
 
 Each signal is recorded in the gate's signal history with a unique ID, timestamp, and session reference.
 
+**`gate_signal` is restricted to the team lead role at the tool-policy layer.** Every contributor role (`coder`, `test-engineer`, `reviewer`, `code-reviewer`, `security-reviewer`, `architect`, `spec-auditor`, `qa-tester`, `docs-writer`) declares `toolPolicies.gate_signal: never` in `defaults/roles/*.yaml`, so the tool-guard extension hard-blocks the call at runtime. Only the team lead has the goal branch checked out and can merge contributor work before verification runs from the goal-branch HEAD. Contributors hand off command-format / expect-failure gate inputs (raw shell command, `error_pattern` regex) via task `result_summary` for the team lead to attach when signalling. Invariant enforced by `tests/role-gate-signal-policy.test.ts`.
+
 ### Verification
 
 Gates can define automated verification that runs when signaled:
