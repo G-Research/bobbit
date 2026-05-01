@@ -11,19 +11,6 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-// Legacy top-level QA keys that were moved into per-component `config:` maps.
-// Reject at the top level of `propose_project` payloads with the same message
-// the REST PUT uses, so agents migrate to `components[<name>].config.<key>`.
-const LEGACY_QA_KEYS_REJECTED = [
-	"qa_start_command",
-	"qa_build_command",
-	"qa_health_check",
-	"qa_browser_entry",
-	"qa_env",
-	"qa_max_duration_minutes",
-	"qa_max_scenarios",
-] as const;
-
 export default function (pi: ExtensionAPI) {
 	function ack() {
 		return {
@@ -172,32 +159,7 @@ export default function (pi: ExtensionAPI) {
 				value: Type.Optional(Type.String()),
 			}), { description: "Sandbox token list. Server strips `value` to SecretsStore on PUT." })),
 		}),
-		async execute(args: Record<string, unknown>) {
-			// Reject the seven legacy top-level qa_* keys — they live on components[*].config now.
-			for (const k of LEGACY_QA_KEYS_REJECTED) {
-				if (k in args) {
-					throw new Error(`${k} has moved to components[].config[]; set components[<name>].config.${k} instead`);
-				}
-			}
-			// Validate per-component `config` maps: max 100 entries, non-empty keys, string values.
-			const components = (args as { components?: Array<{ name?: string; config?: Record<string, unknown> }> }).components;
-			if (Array.isArray(components)) {
-				for (const c of components) {
-					if (!c || !c.config) continue;
-					const entries = Object.entries(c.config);
-					if (entries.length > 100) {
-						throw new Error(`components[${c.name ?? "?"}].config: too many entries (max 100, got ${entries.length})`);
-					}
-					for (const [k, v] of entries) {
-						if (!k) throw new Error(`components[${c.name ?? "?"}].config: empty key`);
-						if (typeof v !== "string") {
-							throw new Error(`components[${c.name ?? "?"}].config.${k}: must be string, got ${typeof v}`);
-						}
-					}
-				}
-			}
-			return ack();
-		},
+		async execute() { return ack(); },
 	});
 
 	console.log("[proposal-tools] Registered 8 proposal tools");
