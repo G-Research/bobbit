@@ -11,8 +11,21 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import { containerPathToHost } from "./rpc-bridge.js";
 import type { SandboxManager } from "./sandbox-manager.js";
+
+/**
+ * Thrown by `sessionFileCopy` when the (src, dst) sandbox/project realms
+ * differ in a way the helper does not currently support. Callers should
+ * map this to HTTP 422 (`{error: "cross-realm continue not supported"}`).
+ */
+export class CrossRealmCopyError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CrossRealmCopyError";
+	}
+}
 
 /**
  * Context describing the session's sandbox state and project affiliation.
@@ -131,6 +144,55 @@ export async function sessionFileRead(
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Copy a file from `srcPath` to `dstPath`, dispatched on whether the source
+ * and destination sessions are sandboxed.
+ *
+ *   src \ dst | non-sandboxed                 | sandboxed (same project)
+ *   ──────────┼───────────────────────────────┼──────────────────────────
+ *   non-sb    | host fs.copyFileSync          | CrossRealmCopyError
+ *   sandboxed | CrossRealmCopyError           | docker exec cp
+ *
+ * Cross-realm and cross-project copies throw `CrossRealmCopyError`. Same-
+ * realm copies create the destination directory (host-side or via
+ * `docker exec mkdir -p`) before copying.
+ */
+export async function sessionFileCopy(
+	srcCtx: SessionFsContext,
+	srcPath: string,
+	dstCtx: SessionFsContext,
+	dstPath: string,
+	sandboxManager: SandboxManager | null,
+): Promise<void> {
+	const srcSandboxed = !!srcCtx.sandboxed;
+	const dstSandboxed = !!dstCtx.sandboxed;
+
+	if (!srcSandboxed && !dstSandboxed) {
+		// Host → host
+		const dir = path.dirname(dstPath);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.copyFileSync(srcPath, dstPath);
+		return;
+	}
+
+	if (srcSandboxed && dstSandboxed) {
+		if (!srcCtx.projectId || !dstCtx.projectId || srcCtx.projectId !== dstCtx.projectId) {
+			throw new CrossRealmCopyError("cross-realm continue not supported");
+		}
+		const sandbox = sandboxManager?.get(srcCtx.projectId);
+		if (!sandbox) {
+			throw new Error(`sandbox unavailable for project ${srcCtx.projectId}`);
+		}
+		const dir = path.posix.dirname(dstPath.replace(/\\/g, "/"));
+		await sandbox.exec(["mkdir", "-p", dir]);
+		await sandbox.exec(["cp", srcPath, dstPath]);
+		return;
+	}
+
+	// Cross-realm (host↔sandbox) — not supported today.
+	throw new CrossRealmCopyError("cross-realm continue not supported");
 }
 
 /**

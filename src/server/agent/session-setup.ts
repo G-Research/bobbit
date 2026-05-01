@@ -112,10 +112,13 @@ export interface SessionSetupPlan {
 	instructions?: string;
 	context?: Record<string, string>;
 
-	// Continue-Archived: seed context injected into the system prompt, plus
-	// the source archived session ID for prompt-section provenance.
-	seedContext?: string;
-	seedContextSourceId?: string;
+	/**
+	 * Continue-Archived: a `.jsonl` path that has already been cloned from the
+	 * source archived session. When set, `spawnAgent` issues a `switch_session`
+	 * RPC against this path immediately after `rpcClient.start()` so the agent
+	 * CLI rehydrates from it (same mechanism `restoreSession` uses).
+	 */
+	preExistingAgentSessionFile?: string;
 }
 
 /**
@@ -381,8 +384,6 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools,
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
-			seedContext: plan.seedContext,
-			seedContextSource: plan.seedContextSourceId,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
@@ -458,7 +459,10 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		id: session.id,
 		title: session.title,
 		cwd: session.cwd,
-		agentSessionFile: "",
+		// Continue-Archived: when the cloned JSONL path is known up front, persist
+		// it so a hard kill before spawn doesn't lose the cloned transcript.
+		// Otherwise the agent CLI populates this field via persistSessionMetadata.
+		agentSessionFile: plan.preExistingAgentSessionFile || "",
 		createdAt: session.createdAt,
 		lastActivity: session.lastActivity,
 		goalId: plan.goalId,
@@ -691,6 +695,19 @@ export async function executeWorktreeAsync(
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 
+	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
+	if (plan.preExistingAgentSessionFile) {
+		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			switchTimeout,
+		);
+		if (!switchResp.success) {
+			await rpcClient.stop().catch(() => {});
+			throw new Error(`switch_session failed: ${switchResp.error}`);
+		}
+	}
+
 	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
 	// a kill (crash, taskkill, OS shutdown) in the gap between idle and the
 	// post-spawn fire-and-forget persist archives the session on next boot,
@@ -780,6 +797,20 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
+
+	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
+	// before we persist or flip to idle. Same RPC the restart-resume path uses.
+	if (plan.preExistingAgentSessionFile) {
+		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			switchTimeout,
+		);
+		if (!switchResp.success) {
+			await rpcClient.stop().catch(() => {});
+			throw new Error(`switch_session failed: ${switchResp.error}`);
+		}
+	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);

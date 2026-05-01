@@ -19,7 +19,6 @@ import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./ContinueSessionChooser.js";
-import { estimateTranscriptBytes } from "./ContinueSessionChooser.js";
 import { state as appState } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -129,7 +128,6 @@ export class AgentInterface extends LitElement {
 		const chooser = document.createElement("continue-session-chooser") as any;
 		chooser.sessionId = this.session?.sessionId ?? "";
 		chooser.messageCount = this.session?.state?.messages?.length ?? 0;
-		chooser.transcriptBytes = estimateTranscriptBytes(this.session?.state);
 		document.body.appendChild(chooser);
 
 		const cleanup = () => {
@@ -137,8 +135,7 @@ export class AgentInterface extends LitElement {
 		};
 
 		chooser.addEventListener("cancel", () => cleanup());
-		chooser.addEventListener("continue", async (e: Event) => {
-			const { mode } = (e as CustomEvent).detail || {};
+		chooser.addEventListener("continue", async () => {
 			cleanup();
 			const archivedId = this.session?.sessionId;
 			if (!archivedId) return;
@@ -146,7 +143,7 @@ export class AgentInterface extends LitElement {
 				const resp = await gatewayFetch(`/api/sessions/${archivedId}/continue`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ mode }),
+					body: JSON.stringify({}),
 				});
 				if (!resp.ok) {
 					const text = await resp.text().catch(() => "");

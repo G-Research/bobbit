@@ -197,10 +197,6 @@ export interface PromptParts {
 	workflowContext?: string;
 	/** Project config store for multi-file agent discovery */
 	projectConfigStore?: ProjectConfigReader;
-	/** Seed context for Continue-Archived: transcript of the prior archived session. */
-	seedContext?: string;
-	/** Source ID for the prior archived session — used for prompt-section provenance. */
-	seedContextSource?: string;
 	/** Skills available for autonomous activation via the `activate_skill` tool.
 	 *  When non-empty, an "Available Skills" section is injected into the system prompt.
 	 *  Skills with `disable-model-invocation: true` should be filtered out by the caller. */
@@ -354,16 +350,6 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(parts.workflowContext.trim());
 	}
 
-	// 7. Prior session transcript (Continue-Archived seed context)
-	if (parts.seedContext?.trim()) {
-		sections.push(
-			`## Prior Session Transcript\n\n` +
-			`The user previously worked in an archived session. The full conversation (or a summary) follows. ` +
-			`This is for context only — do not act on it unless the user asks you to continue a specific task from it.\n\n` +
-			parts.seedContext.trim()
-		);
-	}
-
 	if (sections.length === 0) return undefined;
 
 	const combined = sections.join("\n\n---\n\n") + "\n";
@@ -478,19 +464,6 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 9. Workflow context
 	if (parts.workflowContext?.trim()) {
 		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim(), tokens: estimateTokens(parts.workflowContext.trim()) });
-	}
-
-	// 10. Prior session transcript (Continue-Archived)
-	if (parts.seedContext?.trim()) {
-		const src = parts.seedContextSource
-			? `Continued from archived session ${parts.seedContextSource}`
-			: "Continued from archived session";
-		sections.push({
-			label: "Prior Session Transcript",
-			source: src,
-			content: parts.seedContext.trim(),
-			tokens: estimateTokens(parts.seedContext.trim()),
-		});
 	}
 
 	return sections;
