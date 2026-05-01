@@ -38,12 +38,6 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 		callbackName: "onStaffProposal",
 	},
 	{
-		tag: "setup_proposal",
-		fields: ["action", "content", "language", "framework", "testing", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"],
-		requiredFields: ["action"],
-		callbackName: "onSetupProposal",
-	},
-	{
 		tag: "workflow_proposal",
 		fields: ["id", "name", "description", "gates"],
 		requiredFields: ["id", "name"],

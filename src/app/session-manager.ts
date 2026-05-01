@@ -1096,41 +1096,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onSetupProposal = (proposal, _streaming = false) => {
-			if (activeSessionId() !== sessionId) return;
-			state.setupPreviewAction = proposal.action;
-			state.assistantHasProposal = true;
-
-			if (proposal.action === "stack") {
-				if (proposal.language) state.setupFormStack.language = proposal.language;
-				if (proposal.framework) state.setupFormStack.framework = proposal.framework;
-				if (proposal.testing) state.setupFormStack.testing = proposal.testing;
-			} else if (proposal.action === "commands") {
-				const cmdFields = ["build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"];
-				for (const f of cmdFields) {
-					if ((proposal as any)[f] && !state.setupFormCommandsEdited[f]) {
-						state.setupFormCommands[f] = (proposal as any)[f];
-					}
-				}
-			} else if (proposal.action === "models") {
-				const modelFields = ["session_model", "review_model", "naming_model"] as const;
-				for (const f of modelFields) {
-					if ((proposal as any)[f] && !state.setupFormModelsEdited[f]) {
-						state.setupFormModels[f] = (proposal as any)[f];
-					}
-				}
-			} else if (proposal.action === "system-prompt") {
-				if (proposal.content && !state.setupFormSystemPromptEdited) {
-					state.setupFormSystemPrompt = proposal.content;
-				}
-			}
-
-			if (state.assistantTab === "chat" && !isDesktop()) {
-				state.assistantTab = "preview";
-			}
-			renderApp();
-		};
-
 		remote.onWorkflowProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.workflowPreviewId = proposal.id || "";
@@ -1224,7 +1189,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				role: remote.onRoleProposal,
 				tool: remote.onToolProposal,
 				staff: remote.onStaffProposal,
-				setup: remote.onSetupProposal,
 				workflow: remote.onWorkflowProposal,
 				project: remote.onProjectProposal,
 			};
@@ -1258,16 +1222,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: null);
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
-		state.setupPreviewAction = "";
-		state.setupFormStack = { language: "", framework: "", testing: "" };
-		state.setupFormCommands = { build_command: "", test_command: "", typecheck_command: "", test_unit_command: "", test_e2e_command: "" };
-		state.setupFormModels = { session_model: "", review_model: "", naming_model: "" };
-		state.setupFormSystemPrompt = "";
-		state.setupFormSystemPromptEdited = false;
-		state.setupFormCommandsEdited = {};
-		state.setupFormModelsEdited = {};
-		state.setupFormSaving = false;
-		state.setupFormSaved = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelHtml = ""; // Clear stale preview from previous session
 		state.reviewDocuments = new Map();

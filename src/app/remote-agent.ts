@@ -15,7 +15,6 @@ const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	role: "onRoleProposal",
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
-	setup: "onSetupProposal",
 	workflow: "onWorkflowProposal",
 	project: "onProjectProposal",
 };
@@ -191,8 +190,6 @@ export class RemoteAgent {
 	onToolProposal?: (proposal: { tool: string; action: string; content: string }, streaming: boolean) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
-	/** Callback fired when a setup proposal is detected in an assistant message. */
-	onSetupProposal?: (proposal: Record<string, string> & { action: string }, streaming: boolean) => void;
 	/** Callback fired when a workflow proposal is detected in an assistant message. */
 	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
@@ -1259,7 +1256,7 @@ export class RemoteAgent {
 			const callback = (this as any)[parser.callbackName];
 			if (!callback) continue;
 
-			// Match all occurrences (e.g. setup_proposal may appear multiple times)
+			// Match all occurrences (a proposal block may appear multiple times)
 			const regex = new RegExp(`<${parser.tag}>([\\s\\S]*?)<\\/${parser.tag}>`, "g");
 			let match: RegExpExecArray | null;
 			while ((match = regex.exec(text)) !== null) {
