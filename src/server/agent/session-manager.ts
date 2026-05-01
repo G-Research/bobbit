@@ -2584,7 +2584,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -2679,8 +2679,7 @@ export class SessionManager {
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
-				seedContext: opts?.seedContext,
-				seedContextSourceId: opts?.seedContextSourceId,
+				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				bridgeOptions: { cwd },
 			};
 
@@ -2733,8 +2732,7 @@ export class SessionManager {
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
-			seedContext: opts?.seedContext,
-			seedContextSourceId: opts?.seedContextSourceId,
+			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			bridgeOptions: { cwd },
 		};
 
@@ -3629,11 +3627,6 @@ export class SessionManager {
 	}
 
 	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
-		return this.getNamingModelOptions();
-	}
-
-	/** Public accessor for the naming-model config — used by continue-archived summarization. */
-	getNamingModelOptions(): { namingModel?: string; aigwUrl?: string; thinkingLevel?: string } {
 		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
 		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
 		const namingThinking = this.preferencesStore?.get("default.namingThinkingLevel") as string | undefined;
@@ -4168,8 +4161,12 @@ export class SessionManager {
 	 * Try to recover a session's .jsonl file when agentSessionFile is empty.
 	 * The agent CLI stores files as: <sessionsDir>/<cwd-slug>/<timestamp>_<uuid>.jsonl
 	 * We scan the CWD-derived directory for a .jsonl created close to the session's createdAt.
+	 *
+	 * Public so the continue-archived REST handler can resolve the source
+	 * `.jsonl` path for legacy persisted sessions whose `agentSessionFile`
+	 * field was never populated.
 	 */
-	private recoverSessionFile(ps: PersistedSession): string | null {
+	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
 			const sessionsDir = path.join(globalAgentDir(), "sessions");
 			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'

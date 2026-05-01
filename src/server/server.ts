@@ -5429,18 +5429,19 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:archivedId/continue — Continue-Archived
-	// Creates a new session cloned from an archived one's settings, with the
-	// archived transcript seeded into the new session's system prompt.
+	// POST /api/sessions/:archivedId/continue — Continue-Archived (lossless)
+	//
+	// Clones the archived session's `.jsonl` into a fresh slot, registers it
+	// as the new session's `agentSessionFile`, and lets the agent CLI rehydrate
+	// from it via `switch_session` — same mechanism the restart-resume path
+	// uses for live sessions. No transcript stringification, no system-prompt
+	// seeding, no byte budget.
 	const continueMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/continue$/);
 	if (continueMatch && req.method === "POST") {
 		const archivedId = continueMatch[1];
-		const body = await readBody(req);
-		const mode = body?.mode;
-		if (mode !== "summary" && mode !== "full") {
-			json({ error: "mode must be 'summary' or 'full'" }, 400);
-			return;
-		}
+		// Body is read for parity but no fields are required — the legacy `mode`
+		// parameter is ignored.
+		await readBody(req).catch(() => ({}));
 
 		// Resolve the archived session across all project contexts.
 		const ps = sessionManager.getPersistedSession(archivedId);
@@ -5455,20 +5456,38 @@ async function handleApiRoute(
 			return;
 		}
 
-		const messages = await sessionManager.getArchivedMessages(archivedId);
-		if (!messages || messages.length === 0) {
+		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
+		// sessions whose persisted `agentSessionFile` was never populated.
+		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { copyToolContentDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		const nodeFs = await import("node:fs");
+		const { randomUUID } = await import("node:crypto");
+
+		let sourceJsonl = ps.agentSessionFile;
+		if (!sourceJsonl) {
+			const recovered = sessionManager.recoverSessionFile(ps);
+			if (recovered) sourceJsonl = recovered;
+		}
+		if (!sourceJsonl) {
 			json({ error: "archived transcript missing or empty" }, 404);
 			return;
 		}
 
-		let seedContext: string;
-		try {
-			const { buildSeedContext } = await import("./agent/continue-archived.js");
-			const namingOpts = sessionManager.getNamingModelOptions();
-			seedContext = await buildSeedContext(messages, mode, ps, namingOpts);
-		} catch (err) {
-			json({ error: `failed to build seed context: ${String(err)}` }, 500);
-			return;
+		// Verify the source file actually exists and is non-empty. For non-sandboxed
+		// sessions a quick host-side stat suffices; sandboxed sessions defer to the
+		// copy step (which surfaces the failure as a 500). Empty / missing → 404.
+		if (!ps.sandboxed) {
+			try {
+				const st = nodeFs.statSync(sourceJsonl);
+				if (!st.isFile() || st.size === 0) {
+					json({ error: "archived transcript missing or empty" }, 404);
+					return;
+				}
+			} catch {
+				json({ error: "archived transcript missing or empty" }, 404);
+				return;
+			}
 		}
 
 		const proj = projectRegistry.get(ps.projectId)!;
@@ -5483,13 +5502,42 @@ async function handleApiRoute(
 			} catch { /* ignore — no worktree */ }
 		}
 
+		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
+		// for worktree-backed sessions the agent CLI will rotate to a new file
+		// once the worktree cwd is final, but the cloned file we hand it via
+		// `switch_session` is what gets adopted.
+		const newSessionId = randomUUID();
+		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
+
+		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
+		const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		try {
+			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+		} catch (err) {
+			if (err instanceof CrossRealmCopyError) {
+				json({ error: "cross-realm continue not supported" }, 422);
+				return;
+			}
+			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			json({ error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` }, 500);
+			return;
+		}
+
+		// Defensive forward-compat: copy the lazy tool-content cache if present.
+		try {
+			copyToolContentDirIfPresent(archivedId, newSessionId, bobbitStateDir());
+		} catch (err) {
+			console.warn(`[continue-archived] tool-content copy failed (non-fatal): ${err}`);
+		}
+
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
 		const createOpts: any = {
+			sessionId: newSessionId,
 			projectId: ps.projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
-			seedContext,
-			seedContextSourceId: archivedId,
+			preExistingAgentSessionFile: destJsonl,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
@@ -5506,7 +5554,8 @@ async function handleApiRoute(
 				projCwd, undefined, undefined, undefined, createOpts,
 			);
 		} catch (err) {
-			json({ error: `failed to create session: ${String(err)}` }, 500);
+			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			json({ error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` }, 500);
 			return;
 		}
 
