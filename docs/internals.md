@@ -821,22 +821,39 @@ Existing users have a `bobbit-session-visited` map in `localStorage` from before
 
 ### `lastActivity` preservation across restart
 
-`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but `restoreSession()` re-issues every historical rpc event into the session as part of replay. Without a guard, every replayed event would call `session.lastActivity = Date.now()` and clobber the persisted value with restore time — making every session look like it was just active.
+`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but three paths in `session-manager.ts` install rpc-event listeners that mutate `session.lastActivity` after re-attaching to a fresh `RpcBridge`:
 
-`restoreSession()` already keeps a `restoring` flag (used to suppress cost tracking during replay). The `lastActivity` bump is gated on the same flag — replay-phase rpc events are observed for transcript reconstruction but do not update the timestamp. The first event after `restoring` flips to `false` is the first one that bumps `lastActivity`, so the persisted timestamp survives intact until genuine new activity occurs. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+- `restoreSession()` — server startup restores persisted sessions concurrently (CONCURRENCY=5).
+- The role-restart path — swaps the bridge after a role change.
+- The abort-restart path (`restoreFromAbort`) — swaps the bridge after a force-abort.
+
+All three bridges emit `switch_session` history replay frames followed by lifecycle frames on resume (`agent_start`, `agent_idle`, `connection_state`, `state`, `session_title`, etc.). Without a guard, every one of those frames would call `session.lastActivity = Date.now()` and clobber the persisted value. The original guard — a `restoring` / `switchingSession` flag flipped to `false` after `switch_session` resolves — was insufficient because lifecycle frames continue to fire after the flag clears, and under concurrent restore every restored session ended up clustered at restart time with identical timestamps.
+
+**Single source of truth**: the exported helper `isUserVisibleActivity(event)` at the top of `src/server/agent/session-manager.ts`. It returns `true` only for events that represent real new turn activity:
+
+- `message_update`
+- `message_end`
+- `tool_execution_start`
+- `tool_execution_end`
+- `agent_end`
+
+Everything else returns `false`, including all lifecycle frames, `auto_compaction_*`, `process_exit`, container `died`/`recovered` events, and `gate_verification_*` frames. All three rpc-event listeners now wrap the `session.lastActivity = Date.now()` bump in `if (isUserVisibleActivity(event))`. The pre-existing `restoring` / `switchingSession` flags are retained for cost-tracking but no longer relied on for `lastActivity`. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+
+Locked by `tests/session-restore-last-activity.test.ts` — source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
 
 ### Key files
 
 | File | Role |
 |---|---|
 | `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
-| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `restoring`-flag gate on `lastActivity` |
+| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `isUserVisibleActivity()` filter applied at `restoreSession`, role-restart, and abort-restart event listeners |
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
+| `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
 | `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
 
 ---
