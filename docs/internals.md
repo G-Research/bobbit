@@ -2067,6 +2067,23 @@ The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionI
 
 See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.
 
+### Nested goals
+
+Goals nest recursively via `PersistedGoal.parentGoalId` / `rootGoalId`; top-level goals (`parentGoalId == null`) behave exactly as before. The implementation reuses the existing workflow / gate / verification / team-lead / sidebar / dashboard infrastructure rather than introducing a parallel entity — there is no `Mission` store. See [nested-goals.md](nested-goals.md) for the user-facing reference and [design/nested-goals.md](design/nested-goals.md) for the full design (data model, classifier algorithm, harness wiring, REST schemas, system-prompt stanzas).
+
+Key implementation points:
+
+- **`GoalStore` indexes** — in-memory `childrenByParent: Map<parentId, Set<childId>>` and `byRoot: Map<rootId, Set<descendantId>>` are rebuilt on load and on every mutation, so subtree queries (`?include=tree`, recursive archive, root-only concurrency) are O(1) lookups.
+- **Branching** — `GoalManager.createGoal` derives `baseBranch` from the parent's branch HEAD when `parentGoalId` is set, and `mergeTarget` defaults to `"parent"`. Sibling children spawned later naturally branch from the advanced tip after a previous child has merged in.
+- **Child PR short-circuit** — the verification harness checks `goal.mergeTarget === "parent"` early in `verifyGateSignal` for `ready-to-merge` and runs a local merge into the parent's branch instead of `gh pr create`. Only the top-level goal (`parentGoalId == null`) ever raises a PR.
+- **Subgoal verify steps** — `VerifyStep.type: "subgoal"` carries an embedded `subgoal: { title, spec, workflowId?, inlineWorkflow?, suggestedRole?, planId, ... }`. The harness spawns idempotently keyed by `planId` (recorded on the gate's verification record), waits for the child's `ready-to-merge` to pass, then runs `goal_merge_child`. Multiple steps with the same `phase` execute in parallel, gated by a root-only concurrency semaphore (`goalManager.resolveRootMaxConcurrentChildren(rootGoalId)` — sub-goal `maxConcurrentChildren` values are stored but inert in v1).
+- **Pause / resume** — `goal.paused` (set on any goal in the tree, propagated by the harness via `rootGoalId`) suspends ticking for the entire subtree until `goal_resume`. Required by `strict` policy before `restructure` mutations are accepted.
+- **Mutation classifier** — `plan-mutation.ts::classifyMutation` returns one of `fix-up` / `expansion` / `restructure` / `criteria-drop` plus `droppedCriteria`, `addedNodes`, `removedNodes`. Adherence is a whitespace-normalised, case-insensitive substring match against the union of root spec + remaining subgoal step specs. Wired into `PATCH /api/goals/:id/plan` and `POST /api/goals/:id/spawn-child`.
+- **Pending mutations** — `goalManager.pendingMutations: Map<goalId, PendingMutation>` holds outstanding requests (15 min TTL); the server fans out `goal_mutation_pending` to dashboard viewers, and `POST /api/goals/:id/mutation/:requestId/decision` resolves them. `goal_mutation_resolved` clears the banner.
+- **Replan cap & auto-pause** — `replanCount` bumps on every post-freeze plan mutation; on `>5` the goal auto-pauses with `goal_paused { by: "auto-replan-cap" }`.
+- **Recursive archive** — `DELETE /api/goals/:id?recursive=1` walks `byRoot.get(id)` and archives each descendant; without the flag only the named goal is archived (in-flight children continue).
+- **Resolution chain** — inline workflows / roles snapshotted on a goal at creation are resolved by `workflow-resolution.ts` / `role-resolution.ts` walking up the `parentGoalId` chain before falling through to project, server, then builtin layers.
+
 ### Goal re-attempt flow
 
 1. User clicks "Re-attempt" in goal dashboard or sidebar

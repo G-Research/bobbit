@@ -49,15 +49,29 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List all goals. `?archived=true` returns archived goals with an `archivedSessions` field. Supports `?since=N` generation counter for conditional fetch |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
-| `GET` | `/api/goals/:id` | Get a goal |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf?, parentGoalId?, baseBranch?, inlineWorkflow?, inlineRoles?, divergencePolicy?, maxConcurrentChildren? }`). When `parentGoalId` is set the goal becomes a child: `mergeTarget` defaults to `"parent"` and `baseBranch` defaults to the parent's branch HEAD. See [docs/nested-goals.md](nested-goals.md). |
+| `GET` | `/api/goals/:id` | Get a goal. With `?include=tree`, response also includes `descendants: PersistedGoal[]` and `gatesByGoal: Record<goalId, GateState[]>` for the entire subtree (rooted at this goal). |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
-| `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
+| `DELETE` | `/api/goals/:id` | Archive a goal and its tasks. With `?recursive=1`, recursively archives every descendant in the subtree and returns `{ archived: [...goalIds] }`. Without the flag only the named goal is archived; in-flight children continue to run. |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+### Nested Goals
+
+Endpoints for the parent / child subgoal model. See [docs/nested-goals.md §12](nested-goals.md#12-rest-cheatsheet) for the full cheatsheet including 409 body schemas (mutation-rejected, stale-plan, replan-cap) and [docs/design/nested-goals.md §8](design/nested-goals.md) for body/response schemas.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/goals/:id/spawn-child` | Spawn a child goal under this parent. Body: `{ title, spec, workflowId?, inlineWorkflow?, suggestedRole?, enabledOptionalSteps?, planId? }`. Idempotent on `planId`. Server-side classifier + divergence policy may reject with `409` or queue an `ask_user_choices` prompt via `goal_mutation_pending`. |
+| `POST` | `/api/goals/:id/integrate-child/:childGoalId` | Local merge of a completed child's branch into this parent's branch. No remote push. `200 { merged: true, commitSha }` on success; `409 { merged: false, conflict: true, output }` on merge conflict. |
+| `POST` | `/api/goals/:id/pause` | Suspend verification-harness ticking for the entire goal-tree (root + descendants). Required by `strict` divergence policy before applying restructure mutations. |
+| `POST` | `/api/goals/:id/resume` | Resume verification-harness ticking for the goal-tree. |
+| `GET` | `/api/goals/:id/plan?gateId=execution` | Narrow projection: the named gate's plan plus per-node child-goal state. Defaults to `gateId=execution`. |
+| `PATCH` | `/api/goals/:id/plan` | Replace a named gate's `verify[]` with a proposed plan. Body: `{ planSteps: VerifyStep[], gateId?, replanReason?, expectedReplanCount? }`. Pre-freeze: free. Post-freeze: subject to mutation classifier + divergence policy. `409` on classifier rejection, stale `expectedReplanCount`, or replan-cap exhaustion. |
+| `POST` | `/api/goals/:id/mutation/:requestId/decision` | Resolve a pending mutation surfaced via `goal_mutation_pending`. Body: `{ decision: "approve" \| "reject" }`. `404 { error: "unknown-or-stale-request" }` if the request expired or was already resolved. |
 
 ### Goal Tasks
 
