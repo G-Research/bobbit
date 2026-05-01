@@ -1,3 +1,4 @@
+import { PREVIEW_THEME_BRIDGE as SHARED_PREVIEW_THEME_BRIDGE, PREVIEW_SWIPE_SCRIPT as SHARED_PREVIEW_SWIPE_SCRIPT } from "../shared/preview-bridge-scripts.js";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { icon } from "@mariozechner/mini-lit";
@@ -2176,107 +2177,12 @@ function goalProposalPanel() {
 // PREVIEW THEME BRIDGE
 // ============================================================================
 
-/** Script injected into preview iframes to sync the app's theme, palette, and
- *  CSS custom properties into the iframe document. Observes changes so toggling
- *  dark/light mode or switching palettes updates the preview in real time. */
-const PREVIEW_THEME_BRIDGE = `<script>
-(function() {
-	try {
-		var root = document.documentElement;
-		var parentRoot = parent.document.documentElement;
-		var parentStyles = parent.getComputedStyle(parentRoot);
-
-		function sync() {
-			/* Mirror dark class */
-			root.classList.toggle('dark', parentRoot.classList.contains('dark'));
-
-			/* Mirror data-palette attribute */
-			var palette = parentRoot.getAttribute('data-palette');
-			if (palette) root.setAttribute('data-palette', palette);
-			else root.removeAttribute('data-palette');
-
-			/* Copy all CSS custom properties from the app stylesheet */
-			var vars = [];
-			try {
-				for (var s = 0; s < parent.document.styleSheets.length; s++) {
-					var sheet = parent.document.styleSheets[s];
-					try {
-						var rules = sheet.cssRules || sheet.rules;
-						for (var r = 0; r < rules.length; r++) {
-							var rule = rules[r];
-							if (rule.style) {
-								for (var i = 0; i < rule.style.length; i++) {
-									var name = rule.style[i];
-									if (name.startsWith('--')) vars.push(name);
-								}
-							}
-						}
-					} catch(e) { /* cross-origin sheet, skip */ }
-				}
-			} catch(e) {}
-
-			/* Deduplicate and copy computed values */
-			var seen = {};
-			for (var v = 0; v < vars.length; v++) {
-				if (seen[vars[v]]) continue;
-				seen[vars[v]] = true;
-				var val = parentStyles.getPropertyValue(vars[v]);
-				if (val) root.style.setProperty(vars[v], val);
-			}
-		}
-
-		/* Copy the app font stack */
-		root.style.fontFamily = parentStyles.fontFamily;
-
-		/* Initial sync */
-		sync();
-
-		/* Watch for class/attribute changes on the parent root element */
-		var observer = new MutationObserver(sync);
-		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
-	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
-})();
-<\/script>`;
-
-// ============================================================================
-// PREVIEW SWIPE (mobile)
-// ============================================================================
-
-/** Script injected into the preview iframe srcdoc to detect horizontal swipes
- *  and send position updates to the parent via postMessage.
- *  Only horizontal swipes are captured; all other gestures pass through normally. */
-const PREVIEW_SWIPE_SCRIPT = `<script>
-(function() {
-	var startX = 0, startY = 0, captured = false, decided = false;
-	document.addEventListener('touchstart', function(e) {
-		startX = e.touches[0].clientX;
-		startY = e.touches[0].clientY;
-		captured = false;
-		decided = false;
-	}, {passive: true});
-	document.addEventListener('touchmove', function(e) {
-		if (decided && !captured) return;
-		var dx = e.touches[0].clientX - startX;
-		var dy = e.touches[0].clientY - startY;
-		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-			decided = true;
-			captured = Math.abs(dx) > Math.abs(dy);
-			if (captured) parent.postMessage({type:'preview-swipe-start'}, '*');
-		}
-		if (captured) {
-			e.preventDefault();
-			parent.postMessage({type:'preview-swipe-move', dx: dx}, '*');
-		}
-	}, {passive: false});
-	document.addEventListener('touchend', function(e) {
-		if (!captured) return;
-		var dx = e.changedTouches[0].clientX - startX;
-		parent.postMessage({type:'preview-swipe-end', dx: dx}, '*');
-		captured = false;
-		decided = false;
-	}, {passive: true});
-})();
-<\/script>`;
+/** Theme-bridge + swipe scripts injected into preview iframes. Source of
+ *  truth: `src/shared/preview-bridge-scripts.ts` (also imported by the
+ *  server's `/api/preview/render` route so client and server emit byte-equal
+ *  payloads). Local aliases preserved to avoid churning call sites. */
+const PREVIEW_THEME_BRIDGE = SHARED_PREVIEW_THEME_BRIDGE;
+const PREVIEW_SWIPE_SCRIPT = SHARED_PREVIEW_SWIPE_SCRIPT;
 
 /** Whether the unified panel is active for the current non-assistant session. */
 function hasUnifiedPanel(): boolean {
@@ -2799,6 +2705,21 @@ export function doRenderApp(): void {
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
 	const htmlPreviewContent = () => {
+		const sid = activeSessionId();
+		const mode = state.previewPanelMode;
+		const v = state.previewPanelMtime || 0;
+		if (mode === "file" && sid) {
+			return html`
+				<div style="position:relative;flex:1;min-height:0;">
+					<iframe
+						class="w-full border-0"
+						style="position:absolute;inset:0;height:100%;"
+						sandbox="allow-scripts allow-same-origin"
+						src=${`/api/preview/render?sessionId=${encodeURIComponent(sid)}&v=${v}`}
+					></iframe>
+				</div>
+			`;
+		}
 		return html`
 			<div style="position:relative;flex:1;min-height:0;">
 				<iframe
@@ -3033,14 +2954,7 @@ export function doRenderApp(): void {
 							</button>
 						</div>
 						<!-- Preview iframe fills available space -->
-						<div style="position:relative;flex:1;min-height:0;">
-							<iframe
-								class="w-full border-0"
-								style="position:absolute;inset:0;height:100%;"
-								sandbox="allow-scripts allow-same-origin"
-								.srcdoc=${state.previewPanelHtml + PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT}
-							></iframe>
-						</div>
+						${htmlPreviewContent()}
 						<!-- Compact prompt bar at bottom -->
 						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
 							${state.chatPanel}
