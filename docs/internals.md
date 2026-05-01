@@ -170,6 +170,27 @@ The live llm-review path is not actually affected by the bug (the kickoff prompt
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
 
+#### Delegate restart resilience
+
+Delegate sessions (spawned via the `delegate` tool in `defaults/tools/agent/extension.ts`) survive server restart through the same blocking-tool harness pattern as verification — see [docs/blocking-tools.md](blocking-tools.md) for the pattern and [docs/design/delegate-restart-resilience.md](design/delegate-restart-resilience.md) for the full design.
+
+Key moving parts:
+
+- **`DelegateHarness`** (`src/server/agent/delegate-harness.ts`) parks Promises keyed by `(parentSessionId, toolUseId)` and persists in-flight entries to `<stateDir>/active-delegates.json` on every mutation. Parallel delegates use slot keys `${toolUseId}#${i}` so independent waits never collide. Submit-before-register latches the result; the parent's next `register()` drains immediately. On reload, persisted entries become metadata-only **shells** — the original closures are gone, so subsequent submits latch instead of resolving dead resolvers, and the parent's re-POST drains the latch.
+- **Three internal endpoints** (allow-listed in `sandbox-guard.ts`):
+  - `POST /api/internal/delegate/wait` — chunked-heartbeat long-poll, mirrors `/api/sessions/:id/wait`.
+  - `POST /api/internal/delegate/submit` — idempotent (second arrival returns `drained: false`).
+  - `POST /api/internal/delegate/cancel` — parent-abort path; submits a `terminated` result and the parent then archives the child via `DELETE /api/sessions/:id`.
+- **`SessionManager.attachDelegateCompletionListener`** subscribes to the child's `RpcBridge` (`agent_end` / `process_exit`) plus the global termination listener and submits a structured result back to the harness exactly once. Used by both the live path (`createDelegateSession`) and the restart-resume path (server.ts after `restoreSessions`). The two paths attach the listener with different options:
+  - **Live path** — attaches WITHOUT `resumeFallback`. Listener installs *before* `sendDelegatePrompt()` runs, so a slow agent spawn / sandbox start / model warm-up that takes >5s to emit `agent_start` must not be (mis-)treated as terminal idle. Live waits rely purely on the RPC events firing.
+  - **Resume path** — attaches WITH `resumeFallback: true`. The resumed agent may finish its continuation turn (firing `agent_end`) BEFORE the listener was attached, leaving the delegate idle forever. The fallback waits up to 5s for `agent_start` (via `waitForStreaming`); if no streaming starts and the child is still `idle`, that is taken as proof the turn already ran and ended, and a synthetic `completed` result is drained from the persisted output. `submitOnce()` makes a real `agent_end` arriving mid-poll safe — first-write-wins.
+- **Pre-restore `wasStreaming` snapshot.** Before calling `restoreSessions()`, server.ts captures `sessionManager.getPreRestoreWasStreaming()` — the set of session ids whose `wasStreaming` flag was true on disk. `restoreSession` then clears that flag as part of the resume path, so the snapshot must be taken first. The resume loop uses this set to distinguish *idle because the delegate finished cleanly before the gateway crashed* (drain a synthetic `completed` immediately) from *idle because the continuation re-prompt is still in flight* (attach the listener and wait for the resumed turn to actually end). Without the pre-restore snapshot, the latter case would deliver stale pre-restart output and ignore the resumed work.
+- **Eager-restore branch** in `SessionManager.restoreSessions()` consults `delegateHarness.getActiveDelegateSessionIds()`: archived delegates and delegates whose parent finished cleanly stay dormant; in-flight delegates flow through the same `restoreOneSession` path as workers, preserving `BOBBIT_SESSION_ID` injection (PR #397) and `lastActivity` (PR #385). A new `kind: "delegate" | "worker" | "reviewer"` discriminator on `PersistedSession` (sibling of `TeamAgent.kind` from PR #406) is set at create time; legacy records cascade through `resolveSessionKind()` in `delegate-harness.ts`.
+
+Termination semantics: a parent terminate/archive triggers `rejectAllForSession(parentSessionId)`, which rejects every parked Promise for that prefix and returns the list of child session ids the server then cascade-terminates. Each cascade-terminate fires the global listener which submits a `terminated` result — redundant against the already-rejected Promise, but the harness's idempotency contract (first-write-wins) makes that safe.
+
+Tests: `tests/delegate-harness.test.ts` (unit, persistence round-trip + idempotency), `tests/e2e/delegate-restart.spec.ts` (API D-RST-01..07 covering single+parallel restart, downtime completion, parent cascade, idempotent submit, cancel). Browser-level coverage (DUI-01..04 in `tests/e2e/ui/delegate-restart.spec.ts`) is skipped in standard E2E because the in-process gateway harness has no restart hook — deferred to `npm run test:manual` (same precedent as `tests/e2e/ui/stories-resilience.spec.ts`).
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
@@ -707,6 +728,16 @@ The resulting string is passed to `createSession()` as `opts.seedContext` (with 
 - `src/server/agent/system-prompt.ts` — `Prior Session Transcript` section assembly
 - `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`
 - `src/ui/components/ContinueSessionChooser.ts` — mode chooser dialog (Summary vs Full, with large-transcript warning)
+
+### Archived session WS handshake
+
+When a client opens an archived session, the WebSocket handler in `src/server/ws/handler.ts` must push a `state` frame as part of the initial handshake — immediately after `auth_ok` / `session_status` / `session_title`. The frame carries the session's persisted `model` (provider, id, plus inferred `contextWindow` / `maxTokens` / `reasoning`) and any `imageGenerationModel`, matching the shape live sessions receive via the proactive `getState()` push.
+
+**Why this exists.** `RemoteAgent` in `src/app/remote-agent.ts` seeds `_state.model` at construction time with a hardcoded placeholder default (currently a Claude Opus id) so the footer model picker has something to render before the first server frame arrives. For live sessions this placeholder is overwritten almost instantly by the `getState()` push the server makes on connect. Archived sessions used to have no equivalent push — the persisted model only shipped if and when the client sent `get_state`, which happens on reconnect but not on initial connect — so the placeholder leaked into the footer until the user reloaded or the WebSocket dropped and resumed. The bug surfaced as "every archived session looks like it ran on Opus regardless of which model it actually used." The fix closes the asymmetry between live and archived initial-connect behaviour.
+
+**Single source of truth.** The archived state payload is built by `buildArchivedStateData(archived, sessionManager, sessionId)` in the same handler module. Both the archived branch of the `auth_ok` flow and the existing `get_state` request handler call it, so the two sites cannot drift in shape (e.g. `get_state` previously emitted a slimmer payload missing `contextWindow` / `maxTokens` / `imageGenerationModel`). Any future field added to the archived state — new model metadata, additional read-only flags — belongs inside that helper.
+
+**Latent fragility.** The client-side placeholder default in `RemoteAgent` is the underlying reason this bug was visible at all; removing it would require auditing every consumer of `state.model` for null-safety and is out of scope here. As long as the placeholder exists, every code path that hydrates state for an archived session must push a real `state` frame on initial connect. New transports or alternative connect paths (e.g. snapshot replay endpoints, future test harnesses) need to preserve this invariant. The regression test `tests/e2e/archived-footer-model.spec.ts` connects to an archived session **without** sending `get_state` and asserts the inbound `state` frame carries the true persisted model — keep it green.
 
 ### Sidebar grouping
 

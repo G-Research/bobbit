@@ -113,6 +113,18 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/sessions/child1", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/sessions/child1/wait", "POST", scope)).toBe(true);
 
+		// Delegate restart-resilience harness endpoints (see
+		// docs/design/delegate-restart-resilience.md §3.2). Sandboxed
+		// agents need these to register / submit / cancel parked Promises
+		// against their own delegate calls — same justification as
+		// /api/sessions/:id/wait.
+		expect(isSandboxAllowed("/api/internal/delegate/wait", "POST", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/internal/delegate/submit", "POST", scope)).toBe(true);
+		expect(isSandboxAllowed("/api/internal/delegate/cancel", "POST", scope)).toBe(true);
+		// Other methods on the delegate endpoints are not allowed.
+		expect(isSandboxAllowed("/api/internal/delegate/wait", "GET", scope)).toBe(false);
+		expect(isSandboxAllowed("/api/internal/delegate/submit", "GET", scope)).toBe(false);
+
 		// Own goal
 		expect(isSandboxAllowed("/api/goals/g1/team/agents", "GET", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/goals/g1/gates", "GET", scope)).toBe(true);

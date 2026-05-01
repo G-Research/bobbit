@@ -7,6 +7,21 @@
  *
  * The delegate agent has full tool access (bash, read, write, etc.) but gets
  * only AGENTS.md + the instructions you provide — it does NOT see the parent conversation.
+ *
+ * Restart resilience: parent ↔ child rendezvous flows through the
+ * `DelegateHarness` blocking-tool pattern (mirrors VerificationHarness; see
+ * docs/design/delegate-restart-resilience.md).  The tool POSTs
+ * /api/internal/delegate/wait to register a parked Promise keyed by
+ * (parentSessionId, toolUseId). The harness persists the entry to
+ * <stateDir>/active-delegates.json before resolving, so a server restart
+ * mid-flight is recoverable: on resume the parent re-POSTs and either drains
+ * a latched result or re-registers an awaiter for an in-flight child.
+ *
+ * Parallel array: each slot uses key `${toolUseId}#${i}` so independent
+ * (parent, slot) waits never collide. Cancel: parent abort fires
+ * /api/internal/delegate/cancel before deleting the child session — this
+ * settles the parked Promise on the server side cleanly rather than letting
+ * the harness leak a pending entry.
  */
 
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
@@ -20,7 +35,7 @@ import * as path from "node:path";
 export interface DelegateResult {
 	id: string;
 	sessionId: string;
-	status: "completed" | "failed" | "timeout";
+	status: "completed" | "failed" | "timeout" | "terminated";
 	output: string;
 	durationMs: number;
 	error?: string;
@@ -85,7 +100,7 @@ export async function createDelegateSession(
 	parentSessionId: string,
 	instructions: string,
 	cwd: string,
-	opts?: { title?: string; context?: Record<string, string> },
+	opts?: { title?: string; context?: Record<string, string>; toolUseId?: string; timeoutMs?: number },
 ): Promise<string> {
 	const resp = await gatewayFetch("/api/sessions", {
 		method: "POST",
@@ -95,6 +110,13 @@ export async function createDelegateSession(
 			cwd,
 			title: opts?.title,
 			context: opts?.context,
+			// Threading toolUseId+timeoutMs so the server can wire the live-path
+			// completion listener via attachDelegateCompletionListener (see
+			// docs/design/delegate-restart-resilience.md §6.3). The server-side
+			// /api/sessions delegate-create branch forwards these to
+			// SessionManager.createDelegateSession.
+			toolUseId: opts?.toolUseId,
+			timeoutMs: opts?.timeoutMs,
 		}),
 	});
 	if (!resp.ok) {
@@ -105,24 +127,55 @@ export async function createDelegateSession(
 	return data.id;
 }
 
-/** Wait for a delegate session to finish and get its output */
+/**
+ * Register a parked Promise on the DelegateHarness and wait for completion.
+ *
+ * Replaces the legacy /api/sessions/:id/wait flow. The `/api/internal/delegate/wait`
+ * endpoint:
+ *   - registers the wait keyed by (parentSessionId, toolUseId), drains any
+ *     latched result if present (the harness's submit-before-register
+ *     idempotency contract).
+ *   - holds the response open and writes chunked heartbeat newlines so undici
+ *     bodyTimeout can't kill the connection mid-wait.
+ *   - on terminal child status, resolves the Promise; the response body is
+ *     `DelegateResultPayload` JSON (whitespace-trimmed by the heartbeat).
+ *
+ * On AbortSignal abort, the caller must POST /api/internal/delegate/cancel —
+ * we fire-and-forget that from runDelegateSession() before the DELETE so the
+ * server-side parked Promise doesn't leak.
+ */
 export async function waitForDelegate(
-	sessionId: string,
-	timeoutMs: number,
+	args: {
+		parentSessionId: string;
+		toolUseId: string;
+		delegateSessionId: string;
+		cwd: string;
+		title?: string;
+		sandboxed?: boolean;
+		instructions: string;
+		timeoutMs: number;
+	},
 	signal?: AbortSignal,
-): Promise<{ status: string; output: string }> {
-	// The /wait endpoint blocks until the delegate finishes or times out server-side.
-	// Node's fetch (undici) has a default bodyTimeout of 300s which would kill the
-	// connection before our actual timeout. Use AbortSignal.timeout with generous padding
-	// (30s beyond our timeout) to let the server-side timeout be authoritative.
-	const fetchTimeout = AbortSignal.timeout(timeoutMs + 30_000);
+): Promise<{ status: string; output: string; error?: string }> {
+	// Server-side hardTimeout fires at timeoutMs+30s; let undici give us a few
+	// seconds beyond that so the server-side timeout is authoritative.
+	const fetchTimeout = AbortSignal.timeout(args.timeoutMs + 60_000);
 	const combinedSignal = signal
 		? AbortSignal.any([signal, fetchTimeout])
 		: fetchTimeout;
 
-	const resp = await gatewayFetch(`/api/sessions/${sessionId}/wait`, {
+	const resp = await gatewayFetch("/api/internal/delegate/wait", {
 		method: "POST",
-		body: JSON.stringify({ timeout_ms: timeoutMs }),
+		body: JSON.stringify({
+			parentSessionId: args.parentSessionId,
+			toolUseId: args.toolUseId,
+			delegateSessionId: args.delegateSessionId,
+			cwd: args.cwd,
+			title: args.title,
+			sandboxed: args.sandboxed,
+			instructions: args.instructions,
+			timeoutMs: args.timeoutMs,
+		}),
 		signal: combinedSignal,
 	});
 
@@ -130,22 +183,44 @@ export async function waitForDelegate(
 		if (resp.status === 408) {
 			return { status: "timeout", output: "" };
 		}
-		return { status: "failed", output: `API error: ${resp.status}` };
+		let bodyText = "";
+		try { bodyText = await resp.text(); } catch { /* ignore */ }
+		return { status: "failed", output: "", error: `delegate/wait HTTP ${resp.status}${bodyText ? ": " + bodyText : ""}` };
 	}
 
-	// The server sends chunked responses with periodic heartbeat newlines
-	// to prevent undici's bodyTimeout. Read full body and trim whitespace.
+	// Body is chunked with heartbeat newlines; the trailing entry is JSON.
 	const rawText = await resp.text();
-	const data = JSON.parse(rawText.trim()) as any;
-	if (data.error) {
-		return { status: "timeout", output: "" };
+	let data: any;
+	try {
+		data = JSON.parse(rawText.trim());
+	} catch (err: any) {
+		return { status: "failed", output: "", error: `delegate/wait parse error: ${err.message}` };
 	}
-	return { status: "completed", output: data.output || "" };
+	// data shape: { status, output, error? } per DelegateResultPayload
+	if (typeof data?.status !== "string") {
+		return { status: "failed", output: "", error: "delegate/wait: malformed response" };
+	}
+	return { status: data.status, output: typeof data.output === "string" ? data.output : "", error: data.error };
+}
+
+/**
+ * Fire-and-forget cancellation of a parked delegate wait.  Called on
+ * AbortSignal abort BEFORE the DELETE /api/sessions/:id so the harness's
+ * parked Promise resolves cleanly with status="terminated" instead of leaking.
+ */
+async function cancelDelegateWait(parentSessionId: string, toolUseId: string, reason: string): Promise<void> {
+	try {
+		await gatewayFetch("/api/internal/delegate/cancel", {
+			method: "POST",
+			body: JSON.stringify({ parentSessionId, toolUseId, reason }),
+		});
+	} catch { /* fire-and-forget */ }
 }
 
 /** Run a single delegate: create session, wait for completion, return result */
 export async function runDelegateSession(
 	parentSessionId: string,
+	toolUseId: string,
 	instructions: string,
 	cwd: string,
 	timeoutMs: number,
@@ -156,11 +231,24 @@ export async function runDelegateSession(
 	let sessionId = "";
 
 	try {
-		sessionId = await createDelegateSession(parentSessionId, instructions, cwd, opts);
+		sessionId = await createDelegateSession(parentSessionId, instructions, cwd, {
+			...opts,
+			toolUseId,
+			timeoutMs,
+		});
 
-		const result = await waitForDelegate(sessionId, timeoutMs, signal);
+		const result = await waitForDelegate({
+			parentSessionId,
+			toolUseId,
+			delegateSessionId: sessionId,
+			cwd,
+			title: opts?.title,
+			instructions,
+			timeoutMs,
+		}, signal);
 
-		// Terminate the delegate session (archives it so it appears in sidebar under "show archived")
+		// Terminate the delegate session (archives it). On abort the catch
+		// branch already issued cancel + DELETE; this is the happy-path cleanup.
 		try { await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }); } catch { /* ignore */ }
 
 		return {
@@ -169,11 +257,14 @@ export async function runDelegateSession(
 			status: result.status as DelegateResult["status"],
 			output: result.output,
 			durationMs: Date.now() - startTime,
+			error: result.error,
 		};
 	} catch (err: any) {
 		if (signal?.aborted) {
-			// Try to terminate the delegate session on abort (archives it)
+			// Cancel the parked Promise FIRST so the server-side wait settles
+			// cleanly, then archive the child via DELETE.
 			if (sessionId) {
+				await cancelDelegateWait(parentSessionId, toolUseId, "Aborted by user");
 				try { await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }); } catch { /* ignore */ }
 			}
 			return {
@@ -202,7 +293,7 @@ export async function runDelegateSession(
  * Try to find the current session's gateway session ID.
  * The gateway passes this via env or we can read from the session state.
  */
-export function getParentSessionId(ctx: any): string {
+export function getParentSessionId(_ctx: any): string {
 	// The session manager sets this in the agent's environment
 	if (process.env.BOBBIT_SESSION_ID) return process.env.BOBBIT_SESSION_ID;
 	// Fallback: use a placeholder (the server can figure it out from the auth)
@@ -247,20 +338,24 @@ const extension: ExtensionFactory = (pi) => {
 			timeout_minutes: Type.Optional(Type.Number({ description: "Timeout in minutes (default: 10)" })),
 		}),
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const cwd = (ctx as any).cwd || process.cwd();
 			const timeoutMs = (params.timeout_minutes ?? 10) * 60_000;
 			const parentSessionId = getParentSessionId(ctx);
 
 			if (params.parallel && params.parallel.length > 0) {
+				const parallelN = params.parallel.length;
 				const completedResults: DelegateResult[] = [];
 				const startTime = Date.now();
-				const sessionIds: string[] = new Array(params.parallel.length).fill("");
+				const sessionIds: string[] = new Array(parallelN).fill("");
+				// Per-slot harness keys — `${toolUseId}#${i}` ensures independent
+				// (parent, slot) tracking across the parallel array.
+				const slotToolUseIds: string[] = Array.from({ length: parallelN }, (_, i) => `${toolCallId}#${i}`);
 
 				// Helper: build current state snapshot for progress updates
 				function buildProgressUpdate() {
 					return {
-						content: [{ type: "text" as const, text: `${completedResults.length}/${params.parallel!.length} delegates finished` }],
+						content: [{ type: "text" as const, text: `${completedResults.length}/${parallelN} delegates finished` }],
 						details: {
 							delegates: params.parallel!.map((p: any, j: number) => {
 								const sid = sessionIds[j];
@@ -277,18 +372,20 @@ const extension: ExtensionFactory = (pi) => {
 
 				// Start heartbeat right away (before session creation)
 				const heartbeat = setInterval(() => {
-					if (onUpdate && completedResults.length < params.parallel!.length) {
+					if (onUpdate && completedResults.length < parallelN) {
 						onUpdate(buildProgressUpdate());
 					}
 				}, 3000);
 
 				// Create sessions — emit progress after each one so the UI updates incrementally
-				for (let i = 0; i < params.parallel.length; i++) {
+				for (let i = 0; i < parallelN; i++) {
 					const p = params.parallel[i];
 					try {
 						const sid = await createDelegateSession(parentSessionId, p.instructions, cwd, {
 							title: p.instructions.split("\n")[0].slice(0, 60),
 							context: { ...params.context, ...p.context },
+							toolUseId: slotToolUseIds[i],
+							timeoutMs,
 						});
 						sessionIds[i] = sid;
 						if (onUpdate) onUpdate(buildProgressUpdate());
@@ -305,21 +402,36 @@ const extension: ExtensionFactory = (pi) => {
 					}
 				}
 
-				// Wait for all delegates in parallel
+				// Wait for all delegates in parallel — each on its own (parent, toolUseId#i) key.
 				const promises = sessionIds.map((sid, i) => {
-					if (!sid) return Promise.resolve(); // already failed
-					return waitForDelegate(sid, timeoutMs, signal).then(async (result) => {
+					if (!sid) return Promise.resolve(); // already failed during creation
+					const slotToolUseId = slotToolUseIds[i];
+					const slotInstructions = params.parallel![i].instructions;
+					return waitForDelegate({
+						parentSessionId,
+						toolUseId: slotToolUseId,
+						delegateSessionId: sid,
+						cwd,
+						title: slotInstructions.split("\n")[0].slice(0, 60),
+						instructions: slotInstructions,
+						timeoutMs,
+					}, signal).then(async (result) => {
 						completedResults.push({
 							id: sid.slice(0, 12),
 							sessionId: sid,
 							status: result.status as DelegateResult["status"],
 							output: result.output,
 							durationMs: Date.now() - startTime,
+							error: result.error,
 						});
 						// Terminate the completed delegate session (archives it)
 						try { await gatewayFetch(`/api/sessions/${sid}`, { method: "DELETE" }); } catch { /* ignore */ }
 						if (onUpdate) onUpdate(buildProgressUpdate());
 					}).catch(async (err: any) => {
+						// On signal abort, cancel the parked wait first.
+						if (signal?.aborted) {
+							await cancelDelegateWait(parentSessionId, slotToolUseId, "Aborted by user");
+						}
 						completedResults.push({
 							id: sid.slice(0, 12),
 							sessionId: sid,
@@ -341,7 +453,7 @@ const extension: ExtensionFactory = (pi) => {
 				const lines: string[] = [];
 				const details: DelegateDetails = { delegates: [] };
 				let failCount = 0;
-				for (let i = 0; i < params.parallel.length; i++) {
+				for (let i = 0; i < parallelN; i++) {
 					const sid = sessionIds[i];
 					const r = completedResults.find((c) => c.sessionId === sid);
 					const ic = r?.status === "completed" ? "✓" : r?.status === "timeout" ? "⏱" : "✗";
@@ -361,7 +473,7 @@ const extension: ExtensionFactory = (pi) => {
 						durationMs: r?.durationMs || 0,
 					});
 				}
-				lines.push(`**Summary:** ${params.parallel.length - failCount}/${params.parallel.length} delegates completed.`);
+				lines.push(`**Summary:** ${parallelN - failCount}/${parallelN} delegates completed.`);
 
 				return { content: [{ type: "text", text: lines.join("\n") }], details };
 			}
@@ -372,6 +484,7 @@ const extension: ExtensionFactory = (pi) => {
 			}
 			const result = await runDelegateSession(
 				parentSessionId,
+				toolCallId,
 				params.instructions,
 				cwd,
 				timeoutMs,

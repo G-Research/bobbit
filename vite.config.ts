@@ -148,6 +148,58 @@ function localhostGuard(): Plugin {
 	};
 }
 
+/**
+ * Stamp `__BOBBIT_BUILD_ID__` in `public/sw.js` with a per-build identifier
+ * so the service worker's CACHE_NAME changes on every deploy. Without this,
+ * an in-flight client keeps the previous build's caches forever and a hard
+ * refresh can't escape stale hashed assets after a gateway restart.
+ *
+ * Dev: stamps the file on every request with a fresh timestamp so reloading
+ *      always activates a new SW (matches Vite's HMR mental model).
+ * Build: stamps once with a content hash + timestamp into the emitted asset.
+ */
+function bobbitSwVersion(): Plugin {
+	const PLACEHOLDER = "__BOBBIT_BUILD_ID__";
+	const stamp = (src: string, id: string): string => src.split(PLACEHOLDER).join(id);
+	return {
+		name: "bobbit-sw-version",
+		// Dev: intercept GET /sw.js and rewrite the placeholder per request.
+		configureServer(server) {
+			server.middlewares.use((req, res, next) => {
+				if (req.method !== "GET" || (req.url || "").split("?")[0] !== "/sw.js") return next();
+				const swPath = path.join(process.cwd(), "public", "sw.js");
+				let src: string;
+				try { src = fs.readFileSync(swPath, "utf-8"); } catch { return next(); }
+				const body = stamp(src, `dev-${Date.now()}`);
+				res.writeHead(200, {
+					"Content-Type": "application/javascript; charset=utf-8",
+					// Service workers should not be cached themselves — browsers
+					// already byte-compare on update, but explicit no-cache keeps
+					// proxies and CDNs from holding onto an old copy.
+					"Cache-Control": "no-cache, no-store, must-revalidate",
+				});
+				res.end(body);
+			});
+		},
+		// Build: Vite copies `public/sw.js` verbatim into outDir during
+		// `writeBundle`. Run after that copy and rewrite the placeholder
+		// in-place. `closeBundle` is the last hook so the on-disk file is
+		// guaranteed to exist by the time we get here.
+		closeBundle: {
+			order: "post",
+			handler() {
+				const outFile = path.join(process.cwd(), "dist", "ui", "sw.js");
+				if (!fs.existsSync(outFile)) return;
+				let src: string;
+				try { src = fs.readFileSync(outFile, "utf-8"); } catch { return; }
+				if (!src.includes(PLACEHOLDER)) return;
+				const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+				fs.writeFileSync(outFile, stamp(src, id));
+			},
+		},
+	};
+}
+
 function dynamicGatewayProxy(): Plugin {
 	return {
 		name: "dynamic-gateway-proxy",
@@ -222,7 +274,7 @@ function dynamicGatewayProxy(): Plugin {
 }
 
 export default defineConfig({
-	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), dynamicGatewayProxy()],
+	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
 	build: {
 		outDir: "dist/ui",
 	},
