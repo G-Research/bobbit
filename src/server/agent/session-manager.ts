@@ -1319,35 +1319,12 @@ export class SessionManager {
 			return;
 		}
 
-		// If agent is idle and queue is empty, dispatch directly. Flip status
-		// before touching the RPC pipeline so a rapid second prompt cannot also
-		// observe idle+empty and leapfrog into a concurrent dispatch.
+		// If agent is idle and queue is empty, dispatch directly
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			session.lastPromptText = dispatchText;
 			session.lastPromptImages = opts?.images;
-			session.status = "streaming";
-			session.streamingStartedAt = Date.now();
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
-			try {
-				await session.rpcClient.prompt(dispatchText, opts?.images);
-			} catch (err) {
-				console.error(`[session-manager] Failed to dispatch prompt for ${session.id}; re-queueing:`, err);
-				session.promptQueue.prepend({
-					id: randomUUID(),
-					text: dispatchText,
-					...(opts?.images?.length ? { images: opts.images } : {}),
-					...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
-					isSteered: opts?.isSteered ?? false,
-					createdAt: Date.now(),
-				});
-				session.status = "idle";
-				session.streamingStartedAt = undefined;
-				this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
-				broadcast(session.clients, { type: "session_status", status: "idle" });
-				this.broadcastQueue(session);
-			}
+			await session.rpcClient.prompt(dispatchText, opts?.images);
 			return;
 		}
 
@@ -1504,16 +1481,13 @@ export class SessionManager {
 		// Batch all steered messages at the front into a single prompt
 		const steered = session.promptQueue.dequeueAllSteered();
 		let next: QueuedMessage | undefined;
-		let dequeued: QueuedMessage[] = [];
 
 		if (steered.length > 0) {
 			const batchText = steered.map(m => m.text).join('\n');
 			next = { ...steered[0], text: batchText };
-			dequeued = steered;
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
 			next = session.promptQueue.dequeueUndispatched();
-			if (next) dequeued = [next];
 		}
 
 		this.broadcastQueue(session);
@@ -1534,16 +1508,10 @@ export class SessionManager {
 
 		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
 		dispatchPromise.catch((err: any) => {
-			console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}; re-queueing:`, err);
-			// Put the exact dequeued rows back so no user text is lost. For a
-			// steered batch this preserves the original individual queue items.
-			session.promptQueue.prepend(dequeued);
+			console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
 			// Revert optimistic status on failure
 			session.status = "idle";
-			session.streamingStartedAt = undefined;
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcast(session.clients, { type: "session_status", status: "idle" });
-			this.broadcastQueue(session);
 		});
 	}
 

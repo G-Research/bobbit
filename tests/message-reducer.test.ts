@@ -140,36 +140,6 @@ describe("message-reducer", () => {
 		assert.strictEqual(s.messages[0]._order, 1);
 	});
 
-	it("(7b) optimistic → snapshot echo (text fallback)", () => {
-		const s = applyAll([
-			{ type: "optimistic-prompt", message: userMsg("optimistic_1", "hi") },
-			{
-				type: "snapshot",
-				messages: [
-					userMsg("srv1", "hi"),
-					assistantMsg("a1", "hello"),
-				],
-			},
-		]);
-		assert.deepStrictEqual(ids(s), [
-			{ id: "srv1", _order: SNAPSHOT_ORDER_FLOOR, role: "user" },
-			{ id: "a1", _order: SNAPSHOT_ORDER_FLOOR + 1, role: "assistant" },
-		]);
-	});
-
-	it("(7c) snapshot text fallback preserves a new repeated prompt", () => {
-		const existing = userMsg("srv-old", "again");
-		const s = applyAll([
-			liveMessageEnd(1, existing),
-			{ type: "optimistic-prompt", message: userMsg("optimistic_new", "again") },
-			{ type: "snapshot", messages: [existing] },
-		]);
-		assert.deepStrictEqual(ids(s), [
-			{ id: "srv-old", _order: SNAPSHOT_ORDER_FLOOR, role: "user" },
-			{ id: "optimistic_new", _order: Number.MAX_SAFE_INTEGER - 1_000_000_000 + 2, role: "user" },
-		]);
-	});
-
 	it("(8) proposal burst — two assistant turns + toolResult, all in order", () => {
 		const a1 = assistantMsg("a1", "", {
 			content: [

@@ -102,10 +102,6 @@ export class RemoteAgent {
 	 *  event frames — it sends a state snapshot instead). */
 	private _seqInitialized = false;
 	private _pendingEvents: Array<{ seq: number; ts?: number; data: any }> = [];
-	/** Outbound user-intent frames waiting for an authenticated WebSocket.
-	 *  Prompts/steers must be at-least-once delivered; silently dropping them
-	 *  while reconnecting is worse than a duplicate. */
-	private _outbox: any[] = [];
 	/** Defensive cap — if we ever buffer more than this while waiting for a
 	 *  gap to fill, fall back to a snapshot refresh instead of growing forever. */
 	private readonly _pendingEventsMax = 500;
@@ -410,7 +406,6 @@ export class RemoteAgent {
 								}
 							}, 3000);
 						}
-						this._flushOutbox();
 					} else if (msg.type === "auth_failed") {
 						settled = true;
 						if (initial) {
@@ -586,15 +581,6 @@ export class RemoteAgent {
 			...(imageData?.length ? { images: imageData } : {}),
 			...(attachments?.length ? { attachments } : {}),
 		});
-
-		// Mirror the server's immediate transition for the first prompt. This
-		// prevents rapid follow-up sends from rendering as extra optimistic rows;
-		// the server queues them and the queue UI shows them in delivery order.
-		if (!this._state.isStreaming) {
-			this._state.isStreaming = true;
-			this._state.turnStartTime = this._state.turnStartTime ?? Date.now();
-			this.emit({ type: "state_update", data: { isStreaming: true } });
-		}
 	}
 
 	steer(message: any): void {
@@ -831,31 +817,8 @@ export class RemoteAgent {
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
-			return;
-		}
-
-		if (this._isReliableOutbound(msg)) {
-			this._outbox.push(msg);
-			console.warn("[RemoteAgent] Queued outbound message until reconnect:", msg.type, "readyState:", this.ws?.readyState);
-			if (!this._intentionalDisconnect && !this._reconnectTimer && (!this.ws || this.ws.readyState >= WebSocket.CLOSING)) {
-				this._setConnectionStatus("reconnecting");
-				this._connectWs(false).catch(() => { /* onclose schedules retry */ });
-			}
-			return;
-		}
-
-		console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
-	}
-
-	private _isReliableOutbound(msg: any): boolean {
-		return msg?.type === "prompt" || msg?.type === "steer";
-	}
-
-	private _flushOutbox(): void {
-		if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this._outbox.length === 0) return;
-		const pending = this._outbox.splice(0);
-		for (const msg of pending) {
-			this.ws.send(JSON.stringify(msg));
+		} else {
+			console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
 		}
 	}
 
