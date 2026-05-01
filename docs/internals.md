@@ -985,7 +985,9 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 
 ## Spawn-time model pinning
 
-Non-pool agent processes are spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single `model_change` event. The legacy path — boot with the CLI's hardcoded default, then call `setModel` ~13 ms later — still runs as a fallback for paths that don't know the model at spawn time (worktree pool claim, aigw cold-cache discovery).
+Without spawn-time pinning, every session emitted two `model_change` events at startup — pi-coding-agent booted with its CLI default (`anthropic/claude-opus-4-7`) and Bobbit then called `setModel` ~13 ms later — which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
+
+Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single `model_change` event. The legacy path — boot with the CLI default, then call `setModel` post-spawn — still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
 
 ### Bridge options and CLI flags
 
@@ -1012,7 +1014,7 @@ Non-pool agent processes are spawned with the desired model and reasoning level 
 
 ### Pool-claimed sessions
 
-Pool worktrees pre-spawn the agent process before role/goal is known, so they cannot pin at spawn time. Pool-claim sessions go through `resolveBridgeOptions` like any other session — the helpers may still pin a model when one happens to be resolvable — but in practice the pre-spawned agent boots with the CLI default and the post-spawn `setModel` runs unconditionally. Two `model_change` events on this path is documented and acceptable.
+The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** — it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too — there is no special pool path that emits two `model_change` events. The remaining two-event case is the aigw cold-cache discovery fallback, where the model is not resolvable at spawn time.
 
 ### Out of scope
 
