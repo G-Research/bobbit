@@ -113,6 +113,46 @@ test("buildSavePayload composes the structured PUT body (no worktree_root — Ge
 	expect(result.worktree_root).toBeUndefined();
 });
 
+test("componentToEditState surfaces config as editable rows", async ({ page }) => {
+	const result = await page.evaluate(() => (window as any).componentToEditState({
+		name: "web",
+		repo: ".",
+		config: { qa_start_command: "PORT=$PORT npm start", qa_max_duration_minutes: "10" },
+	}));
+	expect(result.config).toEqual([
+		{ key: "qa_start_command", value: "PORT=$PORT npm start" },
+		{ key: "qa_max_duration_minutes", value: "10" },
+	]);
+});
+
+test("editStateToComponent serializes config and strips empty keys", async ({ page }) => {
+	const result = await page.evaluate(() => (window as any).editStateToComponent({
+		name: "web",
+		repo: ".",
+		commands: [],
+		config: [
+			{ key: "qa_start_command", value: "PORT=$PORT npm start" },
+			{ key: "", value: "ignored" },
+			{ key: "qa_max_scenarios", value: "5" },
+		],
+	}));
+	expect(result).toEqual({
+		name: "web",
+		repo: ".",
+		config: { qa_start_command: "PORT=$PORT npm start", qa_max_scenarios: "5" },
+	});
+});
+
+test("editStateToComponent omits config when the list is empty", async ({ page }) => {
+	const result = await page.evaluate(() => (window as any).editStateToComponent({
+		name: "web",
+		repo: ".",
+		commands: [],
+		config: [],
+	}));
+	expect(result.config).toBeUndefined();
+});
+
 test("round-trip: clearing commands turns a component data-only", async ({ page }) => {
 	const result = await page.evaluate(() => {
 		const w = window as any;
