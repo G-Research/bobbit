@@ -1,6 +1,6 @@
 # Testing Coverage
 
-Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md).
+Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md). For opt-in video capture on top of browser E2E, see [testing-tier-2-5.md](testing-tier-2-5.md).
 
 ## Prompt interactions
 

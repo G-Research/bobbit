@@ -911,10 +911,16 @@ export class AgentInterface extends LitElement {
 		// streaming-container. The reducer publishes this id via RemoteAgent's
 		// `_streamingMessageId` private field; we read it defensively.
 		const streamingMessageId: string | undefined = (this.session as any)?.streamingMessageId;
-		const visibleMessages = (this.session.state.messages || []).filter(
-			(m: any) => !isAskResponseEnvelope(m) &&
-				(!streamingMessageId || m.id !== streamingMessageId),
-		);
+		const streamingMessage: any = this.session?.state.streamingMessage;
+		const visibleMessages = (this.session.state.messages || []).filter((m: any) => {
+			if (isAskResponseEnvelope(m)) return false;
+			// Belt-and-braces: hide a row that IS the same object reference as
+			// the in-flight streaming message, even if streamingMessageId is
+			// undefined (legacy fallback path). The id-equality check below is
+			// the primary guard.
+			if (streamingMessage && m === streamingMessage) return false;
+			return !streamingMessageId || m.id !== streamingMessageId;
+		});
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->

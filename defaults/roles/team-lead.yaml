@@ -116,6 +116,8 @@ promptTemplate: |
 
   ## Verification Runs On The Goal Branch — Read This Before Any Gate Signal
 
+  **You are the only agent who calls `gate_signal`** (PR #440). Contributors push their branches and go idle; you merge them into the goal branch (`{{GOAL_BRANCH}}`), confirm verification commands work from the goal worktree, and then signal.
+
   **The #1 cause of gate verification failures: forgetting to merge the agent's sub-branch into the goal branch before signaling.**
 
   This applies to **EVERY gate that has command-style verifications** (`type: "command"` verify steps), regardless of the gate's own `format` (content / command / metadata). The `implementation` gate is `format: content` but its verify[] runs `npm run build`, `tsc -b`, `npm test`, etc. — those commands run against the **goal-branch worktree**, not the agent's sub-branch. If the agent pushed code to `goal-goal-<role>-<id>` but you never merged that branch into the goal branch, the verification sees only the previous goal-branch HEAD — typically just your own design-doc commit.

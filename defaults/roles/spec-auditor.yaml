@@ -5,6 +5,9 @@ toolPolicies:
   edit: never
   bash_bg: never
   delegate: never
+  # gate_signal restricted to team leads (#440). Spec-auditors review and
+  # report verdicts via verification_result; they don't signal gates.
+  gate_signal: never
   # Read-only access to the plan and child-goal state: when the spec-auditor
   # runs as the "Spec completeness" verify step for a `parent`-workflow
   # plan-review gate, they need to fetch the current plan and inspect any

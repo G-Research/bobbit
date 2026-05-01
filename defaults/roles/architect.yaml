@@ -3,6 +3,9 @@ label: Architect
 accessory: set-square
 toolPolicies:
   edit: never
+  # gate_signal restricted to team leads (#440). Architects review and
+  # report verdicts via verification_result; they don't signal gates.
+  gate_signal: never
   # Read-only access to the plan and child-goal state: when the architect
   # runs as the verify step for a `parent`-workflow plan-review gate or any
   # cross-goal review, they need to fetch the current plan and inspect

@@ -21,6 +21,7 @@ toolPolicies:
   browser_resize: allow
   gate_list: allow
   gate_status: allow
+  gate_signal: never
   task_list: allow
   task_update: allow
   write: allow
