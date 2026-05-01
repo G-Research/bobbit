@@ -359,6 +359,72 @@ test.describe("delegate restart resilience (API)", () => {
 		);
 	});
 
+	test("D-RST-09: live-path listener does NOT synthesize completion during slow spawn (resumeFallback gate)", async ({ gateway }) => {
+		// Regression test for code-review #12: attachDelegateCompletionListener
+		// is used by both the live path (createDelegateSession, attached BEFORE
+		// sendDelegatePrompt runs) and the restart-resume path. The race-window
+		// fallback that submits 'completed' on idle MUST be gated to the resume
+		// path — firing it on the live path would prematurely complete a
+		// brand-new delegate before its first turn has had a chance to start
+		// (slow sandbox / model warm-up / spawn delay all take >5s).
+		const projectId = await defaultProjectId();
+		const parentId = await createSession({ projectId });
+		const childId = await createSession({ projectId });
+		const toolUseId = `tu_${Date.now()}_09`;
+		const sm = gateway.sessionManager;
+		const harness = sm.getDelegateHarness();
+
+		// Record the delegate as the live path would, then attach the
+		// listener WITHOUT the resumeFallback flag (matches
+		// createDelegateSession behaviour).
+		harness.recordActive({
+			parentSessionId: parentId,
+			toolUseId,
+			delegateSessionId: childId,
+			cwd: "",
+			instructions: "",
+			timeoutMs: 30_000,
+			createdAt: Date.now(),
+		});
+		sm.attachDelegateCompletionListener(childId, parentId, toolUseId); // no opts
+
+		// Wait past the 5s waitForStreaming budget that the resume-path
+		// fallback would use. The freshly-created child is idle (no prompt
+		// sent yet). With the bug, the listener's race-window fallback
+		// would fire and submit a synthetic 'completed'. With the fix
+		// (resumeFallback gate), nothing happens and the delegate stays
+		// in-flight. waitForCondition on the invariant that the delegate
+		// becomes inactive will (correctly) time out, which we treat as
+		// proof the bug is absent.
+		let bugTriggered = false;
+		await waitForCondition(
+			() => {
+				if (!harness.getActiveDelegateSessionIds().has(childId)) {
+					bugTriggered = true;
+					return true; // satisfy the predicate so we exit fast on bug
+				}
+				return false;
+			},
+			{ timeoutMs: 5_500, message: "delegate stayed in-flight (correct)" },
+		).catch(() => { /* timeout = correct behaviour */ });
+		expect(bugTriggered).toBe(false);
+		expect(harness.getActiveDelegateSessionIds().has(childId)).toBe(true);
+		const pendingDrained = harness.submit(parentId, toolUseId, { status: "completed", output: "real result" });
+		// No pending awaiter (we never called register), so submit latches.
+		expect(pendingDrained).toBe(false);
+		const result = await harness.register({
+			parentSessionId: parentId,
+			toolUseId,
+			delegateSessionId: childId,
+			cwd: "",
+			instructions: "",
+			timeoutMs: 30_000,
+			createdAt: Date.now(),
+		});
+		expect(result).toMatchObject({ status: "completed", output: "real result" });
+		harness.acknowledge(parentId, toolUseId);
+	});
+
 	test("D-RST-08: live-path race — child completes BEFORE parent registers /wait, result is latched", async ({ gateway }) => {
 		// Regression test for the pre-registration race: createDelegateSession
 		// must NOT pre-register a parked Promise on the harness, because the

@@ -1239,6 +1239,7 @@ export function createGateway(config: GatewayConfig) {
 						entry.delegateSessionId,
 						entry.parentSessionId,
 						entry.toolUseId,
+						{ resumeFallback: true },
 					);
 				}
 			} catch (err) {

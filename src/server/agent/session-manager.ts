@@ -425,7 +425,7 @@ export class SessionManager {
 	 * path (server.ts after restoreSessions); see
 	 * docs/design/delegate-restart-resilience.md §6.3.
 	 */
-	attachDelegateCompletionListener(childSessionId: string, parentSessionId: string, toolUseId: string): void {
+	attachDelegateCompletionListener(childSessionId: string, parentSessionId: string, toolUseId: string, opts?: { resumeFallback?: boolean }): void {
 		const harness = this._delegateHarness;
 		if (!harness) return;
 		const child = this.sessions.get(childSessionId);
@@ -486,48 +486,47 @@ export class SessionManager {
 		};
 		this._terminationListeners.push(termFn);
 
-		// Race protection on the restart-resume path: the resumed agent may
-		// finish its continuation turn (firing `agent_end`) BEFORE this
+		// Race protection — RESTART-RESUME PATH ONLY. The resumed agent
+		// may finish its continuation turn (firing `agent_end`) BEFORE this
 		// listener was attached. Without this fallback, the delegate would
 		// sit idle forever and the parent's `/wait` would time out.
 		//
-		// We can't blindly poll for `idle` after attach — a session that
-		// `wasStreaming` at restart hasn't yet received its continuation
-		// `agent_start` (the prompt is dispatched fire-and-forget by
-		// `restoreSession`), and during that window `status` is still
-		// `idle`. Treating that idle as terminal would deliver stale
-		// pre-restart output. Instead we use `waitForStreaming` (sibling of
+		// We deliberately gate this on `opts.resumeFallback === true`
+		// because the LIVE path attaches this listener BEFORE
+		// `sendDelegatePrompt()` runs, so a slow spawn / sandbox start /
+		// model warm-up that takes >5s to emit `agent_start` would
+		// otherwise be (mis-)treated as terminal idle, completing the
+		// parent's wait with empty output before the delegate has actually
+		// done any work.
+		//
+		// On the resume path we use `waitForStreaming` (sibling of
 		// `waitForIdle`, resolves on `agent_start`) with a short budget,
 		// then treat sustained idleness afterwards as proof the turn ran
 		// and ended before our listener attached.
 		//
-		// submitOnce() guarantees at-most-once delivery, so a real
-		// `agent_end` firing through the listener mid-poll is safe — first
-		// to land wins.
-		void (async () => {
-			// Phase 1: give the (possibly resumed) turn a chance to start.
-			// If `waitForStreaming` resolves, we know the turn has begun and
-			// the rpc-event listener will reliably observe its `agent_end`.
-			// If it rejects (timeout), the turn never started — either it
-			// already finished before attach, or there is no resumed work
-			// at all. We then check the current status and submit if idle.
-			try {
-				await this.waitForStreaming(childSessionId, 5_000);
-				return; // listener will catch agent_end
-			} catch { /* fall through */ }
-			if (submitted) return;
-			const current = this.sessions.get(childSessionId);
-			if (!current) {
-				submitOnce({ status: "failed", output: "", error: "Delegate session disappeared" });
-				return;
-			}
-			if (current.status === "idle") {
-				let output = "";
-				try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
-				submitOnce({ status: "completed", output });
-			}
-			// Else status is streaming/terminated/etc — listener handles it.
-		})();
+		// submitOnce() guarantees at-most-once delivery either way, so a
+		// real `agent_end` firing through the listener mid-poll is safe —
+		// first to land wins.
+		if (opts?.resumeFallback) {
+			void (async () => {
+				try {
+					await this.waitForStreaming(childSessionId, 5_000);
+					return; // listener will catch agent_end
+				} catch { /* fall through */ }
+				if (submitted) return;
+				const current = this.sessions.get(childSessionId);
+				if (!current) {
+					submitOnce({ status: "failed", output: "", error: "Delegate session disappeared" });
+					return;
+				}
+				if (current.status === "idle") {
+					let output = "";
+					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
+					submitOnce({ status: "completed", output });
+				}
+				// Else status is streaming/terminated/etc — listener handles it.
+			})();
+		}
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
