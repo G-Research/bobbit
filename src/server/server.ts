@@ -209,6 +209,17 @@ function validateInlineRolesShape(roles: unknown): string | null {
 				return `inlineRoles.${name}.toolPolicies must be an object`;
 			}
 		}
+		// Defense-in-depth size cap: prompt and promptTemplate must not exceed 64 KB.
+		// Inline roles are snapshotted into the goal record and re-rendered into
+		// every team-lead system prompt; an oversized prompt would balloon context
+		// and could be used to smuggle adversarial content past truncation.
+		const MAX_PROMPT_LEN = 64 * 1024;
+		if (typeof role.prompt === "string" && role.prompt.length > MAX_PROMPT_LEN) {
+			return `role "${name}".prompt exceeds ${MAX_PROMPT_LEN} chars`;
+		}
+		if (typeof role.promptTemplate === "string" && role.promptTemplate.length > MAX_PROMPT_LEN) {
+			return `role "${name}".promptTemplate exceeds ${MAX_PROMPT_LEN} chars`;
+		}
 	}
 	return null;
 }
@@ -3197,6 +3208,14 @@ async function handleApiRoute(
 			if (body.baseBranch !== undefined) {
 				if (typeof body.baseBranch !== "string" || !body.baseBranch) {
 					json({ error: "baseBranch must be a non-empty string" }, 400);
+					return;
+				}
+				// Defense-in-depth: baseBranch flows into git plumbing as an argument
+				// (e.g. `git worktree add … <baseBranch>`). Restrict to the safe charset
+				// for git ref names so a payload like `--upload-pack=evil` cannot be
+				// interpreted as an option flag by any downstream `git` invocation.
+				if (!/^[A-Za-z0-9._/-]+$/.test(body.baseBranch)) {
+					json({ field: "baseBranch", error: "baseBranch must match /^[A-Za-z0-9._/-]+$/" }, 400);
 					return;
 				}
 				baseBranch = body.baseBranch;

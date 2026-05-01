@@ -233,4 +233,52 @@ test.describe("POST /api/goals — nested-goals fields", () => {
 		const body = await resp.json();
 		expect(String(body.error)).toMatch(/divergencePolicy/i);
 	});
+
+	// ── Security hardening (F4) ────────────────────────────────────────────
+
+	test("baseBranch with shell-flag-style payload is rejected with 400", async () => {
+		// Defense-in-depth: baseBranch flows into git CLI invocations. A payload
+		// like `--upload-pack=evil` or anything outside [A-Za-z0-9._/-] must be
+		// rejected before it reaches `git`.
+		const projectId = await defaultProjectId();
+		const resp = await createGoalRaw({
+			title: `Bad BaseBranch ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+			baseBranch: "--upload-pack=evil",
+		});
+		expect(resp.status).toBe(400);
+		const body = await resp.json();
+		expect(body.field).toBe("baseBranch");
+		expect(String(body.error)).toMatch(/baseBranch must match/i);
+	});
+
+	test("oversized inlineRoles prompt (>64KB) is rejected with 400", async () => {
+		// Defense-in-depth: snapshot inline roles are re-rendered into every
+		// team-lead system prompt; a 70KB prompt exceeds the 64KB cap.
+		const projectId = await defaultProjectId();
+		const resp = await createGoalRaw({
+			title: `Oversized Inline Role ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+			inlineRoles: {
+				coder: {
+					label: "Coder",
+					prompt: "x".repeat(70_000),
+				},
+			},
+		});
+		expect(resp.status).toBe(400);
+		const body = await resp.json();
+		expect(body.field).toBe("inlineRoles");
+		expect(String(body.error)).toMatch(/exceeds.*chars/i);
+	});
 });
