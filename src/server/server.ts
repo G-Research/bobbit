@@ -37,6 +37,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
+import { DelegateHarness, type ActiveDelegate, type DelegateResultPayload } from "./agent/delegate-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 
@@ -573,6 +574,7 @@ export function createGateway(config: GatewayConfig) {
 
 	// Verification harness — assigned after wss is created (closure captures the reference)
 	let verificationHarness: VerificationHarness;
+	let delegateHarness: DelegateHarness;
 
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
@@ -643,7 +645,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, delegateHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -834,6 +836,30 @@ export function createGateway(config: GatewayConfig) {
 
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
 	teamManager.setVerificationHarness(verificationHarness);
+
+	// DelegateHarness — must be constructed BEFORE sessionManager.restoreSessions()
+	// is called (in the start() body below) so the harness has loaded its persisted
+	// active-delegates.json and restoreSessions can consult
+	// `getActiveDelegateSessionIds()` to decide which delegates to eager-restore.
+	// Constructor wires `addTerminationListener` for parent-cascade rejection.
+	delegateHarness = new DelegateHarness(stateDir, sessionManager, broadcastToSession);
+	sessionManager.setDelegateHarness(delegateHarness);
+	// When a parent session terminates, also cascade-terminate its still-running
+	// delegate child sessions (the harness rejects parked Promises but doesn't
+	// own session lifecycle). Mirrors docs/design/delegate-restart-resilience.md §6.1.
+	sessionManager.addTerminationListener((sessionId, info) => {
+		const killed = delegateHarness.rejectAllForSession(
+			sessionId,
+			info.reason === "archived" ? "Parent session archived" : "Parent session terminated",
+		);
+		for (const childId of killed) {
+			// Avoid re-cascading the parent we just terminated; only act on real children.
+			if (childId === sessionId) continue;
+			sessionManager.terminateSession(childId).catch(err => {
+				console.warn(`[delegate-harness] cascade-terminate of ${childId} failed:`, err);
+			});
+		}
+	});
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
 		if (!team?.teamLeadSessionId) return;
@@ -1136,6 +1162,54 @@ export function createGateway(config: GatewayConfig) {
 				console.error("[verification] Error resuming interrupted verifications:", err);
 			});
 
+			// Resume any delegate waits that were interrupted by a server restart.
+			// For each persisted active delegate:
+			//   - if the child session was eager-restored and is alive, attach a
+			//     completion listener so its terminal status flows back to the
+			//     parent's parked Promise (drained on the parent's next /wait POST,
+			//     or latched if the parent isn't connected yet).
+			//   - if the child is already terminated/archived, drain a synthetic
+			//     completed/terminated result.
+			//   - if the child session row is missing entirely, drain a synthetic
+			//     failure so the parent unwedges per PR #367 implicit-unstick.
+			try {
+				const active = delegateHarness.resumeInterruptedDelegates();
+				for (const entry of active) {
+					const child = sessionManager.getSession(entry.delegateSessionId);
+					if (!child) {
+						// Persisted but neither restored nor dormant — likely the
+						// session row is gone. Drain a structured failure so the
+						// parent's tool call doesn't hang.
+						delegateHarness.submit(entry.parentSessionId, entry.toolUseId, {
+							status: "failed",
+							output: "",
+							error: "Delegate session not found after restart",
+						});
+						continue;
+					}
+					if (child.status === "terminated") {
+						// Dormant or already-archived; drain a terminated result.
+						let output = "";
+						try { output = await sessionManager.getSessionOutput(entry.delegateSessionId); } catch { /* ignore */ }
+						delegateHarness.submit(entry.parentSessionId, entry.toolUseId, {
+							status: "terminated",
+							output,
+							error: "Delegate session was terminated before restart resume",
+						});
+						continue;
+					}
+					// Live (idle or streaming): wire the completion listener so when
+					// the child reaches a terminal state, the harness gets the result.
+					sessionManager.attachDelegateCompletionListener(
+						entry.delegateSessionId,
+						entry.parentSessionId,
+						entry.toolUseId,
+					);
+				}
+			} catch (err) {
+				console.error("[delegate-harness] Error resuming interrupted delegates:", err);
+			}
+
 			// Port 0 = let OS assign a free port; skip the auto-increment loop
 			if (config.port === 0) {
 				await new Promise<void>((resolve, reject) => {
@@ -1354,6 +1428,7 @@ async function handleApiRoute(
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
 	verificationHarness: VerificationHarness,
+	delegateHarness: DelegateHarness,
 	preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
 	groupPolicyStore: ToolGroupPolicyStore,
@@ -7167,6 +7242,109 @@ async function handleApiRoute(
 			reportHtml,
 		});
 		json({ ok: true });
+		return;
+	}
+
+	// ── Delegate harness endpoints (docs/design/delegate-restart-resilience.md §3.2) ──
+	// All three are sandbox-allowed (sandbox-guard.ts).
+
+	// POST /api/internal/delegate/wait — block until the (parent, toolUseId)
+	// parked Promise resolves. Idempotent: re-POST replaces the resolver and
+	// drains any latched result. Mirrors the chunked-heartbeat pattern of
+	// /api/sessions/:id/wait so undici client body-timeout doesn't fire.
+	if (url.pathname === "/api/internal/delegate/wait" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.parentSessionId || !body?.toolUseId || !body?.delegateSessionId
+			|| typeof body.parentSessionId !== "string" || typeof body.toolUseId !== "string"
+			|| typeof body.delegateSessionId !== "string") {
+			json({ error: "Missing required fields: parentSessionId, toolUseId, delegateSessionId" }, 400);
+			return;
+		}
+		const timeoutMs: number = typeof body.timeoutMs === "number" && body.timeoutMs > 0 ? body.timeoutMs : 600_000;
+		const active: ActiveDelegate = {
+			parentSessionId: body.parentSessionId,
+			toolUseId: body.toolUseId,
+			delegateSessionId: body.delegateSessionId,
+			cwd: typeof body.cwd === "string" ? body.cwd : "",
+			title: typeof body.title === "string" ? body.title : undefined,
+			sandboxed: typeof body.sandboxed === "boolean" ? body.sandboxed : undefined,
+			instructions: typeof body.instructions === "string" ? body.instructions : "",
+			timeoutMs,
+			createdAt: Date.now(),
+		};
+
+		res.writeHead(200, {
+			"Content-Type": "application/json",
+			"Transfer-Encoding": "chunked",
+			"Cache-Control": "no-cache",
+		});
+		const heartbeat = setInterval(() => {
+			try { res.write("\n"); } catch { /* connection gone */ }
+		}, 60_000);
+
+		const hardTimeout = setTimeout(() => {
+			try { res.end(JSON.stringify({ status: "timeout", output: "", error: "delegate wait timed out" } as DelegateResultPayload)); } catch { /* ignore */ }
+		}, timeoutMs + 30_000);
+
+		try {
+			const result = await delegateHarness.register(active);
+			res.end(JSON.stringify(result));
+		} catch (err) {
+			const payload: DelegateResultPayload = {
+				status: "failed",
+				output: "",
+				error: err instanceof Error ? err.message : String(err),
+			};
+			try { res.end(JSON.stringify(payload)); } catch { /* ignore */ }
+		} finally {
+			clearInterval(heartbeat);
+			clearTimeout(hardTimeout);
+		}
+		return;
+	}
+
+	// POST /api/internal/delegate/submit — internal use by the live-path
+	// completion listener (or by tests). Idempotent: second arrival is a no-op.
+	if (url.pathname === "/api/internal/delegate/submit" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.parentSessionId || !body?.toolUseId
+			|| typeof body.parentSessionId !== "string" || typeof body.toolUseId !== "string") {
+			json({ error: "Missing required fields: parentSessionId, toolUseId" }, 400);
+			return;
+		}
+		const status = body.status;
+		if (status !== "completed" && status !== "failed" && status !== "timeout" && status !== "terminated") {
+			json({ error: "status must be one of: completed, failed, timeout, terminated" }, 400);
+			return;
+		}
+		const result: DelegateResultPayload = {
+			status,
+			output: typeof body.output === "string" ? body.output : "",
+			error: typeof body.error === "string" ? body.error : undefined,
+		};
+		const drained = delegateHarness.submit(body.parentSessionId, body.toolUseId, result);
+		json({ ok: true, drained });
+		return;
+	}
+
+	// POST /api/internal/delegate/cancel — parent abort path. Submits a
+	// terminated result so the parent's parked Promise resolves cleanly
+	// (rather than hanging) and any latched result is dropped. Caller is
+	// responsible for terminating the child session via DELETE /api/sessions/:id.
+	if (url.pathname === "/api/internal/delegate/cancel" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.parentSessionId || !body?.toolUseId
+			|| typeof body.parentSessionId !== "string" || typeof body.toolUseId !== "string") {
+			json({ error: "Missing required fields: parentSessionId, toolUseId" }, 400);
+			return;
+		}
+		const reason = typeof body.reason === "string" ? body.reason : "cancelled";
+		const drained = delegateHarness.submit(body.parentSessionId, body.toolUseId, {
+			status: "terminated",
+			output: "",
+			error: reason,
+		});
+		json({ ok: true, drained });
 		return;
 	}
 

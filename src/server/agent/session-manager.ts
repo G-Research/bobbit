@@ -386,6 +386,7 @@ export class SessionManager {
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
+	private _delegateHarness?: import("./delegate-harness.js").DelegateHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
@@ -402,6 +403,82 @@ export class SessionManager {
 
 	setVerificationHarness(harness: import("./verification-harness.js").VerificationHarness): void {
 		this._verificationHarness = harness;
+	}
+
+	/** Wire the DelegateHarness so createDelegateSession can register parked Promises
+	 * and restoreSessions can decide which delegates to eager-restore. */
+	setDelegateHarness(harness: import("./delegate-harness.js").DelegateHarness): void {
+		this._delegateHarness = harness;
+	}
+
+	getDelegateHarness(): import("./delegate-harness.js").DelegateHarness | undefined {
+		return this._delegateHarness;
+	}
+
+	/**
+	 * Subscribe to the child delegate session's RpcBridge so that when it goes
+	 * terminal (agent_end / process_exit) we submit a structured result back to
+	 * the parent's parked Promise via DelegateHarness.submit. Idempotent — a
+	 * second event for the same key is a no-op in the harness.
+	 *
+	 * Used by both the live path (createDelegateSession) and the restart-resume
+	 * path (server.ts after restoreSessions); see
+	 * docs/design/delegate-restart-resilience.md §6.3.
+	 */
+	attachDelegateCompletionListener(childSessionId: string, parentSessionId: string, toolUseId: string): void {
+		const harness = this._delegateHarness;
+		if (!harness) return;
+		const child = this.sessions.get(childSessionId);
+		if (!child) {
+			// Caller is responsible for handling the missing-child case (synthesizes a failure result).
+			return;
+		}
+		let submitted = false;
+		const submitOnce = (result: import("./delegate-harness.js").DelegateResultPayload) => {
+			if (submitted) return;
+			submitted = true;
+			try { unsub(); } catch { /* ignore */ }
+			try { harness.submit(parentSessionId, toolUseId, result); } catch (err) {
+				console.error(`[delegate-harness] submit failed for ${parentSessionId}:${toolUseId}:`, err);
+			}
+		};
+		const unsub = child.rpcClient.onEvent((event: any) => {
+			if (submitted) return;
+			if (event?.type === "agent_end") {
+				void (async () => {
+					let output = "";
+					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
+					submitOnce({ status: "completed", output });
+				})();
+			} else if (event?.type === "process_exit") {
+				void (async () => {
+					let output = "";
+					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
+					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+					submitOnce({
+						status: event.code === 0 ? "completed" : "failed",
+						output,
+						error: event.code === 0 ? undefined : `Agent process exited (${reason})`,
+					});
+				})();
+			}
+		});
+		// Termination (archive/terminate) is observed via the global termination
+		// listener wired in server.ts; that path also fires submit if the
+		// agent_end/process_exit listener didn't get there first.
+		const termFn = (terminatedId: string, info: { reason: "terminated" | "archived" | "purged" }) => {
+			if (terminatedId !== childSessionId) return;
+			void (async () => {
+				let output = "";
+				try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
+				submitOnce({
+					status: "terminated",
+					output,
+					error: info.reason === "archived" ? "Delegate archived" : "Delegate terminated",
+				});
+			})();
+		};
+		this._terminationListeners.push(termFn);
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
@@ -2119,7 +2196,22 @@ export class SessionManager {
 		const regular = persisted.filter(ps => !ps.delegateOf);
 		const delegates = persisted.filter(ps => !!ps.delegateOf);
 
-		console.log(`[session-manager] Restoring ${regular.length} session(s), deferring ${delegates.length} delegate(s)...`);
+		// Eager-restore delegates whose parent has a registered wait in the
+		// DelegateHarness (active-delegates.json). Archived delegates and
+		// delegates whose parent finished cleanly stay dormant. See
+		// docs/design/delegate-restart-resilience.md §4.
+		const activeDelegateIds = this._delegateHarness?.getActiveDelegateSessionIds() ?? new Set<string>();
+		const eagerDelegates: PersistedSession[] = [];
+		const dormantDelegates: PersistedSession[] = [];
+		for (const ps of delegates) {
+			if (!ps.archived && ps.agentSessionFile && activeDelegateIds.has(ps.id)) {
+				eagerDelegates.push(ps);
+			} else {
+				dormantDelegates.push(ps);
+			}
+		}
+
+		console.log(`[session-manager] Restoring ${regular.length} session(s) + ${eagerDelegates.length} active delegate(s), deferring ${dormantDelegates.length} dormant delegate(s)...`);
 
 		// Restore regular sessions in parallel (batched concurrency)
 		const CONCURRENCY = 5;
@@ -2128,8 +2220,16 @@ export class SessionManager {
 			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
 		}
 
-		// Delegate sessions: dormant entries only — restored on-demand via addClient()
-		for (const ps of delegates) {
+		// Eager-restore active delegates through the same code path as regular
+		// sessions — keeps `BOBBIT_SESSION_ID` injection (PR #397), `lastActivity`
+		// preservation (PR #385), and sandbox handling identical.
+		for (let i = 0; i < eagerDelegates.length; i += CONCURRENCY) {
+			const batch = eagerDelegates.slice(i, i + CONCURRENCY);
+			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
+		}
+
+		// Dormant delegate sessions: restored on-demand via addClient()
+		for (const ps of dormantDelegates) {
 			if (!ps.agentSessionFile) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
@@ -2727,6 +2827,17 @@ export class SessionManager {
 		cwd: string;
 		title?: string;
 		context?: Record<string, string>;
+		/**
+		 * Tool-use id of the parent's `delegate` tool call. When supplied, the
+		 * harness registers a parked Promise keyed by `(parent, toolUseId)` and
+		 * the live-path completion listener submits the structured result back
+		 * when the child reaches a terminal state. Required for restart-survival
+		 * — callers without a `toolUseId` (legacy) get the old fire-and-forget
+		 * behaviour and must continue to use POST /api/sessions/:id/wait.
+		 */
+		toolUseId?: string;
+		/** Per-call timeout budget for the harness (ms). Default 600_000. */
+		timeoutMs?: number;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
@@ -2760,6 +2871,7 @@ export class SessionManager {
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
+			kind: "delegate",
 			sandboxed: delegateSandboxed || undefined,
 			instructions: opts.instructions,
 			context: opts.context,
@@ -2775,6 +2887,39 @@ export class SessionManager {
 		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		}).finally(() => { session.pendingMetadataPersist = undefined; });
+
+		// Register parked Promise BEFORE sending the delegate prompt so the
+		// active-delegates.json entry exists on disk before any failure window
+		// (e.g. spawn crash, gateway crash). The parent's `/wait` POST drains
+		// the harness's parked Promise; here in the live path we don't actually
+		// await the returned Promise — the parent will register its own awaiter
+		// from the tool extension. We only need the persistence side-effect plus
+		// a completion listener so the result eventually flows.
+		if (this._delegateHarness && opts.toolUseId) {
+			try {
+				// Fire-and-forget the Promise — the harness records the entry on disk
+				// and will resolve it when the parent's /wait POST registers a real
+				// awaiter (drains any latched result) or when submit() arrives first.
+				void this._delegateHarness.register({
+					parentSessionId,
+					toolUseId: opts.toolUseId,
+					delegateSessionId: id,
+					cwd: opts.cwd,
+					title: titleSummary,
+					sandboxed: delegateSandboxed || undefined,
+					instructions: opts.instructions,
+					timeoutMs: opts.timeoutMs ?? 600_000,
+					createdAt: Date.now(),
+				}).catch(err => {
+					// Promise rejection only fires on rejectAllForSession or supersede;
+					// neither is an error here.
+					void err;
+				});
+				this.attachDelegateCompletionListener(id, parentSessionId, opts.toolUseId);
+			} catch (err) {
+				console.error(`[session-manager] Failed to register delegate ${id} with harness:`, err);
+			}
+		}
 
 		// Send delegate prompt with 30s timeout
 		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
