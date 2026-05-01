@@ -15,6 +15,8 @@ export interface ComponentEditState {
 	worktree_setup_command?: string;
 	/** Flat name → shell map. Empty array ⇒ data-only component. */
 	commands: Array<{ key: string; value: string }>;
+	/** Opaque key→string config map (e.g. qa_start_command). Empty array allowed. */
+	config: Array<{ key: string; value: string }>;
 }
 
 export interface ServerComponent {
@@ -23,16 +25,19 @@ export interface ServerComponent {
 	relativePath?: string;
 	worktreeSetupCommand?: string;
 	commands?: Record<string, string>;
+	config?: Record<string, string>;
 }
 
 export function componentToEditState(c: ServerComponent): ComponentEditState {
 	const cmds = c.commands ? Object.entries(c.commands).map(([key, value]) => ({ key, value })) : [];
+	const cfg = c.config ? Object.entries(c.config).map(([key, value]) => ({ key, value })) : [];
 	return {
 		name: c.name,
 		repo: c.repo,
 		relative_path: c.relativePath ?? "",
 		worktree_setup_command: c.worktreeSetupCommand ?? "",
 		commands: cmds,
+		config: cfg,
 	};
 }
 
@@ -48,6 +53,18 @@ export function editStateToComponent(e: ComponentEditState): Record<string, unkn
 			if (key.trim() && value.trim()) cmds[key.trim()] = value;
 		}
 		if (Object.keys(cmds).length > 0) out.commands = cmds;
+	}
+	// Per-component opaque config map (e.g. qa_start_command, qa_health_check).
+	// Drop entries with empty key; preserve empty values is meaningless so
+	// require both. Mirrors `commands` semantics.
+	// `e.config` may be undefined when callers pass a partial edit-state
+	// (e.g. legacy fixture tests). Treat absent as empty.
+	if (e.config && e.config.length > 0) {
+		const cfg: Record<string, string> = {};
+		for (const { key, value } of e.config) {
+			if (key.trim() && value !== "") cfg[key.trim()] = value;
+		}
+		if (Object.keys(cfg).length > 0) out.config = cfg;
 	}
 	return out;
 }
