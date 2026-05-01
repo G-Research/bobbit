@@ -76,6 +76,30 @@ export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "a
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 
 /**
+ * Returns true only for rpc events that represent genuine new user-visible
+ * activity (a message, tool call, or end-of-turn). Lifecycle frames the
+ * agent CLI emits automatically on resume (agent_start, agent_idle,
+ * connection_state, state, session_title, etc.) return false so they don't
+ * clobber the persisted `lastActivity` timestamp on restore / role-restart /
+ * abort-restart paths.
+ *
+ * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
+ */
+export function isUserVisibleActivity(event: any): boolean {
+	if (!event || typeof event.type !== "string") return false;
+	switch (event.type) {
+		case "message_update":
+		case "message_end":
+		case "tool_execution_start":
+		case "tool_execution_end":
+		case "agent_end":
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
  * Build a user-visible system-prefix explaining that the previous turn
  * errored. Injected in front of the user's new text when SessionManager
  * implicitly unsticks a wedged session — orients the model to ignore the
@@ -2479,11 +2503,14 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
-			// timestamp with Date.now(). Gate on the restoring flag so only
-			// genuine post-restore activity bumps it.
+			// timestamp with Date.now(). Gate on the restoring flag AND on
+			// isUserVisibleActivity so post-resume lifecycle frames (agent_start,
+			// agent_idle, connection_state, state, session_title) don't clobber it.
 			if (!restoring) {
-				session.lastActivity = Date.now();
-				restoreStore.update(ps.id, { lastActivity: session.lastActivity });
+				if (isUserVisibleActivity(event)) {
+					session.lastActivity = Date.now();
+					restoreStore.update(ps.id, { lastActivity: session.lastActivity });
+				}
 			}
 
 			this.handleAgentLifecycle(session, event);
@@ -3524,8 +3551,10 @@ export class SessionManager {
 		let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			roleStore.update(id, { lastActivity: session.lastActivity });
+			if (isUserVisibleActivity(event)) {
+				session.lastActivity = Date.now();
+				roleStore.update(id, { lastActivity: session.lastActivity });
+			}
 			this.handleAgentLifecycle(session, event);
 			const truncated = truncateLargeToolContent(event);
 			emitSessionEvent(session, truncated);
@@ -4510,8 +4539,10 @@ export class SessionManager {
 			let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
-				session.lastActivity = Date.now();
-				abortStore.update(id, { lastActivity: session.lastActivity });
+				if (isUserVisibleActivity(event)) {
+					session.lastActivity = Date.now();
+					abortStore.update(id, { lastActivity: session.lastActivity });
+				}
 
 				this.handleAgentLifecycle(session, event);
 

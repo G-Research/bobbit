@@ -311,6 +311,11 @@ export class RemoteAgent {
 
 	/** Play a short two-tone beep using the Web Audio API (no file needed). */
 	static playNotificationBeep(): void {
+		// Gated by user preference (Settings → General). Default ON; only "false" silences.
+		if (typeof document !== "undefined"
+			&& document.documentElement.dataset.playAgentFinishSound === "false") {
+			return;
+		}
 		try {
 			const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
 			const now = ctx.currentTime;
@@ -1473,6 +1478,12 @@ export class RemoteAgent {
 		// Apply showTimestamps
 		if ("showTimestamps" in prefs) {
 			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+		}
+
+		// Apply playAgentFinishSound — default ON when unset.
+		if ("playAgentFinishSound" in prefs) {
+			document.documentElement.dataset.playAgentFinishSound =
+				prefs.playAgentFinishSound === false ? "false" : "true";
 		}
 
 		// Apply shortcuts

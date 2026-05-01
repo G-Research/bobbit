@@ -831,6 +831,14 @@ export function renderSidebar() {
 						${icon(Wrench, "xs", "!w-3.5 !h-3.5")}
 						<span>Tools</span>
 					</button>
+					<button
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); })}
+						title="View skills"
+					>
+						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
+						<span>Skills</span>
+					</button>
 				</div>
 				<div class="flex items-center">
 					<button
@@ -840,14 +848,6 @@ export function renderSidebar() {
 					>
 						${icon(Workflow, "xs", "!w-3.5 !h-3.5")}
 						<span>Workflows</span>
-					</button>
-					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); })}
-						title="View skills"
-					>
-						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
-						<span>Skills</span>
 					</button>
 					<button
 						data-new-goal-trigger

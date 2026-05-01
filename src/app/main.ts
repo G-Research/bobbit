@@ -377,6 +377,9 @@ async function initApp() {
 					if (prefs.showTimestamps) {
 						document.documentElement.dataset.showTimestamps = "true";
 					}
+					// Apply playAgentFinishSound — default ON when unset.
+					document.documentElement.dataset.playAgentFinishSound =
+						prefs.playAgentFinishSound === false ? "false" : "true";
 				}
 			} catch {}
 
@@ -659,6 +662,9 @@ async function initApp() {
 			}
 			// Apply showTimestamps
 			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			// Apply playAgentFinishSound — default ON when unset.
+			document.documentElement.dataset.playAgentFinishSound =
+				prefs.playAgentFinishSound === false ? "false" : "true";
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();
