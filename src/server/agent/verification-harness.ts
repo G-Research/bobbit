@@ -1315,7 +1315,40 @@ export class VerificationHarness {
 	private notifyTeamLead(goalId: string, gateId: string, status: string): void {
 		if (!this.notifyTeamLeadFn) return;
 		const verb = status === "passed" ? "PASSED" : "FAILED";
-		this.notifyTeamLeadFn(goalId, `Gate verification ${verb}: "${gateId}". ${status === "passed" ? "Downstream work for this gate can now proceed." : "Check the verification output, fix the issues, and re-signal the gate."}`);
+
+		// For failures, surface the actual failed-step names + a brief output
+		// snippet inline so the team-lead's first nudge is actionable. Without
+		// this, the message was "Check the verification output" — generic enough
+		// that team-leads would react reactively then go idle without re-
+		// signalling the gate. Live test (PR #409): a child team-lead's design-
+		// doc gap-analysis failed, the parent message didn't carry the failure
+		// reason, so the team-lead spawned more reviewers and went idle without
+		// fixing the underlying gap.
+		let detail = "";
+		if (status === "failed") {
+			try {
+				const gateState = this.resolveGateStore(goalId).getGate(goalId, gateId);
+				const latest = gateState?.signals?.[gateState.signals.length - 1];
+				const failedSteps = latest?.verification?.steps?.filter(s => s && !s.passed) ?? [];
+				if (failedSteps.length > 0) {
+					const names = failedSteps.map(s => `"${s.name}"`).join(", ");
+					// Take the first failed step's output, truncated. Most useful
+					// for LLM-review failures whose output is the reviewer's verdict.
+					const firstOutput = (failedSteps[0].output ?? "").trim();
+					const snippet = firstOutput.length > 600
+						? firstOutput.slice(0, 600) + "…"
+						: firstOutput;
+					detail = ` Failed step(s): ${names}.${snippet ? `\n\n--- ${failedSteps[0].name} ---\n${snippet}` : ""}`;
+				}
+			} catch (err) {
+				console.warn(`[verification] Failed to load failure detail for ${goalId}/${gateId}:`, err);
+			}
+		}
+
+		const actionHint = status === "passed"
+			? "Downstream work for this gate can now proceed."
+			: "Read the failed step output above, fix the underlying issue (don't just re-spawn the same reviewers), then re-signal the gate. If the failure is unfixable, surface to the user via ask_user_choices.";
+		this.notifyTeamLeadFn(goalId, `Gate verification ${verb}: "${gateId}".${detail} ${actionHint}`);
 
 		// Bubble notable child-gate transitions UP to the parent team-lead so
 		// parent-pattern goals (which orchestrate via `goal_spawn_child` and
@@ -1345,13 +1378,16 @@ export class VerificationHarness {
 		if (!notable) return;
 
 		const parentVerb = status === "passed" ? "PASSED" : "FAILED";
+		// For child failures, include the same failed-step detail in the
+		// parent's notification so the parent can intervene without first
+		// calling goal_inspect_child. Reuse the detail string we built above.
 		const parentMsg =
-			`Child goal "${child.title}" (${goalId}) gate verification ${parentVerb}: "${gateId}". ` +
+			`Child goal "${child.title}" (${goalId}) gate verification ${parentVerb}: "${gateId}".${status === "failed" ? detail : ""} ` +
 			(gateId === "ready-to-merge" && status === "passed"
 				? "The parent harness will now perform the local merge."
 				: status === "failed"
-				? "Check the child's verification output and decide whether to nudge, escalate, or archive."
-				: "Use goal_plan_status / list_children to see the latest tree state.");
+				? "The child's team-lead has been notified directly. Watch for the next gate signal; if the child stays stuck, intervene via goal_inspect_child / WS-prompt the child's team-lead, or archive via goal_archive_child."
+				: "Use goal_plan_status / goal_list_children to see the latest tree state.");
 		try {
 			this.notifyTeamLeadFn(child.parentGoalId, parentMsg);
 		} catch (err) {
