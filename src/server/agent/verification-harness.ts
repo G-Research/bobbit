@@ -765,6 +765,46 @@ export class VerificationHarness {
 
 			if (resumeResult) {
 				resolvedSteps.push(resumeResult);
+			} else if (step.type === "subgoal") {
+				// BUG-16 fix: subgoal steps don't have a session of their OWN —
+				// the "session" is the child goal record. After restart we may
+				// find the step running with no session id but with a recorded
+				// `subgoal.childGoalId`. Don't fail it; mark as transient so a
+				// subsequent execution-gate signal (auto-fired on goal-plan
+				// re-signal, or manually invoked) re-runs `runSubgoalStep` which
+				// reconciles via the spawnedFromPlanId fallback (cef6257f).
+				//
+				// Defensively kick off team setup for the child if it exists
+				// but has no team yet — covers the case where the IIFE crashed
+				// AFTER the createGoal but BEFORE setupWorktreeAndStartTeam.
+				const childGoalId = (step as any).subgoal?.childGoalId as string | undefined;
+				let recoveryNote = "Subgoal step interrupted by server restart — will be resolved on next execution-gate signal via spawnedFromPlanId reconciliation.";
+				if (childGoalId && this.projectContextManager && this.teamManager) {
+					const childCtx = this.projectContextManager.getContextForGoal(childGoalId);
+					const child = childCtx?.goalStore.get(childGoalId);
+					if (child && !child.archived) {
+						const childAgents = this.teamManager.listAgents(childGoalId);
+						if (childAgents.length === 0 && child.setupStatus !== "error") {
+							// Fire-and-forget: re-trigger team setup so the child
+							// goal record gets its team-lead session and starts
+							// working. Mirrors the spawn-time path.
+							const teamMgr = this.teamManager;
+							if (childCtx) {
+								childCtx.goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamMgr.startTeam(childGoalId))
+									.catch(err => console.warn(`[verification] BUG-16 recovery: setupWorktreeAndStartTeam failed for child ${childGoalId}:`, err));
+							}
+							recoveryNote += ` Detected partially-spawned child ${childGoalId} (no team agents) — re-triggered worktree setup + team start.`;
+							console.log(`[verification] BUG-16 recovery: re-triggering team setup for orphan child ${childGoalId}`);
+						}
+					}
+				}
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: false,
+					output: recoveryNote,
+					duration_ms: Date.now() - step.startedAt,
+				});
 			} else {
 				// No session and not an llm-review — cannot recover
 				resolvedSteps.push({

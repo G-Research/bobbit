@@ -5087,7 +5087,8 @@ async function handleApiRoute(
 			const execGate = goal.workflow.gates.find(g => g.id === "execution");
 			if (execGate) {
 				if (!execGate.metadata) execGate.metadata = {};
-				if (execGate.metadata.frozen !== "true") {
+				const wasFrozen = execGate.metadata.frozen === "true";
+				if (!wasFrozen) {
 					const frozenAt = Date.now();
 					execGate.metadata.frozen = "true";
 					execGate.metadata.frozenAt = String(frozenAt);
@@ -5099,13 +5100,25 @@ async function handleApiRoute(
 						gateId: execGate.id,
 						frozenAt,
 					});
-					// Once the plan is frozen, auto-signal the execution gate so
-					// the verification harness picks up the subgoal verify steps
-					// and starts spawning / re-binding children. Without this, the
-					// team-lead has to manually signal `execution` after
-					// approving the plan, which violates the design contract
-					// ("the harness automatically spawns the planned children at
-					// the right phases"). See PR #409 live integration test.
+				}
+				// Once the plan is frozen, auto-signal the execution gate so
+				// the verification harness picks up the subgoal verify steps
+				// and starts spawning / re-binding children. Without this, the
+				// team-lead has to manually signal `execution` after
+				// approving the plan, which violates the design contract
+				// ("the harness automatically spawns the planned children at
+				// the right phases"). See PR #409 live integration test.
+				//
+				// BUG-15 fix: don't tie auto-signal to the FIRST freeze — also
+				// fire when goal-plan is re-signalled and execution is still
+				// unsignalled (e.g. previous goal-plan signal landed pre-fix
+				// and never auto-signalled, or the previous auto-signal was
+				// interrupted by a server restart). Idempotency: skip if
+				// execution already has a signal (re-signalling would cancel
+				// in-flight verification).
+				const execGateState = gateStore.getGate(goalId, "execution");
+				const execAlreadySignalled = (execGateState?.signals?.length ?? 0) > 0;
+				if (!execAlreadySignalled) {
 					shouldAutoSignalExecution = true;
 				}
 			}
