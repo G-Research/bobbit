@@ -23,6 +23,10 @@ import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-
 
 setRenderApp(doRenderApp);
 
+// Expose state on window for E2E tests (harmless in production — the state
+// object is already mutable from devtools and contains no secrets).
+(window as any).__bobbitState = state;
+
 // ============================================================================
 // GATEWAY STARTUP POLLING
 // ============================================================================

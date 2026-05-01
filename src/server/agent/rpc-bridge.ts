@@ -104,6 +104,33 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
 	_factory = factory;
 }
 
+/**
+ * Build the pi-coding-agent CLI arg list from RpcBridgeOptions.
+ *
+ * Exported for unit testing (mocking child_process.spawn is brittle).
+ * Order matters: --model and --thinking are inserted BEFORE caller-supplied
+ * `options.args` so any explicit override in `args` (e.g. `--model x` from
+ * a custom flow) wins over the spawn-time pin.
+ */
+export function buildAgentArgs(options: RpcBridgeOptions): string[] {
+	const args = ["--mode", "rpc"];
+	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
+	if (options.initialModel) {
+		const slash = options.initialModel.indexOf("/");
+		if (slash > 0 && slash < options.initialModel.length - 1) {
+			args.push("--model", options.initialModel);
+		}
+	}
+	if (options.initialThinkingLevel) {
+		const valid = ["off", "minimal", "low", "medium", "high"];
+		if (valid.includes(options.initialThinkingLevel)) {
+			args.push("--thinking", options.initialThinkingLevel);
+		}
+	}
+	if (options.args) args.push(...options.args);
+	return args;
+}
+
 export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
@@ -131,24 +158,7 @@ export class RpcBridge {
 
 	async start(): Promise<void> {
 		const cliPath = this.options.cliPath || findAgentCli();
-		const args = ["--mode", "rpc"];
-		if (this.options.systemPromptPath) args.push("--system-prompt", this.options.systemPromptPath);
-		// Pin model/thinking-level at spawn time to avoid redundant initial
-		// `model_change` events. Inserted BEFORE caller-supplied args so any
-		// explicit override in `this.options.args` wins.
-		if (this.options.initialModel) {
-			const slash = this.options.initialModel.indexOf("/");
-			if (slash > 0 && slash < this.options.initialModel.length - 1) {
-				args.push("--model", this.options.initialModel);
-			}
-		}
-		if (this.options.initialThinkingLevel) {
-			const valid = ["off", "minimal", "low", "medium", "high"];
-			if (valid.includes(this.options.initialThinkingLevel)) {
-				args.push("--thinking", this.options.initialThinkingLevel);
-			}
-		}
-		if (this.options.args) args.push(...this.options.args);
+		const args = buildAgentArgs(this.options);
 
 		// Enable all built-in tools EXCEPT bash (which is provided by our custom extension)
 		// unless --tools was explicitly passed (e.g. by role-based tool activation).
