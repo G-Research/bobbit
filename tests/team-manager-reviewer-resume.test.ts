@@ -22,7 +22,7 @@ import path from "node:path";
 const TEST_PI_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-reviewer-resume-test-"));
 process.env.BOBBIT_DIR = TEST_PI_DIR;
 
-const { TeamManager } = await import("../dist/server/agent/team-manager.js");
+const { TeamManager } = await import("../src/server/agent/team-manager.ts");
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
 
 function clearTeamStore() {

@@ -10,7 +10,7 @@ const TEST_PI_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-test-"));
 process.env.BOBBIT_DIR = TEST_PI_DIR;
 
 // Import AFTER setting env var so bobbitDir() picks it up
-const { TeamManager } = await import("../dist/server/agent/team-manager.js");
+const { TeamManager } = await import("../src/server/agent/team-manager.ts");
 
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
 function clearTeamStore() { try { fs.unlinkSync(TEAM_STORE_FILE); } catch { /* ignore */ } }
