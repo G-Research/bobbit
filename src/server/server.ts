@@ -5179,6 +5179,68 @@ async function handleApiRoute(
 			}
 		}
 
+		// Manual-merge reconciliation: when a parent's `execution` gate is
+		// signalled (manual re-signal OR auto-signal after goal-plan freeze),
+		// scan its non-archived children whose `ready-to-merge` gate has
+		// passed and check whether their branch tip is already reachable
+		// from the parent's branch HEAD. If yes — the user must have merged
+		// manually via `git merge` from the terminal (e.g. to resolve a
+		// conflict the eager-merge IIFE couldn't handle automatically) —
+		// archive the child so it no longer clutters the dashboard.
+		//
+		// Live test (PR #409): the storage-sqlite-and-markdown leaf
+		// (9dbbce41) sat in `state: complete, archived: false` for
+		// hours after a manual conflict-resolution merge, because none of
+		// the three Bobbit-driven merge paths (runSubgoalStep, eager-merge
+		// IIFE, integrate-child REST) got retriggered.
+		if (gateId === "execution") {
+			try {
+				const { listReconcileCandidates, shouldArchiveAfterAncestryCheck } = await import("./agent/reconcile-manually-merged-children.js");
+				const children = gateSignalCtx.goalStore.getAll().filter(g => g.parentGoalId === goalId);
+				const gatesByChild = new Map<string, Array<{ gateId: string; status: "pending" | "running" | "passed" | "failed" }>>();
+				for (const c of children) {
+					const gs = gateStore.getGatesForGoal(c.id);
+					gatesByChild.set(c.id, gs.map(g => ({ gateId: g.gateId, status: g.status as "pending" | "running" | "passed" | "failed" })));
+				}
+				const candidates = listReconcileCandidates(goalId, children, gatesByChild);
+				if (candidates.length > 0 && goal.cwd) {
+					// Best-effort fire-and-forget: do the git checks +
+					// archive in a background async block so the response to
+					// the original gate-signal POST isn't blocked.
+					(async () => {
+						for (const child of candidates) {
+							try {
+								// `git merge-base --is-ancestor <child-branch> HEAD`
+								// exits 0 if ancestor, 1 if not. Anything else → null.
+								const result = await execGitSafe(
+									`git merge-base --is-ancestor ${child.branch} HEAD; echo $?`,
+									goal.cwd,
+									"-1",
+								);
+								const exitCode = parseInt(result.trim().split(/\s+/).pop() ?? "-1", 10);
+								const isAncestor: boolean | null = exitCode === 0 ? true : exitCode === 1 ? false : null;
+								if (shouldArchiveAfterAncestryCheck(isAncestor)) {
+									try {
+										await teamManager.teardownTeam(child.id).catch(err => {
+											console.warn(`[manual-merge-reconcile] teardownTeam failed for ${child.id} (best-effort):`, err);
+										});
+										await gateSignalCtx.goalManager.archiveGoal(child.id);
+										console.log(`[manual-merge-reconcile] Archived child ${child.id} (branch ${child.branch} already merged into parent ${goalId} HEAD)`);
+									} catch (err) {
+										console.warn(`[manual-merge-reconcile] archive failed for ${child.id} (best-effort):`, err);
+									}
+								}
+							} catch (err) {
+								console.warn(`[manual-merge-reconcile] git ancestry check failed for ${child.id} (best-effort):`, err);
+							}
+						}
+					})();
+				}
+			} catch (err) {
+				console.warn(`[manual-merge-reconcile] setup failed for goal ${goalId} (best-effort):`, err);
+			}
+		}
+
 		// Auto-signal execution after goal-plan freezes the plan. Fire-and-
 		// forget after the response is sent. Mirrors the structure of a normal
 		// gate signal: synthesize a signal record + invoke verifyGateSignal.
