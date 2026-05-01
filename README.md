@@ -91,7 +91,7 @@ Register multiple project directories with a single Bobbit server. Each project 
 Each session is a running agent with its own conversation and persistence. Run multiple sessions in parallel, each working on different parts of your project. Connect from multiple devices at once.
 
 ### Goals & Tasks
-Track larger work items with structured goals. Each goal has a title, spec, state, and optional task board. Goals can create dedicated git worktrees for isolated work.
+Track larger work items with structured goals. Each goal has a title, spec, state, and optional task board. Goals can create dedicated git worktrees for isolated work. Goals can nest recursively (parent + child subgoals running in parallel) — see [docs/nested-goals.md](docs/nested-goals.md).
 
 ### Teams
 Coordinate multiple agents working together. A team lead spawns role agents (coder, reviewer, tester) that work on tasks in parallel, each in their own git worktree.

@@ -19,6 +19,7 @@ Goals are a task-tracking layer on top of sessions. A goal has a title, spec (ma
 - **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
 - **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager.
 - **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.
+- **Nested goals**: Goals nest recursively. A parent goal's team-lead can spawn child goals (each in its own worktree, branched off the parent's branch HEAD), run them in parallel up to a per-tree concurrency cap, and merge each child locally back into the parent on `ready-to-merge` — only the top-level goal raises a PR. The built-in `parent` workflow adds a planning phase (`charter` → `plan-review` → `goal-plan` → `execution`) where the `execution` gate's verify[] is the plan, populated as `subgoal` verify steps. Mid-flight plan mutations are classified server-side (`fix-up` / `expansion` / `restructure` / `criteria-drop`) and gated by a per-goal `divergencePolicy` (`strict` / `balanced` / `autonomous`). See [nested-goals.md](nested-goals.md).
 
 ## Teams
 

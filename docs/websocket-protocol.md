@@ -67,6 +67,15 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
 | `pr_status_changed` | `goalId?`, `sessionId?`, `status` | PR status changed for a goal or session |
+| `goal_plan_proposed` | `goalId`, `gateId`, `planSteps`, `replanCount` | A new plan was written via `goal_plan_propose` or `PATCH /api/goals/:id/plan`. See [docs/design/nested-goals.md §9](design/nested-goals.md) for full payload. |
+| `goal_plan_frozen` | `goalId`, `gateId`, `frozenAt` | The `goal-plan` gate was signalled — the gate's `verify[]` is now locked against further mutation unless the goal is paused. |
+| `goal_child_spawned` | `parentGoalId`, `childGoalId`, `planId`, `branch`, `baseBranch` | A child goal was spawned (via REST, `goal_spawn_child`, or harness subgoal step). |
+| `goal_paused` | `goalId`, `by` (`"user"` \| `"auto-replan-cap"`) | Verification harness ticks suspended for the goal-tree. |
+| `goal_resumed` | `goalId` | Verification harness ticks resumed. |
+| `goal_mutation_pending` | `goalId`, `classification`, `summary`, `droppedCriteria`, `addedNodes`, `removedNodes`, `requestId` | A mutation requires user approval per the divergence policy; drives the dashboard banner. Resolve via `POST /api/goals/:id/mutation/:requestId/decision`. |
+| `goal_mutation_resolved` | `goalId`, `requestId`, `decision` (`"approve"` \| `"reject"`) | The pending mutation was resolved (banner dismisses). |
+| `goal_merge_complete` | `parentGoalId`, `childGoalId`, `commitSha` | A child's branch was successfully merged into its parent's branch (no remote push). |
+| `goal_merge_conflict` | `parentGoalId`, `childGoalId`, `output` | Local merge of a child raised a conflict; team-lead must resolve. |
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
 | `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |
