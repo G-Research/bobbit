@@ -354,6 +354,9 @@ export function bucketArchivedByProject(
 	for (const p of projects) map.set(p.id, { archivedGoals: [], standaloneArchivedSessions: [] });
 	for (const g of archivedGoals) {
 		if (!g.projectId) { console.warn("[sidebar] archived goal with no projectId — skipping", g.id); continue; }
+		// Only top-level archived goals at the project root — child archived
+		// goals nest under their parent via `renderGoalGroup` recursion.
+		if (g.parentGoalId) continue;
 		const bucket = map.get(g.projectId);
 		if (!bucket) { console.warn("[sidebar] archived goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 		bucket.archivedGoals.push(g);
@@ -623,6 +626,12 @@ const teamLoading = new Set<string>();
 // ============================================================================
 // NESTED-GOAL HELPERS (see docs/design/nested-goals.md §10.1)
 // ============================================================================
+
+// Re-export the pure top-level filter so existing call sites can keep
+// importing from render-helpers. The implementation lives in
+// `sidebar-nesting.ts` (no DOM / no Lit / no state) so it can be unit
+// tested via `node:test` without dragging the whole UI stack in.
+export { filterTopLevelGoals } from "./sidebar-nesting.js";
 
 /** Immediate non-archived child goals of `parentId`, sorted by createdAt ASC.
  *  Pure function over the supplied goals array — the second arg makes this

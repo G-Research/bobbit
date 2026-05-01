@@ -223,6 +223,10 @@ function renderMobileLanding() {
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
 										for (const g of liveGoals) {
 											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
+											// Only top-level goals at the project root — child goals
+											// nest under their parent via `renderGoalGroup` recursion.
+											// See sidebar.ts for the desktop equivalent.
+											if (g.parentGoalId) continue;
 											const bucket = projectMap.get(g.projectId);
 											if (!bucket) { console.warn("[mobile] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 											bucket.goals.push(g);

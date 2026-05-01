@@ -30,7 +30,7 @@ import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, filterTopLevelGoals } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
@@ -846,7 +846,8 @@ export function renderSidebar() {
 	const { ungroupedSessions, liveGoals, archivedGoals } = getSidebarData();
 
 	if (state.sidebarCollapsed) {
-		return renderCollapsedSidebar(liveGoals, ungroupedSessions, archivedGoals);
+		// Only top-level goals — child goals nest under their parent.
+		return renderCollapsedSidebar(filterTopLevelGoals(liveGoals), ungroupedSessions, filterTopLevelGoals(archivedGoals));
 	}
 
 	const isRolesActive = isRouteActive("roles", "role-edit");
@@ -961,6 +962,11 @@ export function renderSidebar() {
 							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [] });
 							for (const g of filteredGoals) {
 								if (!g.projectId) { console.warn("[sidebar] orphaned goal with no projectId — skipping", g.id); continue; }
+								// Only top-level goals at the project root — child goals
+								// (g.parentGoalId set) are rendered nested under their parent
+								// by `renderGoalGroup`'s recursion. Without this filter they
+								// would appear both at the top level AND under their parent.
+								if (g.parentGoalId) continue;
 								const bucket = projectMap.get(g.projectId);
 								if (!bucket) { console.warn("[sidebar] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 								bucket.goals.push(g);
@@ -984,6 +990,10 @@ export function renderSidebar() {
 							const filteredStandaloneArchived = filterArchivedSessionsByQuery(allStandaloneArchived, state.searchQuery);
 							for (const g of filteredArchivedGoals) {
 								if (!g.projectId) { console.warn("[sidebar] archived goal with no projectId — skipping", g.id); continue; }
+								// Same nesting rule as live goals — only top-level archived
+								// goals at the project root; child archived goals nest under
+								// their parent via `renderGoalGroup` recursion.
+								if (g.parentGoalId) continue;
 								const bucket = projectMap.get(g.projectId);
 								if (!bucket) { console.warn("[sidebar] archived goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
 								bucket.archivedGoals.push(g);
