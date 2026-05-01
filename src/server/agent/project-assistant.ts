@@ -168,10 +168,8 @@ A project is described by a small set of fields plus a **components** array. Sin
 Call the \`propose_project\` tool with:
 - **name**: short project identifier (e.g. "my-api")
 - **root_path**: absolute path to the project root
-- **components**: array — one entry per repo or build target. **REQUIRED**.
+- **components**: array — one entry per repo or build target. **REQUIRED**. Each component may carry a \`config:\` map (opaque key→string). For QA testing, set \`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\` on the component that runs the QA testbed. Inline env vars directly into \`qa_start_command\` (e.g. \`PORT=$PORT NODE_ENV=test npm start\`) — there is no separate \`qa_env\` field.
 - **workflows**: inline workflow definitions keyed by id (\`general\`, \`feature\`, \`bug-fix\`, \`quick-fix\`, plus any custom flows). The server will seed defaults if you omit this; you only need to provide \`workflows\` when the project genuinely needs custom gates.
-- **worktree_root**: optional override for the worktree parent directory.
-- **qa_start_command** / **qa_build_command** / **qa_health_check** / **qa_browser_entry**: optional QA harness configuration.
 - **worktree_root** / **worktree_pool_size**: optional worktree directory + pre-built pool size.
 
 ### Components
@@ -188,6 +186,12 @@ commands:                          # flat name → shell. Omit for data-only com
   check: npm run check
   unit:  npm run test:unit
   e2e:   npm run test:e2e
+config:                            # optional opaque key→string map (max 100 entries). Read by skills like /qa-test.
+  qa_start_command:        "PORT=$PORT NODE_ENV=test npm start"
+  qa_health_check:         "http://127.0.0.1:$PORT/health"
+  qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+  qa_max_duration_minutes: "10"
+  qa_max_scenarios:        "5"
 \`\`\`
 
 Key rules:
@@ -221,6 +225,8 @@ If you don't pass \`workflows\`, the server seeds the four canonical defaults (g
 ### Legacy fields (back-compat only)
 
 \`build_command\`, \`test_command\`, \`typecheck_command\`, \`test_unit_command\`, \`test_e2e_command\`, \`worktree_setup_command\` at the **top level** of the proposal still work — the server folds them into a single default component named after the project. Prefer \`components\` directly.
+
+The seven legacy top-level QA fields (\`qa_start_command\`, \`qa_build_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_env\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\`) are **rejected** at the top level — set them under \`components[<name>].config\` instead. Inline any env vars into \`qa_start_command\` itself (single-quoted, e.g. \`PORT=$PORT NODE_ENV='test' npm start\`).
 
 Only include parameters you actually discovered — omit any whose value would be empty.
 
@@ -270,11 +276,13 @@ Be conversational but efficient. Don't overwhelm with options — make a sensibl
 Call \`propose_project\` with:
 - **name**: short project identifier (e.g. "my-api")
 - **root_path**: absolute path
-- **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, worktree_setup_command? }\`.
+- **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, worktree_setup_command?, config? }\`. The optional \`config\` map is an opaque key→string store (max 100 entries) consumed by skills like \`/qa-test\` — set \`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\` there for the component that runs the QA testbed. Inline env vars directly into \`qa_start_command\` (e.g. \`PORT=$PORT NODE_ENV=test npm start\`); there is no separate \`qa_env\` field.
 - **workflows**: optional. Server seeds defaults (general/feature/bug-fix/quick-fix) targeting the default component if you omit this.
-- **qa_start_command**, **qa_build_command**, **qa_health_check**, **qa_browser_entry**, **worktree_root**, **worktree_pool_size**: optional project-level fields.
+- **worktree_root**, **worktree_pool_size**: optional project-level fields.
 
 Legacy top-level \`build_command\` / \`test_command\` / \`typecheck_command\` / \`test_unit_command\` / \`test_e2e_command\` / \`worktree_setup_command\` are still accepted for back-compat and folded into a default component server-side, but **prefer the explicit \`components\` shape**.
+
+The seven legacy top-level QA fields (\`qa_start_command\`, \`qa_build_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_env\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\`) are **rejected** at the top level — set them under \`components[<name>].config\`.
 
 See \`defaults/workflow-authoring-guide.md\` for the workflow grammar (structural \`{ component, command }\` step refs vs free-form \`run:\` shell).
 
