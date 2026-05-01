@@ -166,10 +166,10 @@ export const state = {
 	/**
 	 * Unified proposal slot table keyed by ProposalType. Single source of truth
 	 * for active proposals across all assistant types (goal/project/role/staff/
-	 * workflow/tool). See `src/app/proposal-registry.ts` for `ProposalSlot`.
+	 * tool). See `src/app/proposal-registry.ts` for `ProposalSlot`.
 	 */
 	activeProposals: {} as Partial<Record<
-		"goal" | "project" | "workflow" | "role" | "tool" | "staff",
+		"goal" | "project" | "role" | "tool" | "staff",
 		{
 			sessionId: string;
 			fields: Record<string, unknown>;
@@ -308,11 +308,6 @@ export const state = {
 	/** Whether the setup wizard has been completed (safe default: true — don't show banner until we know) */
 	setupComplete: true,
 
-	// Workflow assistant preview state
-	workflowPreviewId: "",
-	workflowPreviewName: "",
-	workflowPreviewDescription: "",
-	workflowPreviewGates: "",
 
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,
@@ -325,8 +320,7 @@ export const state = {
 	/** Per-proposal-tag streaming flag. True between the first message_update
 	 *  delta carrying a propose_<tag> block and the matching block-finish event.
 	 *  Keyed by the `tag` from PROPOSAL_PARSERS — i.e. "goal_proposal",
-	 *  "project_proposal", "role_proposal", "tool_proposal", "staff_proposal",
-	 *  "workflow_proposal".
+	 *  "project_proposal", "role_proposal", "tool_proposal", "staff_proposal".
 	 *  Owner: state.ts. Sole writer: RemoteAgent. Readers: render.ts panels
 	 *  via isProposalStreaming(tag). */
 	proposalStreamingByTag: {} as Record<string, boolean>,

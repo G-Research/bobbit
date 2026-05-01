@@ -1651,8 +1651,13 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 		setProjects(await fetchProjects());
 		const { connectToSession } = await import("./session-manager.js");
 		const actualType = scaffolding ? "project-scaffolding" : "project";
-		const projectEditContext = opts?.projectId && opts?.existingProjectName
-			? { name: opts.existingProjectName, rootPath: dirPath }
+		// Edit-mode is signalled solely by `projectId` (an already-registered
+		// project). `existingProjectName` is only a display hint; if it's empty we
+		// fall back to the project's id so the prompt still routes to the edit
+		// branch (otherwise the assistant would re-run new-project discovery on
+		// an already-registered project).
+		const projectEditContext = opts?.projectId
+			? { name: opts.existingProjectName || opts.projectId, rootPath: dirPath }
 			: undefined;
 		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath, projectEditContext });
 	} catch (err) {

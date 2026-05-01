@@ -780,133 +780,6 @@ export async function openProjectAssistantForWorkflows(): Promise<void> {
 }
 
 // ============================================================================
-// ASSISTANT PANEL EDIT FORM (exported for use in render.ts)
-// ============================================================================
-
-/** Initialize empty edit state for the assistant panel (new workflow). */
-export function initAssistantEditState(): void {
-	isNew = true;
-	selectedWorkflow = null;
-	editId = "";
-	editName = "";
-	editDescription = "";
-	editGates = [];
-	saving = false;
-	expandedGateIndices = new Set();
-	expandedVStepKeys = new Set();
-	dragIndex = null;
-	dropTargetIndex = null;
-	vstepDragGateIdx = null;
-	vstepDragStepIdx = null;
-	vstepDropTarget = null;
-	emptyPhases = new Map();
-}
-
-/** Populate edit state from a fetched workflow (after assistant creates/updates it). */
-export function populateAssistantEditState(wf: Workflow): void {
-	selectedWorkflow = wf;
-	isNew = false;
-	editId = wf.id;
-	editName = wf.name;
-	editDescription = wf.description;
-	editGates = wf.gates.map((g) => ({
-		...g,
-		dependsOn: [...g.dependsOn],
-		verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined,
-		metadata: g.metadata ? { ...g.metadata } : undefined,
-	}));
-	saving = false;
-	// Expand all gates so the user can see what was created
-	expandedGateIndices = new Set(wf.gates.map((_, i) => i));
-}
-
-/** Populate edit state directly from a proposal (no API fetch — workflow doesn't exist yet). */
-export function populateFromProposal(data: { id: string; name: string; description: string; gates: WorkflowGate[] }): void {
-	// If editing an existing workflow and proposal ID matches, keep update mode
-	if (selectedWorkflow && data.id === selectedWorkflow.id) {
-		isNew = false;
-		// selectedWorkflow stays set — save will use updateWorkflow()
-	} else {
-		selectedWorkflow = null;
-		isNew = true;
-	}
-	editId = data.id;
-	editName = data.name;
-	editDescription = data.description;
-	editGates = data.gates.map((g) => ({
-		...g,
-		dependsOn: [...(g.dependsOn || [])],
-		verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined,
-		metadata: g.metadata ? { ...g.metadata } : undefined,
-	}));
-	saving = false;
-	expandedGateIndices = new Set(data.gates.map((_, i) => i));
-}
-
-/** Save workflow from the assistant panel (no navigation). */
-export async function saveWorkflowFromPanel(): Promise<boolean> {
-	saving = true;
-	renderApp();
-
-	try {
-		// Compact phases before saving
-		const compactedGates = compactPhases(editGates);
-
-		if (!selectedWorkflow) {
-			// Create new
-			const result = await createWorkflow({
-				id: editId,
-				name: editName,
-				description: editDescription,
-				gates: compactedGates,
-			}, getConfigProjectId() || undefined);
-			if (result) {
-				selectedWorkflow = result;
-				isNew = false;
-				workflows = await fetchWorkflowsScoped();
-				renderApp();
-				return true;
-			}
-		} else {
-			// Update existing
-			const ok = await updateWorkflow(selectedWorkflow.id, {
-				name: editName,
-				description: editDescription,
-				gates: compactedGates,
-			}, getConfigProjectId() || undefined);
-			if (ok) {
-				workflows = await fetchWorkflowsScoped();
-				const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
-				if (updated) {
-					selectedWorkflow = updated;
-				}
-				renderApp();
-				return true;
-			}
-		}
-	} finally {
-		saving = false;
-		renderApp();
-	}
-	return false;
-}
-
-/** Get whether the form is currently saving. */
-export function isWorkflowSaving(): boolean {
-	return saving;
-}
-
-/** Get whether the form can be saved. */
-export function canSaveWorkflow(): boolean {
-	return !saving && (isNew ? !!editId.trim() && !!editName.trim() : !!editName.trim());
-}
-
-/** Render the workflow edit form for the assistant panel. */
-export function renderWorkflowEditPanel(): TemplateResult {
-	return renderEditView();
-}
-
-// ============================================================================
 // RENDER: NAV BAR
 // ============================================================================
 
@@ -1030,9 +903,10 @@ function renderListView(): TemplateResult {
 				<p class="wf-empty-desc">Workflows define gates — checkpoints a goal must pass through, with dependency ordering and automated verification.</p>
 				${Button({
 					variant: "default",
-					onClick: showNewEdit,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Plus, "sm")} Create your first workflow</span>`,
+					onClick: openProjectAssistantForWorkflows,
+					children: html`<span class="inline-flex items-center gap-1.5" data-testid="open-project-assistant-from-workflows-empty">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
 				})}
+				<p class="text-xs text-muted-foreground mt-2">Or use the manual editor: <button class="underline" @click=${showNewEdit}>create one by hand</button>.</p>
 			</div>
 		`;
 	}

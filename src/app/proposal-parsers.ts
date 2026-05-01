@@ -39,11 +39,6 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 		requiredFields: ["name", "prompt"],
 	},
 	{
-		tag: "workflow_proposal",
-		fields: ["id", "name", "description", "gates"],
-		requiredFields: ["id", "name"],
-	},
-	{
 		tag: "project_proposal",
 		fields: ["name", "root_path", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "worktree_setup_command", "worktree_root", "worktree_pool_size"],
 		requiredFields: ["name", "root_path"],

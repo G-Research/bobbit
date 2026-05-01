@@ -61,14 +61,6 @@ const FIXTURES: TypeFixture[] = [
 		preservedFieldKey: "components",
 	},
 	{
-		type: "workflow",
-		emitPrompt: "WORKFLOW_PROPOSAL_PARITY",
-		streamingEditPrompt: "WORKFLOW_PROPOSAL_PARITY_EDIT",
-		editedFieldKey: "name",
-		editedFieldValueAfter: "parity-workflow-edited",
-		preservedFieldKey: "id",
-	},
-	{
 		type: "role",
 		emitPrompt: "ROLE_PROPOSAL_PARITY",
 		streamingEditPrompt: "ROLE_PROPOSAL_PARITY_EDIT",

@@ -150,21 +150,6 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, args) { await seedProposal("staff", args); return ack(); },
 	});
 
-	// ── propose_workflow ──────────────────────────────────────────────
-	pi.registerTool({
-		name: "propose_workflow",
-		label: "Propose Workflow",
-		description: "Submit a workflow proposal for user review. Call this when you have designed a custom workflow.",
-		promptSnippet: "Propose a workflow with id, name, description, and gates.",
-		parameters: Type.Object({
-			id: Type.String({ description: "Workflow ID (lowercase, hyphens)" }),
-			name: Type.String({ description: "Human-readable workflow name" }),
-			description: Type.Optional(Type.String({ description: "Workflow description" })),
-			gates: Type.Optional(Type.String({ description: "Gate definitions (YAML or JSON string)" })),
-		}),
-		async execute(_id, args) { await seedProposal("workflow", args); return ack(); },
-	});
-
 	// ── propose_project ───────────────────────────────────────────────
 	pi.registerTool({
 		name: "propose_project",

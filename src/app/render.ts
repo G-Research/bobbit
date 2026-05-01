@@ -470,7 +470,6 @@ const toolRendererPreviewRef = createRef<HTMLDivElement>();
 const toolOuterScrollRef = createRef<HTMLDivElement>();
 const staffPromptPreviewRef = createRef<HTMLDivElement>();
 const staffPromptTextareaRef = createRef<HTMLTextAreaElement>();
-const workflowEditWrapperRef = createRef<HTMLDivElement>();
 const projectOuterScrollRef = createRef<HTMLDivElement>();
 
 // ============================================================================
@@ -1529,76 +1528,6 @@ function staffPreviewPanel() {
 // ASSISTANT PREVIEW DISPATCH
 // ============================================================================
 
-let _workflowPageModule: typeof import("./workflow-page.js") | null = null;
-function ensureWorkflowPageLoaded() {
-	if (!_workflowPageModule) {
-		import("./workflow-page.js").then(mod => { _workflowPageModule = mod; renderApp(); });
-	}
-}
-
-function workflowPreviewPanel() {
-	ensureWorkflowPageLoaded();
-	const streaming = isProposalStreaming("workflow_proposal");
-	queueMicrotask(() => {
-		reconcileFollowTail(workflowEditWrapperRef.value);
-	});
-
-	const handleCreateWorkflow = async () => {
-		if (_workflowPageModule) {
-			const ok = await _workflowPageModule.saveWorkflowFromPanel();
-			if (!ok) return;
-		}
-		const sessionId = activeSessionId();
-		if (sessionId) void deleteProposalFile(sessionId, "workflow");
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-		state.assistantType = null;
-		localStorage.removeItem("gateway.sessionId");
-		state.appView = "authenticated";
-		if (sessionId) {
-			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-			clearSessionModel(sessionId);
-		}
-		await refreshSessions();
-		setHashRoute("workflows");
-		renderApp();
-	};
-
-	if (!_workflowPageModule) {
-		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="workflow-proposal">
-				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading editor...</div>
-			</div>
-		`;
-	}
-
-	const { renderWorkflowEditPanel, isWorkflowSaving, canSaveWorkflow } = _workflowPageModule;
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="workflow-proposal">
-			<div ${ref(workflowEditWrapperRef)} class="flex-1 overflow-y-auto p-4 ${streaming ? STREAMING_BORDER : ""}">
-				${renderWorkflowEditPanel()}
-			</div>
-			<div class="flex items-center justify-between p-3 border-t border-border">
-				<div></div>
-				<div class="flex items-center gap-2">
-					${streaming ? streamingBadge() : ""}
-					<span data-testid="proposal-primary-submit">${Button({
-						variant: "default",
-						size: "sm",
-						onClick: handleCreateWorkflow,
-						disabled: !canSaveWorkflow() || streaming,
-						children: isWorkflowSaving() ? "Creating\u2026" : "Create Workflow",
-					})}</span>
-				</div>
-			</div>
-		</div>
-	`;
-}
-
 /** Editable scalars shown in the proposal panel's Settings tab.
  *  Components are the canonical home for build/test/typecheck/setup commands —
  *  those legacy keys are still accepted on the wire (back-compat) but hidden
@@ -1835,7 +1764,6 @@ function getAssistantPreviewPanel(type: string) {
 		case "role": return rolePreviewPanel();
 		case "tool": return toolPreviewPanel();
 		case "staff": return staffPreviewPanel();
-		case "workflow": return workflowPreviewPanel();
 		case "project":
 		case "project-scaffolding":
 			return projectProposalPanel();
@@ -2469,10 +2397,10 @@ export function doRenderApp(): void {
 				>Chat</button>
 				<button
 					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
-					title="${state.assistantType === "workflow" ? "Editor" : "Preview"}"
+					title="Preview"
 					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
 				>
-					${state.assistantType === "workflow" ? "Editor" : "Preview"}${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
+					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
 				</button>
 			</div>
 		`;

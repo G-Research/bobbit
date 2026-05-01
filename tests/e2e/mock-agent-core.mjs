@@ -228,20 +228,6 @@ export class MockAgentCore {
 				output: "Goal proposal submitted.",
 			};
 		}
-		if (text.includes("WORKFLOW_PROPOSAL_PARITY_EDIT")) {
-			return {
-				tool: "propose_workflow",
-				input: { id: "parity-workflow", name: "parity-workflow-edited", description: "d", gates: "[]" },
-				output: "Workflow proposal partial submitted.",
-			};
-		}
-		if (text.includes("WORKFLOW_PROPOSAL_PARITY")) {
-			return {
-				tool: "propose_workflow",
-				input: { id: "parity-workflow", name: "Parity Workflow", description: "parity-workflow description", gates: "[]" },
-				output: "Workflow proposal submitted.",
-			};
-		}
 		if (text.includes("ROLE_PROPOSAL_PARITY_EDIT")) {
 			return {
 				tool: "propose_role",
