@@ -30,7 +30,7 @@ function writeFixtureSkill(cwd: string) {
 		join(dir, "SKILL.md"),
 		`---\ndescription: Multi-file fixture skill\n---\n\n# ${BODY_MARKER}\n\nUse @references/REFERENCE.md when needed.\n`,
 	);
-	writeFileSync(join(dir, "references", "REFERENCE.md"), "REFERENCE-CONTENT", "utf-8");
+	writeFileSync(join(dir, "references", "REFERENCE.md"), "READ_THIS_CONTENT_E2E", "utf-8");
 	writeFileSync(join(dir, "scripts", "hello.sh"), "#!/bin/sh\necho hello\n", "utf-8");
 	writeFileSync(join(dir, "assets", "template.txt"), "TEMPLATE", "utf-8");
 }
@@ -68,7 +68,7 @@ test.describe("multi-file skill activation", () => {
 		expect(data.expanded).toContain(BODY_MARKER);
 		// `@references/REFERENCE.md` must reach the agent verbatim — NOT inlined.
 		expect(data.expanded).toContain("@references/REFERENCE.md");
-		expect(data.expanded).not.toContain("REFERENCE-CONTENT");
+		expect(data.expanded).not.toContain("READ_THIS_CONTENT_E2E");
 
 		// (B) Open UI and send /<name>; chip should render.
 		await openApp(page);

@@ -32,7 +32,7 @@
  * `bg.abortAllWaits` call from `_dispatchSteeredMessages`, or the steer pill
  * stops dispatching at tool boundaries — this single test catches it.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import {
 	createSession,
 	waitForHealth,
@@ -52,13 +52,14 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		await waitForHealth();
 	});
 
-	test("queue + steer while bg-wait is parked aborts the wait and delivers the steer mid-turn", async ({ page }) => {
+	test("queue + steer while bg-wait is parked aborts the wait and delivers the steer mid-turn", async ({ page, rec }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
 		await openApp(page);
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await rec.capture("Empty composer ready");
 
 		// 1. Make the agent busy. STAY_BUSY:<ms> emits tool_execution_start
 		//    ("Bash sleep"), ticks for <ms>, then emits tool_execution_end.
@@ -67,6 +68,7 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		//    bg wait, (b) queue a message, (c) click Steer — comfortably ~5s.
 		await sendMessage(page, "STAY_BUSY:5000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await rec.capture("Agent busy — Stop button visible");
 
 		// 2. Spawn a real long-running bg process attached to this session,
 		//    then start a long-poll wait with a generous timeout. Don't await
@@ -87,6 +89,7 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 			timedOut: boolean;
 			info: { status: string };
 		} }));
+		await rec.capture("Bg sleeper running, wait long-poll parked");
 
 		// 3. Queue a follow-up message via the UI textarea (the real user path).
 		const textarea = page.locator("textarea").first();
@@ -94,6 +97,7 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		await textarea.press("Enter");
 		await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".steer-btn")).toHaveCount(1);
+		await rec.capture("Follow-up queued — pill visible, Steer button armed");
 
 		// 4. Click the Steer pill → server marks isSteered, then batches and
 		//    dispatches at the next tool boundary (mock agent's busy
@@ -101,6 +105,7 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		await page.locator(".steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".sent-indicator")).toContainText("Sent");
+		await rec.capture("Steer clicked — sent-indicator shows Sent");
 
 		// 5. `steerQueued` calls `bgProcessManager.abortAllWaits(sessionId)`
 		//    synchronously when the session is streaming, so the parked wait
@@ -128,6 +133,7 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		await expect(
 			page.getByText("STEER_RECEIVED").first(),
 		).toBeVisible({ timeout: 15_000 });
+		await rec.capture("STEER_RECEIVED rendered — steer reached agent");
 
 		// 7. After all the dust settles, the bg process is still running.
 		const listRes = await apiFetch(`/api/sessions/${sessionId}/bg-processes`);
