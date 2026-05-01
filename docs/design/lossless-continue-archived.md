@@ -123,6 +123,47 @@ the pool will produce. Simpler: defer path computation until *inside*
 `session-setup.ts` compute the destination after `plan.cwd` is final
 (see §"createSession plumbing").
 
+## Worktree-cwd slug invariant (follow-up correction)
+
+The original design above proposed deferring path computation until inside
+`createSession` so `plan.cwd` could be honoured. The shipped implementation
+did the simpler thing instead — the continue handler in `server.ts`
+pre-computes `destJsonl` against `proj.rootPath` and threads it via
+`preExistingAgentSessionFile` — which is correct for non-worktree sessions
+but wrong for worktree-backed ones: the agent CLI for those boots with
+`cwd = offsetCwd` (the per-branch worktree container, e.g.
+`<rootPath>-wt/session-<id8>/`), and `formatAgentSessionFilePath` embeds a
+`slugify(cwd)` segment in the directory name. A clone left under the
+project-root slug-dir is invisible to the agent CLI's JSONL reader, so
+`switch_session` fails, `handleSetupFailure` archives the new session, and
+the UI presents it as read-only with no editor.
+
+Fix: `executeWorktreeAsync` in `src/server/agent/session-setup.ts` performs a
+rebase after `plan.cwd` is finalised to the worktree path and before issuing
+`switch_session`:
+
+1. Re-derive the correct path via
+   `formatAgentSessionFilePath(plan.cwd, Date.now(), session.id)`.
+2. `mkdir { recursive: true }` the new slug-dir.
+3. Move the cloned `.jsonl` from the old (project-root-slug) location to the
+   new (worktree-cwd-slug) location:
+   - Non-sandboxed: `fs.promises.rename`, with `copyFile + unlink` cross-device
+     fallback (`EXDEV`).
+   - Sandboxed: container-side `sessionFileCopy + sessionFileDelete` (the same
+     pair already used for the initial host→sandbox / sandbox→sandbox copy in
+     the continue handler).
+4. Update `plan.preExistingAgentSessionFile` and the persisted
+   `agentSessionFile` field on the session row, so a hard kill in the
+   post-spawn window restores the correct path.
+
+The rebase only fires on the worktree branch when `plan.preExistingAgentSessionFile`
+is set, so the non-worktree continue path is unchanged. The lossless
+contract is preserved — still a JSONL clone, no transcript stringification,
+no `seedContext`, no byte budget; `formatAgentSessionFilePath` itself is
+untouched, only the caller is now correct. `CrossRealmCopyError → 422`
+remains the only cross-realm rejection. Regression test:
+`tests/e2e/continue-archived-worktree.spec.ts`.
+
 ## Sandbox copy strategy
 
 `session-fs.ts` already implements `sessionFileExists/Read/Delete` with the
