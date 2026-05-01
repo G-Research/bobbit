@@ -488,14 +488,33 @@ export class SessionManager {
 
 		// Race protection on the restart-resume path: the resumed agent may
 		// finish its continuation turn (firing `agent_end`) BEFORE this
-		// listener was attached. Without this poll, the delegate would
-		// silently sit idle forever and the parent's `/wait` would time out.
-		// We watch the session for a short window and if it goes (or stays)
-		// idle while we hold the listener, drain a synthetic `completed` so
-		// the parent unwedges. submitOnce() guarantees at-most-once delivery,
-		// so a real `agent_end` racing this poll is safe — first to fire wins.
-		const raceWindowDeadline = Date.now() + 30_000;
-		const pollIdleAfterAttach = () => {
+		// listener was attached. Without this fallback, the delegate would
+		// sit idle forever and the parent's `/wait` would time out.
+		//
+		// We can't blindly poll for `idle` after attach — a session that
+		// `wasStreaming` at restart hasn't yet received its continuation
+		// `agent_start` (the prompt is dispatched fire-and-forget by
+		// `restoreSession`), and during that window `status` is still
+		// `idle`. Treating that idle as terminal would deliver stale
+		// pre-restart output. Instead we use `waitForStreaming` (sibling of
+		// `waitForIdle`, resolves on `agent_start`) with a short budget,
+		// then treat sustained idleness afterwards as proof the turn ran
+		// and ended before our listener attached.
+		//
+		// submitOnce() guarantees at-most-once delivery, so a real
+		// `agent_end` firing through the listener mid-poll is safe — first
+		// to land wins.
+		void (async () => {
+			// Phase 1: give the (possibly resumed) turn a chance to start.
+			// If `waitForStreaming` resolves, we know the turn has begun and
+			// the rpc-event listener will reliably observe its `agent_end`.
+			// If it rejects (timeout), the turn never started — either it
+			// already finished before attach, or there is no resumed work
+			// at all. We then check the current status and submit if idle.
+			try {
+				await this.waitForStreaming(childSessionId, 5_000);
+				return; // listener will catch agent_end
+			} catch { /* fall through */ }
 			if (submitted) return;
 			const current = this.sessions.get(childSessionId);
 			if (!current) {
@@ -503,24 +522,12 @@ export class SessionManager {
 				return;
 			}
 			if (current.status === "idle") {
-				void (async () => {
-					let output = "";
-					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
-					submitOnce({ status: "completed", output });
-				})();
-				return;
+				let output = "";
+				try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
+				submitOnce({ status: "completed", output });
 			}
-			if (Date.now() < raceWindowDeadline) {
-				setTimeout(pollIdleAfterAttach, 200);
-			}
-			// Past the race window without going idle: trust the listener; if
-			// the session ever does go idle later, agent_end will fire and
-			// the listener catches it.
-		};
-		// Defer the first poll to the next microtask so the caller has a
-		// chance to observe `attachDelegateCompletionListener()` returning
-		// before we start checking state.
-		setTimeout(pollIdleAfterAttach, 50);
+			// Else status is streaming/terminated/etc — listener handles it.
+		})();
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
