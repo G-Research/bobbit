@@ -615,7 +615,7 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 [worktree-pool] running setup for components: <names>
 ```
 
-This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper.
+This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper. A sibling guard in `tests/worktree-setup-fallback.test.ts` enforces the inverse direction: it fails if any source file passes a `setupCommand` argument to `createWorktree` / `createWorktreeSet`, or references the deleted `setupWorktreeDeps` helper, so a future caller cannot reintroduce the legacy plumbing that bypassed `componentRoot()` and ran setup hooks at the wrong cwd.
 
 **`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
 
