@@ -92,6 +92,7 @@ let _listening = false;
 
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
+let settingsPlayFinishSound = true;
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -1806,6 +1807,8 @@ function loadGeneralSettings() {
 				if (res.ok) {
 					const prefs = await res.json();
 					settingsShowTimestamps = !!prefs.showTimestamps;
+					// Default ON when unset — only an explicit `false` opts out.
+					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					renderApp();
 				}
 			} catch {}
@@ -1820,6 +1823,21 @@ async function toggleShowTimestamps(): Promise<void> {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ showTimestamps: settingsShowTimestamps }),
+		});
+	} catch {}
+}
+
+async function togglePlayFinishSound(): Promise<void> {
+	settingsPlayFinishSound = !settingsPlayFinishSound;
+	// Apply synchronously to the dataset so the gate flips without waiting on
+	// the preferences_changed broadcast — mirrors the runtime path used by the
+	// playNotificationBeep() guard.
+	document.documentElement.dataset.playAgentFinishSound = settingsPlayFinishSound ? "true" : "false";
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ playAgentFinishSound: settingsPlayFinishSound }),
 		});
 	} catch {}
 }
@@ -1840,6 +1858,21 @@ function renderGeneralTab() {
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
 					Display timestamps next to user and assistant messages.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-play-finish-sound"
+						.checked=${settingsPlayFinishSound}
+						@change=${togglePlayFinishSound}
+					/>
+					<span class="text-sm font-medium text-foreground">Play sound when an agent finishes</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Play a short notification beep when an agent finishes its turn.
 				</p>
 			</div>
 		</div>

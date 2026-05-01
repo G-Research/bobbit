@@ -117,6 +117,63 @@ test.describe("Settings (full-stack UI)", () => {
 		await checkboxAfterReload.click();
 	});
 
+	test("play-finish-sound toggle persists after reload", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+
+		await expect(page.getByText("Play sound when an agent finishes")).toBeVisible({ timeout: 10_000 });
+		const checkbox = page.locator("[data-testid='general-play-finish-sound']");
+		await expect(checkbox).toBeVisible({ timeout: 5_000 });
+
+		// Default: ON.
+		await expect(checkbox).toBeChecked();
+
+		// Synchronous dataset flag is the testable seam for the playNotificationBeep guard.
+		const initialDataset = await page.evaluate(() => document.documentElement.dataset.playAgentFinishSound);
+		expect(initialDataset === undefined || initialDataset === "true").toBe(true);
+
+		// Uncheck → verify dataset flips synchronously → verify persists across reload.
+		let responsePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/preferences") && resp.request().method() === "PUT" && resp.status() === 200,
+		);
+		await checkbox.click();
+		await expect(checkbox).not.toBeChecked();
+		await expect.poll(
+			() => page.evaluate(() => document.documentElement.dataset.playAgentFinishSound),
+		).toBe("false");
+		await responsePromise;
+
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.getByText("Play sound when an agent finishes")).toBeVisible({ timeout: 10_000 });
+		const afterReload = page.locator("[data-testid='general-play-finish-sound']");
+		await expect(afterReload).toBeVisible({ timeout: 5_000 });
+		await expect(afterReload).not.toBeChecked();
+		await expect.poll(
+			() => page.evaluate(() => document.documentElement.dataset.playAgentFinishSound),
+		).toBe("false");
+
+		// Re-check → reload → still checked.
+		responsePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/preferences") && resp.request().method() === "PUT" && resp.status() === 200,
+		);
+		await afterReload.click();
+		await expect(afterReload).toBeChecked();
+		await responsePromise;
+
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.getByText("Play sound when an agent finishes")).toBeVisible({ timeout: 10_000 });
+		const finalCheckbox = page.locator("[data-testid='general-play-finish-sound']");
+		await expect(finalCheckbox).toBeChecked();
+	});
+
 	test("per-project settings scope switching", async ({ page }) => {
 		// Create a project via API
 		const resp = await apiFetch("/api/projects", {
