@@ -23,6 +23,13 @@ import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
+import { invalidateProjectScopeConfig } from "./settings-page.js";
+import {
+	isProposalDismissed as isProposalDismissedTyped,
+	markProposalDismissed as markProposalDismissedTyped,
+	clearProposalDismissed as clearProposalDismissedTyped,
+} from "./proposal-helpers.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -99,45 +106,62 @@ export function applyProjectPalette(projectId?: string): void {
 }
 
 // ============================================================================
-// GOAL PROPOSAL DISMISS PERSISTENCE
+// PROPOSAL DISMISS PERSISTENCE — see ./proposal-helpers.ts for the typed,
+// per-ProposalType implementation. Below are thin shims preserving the
+// goal-only call shape used by render.ts:goalProposalPanel.
 // ============================================================================
 
-function proposalFingerprint(proposal: { title: string; spec: string }): string {
-	let hash = 5381;
-	const str = proposal.title + "\n" + proposal.spec;
-	for (let i = 0; i < str.length; i++) {
-		hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+/** Resolve provisional/registered mode for a project proposal slot from the
+ *  current session→project mapping. Extracted for the unified onProposal
+ *  callback (Slice E gap-closure). Returns "provisional" if no project is
+ *  registered yet (fresh project assistant flow). */
+function resolveProjectMode(sessionId: string): "provisional" | "registered" {
+	const session = state.gatewaySessions.find(s => s.id === sessionId);
+	const project = state.projects.find(p => p.id === session?.projectId);
+	return project?.provisional ? "provisional" : "registered";
+}
+
+/**
+ * Slice E gap-closure: dismissal helpers are now thin shims forwarding to the
+ * typed (per-ProposalType) implementations in `./proposal-helpers.ts`.
+ * Optional `type` defaults to `"goal"` for back-compat with existing callers
+ * (render.ts goalProposalPanel:handleDismiss). New callers should pass an
+ * explicit type to opt into per-type dismissal stickiness.
+ */
+export function isProposalDismissed(
+	sessionId: string,
+	proposalOrType: ProposalType | Record<string, unknown>,
+	maybeFields?: Record<string, unknown>,
+): boolean {
+	if (typeof proposalOrType === "string" && isProposalType(proposalOrType)) {
+		return isProposalDismissedTyped(sessionId, proposalOrType, maybeFields ?? {});
 	}
-	return String(hash);
+	return isProposalDismissedTyped(sessionId, "goal", proposalOrType as Record<string, unknown>);
 }
 
-function dismissedProposalKey(sessionId: string): string {
-	return `bobbit-goal-proposal-dismissed-${sessionId}`;
+export function markProposalDismissed(
+	sessionId: string,
+	proposalOrType: ProposalType | Record<string, unknown>,
+	maybeFields?: Record<string, unknown>,
+): void {
+	if (typeof proposalOrType === "string" && isProposalType(proposalOrType)) {
+		markProposalDismissedTyped(sessionId, proposalOrType, maybeFields ?? {});
+		return;
+	}
+	markProposalDismissedTyped(sessionId, "goal", proposalOrType as Record<string, unknown>);
 }
 
-export function isProposalDismissed(sessionId: string, proposal: { title: string; spec: string }): boolean {
-	try {
-		const stored = localStorage.getItem(dismissedProposalKey(sessionId));
-		return stored === proposalFingerprint(proposal);
-	} catch { return false; }
+export function clearProposalDismissed(sessionId: string, type?: ProposalType): void {
+	if (type) {
+		clearProposalDismissedTyped(sessionId, type);
+		return;
+	}
+	clearProposalDismissedTyped(sessionId, "goal");
 }
 
-export function markProposalDismissed(sessionId: string, proposal: { title: string; spec: string }): void {
-	try {
-		localStorage.setItem(dismissedProposalKey(sessionId), proposalFingerprint(proposal));
-	} catch { /* ignore */ }
-}
-
-export function clearProposalDismissed(sessionId: string): void {
-	try {
-		localStorage.removeItem(dismissedProposalKey(sessionId));
-	} catch { /* ignore */ }
-}
-
+/** Clear dismissal fingerprints for ALL proposal types — used on session terminate. */
 function clearDismissedProposal(sessionId: string): void {
-	try {
-		localStorage.removeItem(dismissedProposalKey(sessionId));
-	} catch { /* ignore */ }
+	for (const t of PROPOSAL_TYPES) clearProposalDismissedTyped(sessionId, t);
 }
 
 // ============================================================================
@@ -205,7 +229,7 @@ const goalDraft = createDraftManager({
 	type: 'goal',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeGoalProposal: state.activeGoalProposal ?? undefined,
+		activeGoalProposal: (state.activeProposals.goal?.fields as any) ?? undefined,
 		previewTitle: state.previewTitle,
 		previewSpec: state.previewSpec,
 		previewCwd: state.previewCwd,
@@ -217,7 +241,16 @@ const goalDraft = createDraftManager({
 		goalAssistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
-		state.activeGoalProposal = draft.activeGoalProposal ?? null;
+		if (draft.activeGoalProposal) {
+			state.activeProposals.goal = {
+				sessionId: _sessionId,
+				fields: draft.activeGoalProposal as Record<string, unknown>,
+				streaming: false,
+				rev: 1,
+			};
+		} else {
+			delete state.activeProposals.goal;
+		}
 		state.previewTitle = draft.previewTitle ?? "";
 		state.previewSpec = draft.previewSpec ?? "";
 		state.previewCwd = draft.previewCwd ?? "";
@@ -245,7 +278,7 @@ const roleDraft = createDraftManager({
 	type: 'role',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeRoleProposal: state.activeRoleProposal ?? undefined,
+		activeRoleProposal: (state.activeProposals.role?.fields as any) ?? undefined,
 		previewName: state.rolePreviewName,
 		previewLabel: state.rolePreviewLabel,
 		previewPrompt: state.rolePreviewPrompt,
@@ -260,7 +293,16 @@ const roleDraft = createDraftManager({
 		roleAssistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
-		state.activeRoleProposal = draft.activeRoleProposal ?? null;
+		if (draft.activeRoleProposal) {
+			state.activeProposals.role = {
+				sessionId: _sessionId,
+				fields: draft.activeRoleProposal as Record<string, unknown>,
+				streaming: false,
+				rev: 1,
+			};
+		} else {
+			delete state.activeProposals.role;
+		}
 		state.rolePreviewName = draft.previewName ?? "";
 		state.rolePreviewLabel = draft.previewLabel ?? "";
 		state.rolePreviewPrompt = draft.previewPrompt ?? "";
@@ -291,12 +333,23 @@ const projectDraft = createDraftManager({
 	type: 'project',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeProjectProposal: state.activeProjectProposal ?? undefined,
+		activeProjectProposal: state.activeProposals.project ?? undefined,
 		hasReceivedProposal: state.assistantHasProposal,
 		assistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
-		state.activeProjectProposal = draft.activeProjectProposal ?? undefined;
+		if (draft.activeProjectProposal) {
+			const p = draft.activeProjectProposal as any;
+			state.activeProposals.project = {
+				sessionId: p.sessionId,
+				fields: p.fields ?? {},
+				mode: p.mode,
+				streaming: typeof p.streaming === "boolean" ? p.streaming : false,
+				rev: typeof p.rev === "number" ? p.rev : 1,
+			};
+		} else {
+			delete state.activeProposals.project;
+		}
 		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
 		state.assistantTab = draft.assistantTab ?? "chat";
 	},
@@ -608,8 +661,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	// moment the user navigates away so it never bleeds into other sessions.
 	// connectToSession() rehydrates from the persisted draft if the user comes
 	// back to the originating session.
-	if (state.activeProjectProposal && state.activeProjectProposal.sessionId !== sessionId) {
-		state.activeProjectProposal = undefined;
+	if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
+		delete state.activeProposals.project;
 		state.assistantHasProposal = false;
 	}
 
@@ -690,9 +743,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: null);
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
-		state.activeGoalProposal = null;
-		state.activeRoleProposal = null;
-		state.activeStaffProposal = null;
+		delete state.activeProposals.goal;
+		delete state.activeProposals.role;
+		delete state.activeProposals.staff;
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
@@ -1001,7 +1054,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onGoalProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			if (state.assistantType === "goal") {
-				state.activeGoalProposal = proposal;
+				// Slice E: state.activeProposals.goal is owned by the unified
+				// onProposal callback (which runs before us with mergeFields).
+				// Legacy callback only handles form-mirror state + summarisation.
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
 				if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
@@ -1024,25 +1079,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Persist draft to IndexedDB
 				saveGoalDraft(sessionId);
 			} else {
-				// Non-goal-assistant session: check if this proposal was previously dismissed
-				if (isProposalDismissed(sessionId, proposal)) return;
-				// Show inline preview panel — only auto-switch tabs on the first proposal
-				const isFirstProposal = state.activeGoalProposal == null;
-				state.activeGoalProposal = proposal;
+				// Non-goal-assistant session: dismissal short-circuit + project-id
+				// inference. The unified onProposal callback (already fired above)
+				// owns the slot + auto-tab-select side-effect; we still need to
+				// roll back the slot if the user previously dismissed this proposal.
+				if (isProposalDismissed(sessionId, proposal)) {
+					delete state.activeProposals.goal;
+					return;
+				}
 				// Set projectId from current session so the goal is created in the correct project
 				const currentSess = state.gatewaySessions.find(s => s.id === sessionId);
 				if (currentSess?.projectId) {
 					state.previewProjectId = currentSess.projectId;
-				}
-				if (isFirstProposal) {
-					state.previewPanelActiveTab = "goal";
-					// Un-collapse panel on desktop
-					const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
-					localStorage.removeItem(collapseKey);
-					// On mobile, switch to the goal tab so user sees the goal form
-					if (!isDesktop()) {
-						state.previewPanelTab = "goal";
-					}
 				}
 			}
 			renderApp();
@@ -1050,7 +1098,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onRoleProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
-			state.activeRoleProposal = proposal;
+			// Slice E: state.activeProposals.role owned by unified onProposal.
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
 			if (!state.rolePreviewLabelEdited) state.rolePreviewLabel = proposal.label;
 			if (!state.rolePreviewPromptEdited) state.rolePreviewPrompt = proposal.prompt;
@@ -1096,41 +1144,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onSetupProposal = (proposal, _streaming = false) => {
-			if (activeSessionId() !== sessionId) return;
-			state.setupPreviewAction = proposal.action;
-			state.assistantHasProposal = true;
-
-			if (proposal.action === "stack") {
-				if (proposal.language) state.setupFormStack.language = proposal.language;
-				if (proposal.framework) state.setupFormStack.framework = proposal.framework;
-				if (proposal.testing) state.setupFormStack.testing = proposal.testing;
-			} else if (proposal.action === "commands") {
-				const cmdFields = ["build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"];
-				for (const f of cmdFields) {
-					if ((proposal as any)[f] && !state.setupFormCommandsEdited[f]) {
-						state.setupFormCommands[f] = (proposal as any)[f];
-					}
-				}
-			} else if (proposal.action === "models") {
-				const modelFields = ["session_model", "review_model", "naming_model"] as const;
-				for (const f of modelFields) {
-					if ((proposal as any)[f] && !state.setupFormModelsEdited[f]) {
-						state.setupFormModels[f] = (proposal as any)[f];
-					}
-				}
-			} else if (proposal.action === "system-prompt") {
-				if (proposal.content && !state.setupFormSystemPromptEdited) {
-					state.setupFormSystemPrompt = proposal.content;
-				}
-			}
-
-			if (state.assistantTab === "chat" && !isDesktop()) {
-				state.assistantTab = "preview";
-			}
-			renderApp();
-		};
-
 		remote.onWorkflowProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.workflowPreviewId = proposal.id || "";
@@ -1161,7 +1174,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onStaffProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
-			state.activeStaffProposal = proposal;
+			// Slice E: state.activeProposals.staff owned by unified onProposal.
 			if (!state.staffPreviewNameEdited) state.staffPreviewName = proposal.name;
 			if (!state.staffPreviewDescriptionEdited) state.staffPreviewDescription = proposal.description;
 			if (!state.staffPreviewPromptEdited) state.staffPreviewPrompt = proposal.prompt;
@@ -1174,60 +1187,66 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onProjectProposal = async (fields: Record<string, unknown>, _streaming = false) => {
+		remote.onProjectProposal = async (_fields: Record<string, unknown>, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
-			const session = state.gatewaySessions.find(s => s.id === sessionId);
-			const project = state.projects.find(p => p.id === session?.projectId);
-			const mode: "provisional" | "registered" = project?.provisional ? "provisional" : "registered";
-			const isFirstProposal = state.activeProjectProposal == null;
-			// Bug C fix: shallow-merge structured side-tables (`components`,
-			// `workflows`) so a streaming partial that lacks one of them doesn't
-			// drop the prior structured value. Incoming flat fields still win.
-			const prevFields = state.activeProjectProposal?.fields ?? {};
-			const merged: Record<string, unknown> = { ...prevFields, ...fields };
-			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
-			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
-			// Per-component shallow merge: when both prev and incoming carry
-			// `components`, merge entries by name so a partial component update
-			// (e.g. only `commands`) doesn't clobber the previously-proposed
-			// `config` (or vice versa) on that component.
-			if (Array.isArray(fields.components) && Array.isArray((prevFields as Record<string, unknown>).components)) {
-				const prevComps = (prevFields as Record<string, unknown>).components as Array<Record<string, unknown>>;
-				const prevByName = new Map<string, Record<string, unknown>>();
-				for (const pc of prevComps) {
-					if (pc && typeof pc === "object" && typeof pc.name === "string") prevByName.set(pc.name, pc);
-				}
-				merged.components = (fields.components as Array<Record<string, unknown>>).map(c => {
-					if (!c || typeof c !== "object" || typeof c.name !== "string") return c;
-					const prev = prevByName.get(c.name);
-					if (!prev) return c;
-					return {
-						...prev,
-						...c,
-						commands: c.commands ?? prev.commands,
-						config: c.config ?? prev.config,
-					};
-				});
-			}
-			state.activeProjectProposal = { sessionId, fields: merged, mode };
-			state.assistantHasProposal = true;
-			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
-				if (state.assistantTab === "chat" && !isDesktop()) {
-					state.assistantTab = "preview";
-				}
-			} else if (isFirstProposal) {
-				// Non-assistant session: first proposal auto-selects the new Project tab.
-				state.previewPanelActiveTab = "project";
-				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
-				localStorage.removeItem(collapseKey);
-				if (!isDesktop()) state.previewPanelTab = "project";
-			}
-			// Persist only for project-assistant sessions (the session is dedicated
-			// to producing this proposal, so reload should restore work in progress).
-			// For non-assistant sessions, the proposal is transient — same model as
-			// goal proposals: it lives only as long as the user stays on this session.
+			// Slice E: state.activeProposals.project + mode + tab side-effects are
+			// owned by the unified onProposal callback (with plugin.mergeFields
+			// preserving structured side-tables, including per-component shallow
+			// merge of commands/config). The legacy callback now only triggers the
+			// project-assistant draft save.
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				saveProjectDraft(sessionId);
+			}
+			renderApp();
+		};
+
+		// Slice E gap-closure: unified onProposal callback. Runs IN ADDITION to
+		// the legacy onXProposal callbacks above so:
+		//   • `proposal_update` from edit_proposal broadcasts hits the UI.
+		//   • `proposal_update {source: "rehydrate"}` on WS attach restores the panel
+		//     across server restarts.
+		//   • `proposal_cleared` after DELETE clears the in-memory slot.
+		// The legacy callbacks still own the bespoke side-effects (project mode
+		// resolution, goal title summarisation, workflow JSON parse → populateFromProposal,
+		// per-type form-mirror state). The plugin.mergeFields shallow-merge guarantees
+		// the second invocation per propose_* tool-use is idempotent.
+		remote.onProposal = (type, fields, _streaming) => {
+			if (activeSessionId() !== sessionId) return;
+			if (fields === null) {
+				// proposal_cleared event from DELETE / accept
+				delete state.activeProposals[type];
+				// Recompute assistantHasProposal across remaining slots.
+				state.assistantHasProposal = Object.keys(state.activeProposals).length > 0;
+				renderApp();
+				return;
+			}
+			const plugin = PROPOSAL_TYPE_REGISTRY[type];
+			const prev = state.activeProposals[type];
+			const merged = plugin.mergeFields(prev?.fields ?? {}, fields);
+			const isFirstEmit = prev == null;
+			// First-emit dismissal short-circuit — generalised from the goal-only
+			// check at session-manager.ts:1062. Skip this only when (a) it's the
+			// very first emit for this slot AND (b) the user previously dismissed
+			// an identical-fingerprint proposal of this type.
+			if (isFirstEmit && isProposalDismissedTyped(sessionId, type, merged)) {
+				return;
+			}
+			const slot: ProposalSlot = {
+				sessionId,
+				fields: merged,
+				streaming: false,
+				mode: type === "project"
+					? (prev?.mode ?? resolveProjectMode(sessionId))
+					: undefined,
+				rev: (prev?.rev ?? 0) + 1,
+			};
+			state.activeProposals[type] = slot;
+			state.assistantHasProposal = true;
+			if (isFirstEmit) {
+				plugin.onFirstEmit(slot, {
+					isAssistant: state.assistantType === type,
+					isMobile: !isDesktop(),
+				});
 			}
 			renderApp();
 		};
@@ -1238,20 +1257,27 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			const { type, fields } = e.detail || {};
 			if (!type || !fields) return;
-			// Clear any previous dismissal so the proposal re-opens
-			// (the user explicitly clicked "Open proposal")
-			if (type === "goal") clearProposalDismissed(sessionId);
+			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
+			// always re-opens the panel (the user explicitly clicked it).
+			if (isProposalType(type)) clearProposalDismissedTyped(sessionId, type);
 			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
 				tool: remote.onToolProposal,
 				staff: remote.onStaffProposal,
-				setup: remote.onSetupProposal,
 				workflow: remote.onWorkflowProposal,
 				project: remote.onProjectProposal,
 			};
 			const cb = callbackMap[type];
 			if (cb) cb(fields, /* streaming */ false);
+			// Also fire the unified callback so the activeProposals slot
+			// is populated for types whose legacy callback doesn't write to it
+			// (tool, workflow). Idempotent for goal/role/staff/project (the
+			// legacy callback already wrote the slot, plugin.mergeFields
+			// shallow-merges).
+			if (isProposalType(type) && remote.onProposal) {
+				remote.onProposal(type, fields as Record<string, unknown>, false);
+			}
 		}) as EventListener;
 		document.addEventListener("proposal-open", proposalOpenHandler);
 
@@ -1280,16 +1306,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: null);
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
-		state.setupPreviewAction = "";
-		state.setupFormStack = { language: "", framework: "", testing: "" };
-		state.setupFormCommands = { build_command: "", test_command: "", typecheck_command: "", test_unit_command: "", test_e2e_command: "" };
-		state.setupFormModels = { session_model: "", review_model: "", naming_model: "" };
-		state.setupFormSystemPrompt = "";
-		state.setupFormSystemPromptEdited = false;
-		state.setupFormCommandsEdited = {};
-		state.setupFormModelsEdited = {};
-		state.setupFormSaving = false;
-		state.setupFormSaved = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelHtml = ""; // Clear stale preview from previous session
 		state.reviewDocuments = new Map();
@@ -1506,15 +1522,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// checking, but they don't depend on refreshSessions.
 		const draftRestorePromise = (async () => {
 			// Clear stale proposals for non-matching assistant types or sessions
-			if (state.assistantType !== "goal") state.activeGoalProposal = null;
-			if (state.assistantType !== "role") state.activeRoleProposal = null;
-			if (state.assistantType !== "staff") state.activeStaffProposal = null;
+			if (state.assistantType !== "goal") delete state.activeProposals.goal;
+			if (state.assistantType !== "role") delete state.activeProposals.role;
+			if (state.assistantType !== "staff") delete state.activeProposals.staff;
 			// Project proposal is scoped to the originating session and transient
 			// for non-assistant sessions — mirrors the goal-proposal model. The
 			// project-assistant branch below handles persistence for that session
 			// type only (its session is dedicated to building the proposal).
-			if (state.activeProjectProposal && state.activeProjectProposal.sessionId !== sessionId) {
-				state.activeProjectProposal = undefined;
+			if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
+				delete state.activeProposals.project;
 				state.assistantHasProposal = false;
 			}
 
@@ -1580,7 +1596,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (isStale()) return;
 				if (!restored) {
 					state.assistantTab = "chat";
-					state.activeProjectProposal = undefined;
+					delete state.activeProposals.project;
 					state.assistantHasProposal = false;
 				}
 			} else if (state.assistantType === "workflow") {
@@ -1779,8 +1795,8 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	}
 
 	// Clear project proposal if it belonged to this session
-	if (state.activeProjectProposal?.sessionId === sessionId) {
-		state.activeProjectProposal = undefined;
+	if (state.activeProposals.project?.sessionId === sessionId) {
+		delete state.activeProposals.project;
 	}
 
 	await refreshSessions();
@@ -1791,7 +1807,7 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // ============================================================================
 
 export async function acceptProjectProposal(): Promise<void> {
-	const proposal = state.activeProjectProposal;
+	const proposal = state.activeProposals.project;
 	if (!proposal) return;
 	if (proposal.mode === "registered") {
 		return acceptRegisteredProjectProposal();
@@ -1800,7 +1816,7 @@ export async function acceptProjectProposal(): Promise<void> {
 }
 
 async function acceptProvisionalProjectProposal(): Promise<void> {
-	const proposal = state.activeProjectProposal;
+	const proposal = state.activeProposals.project;
 	if (!proposal) return;
 	const { fields, sessionId: propSessionId } = proposal;
 
@@ -1847,9 +1863,18 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 
 	// Refresh
 	setProjects(await fetchProjects());
-	state.activeProjectProposal = undefined;
+	// Settings page caches /api/projects/:id/config{,/resolved} per-project; the
+	// PUT above bypassed it, so invalidate explicitly to keep the Settings tab
+	// coherent without forcing the user to hard-reload.
+	invalidateProjectScopeConfig(projectId);
+	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
-	if (proposal.sessionId) deleteProjectDraft(proposal.sessionId);
+	if (proposal.sessionId) {
+		deleteProjectDraft(proposal.sessionId);
+		// Slice E: drop the on-disk proposal file once accepted.
+		const { deleteProposalFile } = await import("./proposal-helpers.js");
+		void deleteProposalFile(proposal.sessionId, "project");
+	}
 
 	// Terminate the project assistant session silently (no confirmation dialog)
 	try {
@@ -1892,7 +1917,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
  *  live project without terminating or navigating away. The server diffs
  *  against persisted state — we just send everything the proposal carries. */
 async function acceptRegisteredProjectProposal(): Promise<void> {
-	const proposal = state.activeProjectProposal;
+	const proposal = state.activeProposals.project;
 	if (!proposal) return;
 	const { fields, sessionId: propSessionId } = proposal;
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
@@ -1944,9 +1969,15 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 
 	// 3. Refresh projects list; clear proposal; stay connected.
 	try { setProjects(await fetchProjects()); } catch { /* ignore */ }
-	state.activeProjectProposal = undefined;
+	// Invalidate the Settings page's per-project config cache so its tab picks
+	// up the just-applied changes the next time it renders (no hard reload).
+	invalidateProjectScopeConfig(projectId);
+	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
 	deleteProjectDraft(propSessionId);
+	// Slice E: drop the on-disk proposal file once accepted.
+	const { deleteProposalFile } = await import("./proposal-helpers.js");
+	void deleteProposalFile(propSessionId, "project");
 	renderApp();
 }
 
@@ -1959,9 +1990,9 @@ export function backToSessions(): void {
 	state.remoteAgent = null;
 	state.connectionStatus = "disconnected";
 	state.selectedSessionId = null;
-	state.activeGoalProposal = null;
-	state.activeRoleProposal = null;
-	state.activeProjectProposal = undefined;
+	delete state.activeProposals.goal;
+	delete state.activeProposals.role;
+	delete state.activeProposals.project;
 	void (async () => {
 		try {
 			const { resetProjectProposalPanel } = await import("./render.js");

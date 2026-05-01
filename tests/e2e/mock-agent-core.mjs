@@ -141,6 +141,49 @@ export class MockAgentCore {
 			};
 		}
 
+		// Editable-proposals + parity matchers must precede the generic
+		// `project_proposal` substring match below — EDITABLE_PROPOSAL_*
+		// and PROJECT_PROPOSAL_PARITY both contain that substring.
+		if (text.includes("EDITABLE_PROPOSAL_INITIAL")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Editable",
+					root_path: "/tmp/editable",
+					build_command: "echo old",
+					test_command: "echo test",
+				},
+				output: "Project proposal seeded with echo old.",
+			};
+		}
+		if (text.includes("EDITABLE_PROPOSAL_EDIT")) {
+			return {
+				tool: "edit_proposal",
+				input: { type: "project", old_text: "echo old", new_text: "echo new" },
+				output: "Edit applied.",
+			};
+		}
+		if (text.includes("PROJECT_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_project",
+				input: { name: "Parity Project", root_path: "/tmp/parity-project", build_command: "echo parity-edited" },
+				output: "Project proposal partial submitted.",
+			};
+		}
+		if (text.includes("PROJECT_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Parity Project",
+					root_path: "/tmp/parity-project",
+					build_command: "echo parity",
+					test_command: "echo parity-test",
+					components: [{ name: "core", repo: ".", commands: { build: "echo build-core" } }],
+				},
+				output: "Project proposal submitted.",
+			};
+		}
+
 		if (lower.includes("project_proposal") || lower.includes("project proposal")) {
 			return {
 				tool: "propose_project",
@@ -164,6 +207,82 @@ export class MockAgentCore {
 		// assistant message overwrote the first widget when the second arrived).
 		if (lower.includes("proposal_burst")) {
 			return { proposalBurst: true };
+		}
+
+		// UX-parity matrix triggers for assistant-only types (workflow / role /
+		// tool / staff). _PARITY emits a full propose_<type>; _PARITY_EDIT emits
+		// a partial that touches one scalar so mergeFields preservation is
+		// exercised. Goal + project parity triggers live above (they must precede
+		// the generic substring matchers).
+		if (text.includes("GOAL_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_goal",
+				input: { title: "Parity Goal A — edited", spec: "Body B." },
+				output: "Goal proposal partial submitted.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_goal",
+				input: { title: "Parity Goal A", workflow: "general", spec: "Body A.", cwd: "/tmp/parity-goal" },
+				output: "Goal proposal submitted.",
+			};
+		}
+		if (text.includes("WORKFLOW_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_workflow",
+				input: { id: "parity-workflow", name: "parity-workflow-edited", description: "d", gates: "[]" },
+				output: "Workflow proposal partial submitted.",
+			};
+		}
+		if (text.includes("WORKFLOW_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_workflow",
+				input: { id: "parity-workflow", name: "Parity Workflow", description: "parity-workflow description", gates: "[]" },
+				output: "Workflow proposal submitted.",
+			};
+		}
+		if (text.includes("ROLE_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_role",
+				input: { name: "parity-role", label: "parity-role-edited", prompt: "P", tools: "", accessory: "none" },
+				output: "Role proposal partial submitted.",
+			};
+		}
+		if (text.includes("ROLE_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_role",
+				input: { name: "parity-role", label: "Parity Role", prompt: "Parity prompt body.", tools: "", accessory: "none" },
+				output: "Role proposal submitted.",
+			};
+		}
+		if (text.includes("TOOL_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_tool",
+				input: { tool: "parity-tool", action: "docs", content: "parity-tool-edited content" },
+				output: "Tool proposal partial submitted.",
+			};
+		}
+		if (text.includes("TOOL_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_tool",
+				input: { tool: "parity-tool", action: "docs", content: "Parity tool docs." },
+				output: "Tool proposal submitted.",
+			};
+		}
+		if (text.includes("STAFF_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_staff",
+				input: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "" },
+				output: "Staff proposal partial submitted.",
+			};
+		}
+		if (text.includes("STAFF_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_staff",
+				input: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "" },
+				output: "Staff proposal submitted.",
+			};
 		}
 
 		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
@@ -351,7 +470,7 @@ export class MockAgentCore {
 			this.conversationMessages.push(assistantMsg);
 			this.emit({ type: "message_end", message: assistantMsg });
 		} else if (toolAction && toolAction.tool) {
-			this._handleSingleTool(toolAction);
+			await this._handleSingleTool(toolAction);
 		} else if (toolAction && toolAction.text) {
 			const assistantMsg = { role: "assistant", content: [{ type: "text", text: toolAction.text }] };
 			this.conversationMessages.push(assistantMsg);
@@ -972,7 +1091,7 @@ export class MockAgentCore {
 		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
-	_handleSingleTool(toolAction) {
+	async _handleSingleTool(toolAction) {
 		const toolId = `tool_${Date.now()}`;
 		this.emit({ type: "tool_execution_start", toolName: toolAction.tool, toolId, input: toolAction.input });
 
@@ -984,6 +1103,22 @@ export class MockAgentCore {
 				const content = fs.readFileSync(toolAction.input.path, "utf-8");
 				fs.writeFileSync(toolAction.input.path, content.replace(toolAction.input.oldText, toolAction.input.newText), "utf-8");
 			} catch {}
+		}
+		// propose_* tools: mirror the real extension's seed POST so the file-on-disk
+		// source of truth (Slice B) is populated during E2E. Awaited so the seed
+		// completes before message_end fires — the rehydrate path on reload depends
+		// on the file already existing.
+		if (typeof toolAction.tool === "string" && toolAction.tool.startsWith("propose_")) {
+			await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+		}
+		// edit_proposal tool: shell to the gateway edit endpoint so the file
+		// updates and the server broadcasts proposal_update {source:"edit"}.
+		if (toolAction.tool === "edit_proposal" && toolAction.input?.type) {
+			await this._editProposal(
+				toolAction.input.type,
+				toolAction.input.old_text ?? "",
+				toolAction.input.new_text ?? "",
+			);
 		}
 
 		this.emit({ type: "tool_execution_update", toolId, toolName: toolAction.tool, status: "complete", output: toolAction.output });
@@ -1008,6 +1143,64 @@ export class MockAgentCore {
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/** Resolve the gateway URL+token. Returns null when unavailable. */
+	_gatewayCreds() {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		try {
+			const gwUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			const token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+			if (!sessionId || !gwUrl || !token) return null;
+			return { sessionId, gwUrl, token };
+		} catch {
+			return null;
+		}
+	}
+
+	/** Generic gateway POST helper used by seed / edit endpoints. */
+	_gatewayPost(pathname, body) {
+		const creds = this._gatewayCreds();
+		if (!creds) return Promise.resolve();
+		const { gwUrl, token } = creds;
+		const payload = JSON.stringify(body);
+		return new Promise((resolve) => {
+			try {
+				const u = new URL(`${gwUrl}${pathname}`);
+				const req = http.request(u, {
+					method: "POST",
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(payload),
+					},
+					timeout: 5_000,
+				}, (res) => { res.on("data", () => {}); res.on("end", resolve); });
+				req.on("timeout", () => { req.destroy(); resolve(); });
+				req.on("error", () => resolve());
+				req.write(payload);
+				req.end();
+			} catch { resolve(); }
+		});
+	}
+
+	_seedProposal(type, args) {
+		const creds = this._gatewayCreds();
+		if (!creds) return Promise.resolve();
+		return this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
+	}
+
+	_editProposal(type, oldText, newText) {
+		const creds = this._gatewayCreds();
+		if (!creds) return Promise.resolve();
+		return this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/edit`, {
+			old_text: oldText,
+			new_text: newText,
+		});
 	}
 
 	/** Handle RPC command. Returns response data or undefined. */

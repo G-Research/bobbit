@@ -163,15 +163,21 @@ export const state = {
 	projects: [] as Project[],
 	/** @deprecated No longer used — provisional projects replace pending projects */
 	pendingProjects: [] as Array<{ sessionId: string; dirPath: string; name: string }>,
-	activeProjectProposal: undefined as undefined | {
-		sessionId: string;
-		/** Plain string fields plus optional structured blocks (components, workflows). */
-		fields: Record<string, unknown>;
-		/** Provisional = project is still in .bobbit/state/projects.json with
-		 *  provisional:true (existing assistant flow). Registered = any other
-		 *  project (regular/goal/staff session pointing at a live project). */
-		mode?: "provisional" | "registered";
-	},
+	/**
+	 * Unified proposal slot table keyed by ProposalType. Single source of truth
+	 * for active proposals across all assistant types (goal/project/role/staff/
+	 * workflow/tool). See `src/app/proposal-registry.ts` for `ProposalSlot`.
+	 */
+	activeProposals: {} as Partial<Record<
+		"goal" | "project" | "workflow" | "role" | "tool" | "staff",
+		{
+			sessionId: string;
+			fields: Record<string, unknown>;
+			streaming: boolean;
+			mode?: "provisional" | "registered";
+			rev: number;
+		}
+	>>,
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
@@ -218,8 +224,6 @@ export const state = {
 	archivedSessionsHasMore: false,
 	archivedSessionsTotal: 0,
 
-	/** Active goal proposal from a goal-assistant session */
-	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string; options?: string } | null,
 
 	// Unified assistant state
 	assistantType: null as string | null,
@@ -239,8 +243,6 @@ export const state = {
 	cwdDropdownOpen: false,
 	cwdHighlightIndex: -1,
 
-	/** Active role proposal from a role-assistant session */
-	activeRoleProposal: null as { name: string; label: string; prompt: string; tools: string; accessory: string } | null,
 
 	// Role assistant split-screen state
 	isRoleAssistantSession: false,
@@ -291,7 +293,6 @@ export const state = {
 	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[]; projectId?: string }>,
 
 	// Staff assistant split-screen state
-	activeStaffProposal: null as { name: string; description: string; prompt: string; triggers: string; cwd: string } | null,
 	staffPreviewName: "",
 	staffPreviewDescription: "",
 	staffPreviewPrompt: "",
@@ -313,25 +314,6 @@ export const state = {
 	workflowPreviewDescription: "",
 	workflowPreviewGates: "",
 
-	// Setup assistant preview state — form fields populated by setup_proposal XML
-	setupPreviewAction: "",
-	setupFormStack: { language: "", framework: "", testing: "" },
-	setupFormCommands: {
-		build_command: "",
-		test_command: "",
-		typecheck_command: "",
-		test_unit_command: "",
-		test_e2e_command: "",
-
-	} as Record<string, string>,
-	setupFormModels: { session_model: "", review_model: "", naming_model: "" },
-	setupFormSystemPrompt: "",
-	setupFormSystemPromptEdited: false,
-	setupFormCommandsEdited: {} as Record<string, boolean>,
-	setupFormModelsEdited: {} as Record<string, boolean>,
-	setupFormSaving: false,
-	setupFormSaved: false,
-
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,
 	/** Whether the new-session role picker dropdown is open */
@@ -344,7 +326,7 @@ export const state = {
 	 *  delta carrying a propose_<tag> block and the matching block-finish event.
 	 *  Keyed by the `tag` from PROPOSAL_PARSERS — i.e. "goal_proposal",
 	 *  "project_proposal", "role_proposal", "tool_proposal", "staff_proposal",
-	 *  "workflow_proposal", "setup_proposal".
+	 *  "workflow_proposal".
 	 *  Owner: state.ts. Sole writer: RemoteAgent. Readers: render.ts panels
 	 *  via isProposalStreaming(tag). */
 	proposalStreamingByTag: {} as Record<string, boolean>,

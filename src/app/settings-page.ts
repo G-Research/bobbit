@@ -109,6 +109,22 @@ const _projectScopePending = new Map<string, Record<string, any>>();
 /** Per-project transient state for the "Add custom key" composer in the Project tab. */
 const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
 
+/**
+ * Invalidate ALL cached project-config UI state for one project so the next
+ * Settings render fetches fresh values. Wipes both the `/config{,/resolved}`
+ * cache that drives the Project tab and the `/structured` cache that drives
+ * the Components tab. Call this from any site outside `settings-page.ts`
+ * that mutates project config — e.g. the `propose_project` accept paths in
+ * `session-manager.ts` — to keep the Settings page coherent without forcing
+ * a hard page reload. Skips invalidation when the Components tab has unsaved
+ * (dirty) edits so the user's in-flight work isn't silently overwritten.
+ */
+export function invalidateProjectScopeConfig(projectId: string): void {
+	projectScopeConfigCache.delete(projectId);
+	const comp = _componentsTabState.get(projectId);
+	if (comp && !comp.dirty) _componentsTabState.delete(projectId);
+}
+
 function loadProjectScopeConfig(projectId: string): void {
 	const cached = projectScopeConfigCache.get(projectId);
 	if (cached?.loaded) return;

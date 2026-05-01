@@ -1,5 +1,6 @@
 import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
+import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
@@ -9,13 +10,37 @@ import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSu
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 
-/** Maps propose_* tool suffix → callback name on RemoteAgent */
+/** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
+ *  Slice E will replace this lookup with a flat ProposalType allow-list and
+ *  a single `this.onProposal?.(type, input, streaming)` dispatch. Until then,
+ *  both the legacy per-type callbacks AND the new unified `onProposal`
+ *  callback are fired so Slice E can migrate consumers atomically. */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	goal: "onGoalProposal",
 	role: "onRoleProposal",
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
-	setup: "onSetupProposal",
+	workflow: "onWorkflowProposal",
+	project: "onProjectProposal",
+};
+
+/** Maps legacy XML proposal tag → ProposalType (replaces the per-parser
+ *  `callbackName` field which was dropped in Slice D). */
+const PROPOSAL_TAG_TO_TYPE: Record<string, ProposalType> = {
+	goal_proposal: "goal",
+	role_proposal: "role",
+	tool_proposal: "tool",
+	staff_proposal: "staff",
+	workflow_proposal: "workflow",
+	project_proposal: "project",
+};
+
+/** Maps ProposalType → legacy per-type callback name on RemoteAgent. */
+const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
+	goal: "onGoalProposal",
+	role: "onRoleProposal",
+	tool: "onToolProposal",
+	staff: "onStaffProposal",
 	workflow: "onWorkflowProposal",
 	project: "onProjectProposal",
 };
@@ -191,12 +216,24 @@ export class RemoteAgent {
 	onToolProposal?: (proposal: { tool: string; action: string; content: string }, streaming: boolean) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
-	/** Callback fired when a setup proposal is detected in an assistant message. */
-	onSetupProposal?: (proposal: Record<string, string> & { action: string }, streaming: boolean) => void;
 	/** Callback fired when a workflow proposal is detected in an assistant message. */
 	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
 	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
+	/**
+	 * Slice D: unified proposal callback. Slice E will collapse all six
+	 * `onXProposal` callbacks above into this one. For now both fire — see
+	 * `_checkToolProposals` and the `proposal_update` / `proposal_cleared`
+	 * WS handlers below.
+	 *
+	 * `fields === null` signals a `proposal_cleared` event from the server
+	 * (e.g. after accept/dismiss/file-delete).
+	 */
+	onProposal?: (
+		type: ProposalType,
+		fields: Record<string, unknown> | null,
+		streaming: boolean,
+	) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
@@ -1096,6 +1133,26 @@ export class RemoteAgent {
 				this.onPreviewChanged?.(msg.sessionId, msg.preview);
 				break;
 
+			case "proposal_update": {
+				// Slice D: server-pushed proposal projection (post-edit / post-seed /
+				// rehydrate-on-attach). Always non-streaming — streaming partials
+				// flow through the inline tool_use scan in `_checkToolProposals`.
+				const pType = (msg as any).proposalType;
+				const fields = (msg as any).fields;
+				if (this.onProposal && isProposalType(pType) && fields && typeof fields === "object") {
+					this.onProposal(pType, fields as Record<string, unknown>, false);
+				}
+				break;
+			}
+
+			case "proposal_cleared": {
+				const pType = (msg as any).proposalType;
+				if (this.onProposal && isProposalType(pType)) {
+					this.onProposal(pType, null, false);
+				}
+				break;
+			}
+
 			case "bg_process_created":
 			case "bg_process_output":
 			case "bg_process_exited":
@@ -1198,7 +1255,9 @@ export class RemoteAgent {
 			const callbackName = PROPOSAL_TOOL_MAP[proposalType];
 			if (!callbackName) continue;
 			const callback = (this as any)[callbackName];
-			if (!callback) continue;
+			// Slice D: dispatch to unified onProposal alongside legacy callback.
+			// Either may be unset — we keep going as long as one is wired.
+			if (!callback && !this.onProposal) continue;
 
 			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh).
 			// During streaming we still check this so we don't re-fire after message_end marks it.
@@ -1222,7 +1281,16 @@ export class RemoteAgent {
 			if (streaming) {
 				state.proposalStreamingByTag[tagKey] = true;
 			}
-			callback(input, streaming);
+			// Slice E gap-closure: run the unified onProposal BEFORE the legacy
+			// per-type callback so plugin.mergeFields sees the un-mutated prev
+			// slot. Several legacy callbacks (goal/role/staff) overwrite
+			// state.activeProposals[type].fields with the incoming partial verbatim,
+			// which would leave nothing for mergeFields to preserve if onProposal
+			// ran second.
+			if (this.onProposal && isProposalType(proposalType)) {
+				this.onProposal(proposalType, input, streaming);
+			}
+			if (callback) callback(input, streaming);
 
 			// Only mark as processed on non-streaming calls (message_end, full re-scan).
 			// During streaming we fire the callback repeatedly for live preview sync
@@ -1261,10 +1329,12 @@ export class RemoteAgent {
 		if (!text) return;
 
 		for (const parser of PROPOSAL_PARSERS) {
-			const callback = (this as any)[parser.callbackName];
-			if (!callback) continue;
+			const proposalType = PROPOSAL_TAG_TO_TYPE[parser.tag];
+			const callbackName = proposalType ? TYPE_TO_LEGACY_CALLBACK[proposalType] : undefined;
+			const callback = callbackName ? (this as any)[callbackName] : undefined;
+			if (!callback && !this.onProposal) continue;
 
-			// Match all occurrences (e.g. setup_proposal may appear multiple times)
+			// Match all occurrences (a proposal block may appear multiple times)
 			const regex = new RegExp(`<${parser.tag}>([\\s\\S]*?)<\\/${parser.tag}>`, "g");
 			let match: RegExpExecArray | null;
 			while ((match = regex.exec(text)) !== null) {
@@ -1304,7 +1374,10 @@ export class RemoteAgent {
 				if (missing) continue;
 
 				console.warn(`[proposal] Detected legacy XML <${parser.tag}> block — this format is deprecated, use propose_* tools instead`);
-				callback(normalized);
+				if (this.onProposal && proposalType) {
+					this.onProposal(proposalType, normalized, false);
+				}
+				if (callback) callback(normalized);
 			}
 		}
 	}

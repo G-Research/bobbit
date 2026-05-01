@@ -296,7 +296,7 @@ The project assistant guides users through registering a new project directory. 
 
 **Provisional projects**: When a project assistant session is created (Path B or C), the server registers a **provisional project** via `ProjectRegistry.registerProvisional(name, rootPath)` with `provisional: true`. The assistant session is assigned to this provisional project's real `projectId` — so it has proper project isolation from the start, with its own store directory. The sidebar renders provisional projects as normal project folders but with a "(setting up)" badge, and suppresses action buttons (Add Goal, Add Staff, etc.) while the project remains provisional. Because this is server-side state, it survives page refreshes — unlike the previous `state.pendingProjects` client-side approach. If the session is terminated without accepting a proposal, the provisional project is cleaned up via `DELETE /api/projects/:id`.
 
-When the agent calls `propose_project`, the client populates `state.activeProjectProposal` and shows a **preview form** in the right panel (similar to goal proposals) with editable fields: project name, build/test/typecheck commands, and worktree setup command. The user reviews and clicks "Accept" — only then does the client promote the provisional project via `POST /api/projects/:id/promote` (which clears the `provisional` flag and updates the name) and write all config fields to `project.yaml` via `PUT /api/projects/:id/config`. The config write is atomic — all keys are validated before any are written, so a validation failure leaves the existing config unchanged. The client deduplicates proposal acceptance by tracking processed tool_use block IDs in `sessionStorage`, preventing re-fires on message re-scan (reconnect, refresh). This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
+When the agent calls `propose_project`, the client populates `state.activeProposals["project"]` and shows a **preview form** in the right panel (similar to goal proposals) with editable fields: project name, build/test/typecheck commands, and worktree setup command. The user reviews and clicks "Accept" — only then does the client promote the provisional project via `POST /api/projects/:id/promote` (which clears the `provisional` flag and updates the name) and write all config fields to `project.yaml` via `PUT /api/projects/:id/config`. The config write is atomic — all keys are validated before any are written, so a validation failure leaves the existing config unchanged. The client deduplicates proposal acceptance by tracking processed tool_use block IDs in `sessionStorage`, preventing re-fires on message re-scan (reconnect, refresh). This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
 
 **Auto-import path**: If `POST /api/projects/detect` reports `.bobbit/` already exists, the UI skips the assistant entirely and registers the project immediately with the auto-detected name (from `package.json` or directory basename). Existing `.bobbit/config/` settings are preserved as-is.
 
@@ -330,7 +330,7 @@ Each registered project can override system-level settings (from `project.yaml`)
 - **Provisional** (project-assistant flow, unchanged): promote via `POST /api/projects/:id/promote`, write config via `PUT /api/projects/:id/config`, then terminate the assistant session and navigate to landing.
 - **Registered** (new path): `PUT /api/projects/:id/config` for project.yaml fields and `PUT /api/projects/:id` for the project name if it changed. The session stays connected and the agent continues where it left off — no navigation, no termination.
 
-The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProposals["project"]` (proposal slot with `fields` + `mode` + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
 
 ### Project-proposal panel structure
 
@@ -791,6 +791,180 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 | `config-cascade.ts` | Three-layer entity resolution (builtin → server → project) with origin tags |
 | `config-scope.ts` | Shared UI scope row + origin badge helpers for config pages |
 | `project-assistant.ts` | Guided project registration |
+
+---
+
+## Editable proposals
+
+Every `propose_*` payload (`goal`, `project`, `workflow`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth; the in-memory `state.activeProposals[type]` slot is a parsed projection rebuilt on every change. Two new tools — `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` — let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+
+### Why
+
+Agents previously had to re-emit the entire payload via `propose_*` to tweak one field. For a fully-elaborated `propose_project` call (components, workflows, gate DAGs, verify steps) this meant streaming kilobytes of YAML to change a single command string — expensive in tokens and wall-clock time, and easy to drift between successive emissions. The file-on-disk model lets `edit_proposal` patch the draft in place using the same `old_text`/`new_text` contract the agent already uses for source code, with atomic rollback so a malformed edit cannot corrupt the stored form.
+
+The refactor also unified the six per-type proposal slots into one keyed map and lifted the goal-proposal UX behaviours (draft persistence, dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, per-session scoping) so every type inherits them. Bespoke per-type renderers (project's Components/Workflows/Diff, workflow's gate graph, goal's spec markdown) are unchanged — only the surrounding plumbing was rewritten.
+
+Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
+
+### On-disk layout
+
+```
+.bobbit/state/proposal-drafts/
+  <sessionId>/
+    goal.md         # markdown body + YAML frontmatter (title/cwd/workflow/options)
+    project.yaml    # native YAML matching the propose_project arg shape
+    workflow.yaml
+    role.yaml
+    tool.yaml
+    staff.yaml
+```
+
+Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields — see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write, cleaned up on session archive by `session-manager.ts::terminateSession` (fire-and-forget `fs.rm`).
+
+Path safety: `sessionId` is validated against `/^[A-Za-z0-9_-]+$/` and `type` against the union literal, so no traversal is possible.
+
+### Server module: `proposal-files.ts`
+
+`src/server/proposals/proposal-files.ts` owns the disk lifecycle and has no WebSocket or session-manager imports. The atomic-rollback contract is in `editProposalFile`:
+
+1. Read current content.
+2. Apply exact-string replacement (first-and-only-occurrence rule, identical to the builtin `edit` tool). Empty `new_text` deletes.
+3. Write to `<file>.tmp`.
+4. Parse via the per-type plugin in `proposal-types.ts` and run the required-field whitelist.
+5. On any parse/validate failure: unlink the `.tmp`, return a `ParseError` with structured `code`, file on disk untouched.
+6. On success: `fs.rename` `.tmp` → final path.
+
+Structured error codes (returned to the agent in the tool result and as `400` JSON bodies on the REST endpoint):
+
+| Code | Meaning |
+|---|---|
+| `FILE_NOT_FOUND` | No prior `propose_<type>` in this session. |
+| `OLD_TEXT_NOT_FOUND` | `old_text` does not match the file. |
+| `OLD_TEXT_NOT_UNIQUE` | `old_text` matches multiple times — ambiguous. |
+| `FRONTMATTER_MALFORMED` | `goal.md` frontmatter fence is broken. |
+| `YAML_PARSE_ERROR` | The post-edit YAML body fails to parse. |
+| `MISSING_REQUIRED_FIELD` | Per-type required-field whitelist failed. |
+| `STRUCTURAL_VALIDATION_FAILED` | Project YAML fails the same structural validator used by `PUT /api/projects/:id/config`. |
+
+Per-type metadata lives in `src/server/proposals/proposal-types.ts`: `filename`, `serialize(args) → body`, `parse(body) → ParseResult`, `requiredFields[]`. Adding a new proposal type means adding a plugin entry plus the matching client-side entry in `PROPOSAL_TYPE_REGISTRY`.
+
+### Unified client state
+
+The six legacy slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit slots for `tool`/`workflow`) are collapsed into one map in `src/app/state.ts`:
+
+```ts
+activeProposals: Partial<Record<ProposalType, ProposalSlot>>;
+
+interface ProposalSlot {
+  sessionId: string;
+  fields: Record<string, unknown>;  // parsed projection
+  streaming: boolean;                // mirrors proposalStreamingByTag for legacy panels
+  mode?: "provisional" | "registered"; // project only
+  rev: number;                       // monotonic; UI re-render hint
+}
+```
+
+`src/app/proposal-registry.ts` exports `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, and `PROPOSAL_TYPE_REGISTRY`. Each plugin contributes:
+
+- `mergeFields(prev, incoming)` — streaming shallow-merge. Project carries `components` and `workflows` forward when the partial omits them; goal carries the markdown body across frontmatter-only deltas; the others use a plain spread.
+- `onFirstEmit(slot, opts)` — tab auto-select on the first emit (e.g. project flips `previewPanelActiveTab="project"`, mobile flips the assistant tab).
+- `validate(fields)` — returns blocking errors that disable the submit button.
+- `accept(slot)` — reserved hook; current accept paths (`createGoal`, `acceptProjectProposal`, role/staff/tool/workflow accept endpoints) are unchanged.
+
+Unified draft + dismissal helpers in `src/app/proposal-helpers.ts` replace the per-type ad-hoc managers:
+
+- `saveProposalDraft(sid, type)` / `loadProposalDraft(sid, type)` / `deleteProposalDraft(sid, type)`
+- `markProposalDismissed(sid, type, fields)` / `isProposalDismissed(sid, type, fields)` / `clearProposalDismissed(sid, type)`
+
+LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId}`; the legacy `bobbit-goal-proposal-dismissed-<sid>` key is migrated once on first read.
+
+### Flow: `propose_*` → file-seed → broadcast → parsed projection
+
+```
+agent calls propose_<type>(args)
+  └─> defaults/tools/proposals/extension.ts execute()
+        └─> POST /api/sessions/:id/proposal/:type/seed { args }
+              └─> writeProposalFile (serialize + write)
+                    └─> parseProposalFile
+                          └─> _broadcastToSession({ type: "proposal_update",
+                                                       proposalType, fields,
+                                                       streaming: false,
+                                                       source: "seed" })
+                                └─> client remote.onProposal(type, fields, false)
+                                      └─> mergeFields, onFirstEmit (if first), renderApp
+```
+
+`edit_proposal` follows the same flow except the entry point is `POST /api/sessions/:id/proposal/:type/edit` and `source: "edit"`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
+
+### Dual-fire: legacy streaming path coexists
+
+The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolProposals` continues to fire the legacy per-type `onXProposal` callbacks during streaming, so partial deltas flow into the panel as the model types them. The unified `remote.onProposal` callback is the WS-driven path — it handles `proposal_update` (sources `seed`, `edit`, `rehydrate`) and `proposal_cleared`. Both paths funnel into the same `state.activeProposals[type]` slot via the plugin's `mergeFields`. The streaming-partial path provides UX responsiveness; the file-derived path provides the canonical projection and restart survival.
+
+### Restart survival via rehydrate-on-attach
+
+On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. Because the file IS the source of truth, no separate persistence layer is needed — a server restart mid-edit, a browser reload, or a session resume all yield the same broadcasted projection.
+
+Session archive cleans the directory: `session-manager.ts::terminateSession` fire-and-forgets `fs.rm` of the per-session dir. An in-flight `editProposalFile` racing with cleanup is harmless — `unlink` on a missing dir is a no-op.
+
+### Accept lifecycle
+
+The per-type accept handlers (`createGoal`, `acceptProjectProposal`, etc.) are unchanged. After a successful accept, the client fires `DELETE /api/sessions/:id/proposal/:type` which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
+
+### Tool surface
+
+| Tool | Group | Purpose |
+|---|---|---|
+| `view_proposal` | Proposals | `{ type }` → raw file body, or `404 {code:"FILE_NOT_FOUND"}` pointing at the matching `propose_*`. |
+| `edit_proposal` | Proposals | `{ type, old_text, new_text }` → post-edit body on success, structured error otherwise. Failed edits do NOT modify the file. |
+| `propose_<type>` | Proposals | Unchanged surface; now also seeds the file via the `/seed` REST endpoint as a side effect of `execute()`. |
+
+Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementation: `defaults/tools/proposals/extension.ts`.
+
+### REST endpoints
+
+Four endpoints, full reference in [docs/rest-api.md — Proposal drafts](rest-api.md#proposal-drafts):
+
+- `GET /api/sessions/:id/proposal/:type` — read raw body
+- `POST /api/sessions/:id/proposal/:type/seed` — called by `propose_*` `execute()`
+- `POST /api/sessions/:id/proposal/:type/edit` — surgical edit
+- `DELETE /api/sessions/:id/proposal/:type` — clean up after accept
+
+### Per-type panel testids
+
+Each proposal preview panel exposes `data-panel="<type>-proposal"` for E2E targeting. The project panel keeps its three-view structure (`view-tab-{components|workflows|diff}`) on top of the unified slot — see [Project-proposal panel structure](#project-proposal-panel-structure).
+
+### Out of scope
+
+- Diff/undo history of edits. Agents see the latest file contents only.
+- Concurrent multi-agent edits to the same proposal (single-session model preserved).
+- Refactoring the bespoke per-type preview forms.
+
+### Key files
+
+| Path | Purpose |
+|---|---|
+| `src/server/proposals/proposal-files.ts` | Atomic file API (`writeProposalFile`, `editProposalFile`, `parseProposalFile`, `deleteProposalFile`). |
+| `src/server/proposals/proposal-types.ts` | Per-type plugins: filename, serialize, parse, requiredFields. |
+| `src/server/server.ts` | Four REST handlers (regex-routed at `/api/sessions/:id/proposal/:type[/edit\|/seed]`). |
+| `src/server/ws/protocol.ts` | `proposal_update` / `proposal_cleared` server messages. |
+| `src/server/ws/handler.ts` | Rehydrate-on-attach. |
+| `src/server/agent/session-manager.ts::terminateSession` | Per-session directory cleanup. |
+| `src/app/proposal-registry.ts` | `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, `PROPOSAL_TYPE_REGISTRY`. |
+| `src/app/proposal-helpers.ts` | Unified draft + dismissal helpers. |
+| `src/app/state.ts::activeProposals` | Unified slot map. |
+| `src/app/session-manager.ts::remote.onProposal` | Unified WS-driven callback. |
+| `src/app/remote-agent.ts` | WS dispatch + legacy `_checkToolProposals` dual-fire. |
+| `defaults/tools/proposals/{view,edit}_proposal.yaml` | Tool descriptors. |
+| `defaults/tools/proposals/extension.ts` | Tool registration; `propose_*` `execute()` POSTs to `/seed`. |
+
+### Tests
+
+- `tests/proposal-files.test.ts` — unit: write/read/edit/parse/delete round-trip, atomic-rollback, path-traversal rejection.
+- `tests/proposal-registry.test.ts` — unit: per-type `mergeFields` and validators.
+- `tests/proposal-helpers.test.ts` — unit: unified draft + dismissal.
+- `tests/e2e/proposal-edit-api.spec.ts` — API E2E: edit-before-propose, restart survival, malformed-edit rollback (SHA-256 byte-equal pre/post).
+- `tests/e2e/ui/proposal-edit-flow.spec.ts` — browser E2E: project propose → edit → accept happy path.
+- `tests/e2e/ui/proposal-types-uX-parity.spec.ts` — parametrised across all six types: dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, restart survival.
 
 ---
 
@@ -1983,7 +2157,7 @@ When modifying scroll behaviour: do not introduce new timers, do not widen the 1
 
 ### Proposal panel scroll lock invariant
 
-The seven proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow`, `setup` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
+The six proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
 
 The logic lives in **`src/app/follow-tail.ts`** (`reconcileFollowTail(el)`), called from a `queueMicrotask` at the end of each panel's render so it fires after the synchronous DOM commit but before paint. The same three rules apply:
 
@@ -1995,15 +2169,15 @@ Lock state is stored in a module-private `WeakMap<HTMLElement, LockState>` keyed
 
 Textarea selection (`selectionStart` / `selectionEnd`) is captured on `select`, `keyup`, and `click`, then re-applied via `setSelectionRange(...)` after every reconcile branch (positive delta, zero delta, and shrink) — `setSelectionRange` is a state mutation per the WHATWG spec and applies even when the textarea is not the active element, so the caret is in the right place when focus returns. The DOMException some browsers throw on detached/hidden inputs is swallowed.
 
-**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The seven panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
+**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The six panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
 
 When modifying proposal-panel scroll behaviour: route through `reconcileFollowTail` rather than touching `scrollTop` or `setSelectionRange` directly; do not introduce timer-based intent heuristics; do not widen the 5px tail. See `src/app/follow-tail.ts` and the panel render functions in `src/app/render.ts`. Behavioural twin test: `tests/follow-tail.spec.ts`.
 
 ### Proposal streaming flag
 
-`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`, `workflow_proposal`, `setup_proposal`. Read via the `isProposalStreaming(tag)` accessor.
+`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`, `workflow_proposal`. Read via the `isProposalStreaming(tag)` accessor.
 
-A per-tag map rather than a single boolean because the seven panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
+A per-tag map rather than a single boolean because the six panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
 
 **Why the flag exists.** Without it the Create / Apply / Save buttons are clickable mid-stream and a user can submit before the spec/title has finished streaming, producing a goal/role/tool with truncated content. The flag drives (a) the `disabled` state of each panel's primary submit, (b) the `streamingBadge()` + `STREAMING_BORDER` indicator, and (c) consumers in `session-manager.ts` that may want to suppress destructive side-effects on streaming-mode fires.
 

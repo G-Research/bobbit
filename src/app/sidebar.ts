@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, WandSparkles, Workflow, Wrench, X, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
@@ -28,7 +28,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, dismissSetup, gatewayFetch, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -639,50 +639,6 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 // renderArchivedSessionRow is now in render-helpers.ts
 
 // ============================================================================
-// SETUP WIZARD BANNER
-// ============================================================================
-
-export async function launchSetupWizard(): Promise<void> {
-	try {
-		const res = await gatewayFetch("/api/sessions", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ assistantType: "setup" }),
-		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
-		const { id } = await res.json();
-		await connectToSession(id, false, { assistantType: "setup" });
-	} catch (err) {
-		console.error("[setup] Failed to create setup assistant session:", err);
-	}
-}
-
-export function isSetupWizardActive(): boolean {
-	return state.gatewaySessions.some(s => s.assistantType === "setup");
-}
-
-export function renderSetupBanner(mobile = false) {
-	if (state.setupComplete || isSetupWizardActive()) return "";
-	return html`
-		<div class="flex items-center gap-1 ${mobile ? "px-2 py-1.5 mx-1 mb-1" : "px-1.5 py-1 mx-0.5 mb-0.5"} rounded-md border border-primary/20 bg-primary/5">
-			<button
-				class="flex-1 flex items-center gap-1.5 ${mobile ? "text-sm" : "text-xs"} text-primary hover:text-primary/80 transition-colors font-medium cursor-pointer bg-transparent border-none p-0"
-				@click=${launchSetupWizard}
-				title="Set up your project for AI agents"
-			>
-				${icon(WandSparkles, mobile ? "sm" : "xs")}
-				<span>Setup Wizard</span>
-			</button>
-			<button
-				class="${mobile ? "p-1.5" : "p-0.5"} rounded text-muted-foreground hover:text-foreground transition-colors cursor-pointer bg-transparent border-none"
-				@click=${(e: Event) => { e.stopPropagation(); dismissSetup(); }}
-				title="Dismiss setup wizard"
-			>${icon(X, "xs")}</button>
-		</div>
-	`;
-}
-
-// ============================================================================
 // RENDER SIDEBAR
 // ============================================================================
 
@@ -908,7 +864,6 @@ export function renderSidebar() {
 					</button>
 				</div>
 			</div>
-			${renderSetupBanner()}
 			<div class="flex flex-col gap-1">
 				<search-box
 					.query=${state.searchQuery}

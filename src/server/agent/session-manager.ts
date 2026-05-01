@@ -1,6 +1,7 @@
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
@@ -3881,6 +3882,12 @@ export class SessionManager {
 			const modelNameFile = path.join(bobbitStateDir(), "model-name-" + id + ".txt");
 			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
 		} catch { /* ignore */ }
+
+		// Clean up per-session proposal-drafts directory (fire-and-forget).
+		// Same pattern as eagerDeleteRemoteSessionBranch — never blocks; missing
+		// dir is harmless. See docs/design/editable-proposals.md §4.
+		fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", id), { recursive: true, force: true })
+			.catch(err => console.warn(`[session-manager] proposal-drafts cleanup failed for ${id}:`, err));
 
 		// Broadcast session_archived event before closing clients
 		const archivedAt = Date.now();
