@@ -15,7 +15,6 @@ const PROPOSAL_LABELS: Record<string, { label: string; type: string; titleField:
 	propose_role: { label: "Role Proposal", type: "role", titleField: "name", previewField: "prompt" },
 	propose_tool: { label: "Tool Proposal", type: "tool", titleField: "tool", previewField: "content" },
 	propose_staff: { label: "Staff Proposal", type: "staff", titleField: "name", previewField: "prompt" },
-	propose_workflow: { label: "Workflow Proposal", type: "workflow", titleField: "name", previewField: "description" },
 	propose_project: { label: "Project Proposal", type: "project", titleField: "name", previewField: "root_path" },
 };
 

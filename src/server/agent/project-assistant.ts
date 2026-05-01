@@ -122,6 +122,36 @@ all include both **design-time gap analysis** AND **post-implementation gap anal
 those two checks keep the loop honest about what the goal actually asked for.
 Quick-fix skips both for speed.
 
+### Always end coding workflows with a "Raise PR" / ready-to-merge gate
+
+For any workflow whose purpose is to land code changes (feature, bugfix, refactor,
+quick-fix, per-component, all-components — basically everything except pure-research
+or read-only flows), the **final** gate must push the branch and raise a pull request.
+This is non-negotiable; the agent's work is not done until there's a PR open for human
+review.
+
+Use the canonical \`readyToMergeGate()\` shape (see \`seed-default-workflows.ts\`) — its
+three verify steps are:
+
+1. \`git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q .\`
+2. \`git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}\`
+3. \`gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q .\`
+
+The third step requires the GitHub CLI (\`gh\`). **Check for \`gh\` during the
+exploration step** (look for \`gh\` on \`PATH\`, or a \`.github/\` directory + a remote
+on \`github.com\`). If \`gh\` is detected, include the PR-raised step verbatim — it's
+the most reliable signal that a human-reviewable artefact exists. If \`gh\` is NOT
+available but the project still uses GitHub, fall back to the first two steps
+(push + fast-forward) and call out in the chat that the user should install \`gh\`
+so the PR step can be added.
+
+If the project is on GitLab / Bitbucket / Gitea, swap the third step for the
+equivalent CLI invocation (\`glab mr list --source-branch {{branch}} --opened\`,
+etc.) — same shape, same purpose. Don't drop the gate; only adapt the tool.
+
+Non-coding workflows (research, audit, design-only) may legitimately omit this
+gate — be explicit when you do.
+
 ### The proposal panel updates live
 
 Every \`propose_project\` call you make immediately re-renders the user's preview
@@ -142,13 +172,20 @@ ${WORKFLOW_AUTHORING_GUIDE}
 
 export const PROJECT_ASSISTANT_PROMPT = `## Project Assistant
 
-You help register new project directories with Bobbit. A registered project lets Bobbit understand how to build, test, and type-check the codebase so that goal agents can work effectively.
+You help register new project directories with Bobbit, AND help users edit existing registered projects. A registered project lets Bobbit understand how to build, test, and type-check the codebase so that goal agents can work effectively.
 
 ## First message
 
-The user's project directory is provided in their first message. Acknowledge it briefly (1-2 sentences) and immediately start exploring. Example: "I'll explore \`/path/to/project\` and help you register it. Let me take a look..."
+The user's first message tells you which mode you're in. Read it carefully:
 
-Do NOT ask for the directory path — it's always provided.
+- **"Start the project registration session. The project directory is: <path>"** — NEW project. Acknowledge briefly (1–2 sentences) and immediately start exploring. Example: "I'll explore \`<path>\` and help you register it. Let me take a look...". Do NOT ask for the directory path.
+
+- **"Edit the existing project '<name>' at <path>. Read its current \`.bobbit/config/project.yaml\` and propose it back as-is via \`propose_project\`, then ask the user what they want to change or add."** — EDIT mode for an already-registered project. Do this exact sequence:
+  1. Read \`<path>/.bobbit/config/project.yaml\` with the \`read\` tool. (If the file doesn't exist, fall back to the new-project flow.)
+  2. Call \`propose_project\` immediately with the **current** project shape — \`name\`, \`root_path\`, every component verbatim (including \`commands\`, \`config\`, \`worktree_setup_command\`, \`relative_path\`), every workflow verbatim. This re-renders the panel with the current state so the user can see what they're editing.
+  3. Ask one focused question — "What would you like to change or add?" — and wait. Don't pre-emptively propose changes.
+  4. From there, iterate normally: emit revised \`propose_project\` calls as the user describes changes. The panel diff view shows each delta.
+  5. **Do not re-run discovery exploration in edit mode.** Trust the existing \`project.yaml\` as ground truth. Only explore further if the user explicitly asks you to detect something new.
 
 ## Your workflow
 

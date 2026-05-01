@@ -704,7 +704,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // CONNECT TO SESSION (select + hydrate)
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; workflowEditContext?: { id: string; name: string }; projectDirPath?: string; onMissing?: "toast" | "modal" }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; onMissing?: "toast" | "modal" }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
 	const replaceHistory = startingRoute.view === "goal-dashboard";
@@ -864,17 +864,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			tool: "Start the tool assistant session. Help me document, improve, or create tools.",
 			staff: "Start the staff agent creation session.",
 			setup: "Start the project setup session.",
-			workflow: "Start the workflow creation session. Help me design a new workflow with gates and verification.",
 		};
 		if (options?.assistantType && !isExisting) {
 			let autoPrompt: string | undefined;
-			if (options.assistantType === "project" && options.projectDirPath) {
+			if (options.assistantType === "project" && options.projectEditContext) {
+				const pec = options.projectEditContext;
+				autoPrompt = `Edit the existing project '${pec.name}' at ${pec.rootPath}. Read its current \`.bobbit/config/project.yaml\` and propose it back as-is via \`propose_project\`, then ask the user what they want to change or add.`;
+			} else if (options.assistantType === "project" && options.projectDirPath) {
 				autoPrompt = `Start the project registration session. The project directory is: ${options.projectDirPath}`;
 			} else if (options.assistantType === "project-scaffolding" && options.projectDirPath) {
 				autoPrompt = `Start the new project setup session. The target directory is: ${options.projectDirPath}`;
-			} else if (options.assistantType === "workflow" && options.workflowEditContext) {
-				const wfCtx = options.workflowEditContext;
-				autoPrompt = `I want to edit the existing workflow '${wfCtx.name}' (id: ${wfCtx.id}). Read it from .bobbit/config/workflows/${wfCtx.id}.yaml and help me improve it.`;
 			} else {
 				autoPrompt = AUTO_PROMPTS[options.assistantType];
 			}
@@ -1144,34 +1143,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onWorkflowProposal = (proposal, _streaming = false) => {
-			if (activeSessionId() !== sessionId) return;
-			state.workflowPreviewId = proposal.id || "";
-			state.workflowPreviewName = proposal.name || "";
-			state.workflowPreviewDescription = proposal.description || "";
-			state.workflowPreviewGates = proposal.gates || "";
-			state.assistantHasProposal = true;
-			if (state.assistantTab === "chat" && !isDesktop()) {
-				state.assistantTab = "preview";
-			}
-			// Parse gates JSON from proposal and populate edit form directly
-			if (proposal.id) {
-				let gates: any[] = [];
-				try { gates = JSON.parse(proposal.gates || "[]"); } catch { /* ignore parse errors */ }
-				import("./workflow-page.js").then(({ populateFromProposal }) => {
-					if (isStale()) return;
-					populateFromProposal({
-						id: proposal.id,
-						name: proposal.name || "",
-						description: proposal.description || "",
-						gates,
-					});
-					renderApp();
-				});
-			}
-			renderApp();
-		};
-
 		remote.onStaffProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			// Slice E: state.activeProposals.staff owned by unified onProposal.
@@ -1265,14 +1236,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				role: remote.onRoleProposal,
 				tool: remote.onToolProposal,
 				staff: remote.onStaffProposal,
-				workflow: remote.onWorkflowProposal,
 				project: remote.onProjectProposal,
 			};
 			const cb = callbackMap[type];
 			if (cb) cb(fields, /* streaming */ false);
 			// Also fire the unified callback so the activeProposals slot
 			// is populated for types whose legacy callback doesn't write to it
-			// (tool, workflow). Idempotent for goal/role/staff/project (the
+			// (tool). Idempotent for goal/role/staff/project (the
 			// legacy callback already wrote the slot, plugin.mergeFields
 			// shallow-merges).
 			if (isProposalType(type) && remote.onProposal) {
@@ -1599,16 +1569,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					delete state.activeProposals.project;
 					state.assistantHasProposal = false;
 				}
-			} else if (state.assistantType === "workflow") {
-				state.assistantTab = "chat";
-				state.workflowPreviewId = "";
-				state.workflowPreviewName = "";
-				state.workflowPreviewDescription = "";
-				state.workflowPreviewGates = "";
-				// Initialize the edit form state for the panel
-				import("./workflow-page.js").then(({ initAssistantEditState }) => {
-					initAssistantEditState();
-				});
 			}
 		})();
 

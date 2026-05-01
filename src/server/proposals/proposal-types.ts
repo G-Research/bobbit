@@ -171,11 +171,6 @@ const projectPlugin = makeYamlPlugin({
 	requiredFields: ["name", "root_path"],
 });
 
-const workflowPlugin = makeYamlPlugin({
-	type: "workflow",
-	requiredFields: ["id", "name"],
-});
-
 const rolePlugin = makeYamlPlugin({
 	type: "role",
 	requiredFields: ["name", "label", "prompt"],
@@ -194,7 +189,6 @@ const staffPlugin = makeYamlPlugin({
 const REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
 	goal: goalPlugin,
 	project: projectPlugin,
-	workflow: workflowPlugin,
 	role: rolePlugin,
 	tool: toolPlugin,
 	staff: staffPlugin,

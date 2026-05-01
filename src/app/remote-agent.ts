@@ -20,7 +20,6 @@ const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	role: "onRoleProposal",
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
-	workflow: "onWorkflowProposal",
 	project: "onProjectProposal",
 };
 
@@ -31,7 +30,6 @@ const PROPOSAL_TAG_TO_TYPE: Record<string, ProposalType> = {
 	role_proposal: "role",
 	tool_proposal: "tool",
 	staff_proposal: "staff",
-	workflow_proposal: "workflow",
 	project_proposal: "project",
 };
 
@@ -41,7 +39,6 @@ const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
 	role: "onRoleProposal",
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
-	workflow: "onWorkflowProposal",
 	project: "onProjectProposal",
 };
 
@@ -216,8 +213,6 @@ export class RemoteAgent {
 	onToolProposal?: (proposal: { tool: string; action: string; content: string }, streaming: boolean) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
-	/** Callback fired when a workflow proposal is detected in an assistant message. */
-	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
 	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
 	/**

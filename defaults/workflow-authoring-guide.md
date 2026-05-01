@@ -1,6 +1,6 @@
 # Workflow Authoring Guide
 
-> **Audience:** the project assistant, workflow assistant, and goal assistant when generating or editing the inline `workflows:` block of a project's `project.yaml`.
+> **Audience:** the project assistant and goal assistant when generating or editing the inline `workflows:` block of a project's `project.yaml`.
 >
 > This guide is **not read at runtime**. It is included as context for assistant prompts so that hand-generated workflows are consistent and runnable. The runtime contract lives in `src/server/agent/workflow-validator.ts` and the gate runner; this document mirrors it.
 
