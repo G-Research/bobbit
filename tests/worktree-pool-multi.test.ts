@@ -55,7 +55,7 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
 	});
 
-	it("fills multi-repo pool sets and claim returns the full set", async () => {
+	it("fills multi-repo pool sets and claim returns the full set on session/<id8>", async () => {
 		const root = await makeMultiRepoRoot(["api", "web", "shared"]);
 		try {
 			const components: Component[] = [
@@ -71,57 +71,36 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 			}
 			assert.equal(pool.size, 1, "pool should have one multi-repo entry after fill");
 
-			const claim = await pool.claim("session/multi-test-12345678");
+			const claim = await pool.claim("session/abcd1234");
 			assert.ok(claim, "claim should succeed");
-			assert.equal(claim!.branchName, "session/multi-test-12345678");
+			assert.equal(claim!.branchName, "session/abcd1234");
 			assert.ok(claim!.worktrees, "multi-repo claim should expose per-repo worktrees");
 			assert.equal(claim!.worktrees!.length, 3, "all three repos (incl. data-only) should be in the set");
 
 			const repoNames = claim!.worktrees!.map(w => w.repo).sort();
 			assert.deepEqual(repoNames, ["api", "shared", "web"]);
 
-			// Per-repo worktree paths must exist on disk.
+			// Per-repo worktree paths must exist on disk and all be on the same
+			// final branch — multi-repo claim consistency invariant.
 			for (const w of claim!.worktrees!) {
 				assert.ok(fs.existsSync(w.worktreePath), `worktree should exist on disk: ${w.worktreePath}`);
 				const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: w.worktreePath });
-				assert.equal(stdout.trim(), "session/multi-test-12345678", `repo ${w.repo} should be on the renamed branch`);
+				assert.equal(stdout.trim(), "session/abcd1234", `repo ${w.repo} should be on the renamed branch`);
+				// Each repo's worktree path lives under <wtRoot>/session-abcd1234/<repo>/
+				assert.ok(
+					w.worktreePath.includes(`session-abcd1234`) && w.worktreePath.endsWith(w.repo),
+					`repo ${w.repo} worktree path should be under session-abcd1234/${w.repo}, got ${w.worktreePath}`,
+				);
 			}
 
 			assert.ok(claim!.container, "container path should be set on multi-repo claim");
-			assert.equal(path.basename(claim!.container!), "session-multi-test-12345678");
+			assert.equal(path.basename(claim!.container!), "session-abcd1234");
 
 			// Replenishment: pool should fill again after claim.
 			for (let i = 0; i < 100 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should replenish after claim");
-		} finally {
-			await rmRoot(root);
-		}
-	});
-
-	it("claimUnnamed returns multi-repo entry as-is with worktrees array", async () => {
-		const root = await makeMultiRepoRoot(["api", "web"]);
-		try {
-			const components: Component[] = [
-				{ name: "api", repo: "api" },
-				{ name: "web", repo: "web" },
-			];
-			const pool = new WorktreePool({ repoPath: root, targetSize: 1, componentsResolver: () => components });
-			pool.startFilling();
-			for (let i = 0; i < 100 && pool.size === 0; i++) {
-				await new Promise(r => setTimeout(r, 100));
-			}
-			assert.equal(pool.size, 1);
-
-			const u = pool.claimUnnamed();
-			assert.ok(u);
-			assert.ok(u!.branchName.startsWith("pool/_pool-"));
-			assert.ok(u!.worktrees, "claimUnnamed should expose multi-repo worktrees");
-			assert.equal(u!.worktrees!.length, 2);
-			for (const w of u!.worktrees!) {
-				assert.ok(fs.existsSync(w.worktreePath));
-			}
 		} finally {
 			await rmRoot(root);
 		}

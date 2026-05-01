@@ -626,7 +626,7 @@ export async function executeWorktreeAsync(
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.
 	// For team-spawned sandboxed sessions, plan.sandboxBranch differs from plan.branch
-	// (host auto-generates session/new-session-<uuid8>, team manager sets goal-<slug>-<role>-<id>).
+	// (host auto-generates session/<uuid8>, team manager sets goal-<slug>-<role>-<id>).
 	if (plan.sandboxed && plan.sandboxBranch && plan.sandboxBranch !== plan.branch) {
 		plan.branch = plan.sandboxBranch;
 		ctx.store.update(session.id, { branch: plan.branch });
