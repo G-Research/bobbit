@@ -98,7 +98,7 @@ Unit coverage in `tests/rpc-bridge-spawn-args.test.ts` and `tests/review-model-o
 
 Loading an archived session shows `claude-opus-4-6` (the client-side placeholder) instead of the real persisted model.
 
-- The fix is `buildArchivedStatePayload(archived, sessionManager, sessionId)` in `src/server/ws/handler.ts`, called on the archived auth-ok branch after `session_title`. If the helper isn't being invoked, the client never receives a `state` frame on first connect and the placeholder persists.
+- The fix is `buildArchivedStateData(archived, sessionManager, sessionId)` in `src/server/ws/handler.ts`, called on the archived auth-ok branch after `session_title`. If the helper isn't being invoked, the client never receives a `state` frame on first connect and the placeholder persists.
 - Verify `archived.modelProvider` / `archived.modelId` are present in the session-store row — the helper omits `data.model` when either is missing, leaving the footer empty.
 - The same helper backs the legacy `get_state` handler, so the reconnect path is automatically consistent.
 - The client placeholder seed in `src/app/remote-agent.ts` is a known leftover and out of scope — the footer is correct as long as the server-side push lands.

@@ -1308,8 +1308,25 @@ export class RemoteAgent {
 	 * Check if a message contains review tool results (from the review_open/review_close
 	 * extension) and update the review pane state accordingly. Scans message text content
 	 * for JSON payloads with action "review_open" or "review_close".
+	 *
+	 * Active-session guard: `state.review*` is global, but every connected session
+	 * (including cached/background ones whose RemoteAgent is kept alive in
+	 * `sessionCache` — see session-manager.ts::selectSession) routes its
+	 * `message_end` events through here. Without this gate, a `review_open`
+	 * emitted by a background session would mutate the globally-shared review
+	 * state and land on whichever session the user is currently viewing.
+	 *
+	 * We compare `_sessionId` against `state.selectedSessionId` (set
+	 * synchronously in `selectSession()` before `connectToSession()` runs),
+	 * not `state.remoteAgent`, because the latter is assigned only AFTER
+	 * `remote.connect()` returns — and the initial `auth_ok` handler replays
+	 * message history through this method during connect, so a
+	 * `state.remoteAgent`-based check would no-op the initial review-pane
+	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
 	private _checkReviewToolResult(msg: any): void {
+		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
+
 		// Extract text content from the message
 		const texts: string[] = [];
 		if (typeof msg.content === "string") texts.push(msg.content);
