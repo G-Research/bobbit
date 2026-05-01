@@ -162,6 +162,13 @@ class FakeGoalManager {
 		return true;
 	}
 
+	async archiveGoalAfterMerge(id: string): Promise<boolean> {
+		// Mirrors the production helper: stamp state=complete then archive.
+		this.store.patch(id, { state: "complete" });
+		this.archiveCalls.push(id);
+		return true;
+	}
+
 	resolveRootMaxConcurrentChildren(_rootId: string): number { return this.cap; }
 
 	async setupWorktreeAndStartTeam(_id: string, _fn: () => Promise<any>): Promise<void> { /* noop */ }

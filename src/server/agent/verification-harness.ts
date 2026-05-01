@@ -1468,8 +1468,8 @@ export class VerificationHarness {
 									console.warn(`[verification] Eager-merge teardownTeam failed for child ${childId} (best-effort):`, err);
 								});
 							}
-							await parentCtx.goalManager.archiveGoal(childId).catch(err => {
-								console.warn(`[verification] Eager-merge archiveGoal failed for child ${childId} (best-effort):`, err);
+							await parentCtx.goalManager.archiveGoalAfterMerge(childId).catch(err => {
+								console.warn(`[verification] Eager-merge archiveGoalAfterMerge failed for child ${childId} (best-effort):`, err);
 							});
 							console.log(`[verification] Eager-merge completed: child ${childId} merged into parent ${parentId} (commit ${mergeResult.commitSha ?? "unknown"}); child team torn down + archived.`);
 
@@ -2537,8 +2537,8 @@ export class VerificationHarness {
 						console.warn(`[verification] post-merge teardownTeam failed for child ${childGoalId} (best-effort):`, err);
 					});
 				}
-				await goalManager.archiveGoal(childGoalId).catch(err => {
-					console.warn(`[verification] post-merge archiveGoal failed for child ${childGoalId} (best-effort):`, err);
+				await goalManager.archiveGoalAfterMerge(childGoalId).catch(err => {
+					console.warn(`[verification] post-merge archiveGoalAfterMerge failed for child ${childGoalId} (best-effort):`, err);
 				});
 				console.log(`[verification] Auto-archived child ${childGoalId} after successful merge into parent ${signal.goalId}`);
 				return {

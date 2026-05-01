@@ -778,6 +778,38 @@ export function createGateway(config: GatewayConfig) {
 		}
 	}
 
+	// Boot-migration: backfill `state: "complete"` on archived goals
+	// whose `ready-to-merge` gate passed. Live test (PR #409 v0.1-
+	// foundation): goal 317cdb83 was archived via the eager-merge IIFE
+	// after its branch merged into the parent, but `archiveGoal` (pre-
+	// fix) didn't flip state from "in-progress" to "complete". The
+	// resolvePlanNodeState walker then mapped archived+in-progress to
+	// "failed" (red), shadowing the success. The new
+	// `archiveGoalAfterMerge` helper covers all FUTURE merge-driven
+	// archives; this one-time backfill cleans up pre-existing records.
+	//
+	// Idempotent: a second boot finds nothing to fix and logs nothing.
+	{
+		let stateFixed = 0;
+		for (const ctx of projectContextManager.all()) {
+			for (const goal of ctx.goalStore.getAll()) {
+				if (!goal.archived) continue;
+				if (goal.state === "complete") continue;
+				// Check ready-to-merge gate — if it passed, the merge
+				// happened and the goal is structurally complete.
+				const rtmGate = ctx.gateStore.getGate(goal.id, "ready-to-merge");
+				if (rtmGate?.status === "passed") {
+					ctx.goalStore.update(goal.id, { state: "complete" });
+					stateFixed++;
+					console.log(`[boot-migration] Set state="complete" on archived goal ${goal.id} (ready-to-merge passed; merge-driven archive)`);
+				}
+			}
+		}
+		if (stateFixed > 0) {
+			console.log(`[boot-migration] post-merge state backfill complete (${stateFixed} goals).`);
+		}
+	}
+
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
@@ -5279,8 +5311,8 @@ async function handleApiRoute(
 										await teamManager.teardownTeam(child.id).catch(err => {
 											console.warn(`[manual-merge-reconcile] teardownTeam failed for ${child.id} (best-effort):`, err);
 										});
-										await gateSignalCtx.goalManager.archiveGoal(child.id);
-										console.log(`[manual-merge-reconcile] Archived child ${child.id} (branch ${child.branch} already merged into parent ${goalId} HEAD)`);
+										await gateSignalCtx.goalManager.archiveGoalAfterMerge(child.id);
+										console.log(`[manual-merge-reconcile] Archived child ${child.id} as complete (branch ${child.branch} already merged into parent ${goalId} HEAD)`);
 									} catch (err) {
 										console.warn(`[manual-merge-reconcile] archive failed for ${child.id} (best-effort):`, err);
 									}
@@ -6307,8 +6339,8 @@ async function handleApiRoute(
 					teamManager.teardownTeam(childGoalId).catch(err => {
 						console.warn(`[integrate-child] post-merge teardownTeam failed for child ${childGoalId} (best-effort):`, err);
 					});
-					goalMgr.archiveGoal(childGoalId).catch(err => {
-						console.warn(`[integrate-child] post-merge archiveGoal failed for child ${childGoalId} (best-effort):`, err);
+					goalMgr.archiveGoalAfterMerge(childGoalId).catch(err => {
+						console.warn(`[integrate-child] post-merge archiveGoalAfterMerge failed for child ${childGoalId} (best-effort):`, err);
 					}).then(() => {
 						console.log(`[integrate-child] Auto-archived child ${childGoalId} after successful manual merge into parent ${parentGoalId}`);
 					});

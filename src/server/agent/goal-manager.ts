@@ -853,6 +853,35 @@ export class GoalManager {
 		return true;
 	}
 
+	/**
+	 * Archive a goal after a successful merge. Stamps `state: "complete"`
+	 * so the goal record's terminal state reflects the success path
+	 * (merge succeeded → goal is done) before flipping `archived: true`.
+	 *
+	 * Live test (PR #409 v0.1-foundation): 317cdb83's branch was merged
+	 * into the parent's branch via the eager-merge IIFE, the child was
+	 * archived, but its `state` stayed at `"in-progress"`. The Plan tab's
+	 * resolvePlanNodeState then mapped archived+in-progress to "failed"
+	 * (red), shadowing the actual success.
+	 *
+	 * Use this when ANY of the four merge-driven auto-archive paths fires:
+	 *   1. runSubgoalStep post-merge (verification-harness)
+	 *   2. Eager-merge IIFE in notifyTeamLead (verification-harness)
+	 *   3. integrate-child REST route (server.ts)
+	 *   4. execution-gate-signal manual-merge reconciliation (server.ts)
+	 *
+	 * For non-merge archives (cancellation, zombie cleanup, user delete)
+	 * keep using `archiveGoal` directly — don't silently flip state.
+	 */
+	async archiveGoalAfterMerge(id: string): Promise<boolean> {
+		const goal = this.store.get(id);
+		if (!goal) return false;
+		if (goal.state !== "complete") {
+			this.store.update(id, { state: "complete" });
+		}
+		return this.archiveGoal(id);
+	}
+
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
