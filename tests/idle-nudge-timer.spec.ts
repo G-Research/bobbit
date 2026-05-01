@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { formatElapsed } from "../dist/server/agent/team-manager.js";
+import { formatElapsed } from "../src/server/agent/team-manager.ts";
 
 test.describe("formatElapsed", () => {
 	test("returns 0m for timestamps just now", () => {

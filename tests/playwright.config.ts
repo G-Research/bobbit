@@ -9,4 +9,6 @@ export default defineConfig({
 	// the same machine). 30s gives a comfortable headroom for the
 	// Chromium launch + first paint without masking real test bugs.
 	timeout: 30_000,
+	fullyParallel: true,
+	workers: process.env.CI ? 2 : "50%",
 });

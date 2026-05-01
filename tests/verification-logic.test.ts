@@ -22,7 +22,7 @@ import {
 	TRANSIENT_ERROR_REGEXES,
 	QA_NON_TRANSIENT_PATTERNS,
 	detectJsonValidationError,
-} from "../dist/server/agent/verification-logic.js";
+} from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers — minimal objects satisfying the VerifyStep / GateSignal shapes

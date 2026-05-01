@@ -7,8 +7,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { inferMeta } from "../dist/server/agent/aigw-manager.js";
-import { modelRecencyRank } from "../dist/server/agent/model-registry.js";
+import { inferMeta } from "../src/server/agent/aigw-manager.ts";
+import { modelRecencyRank } from "../src/server/agent/model-registry.ts";
 
 // ── inferMeta tests ────────────────────────────────────────────────
 

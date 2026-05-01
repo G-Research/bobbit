@@ -4,7 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { stripTokenFromGitUrl } from "../dist/server/skills/git.js";
+import { stripTokenFromGitUrl } from "../src/server/skills/git.ts";
 
 describe("stripTokenFromGitUrl", () => {
 	it("strips token from https URL with username", () => {
