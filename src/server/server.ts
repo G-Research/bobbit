@@ -3387,6 +3387,88 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
+			// `?recursive=1` archives the entire tree rooted at this goal,
+			// deepest-first (per design §8). We pre-compute the descendant
+			// list (excluding the named goal) and archive each before
+			// archiving the named goal as the final step. Children of an
+			// archived parent without `recursive=1` are intentionally left
+			// alone — a parent can be cleanly retired while in-flight child
+			// work continues. Returns `{ archived: [...goalIds] }`.
+			if (url.searchParams.get("recursive") === "1") {
+				const rootGoal = getGoalAcrossProjects(id);
+				if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
+				const rootCtx = projectContextManager.getContextForGoal(id);
+				if (!rootCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+				const rootId = rootGoal.rootGoalId ?? rootGoal.id;
+				// `getDescendants(rootId)` returns the entire tree rooted at
+				// `rootId` (incl. the root itself). We restrict to descendants
+				// of the *named* goal: filter to entries whose ancestor chain
+				// includes `id`. Easiest — walk childrenByParent BFS from `id`.
+				const all = rootCtx.goalStore.getDescendants(rootId);
+				const byId = new Map(all.map(g => [g.id, g] as const));
+				// Compute ancestor depth from `id` for ordering (deepest first).
+				const depthFromNamed = new Map<string, number>();
+				depthFromNamed.set(id, 0);
+				let changed = true;
+				while (changed) {
+					changed = false;
+					for (const g of all) {
+						if (depthFromNamed.has(g.id)) continue;
+						if (g.parentGoalId && depthFromNamed.has(g.parentGoalId)) {
+							depthFromNamed.set(g.id, depthFromNamed.get(g.parentGoalId)! + 1);
+							changed = true;
+						}
+					}
+				}
+				const targets = [...depthFromNamed.keys()]
+					.filter(gid => !!byId.get(gid))
+					.sort((a, b) => (depthFromNamed.get(b) ?? 0) - (depthFromNamed.get(a) ?? 0));
+				const archived: string[] = [];
+				for (const gid of targets) {
+					try {
+						// Cancel in-flight verifications for this goal first.
+						for (const active of verificationHarness.getActiveVerifications(gid)) {
+							try {
+								await verificationHarness.cancelStaleVerifications(gid, active.gateId);
+							} catch (err) {
+								console.error(`[api] Error cancelling verification for gate ${active.gateId} on goal ${gid}:`, err);
+							}
+						}
+						const gCtx = projectContextManager.getContextForGoal(gid);
+						const gTeam = gCtx?.teamStore.get(gid);
+						const gAgentBranches: string[] = [];
+						if (gTeam?.agents) {
+							for (const a of gTeam.agents) if (a.branch) gAgentBranches.push(a.branch);
+						}
+						if (gTeam?.teamLeadSessionId) {
+							const tl = gCtx?.sessionStore.get(gTeam.teamLeadSessionId);
+							if (tl?.branch) gAgentBranches.push(tl.branch);
+						}
+						if (teamManager.getTeamState(gid)) {
+							try {
+								await teamManager.teardownTeam(gid);
+							} catch (err) {
+								console.error(`[api] Error tearing down team for goal ${gid}:`, err);
+							}
+						}
+						const gMgr = getGoalManagerForGoal(gid);
+						await gMgr.archiveGoal(gid);
+						archived.push(gid);
+						const gArchived = gMgr.getGoal(gid);
+						if (gArchived?.repoPath) {
+							deleteRemoteGoalBranches(gArchived, gAgentBranches, gArchived.repoPath).catch(err => {
+								console.warn(`[api] Remote branch cleanup failed for goal ${gid}:`, err);
+							});
+						}
+						prStatusStore.remove(gid);
+					} catch (err) {
+						console.error(`[api] Recursive archive failed for goal ${gid}:`, err);
+					}
+				}
+				json({ archived });
+				return;
+			}
+
 			// Cancel any in-flight gate verifications (terminates reviewer sessions)
 			for (const active of verificationHarness.getActiveVerifications(id)) {
 				try {
@@ -4755,15 +4837,23 @@ async function handleApiRoute(
 					}
 					gateStore.updateGateStatus(goalId, gateId, "passed");
 					// Freeze hook (cached re-signal path) — see
-					// docs/design/nested-goals.md §6.1. Idempotent.
+					// docs/design/nested-goals.md §6.1. Idempotent. Broadcasts
+					// `goal_plan_frozen` (§9) on the first transition only.
 					if (gateId === "goal-plan" && goal.workflow) {
 						const execGate = goal.workflow.gates.find(g => g.id === "execution");
 						if (execGate) {
 							if (!execGate.metadata) execGate.metadata = {};
 							if (execGate.metadata.frozen !== "true") {
+								const frozenAt = Date.now();
 								execGate.metadata.frozen = "true";
-								execGate.metadata.frozenAt = String(Date.now());
+								execGate.metadata.frozenAt = String(frozenAt);
 								gateSignalCtx.goalStore.update(goalId, { workflow: goal.workflow });
+								broadcastToGoal(goalId, {
+									type: "goal_plan_frozen",
+									goalId,
+									gateId: execGate.id,
+									frozenAt,
+								});
 							}
 						}
 					}
@@ -4833,9 +4923,17 @@ async function handleApiRoute(
 			if (execGate) {
 				if (!execGate.metadata) execGate.metadata = {};
 				if (execGate.metadata.frozen !== "true") {
+					const frozenAt = Date.now();
 					execGate.metadata.frozen = "true";
-					execGate.metadata.frozenAt = String(Date.now());
+					execGate.metadata.frozenAt = String(frozenAt);
 					gateSignalCtx.goalStore.update(goalId, { workflow: goal.workflow });
+					// Broadcast `goal_plan_frozen` (§9) on the first transition.
+					broadcastToGoal(goalId, {
+						type: "goal_plan_frozen",
+						goalId,
+						gateId: execGate.id,
+						frozenAt,
+					});
 				}
 			}
 		}
@@ -5769,6 +5867,15 @@ async function handleApiRoute(
 				});
 			} else {
 				json({ merged: false, conflict: true, output: result.output }, 409);
+				// Broadcast `goal_merge_conflict` (§9) so dashboard viewers
+				// can surface the conflict to the team-lead. The sibling
+				// `goal_merge_complete` event already fires on success.
+				broadcastToGoal(parentGoalId, {
+					type: "goal_merge_conflict",
+					parentGoalId,
+					childGoalId,
+					output: result.output,
+				});
 			}
 		} catch (err) {
 			json({ error: String(err) }, 400);

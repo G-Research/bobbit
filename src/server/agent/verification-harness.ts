@@ -1211,6 +1211,49 @@ export class VerificationHarness {
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		goalSpec?: string,
 	): Promise<void> {
+		// Child-goal short-circuit for `ready-to-merge` (design §3.4). When a
+		// child goal (`mergeTarget === "parent"`) signals its ready-to-merge
+		// gate we auto-pass without running the underlying verify[] (which is
+		// authored for top-level goals merging into master — Branch pushed /
+		// Master merged into branch / PR raised — and would all fail for a
+		// child branch). The actual local merge is performed by the parent's
+		// subgoal verify-step harness loop (§2.3 / §3.3) via
+		// `mergeChildBranchLocal`. Synthetic single-step result preserves the
+		// gate-passed audit trail; downstream listeners (parent's harness loop)
+		// observe `gate_status_changed → passed` exactly like a real run.
+		if (signal.gateId === "ready-to-merge") {
+			const goalForGate = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+			if (goalForGate?.mergeTarget === "parent") {
+				const syntheticStep: GateSignalStep = {
+					name: "Child ready-to-merge",
+					type: "command",
+					passed: true,
+					output: "Child goal — merge handled by parent.",
+					duration_ms: 0,
+				};
+				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
+					status: "passed",
+					steps: [syntheticStep],
+				});
+				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "passed");
+				this.broadcastFn(signal.goalId, {
+					type: "gate_verification_complete",
+					goalId: signal.goalId,
+					gateId: signal.gateId,
+					signalId: signal.id,
+					status: "passed",
+				});
+				this.broadcastFn(signal.goalId, {
+					type: "gate_status_changed",
+					goalId: signal.goalId,
+					gateId: signal.gateId,
+					status: "passed",
+				});
+				this.notifyTeamLead(signal.goalId, signal.gateId, "passed");
+				return;
+			}
+		}
+
 		const steps = gate.verify;
 		if (!steps || steps.length === 0) {
 			// No verification — auto-pass
