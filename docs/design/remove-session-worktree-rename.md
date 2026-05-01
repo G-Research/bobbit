@@ -1,8 +1,9 @@
 # Remove session worktree & branch renaming
 
-**Status:** Design (proposed)
+**Status:** Implemented.
 **Goal:** `goal-remove-poo-29a70b7e`
 **Supersedes (partially):** `docs/design/multi-repo-components.md` §5.4 (session rename-on-first-prompt mechanics).
+**See also:** [`AGENTS.md`](../../AGENTS.md) (Recipes → Pool claim flow; Debugging → Session persistence) and [`docs/internals.md` — Session worktrees](../internals.md#session-worktrees) for the canonical current-behaviour summary.
 
 ## 1. Problem
 
