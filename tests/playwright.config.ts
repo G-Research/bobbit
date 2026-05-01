@@ -4,5 +4,9 @@ export default defineConfig({
 	testDir: ".",
 	testMatch: "**/*.spec.ts",
 	testIgnore: ["e2e/**", "fullstack/**", "manual-integration/**"],
-	timeout: 15_000,
+	// 15s was tight for browser-fixture page setup under heavy parallel
+	// load (gate verification runs unit + e2e + reviews concurrently on
+	// the same machine). 30s gives a comfortable headroom for the
+	// Chromium launch + first paint without masking real test bugs.
+	timeout: 30_000,
 });
