@@ -31,8 +31,16 @@ detail_docs: |-
 
   ## Side effects
 
-  - The child's worktree is removed.
-  - The child's remote branch is push-deleted (gated by `shouldSkipRemotePush()` so test mode doesn't touch the remote).
   - The child's team-lead session terminates.
   - Any buffered mutations targeting the archived goal are dropped.
   - WebSocket event `goal_archived` is broadcast to subscribers of the goal's tree.
+
+  ## What is NOT removed
+
+  Archiving deliberately does NOT delete the child's git branch (locally or on origin) or remove its worktree directory. This preserves the work-in-progress as a fallback for cherry-picking: if a fresh re-spawn under the same `planId` produces inferior output, the archived branch still carries the earlier attempt's commits. Live integration test confirmed this rescue pattern is real (PR #409 — a zombie sibling's architect had produced superior ADRs that the live attempt cherry-picked).
+
+  Branch / worktree cleanup happens later via the deferred 7-day session purge, OR explicitly via the multi-repo `cleanupWorktree` path on multi-repo projects. If you genuinely need the branch gone immediately, raise a follow-up bug — it'll need a new flag rather than changing the default.
+
+  ## Worktree cleanup for multi-repo projects
+
+  Multi-repo goals fan out per-repo worktrees. On archive, each per-repo worktree IS removed via `cleanupWorktree(repoPath, wt, branch, deleteBranch=true)` (gated by `shouldSkipRemotePush()` so test mode doesn't touch the remote). The branch deletion in this case is intentional — multi-repo per-repo branches don't carry independent value once the goal is shelved.
