@@ -170,7 +170,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Unit tests", type: "command", phase: 1, timeout: 900, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
@@ -211,7 +211,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Unit tests", type: "command", phase: 1, timeout: 900, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
@@ -281,7 +281,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
 					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Repro test passes (bug fixed)", type: "command", phase: 1, run: "{{reproducing-test.meta.test_command}}", expect: "success" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Unit tests", type: "command", phase: 1, timeout: 900, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
@@ -311,7 +311,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Unit tests", type: "command", phase: 1, timeout: 900, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 				],
