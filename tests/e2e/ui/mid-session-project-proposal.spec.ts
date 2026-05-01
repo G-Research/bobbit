@@ -122,4 +122,69 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		const cfg = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
 		expect(cfg.build_command).toBe("dismiss-baseline");
 	});
+
+	test("Settings tab reflects accepted proposal without a hard reload", async ({ page }) => {
+		const projectId = await getDefaultProjectId();
+
+		// Seed a baseline so we can verify the change later. The Components tab
+		// is the canonical surface for build/test commands after the multi-repo
+		// migration; the legacy `build_command` field is folded into
+		// components[0].commands.build by the server.
+		await apiFetch(`/api/projects/${projectId}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ build_command: "settings-cache-baseline" }),
+		});
+
+		await openApp(page);
+
+		// 1. Visit Settings → Components tab to PRIME the per-project config
+		//    cache (`projectScopeConfigCache` in `settings-page.ts`). The
+		//    baseline value should be visible before the proposal accept.
+		await page.evaluate((id) => { window.location.hash = `#/settings/${id}/components`; }, projectId);
+		const componentCard = page.locator('[data-testid="component-card"]').first();
+		await expect(componentCard).toBeVisible({ timeout: 15_000 });
+		// Expand the card so the commands rows are present in the DOM.
+		await componentCard.locator('.wf-gate-header').first().click();
+		// Find the build command row by inspecting all command-key inputs.
+		// Lit binds `.value` as a property, not as an HTML attribute, so a
+		// `[value="build"]` CSS selector does not match — we read inputValue
+		// via page.evaluate instead.
+		const readBuildValue = async () => page.evaluate(() => {
+			const rows = Array.from(document.querySelectorAll('[data-testid="command-row"]'));
+			for (const row of rows) {
+				const keyInput = row.querySelector<HTMLInputElement>('[data-testid="command-key"]');
+				if (keyInput?.value === "build") {
+					const valInput = row.querySelector<HTMLInputElement>('[data-testid="command-value"]');
+					return valInput?.value ?? null;
+				}
+			}
+			return null;
+		});
+		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("settings-cache-baseline");
+
+		// 2. Open a session, trigger a propose_project, click Apply Changes.
+		await createSessionViaUI(page);
+		await sendMessage(page, "Please emit a project_proposal for testing");
+
+		const projectTab = page.locator("button.goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		await expect(projectTab).toBeVisible({ timeout: 15_000 });
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 10_000 });
+		const applyBtn = panel.locator("button", { has: page.locator('[data-testid="accept-label"]') }).first();
+		await applyBtn.click();
+		await expect(projectTab).toHaveCount(0, { timeout: 10_000 });
+
+		// 3. Server-side state confirmation: the new value is on disk.
+		const cfg = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
+		expect(cfg.build_command).toBe("npm run build");
+
+		// 4. Navigate back to the SAME Settings tab WITHOUT a page reload.
+		//    Without the cache invalidator, the Components tab would still
+		//    render the stale `settings-cache-baseline` value.
+		await page.evaluate((id) => { window.location.hash = `#/settings/${id}/components`; }, projectId);
+		const componentCard2 = page.locator('[data-testid="component-card"]').first();
+		await expect(componentCard2).toBeVisible({ timeout: 15_000 });
+		await componentCard2.locator('.wf-gate-header').first().click();
+		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("npm run build");
+	});
 });

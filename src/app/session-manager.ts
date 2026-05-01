@@ -23,6 +23,7 @@ import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
+import { invalidateProjectScopeConfig } from "./settings-page.js";
 import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
@@ -1862,6 +1863,10 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 
 	// Refresh
 	setProjects(await fetchProjects());
+	// Settings page caches /api/projects/:id/config{,/resolved} per-project; the
+	// PUT above bypassed it, so invalidate explicitly to keep the Settings tab
+	// coherent without forcing the user to hard-reload.
+	invalidateProjectScopeConfig(projectId);
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
 	if (proposal.sessionId) {
@@ -1964,6 +1969,9 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 
 	// 3. Refresh projects list; clear proposal; stay connected.
 	try { setProjects(await fetchProjects()); } catch { /* ignore */ }
+	// Invalidate the Settings page's per-project config cache so its tab picks
+	// up the just-applied changes the next time it renders (no hard reload).
+	invalidateProjectScopeConfig(projectId);
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
 	deleteProjectDraft(propSessionId);
