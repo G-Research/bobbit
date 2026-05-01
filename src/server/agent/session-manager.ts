@@ -2888,19 +2888,19 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		}).finally(() => { session.pendingMetadataPersist = undefined; });
 
-		// Register parked Promise BEFORE sending the delegate prompt so the
+		// Persist the delegate metadata BEFORE sending the prompt so the
 		// active-delegates.json entry exists on disk before any failure window
-		// (e.g. spawn crash, gateway crash). The parent's `/wait` POST drains
-		// the harness's parked Promise; here in the live path we don't actually
-		// await the returned Promise — the parent will register its own awaiter
-		// from the tool extension. We only need the persistence side-effect plus
-		// a completion listener so the result eventually flows.
+		// (spawn crash, gateway crash). We use `recordActive()` rather than
+		// `register()`: `register()` would create a fire-and-forget pending
+		// Promise that the live-path completion listener (attached below) would
+		// resolve into, consuming the result before the parent's `/wait` POST
+		// arrives — leaving the real awaiter to hang. With `recordActive()`
+		// the harness has a metadata-only "shell"; if the child completes fast,
+		// `submit()` against a shell-only key latches the result and the
+		// parent's later `register()` drains the latch.
 		if (this._delegateHarness && opts.toolUseId) {
 			try {
-				// Fire-and-forget the Promise — the harness records the entry on disk
-				// and will resolve it when the parent's /wait POST registers a real
-				// awaiter (drains any latched result) or when submit() arrives first.
-				void this._delegateHarness.register({
+				this._delegateHarness.recordActive({
 					parentSessionId,
 					toolUseId: opts.toolUseId,
 					delegateSessionId: id,
@@ -2910,14 +2910,10 @@ export class SessionManager {
 					instructions: opts.instructions,
 					timeoutMs: opts.timeoutMs ?? 600_000,
 					createdAt: Date.now(),
-				}).catch(err => {
-					// Promise rejection only fires on rejectAllForSession or supersede;
-					// neither is an error here.
-					void err;
 				});
 				this.attachDelegateCompletionListener(id, parentSessionId, opts.toolUseId);
 			} catch (err) {
-				console.error(`[session-manager] Failed to register delegate ${id} with harness:`, err);
+				console.error(`[session-manager] Failed to record delegate ${id} with harness:`, err);
 			}
 		}
 

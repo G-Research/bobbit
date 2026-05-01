@@ -343,6 +343,70 @@ test.describe("delegate restart resilience (API)", () => {
 		// Verify the harness state is clean for that parent.
 		const ids = gateway.sessionManager.getDelegateHarness().getActiveDelegateSessionIds();
 		expect(ids.has(childId)).toBe(false);
+
+		// CRITICAL: assert the child session was actually cascade-terminated by
+		// the server's addTerminationListener (server.ts), not just removed from
+		// the harness map. A previous regression had the harness's own listener
+		// consume `pending` first, leaving the server-side listener with an empty
+		// kill-list — children stayed alive. The fix removed the harness's auto
+		// subscription so server.ts is the sole owner of the cascade.
+		await waitForCondition(
+			() => {
+				const child = gateway.sessionManager.getSession(childId);
+				return !child || child.status === "terminated";
+			},
+			{ timeoutMs: 3_000, message: "child delegate session to be cascade-terminated" },
+		);
+	});
+
+	test("D-RST-08: live-path race — child completes BEFORE parent registers /wait, result is latched", async ({ gateway }) => {
+		// Regression test for the pre-registration race: createDelegateSession
+		// must NOT pre-register a parked Promise on the harness, because the
+		// live-path completion listener would then resolve that fire-and-forget
+		// Promise instead of latching the result for the parent's later /wait
+		// POST. The fix uses harness.recordActive() (metadata-only shell) so
+		// submit-before-register correctly latches.
+		const harness = gateway.sessionManager.getDelegateHarness();
+		const parentSessionId = `parent-rst-08`;
+		const toolUseId = `tu_rst_08_${Date.now()}`;
+		const delegateSessionId = `child-rst-08`;
+
+		// Step 1: live path records active metadata (no parked Promise).
+		harness.recordActive({
+			parentSessionId,
+			toolUseId,
+			delegateSessionId,
+			cwd: "",
+			instructions: "",
+			timeoutMs: 30_000,
+			createdAt: Date.now(),
+		});
+		expect(harness.getActiveDelegateSessionIds().has(delegateSessionId)).toBe(true);
+
+		// Step 2: child finishes very fast — completion listener calls submit.
+		// With the bug: this would resolve a pre-registered fire-and-forget Promise
+		// and the result would be lost. With the fix: it latches.
+		const drained = harness.submit(parentSessionId, toolUseId, {
+			status: "completed",
+			output: "fast-output",
+		});
+		expect(drained).toBe(false); // No pending awaiter — result was latched.
+
+		// Step 3: parent now registers (the /wait POST arrives). It must drain
+		// the latch immediately rather than parking and timing out.
+		const result = await harness.register({
+			parentSessionId,
+			toolUseId,
+			delegateSessionId,
+			cwd: "",
+			instructions: "",
+			timeoutMs: 30_000,
+			createdAt: Date.now(),
+		});
+		expect(result).toEqual({ status: "completed", output: "fast-output" });
+
+		// Step 4: harness state cleared after drain.
+		expect(harness.getActiveDelegateSessionIds().has(delegateSessionId)).toBe(false);
 	});
 
 	test("D-RST-06: idempotent submit — second arrival is a no-op", async ({ gateway }) => {

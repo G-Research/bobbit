@@ -103,7 +103,6 @@ export class DelegateHarness {
 	 */
 	private shells = new Map<DelegateKey, ActiveDelegate>();
 	private readonly persistPath: string;
-	private readonly broadcastFn: DelegateBroadcastFn | undefined;
 
 	constructor(
 		stateDir: string,
@@ -111,15 +110,42 @@ export class DelegateHarness {
 		broadcastFn?: DelegateBroadcastFn,
 	) {
 		this.persistPath = path.join(stateDir, "active-delegates.json");
-		this.broadcastFn = broadcastFn;
 		this._loadFromDisk();
-		// Constructor-tolerant registration: tests pass minimal stubs without
-		// addTerminationListener; production wiring uses the full SessionManager.
-		if (sessionManager && typeof sessionManager.addTerminationListener === "function") {
-			sessionManager.addTerminationListener((sessionId, info) => {
-				this._onSessionTerminated(sessionId, info);
-			});
-		}
+		// Note: termination cascade is owned by `server.ts` so the caller can
+		// also terminate child sessions with the killed-id list. We deliberately
+		// do NOT auto-subscribe `addTerminationListener` here — doing both at the
+		// harness level and the server level would race: the harness listener
+		// would consume `pending`/`shells`/`latched` first, leaving the server
+		// listener with an empty `killed` list and no children to terminate.
+		// The `sessionManager` and `broadcastFn` parameters are preserved for
+		// symmetry with VerificationHarness and to leave hooks for tests / future
+		// telemetry without changing the signature.
+		void sessionManager;
+		void broadcastFn;
+	}
+
+	/**
+	 * Persist metadata about an in-flight delegate WITHOUT creating a parked
+	 * Promise. Used by the live path (`SessionManager.createDelegateSession`)
+	 * so the on-disk state exists before the parent's `/wait` POST arrives.
+	 *
+	 * If a fast child completes via `submit()` before the parent registers,
+	 * the harness sees no `pending` entry (only this shell), and `submit()`
+	 * latches the result. The parent's later `register()` call drains the
+	 * latch immediately. This avoids the live-path race where a
+	 * pre-registered Promise would consume the result fire-and-forget,
+	 * leaving the parent's real wait to hang.
+	 *
+	 * Idempotent: calling with an existing `(parent, toolUseId)` key is a
+	 * no-op when the harness already has a real `pending` entry (parent
+	 * already arrived). When the key is fresh, it adds a shell.
+	 */
+	recordActive(active: ActiveDelegate): void {
+		const key = delegateKey(active.parentSessionId, active.toolUseId);
+		if (this.pending.has(key)) return;
+		if (this.shells.has(key)) return;
+		this.shells.set(key, active);
+		this._persist();
 	}
 
 	/**
@@ -248,21 +274,6 @@ export class DelegateHarness {
 	// ---------------------------------------------------------------------
 	// Internals
 	// ---------------------------------------------------------------------
-
-	private _onSessionTerminated(
-		sessionId: string,
-		info: { reason: "terminated" | "archived" | "purged" },
-	): void {
-		// Parent terminated/archived → reject all of its pending waits and drop
-		// matching latched results. Cascade-termination of children is the
-		// caller's responsibility (server.ts wires it via the returned list).
-		const reason = info.reason === "archived" ? "Parent session archived" : "Parent session terminated";
-		this.rejectAllForSession(sessionId, reason);
-		// Note: when a *delegate* (child) session terminates, the live-path
-		// completion listener installed by SessionManager submits the structured
-		// result. We don't need to do anything here for the child case.
-		void this.broadcastFn; // suppress unused warning when no broadcaster wired
-	}
 
 	/** Atomic write-then-rename. Recreates parent dir on demand. */
 	private _persist(): void {

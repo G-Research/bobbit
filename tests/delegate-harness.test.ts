@@ -228,21 +228,16 @@ describe("DelegateHarness", () => {
 		});
 	});
 
-	it("constructor wires addTerminationListener when SessionManager exposes it; rejects pending on parent terminate", async () => {
-		let captured: ((sessionId: string, info: { reason: "terminated" | "archived" | "purged" }) => void) | null = null;
+	it("constructor does NOT auto-subscribe addTerminationListener (cascade is owned by server.ts)", () => {
+		let subscribed = false;
 		const mockSm = {
-			addTerminationListener(fn: (sessionId: string, info: { reason: "terminated" | "archived" | "purged" }) => void) {
-				captured = fn;
+			addTerminationListener(_fn: (sessionId: string, info: { reason: "terminated" | "archived" | "purged" }) => void) {
+				subscribed = true;
 			},
 		};
 		const h = new DelegateHarness(stateDir, mockSm);
-		assert.ok(captured, "harness must register a termination listener");
-
-		const p = h.register(makeActive());
-		const settled = p.catch((e: Error) => e.message);
-		// Synthesise a parent-archive event.
-		(captured as unknown as (sessionId: string, info: { reason: "terminated" | "archived" | "purged" }) => void)("parent-1", { reason: "archived" });
-		assert.equal(await settled, "Parent session archived");
+		assert.equal(subscribed, false, "harness must NOT auto-subscribe — server.ts owns cascade so killed children can be terminated");
+		void h;
 	});
 
 	it("constructor tolerates a SessionManager stub without addTerminationListener", () => {
@@ -250,6 +245,38 @@ describe("DelegateHarness", () => {
 		// Just constructing without throwing is the contract.
 		h.register(makeActive()).catch(() => { /* ignore */ });
 		h.submit("parent-1", "tu_1", { status: "completed", output: "" });
+	});
+
+	it("recordActive: persists shell metadata without creating a pending Promise", () => {
+		const h = new DelegateHarness(stateDir);
+		h.recordActive(makeActive());
+		assert.equal(h.getActiveDelegates().length, 1);
+		// submit BEFORE register (live-path race) latches into latched, not pending.
+		h.submit("parent-1", "tu_1", { status: "completed", output: "early" });
+		// Now the parent's wait POST arrives — register drains the latch.
+		return h.register(makeActive()).then(result => {
+			assert.equal(result.status, "completed");
+			assert.equal(result.output, "early");
+		});
+	});
+
+	it("recordActive: idempotent — second call with same key is a no-op when shell already exists", () => {
+		const h = new DelegateHarness(stateDir);
+		h.recordActive(makeActive({ title: "first" }));
+		h.recordActive(makeActive({ title: "second" }));
+		const all = h.getActiveDelegates();
+		assert.equal(all.length, 1);
+		assert.equal(all[0].title, "first", "first wins; second is a no-op");
+	});
+
+	it("recordActive: no-op when a real pending Promise already exists for the key", async () => {
+		const h = new DelegateHarness(stateDir);
+		const p = h.register(makeActive({ title: "real" }));
+		h.recordActive(makeActive({ title: "shell-attempt" }));
+		h.submit("parent-1", "tu_1", { status: "completed", output: "" });
+		await p;
+		// Pending entry kept its real resolver; recordActive did not overwrite.
+		// (No assertion needed beyond the awaited submit completing successfully.)
 	});
 
 	it("getActiveDelegateSessionIds returns the in-flight delegate child ids", () => {
