@@ -1,4 +1,78 @@
 /**
+ * mock-agent-core.mjs — supported user-prompt triggers
+ * ====================================================
+ *
+ * The mock LLM agent inspects the user prompt text for these phrases and
+ * selects a canned response pattern. Every trigger emits production-shape
+ * events (multi-delta message_update, tool_execution_* lifecycle, role-correct
+ * message_end) so any production reducer / state-machine change is exercised
+ * by tests that use these triggers.
+ *
+ * Busy / wait
+ * -----------
+ *  STAY_BUSY:<ms>           Emit one Bash tool_execution_start, tick <ms>,
+ *                           then tool_execution_end. Default for prompts
+ *                           with no other trigger is busyMs=10.
+ *  STAY_BUSY:propose_<type>:<n>
+ *                           Emit N message_update deltas streaming a
+ *                           propose_<type> tool_use, then message_end +
+ *                           tool_execution_* lifecycle. Stable block id
+ *                           so RemoteAgent's _processedProposalIds dedup
+ *                           engages.
+ *  BG_WAIT:<ms>             Drive the real gateway BgProcessManager:
+ *                           POST a `sleep <ceil(ms/1000)>` bg process,
+ *                           long-poll wait. abortAllWaits resolves it on
+ *                           steer/stop. Multi-delta message_update on both
+ *                           the create and wait assistant messages.
+ *  BG_WAIT_NOID:<ms>        Synthetic-event variant retained for the
+ *                           dual-render regression test. Emits one
+ *                           bash_bg.wait toolCall in an assistant
+ *                           message_end with NO `id` field, parks for
+ *                           <ms> ms, then closes. No real bg process.
+ *
+ * Bursts
+ * ------
+ *  MIXED_BURST:<n>          n cycles (1..6) of [propose_goal + BG_WAIT 1.5s].
+ *                           Stresses the message-ordering reducer.
+ *  STREAM_BURST:<n>         Like MIXED_BURST, plus chunked-text streams
+ *                           before (no final message_end) and after each
+ *                           bash_bg.wait. Reproduces transient client-state
+ *                           bugs cleared by browser refresh.
+ *
+ * Tools (real fs / shell)
+ * -----------------------
+ *  Read:<path>              fs.readFileSync(path, "utf-8") → output.
+ *  Write:<path>::<content>  Recursive mkdir + writeFileSync.
+ *  Edit:<path>::<old>::<new>  read + replace + write.
+ *  Bash:<cmd>               execSync(cmd, {cwd, timeout:10_000}).
+ *
+ * Proposals (assistant-driven)
+ * ----------------------------
+ *  goal_proposal / goal proposal       → propose_goal
+ *  project_proposal / project proposal → propose_project
+ *  proposal_burst                      → 3x propose_goal in one turn
+ *  GOAL_PROPOSAL_PARITY[_EDIT] / PROJECT_PROPOSAL_PARITY[_EDIT] /
+ *  ROLE_PROPOSAL_PARITY[_EDIT] / TOOL_PROPOSAL_PARITY[_EDIT] /
+ *  STAFF_PROPOSAL_PARITY[_EDIT]        → UX-parity matrix triggers
+ *  EDITABLE_PROPOSAL_INITIAL / EDITABLE_PROPOSAL_EDIT
+ *                                      → editable-proposals seed/edit
+ *  (See _decideToolAction / respondToPrompt for the full matcher table.)
+ *
+ * UI primitives
+ * -------------
+ *  ask_user_choices         Single-select widget.
+ *  ask_user_choices_multi   Multi-select widget.
+ *
+ * Steer (RPC, not a prompt-text trigger)
+ * --------------------------------------
+ *  Steer commands (handleCommand → case "steer") emit a synchronous
+ *  [STEER_RECEIVED] <text> assistant message for back-compat with
+ *  tests/e2e/steer-midturn.spec.ts and tests/e2e/ui/bg-wait-steer-flow.spec.ts,
+ *  then abort the in-flight turn and queue a fresh handlePrompt(steeredText)
+ *  which produces a real <user-message> in the chat.
+ *
+ * ----------------------------------------------------------------------
+ *
  * Core mock agent logic, extracted from mock-agent.mjs as a per-session class.
  *
  * Used in two modes:
@@ -17,6 +91,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { execSync } from "node:child_process";
 
 /**
  * @typedef {Object} MockAgentOptions
@@ -412,13 +487,18 @@ export class MockAgentCore {
 			return;
 		}
 
-		// BG_WAIT:<ms> — emit an assistant message_end with a single bash_bg.wait
-		// toolCall block AND no `id` field on the message itself, mimicking the
-		// real LLM stream that triggers the dual-render bug. The toolCall id is
-		// stable so the synthetic-id fallback `synth:tc:<id>` is deterministic.
-		const bgWaitMatch = text.match(/BG_WAIT:(\d+)/);
-		if (bgWaitMatch) {
-			const waitMs = parseInt(bgWaitMatch[1], 10);
+		// BG_WAIT_NOID:<ms> — emit an assistant message_end with a single
+		// bash_bg.wait toolCall block AND no `id` field on the message itself,
+		// mimicking the real LLM stream that triggers the dual-render bug.
+		// The toolCall id is stable so the synthetic-id fallback
+		// `synth:tc:<id>` is deterministic. Used by
+		// tests/e2e/ui/bg-wait-no-dup.spec.ts. Distinct from BG_WAIT:<ms>
+		// (real-process flow, handled below) because the regression specifically
+		// targets the synthetic-event timing where message_end races ahead of
+		// the pendingToolCalls update.
+		const bgWaitNoidMatch = text.match(/BG_WAIT_NOID:(\d+)/);
+		if (bgWaitNoidMatch) {
+			const waitMs = parseInt(bgWaitNoidMatch[1], 10);
 			const toolId = "tc-bg-wait-1";
 			const assistantMsg = {
 				role: "assistant",
@@ -524,8 +604,16 @@ export class MockAgentCore {
 		// Delay before completing — only stay busy when tests explicitly request it.
 		const lower = text.toLowerCase();
 		const busyMatch = text.match(/STAY_BUSY:(\d+)/);
+		// BG_WAIT:<ms> — drive the REAL gateway BgProcessManager via REST.
+		const bgWaitMatch = text.match(/BG_WAIT:(\d+)/);
+		// MIXED_BURST:N — N alternating (propose_goal, real bash_bg create+wait) cycles.
+		const mixedBurstMatch = text.match(/MIXED_BURST:(\d+)/);
+		// STREAM_BURST:N — like MIXED_BURST plus chunked-text streams around each wait.
+		const streamBurstMatch = text.match(/STREAM_BURST:(\d+)/);
 		let busyMs = 10;
-		if (busyMatch) {
+		if (bgWaitMatch) {
+			busyMs = parseInt(bgWaitMatch[1], 10);
+		} else if (busyMatch) {
 			busyMs = parseInt(busyMatch[1], 10);
 		} else if (lower.includes("sleep 120") || lower.includes("sleep 60")) {
 			busyMs = 60000;
@@ -533,7 +621,33 @@ export class MockAgentCore {
 			busyMs = 500;
 		}
 
-		if (busyMs > 100) {
+		if (streamBurstMatch) {
+			const n = Math.max(1, Math.min(6, parseInt(streamBurstMatch[1], 10)));
+			await this._handleStreamBurst(n);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (mixedBurstMatch) {
+			const n = Math.max(1, Math.min(6, parseInt(mixedBurstMatch[1], 10)));
+			await this._handleMixedBurst(n);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (bgWaitMatch && busyMs > 100) {
+			// Drive the REAL gateway BgProcessManager via the same REST endpoints
+			// the production bash_bg extension uses. This means a real OS `sleep`
+			// runs server-side, the pill strip in the UI engages, and the wait
+			// long-poll resolves via the production code path —
+			// SessionManager._dispatchSteeredMessages calls bg.abortAllWaits which
+			// aborts the registered AbortController for this very HTTP request.
+			await this._handleRealBgWait(busyMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (busyMs > 100) {
 			const busyToolId = `tool_busy_${Date.now()}`;
 			this.emit({ type: "tool_execution_start", toolName: "Bash", toolId: busyToolId, input: { command: "sleep" } });
 			await this.tick(busyMs);
@@ -657,6 +771,319 @@ export class MockAgentCore {
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Mixed burst: emit N alternating (propose_goal assistant turn, bash_bg
+	 * create+wait pair) cycles in a single turn. Each propose_goal emits a
+	 * full assistant message + toolResult; each bash_bg cycle drives the real
+	 * gateway BgProcessManager via REST and waits ~1.5s. This is the exact
+	 * event-mix that historically caused proposal widgets to duplicate or
+	 * land out of order — the unified message-ordering reducer in
+	 * src/app/message-reducer.ts is the production code under test.
+	 */
+	async _handleMixedBurst(n) {
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// ── propose_goal turn ─────────────────────────────────
+			const propToolId = `tool_burst_${Date.now()}_${i}_${Math.random().toString(36).slice(2,5)}`;
+			const propInput = {
+				title: `Burst Goal ${i + 1}`,
+				workflow: "general",
+				spec: `proposal #${i + 1} in mixed burst`,
+			};
+			this.emit({ type: "tool_execution_start", toolName: "propose_goal", toolId: propToolId, input: propInput });
+			const propAssistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "text", text: `Proposing goal ${i + 1} of ${n}…` },
+					{ type: "toolCall", id: propToolId, name: "propose_goal", arguments: propInput, input: propInput },
+				],
+			};
+			this.conversationMessages.push(propAssistantMsg);
+			this.emit({ type: "message_update", message: propAssistantMsg });
+			await this.tick(20);
+			this.emit({ type: "message_end", message: propAssistantMsg });
+			const propOutput = `Proposal (${propInput.title}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId: propToolId, toolName: "propose_goal", status: "complete", output: propOutput });
+			this.emit({ type: "tool_execution_end", toolCallId: propToolId, toolName: "propose_goal", isError: false });
+			const propResultMsg = {
+				role: "toolResult",
+				toolCallId: propToolId,
+				toolName: "propose_goal",
+				isError: false,
+				content: [{ type: "text", text: propOutput }],
+			};
+			this.conversationMessages.push(propResultMsg);
+			this.emit({ type: "message_end", message: propResultMsg });
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// ── bash_bg create + wait (real, ~1.5s) ──────────────────
+			await this._handleRealBgWait(1500);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+		const doneMsg = { role: "assistant", content: [{ type: "text", text: `MIXED_BURST_DONE:${n}` }] };
+		this.conversationMessages.push(doneMsg);
+		this.emit({ type: "message_end", message: doneMsg });
+	}
+
+	/**
+	 * Like _handleMixedBurst, but each cycle interleaves a chunked-streamed
+	 * assistant text BETWEEN the proposal and the bash_bg.wait, then a
+	 * second chunked-streamed text AFTER the wait. Reproduces transient
+	 * client-side message duplication / out-of-order rendering bugs.
+	 */
+	async _handleStreamBurst(n) {
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 1. propose_goal turn
+			const propToolId = `tool_sburst_${Date.now()}_${i}_${Math.random().toString(36).slice(2,5)}`;
+			const propInput = {
+				title: `Stream Goal ${i + 1}`,
+				workflow: "general",
+				spec: `proposal #${i + 1} in stream burst`,
+			};
+			this.emit({ type: "tool_execution_start", toolName: "propose_goal", toolId: propToolId, input: propInput });
+			const propAssistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "text", text: `Proposing stream goal ${i + 1} of ${n}…` },
+					{ type: "toolCall", id: propToolId, name: "propose_goal", arguments: propInput, input: propInput },
+				],
+			};
+			this.conversationMessages.push(propAssistantMsg);
+			this.emit({ type: "message_update", message: propAssistantMsg });
+			await this.tick(20);
+			this.emit({ type: "message_end", message: propAssistantMsg });
+			const propOutput = `Proposal (${propInput.title}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId: propToolId, toolName: "propose_goal", status: "complete", output: propOutput });
+			this.emit({ type: "tool_execution_end", toolCallId: propToolId, toolName: "propose_goal", isError: false });
+			const propResultMsg = {
+				role: "toolResult",
+				toolCallId: propToolId,
+				toolName: "propose_goal",
+				isError: false,
+				content: [{ type: "text", text: propOutput }],
+			};
+			this.conversationMessages.push(propResultMsg);
+			this.emit({ type: "message_end", message: propResultMsg });
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 2. Pre-wait chunked streamed text — deliberately omit the final
+			//    message_end, mimicking the LLM abandoning partial text to
+			//    pivot to a tool_use.
+			await this._streamChunkedText(`PRE-WAIT-CHUNK-${i + 1}`, 30, { omitFinalEnd: true });
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 3. Real bash_bg create + wait (~1.5s).
+			await this._handleRealBgWait(1500);
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 4. Post-wait chunked streamed text — finalises so next iteration
+			//    starts clean.
+			await this._streamChunkedText(`POST-WAIT-CHUNK-${i + 1}`, 30);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+		const doneMsg = { role: "assistant", content: [{ type: "text", text: `STREAM_BURST_DONE:${n}` }] };
+		this.conversationMessages.push(doneMsg);
+		this.emit({ type: "message_end", message: doneMsg });
+	}
+
+	/**
+	 * Stream chunked assistant text.
+	 * @param label string  prefix for each chunk so they're identifiable in the report
+	 * @param chunkCount number  how many message_update events to emit
+	 * @param opts.omitFinalEnd boolean  when true, do NOT emit the final message_end.
+	 * @param opts.omitId boolean  when true, do NOT include `id` on the message_update payloads.
+	 */
+	async _streamChunkedText(label, chunkCount, opts = {}) {
+		const msgId = opts.omitId ? undefined : `msg_stream_${Date.now()}_${Math.random().toString(36).slice(2,5)}`;
+		let acc = "";
+		for (let i = 0; i < chunkCount; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+			const chunk = `[${label}#${String(i + 1).padStart(2, "0")}] `;
+			acc += chunk;
+			const partial = {
+				role: "assistant",
+				content: [{ type: "text", text: acc }],
+			};
+			if (msgId) partial.id = msgId;
+			this.emit({ type: "message_update", message: partial });
+			await this.tick(8);
+		}
+		if (opts.omitFinalEnd) return;
+		const finalMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: acc }],
+		};
+		if (msgId) finalMsg.id = msgId;
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+	}
+
+	/**
+	 * Drive a real bash_bg create+wait via the gateway REST API the production
+	 * bash_bg extension uses. The pill strip above the composer engages because
+	 * a real BgProcessManager entry exists; the long-poll wait is resolved by
+	 * SessionManager.abortAllWaits via the production code path on steer/stop.
+	 * Multi-delta message_update on both the create and wait assistant
+	 * messages so the reducer / streaming-message-id code paths exercise the
+	 * realistic real-LLM event shape.
+	 */
+	async _handleRealBgWait(durationMs) {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gwUrl = null;
+		}
+		if (!gwUrl || !sessionId) {
+			// Out-of-process / unit-test usage — fall back to a plain tick.
+			await this.tick(durationMs);
+			return;
+		}
+
+		const gwReq = (method, p, body) => new Promise((resolve, reject) => {
+			const u = new URL(`${gwUrl}${p}`);
+			const payload = body ? JSON.stringify(body) : null;
+			const headers = { "Authorization": `Bearer ${token}` };
+			if (payload) {
+				headers["Content-Type"] = "application/json";
+				headers["Content-Length"] = Buffer.byteLength(payload);
+			}
+			const opts = {
+				method,
+				hostname: u.hostname,
+				port: u.port,
+				path: u.pathname + (u.search || ""),
+				headers,
+				timeout: Math.max(durationMs * 2, 30_000),
+			};
+			const req = http.request(opts, (res) => {
+				let data = "";
+				res.on("data", (c) => data += c);
+				res.on("end", () => {
+					try { resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }); }
+					catch { resolve({ status: res.statusCode, body: { error: data } }); }
+				});
+			});
+			req.on("error", reject);
+			req.on("timeout", () => { req.destroy(new Error("timeout")); });
+			if (payload) req.write(payload);
+			req.end();
+		});
+
+		// ── 1. CREATE ────────────────────────────────────────────
+		const createToolId = `tool_bgcreate_${Date.now()}`;
+		const sleepSecs = Math.max(1, Math.ceil(durationMs / 1000));
+		const command = `sleep ${sleepSecs}`;
+		const name = "long task";
+		const createInput = { action: "create", name, command };
+		this.emit({ type: "tool_execution_start", toolName: "bash_bg", toolId: createToolId, input: createInput });
+		const createAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: createToolId, name: "bash_bg", arguments: createInput, input: createInput }],
+		};
+		this.conversationMessages.push(createAssistantMsg);
+		// Real LLM agents stream the toolCall input progressively via
+		// multiple message_update deltas before the final message_end.
+		const NUM_CREATE_DELTAS = 4;
+		for (let i = 0; i < NUM_CREATE_DELTAS; i++) {
+			this.emit({ type: "message_update", message: createAssistantMsg });
+			await this.tick(20);
+		}
+		this.emit({ type: "message_end", message: createAssistantMsg });
+
+		let bgId;
+		try {
+			const createResp = await gwReq("POST", `/api/sessions/${sessionId}/bg-processes`, { command, name });
+			if (createResp.status !== 201 || !createResp.body?.id) {
+				throw new Error(`bg create failed: ${createResp.status} ${JSON.stringify(createResp.body)}`);
+			}
+			bgId = createResp.body.id;
+		} catch (err) {
+			const msg = `bg create error: ${err?.message || err}`;
+			this.emit({ type: "tool_execution_update", toolId: createToolId, toolName: "bash_bg", status: "complete", output: msg });
+			this.emit({ type: "tool_execution_end", toolCallId: createToolId, toolName: "bash_bg", isError: true });
+			return;
+		}
+
+		const createOutput = `ID: ${bgId} (${name})`;
+		this.emit({ type: "tool_execution_update", toolId: createToolId, toolName: "bash_bg", status: "complete", output: createOutput });
+		this.emit({ type: "tool_execution_end", toolCallId: createToolId, toolName: "bash_bg", isError: false });
+		const createResultMsg = {
+			role: "toolResult",
+			toolCallId: createToolId,
+			toolName: "bash_bg",
+			isError: false,
+			content: [{ type: "text", text: createOutput }],
+		};
+		this.conversationMessages.push(createResultMsg);
+		this.emit({ type: "message_end", message: createResultMsg });
+
+		// ── 2. WAIT (long-poll — abortAllWaits resolves it on steer/stop) ───
+		const waitToolId = `tool_bgwait_${Date.now()}`;
+		const waitInput = { action: "wait", id: bgId, name };
+		this.emit({ type: "tool_execution_start", toolName: "bash_bg", toolId: waitToolId, input: waitInput });
+		const waitAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: waitToolId, name: "bash_bg", arguments: waitInput, input: waitInput }],
+		};
+		this.conversationMessages.push(waitAssistantMsg);
+		// Multi-delta is critical — see PR #436. The 6-delta count is
+		// load-bearing for the dual-render repro condition; do not lower it.
+		const NUM_WAIT_DELTAS = 6;
+		for (let i = 0; i < NUM_WAIT_DELTAS; i++) {
+			this.emit({ type: "message_update", message: waitAssistantMsg });
+			await this.tick(20);
+		}
+		this.emit({ type: "message_end", message: waitAssistantMsg });
+
+		let waitResp;
+		const waitTimeoutSecs = Math.max(10, Math.ceil(durationMs / 1000) + 5);
+		try {
+			waitResp = await gwReq("GET", `/api/sessions/${sessionId}/bg-processes/${bgId}/wait?timeout=${waitTimeoutSecs}`);
+		} catch (err) {
+			waitResp = { status: 0, body: { error: err?.message || String(err) } };
+		}
+
+		const localAborted = !this.currentAbortController || this.currentAbortController.signal.aborted;
+		const bodyAborted = !!(waitResp?.body && (waitResp.body.aborted || waitResp.body.cancelled));
+		const aborted = localAborted || bodyAborted;
+		const waitOutput = aborted
+			? `wait aborted for ${bgId}`
+			: (waitResp?.body?.exitCode != null ? `${bgId} exited with code ${waitResp.body.exitCode}` : `${bgId} done`);
+
+		this.emit({ type: "tool_execution_update", toolId: waitToolId, toolName: "bash_bg", status: "complete", output: waitOutput });
+		this.emit({ type: "tool_execution_end", toolCallId: waitToolId, toolName: "bash_bg", isError: aborted });
+		const waitResultMsg = {
+			role: "toolResult",
+			toolCallId: waitToolId,
+			toolName: "bash_bg",
+			isError: aborted,
+			content: [{ type: "text", text: waitOutput }],
+		};
+		this.conversationMessages.push(waitResultMsg);
+		this.emit({ type: "message_end", message: waitResultMsg });
+
+		if (aborted) {
+			// Best-effort kill so the OS `sleep` doesn't outlive the test.
+			try { await gwReq("DELETE", `/api/sessions/${sessionId}/bg-processes/${bgId}`); } catch { /* ignore */ }
+		}
 	}
 
 	async _handleAskUserChoices(multi = false) {
@@ -1127,15 +1554,32 @@ export class MockAgentCore {
 		const toolId = `tool_${Date.now()}`;
 		this.emit({ type: "tool_execution_start", toolName: toolAction.tool, toolId, input: toolAction.input });
 
-		if (toolAction.tool === "Write" && toolAction.input.path && toolAction.input.content) {
-			try { fs.writeFileSync(toolAction.input.path, toolAction.input.content, "utf-8"); } catch {}
-		}
-		if (toolAction.tool === "Edit" && toolAction.input.path) {
-			try {
+		// Run the actual tool effect against the real filesystem / shell where
+		// possible. The chat card shows whatever string we put in `output`, so
+		// downstream tests can assert on real file contents and real exit codes.
+		let output = toolAction.output;
+		let isError = false;
+		try {
+			if (toolAction.tool === "Write" && toolAction.input.path && typeof toolAction.input.content === "string") {
+				fs.mkdirSync(path.dirname(toolAction.input.path), { recursive: true });
+				fs.writeFileSync(toolAction.input.path, toolAction.input.content, "utf-8");
+				output = `Wrote ${Buffer.byteLength(toolAction.input.content, "utf-8")} bytes to ${toolAction.input.path}`;
+			} else if (toolAction.tool === "Edit" && toolAction.input.path) {
 				const content = fs.readFileSync(toolAction.input.path, "utf-8");
-				fs.writeFileSync(toolAction.input.path, content.replace(toolAction.input.oldText, toolAction.input.newText), "utf-8");
-			} catch {}
+				const next = content.replace(toolAction.input.oldText, toolAction.input.newText);
+				fs.writeFileSync(toolAction.input.path, next, "utf-8");
+				output = next === content ? `Edit no-op (oldText not found)` : `Edited ${toolAction.input.path}`;
+			} else if (toolAction.tool === "Read" && toolAction.input.path) {
+				output = fs.readFileSync(toolAction.input.path, "utf-8");
+			} else if (toolAction.tool === "Bash" && toolAction.input.command) {
+				// Real shell. Use cwd so commands resolve relative paths correctly.
+				output = execSync(toolAction.input.command, { cwd: this.cwd, encoding: "utf-8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
+			}
+		} catch (err) {
+			isError = true;
+			output = `${toolAction.tool} error: ${err?.message || err}`;
 		}
+
 		// propose_* tools: mirror the real extension's seed POST so the file-on-disk
 		// source of truth (Slice B) is populated during E2E. Awaited so the seed
 		// completes before message_end fires — the rehydrate path on reload depends
@@ -1153,8 +1597,8 @@ export class MockAgentCore {
 			);
 		}
 
-		this.emit({ type: "tool_execution_update", toolId, toolName: toolAction.tool, status: "complete", output: toolAction.output });
-		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: toolAction.tool, isError: false });
+		this.emit({ type: "tool_execution_update", toolId, toolName: toolAction.tool, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: toolAction.tool, isError });
 
 		const assistantMsg = {
 			role: "assistant",
@@ -1170,8 +1614,8 @@ export class MockAgentCore {
 			role: "toolResult",
 			toolCallId: toolId,
 			toolName: toolAction.tool,
-			isError: false,
-			content: [{ type: "text", text: toolAction.output }],
+			isError,
+			content: [{ type: "text", text: output }],
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
@@ -1255,12 +1699,43 @@ export class MockAgentCore {
 			}
 
 			case "steer": {
-				const steerMsg = {
+				// Production behaviour: steer interrupts the current turn and
+				// the steered text becomes a fresh user prompt with its own
+				// assistant turn. Two listeners care about the result:
+				//   - Legacy E2E tests (steer-midturn.spec.ts,
+				//     bg-wait-steer-flow.spec.ts) scan for an assistant
+				//     message_end whose text contains both 'STEER_RECEIVED' and
+				//     the steered text — we emit that synchronously below as a
+				//     back-compat marker.
+				//   - New tests scan the rendered chat for a <user-message>
+				//     matching the steered text — we get that by queueing a
+				//     real handlePrompt round-trip after the in-flight turn
+				//     finishes.
+				//
+				// Crucially we do NOT null out currentAbortController here:
+				// the in-flight handlePrompt is still on the call stack and
+				// observes signal.aborted via that reference. Clearing it makes
+				// loop-iteration aborted-checks read undefined and keep running,
+				// which lets the in-flight burst overlap with the steered
+				// handlePrompt and corrupts ordering.
+				const steeredText = msg.message || msg.text || "";
+				const marker = {
 					role: "assistant",
-					content: [{ type: "text", text: `[STEER_RECEIVED] ${msg.message || msg.text || ""}` }],
+					content: [{ type: "text", text: `[STEER_RECEIVED] ${steeredText}` }],
 				};
-				this.conversationMessages.push(steerMsg);
-				this.emit({ type: "message_end", message: steerMsg });
+				this.conversationMessages.push(marker);
+				this.emit({ type: "message_end", message: marker });
+				if (this.currentAbortController) {
+					this.currentAbortController.abort();
+				}
+				if (steeredText) {
+					this._promptChain = this._promptChain
+						.catch(() => {})
+						.then(() => this.handlePrompt(steeredText))
+						.catch(err => {
+							console.error("[mock-agent-core] Steered prompt error:", err);
+						});
+				}
 				return { success: true };
 			}
 
