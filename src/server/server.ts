@@ -7295,15 +7295,18 @@ async function handleApiRoute(
 			timedOut = true;
 			// Cancel the harness entry so we don't leak a parked resolver and a
 			// stale `active-delegates.json` shell when this user-facing timeout
-			// fires. cancel() rejects the pending Promise with "timed out",
-			// which is caught below and translated into a structured timeout
-			// payload — the response body the original `/wait` contract
-			// promised on overrun.
+			// fires. cancel() resolves the pending Promise with
+			// `{status: "terminated", error: "timed out"}`; the response below
+			// remaps that to the `timeout` status the `/wait` contract
+			// promises on overrun.
 			try { delegateHarness.cancel(active.parentSessionId, active.toolUseId, "timed out"); } catch { /* ignore */ }
 		}, timeoutMs + 30_000);
 
 		try {
-			const result = await delegateHarness.register(active);
+			let result = await delegateHarness.register(active);
+			if (timedOut) {
+				result = { status: "timeout", output: "", error: "delegate wait timed out" };
+			}
 			// Wait for the response body to flush before ack'ing the harness.
 			// If the gateway crashes between submit() and HTTP-finished, the
 			// latched result on disk lets a retried /wait drain it. Once the
@@ -7358,10 +7361,19 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/internal/delegate/cancel — parent abort path. Submits a
-	// terminated result so the parent's parked Promise resolves cleanly
-	// (rather than hanging) and any latched result is dropped. Caller is
-	// responsible for terminating the child session via DELETE /api/sessions/:id.
+	// POST /api/internal/delegate/cancel — parent abort path. Cleans up
+	// the harness entry for the given (parent, toolUseId): rejects any
+	// pending awaiter, removes any shell metadata, drops any latched
+	// result, and marks the key as completed so a racing submit is a
+	// no-op. Caller is responsible for terminating the child session via
+	// DELETE /api/sessions/:id.
+	//
+	// We deliberately do NOT use `submit({status: "terminated"})` here:
+	// submit against a shell-only key would *latch* the terminated
+	// result and leave the shell active. After abort there is no parent
+	// to drain or acknowledge that latch, so `active-delegates.json`
+	// would retain orphan state indefinitely and a future restart would
+	// try to resume it.
 	if (url.pathname === "/api/internal/delegate/cancel" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body?.parentSessionId || !body?.toolUseId
@@ -7370,11 +7382,7 @@ async function handleApiRoute(
 			return;
 		}
 		const reason = typeof body.reason === "string" ? body.reason : "cancelled";
-		const drained = delegateHarness.submit(body.parentSessionId, body.toolUseId, {
-			status: "terminated",
-			output: "",
-			error: reason,
-		});
+		const drained = delegateHarness.cancel(body.parentSessionId, body.toolUseId, reason);
 		json({ ok: true, drained });
 		return;
 	}

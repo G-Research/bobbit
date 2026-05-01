@@ -265,6 +265,44 @@ describe("DelegateHarness", () => {
 		assert.match(settled!.error || "", /already.delivered|idempotent.retry/i);
 	});
 
+	it("cancel: shell-only key cleans up entirely (does NOT latch — prevents abort leak)", () => {
+		// Regression for code-review #8: the /api/internal/delegate/cancel
+		// endpoint previously called submit({status:"terminated"}), which
+		// against a shell-only key (parent aborts before /wait registers)
+		// would *latch* the terminated result and leave the shell live. No
+		// parent would ever drain or acknowledge that latch —
+		// active-delegates.json would retain orphan state across restarts.
+		const h = new DelegateHarness(stateDir);
+		h.recordActive(makeActive());
+		assert.equal(h.getActiveDelegateSessionIds().has("child-1"), true);
+		const found = h.cancel("parent-1", "tu_1", "abort");
+		assert.equal(found, true);
+		assert.equal(h.getActiveDelegateSessionIds().has("child-1"), false);
+		const persisted = JSON.parse(fs.readFileSync(persistPath, "utf-8"));
+		assert.deepEqual(persisted, { pending: [], latched: [] });
+		// Racing submit after cancel is a no-op.
+		const drained = h.submit("parent-1", "tu_1", { status: "completed", output: "late" });
+		assert.equal(drained, false);
+		assert.equal(JSON.parse(fs.readFileSync(persistPath, "utf-8")).latched.length, 0);
+	});
+
+	it("cancel: pending awaiter resolves with structured terminated payload", async () => {
+		const h = new DelegateHarness(stateDir);
+		const pending = h.register(makeActive());
+		h.cancel("parent-1", "tu_1", "Aborted by user");
+		const result = await pending;
+		assert.equal(result.status, "terminated");
+		assert.equal(result.error, "Aborted by user");
+	});
+
+	it("cancel: drops latched result, preventing stale redelivery", () => {
+		const h = new DelegateHarness(stateDir);
+		h.submit("parent-1", "tu_1", { status: "completed", output: "stale" });
+		assert.equal(JSON.parse(fs.readFileSync(persistPath, "utf-8")).latched.length, 1);
+		h.cancel("parent-1", "tu_1", "abort");
+		assert.equal(JSON.parse(fs.readFileSync(persistPath, "utf-8")).latched.length, 0);
+	});
+
 	it("recordActive after acknowledge clears completed mark (key recycle)", async () => {
 		// A parent that legitimately re-uses a tool_use_id should get a fresh
 		// lifecycle, not a synthetic already-delivered payload.

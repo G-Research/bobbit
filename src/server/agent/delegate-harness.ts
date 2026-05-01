@@ -223,18 +223,30 @@ export class DelegateHarness {
 	}
 
 	/**
-	 * Cancel a single pending wait without supplying a result. Used by the
-	 * `/api/internal/delegate/wait` hard-timeout path so a timed-out request
-	 * does not leak a parked resolver in `pending` or a stale shell in
-	 * `active-delegates.json`. Returns `true` if anything was cleaned up.
+	 * Cancel a single in-flight delegate. Used by:
+	 *   - the `/api/internal/delegate/wait` hard-timeout path, and
+	 *   - the `/api/internal/delegate/cancel` parent-abort endpoint.
+	 *
+	 * Resolves any pending awaiter with a structured `terminated` payload
+	 * (so the parent's `/wait` HTTP handler observes the same shape it would
+	 * for a normal terminal submit), then drops shell + latched state and
+	 * marks the key completed so a racing submit is a no-op. Returns `true`
+	 * if anything was cleaned up.
+	 *
+	 * This is the cleanup-friendly counterpart to `submit()`: submit against
+	 * a shell-only key would *latch* the terminated result and leave the
+	 * shell live, which is wrong for an abort because no parent will ever
+	 * acknowledge the latch — it would persist in `active-delegates.json`
+	 * indefinitely.
 	 */
 	cancel(parentSessionId: string, toolUseId: string, reason = "cancelled"): boolean {
 		const key = delegateKey(parentSessionId, toolUseId);
 		let found = false;
+		const result: DelegateResultPayload = { status: "terminated", output: "", error: reason };
 		const entry = this.pending.get(key);
 		if (entry) {
 			this.pending.delete(key);
-			try { entry.reject(new Error(reason)); } catch { /* ignore */ }
+			try { entry.resolve(result); } catch { /* ignore */ }
 			found = true;
 		}
 		if (this.shells.delete(key)) found = true;
