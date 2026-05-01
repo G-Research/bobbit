@@ -4,6 +4,7 @@ import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
 import type { Workflow } from "./workflow-store.js";
+import { substituteBuiltinComponents } from "./substitute-builtin-component.js";
 
 /**
  * Minimal session-resolver surface needed by the search orphan filter.
@@ -39,9 +40,25 @@ export class ProjectContextManager {
    */
   setBuiltinWorkflows(workflows: Workflow[]): void {
     this._builtinWorkflows = workflows;
+    // Per-project: substitute the placeholder "app" component name in
+    // builtin workflow command steps with each project's primary
+    // component name. Without this, projects whose primary component
+    // isn't called "app" hit `component "app" not found in components[]`
+    // when the parent workflow's integration gate fires. See live test
+    // PR #409 v0.1-foundation. Substitution is idempotent and only
+    // touches command-type steps where component === "app".
     for (const ctx of this.contexts.values()) {
-      ctx.workflowStore.setBuiltins(workflows);
+      ctx.workflowStore.setBuiltins(this._substituteForProject(ctx, workflows));
     }
+  }
+
+  /** Pure-ish helper: rewrite the builtin workflows for a specific
+   *  project's primary component name. Out-of-line so it's testable
+   *  via the substitute-builtin-component module. */
+  private _substituteForProject(ctx: ProjectContext, workflows: Workflow[]): Workflow[] {
+    const primary = ctx.projectConfigStore.getComponents()[0]?.name;
+    if (!primary) return workflows;
+    return substituteBuiltinComponents(workflows, primary);
   }
 
   /**
@@ -72,9 +89,10 @@ export class ProjectContextManager {
     ctx = new ProjectContext(project);
     ctx.open();
     // Apply builtin workflows to lazily-created contexts the same way
-    // the boot-time loop does for pre-existing ones.
+    // the boot-time loop does for pre-existing ones — with the same
+    // per-project component-name substitution.
     if (this._builtinWorkflows.length > 0) {
-      ctx.workflowStore.setBuiltins(this._builtinWorkflows);
+      ctx.workflowStore.setBuiltins(this._substituteForProject(ctx, this._builtinWorkflows));
     }
     this.contexts.set(projectId, ctx);
     return ctx;
