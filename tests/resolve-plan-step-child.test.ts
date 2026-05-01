@@ -112,3 +112,53 @@ describe("resolvePlanStepChild — re-spawn preference order", () => {
 		assert.equal(result?.id, "ts1");
 	});
 });
+
+describe("resolvePlanStepChild — tier-based preference (BUG #2 regression)", () => {
+	it("BUG: archived+complete (merged) beats archived+in-progress (zombie sibling), even with newer createdAt", () => {
+		// Live test PR #409 v0.1-foundation: storage-sqlite-and-markdown
+		// rendered FAILED because a sibling "Storage live test" child
+		// shared its planId, was archived in-progress, and had a newer
+		// createdAt than the real merged child. The earlier preference
+		// rule (live > archived, then most-recent within ties) shadowed
+		// the success when both were archived.
+		const goals = [
+			c({ id: "real-merged", state: "complete", archived: true, createdAt: 1000 }),
+			c({ id: "sibling-test", state: "in-progress", archived: true, createdAt: 2000 }),
+		];
+		const result = resolvePlanStepChild("p1", "v0.1-storage", goals);
+		assert.equal(result?.id, "real-merged");
+	});
+
+	it("live in-progress beats live-but-complete (top tier wins)", () => {
+		// A live goal that's `state: complete` is mid-merge or paused-
+		// before-merge. The live in-progress one is what's actively
+		// being driven — surface that.
+		const goals = [
+			c({ id: "live-running", state: "in-progress", createdAt: 1000 }),
+			c({ id: "live-complete", state: "complete", createdAt: 2000 }),
+		];
+		const result = resolvePlanStepChild("p1", "v0.1-storage", goals);
+		assert.equal(result?.id, "live-running");
+	});
+
+	it("archived+complete beats live-but-shelved (success terminal beats failure-in-flight)", () => {
+		// A merged sibling vs a live but shelved (= failed) sibling. The
+		// merged child is the canonical source of truth.
+		const goals = [
+			c({ id: "merged", state: "complete", archived: true, createdAt: 1000 }),
+			c({ id: "shelved-live", state: "shelved", archived: false, createdAt: 2000 }),
+		];
+		const result = resolvePlanStepChild("p1", "v0.1-storage", goals);
+		assert.equal(result?.id, "merged");
+	});
+
+	it("archived non-complete is the lowest tier (zombie / aborted)", () => {
+		// All else equal, archived+shelved/in-progress are last-resort.
+		const goals = [
+			c({ id: "zombie", state: "shelved", archived: true, createdAt: 2000 }),
+			c({ id: "live-todo", state: "todo", archived: false, createdAt: 1000 }),
+		];
+		const result = resolvePlanStepChild("p1", "v0.1-storage", goals);
+		assert.equal(result?.id, "live-todo");
+	});
+});

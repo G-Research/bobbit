@@ -80,13 +80,31 @@ export function resolvePlanNodeState(step: PlanStepLike, goals: PlanGoalLike[]):
 	// Tier (b): walk by spawnedFromPlanId (the actual source of truth
 	// post-PR #409 \u2014 mirrors verification-harness's idempotency tier
 	// (c) in `runSubgoalStep`).
+	//
+	// Preference order (live test PR #409: storage-sqlite-and-markdown
+	// rendered FAILED because a sibling 'Storage live test' child shared
+	// its planId, was archived in-progress, and had a newer createdAt
+	// than the real merged child. Most-recent-wins shadowed the success):
+	//   1. live in-progress (work is happening now -- highest priority)
+	//   2. archived + complete (success terminal -- the merged child)
+	//   3. live but other state (todo / shelved)
+	//   4. archived non-complete (zombie / aborted -- lowest priority)
+	// Within each tier, prefer most-recent createdAt.
 	if (!child && planId) {
 		const candidates = goals.filter(g => g.spawnedFromPlanId === planId);
 		if (candidates.length > 0) {
-			// Prefer non-archived; among ties, prefer the most-recent.
-			const live = candidates.filter(c => !c.archived);
-			const pool = live.length > 0 ? live : candidates;
-			child = pool.slice().sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+			const rank = (g: PlanGoalLike): number => {
+				if (!g.archived && g.state === "in-progress") return 0;
+				if (g.archived && g.state === "complete") return 1;
+				if (!g.archived) return 2;
+				return 3;
+			};
+			child = candidates.slice().sort((a, b) => {
+				const ra = rank(a);
+				const rb = rank(b);
+				if (ra !== rb) return ra - rb;
+				return (b.createdAt ?? 0) - (a.createdAt ?? 0);
+			})[0];
 		}
 	}
 

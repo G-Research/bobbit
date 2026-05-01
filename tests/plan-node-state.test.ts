@@ -76,12 +76,31 @@ describe("resolvePlanNodeState \u2014 the bug regression", () => {
 		assert.equal(resolvePlanNodeState(step("v0.1-storage"), goals), "running");
 	});
 
-	it("when multiple LIVE children share a planId (defensive), prefers the most recent", () => {
-		// Shouldn't happen post-fix but might during edits / restarts.
-		// Most-recent createdAt wins.
+	it("when multiple LIVE children share a planId (defensive), prefers IN-PROGRESS over complete", () => {
+		// Tier-based preference (post-PR #409): live in-progress beats
+		// live-but-complete (which is unusual — a live goal that's complete
+		// is mid-merge or paused-before-merge). The LIVE in-progress one
+		// is what the team-lead is actively driving.
 		const goals: PlanGoalLike[] = [
 			{ id: "older-live", state: "in-progress", spawnedFromPlanId: "v0.1-storage", createdAt: 1000 },
 			{ id: "newer-live", state: "complete", spawnedFromPlanId: "v0.1-storage", createdAt: 2000 },
+		];
+		assert.equal(resolvePlanNodeState(step("v0.1-storage"), goals), "running");
+	});
+
+	it("BUG REGRESSION: archived+complete (merged) beats archived+in-progress (zombie sibling) regardless of createdAt", () => {
+		// Live test PR #409 v0.1-foundation: storage-sqlite-and-markdown
+		// rendered FAILED because a sibling "Storage live test" child
+		// shared its planId, was archived in-progress, and had a NEWER
+		// createdAt than the real merged child. The earlier preference
+		// rule (live > archived, then most-recent within ties) shadowed
+		// the success when both were archived.
+		const goals: PlanGoalLike[] = [
+			// The real merged child — archived + complete (success terminal).
+			{ id: "real-storage", state: "complete", archived: true, spawnedFromPlanId: "v0.1-storage", createdAt: 1000 },
+			// A sibling "live test" child that was archived mid-flight —
+			// newer createdAt would have shadowed the merged child pre-fix.
+			{ id: "sibling-live-test", state: "in-progress", archived: true, spawnedFromPlanId: "v0.1-storage", createdAt: 2000 },
 		];
 		assert.equal(resolvePlanNodeState(step("v0.1-storage"), goals), "passed");
 	});
