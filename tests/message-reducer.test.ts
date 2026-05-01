@@ -410,6 +410,35 @@ describe("message-reducer", () => {
 		assert.deepStrictEqual(s.messages.map((m) => m.id), ["u1", "notif_1", "a1"]);
 	});
 
+	it("synthetic streaming id replaces rather than duplicates (bash_bg.wait dual-render)", () => {
+		// Mirrors the remote-agent.ts call site: when assistant message_end
+		// arrives without a string `msg.id`, the dispatcher stamps the
+		// synthetic `synth:tc:<firstToolCallId>` id onto the reducer entry.
+		// A subsequent message_end for the same toolCall id must REPLACE
+		// the prior row by id, not duplicate it.
+		const toolCall = (id: string) => ({ type: "toolCall", id, name: "bash_bg", input: {} });
+		const syntheticId = "synth:tc:tc-1";
+
+		const s = applyAll([
+			liveMessageEnd(1, {
+				id: syntheticId,
+				role: "assistant",
+				content: [toolCall("tc-1")],
+				timestamp: 0,
+			}),
+			liveMessageEnd(2, {
+				id: syntheticId,
+				role: "assistant",
+				content: [toolCall("tc-1"), { type: "text", text: "done" }],
+				timestamp: 0,
+			}),
+		]);
+
+		assert.strictEqual(s.messages.length, 1, "second message_end must replace, not duplicate");
+		assert.strictEqual(s.messages[0].id, syntheticId);
+		assert.strictEqual(s.messages[0]._order, 2, "latest seq wins");
+	});
+
 	it("reset returns initial state", () => {
 		const s1 = applyAll([liveMessageEnd(1, userMsg("u1", "hi"))]);
 		const s2 = reduce(s1, { type: "reset" });

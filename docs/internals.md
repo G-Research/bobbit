@@ -2208,6 +2208,16 @@ Transcript ordering is a single-source-of-truth concern owned by the pure reduce
 
 When extending transcript handling: every new transcript mutation goes through a new action in the reducer — do **not** push directly into `state.messages` from `RemoteAgent`. Compute `_order` from `seq` (live), `SNAPSHOT_ORDER_FLOOR + i` (snapshot), `highestSeq + 0.5` (synthetic), or the optimistic sentinel (user-typed). Reconciliation always goes id-first; text fallback is reserved for the optimistic-prompt and compaction-marker paths and nowhere else. Pinned by `tests/message-reducer.test.ts` (12 scenarios incl. proposal burst and `ask_user_choices` envelope routing) and the ST-DEDUP-02 / ST-DEDUP-03 / ST-DEDUP-04 stories in `tests/e2e/ui/stories-streaming.spec.ts`. Full design: [`docs/design/unified-message-ordering-reducer.md`](design/unified-message-ordering-reducer.md).
 
+### Streaming message id (synthetic fallback)
+
+When an assistant `message_end` carries tool calls, the streaming container in `AgentInterface.ts` keeps owning the rendered card until the next event arrives, while the same message is also appended to `state.messages` by the reducer. The visible-messages filter hides the duplicate by id-equality (`m.id !== streamingMessageId`). Real LLM streams sometimes deliver `message_end` without a string `id` (undefined / null / numeric / `0` / `""`); the historical inline check `typeof msg.id === "string" ? msg.id : undefined` demoted `streamingMessageId` to `undefined`, the `!streamingMessageId` short-circuit opened the filter, and the card rendered twice — each instance with its own `<bg-process-renderer>` and its own `Date.now()` start time, diverging visibly during a parked `bash_bg.wait` where no further events arrive to reconcile.
+
+The canonical key is computed by `computeStreamingMessageId(msg)` in `src/app/streaming-message-id.ts`: prefer a non-empty string `msg.id`, otherwise fall back to `synth:tc:<firstToolCallId>` (toolCall ids are stable across `message_update` deltas), otherwise `undefined`. Both sites in `src/app/remote-agent.ts` — the `streamingMessageId` field assignment **and** the `id` stamped onto the reducer entry before the `live-event` action — must go through the helper, or the two diverge and the filter's id-equality check fails. The defensive `if (streamingMessage && m === streamingMessage) return false` guard in `AgentInterface.renderMessages` is belt-and-braces for the case where the streaming message is the same object reference as a row in `messages`; it does not replace the id-equality path because production hits the separate-objects case via the reducer's `live-event` append.
+
+Follow-up not in this fix: `BgProcessRenderer.getCallStart` keys its start-time WeakMap on the `params` object identity rather than on `bgId`. Two render paths produce two distinct `params` objects → two start times. Re-keying on `bgId` would mask the *visible* dual-timer symptom even if the dual-render itself recurred for some other reason — worth doing as defence in depth, but a separate goal.
+
+Regression tests: `tests/dual-render-noid-message.test.ts` (id=undefined/null/numeric/empty-string cases), `tests/message-reducer.test.ts`, `tests/e2e/ui/bg-wait-no-dup.spec.ts`.
+
 ---
 
 ## Errored-turn recovery (implicit unstick on new input)

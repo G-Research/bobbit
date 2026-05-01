@@ -412,6 +412,52 @@ export class MockAgentCore {
 			return;
 		}
 
+		// BG_WAIT:<ms> — emit an assistant message_end with a single bash_bg.wait
+		// toolCall block AND no `id` field on the message itself, mimicking the
+		// real LLM stream that triggers the dual-render bug. The toolCall id is
+		// stable so the synthetic-id fallback `synth:tc:<id>` is deterministic.
+		const bgWaitMatch = text.match(/BG_WAIT:(\d+)/);
+		if (bgWaitMatch) {
+			const waitMs = parseInt(bgWaitMatch[1], 10);
+			const toolId = "tc-bg-wait-1";
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: "bash_bg", arguments: { action: "wait", id: "bg-1" }, input: { action: "wait", id: "bg-1" } },
+				],
+			};
+			// message_update first — sets `state.streamingMessage` on the client so
+			// the StreamingMessageContainer renders the in-flight card. The 100ms
+			// settle gives Lit's requestAnimationFrame batch in StreamingMessageContainer
+			// time to commit before the message_end fires.
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(150);
+			// NOTE: deliberately do NOT emit tool_execution_start. The bug surface is
+			// the dual-render of the same toolCall row in `state.messages` AND in
+			// `state.streamingMessage`. When the toolCall is in `pendingToolCalls`,
+			// MessageList hides it via `hidePendingToolCalls`, masking the bug; here
+			// we simulate the production timing where message_end races ahead of the
+			// pending-set update.
+			// Assistant message_end WITHOUT an `id` — reproduces the bug condition.
+			// The pre-fix path stamps streamingMessageId=undefined, the visible-messages
+			// filter short-circuits, and the same card renders in BOTH message-list
+			// and StreamingMessageContainer.
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			// Park here — no further events until waitMs elapses, mirroring a real
+			// `bash_bg.wait` that sits indefinitely.
+			await this.tick(waitMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
 		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>.
 		// Emits N message_update deltas (each with a single tool_use whose input
 		// grows on each delta), then message_end + tool_execution_* + agent_end.
