@@ -163,21 +163,10 @@ export const state = {
 	projects: [] as Project[],
 	/** @deprecated No longer used — provisional projects replace pending projects */
 	pendingProjects: [] as Array<{ sessionId: string; dirPath: string; name: string }>,
-	activeProjectProposal: undefined as undefined | {
-		sessionId: string;
-		/** Plain string fields plus optional structured blocks (components, workflows). */
-		fields: Record<string, unknown>;
-		/** Provisional = project is still in .bobbit/state/projects.json with
-		 *  provisional:true (existing assistant flow). Registered = any other
-		 *  project (regular/goal/staff session pointing at a live project). */
-		mode?: "provisional" | "registered";
-	},
 	/**
-	 * Slice D: unified proposal slot table keyed by ProposalType. Slice E will
-	 * remove the legacy per-type slots (`activeGoalProposal`, `activeProjectProposal`,
-	 * `activeRoleProposal`, `activeStaffProposal`) once the call sites are migrated.
-	 * For now this lives ALONGSIDE the legacy fields — additive only.
-	 * See `src/app/proposal-registry.ts` for `ProposalSlot`.
+	 * Unified proposal slot table keyed by ProposalType. Single source of truth
+	 * for active proposals across all assistant types (goal/project/role/staff/
+	 * workflow/tool). See `src/app/proposal-registry.ts` for `ProposalSlot`.
 	 */
 	activeProposals: {} as Partial<Record<
 		"goal" | "project" | "workflow" | "role" | "tool" | "staff",
@@ -235,8 +224,6 @@ export const state = {
 	archivedSessionsHasMore: false,
 	archivedSessionsTotal: 0,
 
-	/** Active goal proposal from a goal-assistant session */
-	activeGoalProposal: null as { title: string; spec: string; cwd?: string; workflow?: string; options?: string } | null,
 
 	// Unified assistant state
 	assistantType: null as string | null,
@@ -256,8 +243,6 @@ export const state = {
 	cwdDropdownOpen: false,
 	cwdHighlightIndex: -1,
 
-	/** Active role proposal from a role-assistant session */
-	activeRoleProposal: null as { name: string; label: string; prompt: string; tools: string; accessory: string } | null,
 
 	// Role assistant split-screen state
 	isRoleAssistantSession: false,
@@ -308,7 +293,6 @@ export const state = {
 	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[]; projectId?: string }>,
 
 	// Staff assistant split-screen state
-	activeStaffProposal: null as { name: string; description: string; prompt: string; triggers: string; cwd: string } | null,
 	staffPreviewName: "",
 	staffPreviewDescription: "",
 	staffPreviewPrompt: "",

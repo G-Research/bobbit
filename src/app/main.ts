@@ -554,7 +554,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen);
 			if (hasPanel) {
 				// If fullscreen, exit fullscreen and collapse in one step
 				if (state.previewPanelFullscreen) {

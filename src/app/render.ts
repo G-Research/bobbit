@@ -710,7 +710,7 @@ function goalPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
-		state.activeGoalProposal = null;
+		delete state.activeProposals.goal;
 		const projectId = state.previewProjectId || undefined;
 		state.previewProjectId = "";
 		const workflowId = _selectedWorkflowId || "general";
@@ -866,7 +866,7 @@ function rolePreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
-		state.activeRoleProposal = null;
+		delete state.activeProposals.role;
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteRoleDraft(sessionId);
@@ -1370,7 +1370,7 @@ function staffPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
-		state.activeStaffProposal = null;
+		delete state.activeProposals.staff;
 		localStorage.removeItem("gateway.sessionId");
 		setHashRoute("landing");
 		state.appView = "authenticated";
@@ -1644,7 +1644,7 @@ export function resetProjectProposalPanel(): void {
 }
 
 function projectProposalPanel() {
-	const proposal = state.activeProjectProposal;
+	const proposal = state.activeProposals.project;
 	const streaming = isProposalStreaming("project_proposal");
 	queueMicrotask(() => {
 		reconcileFollowTail(projectOuterScrollRef.value);
@@ -1699,22 +1699,23 @@ function projectProposalPanel() {
 
 	const handleDismiss = () => {
 		if (proposal?.sessionId) deleteProjectDraft(proposal.sessionId);
-		state.activeProjectProposal = undefined;
+		delete state.activeProposals.project;
 		state.assistantHasProposal = false;
 		renderApp();
 	};
 
 	const onFieldInput = (key: string, value: string) => {
-		if (!state.activeProjectProposal) return;
+		const slot = state.activeProposals.project;
+		if (!slot) return;
 		// Bug B guard: `components` and `workflows` are structured side-tables
 		// owned by dedicated views — never let an Input row clobber them with a
 		// string keystroke value.
 		if (key === "components" || key === "workflows") return;
-		(state.activeProjectProposal.fields as Record<string, unknown>)[key] = value;
+		(slot.fields as Record<string, unknown>)[key] = value;
 		// Only persist edits for project-assistant sessions; non-assistant
 		// sessions follow the goal-proposal model (transient, not restored).
 		if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
-			saveProjectDraft(state.activeProjectProposal.sessionId);
+			saveProjectDraft(slot.sessionId);
 		}
 		renderApp();
 	};
@@ -1850,7 +1851,7 @@ let _proposalInitializedFrom: string | null = null;
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeGoalProposal;
+	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
 	if (!proposal) return;
 	// Use a simple identity check to avoid re-initializing on every render
 	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
@@ -1897,7 +1898,7 @@ function goalProposalPanel() {
 				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
 				autoStartTeam,
 			});
-			state.activeGoalProposal = null;
+			delete state.activeProposals.goal;
 			_proposalEnabledOptionalSteps = [];
 			_proposalInitializedFrom = null;
 			if (goal) {
@@ -1910,8 +1911,8 @@ function goalProposalPanel() {
 	};
 
 	const handleDismiss = () => {
-		const dismissed = state.activeGoalProposal;
-		state.activeGoalProposal = null;
+		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+		delete state.activeProposals.goal;
 		_proposalInitializedFrom = null;
 		_proposalEnabledOptionalSteps = [];
 		_proposalAutoStartTeam = true;
@@ -2069,8 +2070,8 @@ const PREVIEW_SWIPE_SCRIPT = `<script>
 function hasUnifiedPanel(): boolean {
 	return !state.assistantType && (
 		state.isPreviewSession ||
-		state.activeGoalProposal != null ||
-		state.activeProjectProposal != null ||
+		state.activeProposals.goal != null ||
+		state.activeProposals.project != null ||
 		state.reviewPanelOpen
 	);
 }
@@ -2080,8 +2081,8 @@ function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "pro
 	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
-	if (state.activeGoalProposal != null) tabs.push("goal");
-	if (state.activeProjectProposal != null) tabs.push("project");
+	if (state.activeProposals.goal != null) tabs.push("goal");
+	if (state.activeProposals.project != null) tabs.push("project");
 	return tabs;
 }
 
@@ -2488,14 +2489,14 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "review"; renderApp(); }}
 					>Review</button>
 				` : ""}
-				${state.activeGoalProposal != null ? html`
+				${state.activeProposals.goal != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
 						title="Goal"
 						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
-				${state.activeProjectProposal != null ? html`
+				${state.activeProposals.project != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "project" ? "goal-tab-pill--active" : ""}"
 						title="Project"
@@ -2580,21 +2581,21 @@ export function doRenderApp(): void {
 	const unifiedPreviewPanel = () => {
 		// Auto-correct tab if the active tab's content is no longer available
 		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeGoalProposal != null ? "goal" : (state.activeProjectProposal != null ? "project" : "preview"));
-		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : "preview"));
+		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeProposals.goal != null) {
 			state.previewPanelActiveTab = "goal";
-		} else if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal == null && state.isPreviewSession) {
+		} else if (state.previewPanelActiveTab === "goal" && state.activeProposals.goal == null && state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
-		} else if (state.previewPanelActiveTab === "project" && state.activeProjectProposal == null) {
+		} else if (state.previewPanelActiveTab === "project" && state.activeProposals.project == null) {
 			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
-				: (state.activeGoalProposal != null ? "goal"
+				: (state.activeProposals.goal != null ? "goal"
 				: (state.reviewPanelOpen ? "review" : "preview"));
 		}
 
 		const showPreviewTab = state.isPreviewSession;
-		const showGoalTab = state.activeGoalProposal != null;
+		const showGoalTab = state.activeProposals.goal != null;
 		const showReviewTab = state.reviewPanelOpen;
-		const showProjectTab = state.activeProjectProposal != null;
+		const showProjectTab = state.activeProposals.project != null;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -2668,10 +2669,10 @@ export function doRenderApp(): void {
 		if (tab === "review" && state.reviewPanelOpen) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${reviewPaneContent()}</div>`;
 		}
-		if (tab === "goal" && state.activeGoalProposal != null) {
+		if (tab === "goal" && state.activeProposals.goal != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${goalProposalPanel()}</div>`;
 		}
-		if (tab === "project" && state.activeProjectProposal != null) {
+		if (tab === "project" && state.activeProposals.project != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
 		}
 		return html``;
