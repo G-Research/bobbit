@@ -74,6 +74,8 @@ export interface SessionSetupPlan {
 	goalId?: string;
 	assistantType?: string;
 	delegateOf?: string;
+	/** Discriminator persisted on PersistedSession.kind. Defaults via resolveSessionKind(). */
+	kind?: "delegate" | "worker" | "reviewer";
 	taskId?: string;
 	worktreePath?: string;
 	repoPath?: string;
@@ -473,6 +475,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		nonInteractive: plan.nonInteractive,
 		sandboxed: plan.sandboxed,
 		delegateOf: plan.delegateOf,
+		kind: plan.kind ?? (plan.delegateOf ? "delegate" : "worker"),
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
 	});
