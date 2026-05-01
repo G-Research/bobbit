@@ -87,6 +87,15 @@ export class MockAgentCore {
 			return { liveUpdateProposal: true };
 		}
 
+		// Per-component config flow: two consecutive propose_project calls.
+		// First emits components with `config:` populated; second emits the
+		// same components without `config:` (only `commands:`). Tests that
+		// the per-component shallow-merge in onProjectProposal preserves the
+		// previously-proposed `config` map.
+		if (text.includes("COMPONENT_CONFIG_PROPOSAL")) {
+			return { componentConfigProposal: true };
+		}
+
 		// Multi-component proposal with structured components + workflows.
 		if (text.includes("MULTI_COMPONENT_PROPOSAL")) {
 			return {
@@ -442,6 +451,8 @@ export class MockAgentCore {
 			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
 		} else if (toolAction && toolAction.liveUpdateProposal) {
 			await this._handleLiveUpdateProposal();
+		} else if (toolAction && toolAction.componentConfigProposal) {
+			await this._handleComponentConfigProposal();
 		} else if (toolAction && toolAction.activateSkill) {
 			await this._handleActivateSkill(toolAction.activateSkill);
 		} else if (toolAction && toolAction.proposalBurst) {
@@ -919,6 +930,65 @@ export class MockAgentCore {
 					],
 				},
 			},
+		};
+
+		const emitOne = (input, label) => {
+			const toolId = `tool_propose_project_${label}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+			this.emit({ type: "tool_execution_start", toolName: "propose_project", toolId, input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "propose_project", arguments: input, input }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			const output = `Proposal (${label}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId, toolName: "propose_project", status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "propose_project", isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "propose_project",
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		emitOne(firstInput, "first");
+		await this.tick(60);
+		emitOne(secondInput, "second");
+	}
+
+	async _handleComponentConfigProposal() {
+		// First call: components carry `config:` populated with qa_* keys.
+		const firstInput = {
+			name: "CompConfig Project",
+			root_path: "/tmp/comp-config",
+			components: [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "npm run build", test: "npm test" },
+					config: {
+						qa_start_command: "PORT=$PORT NODE_ENV=test npm start",
+						qa_health_check: "http://127.0.0.1:$PORT/health",
+						qa_max_duration_minutes: "10",
+					},
+				},
+				{ name: "api", repo: ".", commands: { build: "npm run build:api" } },
+			],
+		};
+		// Second call: same components but WITHOUT `config:` — the per-component
+		// shallow merge in session-manager.onProjectProposal must preserve the
+		// previously-proposed `config` map on web.
+		const secondInput = {
+			name: "CompConfig Project",
+			root_path: "/tmp/comp-config",
+			components: [
+				{ name: "web", repo: ".", commands: { build: "npm run build", test: "npm test" } },
+				{ name: "api", repo: ".", commands: { build: "npm run build:api" } },
+			],
 		};
 
 		const emitOne = (input, label) => {

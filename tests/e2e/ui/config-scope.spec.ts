@@ -100,13 +100,17 @@ test.describe("Config page scope navigation", () => {
 	test("workflows page hides System tab and shows project tabs only", async ({ page }) => {
 		// Workflows are project-scoped only — the workflow-page omits the
 		// System tab (see config-scope.ts::renderConfigScopeRow excludeSystem).
-		// Note: #/workflows now redirects synchronously to
-		// #/settings/<projectId>/workflows (master commit 0fd63978), so the
-		// workflow-page renders embedded inside the Settings page. The Settings
-		// page has its own top-level "System" tab strip — we must scope the
-		// assertion to the embedded workflows-tab content, not the whole page.
+		// #/workflows now redirects synchronously to
+		// #/settings/<projectId>/workflows, so the workflow-page renders
+		// embedded inside the Settings page. The Settings page has its own
+		// top-level "System" tab strip — we scope the assertion to the
+		// embedded workflows-tab content, not the whole page.
 		await openApp(page);
-		await navigateToHash(page, "#/workflows");
+		await page.evaluate(() => { window.location.hash = "#/workflows"; });
+		await page.waitForFunction(
+			() => window.location.hash.includes("settings") && window.location.hash.includes("workflows"),
+			{ timeout: 10_000 },
+		);
 
 		const tab = page.locator("[data-testid='workflows-tab']").first();
 		await expect(tab).toBeVisible({ timeout: 10_000 });

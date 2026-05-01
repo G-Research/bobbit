@@ -1190,8 +1190,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			// Slice E: state.activeProposals.project + mode + tab side-effects are
 			// owned by the unified onProposal callback (with plugin.mergeFields
-			// preserving structured side-tables). The legacy callback now only
-			// triggers the project-assistant draft save.
+			// preserving structured side-tables, including per-component shallow
+			// merge of commands/config). The legacy callback now only triggers the
+			// project-assistant draft save.
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				saveProjectDraft(sessionId);
 			}
@@ -1830,11 +1831,11 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	if (!promoted) return;
 
 	// Write config fields. Forward every proposed field — including structured
-	// `components` / `workflows` and the native-YAML keys — to the config
-	// endpoint, mirroring the registered-mode accept path. Without this, the
-	// provisional accept silently drops the assistant's proposed workflows
-	// and components, so a freshly accepted multi-component project lands
-	// with zero workflows.
+	// `components` / `workflows` — to the config endpoint via the shared
+	// `buildProjectConfigDiff` helper. Mirrors the registered-mode accept path
+	// so the provisional accept doesn't silently drop the assistant's proposed
+	// workflows and components. Per-component QA config (`config.qa_start_command`
+	// etc.) rides through inside `components[].config`.
 	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
 	if (Object.keys(diff).length > 0) {
 		try {

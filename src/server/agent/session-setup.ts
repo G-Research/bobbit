@@ -148,6 +148,12 @@ export interface PipelineContext {
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
 	buildWorkflowList: (projectId?: string) => string;
+	/**
+	 * Persist agentSessionFile + other live-state-derived fields. Optional —
+	 * tests may construct a context without this; in that case a hard restart
+	 * during the gap will lose the session, which is fine for unit tests.
+	 */
+	persistSessionMetadata?: (session: SessionInfo) => Promise<void>;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -620,7 +626,7 @@ export async function executeWorktreeAsync(
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.
 	// For team-spawned sandboxed sessions, plan.sandboxBranch differs from plan.branch
-	// (host auto-generates session/new-session-<uuid8>, team manager sets goal-<slug>-<role>-<id>).
+	// (host auto-generates session/<uuid8>, team manager sets goal-<slug>-<role>-<id>).
 	if (plan.sandboxed && plan.sandboxBranch && plan.sandboxBranch !== plan.branch) {
 		plan.branch = plan.sandboxBranch;
 		ctx.store.update(session.id, { branch: plan.branch });
@@ -665,6 +671,17 @@ export async function executeWorktreeAsync(
 		() => rpcClient.start(),
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
+
+	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
+	// a kill (crash, taskkill, OS shutdown) in the gap between idle and the
+	// post-spawn fire-and-forget persist archives the session on next boot,
+	// because restoreOneSession() refuses to restore a session whose persisted
+	// agentSessionFile is empty. See tests/manual-integration/restart-minimal.spec.ts.
+	if (ctx.persistSessionMetadata) {
+		try { await ctx.persistSessionMetadata(session); }
+		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
+	}
+
 	session.status = "idle";
 
 	// Notify connected clients that the session is ready
@@ -744,9 +761,19 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
-	session.status = "idle";
 
+	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);
+
+	// Persist agentSessionFile BEFORE flipping status to idle so the session
+	// survives a hard kill in the post-spawn window. See worktree path for
+	// the full rationale.
+	if (ctx.persistSessionMetadata) {
+		try { await ctx.persistSessionMetadata(session); }
+		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
+	}
+
+	session.status = "idle";
 
 	return session;
 }

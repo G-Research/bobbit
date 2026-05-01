@@ -56,6 +56,28 @@ function projectMerge(
 	const merged: Record<string, unknown> = { ...prev, ...incoming };
 	if (!("components" in incoming) && "components" in prev) merged.components = prev.components;
 	if (!("workflows" in incoming) && "workflows" in prev) merged.workflows = prev.workflows;
+	// Per-component shallow merge: when both prev and incoming carry
+	// `components`, merge entries by name so a partial component update
+	// (e.g. only `commands`) doesn't clobber the previously-proposed
+	// `config` (or vice versa) on that component.
+	if (Array.isArray(incoming.components) && Array.isArray(prev.components)) {
+		const prevComps = prev.components as Array<Record<string, unknown>>;
+		const prevByName = new Map<string, Record<string, unknown>>();
+		for (const pc of prevComps) {
+			if (pc && typeof pc === "object" && typeof pc.name === "string") prevByName.set(pc.name, pc);
+		}
+		merged.components = (incoming.components as Array<Record<string, unknown>>).map(c => {
+			if (!c || typeof c !== "object" || typeof c.name !== "string") return c;
+			const prevC = prevByName.get(c.name);
+			if (!prevC) return c;
+			return {
+				...prevC,
+				...c,
+				commands: c.commands ?? prevC.commands,
+				config: c.config ?? prevC.config,
+			};
+		});
+	}
 	return merged;
 }
 

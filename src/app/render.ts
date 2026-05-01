@@ -422,7 +422,7 @@ function ensureQaConfigLoaded(projectId: string): void {
 	gatewayFetch(`/api/projects/${projectId}/qa-testing-config`)
 		.then(r => r.json())
 		.then(data => {
-			_qaConfigCache.set(projectId, !!data.config);
+			_qaConfigCache.set(projectId, !!data.configured);
 			_qaConfigFetching = false;
 			renderApp();
 		})
@@ -647,7 +647,7 @@ function renderGoalForm(config: GoalFormConfig) {
 						<span class="text-xs text-muted-foreground font-medium">${os.label}</span>
 						${os.description ? html`
 							<span title=${qaDisabled
-								? 'Configure qa_start_command in project settings to enable QA testing'
+								? 'Set qa_start_command on a component\'s config map to enable QA testing'
 								: os.description}
 								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 						` : ''}
@@ -1617,12 +1617,21 @@ const PROJECT_LEGACY_COMMAND_KEYS = new Set([
  *  accept (PUT /api/projects/:id/config) without panel involvement. */
 const PROJECT_STRUCTURED_FIELD_KEYS = new Set([
 	"config_directories",
-	"qa_env",
 	"sandbox_tokens",
-	"qa_max_duration_minutes",
-	"qa_max_scenarios",
 	"components",
 	"workflows",
+]);
+/** Legacy top-level QA keys — moved to components[].config[] in the
+ *  component-config-map migration. Hidden from this panel; the migration
+ *  rejects them on the wire (see PUT /api/projects/:id/config). */
+const PROJECT_LEGACY_QA_KEYS = new Set([
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
 ]);
 /** Fields managed exclusively in Settings → Project (not editable in the
  *  proposal panel). Hidden from the panel even if the agent or current config
@@ -1637,10 +1646,6 @@ const PROJECT_PANEL_HIDDEN_KEYS = new Set([
 ]);
 const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 	{ key: "name", label: "Project Name" },
-	{ key: "qa_start_command", label: "QA Start Command" },
-	{ key: "qa_build_command", label: "QA Build Command" },
-	{ key: "qa_health_check", label: "QA Health Check URL" },
-	{ key: "qa_browser_entry", label: "QA Browser Entry URL" },
 	{ key: "worktree_root", label: "Worktree Root" },
 	{ key: "worktree_pool_size", label: "Worktree Pool Size" },
 ];
@@ -1698,6 +1703,7 @@ function projectProposalPanel() {
 		if (k === "root_path") continue;
 		if (PROJECT_LEGACY_COMMAND_KEYS.has(k)) continue;
 		if (PROJECT_STRUCTURED_FIELD_KEYS.has(k)) continue;
+		if (PROJECT_LEGACY_QA_KEYS.has(k)) continue;
 		if (PROJECT_PANEL_HIDDEN_KEYS.has(k)) continue;
 		if (!knownKeys.has(k)) extraKeys.push(k);
 	}
@@ -1733,10 +1739,6 @@ function projectProposalPanel() {
 	/** Per-field placeholders — concrete examples, not just the key name repeated. */
 	const PLACEHOLDERS: Record<string, string> = {
 		name: "my-project",
-		qa_start_command: "PORT=$PORT WORK_DIR=$WORK_DIR npm start",
-		qa_build_command: "npm run build",
-		qa_health_check: "http://127.0.0.1:$PORT/api/health",
-		qa_browser_entry: "http://127.0.0.1:$PORT/?token=$TOKEN",
 		worktree_root: "C:\\Users\\me\\my-project-wt   (default: <root>-wt)",
 		worktree_pool_size: "2",
 	};

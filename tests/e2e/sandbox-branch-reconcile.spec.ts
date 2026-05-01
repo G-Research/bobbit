@@ -40,7 +40,7 @@ async function apiFetch(baseURL: string, path: string, opts: RequestInit = {}) {
 
 test.describe("Sandbox branch reconciliation", () => {
 	test("non-sandboxed worktree session preserves auto-generated branch", async ({ gateway }) => {
-		// Create a worktree session (non-sandboxed) — branch should remain session/new-session-<uuid8>
+		// Create a worktree session (non-sandboxed) — branch should be session/<uuid8>
 		const createRes = await apiFetch(gateway.baseURL, "/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: gitCwd() }),
@@ -60,7 +60,7 @@ test.describe("Sandbox branch reconciliation", () => {
 			const persisted = gateway.sessionManager.getPersistedSession(id);
 			expect(persisted).toBeTruthy();
 			expect(persisted!.branch).toBeTruthy();
-			expect(persisted!.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
+			expect(persisted!.branch).toMatch(/^session\/[a-f0-9]{8}$/);
 		} finally {
 			await apiFetch(gateway.baseURL, `/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
 		}
@@ -149,7 +149,7 @@ test.describe("Sandbox branch reconciliation", () => {
 			const persisted = gateway.sessionManager.getPersistedSession(id);
 			expect(persisted).toBeTruthy();
 			expect(persisted!.branch).toBeTruthy();
-			expect(persisted!.branch).toMatch(/^session\/new-session-[a-f0-9]{8}$/);
+			expect(persisted!.branch).toMatch(/^session\/[a-f0-9]{8}$/);
 
 			// sandboxed should be falsy
 			expect(session.sandboxed).toBeFalsy();

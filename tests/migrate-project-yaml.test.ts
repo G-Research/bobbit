@@ -33,7 +33,7 @@ describe("migrateProjectYaml", () => {
 			test_unit_command: "npm run test:unit",
 			test_e2e_command: "npm run test:e2e",
 			worktree_setup_command: "npm ci",
-			qa_start_command: "node server.js",  // project-level, must NOT move
+			qa_start_command: "node server.js",
 			sandbox: "docker",
 		}));
 
@@ -57,8 +57,9 @@ describe("migrateProjectYaml", () => {
 		assert.equal(cmds.unit, "npm run test:unit");
 		assert.equal(cmds.e2e, "npm run test:e2e");
 
-		// Project-level fields preserved.
-		assert.equal(out.qa_start_command, "node server.js");
+		// qa_start_command moved into the component's config map; top-level key removed.
+		assert.equal(out.qa_start_command, undefined);
+		assert.equal((c.config as Record<string, string>).qa_start_command, "node server.js");
 		assert.equal(out.sandbox, "docker");
 
 		// Legacy command keys stripped.
@@ -226,6 +227,225 @@ describe("migrateProjectYaml", () => {
 		assert.equal(cmds.migrate, "npm run db:migrate");
 		assert.equal(cmds.seed, "npm run seed");
 		assert.equal(out.migrate_command, undefined, "extra *_command keys should be moved, not duplicated");
+	});
+
+	it("migrates legacy top-level qa_* keys onto components[*].config and inlines qa_env into qa_start_command", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			build_command: "npm run build",
+			qa_start_command: "node server.js --port $PORT",
+			qa_health_check: "http://127.0.0.1:$PORT/health",
+			qa_browser_entry: "http://127.0.0.1:$PORT/?token=$TOKEN",
+			qa_env: { PORT: "5173", NODE_ENV: "test" },
+			qa_max_duration_minutes: 15,
+			qa_max_scenarios: 3,
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "myapp" });
+
+		const out = readYaml(yamlFile);
+		const components = out.components as Array<Record<string, unknown>>;
+		const c = components[0];
+		const cfg = c.config as Record<string, string>;
+		assert.ok(cfg, "target component must have a config map after migration");
+		// qa_env is inlined into qa_start_command (single-quoted shell-escape).
+		assert.equal(cfg.qa_start_command, "PORT='5173' NODE_ENV='test' node server.js --port $PORT");
+		assert.equal(cfg.qa_health_check, "http://127.0.0.1:$PORT/health");
+		assert.equal(cfg.qa_browser_entry, "http://127.0.0.1:$PORT/?token=$TOKEN");
+		assert.equal(cfg.qa_max_duration_minutes, "15");
+		assert.equal(cfg.qa_max_scenarios, "3");
+
+		// All seven legacy top-level keys removed.
+		assert.equal(out.qa_start_command, undefined);
+		assert.equal(out.qa_health_check, undefined);
+		assert.equal(out.qa_browser_entry, undefined);
+		assert.equal(out.qa_env, undefined);
+		assert.equal(out.qa_max_duration_minutes, undefined);
+		assert.equal(out.qa_max_scenarios, undefined);
+	});
+
+	it("shell-escapes single quotes inside qa_env values when inlining", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			qa_start_command: "node server.js",
+			qa_env: { TOKEN: "abc'def" },
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "x" });
+
+		const out = readYaml(yamlFile);
+		const c = (out.components as any[])[0];
+		// 'abc'\''def' with the escape sequence — outer quotes wrap, internal '\'' separates.
+		assert.equal((c.config as Record<string, string>).qa_start_command, "TOKEN='abc'\\''def' node server.js");
+	});
+
+	it("is idempotent when re-run on an already-migrated qa_* file", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			qa_start_command: "node server.js",
+			qa_max_scenarios: 4,
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "p" });
+		const after1 = fs.readFileSync(yamlFile, "utf-8");
+
+		const result2 = migrateProjectYaml({ configDir, projectName: "p" });
+		assert.equal(result2.migrated, false, "second run must not migrate again");
+		const after2 = fs.readFileSync(yamlFile, "utf-8");
+		assert.equal(after1, after2, "file must be byte-identical after no-op migration");
+	});
+
+	it("qa migration via maybeSeedWorkflowsOnly path: existing components, top-level qa_*", () => {
+		// File has components: already, but legacy top-level qa_* keys remain.
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "web", repo: ".", commands: { build: "npm run build" } }],
+			qa_start_command: "node server.js",
+			qa_max_duration_minutes: 12,
+		}));
+
+		const result = migrateProjectYaml({ configDir, projectName: "web" });
+		assert.equal(result.migrated, true);
+
+		const out = readYaml(yamlFile);
+		const c = (out.components as any[])[0];
+		assert.equal((c.config as Record<string, string>).qa_start_command, "node server.js");
+		assert.equal((c.config as Record<string, string>).qa_max_duration_minutes, "12");
+		assert.equal(out.qa_start_command, undefined);
+		assert.equal(out.qa_max_duration_minutes, undefined);
+	});
+
+	it("target component fallback: name-match before components[0] when no agent-qa step exists", () => {
+		// Pre-seeded workflows with NO agent-qa step — fallback should hit name-match.
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [
+				{ name: "data", repo: "." },
+				{ name: "myproj", repo: "." },
+			],
+			workflows: { custom: { id: "custom", name: "Custom", gates: [] } },
+			qa_start_command: "node server.js",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "myproj" });
+
+		const out = readYaml(yamlFile);
+		const comps = out.components as any[];
+		assert.equal(comps[0].config, undefined, "first component (not name-matched) should NOT receive QA config");
+		assert.equal((comps[1].config as Record<string, string>).qa_start_command, "node server.js");
+	});
+
+	it("target component priority: agent-qa step component beats name-match", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [
+				{ name: "web", repo: "." },
+				{ name: "myproj", repo: "." },
+			],
+			workflows: {
+				feature: {
+					id: "feature", name: "Feature", gates: [
+						{ id: "impl", name: "Impl", verify: [{ name: "qa", type: "agent-qa", component: "web", prompt: "x" }] },
+					],
+				},
+			},
+			qa_start_command: "node server.js",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "myproj" });
+
+		const out = readYaml(yamlFile);
+		const comps = out.components as any[];
+		// agent-qa step targets "web" — it wins over name-match "myproj".
+		assert.equal((comps[0].config as Record<string, string>).qa_start_command, "node server.js");
+		assert.equal(comps[1].config, undefined);
+	});
+
+	it("target component fallback: agent-qa step references a non-existent component", () => {
+		// Workflow's agent-qa step points at "web" but components[] only has "api".
+		// Picker should ignore the dangling reference and fall back through name-match
+		// (no name match here either) to components[0] = "api".
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "api", repo: "." }],
+			workflows: {
+				default: {
+					name: "Default",
+					description: "",
+					gates: [
+						{ id: "impl", name: "Impl", verify: [{ name: "qa", type: "agent-qa", component: "web", prompt: "x" }] },
+					],
+				},
+			},
+			qa_start_command: "node server.js",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "unrelated" });
+
+		const out = readYaml(yamlFile);
+		const comps = out.components as any[];
+		// Migration must NOT silently no-op — the legacy key must be removed and
+		// the QA config must land on components[0] via the components[0] fallback.
+		assert.equal(out.qa_start_command, undefined, "legacy qa_start_command must be removed");
+		assert.equal(comps[0].name, "api");
+		assert.equal((comps[0].config as Record<string, string>).qa_start_command, "node server.js");
+	});
+
+	it("target component fallback: components[0] when no agent-qa step or name match", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "alpha", repo: "." }, { name: "beta", repo: "." }],
+			qa_start_command: "node server.js",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "unrelated-project-name" });
+
+		const out = readYaml(yamlFile);
+		const comps = out.components as any[];
+		assert.equal((comps[0].config as Record<string, string>).qa_start_command, "node server.js");
+	});
+
+	it("deletes empty legacy qa_* keys even when nothing is emitted to component config", () => {
+		// Synthesis path: components is missing, but qa_start_command is empty
+		// and qa_env is {}. Migration must still strip them from the top level.
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			qa_start_command: "",
+			qa_env: {},
+			qa_max_scenarios: "",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "clean" });
+
+		const out = readYaml(yamlFile);
+		assert.equal((out as Record<string, unknown>).qa_start_command, undefined, "empty qa_start_command must be deleted");
+		assert.equal((out as Record<string, unknown>).qa_env, undefined, "empty qa_env must be deleted");
+		assert.equal((out as Record<string, unknown>).qa_max_scenarios, undefined, "empty qa_max_scenarios must be deleted");
+		const comps = out.components as any[];
+		assert.equal(comps[0].name, "clean");
+		// No config emitted because every legacy value was empty.
+		assert.equal(comps[0].config, undefined);
+	});
+
+	it("deletes empty legacy qa_* keys via the seed-only path (components already present)", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "web", repo: "." }],
+			workflows: {
+				feature: { id: "feature", name: "Feature", gates: [] },
+			},
+			// All present but empty.
+			qa_start_command: "",
+			qa_env: {},
+			qa_max_duration_minutes: "",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "web" });
+
+		const out = readYaml(yamlFile);
+		assert.equal((out as Record<string, unknown>).qa_start_command, undefined);
+		assert.equal((out as Record<string, unknown>).qa_env, undefined);
+		assert.equal((out as Record<string, unknown>).qa_max_duration_minutes, undefined);
 	});
 
 	it("handles empty file with no legacy commands by writing a data-only default component", () => {

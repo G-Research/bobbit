@@ -111,7 +111,7 @@ Callers should always pass an explicit `projectId` when one is available. `cwd`-
 
 `SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern — they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
 
-**Verification harness project config resolution.** `VerificationHarness` resolves `ProjectConfigStore` per-goal via the private `resolveProjectConfigStore(goalId)` helper (alongside `resolveGateStore` etc.), not the server-level `projectConfigStore` injected at construction. This is what makes `{{project.*}}` substitution (e.g. `typecheck_command`, `test_unit_command`, `qa_max_duration_minutes`) pull from the **goal's owning project** config rather than the server's default. All four call sites — command-type verify steps in `runVerification`, LLM-review retry prompts in `_rerunLlmReviewStep`, agent-QA retry prompts in `_rerunAgentQaStep`, and the QA timeout lookup — go through the helper. If `projectContextManager` is unset (tests, legacy wiring) the helper silently falls back to the injected store; if it is set but the goal is not found in any context, the helper logs a `[verification]` warning and falls back, so the class of bug is diagnosable from logs.
+**Verification harness project config resolution.** `VerificationHarness` resolves `ProjectConfigStore` per-goal via the private `resolveProjectConfigStore(goalId)` helper (alongside `resolveGateStore` etc.), not the server-level `projectConfigStore` injected at construction. This is what makes `{{project.*}}` substitution (e.g. `typecheck_command`, `test_unit_command`) and the `agent-qa` step's `qa_max_duration_minutes` lookup (now `getQaMaxDurationMinutes(componentName)`) pull from the **goal's owning project** config rather than the server's default. All four call sites — command-type verify steps in `runVerification`, LLM-review retry prompts in `_rerunLlmReviewStep`, agent-QA retry prompts in `_rerunAgentQaStep`, and the QA timeout lookup — go through the helper. If `projectContextManager` is unset (tests, legacy wiring) the helper silently falls back to the injected store; if it is set but the goal is not found in any context, the helper logs a `[verification]` warning and falls back, so the class of bug is diagnosable from logs.
 
 This design prevents a class of data corruption bugs where missing `projectId` values silently route data to the wrong project's store.
 
@@ -321,6 +321,8 @@ Each registered project can override system-level settings (from `project.yaml`)
 
 **Settings UI**: The settings page has a two-tier layout. The top scope row selects System or a specific project. Sub-tabs within each scope show the relevant settings. Per-project tabs show inherited system values as placeholders with an "(inherited)" badge; overrides show normal text with a "×" reset button. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID (backwards-compatible: `#/settings/shortcuts` maps to `#/settings/system/shortcuts`).
 
+**Per-component editors**: The project Settings tab renders one card per component with editable `commands` and `config` key-value tables (sibling editors with the same shape — add/delete row controls, key/value inputs). Both tables persist via the same `PUT /api/projects/:id/config` payload by sending the `components` array with the edited entry. There are no longer top-level `qa_*` fields on the Settings page — QA settings live exclusively under the relevant component's `config:` map (see [Multi-repo & components](#multi-repo--components)).
+
 **Sidebar shortcut**: Project headers in the sidebar show a gear icon on hover that navigates directly to `#/settings/<project-id>/project`.
 
 **Mid-session project proposals**: Any agent session — regular, goal, staff, or non-project assistant — can call the `propose_project` tool to suggest changes to the current project's config, not just the project-assistant flow. The motivation is that agents often discover a missing test command, a better worktree setup, or a stale model preference while working on a goal; forcing the user into a separate project-assistant session just to accept that fix loses context. When a proposal arrives, the preview panel grows a "Project" tab showing a diff of the proposed fields against the current `project.yaml` (loaded via `GET /api/projects/:id/config`) and registry record. Unchanged fields collapse into a "No changes" group; `root_path` is read-only. The accept handler branches on whether the project is provisional:
@@ -328,7 +330,7 @@ Each registered project can override system-level settings (from `project.yaml`)
 - **Provisional** (project-assistant flow, unchanged): promote via `POST /api/projects/:id/promote`, write config via `PUT /api/projects/:id/config`, then terminate the assistant session and navigate to landing.
 - **Registered** (new path): `PUT /api/projects/:id/config` for project.yaml fields and `PUT /api/projects/:id` for the project name if it changed. The session stays connected and the agent continues where it left off — no navigation, no termination.
 
-The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, plus project-defined custom keys. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store; they are not currently set via any `propose_*` tool and must be edited from Settings → Models. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProposals["project"]` (proposal slot with `fields` + `mode` + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProposals["project"]` (proposal slot with `fields` + `mode` + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
 
 ### Project-proposal panel structure
 
@@ -336,13 +338,13 @@ The `propose_project` preview panel (`src/app/render.ts::projectProposalPanel`, 
 
 | Tab (testid) | Renderer | Purpose |
 |---|---|---|
-| `view-tab-components` | `projectComponentsView` | One card per component (`component-card-${name}`): `repo`, `relative_path`, `worktree_setup_command`, `commands` chips. Data-only components (no `commands` map) are flagged. |
+| `view-tab-components` | `projectComponentsView` | One card per component (`component-card-${name}`): `repo`, `relative_path`, `worktree_setup_command`, `commands` chips, plus a per-component `Config` key-value table (`component-config-${name}`) listing entries from `components[*].config` (e.g. `qa_start_command`, `qa_max_duration_minutes`). Data-only components (no `commands` map) are flagged. |
 | `view-tab-workflows` | `projectWorkflowsView` | One card per workflow (`workflow-card-${id}`) showing the gate DAG (`gate-node-${gateId}`) and each gate's verify steps with type-coloured badges (`step-badge-${type}` for `command` / `llm-review` / `agent-qa`, plus `expect:failure`). Step refs to `(component, command)` link back to the component card. |
-| `view-tab-diff` | `projectDiffView` | When a previous proposal exists in the same session, shows added/changed/removed components and gates rather than raw YAML field diffs. |
+| `view-tab-diff` | `projectDiffView` | When a previous proposal exists in the same session, shows added/changed/removed components and gates rather than raw YAML field diffs. Component diffs include per-key adds/removes/changes for `commands` and `config` (e.g. `+ web.config.qa_start_command`, `~ web.config.qa_max_scenarios: "3" → "5"`). |
 
 The legacy field block at the bottom keeps the original editable-input rows (`name`, plus changed-vs-unchanged partition for `build_command` / `test_command` / etc.) for the small project-level scalar fields the diff views don't surface. `root_path` is read-only.
 
-**Live-update guarantee.** Across repeated `propose_project` calls in one session, the panel must always reflect the latest payload. The mechanism is a shallow-merge in `session-manager.ts::onProjectProposal`: incoming flat fields win, but `components` and `workflows` carry over from the prior proposal when the new payload omits them (a streaming partial may not include both). The render path treats `components`/`workflows` as structured side-tables, never as legacy `Input` rows — `onFieldInput` early-returns for those two keys to prevent a stray keystroke from clobbering the structured value (Bug B), and the proposal tool's serialisation never JSON-stringifies them onto the flat field map (Bug A). The shallow-merge is Bug C's fix.
+**Live-update guarantee.** Across repeated `propose_project` calls in one session, the panel must always reflect the latest payload. The mechanism is a shallow-merge in `session-manager.ts::onProjectProposal`: incoming flat fields win, but `components` and `workflows` carry over from the prior proposal when the new payload omits them (a streaming partial may not include both). The shallow-merge also runs **per component** — entries are matched by `name` and missing `commands` / `config` on the incoming entry are carried over from the prev entry, so a partial re-emit (e.g. updating only `commands` on `web`) does not clobber the previous `config` map on the same component. The render path treats `components`/`workflows` as structured side-tables, never as legacy `Input` rows — `onFieldInput` early-returns for those two keys to prevent a stray keystroke from clobbering the structured value (Bug B), and the proposal tool's serialisation never JSON-stringifies them onto the flat field map (Bug A). The shallow-merge is Bug C's fix.
 
 **Workflow-suggestion checklist (G2).** After the assistant has settled on the components, the project-assistant prompt instructs it to present a single `ask_user_choices` multi-select of workflows it has designed for this specific project. **No options are pre-checked by component count or by canonical name** — the assistant must justify each suggestion against the discovered components and commands. The per-component and all-components scaffolds (`buildPerComponentWorkflow(componentName, allComponents)` and `buildAllComponentsWorkflow(components)` in `src/server/state-migration/per-component-workflows.ts`) are offered as adaptable starting points the assistant chooses explicitly when they fit; they reuse the canonical helpers and prompt strings (`readyToMergeGate()`, `DESIGN_REVIEW_PROMPT`, `GAP_ANALYSIS_DESIGN_PROMPT`, `GAP_ANALYSIS_IMPL_PROMPT`, `CODE_REVIEW_PROMPT`, `DOC_PROMPT`, `RALPH_LOOP_DESCRIPTION`) exported from `seed-default-workflows.ts` so gate semantics stay in one place. `buildDefaultWorkflows()` itself is internal to that module — no caller invokes it as a fallback. See [No default workflow scaffold](#no-default-workflow-scaffold).
 
@@ -354,23 +356,22 @@ The legacy field block at the bottom keeps the original editable-input rows (`na
 
 ### Native-YAML project.yaml fields
 
-Five fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings or quoted numbers:
+Two fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings:
 
 | Field | Shape |
 |---|---|
 | `config_directories` | `{ path: string; types: string[] }[]` |
-| `qa_env` | `Record<string, string>` |
 | `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (the secret `value` is split into `SecretsStore` on PUT — unchanged) |
-| `qa_max_duration_minutes` | `number` |
-| `qa_max_scenarios` | `number` |
+
+(`qa_env`, `qa_max_duration_minutes`, and `qa_max_scenarios` used to live here too — they have moved into per-component `config:` maps, see [Multi-repo & components](#multi-repo--components).)
 
 The motivation is editability and diff-friendliness: hand-editing a JSON-string-inside-YAML field is painful and produces noisy diffs in `propose_project` previews and PRs.
 
 **Lazy-migration loader.** `ProjectConfigStore` accepts both the native shape and the legacy form (JSON-string for the array/map fields, quoted numeric strings for the two numeric fields). Legacy values are parsed transparently into structured side-tables; malformed legacy strings log a warning and fall back to the default. The store sets `isDirty()` on legacy load so the next save rewrites the file in native form — no separate migration step.
 
-**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()`, `getQaEnv()`, `getSandboxTokens()`, `getQaMaxDurationMinutes()`, and `getQaMaxScenarios()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store.
+**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()` and `getSandboxTokens()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store. QA budgets and the start/health/browser-entry strings live on `Component.config: Record<string, string>` and are read via `getComponentConfig(name)`, `getQaMaxDurationMinutes(componentName)`, and `isQaConfiguredOnAnyComponent()`.
 
-**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these five keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form.
+**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these two keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form. The same endpoints reject the seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) with a migration message pointing at `components[<name>].config[<key>]`.
 
 ### Per-project palette
 
@@ -420,7 +421,6 @@ name: myapp
 rootPath: /home/me/w/myapp
 worktree_root: /home/me/wt    # optional override
 sandbox: docker               # project-level
-qa_start_command: …           # project-level (testbed, not a component build)
 config_directories: […]       # project-level
 
 components:                   # the only collection in project.yaml
@@ -433,6 +433,12 @@ components:                   # the only collection in project.yaml
       check: npm run check
       unit:  npx playwright test ...
       e2e:   npx playwright test ...
+    config:                   # opaque key→string map; consumed by skills like /qa-test
+      qa_start_command:        "PORT=$PORT NODE_ENV=test node dist/server.js"
+      qa_health_check:         "http://127.0.0.1:$PORT/api/health"
+      qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+      qa_max_duration_minutes: "10"
+      qa_max_scenarios:        "5"
 
 workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
   general: { name: General, gates: [...] }
@@ -443,7 +449,7 @@ workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
 - Mode is **inferred**, not declared: any `component.repo !== "."` makes the project multi-repo. In multi-repo mode, `rootPath` is a container directory holding sibling git repos; in single-repo mode, `rootPath` is the repo itself.
 - The default component's `name` matches the project's `name` (e.g. `bobbit` → `components[0].name == "bobbit"`). This keeps gate output, branch names, and UI labels meaningful from day one. `migrate-project-yaml.ts` enforces this on first boot for legacy single-repo projects.
 - `commands` is an **opaque `{ name: shell }` map** with no fixed schema. The project assistant tends to use names like `build`/`test`/`check`/`e2e`/`lint` because those are the typical gate verb categories, but any name is allowed (`migrate`, `seed`, `bench`, `gen-types`, …).
-- `qa_*` fields stay project-level because they describe an ephemeral testbed for the whole project, not a per-component build. The `agent-qa` step type implicitly references them.
+- `config` is a sibling **opaque `{ name: string }` map** on each component (max 100 entries; values are strict strings — numeric budgets are stringified). It carries arbitrary skill-consumed settings; the `/qa-test` skill reads `qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_max_duration_minutes`, and `qa_max_scenarios` from here. The `agent-qa` workflow step's `component:` field selects which component's `config` map is read at run time. Inline env vars directly into `qa_start_command` (e.g. `PORT=$PORT NODE_ENV=test npm start`) — there is no separate `qa_env` field; the server never spread `qa_env` into a child env, it was only ever inlined by agents at author time.
 
 **Component schema** (`Component` in `project-config-store.ts`):
 
@@ -454,6 +460,7 @@ workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
 | `relative_path` | no | Sub-path within the repo. Default `""` (component at repo root). |
 | `worktree_setup_command` | no | Per-component runtime hook (see below). |
 | `commands` | no | Flat `{name: shell}` map. **Absent ⇒ data-only component.** |
+| `config` | no | Opaque flat `{key: string}` map (max 100 entries). Consumed by skills like `/qa-test` (which reads `qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_max_duration_minutes`, `qa_max_scenarios`). Numeric budgets are stringified. |
 
 **Data-only components** (a component with no `commands`) declare a repo as part of the project so it gets provisioned on every goal/session worktree set, even though it contributes no workflow steps. Use cases:
 
@@ -478,7 +485,7 @@ The **multi-repo invariant** — every configured repo is checked out as a sibli
 
 Free-form `{ run }` steps that need a different working directory use `cd ... && ...` inside the `run` string. This keeps the schema small and the working-dir rule unambiguous: it is structurally derived from the component, or it is the per-branch container root.
 
-`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution.
+`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution. `agent-qa` additionally carries an optional `component:` field that selects which component's `config:` map the `/qa-test` skill reads (and which workspace to start). When omitted, the verification harness falls back to the first component whose `config.qa_start_command` is set, then to a name-match against the project, then to `components[0]`.
 
 The workflow validator (`workflow-validator.ts`) rejects, at load time:
 
@@ -517,8 +524,8 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 
 | Session type | Worktree? | Branch pattern |
 |---|---|---|
-| Pool pre-build (any session type) | Yes | `pool/_pool-{uuid8}` (temp; renamed on claim) |
-| Regular (host, after pool claim) | Yes | `session/<slug>-{uuid8}` after first prompt |
+| Pool pre-build (any session type) | Yes | `pool/_pool-{uuid8}` (temp; renamed at claim time) |
+| Regular (host, after pool claim) | Yes | `session/<uuid8>` (immediately on claim — no first-prompt rename; see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)) |
 | Regular (sandbox) | Yes | `session/s-{uuid8}` |
 | Goal sessions | Yes | `goal/<branch-name>` |
 | Team agent sessions | Yes | Per-agent branch within goal |
@@ -547,7 +554,7 @@ The agent's cwd in multi-repo mode is the per-branch container, mirroring the pr
 **Pool claim sequence (sessions and goals).** Both flows route through `WorktreePool.claim()`:
 
 1. `git branch -m pool/_pool-<id> <target>` — atomic, ~10ms.
-2. `git worktree move <pool-path> <target-path>` — atomic, updates both gitdir pointers (git ≥ 2.17). Falls back to a branch-rename-only **degraded mode** (logged) when the move fails (e.g. Windows file lock); in that case the directory stays at the pool path.
+2. `git worktree move <pool-path> <target-path>` — atomic, updates both gitdir pointers (git ≥ 2.17). On directory-rename failure (e.g. Windows file lock) for **single-repo** sessions, `claim()` reverts the branch rename and returns null; the caller falls back to a fresh `createWorktree`. (Multi-repo claims may surface a transient `degraded` warning when only one of N repos fails to move — see `PoolClaimResult.degraded`.)
 3. `git fetch origin` + `git reset --hard <remote-primary>` — backgrounded after handoff, so claim itself is fast.
 4. `git push -u origin <target>` — fire-and-forget, non-blocking.
 
@@ -555,19 +562,22 @@ Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per
 
 **Goal flow (Phase 3 fix).** `goal-manager.setupWorktree()` calls `pool.claim(goal.branch)` first and falls back to `createWorktree` only if the pool is empty. Multi-repo goals get the worktree set in one claim. Previously goals bypassed the pool entirely and were observably slower than session start — they now share the same warm-pool benefit.
 
-**Session flow (Phase 3 fix).** Sessions are provisioned eagerly with the temp `pool/_pool-<id>` branch and **renamed on first prompt** to `session/<slug>-<id>` (or `goal/<slug>` for goal sessions promoted from a regular session). The rename uses the same branch+worktree-move sequence as pool claim. If the session is archived without ever sending a prompt, cleanup uses the temp branch name (no rename needed). This keeps the warm-pool benefit (instant session start) while ending up with meaningful branch and directory names. Pre-Phase 3 sessions wasted pool slots on a `"new-session"` placeholder branch.
+**Session flow.** Pool entries pre-build on `pool/_pool-<id>`. On claim, `pool.claim(targetBranch)` runs the single branch-rename + worktree-move to the final `session/<id8>` name and the session is persisted with that name immediately. There is no first-prompt rename. The display title is independent of the git ref — `PUT /api/sessions/:id/title` updates metadata only. Archive cleanup operates on the final branch. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) for the full rationale and the test plan.
 
-**Boot sweeper (Phase 3).** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
+**Boot sweeper.** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
 
-- Renamed-but-orphaned worktrees (server died between rename and persist) — cleaned up.
 - `pool/_pool-<id>` worktrees not in the in-memory pool — reclaimed.
 - Legacy `session/_pool-*` entries (pre-Phase 3) — also recognised.
+- Orphaned `session-<id8>/` directories not owned by any persisted, non-archived session — scheduled for cleanup.
+- Legacy `session-<slug>-<id8>/` and `session-new-session-<id8>/` directories left over from pre-rename-removal sessions — tolerated while a live session row still references them, otherwise treated as orphans (back-compat for sessions that survive an upgrade).
+
+The pre-refactor "renamed-but-orphaned" branch (server died between branch-rename and row-persist) is gone — that race no longer exists because the rename happens synchronously inside `pool.claim()` before the session row is published. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) §13 for the full classification table.
 
 This means crash recovery doesn't require the user to manually clean up pool detritus.
 
 **Lifecycle:**
 
-1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
+1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal/staff branch as appropriate). **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
 2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
@@ -586,7 +596,7 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs **per-component** `worktree_setup_command` hooks (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh — their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
 
-**Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or session-first-prompt rename), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
+**Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or staff wake refresh), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
 **Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. Three invocation points fan out from `runComponentSetups()`:
 
@@ -700,6 +710,16 @@ The resulting string is passed to `createSession()` as `opts.seedContext` (with 
 - `src/server/agent/system-prompt.ts` — `Prior Session Transcript` section assembly
 - `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`
 - `src/ui/components/ContinueSessionChooser.ts` — mode chooser dialog (Summary vs Full, with large-transcript warning)
+
+### Archived session WS handshake
+
+When a client opens an archived session, the WebSocket handler in `src/server/ws/handler.ts` must push a `state` frame as part of the initial handshake — immediately after `auth_ok` / `session_status` / `session_title`. The frame carries the session's persisted `model` (provider, id, plus inferred `contextWindow` / `maxTokens` / `reasoning`) and any `imageGenerationModel`, matching the shape live sessions receive via the proactive `getState()` push.
+
+**Why this exists.** `RemoteAgent` in `src/app/remote-agent.ts` seeds `_state.model` at construction time with a hardcoded placeholder default (currently a Claude Opus id) so the footer model picker has something to render before the first server frame arrives. For live sessions this placeholder is overwritten almost instantly by the `getState()` push the server makes on connect. Archived sessions used to have no equivalent push — the persisted model only shipped if and when the client sent `get_state`, which happens on reconnect but not on initial connect — so the placeholder leaked into the footer until the user reloaded or the WebSocket dropped and resumed. The bug surfaced as "every archived session looks like it ran on Opus regardless of which model it actually used." The fix closes the asymmetry between live and archived initial-connect behaviour.
+
+**Single source of truth.** The archived state payload is built by `buildArchivedStateData(archived, sessionManager, sessionId)` in the same handler module. Both the archived branch of the `auth_ok` flow and the existing `get_state` request handler call it, so the two sites cannot drift in shape (e.g. `get_state` previously emitted a slimmer payload missing `contextWindow` / `maxTokens` / `imageGenerationModel`). Any future field added to the archived state — new model metadata, additional read-only flags — belongs inside that helper.
+
+**Latent fragility.** The client-side placeholder default in `RemoteAgent` is the underlying reason this bug was visible at all; removing it would require auditing every consumer of `state.model` for null-safety and is out of scope here. As long as the placeholder exists, every code path that hydrates state for an archived session must push a real `state` frame on initial connect. New transports or alternative connect paths (e.g. snapshot replay endpoints, future test harnesses) need to preserve this invariant. The regression test `tests/e2e/archived-footer-model.spec.ts` connects to an archived session **without** sending `get_state` and asserts the inbound `state` frame carries the true persisted model — keep it green.
 
 ### Sidebar grouping
 
@@ -1705,7 +1725,7 @@ Sandboxed agents use standard git worktrees inside the project container — the
 1. Removes the worktree via `git worktree remove --force`
 2. Called during session termination
 
-**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 — it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence and rename-on-first-prompt mechanics. Pools are **per-project** — `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` — sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
+**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 — it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence (single rename at claim time, no first-prompt rename — see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)). Pools are **per-project** — `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` — sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
 
 **Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the remote primary branch before being assigned to a session. This prevents stale worktrees when the primary branch has advanced since the pool entry was created. The remote primary branch is resolved dynamically via `git symbolic-ref refs/remotes/origin/HEAD` (falls back to `origin/master` if the ref is not set). The fetch+reset is non-fatal — if it fails, the worktree is still usable but may be behind.
 
