@@ -56,10 +56,29 @@ export function hasChildGoals(goalId: string, goals: GoalLike[]): boolean {
 	return false;
 }
 
+/** Like `hasChildGoals` but also counts archived children. Used by the
+ *  Children-tab visibility predicate so the tab stays visible after
+ *  every child has merged + auto-archived (still useful for browsing
+ *  the merge history). Mirrors the Agents tab pattern: dismissed
+ *  agents stay visible. */
+export function hasAnyChildGoals(goalId: string, goals: GoalLike[]): boolean {
+	for (const g of goals) {
+		if (g.parentGoalId === goalId) return true;
+	}
+	return false;
+}
+
 /** Pure predicate: should the Children tab be visible for this goal?
  *
- *  True iff the goal has any (transitive) non-archived descendants. The
- *  `goals` array is supplied so the predicate stays pure / testable.
+ *  True iff the goal has any (transitive) descendants — INCLUDING
+ *  archived. The `goals` array is supplied so the predicate stays
+ *  pure / testable.
+ *
+ *  Including archived: live test (PR #409 user feedback) showed that
+ *  filtering them out caused the Children tab to disappear once every
+ *  child merged + auto-archived, even though the merge history was
+ *  still useful to browse. Mirrors the Agents tab pattern — dismissed
+ *  agents stay visible.
  *
  *  Independent of the `goal-plan` gate — Plan tab and Children tab are
  *  orthogonal: Plan = "did we approve a DAG?" and Children = "what children
@@ -68,7 +87,7 @@ export function hasChildGoals(goalId: string, goals: GoalLike[]): boolean {
  *  even though no Plan tab. */
 export function shouldShowChildrenTab(goal: GoalLike | null | undefined, goals: GoalLike[]): boolean {
 	if (!goal) return false;
-	return countDescendantsFrom(goal.id, goals) > 0;
+	return countDescendantsFromAny(goal.id, goals) > 0;
 }
 
 /** Pure predicate: should the Tasks tab be visible for this goal?
@@ -91,10 +110,13 @@ export function shouldShowTasksTab(
 	taskCount: number,
 ): boolean {
 	if (taskCount > 0) return true;
-	// No tasks: hide if this is a plan/children-driven goal.
+	// No tasks: hide if this is a plan/children-driven goal. Use
+	// hasAnyChildGoals (includes archived) so a goal whose children all
+	// merged + auto-archived doesn't suddenly start showing a Tasks tab
+	// it never used.
 	if (!goal) return false;
 	const isPlanGoal = shouldShowPlanTab(goal, goals);
-	const isParentOfChildren = hasChildGoals(goal.id, goals);
+	const isParentOfChildren = hasAnyChildGoals(goal.id, goals);
 	if (isPlanGoal || isParentOfChildren) return false;
 	return true;
 }
@@ -105,9 +127,21 @@ export function shouldShowTasksTab(
  *  Mirrors `countDescendantsFrom` in `render-helpers.ts`; duplicated here so
  *  this module has no dependency on the heavy state-bound helper module. */
 export function countDescendantsFrom(goalId: string, goals: GoalLike[]): number {
+	return _countDescendants(goalId, goals, /* includeArchived */ false);
+}
+
+/** Count all (transitive) descendants of `goalId`, INCLUDING archived
+ *  ones. Used by the Children-tab visibility + count badge so the tab
+ *  stays visible (and shows the full count) once every child has
+ *  merged + auto-archived. */
+export function countDescendantsFromAny(goalId: string, goals: GoalLike[]): number {
+	return _countDescendants(goalId, goals, /* includeArchived */ true);
+}
+
+function _countDescendants(goalId: string, goals: GoalLike[], includeArchived: boolean): number {
 	const byParent = new Map<string, GoalLike[]>();
 	for (const g of goals) {
-		if (g.archived) continue;
+		if (!includeArchived && g.archived) continue;
 		if (!g.parentGoalId) continue;
 		let arr = byParent.get(g.parentGoalId);
 		if (!arr) { arr = []; byParent.set(g.parentGoalId, arr); }

@@ -27,6 +27,8 @@ import {
 	shouldShowChildrenTab,
 	shouldShowPlanTab,
 	shouldShowTasksTab,
+	countDescendantsFromAny,
+	hasAnyChildGoals,
 	hasChildGoals,
 	countDescendantsFrom,
 	type GoalLike,
@@ -108,11 +110,20 @@ describe("shouldShowChildrenTab — visibility independent of goal-plan gate", (
 		assert.equal(shouldShowPlanTab(g, [g]), false);
 	});
 
-	it("CT-5: archived descendants do not trigger the Children tab", () => {
+	it("CT-5: archived descendants TRIGGER the Children tab (post-PR #409 — mirrors Agents tab dismissed-stays-visible pattern)", () => {
+		// Pre-fix: filtering archived caused the Children tab to vanish
+		// once every child merged + auto-archived (one of the four auto-
+		// archive paths fired). User feedback: tab should stay visible
+		// for browsing the merge history, like Agents tab does for
+		// dismissed agents.
 		const parent = goal({ id: "g-root", workflow: PARENT_WF });
 		const archived = goal({ id: "c-old", parentGoalId: "g-root", archived: true });
-		assert.equal(shouldShowChildrenTab(parent, [parent, archived]), false);
+		assert.equal(shouldShowChildrenTab(parent, [parent, archived]), true);
+		// The non-archived count is 0 — the tab is driven by the any-
+		// archive count.
 		assert.equal(countDescendantsFrom("g-root", [parent, archived]), 0);
+		assert.equal(countDescendantsFromAny("g-root", [parent, archived]), 1);
+		assert.equal(hasAnyChildGoals("g-root", [parent, archived]), true);
 	});
 
 	it("CT-6: transitive grandchildren count toward Children visibility", () => {
@@ -220,5 +231,42 @@ describe("shouldShowTasksTab — hide when work is plan/children-driven", () => 
 		// migration / mixed workflow), don't hide them.
 		const g = goal({ id: "g", workflow: PARENT_WF });
 		assert.equal(shouldShowTasksTab(g, [g], 3), true);
+	});
+
+	it("hides when ALL children are archived (parent goal post-merge — work IS still children-driven)", () => {
+		// Post-PR #409: once every child merges + auto-archives, we
+		// don't want the Tasks tab to suddenly start showing on a goal
+		// that was never task-driven.
+		const parent = goal({ id: "p", workflow: PARENT_WF });
+		const c = goal({ id: "c", parentGoalId: "p", archived: true });
+		assert.equal(shouldShowTasksTab(parent, [parent, c], 0), false);
+	});
+});
+
+describe("countDescendantsFromAny / hasAnyChildGoals — includes archived (Children-tab visibility post-merge)", () => {
+	it("counts archived descendants (the live-test fix)", () => {
+		const parent = goal({ id: "p" });
+		const live = goal({ id: "live", parentGoalId: "p" });
+		const archived = goal({ id: "arch", parentGoalId: "p", archived: true });
+		assert.equal(countDescendantsFromAny("p", [parent, live, archived]), 2);
+		assert.equal(countDescendantsFrom("p", [parent, live, archived]), 1);
+	});
+
+	it("counts transitive archived grandchildren", () => {
+		const parent = goal({ id: "p" });
+		const mid = goal({ id: "mid", parentGoalId: "p" });
+		const grand = goal({ id: "grand", parentGoalId: "mid", archived: true });
+		assert.equal(countDescendantsFromAny("p", [parent, mid, grand]), 2);
+	});
+
+	it("hasAnyChildGoals fires for an archived-only set", () => {
+		const parent = goal({ id: "p" });
+		const archived = goal({ id: "arch", parentGoalId: "p", archived: true });
+		assert.equal(hasAnyChildGoals("p", [parent, archived]), true);
+		assert.equal(hasAnyChildGoals("other", [parent, archived]), false);
+	});
+
+	it("hasAnyChildGoals returns false on empty", () => {
+		assert.equal(hasAnyChildGoals("p", []), false);
 	});
 });

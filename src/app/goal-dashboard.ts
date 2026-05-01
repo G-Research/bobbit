@@ -6,7 +6,7 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, approveMutation, rejectMutation, signalManualGate, type GateState, type GateSignal } from "./api.js";
-import { countDescendantsFrom, getChildGoals } from "./render-helpers.js";
+import { getChildGoals, getArchivedChildGoalsFrom } from "./render-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
@@ -18,6 +18,7 @@ import { coerceWorkflowGatesForRender, type SafeWorkflowGate } from "./workflow-
 import {
 	shouldShowPlanTab as _shouldShowPlanTab,
 	shouldShowTasksTab as _shouldShowTasksTab,
+	countDescendantsFromAny as _countDescendantsFromAny,
 	shouldShowChildrenTab as _shouldShowChildrenTab,
 } from "./goal-dashboard-tab-visibility.js";
 export { hasChildGoals } from "./goal-dashboard-tab-visibility.js";
@@ -1670,7 +1671,10 @@ function renderTabBar(): TemplateResult {
 	const showPlan = shouldShowPlanTab(currentGoal, state.goals);
 	const showChildren = shouldShowChildrenTab(currentGoal, state.goals);
 	const showTasks = _shouldShowTasksTab(currentGoal as any, state.goals as any, tasks.length);
-	const childCountStr = showChildren ? String(countDescendantsFrom(currentGoal!.id, state.goals)) : "";
+	// Total count includes archived so the badge tracks the Children
+	// tab’s actual rendered list (live + archived, mirroring the Agents
+	// tab’s live + dismissed pattern).
+	const childCountStr = showChildren ? String(_countDescendantsFromAny(currentGoal!.id, state.goals as any)) : "";
 
 	const tabs: Array<{ id: DashboardTab; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
@@ -2318,10 +2322,58 @@ function formatChildLastActivity(ts: number | undefined): string {
 }
 
 /** Children tab body — a list of clickable cards per docs/design/nested-goals.md §10.3. */
+function renderChildCard(c: Goal, isArchived: boolean): TemplateResult {
+	const gateLabel = childCurrentGateLabel(c);
+	const verdict = childLastVerdictLabel(c);
+	const agentCount = childAgentCount(c.id);
+	const lastActivity = formatChildLastActivity(c.updatedAt ?? c.createdAt);
+	// Archived terminal-state badge — distinguishes "merged + cleaned up"
+	// (passed) from "shelved / aborted / zombie cleanup" (failed). Mirrors
+	// the colour-coded plan-node states from `plan-node-state.ts`.
+	const archivedBadge = isArchived
+		? c.state === "complete"
+			? html`<span class="role-tag" style="background:oklch(0.65 0.15 145 / 0.18);color:oklch(0.55 0.15 145);" data-testid="child-card-archived-badge">Merged</span>`
+			: html`<span class="role-tag" style="background:var(--muted);color:var(--muted-foreground);" data-testid="child-card-archived-badge">Archived</span>`
+		: nothing;
+	return html`
+		<div
+			class="child-card ${isArchived ? "opacity-70" : ""}"
+			data-testid="child-card"
+			data-archived="${isArchived ? "true" : "false"}"
+			role="button"
+			tabindex="0"
+			style="cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:10px 12px;background:var(--background);display:flex;flex-direction:column;gap:6px;${isArchived ? "opacity:0.7;" : ""}"
+			@click=${() => setHashRoute("goal-dashboard", c.id)}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setHashRoute("goal-dashboard", c.id); } }}>
+			<div style="display:flex;align-items:center;gap:8px;">
+				<div class="child-title" data-testid="child-card-title" style="font-weight:500;color:var(--foreground);flex:1;">${c.title}</div>
+				${archivedBadge}
+			</div>
+			<div class="child-meta" style="display:flex;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--muted-foreground);">
+				<span data-testid="child-card-gate">Gate: ${gateLabel}</span>
+				<span>·</span>
+				<span data-testid="child-card-verdict">Last verdict: ${verdict}</span>
+				<span>·</span>
+				<span data-testid="child-card-agents">${agentCount} agent${agentCount === 1 ? "" : "s"}</span>
+				<span>·</span>
+				<span data-testid="child-card-activity">${lastActivity}</span>
+			</div>
+		</div>
+	`;
+}
+
 function renderChildrenTab(): TemplateResult {
 	const goal = currentGoal;
 	if (!goal) return html`<div class="tab-empty">No goal loaded.</div>`;
-	const children = getChildGoals(goal.id);
+	// Show ALL children, not just live — mirrors the Agents tab pattern
+	// (live + dismissed agents in the same view). Archived children are
+	// rendered with opacity-70 + an "Archived" / "Merged" badge to
+	// distinguish terminal-state from in-flight. Live test (PR #409
+	// v0.1-foundation): the Children tab showed (1) but the four merged
+	// + auto-archived Phase 1+2 children were invisible — confusing.
+	const liveChildren = getChildGoals(goal.id);
+	const archivedChildren = getArchivedChildGoalsFrom(goal.id, state.goals);
+	const total = liveChildren.length + archivedChildren.length;
 
 	const onAddChild = () => {
 		showNewGoalDialogForChild({
@@ -2334,9 +2386,9 @@ function renderChildrenTab(): TemplateResult {
 		<div class="tab-panel-inner" data-testid="children-tab">
 			<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
 				<div style="font-size:13px;color:var(--muted-foreground);">
-					${children.length === 0
+					${total === 0
 						? html`<span data-testid="children-tab-empty">No children yet.</span>`
-						: html`${children.length} child goal${children.length === 1 ? "" : "s"}`}
+						: html`${total} child goal${total === 1 ? "" : "s"}${archivedChildren.length > 0 ? html` <span style="color:var(--text-tertiary);">(${liveChildren.length} active, ${archivedChildren.length} archived)</span>` : nothing}`}
 				</div>
 				<button
 					class="btn-secondary"
@@ -2345,35 +2397,10 @@ function renderChildrenTab(): TemplateResult {
 					+ Add child goal
 				</button>
 			</div>
-			${children.length === 0 ? nothing : html`
+			${total === 0 ? nothing : html`
 				<div class="children-tab" data-testid="children-tab-list" style="display:flex;flex-direction:column;gap:8px;">
-					${children.map(c => {
-						const gateLabel = childCurrentGateLabel(c);
-						const verdict = childLastVerdictLabel(c);
-						const agentCount = childAgentCount(c.id);
-						const lastActivity = formatChildLastActivity(c.updatedAt ?? c.createdAt);
-						return html`
-							<div
-								class="child-card"
-								data-testid="child-card"
-								role="button"
-								tabindex="0"
-								style="cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:10px 12px;background:var(--background);display:flex;flex-direction:column;gap:6px;"
-								@click=${() => setHashRoute("goal-dashboard", c.id)}
-								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setHashRoute("goal-dashboard", c.id); } }}>
-								<div class="child-title" data-testid="child-card-title" style="font-weight:500;color:var(--foreground);">${c.title}</div>
-								<div class="child-meta" style="display:flex;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--muted-foreground);">
-									<span data-testid="child-card-gate">Gate: ${gateLabel}</span>
-									<span>·</span>
-									<span data-testid="child-card-verdict">Last verdict: ${verdict}</span>
-									<span>·</span>
-									<span data-testid="child-card-agents">${agentCount} agent${agentCount === 1 ? "" : "s"}</span>
-									<span>·</span>
-									<span data-testid="child-card-activity">${lastActivity}</span>
-								</div>
-							</div>
-						`;
-					})}
+					${liveChildren.map(c => renderChildCard(c, false))}
+					${archivedChildren.map(c => renderChildCard(c, true))}
 				</div>
 			`}
 		</div>
