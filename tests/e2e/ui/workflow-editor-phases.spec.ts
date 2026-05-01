@@ -10,8 +10,18 @@
  * - Phase compaction on save
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, defaultProjectId } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+
+/** Build the Settings → Workflows tab hash for the harness's default project.
+ *  The standalone `#/workflows` route redirects to this same hash (see
+ *  `src/app/main.ts`). Tests navigate directly to avoid racing the redirect
+ *  against `navigateToHash`'s `startsWith` check. */
+async function workflowsTabHash(): Promise<string> {
+	const pid = await defaultProjectId();
+	if (!pid) throw new Error("no default project for workflows tab");
+	return `#/settings/${pid}/workflows`;
+}
 
 const WF_ID = `test-wf-phases-${Date.now()}`;
 
@@ -47,8 +57,11 @@ async function deleteTestWorkflow(id?: string): Promise<void> {
 
 /** Navigate to the workflow edit page and expand the first gate. */
 async function navigateToEditAndExpandGate(page: import("@playwright/test").Page): Promise<void> {
-	// Navigate to workflows list — this triggers loadWorkflowPageData()
-	await navigateToHash(page, "#/workflows");
+	// Navigate to the Settings → Workflows tab — Workflows is now an embedded
+	// tab inside Settings (commits 0fd63978, 2fd9ad2b). The legacy `#/workflows`
+	// route redirects here, but tests use the canonical hash directly so
+	// `navigateToHash`'s `startsWith` check sees the final URL.
+	await navigateToHash(page, await workflowsTabHash());
 	// Wait for the test workflow row to appear in the list
 	const wfRow = page.locator(".wf-row").filter({ hasText: "Test Phases Workflow" }).first();
 	await expect(wfRow).toBeVisible({ timeout: 10_000 });
@@ -182,9 +195,17 @@ test.describe("Workflow editor phases", () => {
 		await saveBtn.click();
 		await savePromise;
 
-		// Navigate away and back to verify persistence
-		await navigateToHash(page, "#/workflows");
-		await expect(page.locator(".wf-container")).toBeVisible({ timeout: 5_000 });
+		// Navigate away and back to verify persistence. Reload + bounce through
+		// the landing route so the embedded workflow page's module-level
+		// `currentView` resets from "edit" back to "list" and a real hashchange
+		// fires the workflows-tab render path (navigating to the same hash that
+		// the URL already has is a no-op under high parallel load).
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first())
+			.toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/");
+		await navigateToHash(page, await workflowsTabHash());
+		await expect(page.locator(".wf-container")).toBeVisible({ timeout: 10_000 });
 
 		await navigateToEditAndExpandGate(page);
 
