@@ -24,6 +24,9 @@ import WebSocket from "ws";
 
 const PLAN_FRESH_WORKFLOW_ID = "mutation-banner-fresh";
 
+/** Workflow with `goal-plan` (manual) → `execution` for the freeze broadcast test. */
+const FREEZE_WORKFLOW_ID = "mutation-banner-freeze";
+
 function fakeSubgoalStep(planId: string, title: string): Record<string, unknown> {
 	return {
 		name: title,
@@ -42,6 +45,19 @@ async function seedFreshWorkflow(projectId: string): Promise<void> {
 			description: "Fixture for POST /mutation/:rid/decision — fresh execution gate.",
 			gates: [
 				{ id: "execution", name: "Execution", verify: [] },
+			],
+		},
+		[FREEZE_WORKFLOW_ID]: {
+			id: FREEZE_WORKFLOW_ID,
+			name: "Mutation Banner (Freeze)",
+			description: "Fixture for `goal_plan_frozen` broadcast — manual goal-plan gate → execution.",
+			gates: [
+				// `goal-plan` is manual + has empty verify[] so the signal
+				// transitions straight to passed. The execution gate carries
+				// no `frozen` metadata initially — the freeze hook stamps it
+				// on the first goal-plan signal.
+				{ id: "goal-plan", name: "Goal plan", manual: true, verify: [] },
+				{ id: "execution", name: "Execution", dependsOn: ["goal-plan"], verify: [] },
 			],
 		},
 	};
@@ -275,5 +291,187 @@ test.describe("POST /api/goals/:id/mutation/:requestId/decision", () => {
 			{ method: "POST", body: JSON.stringify({ decision: "approve" }) },
 		);
 		expect(resp.status).toBe(404);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// `goal_plan_frozen` broadcast (design §9). Signalling `goal-plan` stamps
+// `frozen="true"` onto the goal's snapshotted `execution` gate and broadcasts
+// `goal_plan_frozen { goalId, gateId, frozenAt }`. Idempotent — a re-signal
+// of the already-passed gate does NOT re-broadcast (frozen flag stays set).
+// ---------------------------------------------------------------------------
+
+test.describe("goal_plan_frozen WS broadcast", () => {
+	test.beforeAll(async () => {
+		const pid = await defaultProjectId();
+		expect(pid).toBeTruthy();
+		await seedFreshWorkflow(pid!);
+	});
+
+	test("signalling goal-plan broadcasts goal_plan_frozen with execution gateId + frozenAt", async () => {
+		const goalId = await createGoalForTest(FREEZE_WORKFLOW_ID);
+		try {
+			const collector = await openWsCollector(
+				m => m.type === "goal_plan_frozen" && m.goalId === goalId,
+			);
+
+			const before = Date.now();
+			const resp = await apiFetch(`/api/goals/${goalId}/gates/goal-plan/signal`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId: "test-freeze" }),
+			});
+			expect(resp.status).toBe(201);
+			const after = Date.now();
+
+			const events = await collector.finish(800);
+			const frozen = events.find(e => e.type === "goal_plan_frozen");
+			expect(frozen, "expected goal_plan_frozen broadcast").toBeTruthy();
+			expect(frozen.goalId).toBe(goalId);
+			expect(frozen.gateId).toBe("execution");
+			expect(typeof frozen.frozenAt).toBe("number");
+			expect(frozen.frozenAt).toBeGreaterThanOrEqual(before);
+			expect(frozen.frozenAt).toBeLessThanOrEqual(after + 1000);
+
+			// Persisted on the snapshotted workflow.
+			const goalResp = await apiFetch(`/api/goals/${goalId}`);
+			const goal = await goalResp.json();
+			const execGate = goal.workflow.gates.find((g: any) => g.id === "execution");
+			expect(execGate.metadata?.frozen).toBe("true");
+			expect(typeof execGate.metadata?.frozenAt).toBe("string");
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
+	test("re-signalling already-frozen goal-plan emits exactly ONE goal_plan_frozen broadcast", async () => {
+		const goalId = await createGoalForTest(FREEZE_WORKFLOW_ID);
+		try {
+			// Open the collector BEFORE either signal so we count both events
+			// in a single observation window — avoids inter-signal sleep.
+			const collector = await openWsCollector(
+				m => m.type === "goal_plan_frozen" && m.goalId === goalId,
+			);
+
+			// First signal triggers the freeze + broadcast.
+			const first = await apiFetch(`/api/goals/${goalId}/gates/goal-plan/signal`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId: "test-1" }),
+			});
+			expect(first.status).toBe(201);
+
+			// Second signal hits the re-signal cached path; the freeze hook
+			// there is gated on `metadata.frozen !== "true"` so the broadcast
+			// must NOT fire a second time.
+			const second = await apiFetch(`/api/goals/${goalId}/gates/goal-plan/signal`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId: "test-2" }),
+			});
+			expect(second.status).toBe(201);
+
+			const events = await collector.finish(800);
+			const frozenEvents = events.filter(e => e.type === "goal_plan_frozen");
+			expect(frozenEvents.length).toBe(1);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// `goal_merge_conflict` broadcast (design §9). When integrate-child returns
+// `{ merged: false, conflict: true, output }` we broadcast the conflict so
+// dashboard viewers can surface it to the team-lead. Sibling event
+// `goal_merge_complete` already covered by goals-spawn-child-api.spec.ts.
+//
+// We stub `goalManager.mergeChild` directly to return a conflict result — no
+// real git state needed. This isolates the broadcast contract from the merge
+// helper's implementation.
+// ---------------------------------------------------------------------------
+
+test.describe("goal_merge_conflict WS broadcast", () => {
+	test.beforeAll(async () => {
+		const pid = await defaultProjectId();
+		expect(pid).toBeTruthy();
+		await seedFreshWorkflow(pid!);
+	});
+
+	test("integrate-child conflict response broadcasts goal_merge_conflict", async ({ gateway }) => {
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+
+		// Create parent + child goals via the registered API path so the
+		// project-context routing is correct.
+		const parentResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: `Conflict Broadcast Parent ${Date.now()}`,
+				cwd: nonGitCwd(),
+				team: false,
+				worktree: false,
+				workflowId: "general",
+				projectId,
+				autoStartTeam: false,
+			}),
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		const childResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: `Conflict Broadcast Child ${Date.now()}`,
+				cwd: nonGitCwd(),
+				team: false,
+				worktree: false,
+				workflowId: "general",
+				projectId,
+				autoStartTeam: false,
+				parentGoalId: parent.id,
+			}),
+		});
+		expect(childResp.status).toBe(201);
+		const child = await childResp.json();
+
+		// Stub the in-process goalManager.mergeChild to return a conflict.
+		const ctx = gateway.projectContextManager.getContextForGoal(parent.id);
+		if (!ctx) throw new Error("no project context for parent goal");
+		const original = ctx.goalManager.mergeChild.bind(ctx.goalManager);
+		const conflictOutput = "CONFLICT (content): Merge conflict in TEST_FILE.txt\nAutomatic merge failed; aborting.";
+		ctx.goalManager.mergeChild = async (_parentId: string, _childId: string) => ({
+			merged: false,
+			conflict: true,
+			output: conflictOutput,
+		});
+
+		try {
+			const collector = await openWsCollector(
+				m => m.type === "goal_merge_conflict" && m.parentGoalId === parent.id,
+			);
+
+			const integrateResp = await apiFetch(
+				`/api/goals/${parent.id}/integrate-child/${child.id}`,
+				{ method: "POST" },
+			);
+			expect(integrateResp.status).toBe(409);
+			const body = await integrateResp.json();
+			expect(body.merged).toBe(false);
+			expect(body.conflict).toBe(true);
+			expect(body.output).toBe(conflictOutput);
+
+			const events = await collector.finish(700);
+			const conflict = events.find(e => e.type === "goal_merge_conflict");
+			expect(conflict, "expected goal_merge_conflict broadcast").toBeTruthy();
+			expect(conflict.parentGoalId).toBe(parent.id);
+			expect(conflict.childGoalId).toBe(child.id);
+			expect(conflict.output).toBe(conflictOutput);
+
+			// Sanity: success counterpart was NOT also fired.
+			const complete = events.find(e => e.type === "goal_merge_complete");
+			expect(complete, "goal_merge_complete must NOT fire on conflict").toBeUndefined();
+		} finally {
+			ctx.goalManager.mergeChild = original;
+			await deleteGoal(child.id);
+			await deleteGoal(parent.id);
+		}
 	});
 });
