@@ -334,6 +334,21 @@ async function runBatchGitStatus(
 // ── Git diff helper (shared between session and goal endpoints) ──
 const DIFF_MAX_BYTES = 500 * 1024; // 500KB
 
+/**
+ * The seven legacy top-level QA keys that have moved to per-component
+ * `config:` maps. Rejected on PUT and stripped from GET responses as
+ * defence in depth (state-migration removes them on boot).
+ */
+const LEGACY_QA_TOP_LEVEL_KEYS = [
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+] as const;
+
 async function getGitDiff(cwd: string, file?: string, containerId?: string): Promise<string> {
 	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
 	let hasHead = true;
@@ -2041,10 +2056,11 @@ async function handleApiRoute(
 			// Upgrade migrated keys to native structured form for the wire response.
 			const config: Record<string, unknown> = { ...flat };
 			config.config_directories = ctx.projectConfigStore.getConfigDirectories();
-			config.qa_env = ctx.projectConfigStore.getQaEnv();
 			config.sandbox_tokens = ctx.projectConfigStore.getSandboxTokens();
-			config.qa_max_duration_minutes = ctx.projectConfigStore.getQaMaxDurationMinutes();
-			config.qa_max_scenarios = ctx.projectConfigStore.getQaMaxScenarios();
+			// Defence in depth: legacy top-level qa_* keys must never appear on
+			// the wire. Migration removes them on boot; strip again here in case
+			// a stale on-disk value slipped through.
+			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete config[k];
 			mergeSecretsIntoTokens(config, ctx.secretsStore);
 			json(redactSandboxSecrets(config));
 			return;
@@ -2081,10 +2097,9 @@ async function handleApiRoute(
 					: "default";
 			};
 			result.config_directories = { value: ctx.projectConfigStore.getConfigDirectories(), source: migratedSource("config_directories") };
-			result.qa_env = { value: ctx.projectConfigStore.getQaEnv(), source: migratedSource("qa_env") };
 			result.sandbox_tokens = { value: ctx.projectConfigStore.getSandboxTokens(), source: migratedSource("sandbox_tokens") };
-			result.qa_max_duration_minutes = { value: ctx.projectConfigStore.getQaMaxDurationMinutes(), source: migratedSource("qa_max_duration_minutes") };
-			result.qa_max_scenarios = { value: ctx.projectConfigStore.getQaMaxScenarios(), source: migratedSource("qa_max_scenarios") };
+			// Defence in depth: strip legacy top-level qa_* keys.
+			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete result[k];
 			// Merge secrets into sandbox_tokens (structured) for the resolved response.
 			if (Array.isArray(result.sandbox_tokens.value)) {
 				const tempConfig: Record<string, unknown> = { sandbox_tokens: result.sandbox_tokens.value };
@@ -2097,6 +2112,16 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+
+			// Reject legacy top-level qa_* keys — they have moved into
+			// `components[<name>].config`. Done before any other parsing so the
+			// error is fast and unambiguous.
+			for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
+				if (key in (body as Record<string, unknown>)) {
+					json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
+					return;
+				}
+			}
 
 			// Extract structured fields (components / workflows) before flat-key validation.
 			let components = (body as Record<string, unknown>).components;
@@ -2189,10 +2214,7 @@ async function handleApiRoute(
 			const migratedExtracted: Record<string, unknown> = {};
 			const MIGRATED_FIELDS = [
 				{ key: "config_directories", expect: "array" as const },
-				{ key: "qa_env", expect: "object" as const },
 				{ key: "sandbox_tokens", expect: "array" as const },
-				{ key: "qa_max_duration_minutes", expect: "number" as const },
-				{ key: "qa_max_scenarios", expect: "number" as const },
 			];
 			for (const { key, expect } of MIGRATED_FIELDS) {
 				if (!(key in body)) continue;
@@ -2208,14 +2230,6 @@ async function handleApiRoute(
 				}
 				if (expect === "array" && !Array.isArray(v)) {
 					json({ error: `Field "${key}" must be an array` }, 400);
-					return;
-				}
-				if (expect === "object" && (Array.isArray(v) || typeof v !== "object" || v === null)) {
-					json({ error: `Field "${key}" must be an object` }, 400);
-					return;
-				}
-				if (expect === "number" && typeof v !== "number") {
-					json({ error: `Field "${key}" must be a number` }, 400);
 					return;
 				}
 				migratedExtracted[key] = v;
@@ -2255,19 +2269,6 @@ async function handleApiRoute(
 					);
 				}
 			}
-			if ("qa_env" in migratedExtracted) {
-				const v = migratedExtracted.qa_env;
-				if (v === null) {
-					ctx.projectConfigStore.remove("qa_env");
-				} else if (v && typeof v === "object" && !Array.isArray(v)) {
-					const env: Record<string, string> = {};
-					for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-						if (typeof val === "string") env[k] = val;
-						else if (typeof val === "number" || typeof val === "boolean") env[k] = String(val);
-					}
-					ctx.projectConfigStore.setQaEnv(env);
-				}
-			}
 			if ("sandbox_tokens" in migratedExtracted) {
 				const v = migratedExtracted.sandbox_tokens;
 				if (v === null) {
@@ -2281,16 +2282,6 @@ async function handleApiRoute(
 					);
 				}
 			}
-			if ("qa_max_duration_minutes" in migratedExtracted) {
-				const v = migratedExtracted.qa_max_duration_minutes;
-				if (v === null) ctx.projectConfigStore.remove("qa_max_duration_minutes");
-				else if (typeof v === "number") ctx.projectConfigStore.setQaMaxDurationMinutes(v);
-			}
-			if ("qa_max_scenarios" in migratedExtracted) {
-				const v = migratedExtracted.qa_max_scenarios;
-				if (v === null) ctx.projectConfigStore.remove("qa_max_scenarios");
-				else if (typeof v === "number") ctx.projectConfigStore.setQaMaxScenarios(v);
-			}
 
 			// Persist structured fields if provided.
 			if (Array.isArray(components)) {
@@ -2300,6 +2291,7 @@ async function handleApiRoute(
 					relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
 					worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
 					commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+					config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
 				}));
 				ctx.projectConfigStore.setComponents(normalized);
 			}
@@ -2317,8 +2309,7 @@ async function handleApiRoute(
 	if (evConfigMatch && req.method === "GET") {
 		const ctx = projectContextManager.getOrCreate(evConfigMatch[1]);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const config = ctx.projectConfigStore.getQaTestingConfig();
-		json({ config });
+		json({ configured: ctx.projectConfigStore.isQaConfiguredOnAnyComponent() });
 		return;
 	}
 
@@ -3498,13 +3489,19 @@ async function handleApiRoute(
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 		const bodyMap = body as Record<string, unknown>;
 
+		// Reject legacy top-level qa_* keys — they have moved into
+		// `components[<name>].config`.
+		for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
+			if (key in bodyMap) {
+				json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
+				return;
+			}
+		}
+
 		// Native-YAML migrated fields: must be sent as structured types.
 		const MIGRATED_FIELDS = [
 			{ key: "config_directories", expect: "array" as const },
-			{ key: "qa_env", expect: "object" as const },
 			{ key: "sandbox_tokens", expect: "array" as const },
-			{ key: "qa_max_duration_minutes", expect: "number" as const },
-			{ key: "qa_max_scenarios", expect: "number" as const },
 		];
 		const migratedExtracted: Record<string, unknown> = {};
 		for (const { key, expect } of MIGRATED_FIELDS) {
@@ -3516,8 +3513,6 @@ async function handleApiRoute(
 				return;
 			}
 			if (expect === "array" && !Array.isArray(v)) { json({ error: `Field "${key}" must be an array` }, 400); return; }
-			if (expect === "object" && (Array.isArray(v) || typeof v !== "object" || v === null)) { json({ error: `Field "${key}" must be an object` }, 400); return; }
-			if (expect === "number" && typeof v !== "number") { json({ error: `Field "${key}" must be a number` }, 400); return; }
 			migratedExtracted[key] = v;
 			delete bodyMap[key];
 		}
@@ -3547,18 +3542,6 @@ async function handleApiRoute(
 				);
 			}
 		}
-		if ("qa_env" in migratedExtracted) {
-			const v = migratedExtracted.qa_env;
-			if (v === null) projectConfigStore.remove("qa_env");
-			else if (v && typeof v === "object" && !Array.isArray(v)) {
-				const env: Record<string, string> = {};
-				for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-					if (typeof val === "string") env[k] = val;
-					else if (typeof val === "number" || typeof val === "boolean") env[k] = String(val);
-				}
-				projectConfigStore.setQaEnv(env);
-			}
-		}
 		if ("sandbox_tokens" in migratedExtracted) {
 			const v = migratedExtracted.sandbox_tokens;
 			if (v === null) projectConfigStore.remove("sandbox_tokens");
@@ -3569,16 +3552,6 @@ async function handleApiRoute(
 					})),
 				);
 			}
-		}
-		if ("qa_max_duration_minutes" in migratedExtracted) {
-			const v = migratedExtracted.qa_max_duration_minutes;
-			if (v === null) projectConfigStore.remove("qa_max_duration_minutes");
-			else if (typeof v === "number") projectConfigStore.setQaMaxDurationMinutes(v);
-		}
-		if ("qa_max_scenarios" in migratedExtracted) {
-			const v = migratedExtracted.qa_max_scenarios;
-			if (v === null) projectConfigStore.remove("qa_max_scenarios");
-			else if (typeof v === "number") projectConfigStore.setQaMaxScenarios(v);
 		}
 
 		json({ ok: true });
