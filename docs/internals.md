@@ -729,6 +729,16 @@ The resulting string is passed to `createSession()` as `opts.seedContext` (with 
 - `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`
 - `src/ui/components/ContinueSessionChooser.ts` — mode chooser dialog (Summary vs Full, with large-transcript warning)
 
+### Archived session WS handshake
+
+When a client opens an archived session, the WebSocket handler in `src/server/ws/handler.ts` must push a `state` frame as part of the initial handshake — immediately after `auth_ok` / `session_status` / `session_title`. The frame carries the session's persisted `model` (provider, id, plus inferred `contextWindow` / `maxTokens` / `reasoning`) and any `imageGenerationModel`, matching the shape live sessions receive via the proactive `getState()` push.
+
+**Why this exists.** `RemoteAgent` in `src/app/remote-agent.ts` seeds `_state.model` at construction time with a hardcoded placeholder default (currently a Claude Opus id) so the footer model picker has something to render before the first server frame arrives. For live sessions this placeholder is overwritten almost instantly by the `getState()` push the server makes on connect. Archived sessions used to have no equivalent push — the persisted model only shipped if and when the client sent `get_state`, which happens on reconnect but not on initial connect — so the placeholder leaked into the footer until the user reloaded or the WebSocket dropped and resumed. The bug surfaced as "every archived session looks like it ran on Opus regardless of which model it actually used." The fix closes the asymmetry between live and archived initial-connect behaviour.
+
+**Single source of truth.** The archived state payload is built by `buildArchivedStateData(archived, sessionManager, sessionId)` in the same handler module. Both the archived branch of the `auth_ok` flow and the existing `get_state` request handler call it, so the two sites cannot drift in shape (e.g. `get_state` previously emitted a slimmer payload missing `contextWindow` / `maxTokens` / `imageGenerationModel`). Any future field added to the archived state — new model metadata, additional read-only flags — belongs inside that helper.
+
+**Latent fragility.** The client-side placeholder default in `RemoteAgent` is the underlying reason this bug was visible at all; removing it would require auditing every consumer of `state.model` for null-safety and is out of scope here. As long as the placeholder exists, every code path that hydrates state for an archived session must push a real `state` frame on initial connect. New transports or alternative connect paths (e.g. snapshot replay endpoints, future test harnesses) need to preserve this invariant. The regression test `tests/e2e/archived-footer-model.spec.ts` connects to an archived session **without** sending `get_state` and asserts the inbound `state` frame carries the true persisted model — keep it green.
+
 ### Sidebar grouping
 
 The sidebar always groups sessions and goals under collapsible project folder rows — even with a single project. This unified code path avoids duplication between single-project and multi-project layouts.
