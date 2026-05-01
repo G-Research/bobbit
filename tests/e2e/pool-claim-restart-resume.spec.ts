@@ -28,44 +28,11 @@ import { test, expect } from "./in-process-harness.js";
 test.use({ enableWorktreePool: true });
 
 import { apiFetch } from "./e2e-setup.js";
+import { waitForPool, pollSessionUntilSessionBranch } from "./test-utils/pool-polling.mjs";
 import { mkdirSync, existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-async function waitForPool(projectId: string, target: number, timeoutMs = 30_000): Promise<number> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const resp = await apiFetch("/api/worktree-pool");
-		if (resp.status === 200) {
-			const body = await resp.json();
-			const entry = body?.pools?.[projectId];
-			if (entry && entry.ready >= target) return entry.ready;
-		}
-		await new Promise(r => setTimeout(r, 200));
-	}
-	return 0;
-}
-
-async function pollSessionUntilSessionBranch(sessionId: string, timeoutMs = 15_000): Promise<{ branch: string; worktreePath?: string }> {
-	const start = Date.now();
-	let branch: string | undefined;
-	let worktreePath: string | undefined;
-	while (Date.now() - start < timeoutMs) {
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		if (resp.status === 200) {
-			const body = await resp.json();
-			if (typeof body.branch === "string" && body.branch.startsWith("session/")) {
-				branch = body.branch;
-				worktreePath = body.worktreePath;
-				break;
-			}
-		}
-		await new Promise(r => setTimeout(r, 150));
-	}
-	if (!branch) throw new Error(`session ${sessionId} did not reach session/<id8> branch within ${timeoutMs}ms`);
-	return { branch, worktreePath };
-}
 
 function reflog(repo: string, branch: string): string {
 	// Use the branch's own reflog only (NOT --all) so pool replenishment

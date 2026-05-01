@@ -15,6 +15,7 @@ import { test, expect } from "./in-process-harness.js";
 test.use({ enableWorktreePool: true });
 
 import { apiFetch } from "./e2e-setup.js";
+import { waitForPool, pollSessionUntil, pollSessionUntilArchived } from "./test-utils/pool-polling.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -26,20 +27,6 @@ function gitInit(dir: string): void {
 	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
 	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
 	execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir });
-}
-
-async function waitForPool(projectId: string, target: number, timeoutMs = 30_000): Promise<number> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const resp = await apiFetch("/api/worktree-pool");
-		if (resp.status === 200) {
-			const body = await resp.json();
-			const entry = body?.pools?.[projectId];
-			if (entry && entry.ready >= target) return entry.ready;
-		}
-		await new Promise(r => setTimeout(r, 200));
-	}
-	return 0;
 }
 
 test.describe.serial("multi-repo worktree pool E2E", () => {
@@ -163,17 +150,13 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		const sessionId = (await sessResp.json()).id;
 
 		// Poll until branch settles to session/<id8>.
-		let branch: string | undefined;
-		let worktreePath: string | undefined;
-		for (let i = 0; i < 100; i++) {
-			const detail = await apiFetch(`/api/sessions/${sessionId}`).then(r => r.status === 200 ? r.json() : null);
-			if (detail && typeof detail.branch === "string" && detail.branch.startsWith("session/")) {
-				branch = detail.branch;
-				worktreePath = detail.worktreePath;
-				break;
-			}
-			await new Promise(r => setTimeout(r, 150));
-		}
+		const settled = await pollSessionUntil(
+			sessionId,
+			row => typeof row.branch === "string" && row.branch.startsWith("session/"),
+			15_000,
+		);
+		const branch: string | undefined = settled?.branch;
+		const worktreePath: string | undefined = settled?.worktreePath;
 		expect(branch).toMatch(/^session\/[a-f0-9]{8}$/);
 		expect(branch).not.toMatch(/^pool\//);
 		expect(branch).not.toMatch(/^session\/new-session-/);
@@ -206,8 +189,12 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 			body: JSON.stringify({ title: "Multi-repo lifecycle" }),
 		});
 		expect(patch.status === 200 || patch.status === 204).toBe(true);
-		await new Promise(r => setTimeout(r, 500));
-		const afterPatch = await apiFetch(`/api/sessions/${sessionId}`).then(r => r.json());
+		// Settle: re-fetch until the title update has been observed (or timeout).
+		const afterPatch = await pollSessionUntil(
+			sessionId,
+			row => row.title === "Multi-repo lifecycle" || !!row.branch,
+			2_000,
+		);
 		expect(afterPatch.branch).toBe(branch);
 		expect(afterPatch.worktreePath).toBe(worktreePath);
 
@@ -269,17 +256,7 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		expect(del.ok).toBe(true);
 
 		// Poll until the API reports the session as archived.
-		const archivedDeadline = Date.now() + 10_000;
-		while (Date.now() < archivedDeadline) {
-			const r = await apiFetch(`/api/sessions/${sessionId}`);
-			if (r.status === 200) {
-				const body = await r.json();
-				if (body.archived) break;
-			} else if (r.status === 404) {
-				break;
-			}
-			await new Promise(r => setTimeout(r, 200));
-		}
+		await pollSessionUntilArchived(sessionId, 10_000);
 
 		for (const r of repos) {
 			const repoRoot = path.join(lifecycleRoot, r);
