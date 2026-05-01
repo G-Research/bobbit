@@ -53,12 +53,14 @@ export class ProjectContextManager {
   }
 
   /** Pure-ish helper: rewrite the builtin workflows for a specific
-   *  project's primary component name. Out-of-line so it's testable
-   *  via the substitute-builtin-component module. */
+   *  project's primary component (substitution + prune). Out-of-line
+   *  so it's testable via the substitute-builtin-component module.
+   *  Passes the full Component (name + commands) so the prune logic
+   *  can drop verify steps whose command isn't declared. */
   private _substituteForProject(ctx: ProjectContext, workflows: Workflow[]): Workflow[] {
-    const primary = ctx.projectConfigStore.getComponents()[0]?.name;
-    if (!primary) return workflows;
-    return substituteBuiltinComponents(workflows, primary);
+    const primary = ctx.projectConfigStore.getComponents()[0];
+    if (!primary?.name) return workflows;
+    return substituteBuiltinComponents(workflows, { name: primary.name, commands: primary.commands });
   }
 
   /**

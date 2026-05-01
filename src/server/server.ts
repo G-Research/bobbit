@@ -759,21 +759,22 @@ export function createGateway(config: GatewayConfig) {
 	{
 		let rewroteAny = false;
 		for (const ctx of projectContextManager.all()) {
-			const primary = ctx.projectConfigStore.getComponents()[0]?.name;
-			if (!primary || primary === PLACEHOLDER_COMPONENT_NAME) continue;
+			const primary = ctx.projectConfigStore.getComponents()[0];
+			if (!primary?.name || primary.name === PLACEHOLDER_COMPONENT_NAME) continue;
+			const primaryArg = { name: primary.name, commands: primary.commands };
 			for (const goal of ctx.goalStore.getAll()) {
 				if (goal.archived) continue;
 				if (!goal.workflow) continue;
-				const rewritten = substituteBuiltinComponent(goal.workflow, primary);
+				const rewritten = substituteBuiltinComponent(goal.workflow, primaryArg);
 				if (rewritten !== goal.workflow) {
 					ctx.goalStore.update(goal.id, { workflow: rewritten });
 					rewroteAny = true;
-					console.log(`[boot-migration] Rewrote goal ${goal.id} snapshot: component "${PLACEHOLDER_COMPONENT_NAME}" → "${primary}"`);
+					console.log(`[boot-migration] Rewrote goal ${goal.id} snapshot: component "${PLACEHOLDER_COMPONENT_NAME}" → "${primary.name}" (+ pruned undeclared commands)`);
 				}
 			}
 		}
 		if (rewroteAny) {
-			console.log("[boot-migration] component-name placeholder backfill complete.");
+			console.log("[boot-migration] component-name placeholder + command-prune backfill complete.");
 		}
 	}
 
