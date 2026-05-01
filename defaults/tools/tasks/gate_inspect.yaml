@@ -1,6 +1,9 @@
 name: gate_inspect
-description: "Read gate content, verification output, or signal history"
-summary: "Read detailed gate data by section: content, verification output, or signal history."
+description: |-
+  Read gate content, verification output, or signal history.
+
+  **Scope: this gate must be on YOUR own goal's workflow.** `gate_inspect` returns 404 with `Gate not found` when the named gate isn't in the calling session's goal — it does NOT walk up to the parent or down into children. To inspect a child goal's gates, query the gateway directly via the REST API or surface the question to the child's team-lead.
+summary: "Read detailed gate data by section: content, verification output, or signal history. Scoped to the calling session's own goal."
 provider:
   type: bobbit-extension
   extension: extension.ts

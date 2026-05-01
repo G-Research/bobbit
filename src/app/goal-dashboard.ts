@@ -15,6 +15,11 @@ import { showGoalDialog, showNewGoalDialogForChild } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { coerceWorkflowGatesForRender, type SafeWorkflowGate } from "./workflow-gate-coercion.js";
+import {
+	shouldShowPlanTab as _shouldShowPlanTab,
+	shouldShowChildrenTab as _shouldShowChildrenTab,
+} from "./goal-dashboard-tab-visibility.js";
+export { hasChildGoals } from "./goal-dashboard-tab-visibility.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -1557,22 +1562,15 @@ function setTab(tab: DashboardTab): void {
 	renderApp();
 }
 
-/** Pure predicate: should the Plan tab be visible for this goal?
- *  True iff the goal's (snapshotted) workflow includes a `goal-plan` gate.
- *  See docs/design/nested-goals.md §10.2. */
+/** Re-exports of pure predicates from `goal-dashboard-tab-visibility.ts`.
+ *  The helpers live there so they're importable from Node-style unit tests
+ *  without pulling in the dashboard's DOM/lit/state plumbing. See
+ *  docs/design/nested-goals.md §10.2 + §10.3. */
 export function shouldShowPlanTab(goal: Goal | null | undefined): boolean {
-	const gates = goal?.workflow?.gates;
-	if (!gates || gates.length === 0) return false;
-	return gates.some(g => g.id === "goal-plan");
+	return _shouldShowPlanTab(goal as any);
 }
-
-/** Pure predicate: should the Children tab be visible for this goal?
- *  True iff the goal has any (transitive) non-archived descendants. The
- *  `goals` array is supplied so the predicate stays pure / testable. See
- *  docs/design/nested-goals.md §10.3. */
 export function shouldShowChildrenTab(goal: Goal | null | undefined, goals: Goal[]): boolean {
-	if (!goal) return false;
-	return countDescendantsFrom(goal.id, goals) > 0;
+	return _shouldShowChildrenTab(goal as any, goals as any);
 }
 
 /** Pending plan-mutation banner (§10.5).

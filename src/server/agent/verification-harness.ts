@@ -1189,8 +1189,19 @@ export class VerificationHarness {
 	/**
 	 * Cancel any in-flight verifications for the same (goalId, gateId).
 	 * Terminates reviewer sessions and removes from activeVerifications.
+	 *
+	 * Resilience-vs-prior-crash: if a previous signal's route handler crashed
+	 * BEFORE this map was populated, the reviewer sessions still exist as
+	 * `kind: "reviewer"` team-manager agents whose `task` field carries the
+	 * verify-step name. After the activeVerifications sweep, walk the team-
+	 * manager's reviewer agents and terminate any whose task matches a
+	 * verify-step name on this gate. Without this fallback, an orphan
+	 * reviewer survives re-signal, runs in parallel with the new round, and
+	 * tries to submit a stale `verification_result` that the harness then
+	 * correctly rejects — but the orphan is left idle holding a worktree.
 	 */
 	async cancelStaleVerifications(goalId: string, gateId: string): Promise<void> {
+		const terminatedSessionIds = new Set<string>();
 		for (const [signalId, active] of this.activeVerifications) {
 			if (active.goalId === goalId && active.gateId === gateId) {
 				// Mark as cancelled
@@ -1208,6 +1219,7 @@ export class VerificationHarness {
 								await this.teamManager.unregisterReviewerSession(goalId, step.sessionId);
 							} catch { /* ignore */ }
 						}
+						terminatedSessionIds.add(step.sessionId);
 					}
 				}
 
@@ -1231,6 +1243,31 @@ export class VerificationHarness {
 				});
 
 				console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
+			}
+		}
+
+		// Fallback sweep: terminate orphan reviewer agents the
+		// `activeVerifications` walk missed. These exist when a previous
+		// signal's route handler crashed before populating the map (e.g. the
+		// `dependsOn` TypeError pattern). The team-manager records them as
+		// `kind: "reviewer"` agents with `task: "Verification review: <stepName>"`.
+		// We don't have a precise way to filter by gateId from the task string
+		// alone (the step name is gate-scoped but not gate-tagged), so we
+		// terminate ANY reviewer for this goal that we haven't already cancelled.
+		// Reviewers are short-lived and only spawned by the harness; over-
+		// terminating is safe — the harness re-spawns the ones it needs.
+		if (this.teamManager) {
+			const agents = this.teamManager.listAgents(goalId);
+			for (const a of agents) {
+				if (a.role !== "reviewer") continue;
+				if (terminatedSessionIds.has(a.sessionId)) continue;
+				try {
+					await this.sessionManager?.terminateSession(a.sessionId);
+				} catch { /* already terminated */ }
+				try {
+					await this.teamManager.unregisterReviewerSession(goalId, a.sessionId);
+				} catch { /* already gone */ }
+				console.log(`[verification] Swept orphan reviewer ${a.sessionId} (task="${a.task ?? ""}") on goal ${goalId}`);
 			}
 		}
 	}

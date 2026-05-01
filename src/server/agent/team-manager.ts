@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
+import { anyInFlightChild } from "./team-manager-helpers.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { TeamStore } from "./team-store.js";
@@ -400,7 +401,28 @@ export class TeamManager {
 		// Don't nudge a team lead whose goal has already finished (complete/shelved/archived).
 		const goal = this.resolveGoal(goalId);
 		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
+		// Don't nudge a parent team-lead that has child goals still in flight
+		// (nested-goals: parent-pattern team-leads orchestrate via
+		// `goal_spawn_child` rather than `team_spawn`, so they legitimately have
+		// zero direct workers while a phase tree is running). The team-lead is
+		// not idle in any meaningful sense — their dependency is the children's
+		// progress, not their own queue. Same condition the dashboard uses to
+		// surface the Children tab.
+		if (this.hasInFlightChildren(goalId)) return true;
 		return false;
+	}
+
+	/**
+	 * Returns true if any non-archived child goal of `goalId` is in a non-
+	 * terminal state (todo or in-progress). Pure-ish read — looks across all
+	 * project contexts because nested-goals enforce same-project but we route
+	 * through `getContextForGoal` to find the right store.
+	 */
+	private hasInFlightChildren(goalId: string): boolean {
+		if (!this.config.projectContextManager) return false;
+		const ctx = this.config.projectContextManager.getContextForGoal(goalId);
+		if (!ctx) return false;
+		return anyInFlightChild(goalId, ctx.goalStore.getAll());
 	}
 
 	/** Get active (non-reviewer, non-terminated) workers for a goal. */
