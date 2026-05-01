@@ -372,3 +372,238 @@ In-flight state on upgrade:
 | A pool claim that fails at the directory-rename step now falls back to `createWorktree` (slow path) rather than degraded-but-usable. | Acceptable. The degraded mode was already a confusing state in production. Failure is rare (only seen on Windows file-lock contention). The fallback is the same code path used when the pool is empty — well-tested. |
 | Persisted sessions still on `pool/_pool-<id>` branches across an upgrade. | See §6. Window is small (pre-first-prompt only); sweeper cleans them up; documented in release notes. |
 | Future readers expect a `<slug>` in branch names for grep convenience. | Display title is on `session.title`. Operator UX: a follow-up could add `git config gitweb.description` per worktree; out of scope here. |
+
+---
+
+## 11. Fallback (non-pool) branch naming
+
+The cold-pool / non-git / sandbox path today synthesises
+`session/new-session-<id8>` (`session-manager.ts` line ~2762:
+`const fallbackSlug = "session/new-session-" + uuid8;`). This is a second
+naming scheme alongside the post-rename `session/<slug>-<id8>`.
+
+**Decision: unify on `session/<id8>`.** Both warm-pool claims and
+fallback-`createWorktree` calls produce branches of the form
+`session/<id8>` — single namespace for all live regular sessions. The
+`new-session-` prefix is dropped.
+
+Rationale:
+
+- One naming scheme is simpler than two; future readers don't need to
+  ask "is this from the pool or the fallback path?"
+- The `new-session-` prefix carried no semantic value — it was a
+  workaround for not knowing the title at creation time, which is no
+  longer relevant since we've severed branch names from titles.
+- Sandbox sessions get the same treatment: branch name is computed as
+  `session/<sessionId.slice(0,8)>` regardless of host vs sandbox.
+
+Test impact (additions to §5.1):
+
+| Test | Change |
+|---|---|
+| `tests/e2e/sandbox-branch-reconcile.spec.ts:63` | Update regex `/^session\/new-session-[a-f0-9]{8}$/` → `/^session\/[a-f0-9]{8}$/`. |
+| `tests/e2e/sandbox-branch-reconcile.spec.ts:152` | Same regex update. |
+| `tests/sandbox-branch-reconcile.test.ts:61,93,98,108,113,123,128` | Replace literal `session/new-session-620e30c0` with `session/620e30c0` (or whatever 8-hex prefix the fixture uses post-update). |
+
+Acceptance criteria addition (§9):
+
+9. **Fallback path also produces `session/<id8>`.** A session created
+   when the pool is empty, when the project is non-git, or when the
+   session is sandboxed has `branch = session/<id8>` — same format as
+   the warm-pool path. No `session/new-session-*` branches exist
+   anywhere in `sessions.json` or in `git branch --list` output across
+   any path.
+
+## 12. Directory-vs-branch slug formula
+
+The container directory name is derived from the branch name by
+flattening slashes:
+
+```
+dirName = branch.replace(/\//g, "-")
+```
+
+This matches the existing convention in `worktree-pool.ts::branchToSlug`
+and is the **single source of truth** post-refactor.
+
+**Worked example:**
+
+| Branch | Container dir |
+|---|---|
+| `session/abcd1234` | `<wtRoot>/session-abcd1234/` |
+| `pool/_pool-deadbeef` | `<wtRoot>/pool-_pool-deadbeef/` (pool fill-time) |
+| `goal/cleanup-foo-12345678` | `<wtRoot>/goal-cleanup-foo-12345678/` (unchanged) |
+
+Before/after for a session claimed from a warm pool, session id starts
+with `abcd1234…`:
+
+| Stage | Pre-refactor | Post-refactor |
+|---|---|---|
+| Pool fill | branch `pool/_pool-deadbeef`, dir `<wtRoot>/pool-_pool-deadbeef/` | identical |
+| Claim | branch `pool/_pool-deadbeef` (deferred), dir same | branch `session/abcd1234`, dir `<wtRoot>/session-abcd1234/` (renamed at claim) |
+| First prompt | branch renamed to `session/<slug>-abcd1234`, dir renamed to `<wtRoot>/session-<slug>-abcd1234/` | **no change** — already on final names |
+| Archive | cleanup `session/<slug>-abcd1234` | cleanup `session/abcd1234` |
+
+The "directory equals flattened branch" invariant holds at every stage
+post-claim. The boot sweeper relies on this.
+
+## 13. `worktree-sweeper.ts` upgrade behavior
+
+The sweeper post-refactor classifies every directory under
+`<rootPath>-wt/` against three patterns:
+
+| Pattern | Source | Action |
+|---|---|---|
+| `^session-([a-f0-9]{8})$` | Live regular session (post-refactor) | Match against `sessions.json`. If a non-archived session row owns it → keep. Else → orphan, schedule cleanup. |
+| `^pool-_pool-[a-f0-9]{8}$` | Pool fill (current convention) | Match against the in-memory pool. If present → keep. Else → reclaim into pool (unchanged behaviour). |
+| `^session-[a-z0-9-]+-[a-f0-9]{8}$` (longer slug between) | **Legacy upgrade-window orphan** — pre-refactor `session/<slug>-<id8>` directory whose session row has been migrated/cleared. | Match against `sessions.json`. If owned → keep (back-compat: a still-live pre-upgrade session may be on the legacy dir name and be allowed to live out its lifetime). If unowned → orphan, schedule cleanup. |
+| `^session-new-session-[a-f0-9]{8}$` | Legacy fallback-path orphan | Same as above row. |
+| `^goal-[a-z0-9-]+-[a-f0-9]{8}$` | Goal worktree | Unchanged. Match against `goals.json`. |
+| `^staff-[a-z0-9-]+-[a-f0-9]{8}$` | Staff worktree | Unchanged. Match against `staff.json`. |
+| `^pool-_pool-[a-f0-9]{8}$` legacy `session-_pool-` synonym | Pre-Phase-3 pool dir | Unchanged: reclaim into pool via `isPoolBranch` tolerance. |
+| Anything else | Foreign | Leave alone (today's behaviour — never touch unknown dirs). |
+
+The "renamed-but-orphaned" reconciliation branch in the current sweeper
+(where the rename completed on disk but persistence missed it) is
+**deleted** — that race no longer exists because the rename happens
+synchronously inside `pool.claim()` before the session row is persisted.
+
+Upgrade window: pre-existing legacy `session-<slug>-<id8>` and
+`session-new-session-<id8>` directories owned by still-live persisted
+sessions are tolerated indefinitely (the session keeps running on its
+old branch). Once those sessions archive normally, their cleanup path
+removes the worktree, after which no legacy patterns remain.
+
+## 14. `moveWorktree` fate
+
+**Definitive:** `moveWorktree` is **deleted** from
+`src/server/skills/git.ts` and **inlined as a private helper** in
+`src/server/agent/worktree-pool.ts`.
+
+Justification: the only post-refactor caller is `pool.claim()`. The
+"skill" abstraction in `skills/git.ts` exists for things multiple call
+sites share; a single private caller is better expressed as a private
+helper next to its only consumer. This also removes an export from the
+skills surface that was always more git-plumbing than skill.
+
+## 15. `PoolClaimResult.degraded` flag — keep or drop
+
+**Decision: keep `PoolClaimResult.degraded` as a transient claim-result
+signal; drop the persisted `session.worktreeDegraded` field.**
+
+- `PoolClaimResult.degraded` (in-memory result of `pool.claim()`) stays
+  as an internal signal for the caller to decide whether to log a
+  warning / fall back. Post-refactor, "degraded" means the directory
+  rename failed but the branch rename succeeded — a transient, in-memory
+  state inside one `claim()` invocation. Whether to treat that as a
+  hard failure (return `null`, fall back to `createWorktree`) or
+  proceed-with-warning is an implementation detail; the field gives
+  `claim()` the flexibility to decide.
+- `session.worktreeDegraded` (the **persisted** flag on
+  `PersistedSession` and `SessionInfo`) is **deleted**. There is no
+  longer any state worth persisting: post-claim, every successful
+  session has branch == flattened-dir-name, full stop. Any session with
+  an inconsistent state is broken and should be cleaned up by the
+  sweeper, not kept around with a flag.
+
+This is consistent with the broader principle: in-memory transient
+state is cheap to express; on-disk persistent state is a contract that
+must be maintained across restarts and migrations. The fewer flags on
+disk, the fewer migration paths.
+
+## 16. E2E test plan
+
+### 16.1 Updates to `tests/e2e/pool-flow.spec.ts:64-95`
+
+Replace the current "warm to `pool/_pool-*` then session creation
+claims one" assertion sequence with a stepwise lifecycle assertion:
+
+```ts
+// Step 1: Pool warms with pool/_pool-* entries (unchanged).
+// Loop polls pool status until ≥ 1 entry with branch matching
+// /^pool\/_pool-[a-f0-9]{8}$/.
+
+// Step 2: Create a session via POST /api/sessions.
+// IMMEDIATELY after the response (before any prompt), read sessions.json
+// (or hit GET /api/sessions/<id>):
+//
+//   expect(persisted.branch).toMatch(/^session\/[a-f0-9]{8}$/);
+//   expect(persisted.branch).not.toMatch(/^pool\//);
+//   expect(persisted.branch).not.toMatch(/^session\/new-session-/);
+//
+// Verify the on-disk worktree dir is `<wtRoot>/session-<id8>/`.
+
+// Step 3: Send the first prompt via WS / POST.
+// After the prompt round-trips, re-read persistence:
+//
+//   expect(persisted.branch).toBe(<branch from step 2>);
+//
+// I.e. the branch name is byte-equal to what step 2 saw — no ren
+ame
+// occurred. Also assert no `git branch -m` ran (probe via session log
+// scrape for the absence of the legacy "Renaming pool worktree" log
+// line that renameSessionFromPool used to emit).
+
+// Step 4: Set the title via PUT /api/sessions/<id>/title.
+// Confirm metadata-only:
+//
+//   expect(persisted.title).toBe("Whatever");
+//   expect(persisted.branch).toBe(<branch from step 2>);  // unchanged
+
+// Step 5: Archive via DELETE /api/sessions/<id>.
+// Confirm worktree cleanup uses the final branch name (no orphan
+// session/new-session-* or session/<slug>-<id8> branches left in
+// git branch --list).
+```
+
+### 16.2 New restart-resume E2E
+
+**File:** `tests/e2e/pool-claim-restart-resume.spec.ts` (new spec, sits
+alongside `pool-flow.spec.ts`).
+
+**Scenario.** Pool warms; create a session (claims a pool entry on
+`session/<id8>`); send the first prompt and wait for completion;
+restart the gateway via the harness; re-attach to the session via WS
+resume; assert that across the entire lifecycle the persisted `branch`
+field is byte-stable (`branch` after restart === `branch` before
+restart === `branch` immediately after creation), no `git branch -m`
+ever ran (log probe: no `[session-manager] Renaming pool worktree`
+lines in either pre-restart or post-restart server log; symbol grep
+on the running build asserts `renameSessionFromPool` doesn't exist),
+and the worktree dir on disk has not moved (inode-stable on
+Linux/macOS via `fs.statSync(<wtRoot>/session-<id8>/).ino`; on Windows
+just assert `existsSync` plus contents-unchanged).
+
+### 16.3 Multi-repo lifecycle E2E
+
+**Extend `tests/e2e/multi-repo-pool.spec.ts`** with a new test case:
+`"multi-repo session lifecycle: branch + dir stable across creation, prompt, restart, archive"`.
+
+Scenario:
+
+1. Register a multi-repo project (2+ repos, including one data-only).
+2. Wait for the pool to warm at least one multi-repo set.
+3. `POST /api/sessions` → claim from the pool.
+4. Immediately assert: every repo's worktree at
+   `<wtRoot>/session-<id8>/<repo>/`, every repo's branch is
+   `session/<id8>`, byte-identical across repos.
+5. Send first prompt; re-assert all values unchanged.
+6. Restart gateway; resume; re-assert all values unchanged.
+7. Archive; assert all per-repo branches deleted from each repo's
+   local refs (and remote, gated by `BOBBIT_TEST_NO_PUSH`).
+
+The existing single-claim test in `tests/worktree-pool-multi.test.ts`
+(unit-level) covers claim mechanics; this E2E layer covers the full
+lifecycle through real REST + WS + restart.
+
+### 16.4 Coverage matrix
+
+| Path | Unit | API E2E | Browser E2E | Manual integration |
+|---|---|---|---|---|
+| Warm-pool claim → `session/<id8>` | `worktree-pool.test.ts` (updated) | `pool-flow.spec.ts` (updated) | n/a | n/a |
+| Cold-pool fallback → `session/<id8>` | `sandbox-branch-reconcile.test.ts` (regex update) | `sandbox-branch-reconcile.spec.ts` (regex update) | n/a | n/a |
+| First-prompt branch stability | new unit asserting `setTitle` no-op on branch | `pool-flow.spec.ts` step 3-4 (updated) | n/a | n/a |
+| Restart resume preserves branch | n/a | `pool-claim-restart-resume.spec.ts` (new) | n/a | `restart-minimal.spec.ts:199` (updated) |
+| Multi-repo lifecycle | `worktree-pool-multi.test.ts` (updated) | `multi-repo-pool.spec.ts` (extended) | n/a | n/a |
+| Sweeper handles legacy `session-<slug>-<id8>` orphans | new `tests/worktree-sweeper.test.ts` case | n/a | n/a | n/a |
+
