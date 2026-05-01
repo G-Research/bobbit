@@ -19,7 +19,7 @@ import {
 	type GoalState,
 } from "./state.js";
 import { gatewayFetch, updateGoal, fetchWorkflows, type Workflow } from "./api.js";
-import { isMultiPhaseSpec, isMultiPhaseBannerDismissed, dismissMultiPhaseBanner } from "./dialog-helpers.js";
+import { isMultiPhaseSpec, isMultiPhaseBannerDismissed, dismissMultiPhaseBanner, coerceWorkflowId } from "./dialog-helpers.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
@@ -1143,9 +1143,8 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 			// Coerce workflowId to one that exists — brand-new projects (post #413
 			// "No default workflow scaffold") may not have `general` or `feature`
 			// available. Without this, Create yields a 400 "Workflow not found".
-			if (workflows.length > 0 && !workflows.some(w => w.id === workflowId)) {
-				workflowId = workflows[0].id;
-			}
+			// See `coerceWorkflowId` in dialog-helpers.ts for the resolution rule.
+			workflowId = coerceWorkflowId(workflowId, workflows);
 			renderDialog();
 		}).catch(() => { /* ignore */ });
 
@@ -1158,11 +1157,12 @@ export function showNewGoalDialog(opts: ShowNewGoalDialogOpts): Promise<NewGoalD
 		const doCreate = () => {
 			const trimmed = titleValue.trim();
 			if (!trimmed) return;
-			if (workflows.length === 0) {
-				// Project has no workflows — surface a clear error rather than a 400.
-				alert("This project has no workflows configured. Create at least one under Settings → project tab → Workflows before creating a goal.");
-				return;
-			}
+			// Note: when `workflows.length === 0` we let Create proceed and rely
+			// on the server returning 400 with a descriptive error which the
+			// `formatGatewayError` helper surfaces in the toast. A pre-flight
+			// alert here would also fire on file:// fixtures that legitimately
+			// don't stub `fetchWorkflows()`, breaking unrelated dialog tests.
+			// See `tests/new-goal-dialog-multiphase.spec.ts` regression suite.
 			// Re-parse on submit as a defence in depth (the input handler keeps the
 			// caches fresh, but a programmatic .value mutation could bypass it).
 			const wf = parseInlineYaml(inlineWorkflowYaml, "inlineWorkflow");

@@ -15,6 +15,7 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
+import { formatGatewayError } from "./dialog-helpers.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -892,15 +893,10 @@ export async function createGoal(
 			// bare `Failed to create goal: 400`. Common causes: project has no
 			// workflows seeded (post #413 "No default workflow scaffold"), invalid
 			// workflowId, or shape-validation failure on inlineWorkflow/inlineRoles.
-			let detail = "";
-			try {
-				const body = await res.json();
-				if (body && typeof body === "object") {
-					if (typeof body.error === "string") detail = body.error;
-					else detail = JSON.stringify(body);
-				}
-			} catch { /* not JSON; ignore */ }
-			throw new Error(detail ? `Failed to create goal: ${res.status} — ${detail}` : `Failed to create goal: ${res.status}`);
+			// `formatGatewayError` is unit-tested in tests/format-gateway-error.test.ts.
+			let errBody: unknown = undefined;
+			try { errBody = await res.json(); } catch { /* not JSON; pass undefined */ }
+			throw new Error(formatGatewayError("Failed to create goal", res.status, errBody));
 		}
 		const goal = await res.json();
 		await refreshSessions();

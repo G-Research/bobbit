@@ -297,3 +297,89 @@ test.describe("New Goal dialog — Add child goal flow", () => {
 		expect(wfValue).toBe("general");
 	});
 });
+
+// Workflow-id coercion (commit `058c17ea`) — brand-new projects (post
+// `864ae63d` / #413 "No default workflow scaffold") may not have
+// `general` or `feature` available. The dialog historically defaulted
+// `workflowId` to those values without checking, leading to opaque
+// `400 Workflow not found: general` toasts on Accept. The fix coerces
+// to the first available workflow once `fetchWorkflows()` resolves.
+test.describe("New Goal dialog — workflow id coercion (regression)", () => {
+	test("coerces top-level default 'general' to first available when 'general' is missing", async ({ page }) => {
+		// Brand-new project that registered with only a custom workflow.
+		await page.evaluate(() => {
+			(window as any).__nextWorkflowsResponse = [
+				{ id: "agent-memory-build", name: "Agent-Memory Build", gates: [], description: "" },
+			];
+		});
+		await page.evaluate((projectId) => {
+			(window as any).__dialogPromise = (window as any).__showNewGoalDialog({ projectId });
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+		// Wait for the workflow picker to settle on the coerced id (the
+		// fetchWorkflows() promise resolves async — the dialog re-renders).
+		await expect.poll(async () => await page.locator("[data-testid='workflow-picker']").evaluate(
+			(el) => (el as HTMLSelectElement).value,
+		)).toBe("agent-memory-build");
+	});
+
+	test("keeps 'general' when 'general' IS in the project's workflow list", async ({ page }) => {
+		await page.evaluate(() => {
+			(window as any).__nextWorkflowsResponse = [
+				{ id: "general", name: "General", gates: [], description: "" },
+				{ id: "feature", name: "Feature", gates: [], description: "" },
+			];
+		});
+		await page.evaluate((projectId) => {
+			(window as any).__dialogPromise = (window as any).__showNewGoalDialog({ projectId });
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+		// Picker stays on the legacy default — no coercion happens when
+		// the preferred id is in the list.
+		await expect.poll(async () => await page.locator("[data-testid='workflow-picker']").evaluate(
+			(el) => (el as HTMLSelectElement).value,
+		)).toBe("general");
+	});
+
+	test("coerces child-goal default 'feature' to first available when 'feature' is missing", async ({ page }) => {
+		// Sibling regression for the child-goal flow (design §10.4) which
+		// defaults `workflowId` to `feature`.
+		await page.evaluate(() => {
+			(window as any).__nextWorkflowsResponse = [
+				{ id: "general", name: "General", gates: [], description: "" },
+				{ id: "parent", name: "Parent", gates: [], description: "" },
+			];
+		});
+		await page.evaluate((projectId) => {
+			(window as any).__dialogPromise = (window as any).__showNewGoalDialog({
+				projectId,
+				parentGoalId: "parent-abc",
+			});
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+		await expect.poll(async () => await page.locator("[data-testid='workflow-picker']").evaluate(
+			(el) => (el as HTMLSelectElement).value,
+		)).toBe("general");
+	});
+
+	test("empty workflow list — picker shows fallback options, workflowId stays at 'general'", async ({ page }) => {
+		// When `fetchWorkflows()` returns [] (brand-new project, file:// fixture,
+		// or network error), the dialog falls back to `[general, parent]` for
+		// display so the picker remains usable. `coerceWorkflowId` is a no-op
+		// on empty lists — the preferred id is returned unchanged. The eventual
+		// 400 from POST /api/goals is surfaced via `formatGatewayError`, not
+		// pre-empted with a client-side alert (which would also misfire on
+		// file:// fixtures that don't stub fetchWorkflows).
+		await page.evaluate(() => {
+			(window as any).__nextWorkflowsResponse = [];
+		});
+		await page.evaluate((projectId) => {
+			(window as any).__dialogPromise = (window as any).__showNewGoalDialog({ projectId });
+		}, PROJECT_ID);
+		await page.waitForSelector("[data-testid='goal-spec-textarea']");
+		const wfValue = await page.locator("[data-testid='workflow-picker']").evaluate(
+			(el) => (el as HTMLSelectElement).value,
+		);
+		expect(wfValue).toBe("general");
+	});
+});

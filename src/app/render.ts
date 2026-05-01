@@ -25,6 +25,7 @@ import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
+import { coerceWorkflowId } from "./dialog-helpers.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
@@ -2093,13 +2094,9 @@ function goalProposalPanel() {
 	// can have any subset of workflows — the proposal panel may have been
 	// constructed with `workflow: "general"` from the assistant before the
 	// project's workflows finished loading. Without this coercion the user
-	// gets a 400 "Workflow not found: general" on Create.
-	if (_cachedWorkflows.length > 0) {
-		const exists = _cachedWorkflows.some(w => w.id === _proposalWorkflowId);
-		if (!exists) {
-			_proposalWorkflowId = _cachedWorkflows[0].id;
-		}
-	}
+	// gets a 400 "Workflow not found: general" on Create. See
+	// `coerceWorkflowId` in dialog-helpers.ts for the resolution rule.
+	_proposalWorkflowId = coerceWorkflowId(_proposalWorkflowId, _cachedWorkflows);
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
