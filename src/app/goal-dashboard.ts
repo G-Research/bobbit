@@ -17,6 +17,7 @@ import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.
 import { coerceWorkflowGatesForRender, type SafeWorkflowGate } from "./workflow-gate-coercion.js";
 import {
 	shouldShowPlanTab as _shouldShowPlanTab,
+	shouldShowTasksTab as _shouldShowTasksTab,
 	shouldShowChildrenTab as _shouldShowChildrenTab,
 } from "./goal-dashboard-tab-visibility.js";
 export { hasChildGoals } from "./goal-dashboard-tab-visibility.js";
@@ -1668,13 +1669,14 @@ function renderTabBar(): TemplateResult {
 
 	const showPlan = shouldShowPlanTab(currentGoal, state.goals);
 	const showChildren = shouldShowChildrenTab(currentGoal, state.goals);
+	const showTasks = _shouldShowTasksTab(currentGoal as any, state.goals as any, tasks.length);
 	const childCountStr = showChildren ? String(countDescendantsFrom(currentGoal!.id, state.goals)) : "";
 
 	const tabs: Array<{ id: DashboardTab; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		...(showPlan ? [{ id: "plan" as DashboardTab, label: "Plan", icon: svgGate, countStr: "" }] : []),
-		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
+		...(showTasks ? [{ id: "tasks" as DashboardTab, label: "Tasks", icon: svgTasks, countStr: String(tasks.length) }] : []),
 		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && (state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") || state.archivedSessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")) ? 1 : 0)) },
 		...(showChildren ? [{ id: "children" as DashboardTab, label: "Children", icon: svgAgents, countStr: childCountStr }] : []),
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },

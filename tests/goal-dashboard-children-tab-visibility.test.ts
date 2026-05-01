@@ -26,6 +26,7 @@ import assert from "node:assert/strict";
 import {
 	shouldShowChildrenTab,
 	shouldShowPlanTab,
+	shouldShowTasksTab,
 	hasChildGoals,
 	countDescendantsFrom,
 	type GoalLike,
@@ -168,5 +169,56 @@ describe("hasChildGoals — immediate-children helper", () => {
 
 	it("returns false on an empty array", () => {
 		assert.equal(hasChildGoals("anything", []), false);
+	});
+});
+
+describe("shouldShowTasksTab — hide when work is plan/children-driven", () => {
+	it("shows when goal has tasks (any taskCount > 0)", () => {
+		// Always show if there's a task to display, even on a parent goal.
+		const g = goal({ id: "g", workflow: PARENT_WF });
+		assert.equal(shouldShowTasksTab(g, [g], 1), true);
+		assert.equal(shouldShowTasksTab(g, [g], 5), true);
+	});
+
+	it("hides when goal has Plan tab AND no tasks (plan-driven)", () => {
+		// THE bug from the screenshot: v0.1-foundation showed Tasks (0)
+		// next to Plan with 5 subgoals — redundant + confusing.
+		const g = goal({ id: "g", workflow: PARENT_WF });
+		assert.equal(shouldShowTasksTab(g, [g], 0), false);
+	});
+
+	it("hides when goal has children AND no tasks (children-driven)", () => {
+		// Even on a feature workflow without goal-plan gate, if the goal
+		// has children the work is the children, not the (empty) tasks.
+		const parent = goal({ id: "p", workflow: FEATURE_WF });
+		const c = goal({ id: "c", parentGoalId: "p" });
+		assert.equal(shouldShowTasksTab(parent, [parent, c], 0), false);
+	});
+
+	it("shows when goal has neither Plan tab nor children (leaf goal, empty state)", () => {
+		// A leaf goal that legitimately uses task_create still needs the
+		// Tasks tab even at zero — the user might want to add the first.
+		const g = goal({ id: "g", workflow: FEATURE_WF });
+		assert.equal(shouldShowTasksTab(g, [g], 0), true);
+	});
+
+	it("shows when goal is a child (has parent) but has no children itself and no tasks", () => {
+		// A leaf child goal under a parent: no Plan tab, no children of
+		// its own — tasks tab is the place to plan the child's own work.
+		const child = goal({ id: "c", parentGoalId: "p", workflow: FEATURE_WF });
+		assert.equal(shouldShowTasksTab(child, [child], 0), true);
+	});
+
+	it("shows when null goal (defensive: don't crash)", () => {
+		// Null/undefined goal returns false — no goal loaded yet.
+		assert.equal(shouldShowTasksTab(null, [], 0), false);
+		assert.equal(shouldShowTasksTab(undefined, [], 0), false);
+	});
+
+	it("shows even with Plan tab when there ARE tasks (priority: tasks > tab redundancy)", () => {
+		// If a parent goal somehow ended up with tasks (e.g. partial
+		// migration / mixed workflow), don't hide them.
+		const g = goal({ id: "g", workflow: PARENT_WF });
+		assert.equal(shouldShowTasksTab(g, [g], 3), true);
 	});
 });

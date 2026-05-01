@@ -71,6 +71,34 @@ export function shouldShowChildrenTab(goal: GoalLike | null | undefined, goals: 
 	return countDescendantsFrom(goal.id, goals) > 0;
 }
 
+/** Pure predicate: should the Tasks tab be visible for this goal?
+ *
+ *  True iff the goal has at least one task OR the goal has neither the
+ *  Plan tab nor any children. The intent: when the goal IS its plan
+ *  (parent-style orchestration with children), an empty Tasks tab is
+ *  noise — the work IS the children, surfaced via the Plan / Children
+ *  tabs. But a leaf goal that legitimately uses task_create still
+ *  needs its Tasks tab even at task-count zero (so the user can SEE
+ *  the empty state and add tasks).
+ *
+ *  Live test (PR #409 v0.1-foundation screenshot): the Tasks tab
+ *  showed "0" right next to a Plan tab with 5 subgoals, which felt
+ *  redundant and confusing.
+ */
+export function shouldShowTasksTab(
+	goal: GoalLike | null | undefined,
+	goals: GoalLike[],
+	taskCount: number,
+): boolean {
+	if (taskCount > 0) return true;
+	// No tasks: hide if this is a plan/children-driven goal.
+	if (!goal) return false;
+	const isPlanGoal = shouldShowPlanTab(goal, goals);
+	const isParentOfChildren = hasChildGoals(goal.id, goals);
+	if (isPlanGoal || isParentOfChildren) return false;
+	return true;
+}
+
 /** Count all (transitive) non-archived descendants of `goalId`, excluding the
  *  goal itself. Pure over the supplied goals array. Cycle-safe via visited set.
  *

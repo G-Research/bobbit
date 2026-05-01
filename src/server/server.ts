@@ -3152,7 +3152,30 @@ async function handleApiRoute(
 		}
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
 		const goals = listGoalsAcrossProjects({ projectId: filterProjectId });
-		json({ generation: currentGen, goals });
+		// Include archived children of LIVE goals so the Plan tab can
+		// resolve planStep linkage post-merge. Without this, after a child
+		// merges + auto-archives, the parent's planStep loses its visual
+		// linkage to the (archived) child and renders as PENDING in the
+		// dashboard. Live test (PR #409 v0.1-foundation): Phase 2 cards
+		// showed PENDING after their children merged because the UI never
+		// fetched the archived child records.
+		//
+		// Scope: only archived children whose parentGoalId is a live goal
+		// in the response. This keeps the payload bounded (typical: 5–10
+		// archived children per active goal-tree) and doesn't bloat the
+		// archived-sessions sidebar (which uses /api/goals?archived=true
+		// with pagination).
+		const liveGoalIds = new Set(goals.map(g => g.id));
+		const archivedChildrenOfLive: PersistedGoal[] = [];
+		for (const ctx of projectContextManager.all()) {
+			if (filterProjectId && ctx.project.id !== filterProjectId) continue;
+			for (const ag of ctx.goalStore.getArchived()) {
+				if (ag.parentGoalId && liveGoalIds.has(ag.parentGoalId)) {
+					archivedChildrenOfLive.push(ag);
+				}
+			}
+		}
+		json({ generation: currentGen, goals: [...goals, ...archivedChildrenOfLive] });
 		return;
 	}
 
