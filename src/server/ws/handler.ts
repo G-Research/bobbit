@@ -14,6 +14,8 @@ import { inferMeta } from "../agent/aigw-manager.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
+import { listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -283,6 +285,31 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_status", status: session.status, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+
+			// Rehydrate any on-disk proposal drafts for this session so the
+			// client can rebuild its activeProposals slot after a server restart
+			// or fresh attach. Fire-and-forget; never blocks auth.
+			(async () => {
+				try {
+					const stateDir = bobbitStateDir();
+					const types = await listProposalFiles(stateDir, sessionId);
+					for (const proposalType of types) {
+						const parsed = await parseProposalFile(stateDir, sessionId, proposalType);
+						if (parsed.ok) {
+							send(ws, {
+								type: "proposal_update",
+								sessionId,
+								proposalType,
+								fields: parsed.value.fields,
+								streaming: false,
+								source: "rehydrate",
+							});
+						}
+					}
+				} catch (err) {
+					console.warn(`[ws] proposal rehydrate failed for ${sessionId}:`, err);
+				}
+			})();
 
 			// If there's a pending tool permission request, send it to the new client.
 			// Stamp a fresh seq+ts so the client reducer can order this frame relative
