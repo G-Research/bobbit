@@ -23,6 +23,12 @@ import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
+import {
+	isProposalDismissed as isProposalDismissedTyped,
+	markProposalDismissed as markProposalDismissedTyped,
+	clearProposalDismissed as clearProposalDismissedTyped,
+} from "./proposal-helpers.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -99,45 +105,62 @@ export function applyProjectPalette(projectId?: string): void {
 }
 
 // ============================================================================
-// GOAL PROPOSAL DISMISS PERSISTENCE
+// PROPOSAL DISMISS PERSISTENCE — see ./proposal-helpers.ts for the typed,
+// per-ProposalType implementation. Below are thin shims preserving the
+// goal-only call shape used by render.ts:goalProposalPanel.
 // ============================================================================
 
-function proposalFingerprint(proposal: { title: string; spec: string }): string {
-	let hash = 5381;
-	const str = proposal.title + "\n" + proposal.spec;
-	for (let i = 0; i < str.length; i++) {
-		hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+/** Resolve provisional/registered mode for a project proposal slot from the
+ *  current session→project mapping. Extracted for the unified onProposal
+ *  callback (Slice E gap-closure). Returns "provisional" if no project is
+ *  registered yet (fresh project assistant flow). */
+function resolveProjectMode(sessionId: string): "provisional" | "registered" {
+	const session = state.gatewaySessions.find(s => s.id === sessionId);
+	const project = state.projects.find(p => p.id === session?.projectId);
+	return project?.provisional ? "provisional" : "registered";
+}
+
+/**
+ * Slice E gap-closure: dismissal helpers are now thin shims forwarding to the
+ * typed (per-ProposalType) implementations in `./proposal-helpers.ts`.
+ * Optional `type` defaults to `"goal"` for back-compat with existing callers
+ * (render.ts goalProposalPanel:handleDismiss). New callers should pass an
+ * explicit type to opt into per-type dismissal stickiness.
+ */
+export function isProposalDismissed(
+	sessionId: string,
+	proposalOrType: ProposalType | Record<string, unknown>,
+	maybeFields?: Record<string, unknown>,
+): boolean {
+	if (typeof proposalOrType === "string" && isProposalType(proposalOrType)) {
+		return isProposalDismissedTyped(sessionId, proposalOrType, maybeFields ?? {});
 	}
-	return String(hash);
+	return isProposalDismissedTyped(sessionId, "goal", proposalOrType as Record<string, unknown>);
 }
 
-function dismissedProposalKey(sessionId: string): string {
-	return `bobbit-goal-proposal-dismissed-${sessionId}`;
+export function markProposalDismissed(
+	sessionId: string,
+	proposalOrType: ProposalType | Record<string, unknown>,
+	maybeFields?: Record<string, unknown>,
+): void {
+	if (typeof proposalOrType === "string" && isProposalType(proposalOrType)) {
+		markProposalDismissedTyped(sessionId, proposalOrType, maybeFields ?? {});
+		return;
+	}
+	markProposalDismissedTyped(sessionId, "goal", proposalOrType as Record<string, unknown>);
 }
 
-export function isProposalDismissed(sessionId: string, proposal: { title: string; spec: string }): boolean {
-	try {
-		const stored = localStorage.getItem(dismissedProposalKey(sessionId));
-		return stored === proposalFingerprint(proposal);
-	} catch { return false; }
+export function clearProposalDismissed(sessionId: string, type?: ProposalType): void {
+	if (type) {
+		clearProposalDismissedTyped(sessionId, type);
+		return;
+	}
+	clearProposalDismissedTyped(sessionId, "goal");
 }
 
-export function markProposalDismissed(sessionId: string, proposal: { title: string; spec: string }): void {
-	try {
-		localStorage.setItem(dismissedProposalKey(sessionId), proposalFingerprint(proposal));
-	} catch { /* ignore */ }
-}
-
-export function clearProposalDismissed(sessionId: string): void {
-	try {
-		localStorage.removeItem(dismissedProposalKey(sessionId));
-	} catch { /* ignore */ }
-}
-
+/** Clear dismissal fingerprints for ALL proposal types — used on session terminate. */
 function clearDismissedProposal(sessionId: string): void {
-	try {
-		localStorage.removeItem(dismissedProposalKey(sessionId));
-	} catch { /* ignore */ }
+	for (const t of PROPOSAL_TYPES) clearProposalDismissedTyped(sessionId, t);
 }
 
 // ============================================================================
@@ -1231,15 +1254,66 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
+		// Slice E gap-closure: unified onProposal callback. Runs IN ADDITION to
+		// the legacy onXProposal callbacks above so:
+		//   • `proposal_update` from edit_proposal broadcasts hits the UI.
+		//   • `proposal_update {source: "rehydrate"}` on WS attach restores the panel
+		//     across server restarts.
+		//   • `proposal_cleared` after DELETE clears the in-memory slot.
+		// The legacy callbacks still own the bespoke side-effects (project mode
+		// resolution, goal title summarisation, workflow JSON parse → populateFromProposal,
+		// per-type form-mirror state). The plugin.mergeFields shallow-merge guarantees
+		// the second invocation per propose_* tool-use is idempotent.
+		remote.onProposal = (type, fields, _streaming) => {
+			if (activeSessionId() !== sessionId) return;
+			if (fields === null) {
+				// proposal_cleared event from DELETE / accept
+				delete state.activeProposals[type];
+				// Recompute assistantHasProposal across remaining slots.
+				state.assistantHasProposal = Object.keys(state.activeProposals).length > 0;
+				renderApp();
+				return;
+			}
+			const plugin = PROPOSAL_TYPE_REGISTRY[type];
+			const prev = state.activeProposals[type];
+			const merged = plugin.mergeFields(prev?.fields ?? {}, fields);
+			const isFirstEmit = prev == null;
+			// First-emit dismissal short-circuit — generalised from the goal-only
+			// check at session-manager.ts:1062. Skip this only when (a) it's the
+			// very first emit for this slot AND (b) the user previously dismissed
+			// an identical-fingerprint proposal of this type.
+			if (isFirstEmit && isProposalDismissedTyped(sessionId, type, merged)) {
+				return;
+			}
+			const slot: ProposalSlot = {
+				sessionId,
+				fields: merged,
+				streaming: false,
+				mode: type === "project"
+					? (prev?.mode ?? resolveProjectMode(sessionId))
+					: undefined,
+				rev: (prev?.rev ?? 0) + 1,
+			};
+			state.activeProposals[type] = slot;
+			state.assistantHasProposal = true;
+			if (isFirstEmit) {
+				plugin.onFirstEmit(slot, {
+					isAssistant: state.assistantType === type,
+					isMobile: !isDesktop(),
+				});
+			}
+			renderApp();
+		};
+
 		// Listen for "Open proposal" button clicks from ProposalRenderer tool cards.
 		// Routes the event to the same callbacks already wired above.
 		const proposalOpenHandler = ((e: CustomEvent) => {
 			if (activeSessionId() !== sessionId) return;
 			const { type, fields } = e.detail || {};
 			if (!type || !fields) return;
-			// Clear any previous dismissal so the proposal re-opens
-			// (the user explicitly clicked "Open proposal")
-			if (type === "goal") clearProposalDismissed(sessionId);
+			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
+			// always re-opens the panel (the user explicitly clicked it).
+			if (isProposalType(type)) clearProposalDismissedTyped(sessionId, type);
 			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
@@ -1250,6 +1324,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			};
 			const cb = callbackMap[type];
 			if (cb) cb(fields, /* streaming */ false);
+			// Also fire the unified callback so the activeProposals slot
+			// is populated for types whose legacy callback doesn't write to it
+			// (tool, workflow). Idempotent for goal/role/staff/project (the
+			// legacy callback already wrote the slot, plugin.mergeFields
+			// shallow-merges).
+			if (isProposalType(type) && remote.onProposal) {
+				remote.onProposal(type, fields as Record<string, unknown>, false);
+			}
 		}) as EventListener;
 		document.addEventListener("proposal-open", proposalOpenHandler);
 
