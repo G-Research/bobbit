@@ -130,9 +130,11 @@ test.describe("Jump-to-bottom button", () => {
 		}));
 
 		// Filter out unrelated noise (favicon, network warnings) — only fail
-		// on actual JS errors / our component's leak warnings.
+		// on actual JS errors / our component's leak warnings. The git-status
+		// widget hits 400 with `Not a git repository` in temp-dir fixtures; that
+		// is the widget's documented contract, not an unmount leak.
 		const real = consoleErrors.filter((e) =>
-			!/favicon|net::|404 \(Not Found\)|websocket/i.test(e),
+			!/favicon|net::|404 \(Not Found\)|400 \(Bad Request\)|websocket/i.test(e),
 		);
 		expect(real, `unexpected console errors after unmount: ${real.join(" | ")}`).toHaveLength(0);
 	});
