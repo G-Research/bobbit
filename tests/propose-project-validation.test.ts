@@ -198,3 +198,27 @@ describe("propose_project — happy path with no qa_ keys", () => {
 		assert.ok(result);
 	});
 });
+
+describe("propose_project — pi-coding-agent calling convention", () => {
+	// pi-coding-agent invokes ToolDefinition.execute as
+	//   (toolCallId, params, signal, onUpdate, ctx)
+	// — the FIRST positional arg is the tool_use_id STRING. The current
+	// extension treats it as the params object and does `if (k in args)`,
+	// which throws `TypeError: Cannot use 'in' operator to search for
+	// 'qa_start_command' in tooluse_<id>`.
+	it("does not crash when invoked with the real pi-coding-agent calling convention", async () => {
+		const tool = getProposeProject();
+		const result = await tool.execute("tooluse_abc123", { name: "p", root_path: "/tmp/p" });
+		assert.ok(result);
+	});
+
+	it("does not crash when params contain a legacy qa_* key under the two-arg convention", async () => {
+		const tool = getProposeProject();
+		const result = await tool.execute("tooluse_abc123", {
+			name: "p",
+			root_path: "/tmp/p",
+			qa_start_command: "x",
+		});
+		assert.ok(result);
+	});
+});
