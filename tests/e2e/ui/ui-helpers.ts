@@ -70,12 +70,25 @@ export async function navigateToHash(page: Page, hash: string): Promise<void> {
 	// may normalize the hash (e.g. append a trailing slash, strip query
 	// params). `contains` is enough to prove the navigation happened —
 	// tests that care about the exact form use `url_equals` separately.
+	// Some routes redirect synchronously in main.ts (e.g. #/workflows → #/settings/<projectId>/workflows).
+	// Tests that hard-code #/workflows still need to land on the workflows surface, so accept either
+	// the literal hash or its known redirect target as success.
+	const redirectMap: Record<string, RegExp> = {
+		"#/workflows": /^#\/settings\/[^/]+\/workflows/,
+	};
 	for (let attempt = 0; attempt < 3; attempt++) {
 		await page.evaluate((h) => { window.location.hash = h; }, hash);
 		try {
 			await page.waitForFunction(
-				(h) => window.location.hash.startsWith(h),
-				hash,
+				({ h, redirectSrc }: { h: string; redirectSrc: string | null }) => {
+					const current = window.location.hash;
+					if (current.startsWith(h)) return true;
+					if (redirectSrc) {
+						try { return new RegExp(redirectSrc).test(current); } catch { return false; }
+					}
+					return false;
+				},
+				{ h: hash, redirectSrc: redirectMap[hash]?.source ?? null },
 				{ timeout: attempt === 2 ? 10_000 : 3_000 },
 			);
 			return;

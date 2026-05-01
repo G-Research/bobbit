@@ -52,6 +52,24 @@ function normalizeComponents(arr: unknown[]): Component[] {
 			}
 			if (Object.keys(cmds).length > 0) c.commands = cmds;
 		}
+		if (r.config && typeof r.config === "object" && !Array.isArray(r.config)) {
+			const cfg: Record<string, string> = {};
+			let count = 0;
+			for (const [k, v] of Object.entries(r.config as Record<string, unknown>)) {
+				if (!k) continue;
+				if (count >= 100) {
+					console.warn(`[project-config-store] Component "${r.name}": config truncated at 100 entries`);
+					break;
+				}
+				let str: string | undefined;
+				if (typeof v === "string") str = v;
+				else if (typeof v === "number" || typeof v === "boolean") str = String(v);
+				if (str === undefined || str === "") continue;
+				cfg[k] = str;
+				count++;
+			}
+			if (Object.keys(cfg).length > 0) c.config = cfg;
+		}
 		out.push(c);
 	}
 	return out;
@@ -62,6 +80,7 @@ function serializeComponent(c: Component): Record<string, unknown> {
 	if (c.relativePath) out.relative_path = c.relativePath;
 	if (c.worktreeSetupCommand) out.worktree_setup_command = c.worktreeSetupCommand;
 	if (c.commands && Object.keys(c.commands).length > 0) out.commands = { ...c.commands };
+	if (c.config && Object.keys(c.config).length > 0) out.config = { ...c.config };
 	return out;
 }
 
@@ -84,6 +103,7 @@ export interface Component {
 	relativePath?: string;              // optional sub-path inside the repo
 	worktreeSetupCommand?: string;      // per-component runtime hook
 	commands?: Record<string, string>;  // flat name → shell. Absent ⇒ data-only.
+	config?: Record<string, string>;    // opaque key→string map. Used by /qa-test skill etc.
 }
 
 export type CommandStepStructural = {
@@ -114,7 +134,7 @@ export type LlmReviewStep = {
 
 export type AgentQaStep = {
 	name: string; type: "agent-qa"; prompt: string;
-	role?: string; phase?: number; timeout?: number;
+	role?: string; component?: string; phase?: number; timeout?: number;
 	optional?: boolean; label?: string; description?: string;
 };
 
@@ -142,14 +162,65 @@ export interface InlineWorkflowDef {
 	gates: InlineWorkflowGate[];
 }
 
-export interface QaTestingConfig {
-	buildCommand: string;
-	startCommand: string;
-	healthCheck: string;
-	browserEntry: string;
-	env: Record<string, string>;
-	maxDurationMinutes: number;
-	maxScenarios: number;
+// ── Native-YAML migrated fields (typed side-tables) ──────────────────
+//
+// These five fields used to be JSON-encoded strings (or numeric strings)
+// in project.yaml. They are now first-class structured fields. The store
+// keeps a back-compat surface: `get(key)` for these keys returns the
+// JSON-stringified form computed on demand, so existing call sites that
+// read `get("config_directories")` keep working. `set(key, value)`
+// parses the string and routes to the typed setter.
+
+export interface ConfigDirectoryEntry {
+	path: string;
+	types: string[];
+}
+
+export interface SandboxTokenEntry {
+	key: string;
+	enabled: boolean;
+	/** Only used at API ingress (PUT redaction merge). Not persisted to disk. */
+	value?: string;
+}
+
+const MIGRATED_KEYS = new Set([
+	"config_directories",
+	"sandbox_tokens",
+]);
+
+function isPlainObject(x: unknown): x is Record<string, unknown> {
+	return !!x && typeof x === "object" && !Array.isArray(x);
+}
+
+function normalizeConfigDirectories(raw: unknown): { value: ConfigDirectoryEntry[]; ok: boolean } {
+	if (!Array.isArray(raw)) return { value: [], ok: false };
+	const out: ConfigDirectoryEntry[] = [];
+	for (const e of raw) {
+		if (!isPlainObject(e)) continue;
+		if (typeof e.path !== "string") continue;
+		const typesRaw = e.types;
+		const types = Array.isArray(typesRaw)
+			? typesRaw.filter((t): t is string => typeof t === "string")
+			: [];
+		out.push({ path: e.path, types });
+	}
+	return { value: out, ok: true };
+}
+
+function normalizeSandboxTokens(raw: unknown): { value: SandboxTokenEntry[]; ok: boolean } {
+	if (!Array.isArray(raw)) return { value: [], ok: false };
+	const out: SandboxTokenEntry[] = [];
+	for (const e of raw) {
+		if (!isPlainObject(e)) continue;
+		if (typeof e.key !== "string") continue;
+		const entry: SandboxTokenEntry = {
+			key: e.key,
+			enabled: e.enabled !== false, // default true
+		};
+		if (typeof e.value === "string" && e.value.length > 0) entry.value = e.value;
+		out.push(entry);
+	}
+	return { value: out, ok: true };
 }
 
 const DEFAULTS: Record<string, string> = {
@@ -159,21 +230,15 @@ const DEFAULTS: Record<string, string> = {
 	test_unit_command: "npm run test:unit",
 	test_e2e_command: "npm run test:e2e",
 	worktree_setup_command: "",  // Empty = no setup runs on new worktrees
-	default_thinking_level: "",  // Empty = use agent's built-in default ("medium")
 	sandbox: "none",                    // "none" | "docker"
 	sandbox_image: "bobbit-agent",      // Docker image name
-	sandbox_tokens: "",                 // JSON array: '[{"key":"GITHUB_TOKEN","value":"","enabled":true}]' — unified token list
 	sandbox_credentials: "",            // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"ghp_xxx"}'
 	sandbox_github_token: "true",       // DEPRECATED — use sandbox_tokens. "true" | "false"
 	sandbox_host_token_overrides: "",   // DEPRECATED — use sandbox_tokens. JSON object: '{"GITHUB_TOKEN":"false","NPM_TOKEN":"false"}'
 	sandbox_mounts: "",                 // JSON array: '["/shared/data:/data:ro"]'
 	worktree_pool_size: "2",            // Pre-built worktrees for instant session startup (0 = disable)
-	qa_start_command: "",               // How to start an isolated server for QA
-	qa_build_command: "",               // Build command for QA (defaults to build_command)
-	qa_health_check: "",                // URL to check server health
-	qa_browser_entry: "",               // Browser entry point URL
-	qa_max_duration_minutes: "10",      // Max QA session duration
-	qa_max_scenarios: "5",              // Max QA scenarios to run
+	sandbox_tokens: "",                 // Native YAML array; flat get() returns JSON-stringified form.
+	// config_directories has no string default — empty array.
 };
 
 /**
@@ -182,9 +247,13 @@ const DEFAULTS: Record<string, string> = {
  * Two coexisting shapes:
  *   1. Legacy flat string map (`build_command`, `test_command`, …) — preserved
  *      for back-compat. Reads continue to work after migration.
- *   2. Structured fields (`components: []`, `workflows: {}`) — Phase 1 adds
- *      the type surface and read/write helpers. The migration synthesizes
- *      a one-element `components[]` from legacy fields on first boot.
+ *   2. Structured fields (`components: []`, `workflows: {}`, plus the five
+ *      Native-YAML fields above) — emitted as native YAML on save.
+ *
+ * The store keeps a back-compat read surface for the migrated fields:
+ * `get("config_directories")` etc. return the JSON-stringified form
+ * computed on demand from the typed side-tables. Internal callers should
+ * prefer the typed accessors (`getConfigDirectories()`, …).
  *
  * Auto-saves on every set/remove. Handles missing file gracefully.
  */
@@ -193,40 +262,137 @@ export class ProjectConfigStore {
 	/** Structured side-table — components[] and workflows{} from the same yaml file. */
 	private components: Component[] = [];
 	private workflows: Record<string, InlineWorkflowDef> | undefined;
+
+	// ── Native-YAML migrated fields ──
+	private configDirectories: ConfigDirectoryEntry[] = [];
+	private sandboxTokens: SandboxTokenEntry[] = [];
+	/** Track whether each migrated field was explicitly present on disk. */
+	private present = {
+		config_directories: false,
+		sandbox_tokens: false,
+	};
+	/** Set when load() found legacy (string-encoded) shapes — triggers next save() to rewrite native. */
+	private dirty = false;
+
 	private readonly configFile: string;
 
 	constructor(configDir: string) {
 		this.configFile = path.join(configDir, "project.yaml");
 		this.load();
+		// Lazy migration: if any legacy shape was parsed, the next save() rewrites
+		// in native form. Per design: "the legacy → native upgrade happens on first
+		// write after load." We don't auto-save here to avoid stripping inline
+		// `sandbox_tokens` values before the secrets-migration step in server.ts
+		// has had a chance to extract them into the SecretsStore.
 	}
 
-	private load(): void {
-		try {
-			if (fs.existsSync(this.configFile)) {
-				const raw = yaml.parse(fs.readFileSync(this.configFile, "utf-8"));
-				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-					// Only keep string values for the flat map (back-compat surface).
-					const cleaned: ProjectConfig = {};
-					for (const [k, v] of Object.entries(raw)) {
-						if (typeof v === "string") {
-							cleaned[k] = v;
-						}
-					}
-					this.data = cleaned;
+	/** True iff the loaded file contained a legacy JSON-string or numeric-string
+	 *  shape for any of the migrated fields. Cleared by save(). */
+	isDirty(): boolean { return this.dirty; }
 
-					// Structured side-table: components[] and workflows{}.
-					this.components = Array.isArray((raw as Record<string, unknown>).components)
-						? normalizeComponents((raw as Record<string, unknown>).components as unknown[])
-						: [];
-					const wfBlock = (raw as Record<string, unknown>).workflows;
-					this.workflows = (wfBlock && typeof wfBlock === "object" && !Array.isArray(wfBlock))
-						? wfBlock as Record<string, InlineWorkflowDef>
-						: undefined;
-				}
+	private load(): void {
+		// Reset migrated fields to defaults before loading.
+		this.configDirectories = [];
+		this.sandboxTokens = [];
+		this.present = {
+			config_directories: false,
+			sandbox_tokens: false,
+		};
+
+		try {
+			if (!fs.existsSync(this.configFile)) {
+				this.data = {};
+				this.components = [];
+				this.workflows = undefined;
+				return;
 			}
+			const raw = yaml.parse(fs.readFileSync(this.configFile, "utf-8"));
+			if (!isPlainObject(raw)) return;
+
+			// Flat string map for legacy keys — exclude migrated keys (handled below).
+			const cleaned: ProjectConfig = {};
+			for (const [k, v] of Object.entries(raw)) {
+				if (MIGRATED_KEYS.has(k)) continue;
+				if (typeof v === "string") cleaned[k] = v;
+			}
+			this.data = cleaned;
+
+			// Structured side-table: components[] and workflows{}.
+			this.components = Array.isArray(raw.components)
+				? normalizeComponents(raw.components as unknown[])
+				: [];
+			this.workflows = isPlainObject(raw.workflows)
+				? raw.workflows as Record<string, InlineWorkflowDef>
+				: undefined;
+
+			// ── Migrated fields — accept native, legacy JSON-string, or numeric-string ──
+			this.loadMigrated(raw);
 		} catch (err) {
 			console.error("[project-config-store] Failed to load project config:", err);
 		}
+	}
+
+	private loadMigrated(raw: Record<string, unknown>): void {
+		// config_directories — array of {path, types[]}
+		if (raw.config_directories !== undefined && raw.config_directories !== null) {
+			const v = raw.config_directories;
+			if (typeof v === "string") {
+				if (v.length > 0) {
+					try {
+						const parsed = JSON.parse(v);
+						const norm = normalizeConfigDirectories(parsed);
+						if (norm.ok) {
+							this.configDirectories = norm.value;
+							this.present.config_directories = true;
+							this.dirty = true;
+						} else {
+							console.warn("[project-config-store] Failed to parse config_directories, treating as default");
+						}
+					} catch (err) {
+						console.warn("[project-config-store] Failed to parse config_directories, treating as default:", err);
+					}
+				}
+			} else {
+				const norm = normalizeConfigDirectories(v);
+				if (norm.ok) {
+					this.configDirectories = norm.value;
+					this.present.config_directories = true;
+				} else {
+					console.warn("[project-config-store] Failed to parse config_directories, treating as default");
+				}
+			}
+		}
+
+		// sandbox_tokens — array of {key, enabled, value?}
+		if (raw.sandbox_tokens !== undefined && raw.sandbox_tokens !== null) {
+			const v = raw.sandbox_tokens;
+			if (typeof v === "string") {
+				if (v.length > 0) {
+					try {
+						const parsed = JSON.parse(v);
+						const norm = normalizeSandboxTokens(parsed);
+						if (norm.ok) {
+							this.sandboxTokens = norm.value;
+							this.present.sandbox_tokens = true;
+							this.dirty = true;
+						} else {
+							console.warn("[project-config-store] Failed to parse sandbox_tokens, treating as default");
+						}
+					} catch (err) {
+						console.warn("[project-config-store] Failed to parse sandbox_tokens, treating as default:", err);
+					}
+				}
+			} else {
+				const norm = normalizeSandboxTokens(v);
+				if (norm.ok) {
+					this.sandboxTokens = norm.value;
+					this.present.sandbox_tokens = true;
+				} else {
+					console.warn("[project-config-store] Failed to parse sandbox_tokens, treating as default");
+				}
+			}
+		}
+
 	}
 
 	private save(): void {
@@ -235,22 +401,67 @@ export class ProjectConfigStore {
 			if (!fs.existsSync(dir)) {
 				fs.mkdirSync(dir, { recursive: true });
 			}
-			// Merge structured side-tables (components[], workflows{}) into the
-			// emitted yaml without losing the legacy flat keys.
-			const out: Record<string, unknown> = { ...this.data };
+			// Merge structured side-tables (components[], workflows{}, native fields) with
+			// the legacy flat keys. Migrated keys are NEVER written from `this.data` —
+			// they live exclusively in their typed side-tables to avoid double-writes.
+			const out: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(this.data)) {
+				if (MIGRATED_KEYS.has(k)) continue;
+				out[k] = v;
+			}
+
 			if (this.components.length > 0) {
 				out.components = this.components.map(serializeComponent);
 			}
 			if (this.workflows && Object.keys(this.workflows).length > 0) {
 				out.workflows = this.workflows;
 			}
+
+			// Native-YAML migrated fields. Only emit when explicitly set / non-default
+			// to keep files terse and avoid noisy diffs.
+			if (this.present.config_directories || this.configDirectories.length > 0) {
+				out.config_directories = this.configDirectories.map(e => ({
+					path: e.path,
+					types: [...e.types],
+				}));
+			}
+			if (this.present.sandbox_tokens || this.sandboxTokens.length > 0) {
+				// Persisted form NEVER contains `value:` — secrets live in secrets.json.
+				out.sandbox_tokens = this.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
+			}
+			// Clear dirty flag — file is now in native form.
+			this.dirty = false;
+
 			fs.writeFileSync(this.configFile, yaml.stringify(out), "utf-8");
 		} catch (err) {
 			console.error("[project-config-store] Failed to save project config:", err);
 		}
 	}
 
+	/** Compute the back-compat flat-string view including JSON-stringified migrated values.
+	 *  Sandbox token values are included so legacy callers can still read them; save()
+	 *  always strips values from the on-disk YAML. */
+	private flatLegacyView(): Record<string, string> {
+		const out: Record<string, string> = { ...this.data };
+		if (this.present.config_directories || this.configDirectories.length > 0) {
+			out.config_directories = JSON.stringify(this.configDirectories);
+		}
+		if (this.present.sandbox_tokens || this.sandboxTokens.length > 0) {
+			out.sandbox_tokens = JSON.stringify(
+				this.sandboxTokens.map(e => {
+					const o: Record<string, unknown> = { key: e.key, enabled: e.enabled };
+					if (e.value) o.value = e.value;
+					return o;
+				}),
+			);
+		}
+		return out;
+	}
+
 	get(key: string): string | undefined {
+		if (MIGRATED_KEYS.has(key)) {
+			return this.flatLegacyView()[key];
+		}
 		return this.data[key];
 	}
 
@@ -258,17 +469,81 @@ export class ProjectConfigStore {
 		if (key.includes(".")) {
 			throw new Error(`Project config key "${key}" must not contain dots — dots are reserved for namespace separators in {{project.key}} template variables`);
 		}
+		if (MIGRATED_KEYS.has(key)) {
+			this.setMigratedFromString(key, value);
+			return;
+		}
 		this.data[key] = value;
 		this.save();
 	}
 
+	private setMigratedFromString(key: string, value: string): void {
+		// Empty string clears the field.
+		if (value === "") {
+			this.removeMigrated(key);
+			return;
+		}
+		switch (key) {
+			case "config_directories": {
+				try {
+					const parsed = JSON.parse(value);
+					const norm = normalizeConfigDirectories(parsed);
+					if (norm.ok) {
+						this.configDirectories = norm.value;
+						this.present.config_directories = true;
+						this.save();
+					} else {
+						throw new Error("Invalid config_directories shape");
+					}
+				} catch (err) {
+					throw new Error(`Failed to parse config_directories as JSON: ${(err as Error).message}`);
+				}
+				break;
+			}
+			case "sandbox_tokens": {
+				try {
+					const parsed = JSON.parse(value);
+					const norm = normalizeSandboxTokens(parsed);
+					if (norm.ok) {
+						this.sandboxTokens = norm.value;
+						this.present.sandbox_tokens = true;
+						this.save();
+					} else {
+						throw new Error("Invalid sandbox_tokens shape");
+					}
+				} catch (err) {
+					throw new Error(`Failed to parse sandbox_tokens as JSON: ${(err as Error).message}`);
+				}
+				break;
+			}
+		}
+	}
+
+	private removeMigrated(key: string): void {
+		switch (key) {
+			case "config_directories":
+				this.configDirectories = [];
+				this.present.config_directories = false;
+				break;
+			case "sandbox_tokens":
+				this.sandboxTokens = [];
+				this.present.sandbox_tokens = false;
+				break;
+		}
+		this.save();
+	}
+
 	remove(key: string): void {
+		if (MIGRATED_KEYS.has(key)) {
+			this.removeMigrated(key);
+			return;
+		}
 		delete this.data[key];
 		this.save();
 	}
 
 	getAll(): ProjectConfig {
-		return { ...this.data };
+		return this.flatLegacyView();
 	}
 
 	/** Returns a copy of the built-in defaults. */
@@ -281,7 +556,53 @@ export class ProjectConfigStore {
 	 */
 	getWithDefaults(): Record<string, string> {
 		this.load();
-		return { ...DEFAULTS, ...this.data };
+		return { ...DEFAULTS, ...this.flatLegacyView() };
+	}
+
+	// ── Native-YAML typed accessors (preferred over flat get/set) ────
+
+	getConfigDirectories(): ConfigDirectoryEntry[] {
+		return this.configDirectories.map(e => ({ path: e.path, types: [...e.types] }));
+	}
+
+	setConfigDirectories(dirs: ConfigDirectoryEntry[]): void {
+		this.configDirectories = dirs.map(e => ({ path: e.path, types: [...e.types] }));
+		this.present.config_directories = this.configDirectories.length > 0;
+		this.save();
+	}
+
+	getSandboxTokens(): SandboxTokenEntry[] {
+		return this.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
+	}
+
+	setSandboxTokens(tokens: SandboxTokenEntry[]): void {
+		this.sandboxTokens = tokens.map(e => {
+			const o: SandboxTokenEntry = { key: e.key, enabled: e.enabled };
+			if (e.value) o.value = e.value;
+			return o;
+		});
+		this.present.sandbox_tokens = this.sandboxTokens.length > 0;
+		this.save();
+	}
+
+	/** Returns a defensive clone of the named component's `config` map (or {} if missing/unknown). */
+	getComponentConfig(name: string): Record<string, string> {
+		const c = this.components.find(x => x.name === name);
+		return c?.config ? { ...c.config } : {};
+	}
+
+	/** Reads `components[name].config.qa_max_duration_minutes`, parses with Number(), falls back to 10. */
+	getQaMaxDurationMinutes(componentName: string): number {
+		const raw = this.getComponentConfig(componentName).qa_max_duration_minutes;
+		const n = raw == null ? NaN : Number(raw);
+		return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 10;
+	}
+
+	/** True iff any component has a non-empty `config.qa_start_command`. */
+	isQaConfiguredOnAnyComponent(): boolean {
+		return this.components.some(c =>
+			typeof c.config?.qa_start_command === "string" && c.config.qa_start_command.length > 0
+		);
 	}
 
 	// ── Component & workflow accessors (Phase 1) ─────────────────────
@@ -333,7 +654,11 @@ export class ProjectConfigStore {
 
 	/** Replace the components[] array. Persists immediately. */
 	setComponents(components: Component[]): void {
-		this.components = components.map(c => ({ ...c, commands: c.commands ? { ...c.commands } : undefined }));
+		this.components = components.map(c => ({
+			...c,
+			commands: c.commands ? { ...c.commands } : undefined,
+			config: c.config ? { ...c.config } : undefined,
+		}));
 		this.save();
 	}
 
@@ -353,30 +678,4 @@ export class ProjectConfigStore {
 		this.load();
 	}
 
-	/** Parse QA testing config from qa_* keys. Returns null if not configured (no qa_start_command). */
-	getQaTestingConfig(): QaTestingConfig | null {
-		const all = this.getWithDefaults();
-		if (!all.qa_start_command) return null;
-		return {
-			buildCommand: all.qa_build_command || this.firstComponentBuildCommand() || all.build_command || "npm run build",
-			startCommand: all.qa_start_command,
-			healthCheck: all.qa_health_check || "",
-			browserEntry: all.qa_browser_entry || "",
-			env: all.qa_env ? JSON.parse(all.qa_env) : {},
-			maxDurationMinutes: parseInt(all.qa_max_duration_minutes || "10", 10),
-			maxScenarios: parseInt(all.qa_max_scenarios || "5", 10),
-		};
-	}
-
-	/** First component-defined `build` command, falling back across components in
-	 *  declared order. Returns undefined if no component declares a build command.
-	 *  Used as the modern fallback for QA `buildCommand` after Follow-up A moved
-	 *  legacy top-level `build_command` into components. */
-	private firstComponentBuildCommand(): string | undefined {
-		for (const c of this.components) {
-			const v = c.commands?.build;
-			if (typeof v === "string" && v.length > 0) return v;
-		}
-		return undefined;
-	}
 }

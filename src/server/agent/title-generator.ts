@@ -1,9 +1,9 @@
 /**
  * Generates a short session title from conversation messages.
  * Supports three modes:
- * 1. Direct Anthropic API (default — uses Claude Haiku via api.anthropic.com)
- * 2. AI Gateway proxy (when aigw is configured — routes through the gateway)
- * 3. Custom naming model (user preference — any provider/model via the gateway)
+ * 1. Direct Anthropic API (default - uses Claude Haiku via api.anthropic.com)
+ * 2. AI Gateway proxy (when aigw is configured - routes through the gateway)
+ * 3. Custom naming model (user preference - any provider/model via the gateway)
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -128,7 +128,7 @@ function extractConversationPreview(messages: any[]): string {
 		if (!text.trim()) continue;
 
 		const maxLen = 400;
-		if (text.length > maxLen) text = text.slice(0, maxLen) + "…";
+		if (text.length > maxLen) text = text.slice(0, maxLen) + "...";
 
 		const label = isUser ? "User" : "Assistant";
 		parts.push(`${label}: ${text}`);
@@ -140,15 +140,51 @@ function extractConversationPreview(messages: any[]): string {
 	return parts.join("\n\n");
 }
 
-function cleanTitle(raw: string): string {
-	let title = raw
+const EMOJI_RE = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{FE0F}]/gu;
+
+function normalizeTitle(s: string): string {
+	let title = s
 		.replace(/^#+\s*/, "")
 		.replace(/^["'"']+|["'"']+$/g, "")
-		.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{FE0F}]/gu, '')
-		.replace(/\n.*/s, "")
+		.replace(EMOJI_RE, "")
 		.trim();
 	if (title.length > 30) title = title.slice(0, 27) + "…";
 	return title;
+}
+
+/**
+ * Extract a title from model output. Strategy:
+ *   1. Prefer the contents of the LAST `<title>...</title>` block (the prompt
+ *      asks the model to wrap its answer this way; "last" tolerates models that
+ *      include the tag literally in reasoning preamble).
+ *   2. Fall back to the last non-empty short line (≤80 chars) of the response,
+ *      which handles models that ignored the XML instruction but still placed
+ *      a bare label at the end after some reasoning.
+ *   3. Final fallback: the first line, matching legacy behaviour.
+ */
+export function cleanTitle(raw: string): string {
+	if (!raw) return "";
+
+	// 1. <title>...</title> - last match wins.
+	const tagMatches = [...raw.matchAll(/<title>([\s\S]*?)<\/title>/gi)];
+	if (tagMatches.length > 0) {
+		const inner = tagMatches[tagMatches.length - 1]![1] ?? "";
+		const t = normalizeTitle(inner.replace(/\s+/g, " "));
+		if (t) return t;
+	}
+
+	// 2. Last non-empty short line.
+	const lines = raw
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter((l) => l.length > 0 && l.length <= 80);
+	if (lines.length > 0) {
+		const t = normalizeTitle(lines[lines.length - 1]!);
+		if (t) return t;
+	}
+
+	// 3. First line.
+	return normalizeTitle(raw.split(/\r?\n/)[0] || "");
 }
 
 /**
@@ -169,7 +205,7 @@ async function resolveGatewayModelId(baseUrl: string, strippedId: string): Promi
 		const exact = data.data.find(m => m.id === strippedId);
 		if (exact) return exact.id;
 
-		// Suffix match — find a model whose ID ends with the stripped ID after the prefix slash
+		// Suffix match - find a model whose ID ends with the stripped ID after the prefix slash
 		const match = data.data.find(m => {
 			const slash = m.id.indexOf("/");
 			return slash >= 0 && m.id.slice(slash + 1) === strippedId;
@@ -190,15 +226,18 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 
 	const body: any = {
 		model: resolvedModel,
-		max_tokens: 20,
+		// Bumped from 20 → 500 so reasoning models that ignore the "no thinking"
+		// instruction and emit a few tokens of preamble still leave room for the
+		// label itself. cleanTitle() truncates to 30 chars regardless.
+		max_tokens: 500,
 		messages: [
 			{
 				role: "system",
-				content: "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Output ONLY the label. No quotes, no markdown, no explanation. No emojis.",
+				content: "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.",
 			},
 			{
 				role: "user",
-				content: `Conversation:\n\n---\n${preview}\n---\n\n2-3 word label:`,
+				content: `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`,
 			},
 		],
 	};
@@ -209,11 +248,11 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 		const budget = budgets[thinkingLevel];
 		if (budget) {
 			body.thinking = { type: "enabled", budget_tokens: budget };
-			body.max_tokens = Math.max(body.max_tokens, budget + 20);
+			body.max_tokens = Math.max(body.max_tokens, budget + 500);
 		}
 	}
 
-	console.log(`[title-gen] Requesting title via gateway model "${resolvedModel}"${resolvedModel !== modelId ? ` (resolved from "${modelId}")` : ""}…`);
+	console.log(`[title-gen] Requesting title via gateway model "${resolvedModel}"${resolvedModel !== modelId ? ` (resolved from "${modelId}")` : ""}...`);
 
 	try {
 		const response = await fetch(url, {
@@ -270,21 +309,22 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
 		headers["x-api-key"] = auth.access;
 	}
 
-	const coreInstruction = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Examples: \"Fix Login Bug\", \"Redis Setup\", \"CSV Parser\", \"Dark Mode\". Output ONLY the label. No quotes, no markdown, no explanation. No emojis.";
+	const coreInstruction = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>, <title>Redis Setup</title>, <title>CSV Parser</title>, <title>Dark Mode</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
 	const systemText = auth.type === "oauth"
 		? `You are Claude Code, Anthropic's official CLI for Claude. ${coreInstruction}`
 		: coreInstruction;
 
 	const body: any = {
 		model: DEFAULT_TITLE_MODEL,
-		max_tokens: 12,
+		// Bumped from 12 → 500 to tolerate brief reasoning preamble (see gateway path).
+		max_tokens: 500,
 		system: auth.type === "oauth"
 			? [{ type: "text", text: systemText }]
 			: systemText,
 		messages: [
 			{
 				role: "user",
-				content: `Conversation:\n\n---\n${preview}\n---\n\n2-3 word label:`,
+				content: `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`,
 			},
 		],
 	};
@@ -295,7 +335,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
 		const budget = budgets[thinkingLevel];
 		if (budget) {
 			body.thinking = { type: "enabled", budget_tokens: budget };
-			body.max_tokens = Math.max(body.max_tokens, budget + 12);
+			body.max_tokens = Math.max(body.max_tokens, budget + 500);
 		}
 	}
 
@@ -310,7 +350,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
 
 		// On auth errors, try refreshing the token and retrying once
 		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh…`);
+			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh...`);
 			const newToken = await refreshOAuthToken();
 			if (newToken) {
 				headers["Authorization"] = `Bearer ${newToken}`;
@@ -350,7 +390,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
  * Returns null if generation fails.
  */
 export async function generateSessionTitle(messages: any[], options?: TitleGenOptions): Promise<string | null> {
-	// Skip title generation entirely when tests/CI opt out — avoids real
+	// Skip title generation entirely when tests/CI opt out - avoids real
 	// outbound calls to api.anthropic.com for every prompted test.
 	if (process.env.BOBBIT_SKIP_TITLE_GEN) return null;
 	const preview = extractConversationPreview(messages);
@@ -369,7 +409,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
 
-	// Gateway configured but no explicit naming model — auto-select a low-cost
+	// Gateway configured but no explicit naming model - auto-select a low-cost
 	// Claude model from the gateway (prefer Haiku). This avoids silent failures
 	// in secure-zone deployments that cannot reach api.anthropic.com directly.
 	if (options?.aigwUrl) {
@@ -388,7 +428,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 
 // ── Goal title summarization ──────────────────────────────────────────
 
-const GOAL_SUMMARY_SYSTEM = "Summarize this goal title in exactly 3 words. Output ONLY the 3-word summary. No quotes, no markdown, no explanation. No emojis.";
+const GOAL_SUMMARY_SYSTEM = "Summarize this goal title in exactly 3 words. Wrap the summary in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
 
 /**
  * Generate a 3-word summary of a goal title via the AI Gateway.
@@ -400,10 +440,11 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 
 	const body = {
 		model: resolvedModel,
-		max_tokens: 20,
+		// Bumped from 20 → 500 to tolerate brief reasoning preamble (see session-title path).
+		max_tokens: 500,
 		messages: [
 			{ role: "system", content: GOAL_SUMMARY_SYSTEM },
-			{ role: "user", content: `Goal title:\n\n---\n${goalTitle}\n---\n\n3-word summary:` },
+			{ role: "user", content: `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:` },
 		],
 	};
 
@@ -470,12 +511,13 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
 
 	const body = {
 		model: DEFAULT_TITLE_MODEL,
-		max_tokens: 12,
+		// Bumped from 12 → 500 to tolerate brief reasoning preamble.
+		max_tokens: 500,
 		system: auth.type === "oauth"
 			? [{ type: "text", text: systemText }]
 			: systemText,
 		messages: [
-			{ role: "user", content: `Goal title:\n\n---\n${goalTitle}\n---\n\n3-word summary:` },
+			{ role: "user", content: `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:` },
 		],
 	};
 
@@ -490,7 +532,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
 
 		// On auth errors, try refreshing the token and retrying once
 		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh…`);
+			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh...`);
 			const newToken = await refreshOAuthToken();
 			if (newToken) {
 				headers["Authorization"] = `Bearer ${newToken}`;
@@ -527,7 +569,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
 
 /**
  * Generate a 3-word summary of a goal title for sidebar display.
- * Returns the cleaned summary (without "New goal: " prefix — caller adds that).
+ * Returns the cleaned summary (without "New goal: " prefix - caller adds that).
  * Returns null if generation fails.
  */
 export async function generateGoalSummaryTitle(goalTitle: string, options?: TitleGenOptions): Promise<string | null> {
@@ -546,7 +588,7 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
 
-	// Gateway configured but no explicit naming model — auto-select a low-cost
+	// Gateway configured but no explicit naming model - auto-select a low-cost
 	// Claude model (prefer Haiku) rather than hitting api.anthropic.com.
 	if (options?.aigwUrl) {
 		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl);

@@ -235,13 +235,6 @@ export const state = {
 		 *  provisional:true (existing assistant flow). Registered = any other
 		 *  project (regular/goal/staff session pointing at a live project). */
 		mode?: "provisional" | "registered";
-		/** Current project snapshot + registry fields, loaded lazily after the
-		 *  panel mounts. `undefined` = not fetched yet (panel shows skeleton). */
-		currentConfig?: {
-			name: string;
-			rootPath: string;
-			config: Record<string, string>;
-		};
 	},
 	activeProjectId: null as string | null,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
@@ -414,7 +407,21 @@ export const state = {
 	/** Pending plan-mutation banner state for the active goal dashboard
 	 *  (nested-goals §10.5). Declared in 4.2; populated by 4.3's WS handler. */
 	pendingMutation: undefined as PendingMutation | undefined,
+
+	/** Per-proposal-tag streaming flag. True between the first message_update
+	 *  delta carrying a propose_<tag> block and the matching block-finish event.
+	 *  Keyed by the `tag` from PROPOSAL_PARSERS — i.e. "goal_proposal",
+	 *  "project_proposal", "role_proposal", "tool_proposal", "staff_proposal",
+	 *  "workflow_proposal", "setup_proposal".
+	 *  Owner: state.ts. Sole writer: RemoteAgent. Readers: render.ts panels
+	 *  via isProposalStreaming(tag). */
+	proposalStreamingByTag: {} as Record<string, boolean>,
 };
+
+/** Read-only accessor for the per-tag streaming flag. */
+export function isProposalStreaming(tag: string): boolean {
+	return !!state.proposalStreamingByTag[tag];
+}
 
 // Expose state on window for E2E test diagnostics. The bundle is identical for
 // dev and tests — attaching a reference (not a copy) is cheap and read-only

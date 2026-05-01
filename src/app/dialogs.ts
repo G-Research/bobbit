@@ -124,11 +124,45 @@ export function showConnectionError(title: string, message: string): void {
 // OAUTH DIALOG
 // ============================================================================
 
+/**
+ * Returns the OAuth authentication status for `provider`.
+ *
+ * IMPORTANT: a transient HTTP failure (network blip, gateway restart in
+ * flight, server overload) must NOT be reported as "not authenticated" —
+ * doing so causes `authenticateGateway()` to spuriously open the OAuth
+ * dialog over a perfectly valid session, which is a confusing UX bug in
+ * production and a long-tail E2E flake (the dialog steals focus and
+ * subsequent assertions on sidebar/page elements time out).
+ *
+ * Distinguish:
+ *   - HTTP 200 + `authenticated: false`  → genuinely not authenticated
+ *   - any other response (non-2xx, JSON parse failure, network error)
+ *     → status indeterminate; retry once. If still indeterminate, treat as
+ *     authenticated (best-effort) — the actual gateway endpoints will
+ *     reject if the credential really is missing.
+ */
 export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean> {
-	const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider)}`);
-	if (!res.ok) return false;
-	const data = await res.json();
-	return data.authenticated === true;
+	const attempt = async (): Promise<{ ok: boolean; auth: boolean | null }> => {
+		try {
+			const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider)}`);
+			if (!res.ok) return { ok: false, auth: null };
+			const data = await res.json();
+			return { ok: true, auth: data.authenticated === true };
+		} catch {
+			return { ok: false, auth: null };
+		}
+	};
+	const first = await attempt();
+	if (first.ok) return first.auth === true;
+	// Indeterminate — retry once after a short delay.
+	await new Promise((r) => setTimeout(r, 250));
+	const second = await attempt();
+	if (second.ok) return second.auth === true;
+	// Still indeterminate after a retry. Assume authenticated rather than
+	// stealing the user's flow with a spurious OAuth dialog. The first real
+	// authenticated request will fail-closed if the credential truly is
+	// missing, and the dialog will surface there.
+	return true;
 }
 
 export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
@@ -652,6 +686,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 	let generating = false;
 	let titleChangeUnsub: (() => void) | null = null;
 	let roleDropdownOpen = false;
+	let hasFocused = false;
 	// Track pending changes — null means "no change from current"
 	const session0 = state.gatewaySessions.find((s) => s.id === sessionId);
 	const initialRole: string = session0?.role || "";
@@ -712,35 +747,60 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 
 	let saving = false;
 
-	const doGenerate = () => {
-		if (!state.remoteAgent || activeSessionId() !== sessionId) return;
+	const doGenerate = async () => {
+		if (generating) return;
 		generating = true;
 		renderDialog();
 
-		titleChangeUnsub?.();
-		const prevOnTitle = state.remoteAgent.onTitleChange;
-		state.remoteAgent.onTitleChange = (newTitle: string) => {
-			if (state.remoteAgent) state.remoteAgent.onTitleChange = prevOnTitle;
-			titleChangeUnsub = null;
-			titleValue = newTitle;
-			generating = false;
-			renderDialog();
-			prevOnTitle?.(newTitle);
-		};
-		titleChangeUnsub = () => {
-			if (state.remoteAgent) state.remoteAgent.onTitleChange = prevOnTitle;
-		};
-
-		setTimeout(() => {
+		const timeoutId = setTimeout(() => {
 			if (generating) {
 				generating = false;
 				titleChangeUnsub?.();
 				titleChangeUnsub = null;
 				renderDialog();
 			}
-		}, 15_000);
+		}, 30_000);
 
-		state.remoteAgent.generateTitle();
+		// Live path: use the WS so we get the same streaming UX. Otherwise call REST.
+		if (state.remoteAgent && activeSessionId() === sessionId) {
+			titleChangeUnsub?.();
+			const prevOnTitle = state.remoteAgent.onTitleChange;
+			state.remoteAgent.onTitleChange = (newTitle: string) => {
+				if (state.remoteAgent) state.remoteAgent.onTitleChange = prevOnTitle;
+				titleChangeUnsub = null;
+				clearTimeout(timeoutId);
+				titleValue = newTitle;
+				generating = false;
+				renderDialog();
+				prevOnTitle?.(newTitle);
+			};
+			titleChangeUnsub = () => {
+				if (state.remoteAgent) state.remoteAgent.onTitleChange = prevOnTitle;
+			};
+			state.remoteAgent.generateTitle();
+			return;
+		}
+
+		// Non-active session: REST endpoint reads .jsonl / live messages server-side.
+		try {
+			const res = await gatewayFetch(`/api/sessions/${sessionId}/generate-title`, { method: "POST" });
+			if (res.ok) {
+				const body = await res.json().catch(() => null) as { title?: string } | null;
+				if (body?.title) {
+					titleValue = body.title;
+					updateLocalSessionTitle(sessionId, body.title);
+					refreshSessions();
+				}
+			} else {
+				console.error("[generate-title] failed:", res.status, await res.text().catch(() => ""));
+			}
+		} catch (err) {
+			console.error("[generate-title] error:", err);
+		} finally {
+			clearTimeout(timeoutId);
+			generating = false;
+			renderDialog();
+		}
 	};
 
 	const selectRole = (roleName: string) => {
@@ -793,6 +853,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 												placeholder: "Session title…",
 												onInput: (e: Event) => {
 													titleValue = (e.target as HTMLInputElement).value;
+													renderDialog();
 												},
 												onKeyDown: (e: KeyboardEvent) => {
 													if (e.key === "Enter") doSave();
@@ -800,8 +861,9 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 												},
 											})}
 										</div>
-										${activeSessionId() === sessionId && state.remoteAgent
-											? html`<button
+										${session?.assistantType === "goal"
+											? ""
+											: html`<button
 													class="shrink-0 p-2 rounded-md border border-border hover:bg-secondary/80 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
 													@click=${doGenerate}
 													?disabled=${generating}
@@ -812,8 +874,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 																<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
 															</svg>`
 														: icon(WandSparkles, "sm")}
-												</button>`
-											: ""}
+												</button>`}
 									</div>
 								</div>
 								<!-- Colour picker -->
@@ -913,13 +974,19 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 			container,
 		);
 
-		requestAnimationFrame(() => {
-			const input = container.querySelector("input");
-			if (input) {
-				input.focus();
-				input.select();
-			}
-		});
+		if (!hasFocused) {
+			hasFocused = true;
+			requestAnimationFrame(() => {
+				const input = container.querySelector("input");
+				if (input) {
+					input.focus();
+					// Place caret at end — don't pre-select text. Highlighting on open
+					// is jarring and the selection contrast is poor against the input bg.
+					const end = input.value.length;
+					try { input.setSelectionRange(end, end); } catch { /* non-text input */ }
+				}
+			});
+		}
 
 		// Close role dropdown on click outside
 		if (roleDropdownOpen) {
@@ -2031,7 +2098,7 @@ export function showProjectDialog(): void {
 	renderDialog();
 }
 
-async function createProjectAssistantSession(dirPath: string, scaffolding: boolean): Promise<void> {
+export async function createProjectAssistantSession(dirPath: string, scaffolding: boolean, opts?: { projectId?: string }): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
@@ -2040,6 +2107,10 @@ async function createProjectAssistantSession(dirPath: string, scaffolding: boole
 			assistantType: scaffolding ? "project-scaffolding" : "project",
 			cwd: dirPath,
 		};
+		// When attaching to an existing registered project, pass the projectId
+		// so the server doesn't spin up a new provisional project at the same
+		// rootPath (which would surface as a duplicate in the sidebar).
+		if (opts?.projectId) bodyObj.projectId = opts.projectId;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(bodyObj),

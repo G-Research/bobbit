@@ -8,6 +8,7 @@ import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, approveMutation, rejectMutation, type GateState, type GateSignal } from "./api.js";
 import { countDescendantsFrom, getChildGoals } from "./render-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
+import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog, showNewGoalDialogForChild } from "./dialogs.js";
@@ -181,7 +182,7 @@ function connectDashboardWs(): void {
 	ws.addEventListener("message", (event) => {
 		try {
 			const msg = JSON.parse(event.data as string);
-			document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+			dispatchVerificationEvent(msg);
 		} catch {
 			// ignore unparseable messages
 		}

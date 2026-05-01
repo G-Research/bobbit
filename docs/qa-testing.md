@@ -14,41 +14,44 @@ design-doc → implementation → documentation → ready-to-merge
 
 ## Project configuration
 
-Add `qa_*` keys at the **top level** of `.bobbit/config/project.yaml`. Only `qa_start_command` is required — the rest have sensible defaults or can be omitted.
+QA settings live on a **component** — inside its opaque `config:` key→string map in `.bobbit/config/project.yaml`. Set them on the component that runs the QA testbed (typically the one matching the project name, or whichever the `agent-qa` workflow step's `component:` field points at). Only `qa_start_command` is required — the rest have sensible defaults or can be omitted.
 
-**Why project-level (not per-component).** `qa_*` fields describe a single ephemeral testbed for the whole project, not a per-component build. They sit alongside `name`, `rootPath`, and `sandbox` at the project root — not inside any `components[]` entry. The `agent-qa` workflow step type implicitly references them (no explicit `qa-build`/`qa-start` command names on a component).
+**Why per-component (not project-level).** A multi-repo or monorepo project may have several runnable services and needs to be able to QA-test each independently. Hosting QA settings on a component lets the `agent-qa` workflow step's `component:` field select which testbed to spin up. Single-repo projects still have just one component, so there is no extra friction.
 
+Keys recognised by the `/qa-test` skill (all values are strings — numeric budgets are stringified):
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `qa_build_command` | No | Falls back to `build_command`, then `npm run build` | How to build the project before starting the ephemeral server |
-| `qa_start_command` | **Yes** | — | Command to start an isolated server. Receives `$PORT`, `$WORK_DIR`, and `$TOKEN` as environment variables |
+| `qa_start_command` | **Yes** | — | Command to start an isolated server. Receives `$PORT`, `$WORK_DIR`, and `$TOKEN`. **Inline any extra env vars directly into this string** (e.g. `PORT=$PORT NODE_ENV=test npm start`). |
+| `qa_build_command` | No | Falls back to the component's `commands.build` | How to build the project before starting the ephemeral server |
 | `qa_health_check` | No | `""` | URL to poll for server readiness. Use `$PORT` placeholder (e.g. `http://127.0.0.1:$PORT/api/health`) |
 | `qa_browser_entry` | No | `""` | URL to open in the browser. Use `$PORT` and `$TOKEN` placeholders |
-| `qa_env` | No | `{}` | JSON object of extra environment variables for the server process |
-| `qa_max_duration_minutes` | No | `10` | Hard time budget — server is killed after this many minutes |
-| `qa_max_scenarios` | No | `5` | Maximum number of scenarios to run before stopping |
+| `qa_max_duration_minutes` | No | `"10"` | Hard time budget in minutes — server is killed after this many minutes |
+| `qa_max_scenarios` | No | `"5"` | Maximum number of scenarios to run before stopping |
+
+There is **no** `qa_env` field. Inline env vars into `qa_start_command` itself (single-quoted, with `'\''` escapes for embedded quotes) — no server-side process ever spread `qa_env` into a child env; it was only ever inlined by agents at author time.
 
 ### Bobbit's own config
 
-Bobbit ships with a working config in its `project.yaml`:
+Bobbit ships with a working QA testbed under its single `bobbit` component:
 
 ```yaml
-qa_build_command: npm run build
-qa_start_command: >-
-  PORT=$PORT WORK_DIR=$WORK_DIR BOBBIT_DIR=$WORK_DIR/.bobbit
-  BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1
-  node dist/server/cli.js
-  --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR
-qa_health_check: http://127.0.0.1:$PORT/api/health
-qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
-qa_env: '{"BOBBIT_NO_OPEN":"1","BOBBIT_LLM_REVIEW_SKIP":"1","BOBBIT_SKIP_NPM_CI":"1"}'
-qa_max_duration_minutes: "10"
-qa_max_scenarios: "5"
+components:
+  - name: bobbit
+    repo: "."
+    commands:
+      build: npm run build
+      # ...
+    config:
+      qa_start_command: "BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1 node dist/server/cli.js --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR"
+      qa_health_check:         "http://127.0.0.1:$PORT/api/health"
+      qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+      qa_max_duration_minutes: "10"
+      qa_max_scenarios:        "5"
 ```
 
 Key points for the start command:
-- `BOBBIT_DIR=$WORK_DIR/.bobbit` — isolates all state to the temp directory
+- `WORK_DIR` and `BOBBIT_DIR=$WORK_DIR/.bobbit` are exported by the QA skill itself before invoking `qa_start_command` — isolating all state to the temp directory
 - `--cwd $WORK_DIR` — prevents the ephemeral server from touching the repo
 - `--no-tls` — avoids certificate complexity for local testing
 - `--auth` — generates a token in the temp dir's state for browser authentication
@@ -58,21 +61,26 @@ Key points for the start command:
 For a Node.js web app:
 
 ```yaml
-qa_start_command: "PORT=$PORT node dist/server.js"
-qa_health_check: "http://127.0.0.1:$PORT/healthz"
-qa_browser_entry: "http://127.0.0.1:$PORT"
-qa_max_scenarios: "3"
+components:
+  - name: web
+    repo: "."
+    commands: { build: npm run build, test: npm test }
+    config:
+      qa_start_command:        "PORT=$PORT NODE_ENV=test node dist/server.js"
+      qa_health_check:         "http://127.0.0.1:$PORT/healthz"
+      qa_browser_entry:        "http://127.0.0.1:$PORT"
+      qa_max_scenarios:        "3"
 ```
 
 ### REST endpoint
 
-The parsed config is available via:
+The "is QA configured anywhere?" toggle is available via:
 
 ```
 GET /api/projects/:id/qa-testing-config
 ```
 
-Returns `{ config: QaTestingConfig | null }`. Returns `null` when `qa_start_command` is not set. The `QaTestingConfig` object has camelCase field names: `buildCommand`, `startCommand`, `healthCheck`, `browserEntry`, `env`, `maxDurationMinutes`, `maxScenarios`.
+Returns `{ configured: boolean }` — `true` iff at least one component has a non-empty `config.qa_start_command`. Detailed per-key values are no longer surfaced through this endpoint; they live on the component and are read directly by the `/qa-test` skill from `project.yaml`.
 
 ## The `/qa-test` slash skill
 
@@ -82,13 +90,13 @@ The `/qa-test` skill (in `.claude/skills/qa-test/SKILL.md`) provides the full ep
 
 The protocol has 9 steps:
 
-1. **Read config** — Load `qa_*` keys from `project.yaml`. Stop if `qa_start_command` is missing.
+1. **Read config** — Locate the component whose `config.qa_start_command` is set (preferring the gate's `agent-qa` step `component:` field, then a name-match against the project, then the first component with `qa_start_command`). Read all `qa_*` keys from that component's `config:` map. Stop if no component has `config.qa_start_command`.
 
 2. **Create isolated environment** — Create a temp directory completely outside the repo (`mktemp -d`). Initialize a minimal `.bobbit/state/` inside it, then seed it with realistic fixture data via `node "$REPO/scripts/qa-seed/seed.mjs" "$WORK_DIR"`. The seed populates the environment with a registered project, a goal with passed gates and verification history, archived sessions with tool call messages (including `verification_result`), tasks, and team state — so QA agents can immediately test dashboards, renderers, and verification UI without building state from scratch. See `scripts/qa-seed/README.md` for seed data details. This isolation is critical — the ephemeral server must never read or write the repo's `.bobbit/` or affect the production dev server.
 
 3. **Build** — Run `qa_build_command` from the repo directory. If the build fails, produce a failure report and skip to cleanup.
 
-4. **Allocate port and start server** — Find a free port, then start the server via `bash_bg` (never `bash` with `&` — that hangs agent sessions). The command receives `$PORT`, `$WORK_DIR`, and any `qa_env` variables.
+4. **Allocate port and start server** — Find a free port, then start the server via `bash_bg` (never `bash` with `&` — that hangs agent sessions). The command receives `$PORT` and `$WORK_DIR`. Any other environment variables the project needs are already inlined by the project author into `qa_start_command` itself — there is no `qa_env` step.
 
 5. **Wait for health check** — Poll `qa_health_check` (with `$PORT` substituted) every 2 seconds for up to 60 seconds. Read the auth token from the temp dir's state.
 
@@ -228,7 +236,7 @@ The production dev server is completely unaffected throughout the validation pro
 
 ## Troubleshooting
 
-- **"No QA testing configured"** — The project's `project.yaml` is missing `qa_start_command`. Add `qa_*` keys as described above.
+- **"No QA testing configured"** — No component in the project's `project.yaml` has `config.qa_start_command` set. Add `qa_*` keys to the relevant component's `config:` map as described above.
 - **Health check never passes** — Verify `qa_health_check` URL uses `$PORT` placeholder. Check `bash_bg` logs for server startup errors.
 - **Screenshots missing from report** — The agent drives the browser via the native `browser_*` tools, not `mcp__playwright__*`. Check that the session's role allows the `browser` tool group (the `qa-tester` role does by default) and that the agent called `browser_screenshot({ includeBase64: true })`. Spilled files live under `<session-cwd>/.bobbit-qa/screenshots/` and must be referenced in the report as `<img src="file:///<absolute-path>">` so the server can inline them on submit via `report_html_file`.
 - **QA step skipped unexpectedly** — Check that the goal has QA testing enabled (`enabledOptionalSteps` includes `agent-qa`). Check `gate_status` for the implementation gate verification results.

@@ -1,12 +1,12 @@
 // Phase 4b: per-project Components tab — see docs/design/multi-repo-components.md §8.2.
-// `renderProjectComponentsTab()` below covers components, worktree_root, and an
-// expandable workflows panel; "Re-scan repos" calls `POST /api/projects/:id/rescan-repos`
-// and "Regenerate workflows" routes through the project assistant.
+// `renderProjectComponentsTab()` below covers the components list with inline
+// edit. Repo scanning + workflow regeneration happen via the project assistant
+// (opened by the "Open Project Assistant" button in the components header).
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
-import { ArrowLeft, Brain, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, X } from "lucide";
+import { ArrowLeft, Brain, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -24,6 +24,8 @@ import {
 } from "./shortcut-registry.js";
 import { renderApp, setProjects, state } from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
+import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
+import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
@@ -50,7 +52,7 @@ const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "general", label: "General" },
 	{ id: "project", label: "Commands" },
 	{ id: "components", label: "Components" },
-	{ id: "models", label: "Models" },
+	{ id: "workflows", label: "Workflows" },
 	{ id: "directories", label: "Config Directories" },
 	{ id: "appearance", label: "Appearance" },
 ];
@@ -93,13 +95,18 @@ let settingsShowTimestampsLoaded = false;
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
-	resolved: Record<string, { value: string; source: string }>;
-	raw: Record<string, string>;
+	// `value` is widened to `any` because migrated fields (config_directories, qa_env,
+	// sandbox_tokens, qa_max_duration_minutes, qa_max_scenarios) come back as native
+	// JSON types (array/object/number); other keys remain strings.
+	resolved: Record<string, { value: any; source: string }>;
+	raw: Record<string, any>;
 	loaded: boolean;
 }>();
 
 let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
-const _projectScopePending = new Map<string, Record<string, string>>();
+const _projectScopePending = new Map<string, Record<string, any>>();
+/** Per-project transient state for the "Add custom key" composer in the Project tab. */
+const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
 
 function loadProjectScopeConfig(projectId: string): void {
 	const cached = projectScopeConfigCache.get(projectId);
@@ -122,15 +129,14 @@ function loadProjectScopeConfig(projectId: string): void {
 	})();
 }
 
-async function saveProjectScopeConfig(projectId: string, updates: Record<string, string>): Promise<void> {
+async function saveProjectScopeConfig(projectId: string, updates: Record<string, any>): Promise<void> {
 	projectScopeSaveStatus = "saving";
 	renderApp();
 	try {
 		// Handle rootPath separately via project update API
 		const rootPath = updates._rootPath;
-		const configUpdates = { ...updates };
+		const configUpdates: Record<string, any> = { ...updates };
 		delete configUpdates._rootPath;
-
 		const promises: Promise<Response>[] = [];
 
 		if (Object.keys(configUpdates).length > 0) {
@@ -170,7 +176,8 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 }
 
 async function resetProjectScopeField(projectId: string, key: string): Promise<void> {
-	await saveProjectScopeConfig(projectId, { [key]: "" });
+	const NATIVE_FIELDS = new Set(["config_directories", "sandbox_tokens"]);
+	await saveProjectScopeConfig(projectId, { [key]: NATIVE_FIELDS.has(key) ? null : "" });
 }
 
 // ── Sandbox section state ──
@@ -247,35 +254,37 @@ function loadWorktreePoolStatus(): void {
 }
 
 /** Initialize token/mount entries from resolved config if not already tracked. */
-function initSandboxEntries(projectId: string, resolved: Record<string, { value: string; source: string }>): void {
+function initSandboxEntries(projectId: string, resolved: Record<string, { value: any; source: string }>): void {
 	// Defer token entry init until host tokens have loaded (async),
 	// otherwise the list would be seeded with zero host tokens.
 	if (!_sandboxTokenEntries.has(projectId) && hostTokens !== null) {
-		const tokensRaw = resolved.sandbox_tokens?.value || "";
+		const tokensVal = resolved.sandbox_tokens?.value;
 		const hostEnvVars = new Set((hostTokens || []).map(t => t.envVar));
-		if (tokensRaw) {
-			// New unified format
+		// New unified format — may arrive as native array (post-native-YAML) or
+		// legacy JSON-encoded string. Accept both for forward+back compat.
+		let arr: { key: string; value?: string; enabled: boolean }[] | null = null;
+		if (Array.isArray(tokensVal)) {
+			arr = tokensVal as Array<{ key: string; value?: string; enabled: boolean }>;
+		} else if (typeof tokensVal === "string" && tokensVal.length > 0) {
 			try {
-				const arr: { key: string; value: string; enabled: boolean }[] = JSON.parse(tokensRaw);
-				if (Array.isArray(arr)) {
-					const entries = arr.map(e => ({
-						key: e.key || "",
-						value: e.value === "__REDACTED__" ? "" : (e.value || ""),
-						enabled: !!e.enabled,
-						isHost: hostEnvVars.has(e.key),
-						redacted: e.value === "__REDACTED__",
-					}));
-					// Add any detected host tokens not already in the saved list as disabled
-					for (const ht of (hostTokens || [])) {
-						if (!entries.some(e => e.key === ht.envVar)) {
-							entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true, redacted: false });
-						}
-					}
-					_sandboxTokenEntries.set(projectId, entries);
-				} else {
-					_sandboxTokenEntries.set(projectId, []);
+				const parsed = JSON.parse(tokensVal);
+				if (Array.isArray(parsed)) arr = parsed;
+			} catch { arr = null; }
+		}
+		if (arr) {
+			const entries = arr.map(e => ({
+				key: e.key || "",
+				value: e.value === "__REDACTED__" ? "" : (e.value || ""),
+				enabled: !!e.enabled,
+				isHost: hostEnvVars.has(e.key),
+				redacted: e.value === "__REDACTED__",
+			}));
+			for (const ht of (hostTokens || [])) {
+				if (!entries.some(e => e.key === ht.envVar)) {
+					entries.push({ key: ht.envVar, value: "", enabled: false, isHost: true, redacted: false });
 				}
-			} catch { _sandboxTokenEntries.set(projectId, []); }
+			}
+			_sandboxTokenEntries.set(projectId, entries);
 		} else {
 			// Legacy fallback: merge host tokens + sandbox_credentials + sandbox_host_token_overrides
 			const entries: { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[] = [];
@@ -342,21 +351,23 @@ function initSandboxEntries(projectId: string, resolved: Record<string, { value:
 	}
 }
 
-/** Serialize token entries to pendingChanges.sandbox_tokens */
+/** Serialize token entries to pendingChanges.sandbox_tokens as a structured array.
+ *  Server-side `PUT /api/projects/:id/config` rejects JSON-encoded strings for this
+ *  field after the native-YAML migration. */
 function syncTokenEntries(
 	tokenEntries: { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[],
-	pendingChanges: Record<string, string>,
+	pendingChanges: Record<string, any>,
 ): void {
 	const arr = tokenEntries
 		.filter(e => e.key) // skip empty key rows
 		.map(e => ({ key: e.key, value: e.redacted && !e.value ? "__REDACTED__" : e.value, enabled: e.enabled }));
-	pendingChanges.sandbox_tokens = arr.length > 0 ? JSON.stringify(arr) : "";
+	pendingChanges.sandbox_tokens = arr.length > 0 ? arr : null;
 }
 
 function renderSandboxSection(
 	projectId: string,
-	resolved: Record<string, { value: string; source: string }>,
-	pendingChanges: Record<string, string>,
+	resolved: Record<string, { value: any; source: string }>,
+	pendingChanges: Record<string, any>,
 	inputClass: string,
 	labelClass: string,
 ) {
@@ -589,51 +600,77 @@ function renderSandboxSection(
 				>${icon(Plus, "xs")} Add mount</button>
 			</div>
 
-			<!-- Worktree Pool -->
-			<div class="border-t border-border pt-2 mt-1 flex flex-col gap-2">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree Pool</div>
-				<p class="text-xs text-muted-foreground -mt-1">
-					Pre-built git worktrees so new sessions start instantly instead of waiting for setup. Changes take effect on gateway restart.
-				</p>
+			</div>
+		</div>
+	`;
+}
 
-				<div class="flex items-center gap-3">
-					<span class="${labelClass}">Pool Size</span>
-					<input
-						type="number"
-						min="0"
-						class="${inputClass} max-w-32"
-						placeholder="2"
-						.value=${pendingChanges.worktree_pool_size ?? resolved.worktree_pool_size?.value ?? ""}
-						@input=${(e: Event) => {
-							pendingChanges.worktree_pool_size = (e.target as HTMLInputElement).value;
-						}}
-					/>
-					<span class="text-xs text-muted-foreground">Pre-built worktrees (0 = disable)</span>
+/** Worktree section: root override + pre-built pool size. Used by the General tab. */
+function renderWorktreeSection(
+	_projectId: string,
+	resolved: Record<string, any>,
+	pendingChanges: Record<string, string>,
+	inputClass: string,
+	labelClass: string,
+): import("lit").TemplateResult {
+	return html`
+		<div class="flex flex-col gap-2">
+			<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree</div>
+			<p class="text-xs text-muted-foreground -mt-1">
+				Each session and goal gets its own git worktree under a parent directory. Pre-built worktrees make new sessions start instantly.
+			</p>
+
+			<div class="flex items-center gap-3">
+				<span class="${labelClass}">Worktree Root</span>
+				<input
+					type="text"
+					class="${inputClass}"
+					placeholder="<rootPath>-wt/ (default)"
+					.value=${pendingChanges.worktree_root ?? resolved.worktree_root?.value ?? ""}
+					@input=${(e: Event) => {
+						pendingChanges.worktree_root = (e.target as HTMLInputElement).value;
+					}}
+				/>
+			</div>
+			<p class="text-[11px] text-muted-foreground -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">Custom parent directory for goal/session worktrees. Absolute or relative to rootPath.</p>
+
+			<div class="flex items-center gap-3 flex-wrap">
+				<span class="${labelClass}">Pool Size</span>
+				<input
+					type="number"
+					min="0"
+					class="px-2 py-1 rounded-md border border-input bg-background text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+					style="width: 5rem;"
+					placeholder="2"
+					.value=${pendingChanges.worktree_pool_size ?? resolved.worktree_pool_size?.value ?? ""}
+					@input=${(e: Event) => {
+						pendingChanges.worktree_pool_size = (e.target as HTMLInputElement).value;
+					}}
+				/>
+				<span class="text-xs text-muted-foreground" style="max-width: 18rem;">Pre-built worktrees (0 = disable). Changes take effect on gateway restart.</span>
+			</div>
+
+			<div class="flex items-center gap-3">
+				<span class="${labelClass}">Pool Status</span>
+				<div class="flex items-center gap-2 text-sm">
+					${(() => {
+						loadWorktreePoolStatus();
+						if (worktreePoolStatus === null) return html`<span class="text-muted-foreground">Loading...</span>`;
+						if (!worktreePoolStatus.enabled) return html`<span class="text-muted-foreground">Pool disabled</span>`;
+						return html`
+							<span class="text-xs font-mono flex items-center gap-3">
+								<span>Ready: <span class="text-foreground font-medium">${worktreePoolStatus.ready}</span></span>
+								<span>Target: <span class="text-foreground font-medium">${worktreePoolStatus.target}</span></span>
+								${worktreePoolStatus.filling ? html`<span class="text-orange-500">Filling…</span>` : ""}
+							</span>
+						`;
+					})()}
+					<button
+						class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
+						title="Refresh pool status"
+						@click=${() => { worktreePoolStatusLoaded = false; worktreePoolStatus = null; loadWorktreePoolStatus(); }}
+					>${icon(RotateCcw, "xs")}</button>
 				</div>
-
-				<div class="flex items-center gap-3">
-					<span class="${labelClass}">Pool Status</span>
-					<div class="flex items-center gap-2 text-sm">
-						${(() => {
-							loadWorktreePoolStatus();
-							if (worktreePoolStatus === null) return html`<span class="text-muted-foreground">Loading...</span>`;
-							if (!worktreePoolStatus.enabled) return html`<span class="text-muted-foreground">Pool disabled</span>`;
-							return html`
-								<span class="text-xs font-mono flex items-center gap-3">
-									<span>Ready: <span class="text-foreground font-medium">${worktreePoolStatus.ready}</span></span>
-									<span>Target: <span class="text-foreground font-medium">${worktreePoolStatus.target}</span></span>
-									${worktreePoolStatus.filling ? html`<span class="text-orange-500">Filling…</span>` : ""}
-								</span>
-							`;
-						})()}
-						<button
-							class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
-							title="Refresh pool status"
-							@click=${() => { worktreePoolStatusLoaded = false; worktreePoolStatus = null; loadWorktreePoolStatus(); }}
-						>${icon(RotateCcw, "xs")}</button>
-					</div>
-				</div>
-
 			</div>
 		</div>
 	`;
@@ -1752,12 +1789,6 @@ const PROJECT_KEY_LABELS: Record<string, string> = {
 
 	worktree_setup_command: "Worktree Setup",
 	skill_directories: "Skill Dirs",
-	qa_start_command: "QA Start",
-	qa_build_command: "QA Build",
-	qa_health_check: "QA Health Check",
-	qa_browser_entry: "QA Browser Entry",
-	qa_max_duration_minutes: "QA Max Duration",
-	qa_max_scenarios: "QA Max Scenarios",
 };
 
 function projectKeyLabel(key: string): string {
@@ -1914,7 +1945,8 @@ async function saveConfigDirs(customDirs: Array<{ path: string; types: string[] 
 			: "/api/project-config";
 		const res = await gatewayFetch(endpoint, {
 			method: "PUT",
-			body: JSON.stringify({ config_directories: JSON.stringify(customDirs), skill_directories: null }),
+			// Send structured array (post-native-YAML); server rejects JSON-encoded strings for migrated fields.
+			body: JSON.stringify({ config_directories: customDirs, skill_directories: null }),
 		});
 		if (res.ok) {
 			configDirsSaveStatus = "saved";
@@ -2270,21 +2302,18 @@ function renderProjectScopeTab(projectId: string) {
 	// canonical editor for component build/test commands. Showing them here would create
 	// two competing UIs. Migration auto-folds them into components[0].commands.{build,test,...}.
 	const HIDDEN_KEYS = new Set([
-		"default_thinking_level", "sandbox", "sandbox_image",
+		"sandbox", "sandbox_image",
 		"sandbox_tokens", "sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts",
 		"worktree_pool_size",
 		"config_directories", "skill_directories",
 		// Legacy command keys — use the Components tab instead
 		"build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command",
 		"worktree_setup_command",
-		// Rendered in dedicated sections below
+		// Legacy top-level QA keys — moved to components[].config[]; edit on the Components tab
 		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
 		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
 	]);
 
-	const commandKeys = Object.keys(resolved).filter(k => !HIDDEN_KEYS.has(k));
-	const QA_KEYS = ["qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry", "qa_max_duration_minutes", "qa_max_scenarios"];
-	const qaKeys = QA_KEYS.filter(k => k in resolved);
 	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
 	const inputClass = `w-full min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
 		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
@@ -2293,6 +2322,14 @@ function renderProjectScopeTab(projectId: string) {
 	if (!_projectScopePending.has(projectId)) _projectScopePending.set(projectId, {});
 	const pendingChanges = _projectScopePending.get(projectId)!;
 
+	// "Other Commands" section iterates resolved ∪ pendingChanges so that custom
+	// keys added via the "Add custom key" composer below show up immediately,
+	// not just after Save.
+	const commandKeys = Array.from(new Set([
+		...Object.keys(resolved),
+		...Object.keys(pendingChanges).filter(k => !k.startsWith("_")),
+	])).filter(k => !HIDDEN_KEYS.has(k)).sort();
+
 	return html`
 		<div class="flex flex-col gap-4">
 			${commandKeys.length > 0 ? html`<div class="flex flex-col gap-2">
@@ -2300,9 +2337,11 @@ function renderProjectScopeTab(projectId: string) {
 				<div class="text-xs text-muted-foreground">Build, test, and lint commands now live on each component — see the <strong>Components</strong> tab.</div>
 				${commandKeys.map((key) => {
 					const entry = resolved[key];
-					if (!entry) return "";
-					const isInherited = entry.source !== "project";
-					const displayValue = raw[key] ?? "";
+					const isInherited = entry ? entry.source !== "project" : false;
+					// Pending value wins over saved raw value (so the user sees what
+					// they're about to commit). For a pending-only custom key, raw is
+					// empty and pendingChanges[key] is the value they typed.
+					const displayValue = pendingChanges[key] ?? raw[key] ?? "";
 					return html`
 						<div class="flex items-center gap-3">
 							<span class="${labelClass}">${projectKeyLabel(key)}</span>
@@ -2318,11 +2357,17 @@ function renderProjectScopeTab(projectId: string) {
 								/>
 								${isInherited ? html`<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
 							</div>
-							${!isInherited ? html`
+							${entry && !isInherited ? html`
 								<button
 									class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
 									title="Reset to inherited value"
 									@click=${() => resetProjectScopeField(projectId, key)}
+								>${icon(X, "xs")}</button>
+							` : !entry ? html`
+								<button
+									class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+									title="Discard pending key"
+									@click=${() => { delete pendingChanges[key]; renderApp(); }}
 								>${icon(X, "xs")}</button>
 							` : html`<div class="w-7 shrink-0"></div>`}
 						</div>
@@ -2332,44 +2377,58 @@ function renderProjectScopeTab(projectId: string) {
 
 
 
-			<!-- QA Testing -->
-			${qaKeys.length > 0 ? html`
-				<hr class="border-border" />
-				<div class="flex flex-col gap-2">
-					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">QA Testing</div>
-					<div class="text-xs text-muted-foreground">Configure ephemeral QA environments for automated testing.</div>
-					${qaKeys.map((key) => {
-						const entry = resolved[key];
-						if (!entry) return "";
-						const isInherited = entry.source !== "project";
-						const displayValue = raw[key] ?? "";
-						return html`
+			<!-- Custom keys: lets users add arbitrary project.yaml fields without -->
+			<!-- editing the file by hand. Keeps the legacy KV editing surface alive. -->
+			${(() => {
+				if (!_projectScopeNewKey.has(projectId)) _projectScopeNewKey.set(projectId, { key: "", value: "" });
+				const nk = _projectScopeNewKey.get(projectId)!;
+				const trimmedKey = nk.key.trim();
+				const keyValid = /^[a-z][a-z0-9_]*$/i.test(trimmedKey);
+				const keyExists = trimmedKey in resolved || trimmedKey in pendingChanges;
+				const canAdd = keyValid && !keyExists;
+				return html`
+						<details data-testid="custom-key-composer" class="border-t border-border pt-3">
+							<summary class="text-xs text-muted-foreground cursor-pointer select-none font-medium">Add custom key</summary>
+							<p class="text-[11px] text-muted-foreground mt-2 mb-3">Add an arbitrary <code class="font-mono">project.yaml</code> field. The new row will appear in the section above; click <strong>Save</strong> to persist.</p>
 							<div class="flex items-center gap-3">
-								<span class="${labelClass}">${projectKeyLabel(key)}</span>
-								<div class="flex-1 min-w-0 relative">
+								<input
+									type="text"
+									class="${inputClass} text-foreground"
+									style="width: 11rem; flex: 0 0 auto;"
+									placeholder="key_name"
+									data-testid="custom-key-name"
+									.value=${nk.key}
+									@input=${(e: Event) => { nk.key = (e.target as HTMLInputElement).value; renderApp(); }}
+								/>
+								<div class="flex-1 min-w-0">
 									<input
 										type="text"
-										class="${inputClass} ${isInherited ? "text-muted-foreground" : "text-foreground"}"
-										placeholder=${isInherited ? entry.value : ""}
-										.value=${displayValue}
-										@input=${(e: Event) => {
-											pendingChanges[key] = (e.target as HTMLInputElement).value;
-										}}
+										class="${inputClass} text-foreground"
+										placeholder="value"
+										data-testid="custom-key-value"
+										.value=${nk.value}
+										@input=${(e: Event) => { nk.value = (e.target as HTMLInputElement).value; renderApp(); }}
+										@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && canAdd) { pendingChanges[trimmedKey] = nk.value; nk.key = ""; nk.value = ""; renderApp(); } }}
 									/>
-									${isInherited ? html`<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
 								</div>
-								${!isInherited ? html`
-									<button
-										class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-										title="Reset to inherited value"
-										@click=${() => resetProjectScopeField(projectId, key)}
-									>${icon(X, "xs")}</button>
-								` : html`<div class="w-7 shrink-0"></div>`}
+								<button
+									class="p-1 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors shrink-0 disabled:opacity-30 disabled:pointer-events-none"
+									data-testid="custom-key-add"
+									title="Add field"
+									?disabled=${!canAdd}
+									@click=${() => {
+										pendingChanges[trimmedKey] = nk.value;
+										nk.key = "";
+										nk.value = "";
+										renderApp();
+									}}
+								>${icon(Plus, "sm")}</button>
 							</div>
-						`;
-					})}
-				</div>
-			` : ""}
+							${trimmedKey && !keyValid ? html`<p class="text-[11px] text-destructive mt-2">Key must start with a letter and contain only letters, digits, and underscores.</p>` : ""}
+							${keyValid && keyExists ? html`<p class="text-[11px] text-amber-600 mt-2">A field named <code class="font-mono">${trimmedKey}</code> already exists. Edit it above.</p>` : ""}
+						</details>
+					`;
+			})()}
 
 			<!-- Save -->
 			<div class="flex items-center gap-3 pt-2 border-t border-border">
@@ -2436,6 +2495,11 @@ function renderProjectGeneralTab(projectId: string) {
 					The directory used when creating new sessions and goals for this project.
 				</p>
 			</div>
+
+			<hr class="border-border" />
+
+			<!-- Worktree (root override + pre-built pool) -->
+			${renderWorktreeSection(projectId, resolved, pendingChanges, inputClass, labelClass)}
 
 			<hr class="border-border" />
 
@@ -2511,8 +2575,8 @@ interface ComponentsTabState {
 	saving: "" | "saving" | "saved" | "error";
 	errorMessage: string;
 	workflowsExpanded: boolean;
-	rescanResult: Array<{ folder: string; hasGit: boolean; detectedCommands: Record<string, string> }> | null;
-	rescanLoading: boolean;
+	/** Indices of components currently expanded in the list view. */
+	expanded: Set<number>;
 }
 
 const _componentsTabState = new Map<string, ComponentsTabState>();
@@ -2527,8 +2591,7 @@ function emptyComponentsTabState(): ComponentsTabState {
 		saving: "",
 		errorMessage: "",
 		workflowsExpanded: false,
-		rescanResult: null,
-		rescanLoading: false,
+		expanded: new Set<number>(),
 	};
 }
 
@@ -2599,28 +2662,6 @@ async function saveComponentsTab(projectId: string): Promise<void> {
 	renderApp();
 }
 
-async function rescanRepos(projectId: string): Promise<void> {
-	const s = _componentsTabState.get(projectId);
-	if (!s) return;
-	s.rescanLoading = true;
-	renderApp();
-	try {
-		const res = await gatewayFetch(`/api/projects/${projectId}/rescan-repos`, { method: "POST" });
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			s.errorMessage = data?.error || `Rescan failed (${res.status})`;
-		} else {
-			const data = await res.json();
-			s.rescanResult = data.repos || [];
-			s.errorMessage = "";
-		}
-	} catch (err: any) {
-		s.errorMessage = err?.message || String(err);
-	}
-	s.rescanLoading = false;
-	renderApp();
-}
-
 function renderProjectComponentsTab(projectId: string) {
 	loadComponentsTab(projectId);
 	const s = _componentsTabState.get(projectId);
@@ -2628,155 +2669,122 @@ function renderProjectComponentsTab(projectId: string) {
 		return html`<div class="text-sm text-muted-foreground">Loading components…</div>`;
 	}
 
-	const inputClass = `w-full min-w-0 px-2.5 py-1.5 rounded-md border border-input bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
-
-	const renderComponentCard = (c: ComponentEditState, index: number) => html`
-		<div class="border border-border rounded-md p-3 flex flex-col gap-2 bg-secondary/20" data-testid="component-card" data-component-name=${c.name}>
-			<div class="flex items-center gap-2">
-				<input
-					type="text"
-					class="${inputClass} flex-1"
-					placeholder="Component name"
-					.value=${c.name}
-					data-testid="component-name"
-					@input=${(e: Event) => { c.name = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}
-				/>
-				<button
-					class="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
-					title="Delete component"
-					data-testid="delete-component"
-					@click=${() => {
-						if (!confirm(`Delete component "${c.name}"?`)) return;
-						s.components.splice(index, 1);
-						markComponentsDirty(projectId);
-						renderApp();
-					}}
-				>${icon(X, "sm")}</button>
-			</div>
-			<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-				<label class="flex flex-col gap-1">
-					<span class="text-[11px] text-muted-foreground">Repo ("." for single-repo)</span>
-					<input type="text" class="${inputClass}" .value=${c.repo} placeholder="."
-						@input=${(e: Event) => { c.repo = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-				</label>
-				<label class="flex flex-col gap-1">
-					<span class="text-[11px] text-muted-foreground">Relative path (optional)</span>
-					<input type="text" class="${inputClass}" .value=${c.relative_path ?? ""} placeholder=""
-						@input=${(e: Event) => { c.relative_path = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-				</label>
-			</div>
-			<label class="flex flex-col gap-1">
-				<span class="text-[11px] text-muted-foreground">Worktree setup command (optional)</span>
-				<input type="text" class="${inputClass}" .value=${c.worktree_setup_command ?? ""} placeholder="e.g. npm ci --prefer-offline"
-					@input=${(e: Event) => { c.worktree_setup_command = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-			</label>
-			<label class="flex items-center gap-2 mt-1">
-				<input type="checkbox" class="toggle-switch" .checked=${c.dataOnly}
-					data-testid="data-only-toggle"
-					@change=${(e: Event) => { c.dataOnly = (e.target as HTMLInputElement).checked; markComponentsDirty(projectId); renderApp(); }}/>
-				<span class="text-xs text-muted-foreground font-medium">Data-only (no commands)</span>
-			</label>
-			${c.dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1" data-testid="data-only-hint">no commands</div>` : html`
-				<div class="flex flex-col gap-1.5" data-testid="commands-list">
-					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Commands</div>
-					${c.commands.map((cmd, ci) => html`
-						<div class="flex items-center gap-2" data-testid="command-row">
-							<input type="text" class="${inputClass} flex-1 max-w-[140px]" .value=${cmd.key} placeholder="name"
-								data-testid="command-key"
-								@input=${(e: Event) => { cmd.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-							<input type="text" class="${inputClass} flex-1" .value=${cmd.value} placeholder="shell command"
-								data-testid="command-value"
-								@input=${(e: Event) => { cmd.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-							<button
-								class="p-1 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
-								title="Remove command"
-								@click=${() => { c.commands.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
-							>${icon(X, "xs")}</button>
-						</div>
-					`)}
-					<button
-						class="text-xs text-primary hover:underline self-start mt-1 inline-flex items-center gap-1"
-						data-testid="add-command"
-						@click=${() => { c.commands.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
-					>${icon(Plus, "xs")} Add command</button>
-				</div>
-			`}
-		</div>
-	`;
-
-	const renderWorkflowsPanel = () => {
-		const entries = Object.entries(s.workflows || {});
-		if (entries.length === 0) return html`<div class="text-xs text-muted-foreground">No workflows configured.</div>`;
-		return html`<div class="flex flex-col gap-2" data-testid="workflows-panel">
-			${entries.map(([wfId, wf]: [string, any]) => html`
-				<div class="border border-border rounded-md p-2 bg-background" data-workflow-id=${wfId}>
-					<div class="text-sm font-medium text-foreground mb-1">${wf?.name || wfId}</div>
-					${(wf?.gates || []).map((gate: any) => html`
-						<div class="ml-2 mb-1.5" data-gate-id=${gate?.id || ""}>
-							<div class="text-xs font-medium text-foreground">${gate?.name || gate?.id || "(unnamed gate)"}</div>
-							${(gate?.verify || []).map((step: any, idx: number) => {
-								const component = s.components.find(comp => comp.name === step?.component);
-								const resolvedShell = step?.command && component
-									? component.commands.find(cmd => cmd.key === step.command)?.value || `(no command "${step.command}")`
-									: step?.run || "(free-form)";
-								const label = step?.component && step?.command
-									? `(${step.component}, ${step.command})`
-									: step?.component
-										? `(${step.component}, run)`
-										: "(free-form)";
-								return html`
-									<details class="ml-2" data-testid="workflow-step" data-step-index=${idx}>
-										<summary class="text-[11px] text-muted-foreground cursor-pointer py-0.5">
-											${step?.name || `Step ${idx + 1}`}
-											<span class="text-[10px] opacity-70 ml-1" data-testid="step-resolution">${label}</span>
-										</summary>
-										<pre class="text-[10px] font-mono ml-3 p-1.5 bg-secondary/40 rounded overflow-x-auto" data-testid="step-shell">${resolvedShell}</pre>
-									</details>
-								`;
-							})}
-						</div>
-					`)}
-				</div>
-			`)}
-		</div>`;
+	const toggleExpand = (index: number) => {
+		if (s.expanded.has(index)) s.expanded.delete(index);
+		else s.expanded.add(index);
+		renderApp();
 	};
 
-	const renderRescanResults = () => {
-		if (!s.rescanResult) return "";
-		if (s.rescanResult.length === 0) {
-			return html`<div class="text-xs text-muted-foreground italic mt-1" data-testid="rescan-empty">No repos detected.</div>`;
-		}
+	const renderComponentCard = (c: ComponentEditState, index: number) => {
+		const isExpanded = s.expanded.has(index);
+		const pathSummary = [c.repo && c.repo !== "." ? c.repo : null, c.relative_path].filter(Boolean).join(" / ") || ". (project root)";
+		const dataOnly = c.commands.length === 0;
+		const cmdCountLabel = dataOnly ? "data-only" : `${c.commands.length} cmd${c.commands.length === 1 ? "" : "s"}`;
 		return html`
-			<div class="flex flex-col gap-1 mt-1 p-2 border border-border rounded-md bg-secondary/30" data-testid="rescan-results">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Detected repos</div>
-				${s.rescanResult.map(r => {
-					const already = s.components.some(c => c.repo === r.folder);
-					const cmdCount = Object.keys(r.detectedCommands || {}).length;
-					return html`
-						<div class="flex items-center gap-2 text-xs" data-testid="rescan-repo-row" data-repo-folder=${r.folder}>
-							<code class="font-mono text-foreground">${r.folder}</code>
-							<span class="text-muted-foreground">${r.hasGit ? ".git" : "manifest"} · ${cmdCount} cmd${cmdCount === 1 ? "" : "s"}</span>
-							${already
-								? html`<span class="text-[10px] text-muted-foreground italic">already a component</span>`
-								: html`<button class="text-[10px] text-primary hover:underline"
-									data-testid="rescan-add-component"
-									@click=${() => {
-										const name = r.folder === "." ? "main" : r.folder;
-										s.components.push({
-											name,
-											repo: r.folder,
-											relative_path: "",
-											worktree_setup_command: "",
-											commands: Object.entries(r.detectedCommands || {}).map(([k, v]) => ({ key: k, value: v as string })),
-											dataOnly: cmdCount === 0,
-										});
-										markComponentsDirty(projectId);
-										renderApp();
-									}}
-								>+ Add as component</button>`}
+			<div class="wf-gate-card ${isExpanded ? "expanded" : ""}" data-testid="component-card" data-component-name=${c.name}>
+				<div class="wf-gate-header" @click=${() => toggleExpand(index)}>
+					<span class="wf-gate-idx">${index + 1}</span>
+					<span class="wf-gate-chevron">▸</span>
+					<span class="wf-gate-name">${c.name || "(unnamed)"}</span>
+					<span class="wf-gate-pill" title=${pathSummary}>${pathSummary}</span>
+					${dataOnly ? html`<span class="wf-gate-pill" data-testid="data-only-hint">${cmdCountLabel}</span>` : html`<span class="wf-gate-pill">${cmdCountLabel}</span>`}
+					<input type="checkbox" class="sr-only" tabindex="-1"
+						data-testid="data-only-toggle" .checked=${dataOnly} disabled
+						@click=${(e: Event) => e.stopPropagation()}/>
+					<button
+						class="wf-gate-delete"
+						title="Remove component"
+						data-testid="delete-component"
+						@click=${(e: Event) => {
+							e.stopPropagation();
+							if (!confirm(`Delete component "${c.name}"?`)) return;
+							s.components.splice(index, 1);
+							s.expanded.delete(index);
+							markComponentsDirty(projectId);
+							renderApp();
+						}}
+					>${icon(Trash2, "sm")}</button>
+				</div>
+				<div class="wf-gate-body">
+					<div class="wf-gate-body-inner">
+						<div class="wf-identity-row">
+							<label class="wf-field-label">Name</label>
+							<input class="wf-input" style="flex:1;min-width:0;" .value=${c.name} placeholder="Component name"
+								data-testid="component-name"
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => { c.name = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
 						</div>
-					`;
-				})}
+						<div class="wf-identity-row">
+							<label class="wf-field-label">Git repo</label>
+							<input class="wf-input" style="width:160px;" .value=${c.repo} placeholder="."
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => { c.repo = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+							<label class="wf-field-label" style="margin-left:8px;">Component path</label>
+							<input class="wf-input" style="flex:1;min-width:0;" .value=${c.relative_path ?? ""} placeholder="e.g. packages/api"
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => { c.relative_path = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+						</div>
+						<div class="wf-identity-row">
+							<label class="wf-field-label">Worktree setup</label>
+							<input class="wf-input" style="flex:1;min-width:0;" .value=${c.worktree_setup_command ?? ""} placeholder="e.g. npm ci --prefer-offline"
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => { c.worktree_setup_command = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+						</div>
+						<div class="wf-field" data-testid="commands-list">
+								<span class="wf-verify-label">Commands (${c.commands.length})</span>
+								<div class="flex flex-col gap-1.5">
+									${c.commands.map((cmd, ci) => html`
+										<div class="flex items-center gap-2" data-testid="command-row" @click=${(e: Event) => e.stopPropagation()}>
+											<input type="text" class="wf-input" style="width:140px;" .value=${cmd.key} placeholder="name"
+												data-testid="command-key"
+												@input=${(e: Event) => { cmd.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+											<input type="text" class="wf-input" style="flex:1;min-width:0;" .value=${cmd.value} placeholder="shell command"
+												data-testid="command-value"
+												@input=${(e: Event) => { cmd.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+											<button
+												class="wf-gate-delete"
+												title="Remove command"
+												@click=${() => { c.commands.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
+											>${icon(X, "sm")}</button>
+										</div>
+									`)}
+									<button
+										class="wf-criteria-add-btn"
+										data-testid="add-command"
+										@click=${(e: Event) => { e.stopPropagation(); c.commands.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
+								>Add Command</button>
+							</div>
+							${dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1 mt-1">No commands defined — this is a data-only component (e.g. docs, fixtures, schemas).</div>` : ""}
+						</div>
+						<div class="wf-field" data-testid=${`component-config-${c.name}`}>
+							<span class="wf-verify-label">Config (${c.config.length})</span>
+							<div class="text-[11px] text-muted-foreground italic pl-1 mb-1">Opaque key→string map consumed by skills (e.g. <code>qa_start_command</code>, <code>qa_health_check</code>, <code>qa_max_duration_minutes</code>).</div>
+							<div class="flex flex-col gap-1.5">
+								${c.config.map((cfg, ci) => html`
+									<div class="flex items-center gap-2" data-testid="config-row" @click=${(e: Event) => e.stopPropagation()}>
+										<input type="text" class="wf-input" style="width:200px;" .value=${cfg.key} placeholder="qa_start_command"
+											data-testid="config-key"
+											@input=${(e: Event) => { cfg.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+										<input type="text" class="wf-input" style="flex:1;min-width:0;" .value=${cfg.value} placeholder="value"
+											data-testid="config-value"
+											@input=${(e: Event) => { cfg.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+										<button
+											class="wf-gate-delete"
+											title="Remove config entry"
+											data-testid="delete-config"
+											@click=${() => { c.config.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
+										>${icon(X, "sm")}</button>
+									</div>
+								`)}
+								<button
+									class="wf-criteria-add-btn"
+									data-testid="add-config"
+									@click=${(e: Event) => { e.stopPropagation(); c.config.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
+								>Add Config Entry</button>
+							</div>
+						</div>
+					</div>
+				</div>
 			</div>
 		`;
 	};
@@ -2785,86 +2793,44 @@ function renderProjectComponentsTab(projectId: string) {
 		<div class="flex flex-col gap-5" data-testid="components-tab">
 			${s.errorMessage ? html`<div class="text-sm text-destructive whitespace-pre-wrap" data-testid="components-error">${s.errorMessage}</div>` : ""}
 
-			<div class="flex flex-col gap-2">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree root (optional)</div>
-				<input type="text" class="${inputClass}" .value=${s.worktreeRoot} placeholder="<rootPath>-wt/ (default)"
-					data-testid="worktree-root-input"
-					@input=${(e: Event) => { s.worktreeRoot = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
-				<p class="text-[11px] text-muted-foreground">Custom parent directory for goal/session worktrees. Absolute or relative to rootPath.</p>
-			</div>
-
-			<hr class="border-border"/>
-
-			<div class="flex items-center justify-between gap-3">
-				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Components (${s.components.length})</div>
-				<div class="flex items-center gap-2">
-					<button
-						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary"
-						?disabled=${s.rescanLoading}
-						data-testid="rescan-repos"
-						@click=${() => rescanRepos(projectId)}
-					>${s.rescanLoading ? "Scanning…" : "Re-scan repos"}</button>
-					<button
-						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary inline-flex items-center gap-1"
-						data-testid="add-component"
-						@click=${() => {
-							s.components.push({
-								name: `component-${s.components.length + 1}`,
-								repo: ".",
-								relative_path: "",
-								worktree_setup_command: "",
-								commands: [],
-								dataOnly: true,
-							});
-							markComponentsDirty(projectId);
-							renderApp();
-						}}
-					>${icon(Plus, "xs")} Add component</button>
+			<div class="flex items-start gap-4">
+				<p class="text-sm text-muted-foreground flex-1 m-0">Components are the build targets in this project — each one has its own commands (build, test, check) and may live in its own git repo or sub-path. Workflow steps reference these commands so they stay in sync as the project evolves.</p>
+				<div class="flex items-center gap-2 shrink-0">
+					${Button({
+						variant: "default",
+						size: "sm",
+						onClick: async () => {
+							const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
+							if (!project?.rootPath) return;
+							const { createProjectAssistantSession } = await import("./dialogs.js");
+							await createProjectAssistantSession(project.rootPath, false, { projectId });
+						},
+						children: html`<span class="inline-flex items-center gap-1.5 font-semibold" data-testid="open-project-assistant">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
+					})}
 				</div>
 			</div>
-			${renderRescanResults()}
-
 			<div class="flex flex-col gap-3">
 				${s.components.length === 0
-					? html`<div class="text-sm text-muted-foreground italic">No components defined. Use "Re-scan repos" or "Add component" to get started.</div>`
+					? html`<div class="text-sm text-muted-foreground italic">No components defined. Use "Re-scan repos" or "Add Component" to get started.</div>`
 					: s.components.map((c, i) => renderComponentCard(c, i))}
+				<button
+					class="wf-add-card-btn"
+					data-testid="add-component"
+					@click=${() => {
+						s.components.push({
+							name: `component-${s.components.length + 1}`,
+							repo: ".",
+							relative_path: "",
+							worktree_setup_command: "",
+							commands: [],
+							config: [],
+						});
+						s.expanded.add(s.components.length - 1);
+						markComponentsDirty(projectId);
+						renderApp();
+					}}
+				>${icon(Plus, "sm")}<span>Add Component</span></button>
 			</div>
-
-			<hr class="border-border"/>
-
-			<details ?open=${s.workflowsExpanded} @toggle=${(e: Event) => { s.workflowsExpanded = (e.currentTarget as HTMLDetailsElement).open; }} data-testid="workflows-disclosure">
-				<summary class="text-sm font-medium text-foreground cursor-pointer py-1">Workflows (${Object.keys(s.workflows || {}).length})</summary>
-				<div class="mt-2">${renderWorkflowsPanel()}</div>
-				<div class="mt-3">
-					<button
-						class="text-xs px-2.5 py-1 rounded-md border border-input bg-background hover:bg-secondary"
-						data-testid="regenerate-workflows"
-						@click=${async () => {
-							const { gatewayFetch } = await import("./api.js");
-							const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
-							if (!project) return;
-							// Best-effort: open a project-assistant session at the project's rootPath.
-							try {
-								const res = await gatewayFetch("/api/sessions", {
-									method: "POST",
-									body: JSON.stringify({
-										cwd: project.rootPath,
-										projectId,
-										assistantType: "project",
-										initialPrompt: "Regenerate the inline workflows: block in project.yaml using the components currently configured. Propose only the workflows: edits.",
-									}),
-								});
-								if (res.ok) {
-									const session = await res.json();
-									setHashRoute("session", session.id, true);
-									renderApp();
-								}
-							} catch { /* best-effort */ }
-						}}
-					>Regenerate workflows…</button>
-					<span class="text-[11px] text-muted-foreground ml-2">Opens a project assistant session.</span>
-				</div>
-			</details>
 
 			<div class="flex items-center gap-3 pt-2 border-t border-border">
 				<button
@@ -2880,23 +2846,26 @@ function renderProjectComponentsTab(projectId: string) {
 	`;
 }
 
-function renderProjectScopeModelsTab(_projectId: string) {
-	// For now, show a simplified models view indicating inheritance from system
-	return html`
-		<div class="flex flex-col gap-4">
-			<p class="text-sm text-muted-foreground">
-				Model preferences for this project. Currently inherits all settings from System.
-			</p>
-			<p class="text-xs text-muted-foreground">
-				Per-project model overrides will be available in a future update. Configure models in
-				<button class="text-primary hover:underline" @click=${() => setHashRoute("settings", "system/models", true)}>System &rarr; Models</button>.
-			</p>
-		</div>
-	`;
-}
-
 function renderProjectScopeDirectoriesTab(_projectId: string) {
 	return renderDirectoriesTab();
+}
+
+/** Workflows tab — renders the same UI as the standalone workflows page.
+ *  Workflows are project-scoped only, so this is just a tab-shaped wrapper
+ *  around the existing renderWorkflowPage() / loadWorkflowPageData() module.
+ *  We sync the shared config scope to the active settings project so the
+ *  workflow page fetches the right project's workflows. */
+let _workflowsTabLoadedFor: string | null = null;
+function renderProjectScopeWorkflowsTab(projectId: string) {
+	if (getConfigScope() !== projectId) {
+		setConfigScope(projectId);
+		_workflowsTabLoadedFor = null;
+	}
+	if (_workflowsTabLoadedFor !== projectId) {
+		_workflowsTabLoadedFor = projectId;
+		loadWorkflowPageData();
+	}
+	return html`<div data-testid="workflows-tab">${renderWorkflowPage({ embedded: true })}</div>`;
 }
 
 function renderAppearanceTab(projectId: string) {
@@ -3490,16 +3459,18 @@ export function renderSettingsPage() {
 					>${tab.label}</button>
 				`)}
 			</div>
-			<!-- Tab content -->
+			<!-- Tab content — every tab gets the same centered max-width column for
+			     visual consistency, matching the Workflows tab feel. Workflows itself
+			     self-centers via .wf-list so a wider outer wrapper is fine. -->
 			<div class="flex-1 overflow-y-auto">
-			 <div class="max-w-5xl mx-auto p-2 sm:p-4">
-				<div class="${currentTab === "project" || currentTab === "directories" ? "" : currentTab === "palette" || currentTab === "shortcuts" || currentTab === "appearance" || currentTab === "maintenance" ? "max-w-3xl" : "max-w-xl"}">
+			 <div class="max-w-3xl mx-auto p-2 sm:p-4">
+				<div>
 					${isProjectScope ? html`
 						${currentTab === "general" ? renderProjectGeneralTab(currentScope) : ""}
 						${currentTab === "appearance" ? renderAppearanceTab(currentScope) : ""}
 						${currentTab === "project" ? renderProjectScopeTab(currentScope) : ""}
 						${currentTab === "components" ? renderProjectComponentsTab(currentScope) : ""}
-						${currentTab === "models" ? renderProjectScopeModelsTab(currentScope) : ""}
+						${currentTab === "workflows" ? renderProjectScopeWorkflowsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
 					` : html`
 						${currentTab === "general" ? renderGeneralTab() : ""}

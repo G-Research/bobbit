@@ -55,7 +55,6 @@ export interface AskQuestion {
 	options: string[];
 	/** Short topical tab label (2–4 words, ≤24 chars). Required for multi-question asks. */
 	tab_label?: string;
-	allow_other?: boolean;
 	multi?: boolean;
 	min?: number;
 	max?: number;
@@ -125,7 +124,8 @@ export class AskUserChoicesWidget extends LitElement {
 	private _optionCount(qIdx: number): number {
 		const q = this.questions[qIdx];
 		if (!q) return 0;
-		return q.options.length + (q.allow_other ? 1 : 0);
+		// "Other" is always present.
+		return q.options.length + 1;
 	}
 
 	/** Return the option value (including OTHER_SENTINEL) at 0-based index. */
@@ -134,7 +134,8 @@ export class AskUserChoicesWidget extends LitElement {
 		if (!q) return null;
 		if (optIdx < 0) return null;
 		if (optIdx < q.options.length) return q.options[optIdx];
-		if (q.allow_other && optIdx === q.options.length) return OTHER_SENTINEL;
+		// "Other" is always at q.options.length.
+		if (optIdx === q.options.length) return OTHER_SENTINEL;
 		return null;
 	}
 
@@ -152,7 +153,7 @@ export class AskUserChoicesWidget extends LitElement {
 		if (!q || !d) return false;
 		if (q.multi) {
 			const arr = Array.isArray(d.selected) ? d.selected : [];
-			const maxOptionCount = q.options.length + (q.allow_other ? 1 : 0);
+			const maxOptionCount = q.options.length + 1;
 			const min = q.min ?? 1;
 			const max = q.max ?? maxOptionCount;
 			if (arr.length < min || arr.length > max) return false;
@@ -591,13 +592,11 @@ export class AskUserChoicesWidget extends LitElement {
 						(opt) => `${idx}::${opt}`,
 						(opt, optIdx) => this._renderOption(idx, opt, optIdx, this._isOptionChecked(idx, opt, readOnly), readOnly),
 					)}
-					${q.allow_other
-						? repeat(
-							[OTHER_SENTINEL],
-							() => `${idx}::__other__`,
-							() => this._renderOtherOption(idx, q.options.length, otherChecked, otherText, readOnly),
-						)
-						: nothing}
+					${repeat(
+						[OTHER_SENTINEL],
+						() => `${idx}::__other__`,
+						() => this._renderOtherOption(idx, q.options.length, otherChecked, otherText, readOnly),
+					)}
 				</div>
 			</div>`;
 	}
@@ -689,30 +688,36 @@ export class AskUserChoicesWidget extends LitElement {
 					.checked=${checked}
 					?disabled=${readOnly}
 					@change=${() => this._selectOption(qIdx, OTHER_SENTINEL)}>`;
+		// The Other text input lives as a SIBLING of the label, not a child. If it
+		// were inside the label it would intercept clicks to the label region
+		// (browsers don't cascade activation through interactive descendants), so
+		// `label:has(input[value="__OTHER__"])` clicks would silently no-op when
+		// the cursor lands on the text input. Wrapping both in a flex row keeps
+		// the visual "inline" layout while preserving label-click semantics.
 		return html`
-			<label
-				class=${cls}
-				role=${role}
-				aria-checked=${ariaChecked}
-				tabindex=${readOnly ? "-1" : rovingTabindex}
-				data-option-index=${optIdx}
-				@focus=${() => { if (!readOnly) this._focusedOption = optIdx; }}>
-				${inputEl}
-				<span class="ask-option-index font-mono text-xs text-muted-foreground w-4 text-right select-none" aria-hidden="true">${optIdx + 1}.</span>
-				<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 rounded-full border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
-					${checked ? html`<span class="ask-check-glyph text-[10px] leading-none">✓</span>` : nothing}
-				</span>
-				<span class="ask-option-text">Other</span>
-				${checked ? html`
-					<input
-						type="text"
-						class="ask-other-input ml-2 flex-1 px-2 py-1 text-xs border border-border rounded bg-background"
-						placeholder="Type your answer…"
-						.value=${otherText}
-						?disabled=${readOnly}
-						@input=${(e: Event) => this._setOtherText(qIdx, (e.target as HTMLInputElement).value)}>
-				` : nothing}
-			</label>`;
+			<div class="ask-option-other-row flex items-center gap-2">
+				<label
+					class=${cls}
+					role=${role}
+					aria-checked=${ariaChecked}
+					tabindex=${readOnly ? "-1" : rovingTabindex}
+					data-option-index=${optIdx}
+					@focus=${() => { if (!readOnly) this._focusedOption = optIdx; }}>
+					${inputEl}
+					<span class="ask-option-index font-mono text-xs text-muted-foreground w-4 text-right select-none" aria-hidden="true">${optIdx + 1}.</span>
+					<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 rounded-full border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
+						${checked ? html`<span class="ask-check-glyph text-[10px] leading-none">✓</span>` : nothing}
+					</span>
+					<span class="ask-option-text">Other</span>
+				</label>
+				<input
+					type="text"
+					class="ask-other-input flex-1 self-stretch px-2 py-2 text-sm border border-border rounded bg-background"
+					placeholder="Type your answer…"
+					.value=${otherText}
+					?disabled=${readOnly}
+					@input=${(e: Event) => this._setOtherText(qIdx, (e.target as HTMLInputElement).value)}>
+			</div>`;
 	}
 }
 

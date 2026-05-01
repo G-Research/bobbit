@@ -22,6 +22,7 @@ import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
+import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -603,6 +604,15 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	state.selectedSessionId = sessionId;
 
+	// Project proposal is scoped to the session that emitted it. Clear it the
+	// moment the user navigates away so it never bleeds into other sessions.
+	// connectToSession() rehydrates from the persisted draft if the user comes
+	// back to the originating session.
+	if (state.activeProjectProposal && state.activeProjectProposal.sessionId !== sessionId) {
+		state.activeProjectProposal = undefined;
+		state.assistantHasProposal = false;
+	}
+
 	// Fade out the current chat panel instantly
 	if (state.chatPanel) {
 		state.chatPanel.classList.add("session-fade-out");
@@ -988,7 +998,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			})();
 		};
 
-		remote.onGoalProposal = (proposal) => {
+		remote.onGoalProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			if (state.assistantType === "goal") {
 				state.activeGoalProposal = proposal;
@@ -1038,7 +1048,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onRoleProposal = (proposal) => {
+		remote.onRoleProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.activeRoleProposal = proposal;
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
@@ -1055,7 +1065,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onToolProposal = (proposal) => {
+		remote.onToolProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.toolPreviewName = proposal.tool;
 			// Map action to checklist item
@@ -1086,7 +1096,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onSetupProposal = (proposal) => {
+		remote.onSetupProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.setupPreviewAction = proposal.action;
 			state.assistantHasProposal = true;
@@ -1121,7 +1131,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onWorkflowProposal = (proposal) => {
+		remote.onWorkflowProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.workflowPreviewId = proposal.id || "";
 			state.workflowPreviewName = proposal.name || "";
@@ -1149,7 +1159,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onStaffProposal = (proposal) => {
+		remote.onStaffProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			state.activeStaffProposal = proposal;
 			if (!state.staffPreviewNameEdited) state.staffPreviewName = proposal.name;
@@ -1164,14 +1174,42 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onProjectProposal = async (fields: Record<string, unknown>) => {
+		remote.onProjectProposal = async (fields: Record<string, unknown>, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			const session = state.gatewaySessions.find(s => s.id === sessionId);
 			const project = state.projects.find(p => p.id === session?.projectId);
 			const mode: "provisional" | "registered" = project?.provisional ? "provisional" : "registered";
 			const isFirstProposal = state.activeProjectProposal == null;
-			const prevCurrent = state.activeProjectProposal?.currentConfig;
-			state.activeProjectProposal = { sessionId, fields, mode, currentConfig: prevCurrent };
+			// Bug C fix: shallow-merge structured side-tables (`components`,
+			// `workflows`) so a streaming partial that lacks one of them doesn't
+			// drop the prior structured value. Incoming flat fields still win.
+			const prevFields = state.activeProjectProposal?.fields ?? {};
+			const merged: Record<string, unknown> = { ...prevFields, ...fields };
+			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
+			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
+			// Per-component shallow merge: when both prev and incoming carry
+			// `components`, merge entries by name so a partial component update
+			// (e.g. only `commands`) doesn't clobber the previously-proposed
+			// `config` (or vice versa) on that component.
+			if (Array.isArray(fields.components) && Array.isArray((prevFields as Record<string, unknown>).components)) {
+				const prevComps = (prevFields as Record<string, unknown>).components as Array<Record<string, unknown>>;
+				const prevByName = new Map<string, Record<string, unknown>>();
+				for (const pc of prevComps) {
+					if (pc && typeof pc === "object" && typeof pc.name === "string") prevByName.set(pc.name, pc);
+				}
+				merged.components = (fields.components as Array<Record<string, unknown>>).map(c => {
+					if (!c || typeof c !== "object" || typeof c.name !== "string") return c;
+					const prev = prevByName.get(c.name);
+					if (!prev) return c;
+					return {
+						...prev,
+						...c,
+						commands: c.commands ?? prev.commands,
+						config: c.config ?? prev.config,
+					};
+				});
+			}
+			state.activeProjectProposal = { sessionId, fields: merged, mode };
 			state.assistantHasProposal = true;
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				if (state.assistantTab === "chat" && !isDesktop()) {
@@ -1184,11 +1222,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				localStorage.removeItem(collapseKey);
 				if (!isDesktop()) state.previewPanelTab = "project";
 			}
-			// Lazy-load current config snapshot for registered-mode diff view.
-			if (mode === "registered" && session?.projectId && !prevCurrent) {
-				void loadCurrentProjectConfig(session.projectId, sessionId);
+			// Persist only for project-assistant sessions (the session is dedicated
+			// to producing this proposal, so reload should restore work in progress).
+			// For non-assistant sessions, the proposal is transient — same model as
+			// goal proposals: it lives only as long as the user stays on this session.
+			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
+				saveProjectDraft(sessionId);
 			}
-			saveProjectDraft(sessionId);
 			renderApp();
 		};
 
@@ -1201,7 +1241,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Clear any previous dismissal so the proposal re-opens
 			// (the user explicitly clicked "Open proposal")
 			if (type === "goal") clearProposalDismissed(sessionId);
-			const callbackMap: Record<string, ((p: any) => void) | undefined> = {
+			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
 				tool: remote.onToolProposal,
@@ -1211,7 +1251,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				project: remote.onProjectProposal,
 			};
 			const cb = callbackMap[type];
-			if (cb) cb(fields);
+			if (cb) cb(fields, /* streaming */ false);
 		}) as EventListener;
 		document.addEventListener("proposal-open", proposalOpenHandler);
 
@@ -1465,12 +1505,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// in parallel. Draft restores must complete before we unlock proposal
 		// checking, but they don't depend on refreshSessions.
 		const draftRestorePromise = (async () => {
-			// Clear stale proposals for non-matching assistant types
+			// Clear stale proposals for non-matching assistant types or sessions
 			if (state.assistantType !== "goal") state.activeGoalProposal = null;
 			if (state.assistantType !== "role") state.activeRoleProposal = null;
 			if (state.assistantType !== "staff") state.activeStaffProposal = null;
-			// Project proposals are valid for ANY session — leave state.activeProjectProposal alone.
-			// Draft restore below handles rehydration for project-assistant sessions.
+			// Project proposal is scoped to the originating session and transient
+			// for non-assistant sessions — mirrors the goal-proposal model. The
+			// project-assistant branch below handles persistence for that session
+			// type only (its session is dedicated to building the proposal).
+			if (state.activeProjectProposal && state.activeProjectProposal.sessionId !== sessionId) {
+				state.activeProjectProposal = undefined;
+				state.assistantHasProposal = false;
+			}
 
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
@@ -1744,29 +1790,6 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // PROJECT PROPOSAL ACCEPTANCE
 // ============================================================================
 
-/** Lazily fetch current project registry + config and stash into activeProjectProposal.
- *  Exported so tests and render can trigger a refresh. */
-export async function loadCurrentProjectConfig(projectId: string, sessionId: string): Promise<void> {
-	const { gatewayFetch } = await import("./api.js");
-	try {
-		const [cfgRes, projRes] = await Promise.all([
-			gatewayFetch(`/api/projects/${projectId}/config`),
-			gatewayFetch(`/api/projects/${projectId}`),
-		]);
-		if (!cfgRes.ok || !projRes.ok) return;
-		const config = await cfgRes.json();
-		const proj = await projRes.json();
-		if (state.activeProjectProposal?.sessionId !== sessionId) return; // stale
-		state.activeProjectProposal.currentConfig = {
-			name: proj.name || "",
-			rootPath: proj.rootPath || proj.root_path || "",
-			config: (config && typeof config === "object") ? config : {},
-		};
-		saveProjectDraft(sessionId);
-		renderApp();
-	} catch { /* ignore */ }
-}
-
 export async function acceptProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
@@ -1792,21 +1815,31 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
 	if (!promoted) return;
 
-	// Write config fields
-	const configFields: Record<string, string> = {};
-	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
-		'test_unit_command', 'test_e2e_command', 'worktree_setup_command',
-		'qa_start_command', 'sandbox'];
-	for (const key of CONFIG_KEYS) {
-		const v = fields[key];
-		if (typeof v === "string" && v) configFields[key] = v;
-	}
-	if (Object.keys(configFields).length > 0) {
+	// Write config fields. Forward every proposed field — including structured
+	// `components` / `workflows` — to the config endpoint via the shared
+	// `buildProjectConfigDiff` helper. Mirrors the registered-mode accept path
+	// so the provisional accept doesn't silently drop the assistant's proposed
+	// workflows and components. Per-component QA config (`config.qa_start_command`
+	// etc.) rides through inside `components[].config`.
+	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
+	if (Object.keys(diff).length > 0) {
 		try {
-			await gatewayFetch(`/api/projects/${projectId}/config`, {
+			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 				method: 'PUT',
-				body: JSON.stringify(configFields),
+				body: JSON.stringify(diff),
 			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				const details = Array.isArray(data?.details) && data.details.length > 0
+					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+					: "";
+				const { showConnectionError } = await import("./dialogs.js");
+				showConnectionError(
+					data?.error || `Config write failed (${res.status})`,
+					details || (data?.error ?? ""),
+				);
+				return;
+			}
 		} catch (err) {
 			console.error('[project-proposal] Config write error:', err);
 		}
@@ -1853,29 +1886,24 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	renderApp();
 }
 
-/** Best-effort JSON.parse used by registered-proposal acceptance to coerce
- *  string-shaped `components`/`workflows` fields back into structured form. */
-function safeParseJson(text: string): unknown {
-	try { return JSON.parse(text); } catch { return undefined; }
-}
 
-/** Registered-mode accept: apply diffed config fields to the live project
- *  without terminating or navigating away. */
+
+/** Registered-mode accept: apply the proposal's full config payload to the
+ *  live project without terminating or navigating away. The server diffs
+ *  against persisted state — we just send everything the proposal carries. */
 async function acceptRegisteredProjectProposal(): Promise<void> {
 	const proposal = state.activeProjectProposal;
 	if (!proposal) return;
-	const { fields, sessionId: propSessionId, currentConfig } = proposal;
+	const { fields, sessionId: propSessionId } = proposal;
 	const session = state.gatewaySessions.find(s => s.id === propSessionId);
 	const projectId = session?.projectId;
 	if (!projectId) return;
 
 	const { gatewayFetch, fetchProjects } = await import("./api.js");
-	const currentName = currentConfig?.name ?? "";
-	const currentCfg = currentConfig?.config ?? {};
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 
-	// 1. Rename via PUT /api/projects/:id if name changed.
-	if (fieldNameStr && fieldNameStr !== currentName) {
+	// 1. Rename via PUT /api/projects/:id if a name is supplied.
+	if (fieldNameStr) {
 		try {
 			await gatewayFetch(`/api/projects/${projectId}`, {
 				method: "PUT",
@@ -1886,24 +1914,11 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 		}
 	}
 
-	// 2. Compute config diff — only fields that differ from currentConfig.config.
-	//    root_path never sent. name handled above. `components` and `workflows`
-	//    flow through as structured (non-string) fields when the proposal
-	//    carries them (Phase 4b — multi-repo proposals).
-	const diff: Record<string, unknown> = {};
-	for (const [k, v] of Object.entries(fields)) {
-		if (k === "name" || k === "root_path") continue;
-		if (k === "components" || k === "workflows") {
-			// Always re-send structured fields when present — server diffs
-			// against persisted state, and we don't currently snapshot the
-			// structured side-tables in `currentConfig.config`.
-			if (v !== undefined && v !== null && v !== "") {
-				diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
-			}
-			continue;
-		}
-		if ((currentCfg[k as string] ?? "") !== v) diff[k] = v;
-	}
+	// 2. Send all proposal fields to the config endpoint. Server diffs against
+	//    persisted state; empty/null values are skipped client-side. Native-YAML
+	//    migrated fields ride through as structured payloads (server rejects
+	//    JSON-encoded strings) — parse if the agent supplied them as a string.
+	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
 	if (Object.keys(diff).length > 0) {
 		try {
 			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
@@ -1947,6 +1962,12 @@ export function backToSessions(): void {
 	state.activeGoalProposal = null;
 	state.activeRoleProposal = null;
 	state.activeProjectProposal = undefined;
+	void (async () => {
+		try {
+			const { resetProjectProposalPanel } = await import("./render.js");
+			resetProjectProposalPanel();
+		} catch { /* ignore */ }
+	})();
 	state.assistantType = null;
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;

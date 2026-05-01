@@ -65,6 +65,13 @@ import { TaskManager } from "./task-manager.js";
 export interface TeamAgent {
 	sessionId: string;
 	role: string;
+	/**
+	 * Distinguishes verification reviewer sessions (managed by VerificationHarness)
+	 * from regular worker agents spawned via spawnRole. Reviewer agents must NOT
+	 * fire team-lead nudges on agent_end — the harness manages their lifecycle.
+	 * Defaults to "worker" if missing on load.
+	 */
+	kind: "worker" | "reviewer";
 	worktreePath?: string;
 	branch?: string;
 	baseSha?: string;
@@ -243,6 +250,7 @@ export class TeamManager {
 			agents: entry.agents.map((a) => ({
 				sessionId: a.sessionId,
 				role: a.role,
+				kind: a.kind,
 				worktreePath: a.worktreePath,
 				branch: a.branch,
 				baseSha: a.baseSha,
@@ -289,6 +297,9 @@ export class TeamManager {
 				agents: p.agents.map((a) => ({
 					sessionId: a.sessionId,
 					role: a.role,
+					// Default to "worker" for back-compat with persisted entries
+					// written before the kind field was introduced.
+					kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
 					worktreePath: a.worktreePath,
 					branch: a.branch,
 					baseSha: a.baseSha,
@@ -332,8 +343,11 @@ export class TeamManager {
 			}
 
 			// Re-subscribe to worker agent events so the team lead is notified
-			// when workers go idle (these subscriptions are lost on restart)
+			// when workers go idle (these subscriptions are lost on restart).
+			// Reviewer sessions are managed by VerificationHarness — never attach
+			// the agent_end → notifyTeamLead listener for them.
 			for (const agent of entry.agents) {
+				if (agent.kind === "reviewer" || agent.role === "reviewer") continue;
 				const workerSession = this.sessionManager.getSession(agent.sessionId);
 				if (!workerSession || workerSession.status === "terminated") continue;
 				const { role, sessionId } = agent;
@@ -975,6 +989,7 @@ export class TeamManager {
 			const agent: TeamAgent = {
 				sessionId: session.id,
 				role,
+				kind: "worker",
 				worktreePath: actualWorktreePath,
 				branch: branchName,
 				baseSha,
@@ -1037,6 +1052,14 @@ export class TeamManager {
 	private async notifyTeamLead(goalId: string, workerSessionId: string, role: string, agentId: string): Promise<void> {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return;
+
+		// Defensive guard: never nudge the team lead about a reviewer session.
+		// Reviewer sessions are managed by VerificationHarness; their agent_end
+		// is part of the verification flow, not a worker-finished signal.
+		const firingAgent = entry.agents.find((a) => a.sessionId === workerSessionId);
+		if (firingAgent && (firingAgent.kind === "reviewer" || firingAgent.role === "reviewer")) {
+			return;
+		}
 
 		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
@@ -1203,6 +1226,7 @@ export class TeamManager {
 		const agent: TeamAgent = {
 			sessionId,
 			role: 'reviewer',
+			kind: "reviewer",
 			worktreePath: undefined,
 			branch: undefined,
 			task: `Verification review: ${stepName}`,

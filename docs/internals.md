@@ -111,7 +111,7 @@ Callers should always pass an explicit `projectId` when one is available. `cwd`-
 
 `SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern — they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
 
-**Verification harness project config resolution.** `VerificationHarness` resolves `ProjectConfigStore` per-goal via the private `resolveProjectConfigStore(goalId)` helper (alongside `resolveGateStore` etc.), not the server-level `projectConfigStore` injected at construction. This is what makes `{{project.*}}` substitution (e.g. `typecheck_command`, `test_unit_command`, `qa_max_duration_minutes`) pull from the **goal's owning project** config rather than the server's default. All four call sites — command-type verify steps in `runVerification`, LLM-review retry prompts in `_rerunLlmReviewStep`, agent-QA retry prompts in `_rerunAgentQaStep`, and the QA timeout lookup — go through the helper. If `projectContextManager` is unset (tests, legacy wiring) the helper silently falls back to the injected store; if it is set but the goal is not found in any context, the helper logs a `[verification]` warning and falls back, so the class of bug is diagnosable from logs.
+**Verification harness project config resolution.** `VerificationHarness` resolves `ProjectConfigStore` per-goal via the private `resolveProjectConfigStore(goalId)` helper (alongside `resolveGateStore` etc.), not the server-level `projectConfigStore` injected at construction. This is what makes `{{project.*}}` substitution (e.g. `typecheck_command`, `test_unit_command`) and the `agent-qa` step's `qa_max_duration_minutes` lookup (now `getQaMaxDurationMinutes(componentName)`) pull from the **goal's owning project** config rather than the server's default. All four call sites — command-type verify steps in `runVerification`, LLM-review retry prompts in `_rerunLlmReviewStep`, agent-QA retry prompts in `_rerunAgentQaStep`, and the QA timeout lookup — go through the helper. If `projectContextManager` is unset (tests, legacy wiring) the helper silently falls back to the injected store; if it is set but the goal is not found in any context, the helper logs a `[verification]` warning and falls back, so the class of bug is diagnosable from logs.
 
 This design prevents a class of data corruption bugs where missing `projectId` values silently route data to the wrong project's store.
 
@@ -140,6 +140,36 @@ The verification system is split into two modules:
 - **`verification-harness.ts`** — orchestration: session lifecycle, WS event broadcasting, process spawning, retry logic, persistence. Also implements the **blocking-tool** contract used by `verification_result`: a tool extension POSTs a verdict, which resolves the Promise registered when the gate signal started verification. See [docs/blocking-tools.md](blocking-tools.md) for the pattern. The `ask_user_choices` tool uses a different, non-blocking shape — see [docs/non-blocking-ask.md](non-blocking-ask.md).
 - **`verification-logic.ts`** — pure functions extracted for unit testability: `substituteVars` (template variable resolution), `matchExpectFailure` (expect:failure gate evaluation), `groupStepsByPhase`/`getSortedPhases` (phased execution ordering), `partitionOptionalSteps` (optional step filtering), `buildStepCache`/`canSkipAllSteps` (cache reuse for same-commit re-signals), `isTransientReviewError`/`isTransientQaError` (transient failure detection). These are tested in `tests/verification-logic.test.ts` (~65 tests, <1s) without requiring a running server.
 
+#### Reviewer `kind` & restart resume
+
+Reviewer (and QA) sub-sessions are owned by `VerificationHarness`, but the harness needs them persisted in the team store so a server restart can rebind a running gate signal to the still-alive agent process. `TeamManager.registerReviewerSession()` writes the reviewer's `sessionId` into `entry.agents` for that goal; `unregisterReviewerSession()` removes it on completion.
+
+The persisted-agent shape (`PersistedTeamEntry.agents[]` in `team-store.ts`) carries a `kind: "worker" | "reviewer"` discriminator. Worker entries (regular team agents dispatched via `dispatchToRole`) are nudged on `agent_end` so the team lead learns that a delegate has finished; reviewer entries must never produce that nudge — the verification harness alone interprets reviewer completion. Two enforcement points:
+
+- `resubscribeTeamEvents()` skips agents with `kind === "reviewer"` when re-attaching the `agent_end → notifyTeamLead()` listener after a restart. Pre-fix this listener was attached unconditionally and the live (non-restart) path never noticed because it subscribes only to `tool_execution_end`.
+- `notifyTeamLead()` performs the same check before firing, so even a stray subscription cannot deliver a steer.
+
+Back-compat: `team-state.json` entries written before the field existed have `kind === undefined` after load. The harness treats `undefined` as `"worker"` (the safer default for old records, all of which were workers in practice), but the defensive guard in both sites also accepts `role === "reviewer"` as a fallback discriminator. A persisted reviewer entry that was missing `kind` after a cross-version restart still gets correctly skipped.
+
+Key files: `src/server/agent/team-manager.ts`, `src/server/agent/team-store.ts`. Regression test: `tests/team-manager-reviewer-resume.test.ts`.
+
+#### Reminder race after restart-resume
+
+When a server restart interrupts an in-flight reviewer turn, the harness tries to resume from the existing session rather than spawning a fresh one (`_tryResumeFromSession` in `verification-harness.ts`). Resume sends a reminder prompt asking the agent to call `verification_result`, then races the eventual tool call against an idle-detector so a stuck agent eventually fails rather than hanging the gate.
+
+The race uses two `SessionManager` helpers:
+
+- `waitForIdle(sessionId, timeoutMs)` — resolves when the session transitions to `idle` (or **synchronously** if it is already idle). This is the failure-detector edge of the race: "agent went quiet without calling `verification_result`".
+- `waitForStreaming(sessionId, timeoutMs = 10_000)` — mirror of `waitForIdle` that resolves on `agent_start` (or rejects on `process_exit` / timeout). This confirms the prompt was actually picked up and a new turn has begun.
+
+Both are needed because, after a restart, the resumed session is in `status === "idle"` at the moment the reminder is dispatched. `rpcClient.prompt()` is fire-and-forget on the RPC channel; the session does not synchronously transition to `streaming`. Without `waitForStreaming`, the `waitForIdle` half of the race resolves immediately on the *current* idle, the harness declares failure, and the `finally` block terminates the session before the agent has read the reminder — the user-visible signature is a reviewer archived within tens of milliseconds of restart, with the error string `"Agent did not call verification_result after server restart and reminder."`
+
+The pattern is now applied at all four reminder sites in `verification-harness.ts`: `_tryResumeFromSession` (the original repro), `runLlmReviewViaSession`, the QA-tester reminder, and the legacy direct-`RpcBridge` reminder. The legacy site has no `SessionManager` injected and so reproduces the shape inline with an `agent_start` listener and the same 10s timeout. A `.catch(() => {})` on every `waitForStreaming` call ensures that an unresponsive agent still falls through to the existing `waitForIdle` race rather than blocking forever — the helper raises the floor without lowering the ceiling.
+
+The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern.
+
+Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
@@ -158,7 +188,9 @@ Two resolution modes:
 
 ### Config cascade
 
-The config cascade handles resolution of named config entities (roles, tools, workflows, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
+
+> **Workflows are NOT in the cascade.** Workflows live exclusively inline in each registered project's `project.yaml::workflows` block — there is no system-scope or builtin workflow layer. `ConfigCascade.resolveWorkflows(projectId)` reads only the project layer; without a `projectId` it returns `[]`. See [Workflows are project-scoped only](#workflows-are-project-scoped-only) below for the rationale.
 
 #### Why a cascade?
 
@@ -175,7 +207,7 @@ Two modules implement this:
 
 - **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, etc.).
 
-- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveWorkflows()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`.
+- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveTools()`, and `resolveToolGroupPolicies()` — all accepting an optional `projectId`. `resolveWorkflows()` exists for shape compat but only reads the project layer (see callout above).
 
 Each returned item is a `ResolvedItem<T>` with:
 - `item: T` — the config object
@@ -184,9 +216,39 @@ Each returned item is a `ResolvedItem<T>` with:
 
 #### Resolution rules
 
-For each config type, items are merged by a unique key (roles by `name`, workflows by `id`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top. Hidden workflows (e.g. `test-fast`) are filtered out at the cascade level.
+For each cascaded config type (roles, tools, tool-group-policies), items are merged by a unique key (roles by `name`, tools by `name`). Later layers shadow earlier ones entirely — no field-level merge. Without `projectId`, returns system scope (builtins + server stores at `<server-cwd>/.bobbit/config/`). With `projectId`, the project layer is added on top.
 
-**System-scope writes** (role / workflow customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `workflowStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles and workflows because the server stores are independent of `ProjectContextManager`.
+Workflows are not cascaded — `resolveWorkflows(projectId)` reads only the project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`.
+
+**System-scope writes** (role customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles because the server stores are independent of `ProjectContextManager`. Workflow mutations have no system-scope path — they always require a `projectId`.
+
+#### Workflows are project-scoped only
+
+Workflows are inlined per-project (in `project.yaml::workflows`) rather than cascaded because (a) every workflow step references project-specific `(component, command)` pairs that have no meaning outside the owning project, and (b) the project assistant generates a bespoke workflow set per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md) — there is no useful "system default workflow" to inherit. A cascade would just be ceremony around an empty upper layer.
+
+Consequences:
+
+- `BuiltinConfigProvider.getWorkflows()` returns `[]` (kept only for `ServerStores` shape compat).
+- No system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. `<server-cwd>/.bobbit/config/project.yaml::workflows` is **not** read at runtime.
+- All `/api/workflows*` mutations require a `projectId` (400 otherwise — no `?scope=server` parameter).
+- `GET /api/workflows` (no `projectId`) returns `{ workflows: [] }`; `GET /api/workflows/:id` (no `projectId`) returns 404. Reads are intentionally lenient (don't 400) to keep the Workflows page from crashing during scope transitions.
+- New projects do **not** receive any default seed at `POST /api/projects` time — a `propose_project` call that omits `workflows` results in a project with zero workflows. The project assistant is solely responsible for designing the workflow set from the discovered components and commands. See [No default workflow scaffold](#no-default-workflow-scaffold). Legacy `<project>/.bobbit/config/workflows/*.yaml` files are still folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
+
+#### No default workflow scaffold
+
+Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback** — there is no path that silently seeds a canonical workflow set into a project. The previous fallback produced generic gates targeting a synthetic default component — gates that didn't match the project's real commands and which the assistant would have to redesign anyway, so the fallback hid rather than helped the design step. A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill, no error banner from this layer).
+
+**Removed seed sites** (all three previously seeded `general` / `feature` / `bug-fix` / `quick-fix` targeting a synthetic default component):
+
+- `src/server/server.ts` after `POST /api/projects` when the proposal omitted `workflows`.
+- `src/server/state-migration/migrate-project-yaml.ts::migrateProjectYaml` during the v1→v2 migration.
+- `src/server/state-migration/migrate-project-yaml.ts::maybeSeedWorkflowsOnly` secondary pass; now a no-op for v2 projects with no workflows dir and no inline workflows. (The function still inlines a legacy `workflows/` dir on first boot — that path is unaffected.)
+
+**`buildDefaultWorkflows`** (in `src/server/state-migration/seed-default-workflows.ts`) was kept but is **internal-only**. The only caller is `per-component-workflows.ts::buildPerComponentWorkflow`, which clones the `feature` shape and rewrites step refs to point at a specific component. No callsite invokes `buildDefaultWorkflows` as a fallback.
+
+**Project assistant prompt** (`src/server/agent/project-assistant.ts`) carries a "Workflows are your responsibility" statement in both `PROJECT_ASSISTANT_PROMPT` and `PROJECT_ASSISTANT_SCAFFOLDING_PROMPT`. The G2 workflow-suggestion checklist no longer pre-checks generic options by component count — the assistant must justify every workflow it proposes against the project's actual components and commands. Per-component / all-components scaffolds (`buildPerComponentWorkflow`, `buildAllComponentsWorkflow`) remain available as adaptable starting points the assistant chooses explicitly.
+
+**Tests:** `tests/e2e/projects-no-default-workflows.spec.ts` covers (a) `POST /api/projects` without `workflows` persists with no `workflows:` block, (b) supplied `workflows` is kept verbatim with no defaults merged in, (c) zero-workflows projects don't gain workflows from downstream side-effects. The migration test suite (`tests/migrate-project-yaml.test.ts`) asserts no seeding occurs in either migration path.
 
 #### Server stores decoupling
 
@@ -194,11 +256,11 @@ For each config type, items are merged by a unique key (roles by `name`, workflo
 
 #### Builtin seeding
 
-On server startup, standalone stores are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores (e.g. `createGoal()` looking up workflows) work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding.
+On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope at all, and (since the **No default workflow scaffold** change) they're no longer seeded at project-create time either — the project assistant designs them. See [No default workflow scaffold](#no-default-workflow-scaffold).
 
 #### Scaffolding
 
-`scaffoldBobbitDir()` creates empty `config/roles/`, `config/workflows/` directories. These config types resolve at runtime via the cascade — no files are copied. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
 
 #### Session setup integration
 
@@ -211,16 +273,18 @@ Config list endpoints accept `?projectId=` for project-scoped resolution:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles?projectId=X` | Resolved roles with `origin` and `overrides` fields |
-| `GET` | `/api/workflows?projectId=X` | Resolved workflows |
+| `GET` | `/api/workflows?projectId=X` | Project workflows (returns `[]` without `projectId`) |
 | `GET` | `/api/tools?projectId=X` | Resolved tools |
 | `POST` | `/api/roles/:name/customize?scope=project&projectId=X` | Copy resolved item to target scope for editing |
 | `DELETE` | `/api/roles/:name/override?scope=project&projectId=X` | Remove override, revert to inherited |
 
-The customize/override endpoints follow the same pattern for workflows (`:id`). CRUD endpoints (`POST`, `PUT`, `DELETE`) accept optional `projectId` for scope-aware operations.
+The customize/override endpoints follow the same pattern for roles. Workflow CRUD endpoints (`POST`, `PUT`, `DELETE /api/workflows[/:id]`) **require** `projectId` (400 otherwise) — there is no system-scope path for workflows.
 
 #### UI
 
-The four config pages (Roles, Tools, Skills, Workflows) display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`.
+The Roles, Tools, and Skills config pages display a project scope row (System + per-project tabs) when multiple projects are registered. Items show origin badges (grey=builtin, blue=server, green=project). In project scope, inherited items (origin != "project") appear at 70% opacity. Customize/revert buttons manage overrides. Shared UI helpers live in `config-scope.ts` and `config-scope.css`; the row accepts an optional `excludeSystem` flag.
+
+The Workflows page is a special case — it has **no System tab** because workflows are project-scoped only. The page passes `excludeSystem: true` to the scope row, and visiting `/workflows` while the global scope is `system` auto-switches to the first registered project (or shows an empty state if none).
 
 ### Project assistant
 
@@ -257,6 +321,8 @@ Each registered project can override system-level settings (from `project.yaml`)
 
 **Settings UI**: The settings page has a two-tier layout. The top scope row selects System or a specific project. Sub-tabs within each scope show the relevant settings. Per-project tabs show inherited system values as placeholders with an "(inherited)" badge; overrides show normal text with a "×" reset button. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID (backwards-compatible: `#/settings/shortcuts` maps to `#/settings/system/shortcuts`).
 
+**Per-component editors**: The project Settings tab renders one card per component with editable `commands` and `config` key-value tables (sibling editors with the same shape — add/delete row controls, key/value inputs). Both tables persist via the same `PUT /api/projects/:id/config` payload by sending the `components` array with the edited entry. There are no longer top-level `qa_*` fields on the Settings page — QA settings live exclusively under the relevant component's `config:` map (see [Multi-repo & components](#multi-repo--components)).
+
 **Sidebar shortcut**: Project headers in the sidebar show a gear icon on hover that navigates directly to `#/settings/<project-id>/project`.
 
 **Mid-session project proposals**: Any agent session — regular, goal, staff, or non-project assistant — can call the `propose_project` tool to suggest changes to the current project's config, not just the project-assistant flow. The motivation is that agents often discover a missing test command, a better worktree setup, or a stale model preference while working on a goal; forcing the user into a separate project-assistant session just to accept that fix loses context. When a proposal arrives, the preview panel grows a "Project" tab showing a diff of the proposed fields against the current `project.yaml` (loaded via `GET /api/projects/:id/config`) and registry record. Unchanged fields collapse into a "No changes" group; `root_path` is read-only. The accept handler branches on whether the project is provisional:
@@ -264,7 +330,48 @@ Each registered project can override system-level settings (from `project.yaml`)
 - **Provisional** (project-assistant flow, unchanged): promote via `POST /api/projects/:id/promote`, write config via `PUT /api/projects/:id/config`, then terminate the assistant session and navigate to landing.
 - **Registered** (new path): `PUT /api/projects/:id/config` for project.yaml fields and `PUT /api/projects/:id` for the project name if it changed. The session stays connected and the agent continues where it left off — no navigation, no termination.
 
-The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, plus project-defined custom keys. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+
+### Project-proposal panel structure
+
+The `propose_project` preview panel (`src/app/render.ts::projectProposalPanel`, testid `data-panel="project-proposal"`) is shared by the project assistant and mid-session edit flows. It renders a fixed header (project name + `root_path`), a tab strip, the active tab's body, and a legacy editable-fields block at the bottom. The three tabs all live in `src/app/project-proposal-views.ts`:
+
+| Tab (testid) | Renderer | Purpose |
+|---|---|---|
+| `view-tab-components` | `projectComponentsView` | One card per component (`component-card-${name}`): `repo`, `relative_path`, `worktree_setup_command`, `commands` chips, plus a per-component `Config` key-value table (`component-config-${name}`) listing entries from `components[*].config` (e.g. `qa_start_command`, `qa_max_duration_minutes`). Data-only components (no `commands` map) are flagged. |
+| `view-tab-workflows` | `projectWorkflowsView` | One card per workflow (`workflow-card-${id}`) showing the gate DAG (`gate-node-${gateId}`) and each gate's verify steps with type-coloured badges (`step-badge-${type}` for `command` / `llm-review` / `agent-qa`, plus `expect:failure`). Step refs to `(component, command)` link back to the component card. |
+| `view-tab-diff` | `projectDiffView` | When a previous proposal exists in the same session, shows added/changed/removed components and gates rather than raw YAML field diffs. Component diffs include per-key adds/removes/changes for `commands` and `config` (e.g. `+ web.config.qa_start_command`, `~ web.config.qa_max_scenarios: "3" → "5"`). |
+
+The legacy field block at the bottom keeps the original editable-input rows (`name`, plus changed-vs-unchanged partition for `build_command` / `test_command` / etc.) for the small project-level scalar fields the diff views don't surface. `root_path` is read-only.
+
+**Live-update guarantee.** Across repeated `propose_project` calls in one session, the panel must always reflect the latest payload. The mechanism is a shallow-merge in `session-manager.ts::onProjectProposal`: incoming flat fields win, but `components` and `workflows` carry over from the prior proposal when the new payload omits them (a streaming partial may not include both). The shallow-merge also runs **per component** — entries are matched by `name` and missing `commands` / `config` on the incoming entry are carried over from the prev entry, so a partial re-emit (e.g. updating only `commands` on `web`) does not clobber the previous `config` map on the same component. The render path treats `components`/`workflows` as structured side-tables, never as legacy `Input` rows — `onFieldInput` early-returns for those two keys to prevent a stray keystroke from clobbering the structured value (Bug B), and the proposal tool's serialisation never JSON-stringifies them onto the flat field map (Bug A). The shallow-merge is Bug C's fix.
+
+**Workflow-suggestion checklist (G2).** After the assistant has settled on the components, the project-assistant prompt instructs it to present a single `ask_user_choices` multi-select of workflows it has designed for this specific project. **No options are pre-checked by component count or by canonical name** — the assistant must justify each suggestion against the discovered components and commands. The per-component and all-components scaffolds (`buildPerComponentWorkflow(componentName, allComponents)` and `buildAllComponentsWorkflow(components)` in `src/server/state-migration/per-component-workflows.ts`) are offered as adaptable starting points the assistant chooses explicitly when they fit; they reuse the canonical helpers and prompt strings (`readyToMergeGate()`, `DESIGN_REVIEW_PROMPT`, `GAP_ANALYSIS_DESIGN_PROMPT`, `GAP_ANALYSIS_IMPL_PROMPT`, `CODE_REVIEW_PROMPT`, `DOC_PROMPT`, `RALPH_LOOP_DESCRIPTION`) exported from `seed-default-workflows.ts` so gate semantics stay in one place. `buildDefaultWorkflows()` itself is internal to that module — no caller invokes it as a fallback. See [No default workflow scaffold](#no-default-workflow-scaffold).
+
+**Ralph-loop framing.** The `implementation` gate's `verify` list is the agent's loop body: failures circle back to the implementing agent, which fixes and re-signals until verification passes. The `description` field on `implementation` gates produced by the canonical helpers carries `RALPH_LOOP_DESCRIPTION` so the gate cards in both the proposal panel and the goal dashboard remind reviewers it's a loop, not a checkpoint. The `general`, `feature`, and per-component templates in the authoring guide include gap-analysis steps at design-time (in `design-doc`) AND post-implementation (`implementation` phase 2) to bracket the loop — design-time catches missing requirements before iteration burn, post-impl catches drift between design and code. `quick-fix` skips both. Full authoring rules and worked examples live in [`defaults/workflow-authoring-guide.md`](../defaults/workflow-authoring-guide.md) §3.1 / §6.
+
+**Monorepo subproject scan.** `src/server/agent/monorepo-scan.ts` detects workspace manifests at the candidate root path and expands their globs (one level deep) into a list of subprojects. Recognised manifests: `pnpm-workspace.yaml`, `package.json` `workspaces`, `nx.json`, `turbo.json`, `lerna.json`, `Cargo.toml` `[workspace]`, `go.work`, Gradle `settings.gradle[.kts]` `include(...)`. Output is capped at `MAX_CANDIDATES = 30` with an alphabetical truncation marker; pure detection — no network, no shell. The scan result is added to `POST /api/projects/scan` and consumed by the project-assistant prompt, which is instructed to emit one component per workspace package with `repo: "."` + distinct `relative_path` values (see authoring guide §2 "Monorepo subprojects").
+
+**Assistant prompt construction.** `PROJECT_ASSISTANT_PROMPT` and `PROJECT_ASSISTANT_SCAFFOLDING_PROMPT` in `src/server/agent/project-assistant.ts` inline `defaults/workflow-authoring-guide.md` via `readFileSync` at module init, so prompt updates flow through automatically when the guide is edited. Workflow-design content is roughly half of what the assistant does, so the guide is in-context, not referenced.
+
+### Native-YAML project.yaml fields
+
+Two fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings:
+
+| Field | Shape |
+|---|---|
+| `config_directories` | `{ path: string; types: string[] }[]` |
+| `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (the secret `value` is split into `SecretsStore` on PUT — unchanged) |
+
+(`qa_env`, `qa_max_duration_minutes`, and `qa_max_scenarios` used to live here too — they have moved into per-component `config:` maps, see [Multi-repo & components](#multi-repo--components).)
+
+The motivation is editability and diff-friendliness: hand-editing a JSON-string-inside-YAML field is painful and produces noisy diffs in `propose_project` previews and PRs.
+
+**Lazy-migration loader.** `ProjectConfigStore` accepts both the native shape and the legacy form (JSON-string for the array/map fields, quoted numeric strings for the two numeric fields). Legacy values are parsed transparently into structured side-tables; malformed legacy strings log a warning and fall back to the default. The store sets `isDirty()` on legacy load so the next save rewrites the file in native form — no separate migration step.
+
+**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()` and `getSandboxTokens()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store. QA budgets and the start/health/browser-entry strings live on `Component.config: Record<string, string>` and are read via `getComponentConfig(name)`, `getQaMaxDurationMinutes(componentName)`, and `isQaConfiguredOnAnyComponent()`.
+
+**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these two keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form. The same endpoints reject the seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) with a migration message pointing at `components[<name>].config[<key>]`.
 
 ### Per-project palette
 
@@ -314,7 +421,6 @@ name: myapp
 rootPath: /home/me/w/myapp
 worktree_root: /home/me/wt    # optional override
 sandbox: docker               # project-level
-qa_start_command: …           # project-level (testbed, not a component build)
 config_directories: […]       # project-level
 
 components:                   # the only collection in project.yaml
@@ -327,6 +433,12 @@ components:                   # the only collection in project.yaml
       check: npm run check
       unit:  npx playwright test ...
       e2e:   npx playwright test ...
+    config:                   # opaque key→string map; consumed by skills like /qa-test
+      qa_start_command:        "PORT=$PORT NODE_ENV=test node dist/server.js"
+      qa_health_check:         "http://127.0.0.1:$PORT/api/health"
+      qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+      qa_max_duration_minutes: "10"
+      qa_max_scenarios:        "5"
 
 workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
   general: { name: General, gates: [...] }
@@ -337,7 +449,7 @@ workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
 - Mode is **inferred**, not declared: any `component.repo !== "."` makes the project multi-repo. In multi-repo mode, `rootPath` is a container directory holding sibling git repos; in single-repo mode, `rootPath` is the repo itself.
 - The default component's `name` matches the project's `name` (e.g. `bobbit` → `components[0].name == "bobbit"`). This keeps gate output, branch names, and UI labels meaningful from day one. `migrate-project-yaml.ts` enforces this on first boot for legacy single-repo projects.
 - `commands` is an **opaque `{ name: shell }` map** with no fixed schema. The project assistant tends to use names like `build`/`test`/`check`/`e2e`/`lint` because those are the typical gate verb categories, but any name is allowed (`migrate`, `seed`, `bench`, `gen-types`, …).
-- `qa_*` fields stay project-level because they describe an ephemeral testbed for the whole project, not a per-component build. The `agent-qa` step type implicitly references them.
+- `config` is a sibling **opaque `{ name: string }` map** on each component (max 100 entries; values are strict strings — numeric budgets are stringified). It carries arbitrary skill-consumed settings; the `/qa-test` skill reads `qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_max_duration_minutes`, and `qa_max_scenarios` from here. The `agent-qa` workflow step's `component:` field selects which component's `config` map is read at run time. Inline env vars directly into `qa_start_command` (e.g. `PORT=$PORT NODE_ENV=test npm start`) — there is no separate `qa_env` field; the server never spread `qa_env` into a child env, it was only ever inlined by agents at author time.
 
 **Component schema** (`Component` in `project-config-store.ts`):
 
@@ -348,6 +460,7 @@ workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
 | `relative_path` | no | Sub-path within the repo. Default `""` (component at repo root). |
 | `worktree_setup_command` | no | Per-component runtime hook (see below). |
 | `commands` | no | Flat `{name: shell}` map. **Absent ⇒ data-only component.** |
+| `config` | no | Opaque flat `{key: string}` map (max 100 entries). Consumed by skills like `/qa-test` (which reads `qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_max_duration_minutes`, `qa_max_scenarios`). Numeric budgets are stringified. |
 
 **Data-only components** (a component with no `commands`) declare a repo as part of the project so it gets provisioned on every goal/session worktree set, even though it contributes no workflow steps. Use cases:
 
@@ -372,7 +485,7 @@ The **multi-repo invariant** — every configured repo is checked out as a sibli
 
 Free-form `{ run }` steps that need a different working directory use `cd ... && ...` inside the `run` string. This keeps the schema small and the working-dir rule unambiguous: it is structurally derived from the component, or it is the per-branch container root.
 
-`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution.
+`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution. `agent-qa` additionally carries an optional `component:` field that selects which component's `config:` map the `/qa-test` skill reads (and which workspace to start). When omitted, the verification harness falls back to the first component whose `config.qa_start_command` is set, then to a name-match against the project, then to `components[0]`.
 
 The workflow validator (`workflow-validator.ts`) rejects, at load time:
 
@@ -400,7 +513,7 @@ If the `workflows:` block is empty or missing, goal creation surfaces a clear er
 
 **Removed runtime concepts:**
 
-- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant now generates a bespoke inline `workflows:` block per project from the MD authoring guide. The legacy YAML files are scheduled for deletion (see follow-up note at the bottom of this doc); while they remain on disk during the migration window, `BuiltinConfigProvider.loadWorkflows()` keeps reading them so existing tests that reference workflow IDs by name (`general`, `feature`, `bug-fix`, `quick-fix`, `test-fast`) keep working. New projects do not depend on these IDs being shipped.
+- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant generates a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` does **not** seed defaults when `workflows` is omitted (a project may persist with zero workflows — see [No default workflow scaffold](#no-default-workflow-scaffold)). `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime — there is no system-scope or builtin workflow layer.
 - **`.bobbit/config/workflows/`** is no longer a runtime concept. `InlineWorkflowStore` reads only from `project.yaml::workflows`. The `migrate-project-yaml.ts` step folds any pre-existing per-project workflow files into the inline block on first boot and removes the directory.
 
 ### Session worktrees
@@ -482,6 +595,26 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or session-first-prompt rename), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
+**Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. Three invocation points fan out from `runComponentSetups()`:
+
+| Site | When it runs | How components are resolved |
+|---|---|---|
+| `WorktreePool._fill()` (single-repo and multi-repo) | After every successful pool prebuild, before the entry is published into the pool | `componentsResolver: () => Component[]` closure passed at construction — invoked **fresh per fill** so live edits to `project.yaml` take effect on the next replenishment without a server restart |
+| `StaffManager.refreshWorktree()` | On each wake cycle for non-sandboxed staff, after rebasing the worktree onto the primary branch | `ctx.projectConfigStore.getComponents()` |
+| `session-setup.ts` (single-repo on-demand) | Fallback `createWorktree` path when the pool is empty | `components[0].worktreeSetupCommand` passed via `opts.setupCommand` to `createWorktree` |
+
+**Why the per-fill resolver matters.** Pool entries can sit in the pool for hours; if components were captured at pool construction time, a user who fixes a wrong setup command in `project.yaml` would still get stale entries baked with the old command until the server restarted. The closure pattern guarantees the next fill picks up edits.
+
+**Loud log line.** Every pool fill that has at least one component with a setup command emits:
+
+```
+[worktree-pool] running setup for components: <names>
+```
+
+This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper.
+
+**`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
+
 #### Remote branch cleanup
 
 Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.
@@ -507,11 +640,20 @@ The git-status widget (shown on every session with a worktree and on the goal da
 
 Full design lives in [docs/design/git-status-widget-reliability.md](design/git-status-widget-reliability.md). The sketch:
 
-**Server (`src/server/server.ts`).** `batchGitStatus` is a 750ms-TTL single-flight cache wrapping the raw `runBatchGitStatus` spawn worker. Cache key is `${containerId ?? 'host'}::${cwd}::${summary|untracked}`. Concurrent callers share the same in-flight promise, resolved entries are reused for up to 750ms, errors are never cached (the entry is deleted on rejection so the next call retries fresh). The 750ms window is short enough that users never see "stale" data but long enough to collapse the idle / reconnect / visibility-change refresh storm into one git invocation. `invalidateGitStatusCache(cwd, containerId?)` is called from `/git-commit`, `/git-pull`, `/git-push`, merge endpoints, and the `?fetch=true` branch so local git writes never return cached pre-write state.
+**Server (`src/server/server.ts`, `src/server/skills/git-status-native.ts`).** `batchGitStatus` is a 2000ms-TTL single-flight cache wrapping `runBatchGitStatus`. Cache key is `${containerId ?? 'host'}::${cwd}::${summary|untracked}`. Concurrent callers share the same in-flight promise, resolved entries are reused for up to 2000ms, errors are never cached (the entry is deleted on rejection so the next call retries fresh). The 2-second window collapses the idle / reconnect / visibility-change / dashboard fan-out refresh storm into one git invocation while keeping data fresh enough for a 10s-cadence widget. `invalidateGitStatusCache(cwd, containerId?)` is called from `/git-commit`, `/git-pull`, `/git-push`, merge endpoints, and the `?fetch=true` branch so local git writes never return cached pre-write state.
 
 The default `/git-status` call uses `git status --porcelain=v1 -uno` (summary: skips untracked scan, which is the long tail on large repos). `?untracked=1` switches to `-uall` and sets `untrackedIncluded: true` on the response; clients must not treat `clean` as authoritative when `untrackedIncluded === false`. The session widget fetches summary by default and refetches `?untracked=1` when the user opens the dropdown — the widget dispatches a `git-status-dropdown-open` CustomEvent (bubbles, composed) for this. Summary and untracked responses live in separate cache keys so one doesn't shadow the other.
 
-Spawn-level retry inside `runBatchGitStatus` swallows transient errors (EAGAIN, ENOBUFS, EBUSY, EMFILE, ENFILE, ETIMEDOUT, SIGTERM/SIGKILL, transient ENOENT on win32) with a short backoff; the HTTP handler adds a single belt-and-braces retry on any uncaught error. 15s overall timeout. Responses carry optional `partial: true` when Phase B (porcelain) times out but Phase A (branch / ahead / behind / upstream) succeeded — the client renders a yellow warning dot and the dropdown offers Re-scan.
+**Host path** (no `containerId`) goes through `runBatchGitStatusNative` in `src/server/skills/git-status-native.ts`, which fans out direct `git.exe` invocations via `child_process.execFile` (argv array — no shell) in two parallel phases:
+
+- **Phase A** (`Promise.all`, ~6 calls): current branch, `origin/HEAD` symbolic-ref, master/main verify, `status --porcelain`, upstream tracking branch.
+- **Phase B** (`Promise.all`, ~4 calls): ahead/behind counts vs upstream and vs primary, after Phase A resolves the primary ref.
+
+Per-call timeout is 3s; only the HEAD lookup is mandatory (any other failure falls back to safe defaults matching the legacy bash behaviour — missing upstream → `hasUpstream=false`, count failures → 0, etc.). Wall-clock is dominated by the slowest single git call (~50–150ms on Windows, ~10–30ms on Linux). This replaces the earlier approach that piped a multi-line script through Git Bash on Windows — that one cold spawn cost 500–1000ms per refresh and the in-script git invocations ran sequentially.
+
+**Container path** (when `containerId` is set) keeps the batched approach: a single `docker exec sh -c '<batch script>'` round-trip. Inside the container, `git` is fast and the perf complaint never applied; one round-trip beats N parallel `docker exec` calls because Docker Desktop's daemon serializes inbound requests under contention.
+
+**No in-server retries.** `runBatchGitStatusCount` increments exactly once per `batchGitStatus` call. The 3s per-call timeout fast-fails contended invocations; client-side retry in `git-status-refresh.ts` (4 attempts at [0, 500, 2000, 5000]ms) is the only resilience layer. Responses still carry optional `partial: true` for Phase-B timeouts — the client renders a yellow warning dot and the dropdown offers Re-scan.
 
 Test-only hooks — `__setGitStatusFake` / `__clearGitStatusFake` / `__getGitStatusInvocationCount` / `__resetGitStatusInvocationCount` — replace the git-spawn path with a deterministic function so coalesce/TTL/retry E2E tests don't depend on the real `git status` binary, which becomes flaky under CI load (EAGAIN / ENFILE / Windows ENOENT races). Production code never touches them.
 
@@ -822,6 +964,56 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 
 ---
 
+## AI Gateway per-session header (`x-opencode-session`)
+
+When Bobbit talks to an on-prem model through the AI Gateway, the gateway's token caches are keyed per upstream caller. Without a per-session discriminator every Bobbit session would share one cache bucket, so cache hits collapse and the gen-AI team's routing loses its signal. To partition cleanly, every aigw request carries an `x-opencode-session: <bobbit-session-id>` header — or, when no session id is available, **no header at all**. A constant fallback would defeat the whole point: it would re-collapse buckets onto a single key.
+
+### Where it's emitted
+
+`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `~/.bobbit/agent/models.json`. The `aigw` provider entry now carries a provider-level `headers` block:
+
+- Key: `x-opencode-session`.
+- Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
+
+Provider-level (not per-model) is deliberate — it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
+
+### Startup refresh of `models.json`
+
+On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `~/.bobbit/agent/models.json` doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` — which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
+
+If the gateway is unreachable at startup (network error / HTTP failure / timeout), the function logs `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json` and leaves the file untouched — staleness is preferred to wiping a working file with a stub. The `BOBBIT_SKIP_AIGW_DISCOVERY=1` test/CI escape hatch skips only the network call: when aigw is already configured, the Bedrock env vars are still applied and the existing `models.json` is kept as-is. The not-configured branch (auto-probing for a local gateway) is unchanged.
+
+### Resolver semantics (pi-coding-agent contract surface)
+
+The pi-coding-agent CLI evaluates header values via `resolveConfigValue` (in `dist/core/resolve-config-value.js`):
+
+- A plain string `"X"` falls back to `process.env["X"] || "X"` — i.e. it can leak the literal key name. **Unsafe for our requirement.**
+- A `"!cmd"` string runs `cmd` via `child_process.exec` (shell-interpreted) and returns the trimmed stdout, or `undefined` when stdout is empty.
+- `resolveHeaders` (in `dist/core/model-registry.js`) drops any header whose resolved value is falsy.
+
+So the `!node -e ...` form gives us exactly "send the header iff `BOBBIT_SESSION_ID` is set to a non-empty value, otherwise omit it." That is the only behaviour we want.
+
+### Per-session env injection
+
+Every agent-CLI spawn path (`session-setup.ts`, `session-manager.ts`, the rpc-bridge child spawn) injects `BOBBIT_SESSION_ID=<sessionId>` into the subprocess env. Each Bobbit session owns its own subprocess with its own env, so values are correctly partitioned at the OS level and never leak across sessions.
+
+### Performance: one shell exec per session, not per request
+
+`resolveConfigValue` caches `!cmd` results in a module-level `commandResultCache` `Map` keyed by the command string. The first LLM request in a session pays a one-time ~50 ms `node -e` startup; every subsequent request in that same subprocess reuses the cached value. Because each Bobbit session spawns its own agent subprocess, the cache is naturally per-session — no cross-contamination, no repeated process spawns within a session.
+
+### Cross-shell quoting
+
+`child_process.exec` runs the command through `cmd.exe` on Windows and `/bin/sh` on POSIX. The chosen quoting — outer `"` for the JS argument, inner `'` for the empty-string default — is interpreted identically by both shells (cmd.exe and sh both treat `''` as an empty string literal in this position). The JSON-encoded value in `models.json` is `"!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""`.
+
+### Out of scope
+
+- The `/api/aigw/v1/*` passthrough proxy used for UI model-list/test calls — it never carries a session id and isn't on the request path that needs cache routing.
+- The title generator and other one-shot gateway calls — single-call, no cache benefit.
+- Bedrock/Claude routing — driver ignores `model.headers`, and on-prem models don't route to Bedrock anyway.
+- Custom local providers configured outside the aigw block — the `headers` block is scoped to the `aigw` provider entry only.
+
+---
+
 ## Semantic search
 
 Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
@@ -965,12 +1157,14 @@ Per-session toggle overrides the project default.
 
 Bobbit scans multiple directories for skills, MCP servers, tools, and agent files. Manage via Settings → Config Directories tab or `config_directories` in `project.yaml`.
 
-Storage format:
+Storage format (native YAML):
 ```yaml
-config_directories: '[{"path":"~/my-config","types":["skills","mcp"]}]'
+config_directories:
+  - path: ~/my-config
+    types: [skills, mcp]
 ```
 
-Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority.
+Types: `"skills"`, `"mcp"`, `"tools"`, `"agents"`. Custom directories are additive. Built-in directories always scanned with higher priority. Legacy JSON-string form (`config_directories: '[…]'`) still parses but is rewritten in native form on next save — see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields).
 
 **Per-project scoping:** Config directories are resolved per-project. Each project's `config_directories` in its `project.yaml` affects only that project's sessions — a session in project B uses project B's custom directories for skill, MCP, and agent file discovery. Projects never inherit each other's config directories. The API endpoints (`/api/config-directories`, `/api/slash-skills`, `/api/slash-skills/details`) accept a `?projectId=` query parameter to resolve directories for a specific project.
 
@@ -1634,6 +1828,58 @@ Seq-less frames (old servers) fall through the dispatch path unchanged — the r
 
 ---
 
+## Verification event dedupe
+
+Gate verification streams a separate event family (`gate_verification_step_output`, `gate_verification_step_end`, `gate_verification_complete`, …) that does **not** flow through `emitSessionEvent` and the per-session seq pipeline above. Verification is goal-scoped, not session-scoped: the harness broadcasts via `broadcastToGoal(goalId, event)` to every WebSocket whose session belongs to the goal team, plus the dashboard `__viewer__` connection. The dedupe story for that family is described here.
+
+### The fan-out problem
+
+In the UI, every open session in a goal team has its own `RemoteAgent` with its own WebSocket. When a verification step writes a stdout line, the server delivers the resulting `gate_verification_step_output` payload to all N session sockets (one copy each), plus +1 for the dashboard's viewer WS when mounted. Pre-fix, each `RemoteAgent` independently re-broadcast the payload as a `document.dispatchEvent(new CustomEvent("gate-verification-event", {detail: msg}))`, so the document-level listeners in `<verification-output-modal>` and `<gate-verification-live>` appended one chunk per dispatch — a single log line ended up rendered N× (or (N+1)× with the dashboard mounted).
+
+The bug is fundamentally about **fan-out at the dispatch layer, not the wire layer**: server-side broadcast volume is fine (clients legitimately need every session WS to stay live), but the listeners need to see each logical event exactly once.
+
+### Server-assigned seq
+
+`src/server/agent/verification-harness.ts` stamps a monotonic `seq: number` on every `gate_verification_*` payload it broadcasts. The protocol type in `src/server/ws/protocol.ts` carries the field additively — older clients ignore it, and a pre-`seq` server still fan-outs (the bus then falls back to a content hash, see below). The seq is unique within the verification stream of a single signal/step, which is all the bus needs to dedupe.
+
+### The dedupe bus
+
+`src/app/verification-event-bus.ts` is a module-scoped singleton that exports `dispatchVerificationEvent(msg)`. All dispatch sources — every `RemoteAgent` instance and the goal dashboard's viewer WS in `src/app/goal-dashboard.ts` — funnel through it instead of calling `document.dispatchEvent` directly. The bus computes a key from `(eventType, signalId, stepIndex, seq)`; if the key was seen recently, the dispatch is dropped, otherwise the bus emits the document-level CustomEvent and remembers the key.
+
+The seen-set is bounded (~5000 keys) with FIFO/LRU eviction so a long-running session can't grow it without limit. The eviction window is wide enough that real fan-out (which happens within milliseconds of the original broadcast) is always within the window, but narrow enough to keep memory bounded across a multi-hour goal.
+
+When `seq` is missing (older server, hand-written test fixtures), the bus falls back to hashing the salient payload fields (`stream`, `text`, `status`, …) so identical fan-out copies still collapse — best-effort, since two semantically distinct events that happen to carry identical content would be coalesced. With the new server stamping `seq` on every event this fallback is only a compatibility shim.
+
+### Bootstrap-vs-live overlap in the modal
+
+`<verification-output-modal>` can be opened mid-stream after some output has already accumulated server-side. The modal seeds its rendered chunks from `initialOutput` (the bootstrap) and then continues consuming live events. Pre-fix, a live event whose payload was already in the bootstrap would be appended again, producing a visible "prefix shown twice" effect on reopen.
+
+The fix tracks a high-water `seq` derived from the bootstrap and silently discards live events with `seq` ≤ that mark. The modal also short-circuits `_fetchBootstrapOutput` when `initialOutput` is already populated, eliminating a parallel snapshot race.
+
+### AbortController listener hygiene
+
+Lit re-renders the modal and live components on property changes; without disciplined teardown, `document.addEventListener` calls would accumulate across re-renders and listeners from prior mount cycles would keep firing on stale closures. `VerificationOutputModal` and `GateVerificationLive` now allocate a fresh `AbortController` on connect, pass `{ signal }` to every `addEventListener`, and call `controller.abort()` from `disconnectedCallback`. This guarantees listener count == 1 per live component instance, regardless of how many times Lit re-renders.
+
+### Tests
+
+- `tests/verification-dedup.spec.ts` (+ `tests/fixtures/verification-dedup-*`) — Playwright file:// fixture that dispatches the same `gate-verification-event` 6× and asserts a single rendered occurrence in both `<verification-output-modal>` and `<gate-verification-live>`. This pins the multi-layer guarantee end-to-end on the listener side.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/app/verification-event-bus.ts` | Module-scoped dedupe funnel; `dispatchVerificationEvent(msg)` + bounded LRU seen-set |
+| `src/app/remote-agent.ts` | Routes `gate_verification_*` WS frames through the bus instead of `document.dispatchEvent` |
+| `src/app/goal-dashboard.ts` | Same routing for the dashboard `__viewer__` WS |
+| `src/server/agent/verification-harness.ts` | Stamps monotonic `seq` on every `gate_verification_*` event |
+| `src/server/ws/protocol.ts` | Additive `seq` field on the verification event union |
+| `src/ui/components/VerificationOutputModal.ts` | `AbortController` listeners + bootstrap high-water seq |
+| `src/ui/tools/renderers/GateVerificationLive.ts` | `AbortController` listeners on the live renderer |
+
+For the parallel pattern on the agent stream (different event family, same shape of fix), see [Event stream ordering & dedup](#event-stream-ordering--dedup) above and [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md).
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved — the agent is stuck mid tool-call and the steer feels ignored.
@@ -1693,19 +1939,58 @@ Two surfaces in the chat client previously relied on time-based heuristics that 
 
 1. **Auto-scroll only on positive delta.** The `ResizeObserver` callback computes `delta = newScrollHeight - _lastScrollHeight`. `delta < 0` (shrink) updates the cached height and returns. `delta === 0` is a no-op — the original snap-back bug came from clamping `scrollTop = scrollHeight` on every zero-delta RO fire, which converted a benign sub-pixel reflow into a vibration loop. Only `delta > 0` (real growth) triggers a programmatic scroll, and only when `_stickToBottom` is already true.
 2. **Programmatic scrolls are filtered, not timed.** Before each programmatic `scrollTop` write the code latches `(_lastProgrammaticScrollTop, _lastProgrammaticScrollHeight)`. The matching browser-emitted scroll event is consumed exactly once and the latch is cleared, so a later coincidental geometry match still counts as user intent. This replaces the previous `_isAutoScrolling` timer that would silently drop user scroll-ups whenever the RO happened to fire faster than its 150ms re-arm window.
-3. **User intent is observed, not inferred.** Explicit `wheel`, `touchstart`, and `keydown` (PageUp/Down, Arrow Up/Down, Home, End) listeners on the scroll container set `_stickToBottom = false` immediately. Geometry alone cannot reliably distinguish a user scroll-up from a programmatic one across browsers and pointer types, so the listeners are the source of truth for "the user took control". The 5px stick-to-bottom tail in `_handleScroll` is just a tolerance for sub-pixel rounding — not an intent heuristic.
+3. **User intent is observed, not inferred.** Explicit `wheel`, `touchstart`, and `keydown` (PageUp/Down, Arrow Up/Down, Home, End) listeners on the scroll container set `_stickToBottom = false` immediately. Geometry alone cannot reliably distinguish a user scroll-up from a programmatic one across browsers and pointer types, so the listeners are the source of truth for "the user took control". The 10px stick-to-bottom tail in `_handleScroll` is just a tolerance for sub-pixel rounding — not an intent heuristic.
 
-When modifying scroll behaviour: do not introduce new timers, do not widen the 5px tail, and do not reach for `_isAutoScrolling`-style flags. If a new code path scrolls programmatically, it must update the latch via the same helper used by the existing auto-scroll path so its echo gets consumed. Behavioural twin test: `tests/agent-interface-scroll.spec.ts` (the `delta === 0` no-op case is the canonical regression).
+**Sub-pixel echo tolerance.** The programmatic-scroll echo latch in `_handleScroll` compares `scrollTop` / `scrollHeight` with `Math.abs(observed - latched) < 1` rather than strict equality. HiDPI displays and fractional `devicePixelRatio` round browser-emitted `scroll` event values by sub-pixel amounts, so a strict-equality echo filter would leak a programmatic write through as user intent and silently flip `_stickToBottom = false`.
 
-### Snapshot merge invariant
+**`_wasAtBottomAtLastUserScroll` carry-over.** `_handleScroll` records the *current* `_stickToBottom` value into `_wasAtBottomAtLastUserScroll` on every non-echo recompute. The `state_update` branch of `setupSessionSubscription` then scroll-to-bottoms when **either** `_stickToBottom` is true **or** `_wasAtBottomAtLastUserScroll` was true at fire time. This closes the race where a transient scroll event between two server frames (e.g. layout-induced sub-pixel scroll-up that exceeds the 10px tail) flips `_stickToBottom = false` for one tick and the next state-update would otherwise leave the user staring at older content. Cleared explicitly on `_handleUserIntent` / `_handleScrollKeydown` so a real user scroll-up still wins.
 
-`RemoteAgent.messages` snapshot handling (`src/app/remote-agent.ts`, the `messages` frame handler around `serverIds`) merges three client-only buckets — `_liveEventMessages` (optimistic / live-streamed), `_pendingPermissionCards`, `_compactionSyntheticMessages` — into the server-persisted snapshot. The merge contract is:
+**Session-load settle window.** `_settleWindowActive` + `_settleWindowDeadline` (`performance.now() + 2000`) are armed on every `setupSessionSubscription` call — not just first mount — alongside the existing `_stickToBottom = true` + `updateComplete.then(_scrollToBottom)`. While the window is active and `_stickToBottom` is true, every `ResizeObserver` tick re-calls `_scrollToBottom()`, absorbing async layout growth from late-resolving markdown / code blocks / images. Exits on **(a)** `scrollHeight` unchanged across two consecutive RO ticks (tracked via `_lastSettleScrollHeight`), **(b)** `performance.now() > _settleWindowDeadline`, or **(c)** any user-intent event (`_handleUserIntent`, `_handleScrollKeydown` clear `_settleWindowActive` immediately). Torn down in `disconnectedCallback` — no leaked timers or flags.
 
-- **The server snapshot is authoritative for any id it contains.** Client buckets are filtered against `serverIds = new Set(snapshot.map(m => m.id))`; entries whose id appears in the snapshot are dropped from the bucket. Compaction synthetics also fall back to text-prefix matching (`"Context compacted"`) for legacy entries that predate stable ids.
-- **Client buckets only fill in messages the snapshot lacks.** They never override, reorder, or augment a server-persisted message. After reconciliation, `_liveEventMessages` is cleared (its purpose is purely the optimistic-render gap before the server confirms); `_compactionSyntheticMessages` and `_pendingPermissionCards` keep only their unmatched survivors.
-- **The merged result is sorted by `(timestamp, insertionOrder)`.** The sort is stable: each entry is index-tagged before sorting and the comparator falls back to the tag on equal timestamps, so server-snapshot order is preserved within a single timestamp. This is the fix for the "stale messages trailing after newer ones" bug — previously the buckets were appended after `_state.messages = snapshot`, so a synthetic compaction marker (or stale permission card) would land after newer post-compaction messages.
+**Jump-to-bottom button.** `_showJumpToBottom` is recomputed in `_handleScroll` as `scrollHeight - scrollTop - clientHeight > clientHeight * 0.5` and rendered by `_renderJumpToBottom()` (icon-only on `_isMobileViewport`, label otherwise; reuses existing button vocabulary, opacity-transition hide). Click handler runs `_scrollToBottom()` and sets `_stickToBottom = true` + `_wasAtBottomAtLastUserScroll = true` — no new parallel flag. `_stickToBottom` remains the single source of truth for "viewport is pinned".
 
-When modifying snapshot handling: never push a client-bucket entry without checking `serverIds`; never replace the post-merge sort with an append; if a new client bucket is introduced, route it through the same `serverIds`-filter + timestamp-sort path. Pinned by `tests/remote-agent-snapshot-merge.test.ts`.
+When modifying scroll behaviour: do not introduce new timers, do not widen the 10px tail, do not introduce a parallel flag (the button reuses `_stickToBottom`), and do not reach for `_isAutoScrolling`-style flags. If a new code path scrolls programmatically, it must update the latch via the same helper used by the existing auto-scroll path so its echo gets consumed. Behavioural twin tests: `tests/agent-interface-scroll.spec.ts` (the `delta === 0` no-op case is the canonical regression), `tests/agent-interface-scroll-hardening.spec.ts` (sub-pixel echo, 10px tail, carry-over, settle window), and `tests/e2e/ui/jump-to-bottom.spec.ts` (button visibility threshold + click).
+
+### Proposal panel scroll lock invariant
+
+The seven proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow`, `setup` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
+
+The logic lives in **`src/app/follow-tail.ts`** (`reconcileFollowTail(el)`), called from a `queueMicrotask` at the end of each panel's render so it fires after the synchronous DOM commit but before paint. The same three rules apply:
+
+1. **Auto-scroll only on positive delta.** `delta < 0` (shrink) updates the cached height and returns. `delta === 0` is a no-op — the canonical vibration-loop fix from the chat surface. Only `delta > 0` triggers a programmatic `scrollTop` write, and only when `stickToBottom` is true.
+2. **Programmatic-scroll echo filter, not timers.** Before each programmatic write the helper latches `(lastProgScrollTop, lastProgScrollHeight)`. The matching browser-emitted scroll event is consumed exactly once and the latch is cleared, so a later coincidental geometry match is treated as user intent.
+3. **User intent is observed.** `wheel`, `touchstart`, and `keydown` (PageUp/Down, Home, End, Arrow Up/Down) listeners on the scroll container set `stickToBottom = false` immediately. The 5px tail is sub-pixel rounding tolerance only, not an intent heuristic.
+
+Lock state is stored in a module-private `WeakMap<HTMLElement, LockState>` keyed by the scroll element. This matters for two reasons. First, when Lit re-renders and re-attaches the same element across deltas the WeakMap entry is reused, so the user's `stickToBottom = false` choice persists across re-renders without any explicit re-binding. Second, when the panel unmounts the element is GC-eligible and the WeakMap entry goes with it — a fresh remount of the same panel starts with a clean `{stickToBottom: true, lastScrollHeight: 0}` state. This is the **fresh-state-on-remount invariant**: panel close/reopen always behaves like a first render, never inherits stale lock state from the previous lifecycle.
+
+Textarea selection (`selectionStart` / `selectionEnd`) is captured on `select`, `keyup`, and `click`, then re-applied via `setSelectionRange(...)` after every reconcile branch (positive delta, zero delta, and shrink) — `setSelectionRange` is a state mutation per the WHATWG spec and applies even when the textarea is not the active element, so the caret is in the right place when focus returns. The DOMException some browsers throw on detached/hidden inputs is swallowed.
+
+**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The seven panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
+
+When modifying proposal-panel scroll behaviour: route through `reconcileFollowTail` rather than touching `scrollTop` or `setSelectionRange` directly; do not introduce timer-based intent heuristics; do not widen the 5px tail. See `src/app/follow-tail.ts` and the panel render functions in `src/app/render.ts`. Behavioural twin test: `tests/follow-tail.spec.ts`.
+
+### Proposal streaming flag
+
+`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`, `workflow_proposal`, `setup_proposal`. Read via the `isProposalStreaming(tag)` accessor.
+
+A per-tag map rather than a single boolean because the seven panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
+
+**Why the flag exists.** Without it the Create / Apply / Save buttons are clickable mid-stream and a user can submit before the spec/title has finished streaming, producing a goal/role/tool with truncated content. The flag drives (a) the `disabled` state of each panel's primary submit, (b) the `streamingBadge()` + `STREAMING_BORDER` indicator, and (c) consumers in `session-manager.ts` that may want to suppress destructive side-effects on streaming-mode fires.
+
+**Writer (single owner): `RemoteAgent` in `src/app/remote-agent.ts`.** Set to `true` inside `_checkToolProposals(message, streaming=true)` immediately before the per-tag `callback(input, streaming)` fan-out. Cleared on the matching block-finish branch (`!streaming && blockId` — the `_processedProposalIds.add(blockId)` site, reached on `case "message_end"` and on full re-scans), and bulk-cleared on `case "agent_end"` and `RemoteAgent.reset()` so an aborted/errored turn never leaves the flag stuck on. Readers are the seven panel render functions in `src/app/render.ts`; they call `isProposalStreaming("<tag>_proposal")` once at the top.
+
+**WebSocket reconnect.** The resume path (`{type:"resume", fromSeq}`) replays missed events through the same handler, so a replayed `message_update` re-sets the flag and a replayed `message_end` clears it — no extra logic. The resume-gap fallback (`get_messages`) re-scans the snapshot with `_checkToolProposals(m, false)`, which hits the block-finish branch for any propose_* block in the snapshot and clears any stale flag. The `agent_end` / `reset()` bulk-clears are the final safety net on hard disconnect or session change. Cross-session isolation: `state.proposalStreamingByTag` is a singleton on the global `state` object cleared on `reset()`, which fires on session switch.
+
+### Reducer ordering invariant
+
+Transcript ordering is a single-source-of-truth concern owned by the pure reducer in `src/app/message-reducer.ts`. `RemoteAgent.handleServerMessage` / `handleAgentEvent` are thin dispatchers that translate WebSocket frames into actions and apply them via `reduce(state, action)`; the reducer's `messages` array is the canonical render input — there are no client-only buckets and no render-time sort. The invariant is:
+
+- **Every message carries an `_order: number` and `_insertionTick: number`, and the reducer sorts by `(_order ASC, _insertionTick ASC)` exactly once per `apply()`.** Server live events use the monotonic per-session `seq` (positive integer). Snapshot rows use `_order = SNAPSHOT_ORDER_FLOOR + i` (≡ `-1_000_000_000 + i`) so every snapshot order is strictly less than every live `seq`, no coordination required. `tool_permission_needed` frames are stamped via `EventBuffer.pushFrame()` and treated like a live event. Synthetics (compaction marker, system notifications, error rows) sit at `highestSeq + 0.5`. Optimistic prompts/steers sit at `Number.MAX_SAFE_INTEGER - 1e9 + tick` so they always tail-position until the server echo replaces them by id (or by text fallback when the optimistic id is `^optimistic_`).
+- **The server snapshot is authoritative for any id it contains.** On a `snapshot` action the reducer drops every prior row whose id appears in the snapshot, then merges in the surviving client-only rows (optimistic / synthetic / permission). Permission cards survive iff their id is not in the snapshot **and** no snapshot row has a greater `_order` — the old `_pendingPermissionCards` `maxServerTs` cutoff is gone. The synthetic compaction marker also falls back to a text-prefix check (`"Context compacted"`) so a legacy snapshot row without a stable id still wins.
+- **Render trusts the reducer verbatim.** `MessageList.buildRenderItems` keys every row by id (synthetic fallback `synth:${origin}:${order}:${tick}` for rows without server ids) — no `msg:${i}` index keys, no render-time sort. The streaming-message preview is hidden at render time when `state.streamingMessage?.id === m.id`; the old `_deferredAssistantMessage` mutable slot is gone.
+- **Thirteen actions cover every transcript mutation.** `live-event`, `snapshot`, `optimistic-prompt`, `optimistic-steer`, `permission-needed`, `permission-resolved`, `compaction-placeholder`, `compaction-result`, `system-notification`, `error`, `deny-permission-filter`, `replace-messages`, `reset`. If a new transcript-touching code path can't be expressed as one of these, add a new action — do not bypass the reducer with a direct push. The pre-reducer mechanisms `_deferredAssistantMessage`, `_liveEventMessages`, `_pendingPermissionCards`, `_compactionSyntheticMessages`, `flushDeferredMessage`, optimistic-text dedupe, the snapshot-merge stable-sort by `(timestamp, insertionOrder)`, and `MessageList.buildRenderItems` index keys have all been deleted; if you find yourself wanting to reintroduce one, the design is wrong.
+
+When extending transcript handling: every new transcript mutation goes through a new action in the reducer — do **not** push directly into `state.messages` from `RemoteAgent`. Compute `_order` from `seq` (live), `SNAPSHOT_ORDER_FLOOR + i` (snapshot), `highestSeq + 0.5` (synthetic), or the optimistic sentinel (user-typed). Reconciliation always goes id-first; text fallback is reserved for the optimistic-prompt and compaction-marker paths and nowhere else. Pinned by `tests/message-reducer.test.ts` (12 scenarios incl. proposal burst and `ask_user_choices` envelope routing) and the ST-DEDUP-02 / ST-DEDUP-03 / ST-DEDUP-04 stories in `tests/e2e/ui/stories-streaming.spec.ts`. Full design: [`docs/design/unified-message-ordering-reducer.md`](design/unified-message-ordering-reducer.md).
 
 ---
 
@@ -1802,7 +2087,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `system-prompt.md` | `cli.ts` | Global system prompt template |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
-| `workflows/*.yaml` | `WorkflowStore` | Built-in workflow templates |
+| `workflows/*.yaml` | (legacy) | Historical default workflow seeds. No longer copied into new projects — the server seeds nothing; the project assistant designs workflows. Not read by `BuiltinConfigProvider` at runtime. See [No default workflow scaffold](#no-default-workflow-scaffold). |
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 
@@ -1814,7 +2099,6 @@ Copied to `dist/server/defaults/` at build time by `scripts/copy-defaults.mjs`. 
 |---|---|---|
 | `project.yaml` | `ProjectConfigStore` | Project settings |
 | `roles/*.yaml` | `RoleStore` | Server/project role overrides |
-| `workflows/*.yaml` | `WorkflowStore` | Server/project workflow overrides |
 | `tools/<group>/*.yaml` | `ToolManager` | Server/project tool overrides |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Server/project policy overrides |
 | `mcp.json` | `McpManager` | MCP server overrides |

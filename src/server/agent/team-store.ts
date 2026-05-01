@@ -7,6 +7,12 @@ export interface PersistedTeamEntry {
 	agents: Array<{
 		sessionId: string;
 		role: string;
+		/**
+		 * Distinguishes verification reviewer sessions (managed by VerificationHarness)
+		 * from regular worker agents. Defaults to "worker" when missing on load
+		 * (back-compat with pre-fix persisted entries).
+		 */
+		kind?: "worker" | "reviewer";
 		worktreePath?: string;
 		branch?: string;
 		baseSha?: string;

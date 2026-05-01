@@ -4,6 +4,8 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
+import { ref, createRef } from "lit/directives/ref.js";
+import { reconcileFollowTail } from "./follow-tail.js";
 import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
@@ -16,6 +18,7 @@ import {
 
 	resetArchivedExpandState,
 	getSidebarData,
+	isProposalStreaming,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
@@ -34,6 +37,7 @@ import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
+import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -113,7 +117,9 @@ function renderMobileLanding() {
 					${(() => {
 						const isRolesActive = isRouteActive("roles", "role-edit");
 						const isToolsActive = isRouteActive("tools", "tool-edit");
-						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
+						const route = getRouteFromHash();
+						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit")
+							|| (route.view === "settings" && (route as any).settingsTab === "workflows");
 						const isSkillsActive = isRouteActive("skills");
 						return html`
 					<div class="flex items-center gap-1">
@@ -131,7 +137,12 @@ function renderMobileLanding() {
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
 							title="Manage workflows"
-							@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); })}>
+							@click=${() => {
+								const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
+								if (!projectId) { showProjectDialog(); return; }
+								import("./workflow-page.js").then((m) => m.loadWorkflowPageData());
+								setHashRoute("settings", `${projectId}/workflows`, true);
+							}}>
 							${icon(WorkflowIcon, "xs")} Workflows
 						</button>
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
@@ -351,10 +362,11 @@ function renderMobileLanding() {
 // GOAL PREVIEW PANEL (goal assistant split-screen)
 // ============================================================================
 
-/** Cached workflows for goal creation dropdown. */
+/** Cached workflows for goal creation dropdown — keyed per-project (workflows are project-scoped). */
 import { fetchWorkflows, type Workflow } from "./api.js";
+const _workflowCacheByProject = new Map<string, Workflow[]>();
+const _workflowsLoadingByProject = new Set<string>();
 let _cachedWorkflows: Workflow[] = [];
-let _workflowsLoaded = false;
 let _selectedWorkflowId = "general";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
@@ -366,10 +378,26 @@ export function setSelectedWorkflowId(id: string): void {
 	_selectedWorkflowId = id;
 }
 
-function ensureWorkflowsLoaded(): void {
-	if (_workflowsLoaded) return;
-	_workflowsLoaded = true;
-	fetchWorkflows().then((wfs) => { _cachedWorkflows = wfs; renderApp(); });
+function ensureWorkflowsLoaded(projectId?: string): void {
+	// Workflows are project-scoped (no system layer). Without a project we can't
+	// resolve any — leave the cache empty so the goal form falls back gracefully.
+	if (!projectId) {
+		_cachedWorkflows = [];
+		return;
+	}
+	const cached = _workflowCacheByProject.get(projectId);
+	if (cached) {
+		_cachedWorkflows = cached;
+		return;
+	}
+	if (_workflowsLoadingByProject.has(projectId)) return;
+	_workflowsLoadingByProject.add(projectId);
+	fetchWorkflows(projectId).then((wfs) => {
+		_workflowCacheByProject.set(projectId, wfs);
+		_workflowsLoadingByProject.delete(projectId);
+		_cachedWorkflows = wfs;
+		renderApp();
+	});
 }
 
 let _sandboxStatusFetching = false;
@@ -411,7 +439,7 @@ function ensureQaConfigLoaded(projectId: string): void {
 	gatewayFetch(`/api/projects/${projectId}/qa-testing-config`)
 		.then(r => r.json())
 		.then(data => {
-			_qaConfigCache.set(projectId, !!data.config);
+			_qaConfigCache.set(projectId, !!data.configured);
 			_qaConfigFetching = false;
 			renderApp();
 		})
@@ -426,6 +454,43 @@ function ensureSandboxStatusLoaded(): void {
 	_sandboxStatusFetching = true;
 	fetchSandboxStatus().then(s => { _sandboxStatusFetching = false; if (s) { state.sandboxStatus = s; renderApp(); } });
 }
+
+// ============================================================================
+// PROPOSAL STREAMING UX (shared helpers)
+// ============================================================================
+
+/** Pulsing dot + "Streaming…" label rendered to the left of submit buttons. */
+function streamingBadge() {
+	return html`
+		<span class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
+			  data-testid="proposal-streaming-badge"
+			  aria-live="polite">
+			<span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+			Streaming…
+		</span>
+	`;
+}
+
+/** Tailwind class fragment applied to scrollable preview/textarea regions
+ *  while streaming. Pulsing left border. */
+const STREAMING_BORDER = "border-l-2 border-l-primary/70 animate-pulse";
+
+// Module-scoped refs (one per scroll-target). Refs are singletons because at
+// most one of each panel is mounted at a time (the assistant preview pane is
+// not virtualised).
+const goalSpecPreviewRef = createRef<HTMLDivElement>();
+const goalSpecTextareaRef = createRef<HTMLTextAreaElement>();
+const rolePromptPreviewRef = createRef<HTMLDivElement>();
+const rolePromptTextareaRef = createRef<HTMLTextAreaElement>();
+const toolDocsPreviewRef = createRef<HTMLDivElement>();
+const toolRendererPreviewRef = createRef<HTMLDivElement>();
+const toolOuterScrollRef = createRef<HTMLDivElement>();
+const staffPromptPreviewRef = createRef<HTMLDivElement>();
+const staffPromptTextareaRef = createRef<HTMLTextAreaElement>();
+const setupSystemPromptRef = createRef<HTMLTextAreaElement>();
+const setupOuterScrollRef = createRef<HTMLDivElement>();
+const workflowEditWrapperRef = createRef<HTMLDivElement>();
+const projectOuterScrollRef = createRef<HTMLDivElement>();
 
 // ============================================================================
 // SHARED GOAL FORM
@@ -467,6 +532,7 @@ interface GoalFormConfig {
 	// UI state
 	saving?: boolean;
 	createDisabled?: boolean;
+	streaming?: boolean;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -493,6 +559,11 @@ function renderGoalForm(config: GoalFormConfig) {
 	const sandboxConfigured = !!state.sandboxStatus?.configured;
 	const sandboxAvailable = !!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists);
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
+
+	queueMicrotask(() => {
+		reconcileFollowTail(goalSpecPreviewRef.value);
+		reconcileFollowTail(goalSpecTextareaRef.value);
+	});
 
 	return html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
@@ -595,7 +666,7 @@ function renderGoalForm(config: GoalFormConfig) {
 						<span class="text-xs text-muted-foreground font-medium">${os.label}</span>
 						${os.description ? html`
 							<span title=${qaDisabled
-								? 'Configure qa_start_command in project settings to enable QA testing'
+								? 'Set qa_start_command on a component\'s config map to enable QA testing'
 								: os.description}
 								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 						` : ''}
@@ -615,11 +686,12 @@ function renderGoalForm(config: GoalFormConfig) {
 				</div>
 				${config.specEditMode
 					? html`<textarea
-							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+							${ref(goalSpecTextareaRef)}
+							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${config.streaming ? STREAMING_BORDER : ""}"
 							.value=${config.spec}
 							@input=${config.onSpecChange}
 						></textarea>`
-					: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
+					: html`<div ${ref(goalSpecPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${config.streaming ? STREAMING_BORDER : ""}">
 							<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>
 						</div>`
 				}
@@ -627,20 +699,21 @@ function renderGoalForm(config: GoalFormConfig) {
 		</div>
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
+				${config.streaming ? streamingBadge() : ""}
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
-				${Button({
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: config.createDisabled ?? !config.title.trim(),
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
 }
 
 function goalPreviewPanel() {
-	ensureWorkflowsLoaded();
+	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
 	const handleCreateGoal = async () => {
@@ -771,6 +844,7 @@ function goalPreviewPanel() {
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
 				onCwdHighlight: (i) => { state.cwdHighlightIndex = i; },
 				onCreate: handleCreateGoal,
+				streaming: isProposalStreaming("goal_proposal"),
 			})}
 		</div>
 	`;
@@ -795,6 +869,11 @@ function ensureToolsLoaded(): void {
 
 function rolePreviewPanel() {
 	ensureToolsLoaded();
+	const streaming = isProposalStreaming("role_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(rolePromptPreviewRef.value);
+		reconcileFollowTail(rolePromptTextareaRef.value);
+	});
 
 	const handleCreateRole = async () => {
 		const trimmedName = state.rolePreviewName.trim();
@@ -956,7 +1035,8 @@ function rolePreviewPanel() {
 					</div>
 					${state.rolePreviewPromptEditMode
 						? html`<textarea
-								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+								${ref(rolePromptTextareaRef)}
+								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
 								.value=${state.rolePreviewPrompt}
 								@input=${(e: Event) => {
 									state.rolePreviewPrompt = (e.target as HTMLTextAreaElement).value;
@@ -965,19 +1045,20 @@ function rolePreviewPanel() {
 									if (sid) saveRoleDraft(sid);
 								}}
 							></textarea>`
-						: html`<div class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm">
+						: html`<div ${ref(rolePromptPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}">
 								<markdown-block .content=${state.rolePreviewPrompt || "_No prompt content yet_"}></markdown-block>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({
+				${streaming ? streamingBadge() : ""}
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateRole,
-					disabled: !state.rolePreviewName.trim() || !state.rolePreviewLabel.trim(),
+					disabled: !state.rolePreviewName.trim() || !state.rolePreviewLabel.trim() || streaming,
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(Users, "sm")} Create Role</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -988,6 +1069,12 @@ function rolePreviewPanel() {
 // ============================================================================
 
 function toolPreviewPanel() {
+	const streaming = isProposalStreaming("tool_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(toolDocsPreviewRef.value);
+		reconcileFollowTail(toolRendererPreviewRef.value);
+		reconcileFollowTail(toolOuterScrollRef.value);
+	});
 	const handleDone = () => {
 		backToSessions();
 	};
@@ -1019,7 +1106,7 @@ function toolPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Tool name header -->
 				<div>
 					<div class="text-xs text-muted-foreground mb-1">Tool</div>
@@ -1054,7 +1141,7 @@ function toolPreviewPanel() {
 				${state.toolPreviewDocs ? html`
 					<div>
 						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Documentation Preview</div>
-						<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[200px]">
+						<div ${ref(toolDocsPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[200px] ${streaming ? STREAMING_BORDER : ""}">
 							<markdown-block .content=${state.toolPreviewDocs}></markdown-block>
 						</div>
 					</div>
@@ -1064,7 +1151,7 @@ function toolPreviewPanel() {
 				${state.toolPreviewRendererHtml ? html`
 					<div>
 						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Renderer Preview</div>
-						<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px]">
+						<div ${ref(toolRendererPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px] ${streaming ? STREAMING_BORDER : ""}">
 							<markdown-block .content=${state.toolPreviewRendererHtml}></markdown-block>
 						</div>
 					</div>
@@ -1073,12 +1160,14 @@ function toolPreviewPanel() {
 
 			<!-- Footer -->
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${streaming ? streamingBadge() : ""}
 				${Button({ variant: "ghost", onClick: handleDone, children: "Close" })}
-				${state.toolPreviewName ? Button({
+				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleViewTool,
+					disabled: streaming,
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} View Tool</span>`,
-				}) : ""}
+				})}</span>` : ""}
 			</div>
 		</div>
 	`;
@@ -1286,6 +1375,11 @@ function describeCron(cron: string): string {
 
 function staffPreviewPanel() {
 	ensureSandboxStatusLoaded();
+	const streaming = isProposalStreaming("staff_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(staffPromptPreviewRef.value);
+		reconcileFollowTail(staffPromptTextareaRef.value);
+	});
 	const handleCreateStaff = async () => {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
@@ -1414,7 +1508,8 @@ function staffPreviewPanel() {
 					</div>
 					${state.staffPreviewPromptEditMode
 						? html`<textarea
-								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+								${ref(staffPromptTextareaRef)}
+								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
 								style="min-height:150px; max-height:400px; width:100%"
 								.value=${state.staffPreviewPrompt}
 								@input=${(e: Event) => {
@@ -1422,19 +1517,20 @@ function staffPreviewPanel() {
 									state.staffPreviewPromptEdited = true;
 								}}
 							></textarea>`
-						: html`<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm" style="min-height:150px; max-height:400px">
+						: html`<div ${ref(staffPromptPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}" style="min-height:150px; max-height:400px">
 								<markdown-block .content=${state.staffPreviewPrompt || "_No prompt content yet_"}></markdown-block>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${Button({
+				${streaming ? streamingBadge() : ""}
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
-					disabled: !state.staffPreviewName.trim(),
+					disabled: !state.staffPreviewName.trim() || streaming,
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(UserCheck, "sm")} Create Staff</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -1497,6 +1593,11 @@ async function saveSetupForm(): Promise<void> {
 }
 
 function setupPreviewPanel() {
+	const streaming = isProposalStreaming("setup_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(setupSystemPromptRef.value);
+		reconcileFollowTail(setupOuterScrollRef.value);
+	});
 	const handleDone = () => { backToSessions(); };
 
 	const stack = state.setupFormStack;
@@ -1547,7 +1648,7 @@ function setupPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+			<div ${ref(setupOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Header -->
 				<div>
 					<div class="text-lg font-semibold flex items-center gap-2">
@@ -1595,8 +1696,9 @@ function setupPreviewPanel() {
 				<div class="flex flex-col gap-2">
 					${sectionLabel("System Prompt \u2014 Project Context")}
 					<textarea
+						${ref(setupSystemPromptRef)}
 						class="w-full min-h-[120px] px-3 py-2 rounded-md border border-input bg-background text-sm
-							font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+							font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y ${streaming ? STREAMING_BORDER : ""}"
 						placeholder="The assistant will draft project-specific directives here..."
 						.value=${state.setupFormSystemPrompt}
 						@input=${(e: Event) => {
@@ -1615,13 +1717,14 @@ function setupPreviewPanel() {
 					${state.setupFormSaved ? html`<span class="text-green-600 dark:text-green-400">&#10003; Saved to config files</span>` : ""}
 				</div>
 				<div class="flex items-center gap-2">
+					${streaming ? streamingBadge() : ""}
 					${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
-					${Button({
+					<span data-testid="proposal-primary-submit">${Button({
 						variant: "default",
 						onClick: saveSetupForm,
-						disabled: !canSave || state.setupFormSaving,
+						disabled: !canSave || state.setupFormSaving || streaming,
 						children: state.setupFormSaving ? "Saving\u2026" : "Save Setup",
-					})}
+					})}</span>
 				</div>
 			</div>
 		</div>
@@ -1637,6 +1740,10 @@ function ensureWorkflowPageLoaded() {
 
 function workflowPreviewPanel() {
 	ensureWorkflowPageLoaded();
+	const streaming = isProposalStreaming("workflow_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(workflowEditWrapperRef.value);
+	});
 
 	const handleCreateWorkflow = async () => {
 		if (_workflowPageModule) {
@@ -1673,50 +1780,95 @@ function workflowPreviewPanel() {
 
 	return html`
 		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div class="flex-1 overflow-y-auto p-4">
+			<div ${ref(workflowEditWrapperRef)} class="flex-1 overflow-y-auto p-4 ${streaming ? STREAMING_BORDER : ""}">
 				${renderWorkflowEditPanel()}
 			</div>
 			<div class="flex items-center justify-between p-3 border-t border-border">
 				<div></div>
 				<div class="flex items-center gap-2">
-					${Button({
+					${streaming ? streamingBadge() : ""}
+					<span data-testid="proposal-primary-submit">${Button({
 						variant: "default",
 						size: "sm",
 						onClick: handleCreateWorkflow,
-						disabled: !canSaveWorkflow(),
+						disabled: !canSaveWorkflow() || streaming,
 						children: isWorkflowSaving() ? "Creating\u2026" : "Create Workflow",
-					})}
+					})}</span>
 				</div>
 			</div>
 		</div>
 	`;
 }
 
-/** Editable field set rendered by projectProposalPanel's diff view.
- *  Legacy *_command keys remain in the list because back-compat proposal payloads
- *  still emit them; the server folds them into the default component on accept.
- *  The Components tab is the canonical editor for ongoing edits. */
+/** Editable scalars shown in the proposal panel's Settings tab.
+ *  Components are the canonical home for build/test/typecheck/setup commands —
+ *  those legacy keys are still accepted on the wire (back-compat) but hidden
+ *  from this panel to avoid duplication. They render via the Components tab. */
+const PROJECT_LEGACY_COMMAND_KEYS = new Set([
+	"build_command",
+	"test_command",
+	"typecheck_command",
+	"test_unit_command",
+	"test_e2e_command",
+	"worktree_setup_command",
+]);
+/** Native-YAML structured fields. Stored as objects/arrays/numbers, not
+ *  strings — the panel has no inline editor for them, so we hide them rather
+ *  than render `[object Object]`. They round-trip via the wire format on
+ *  accept (PUT /api/projects/:id/config) without panel involvement. */
+const PROJECT_STRUCTURED_FIELD_KEYS = new Set([
+	"config_directories",
+	"sandbox_tokens",
+	"components",
+	"workflows",
+]);
+/** Legacy top-level QA keys — moved to components[].config[] in the
+ *  component-config-map migration. Hidden from this panel; the migration
+ *  rejects them on the wire (see PUT /api/projects/:id/config). */
+const PROJECT_LEGACY_QA_KEYS = new Set([
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+]);
+/** Fields managed exclusively in Settings → Project (not editable in the
+ *  proposal panel). Hidden from the panel even if the agent or current config
+ *  carries them. */
+const PROJECT_PANEL_HIDDEN_KEYS = new Set([
+	"sandbox",
+	"sandbox_image",
+	"sandbox_mounts",
+	"sandbox_credentials",
+	"sandbox_github_token",
+	"sandbox_host_token_overrides",
+]);
 const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
 	{ key: "name", label: "Project Name" },
-	{ key: "build_command", label: "Build Command (legacy)" },
-	{ key: "test_command", label: "Test Command (legacy)" },
-	{ key: "typecheck_command", label: "Type Check Command (legacy)" },
-	{ key: "test_unit_command", label: "Unit Test Command (legacy)" },
-	{ key: "test_e2e_command", label: "E2E Test Command (legacy)" },
-	{ key: "worktree_setup_command", label: "Worktree Setup Command (legacy)" },
-	{ key: "qa_start_command", label: "QA Start Command" },
-	{ key: "sandbox", label: "Sandbox" },
-	{ key: "session_model", label: "Session Model" },
-	{ key: "review_model", label: "Review Model" },
-	{ key: "naming_model", label: "Naming Model" },
+	{ key: "worktree_root", label: "Worktree Root" },
+	{ key: "worktree_pool_size", label: "Worktree Pool Size" },
 ];
+
+// Module-level state for the project proposal panel's tab UI.
+let _projectProposalView: ProjectViewMode = "components";
+
+/** Reset module-level proposal panel state. Called on session disconnect. */
+export function resetProjectProposalPanel(): void {
+	_projectProposalView = "components";
+}
 
 function projectProposalPanel() {
 	const proposal = state.activeProjectProposal;
+	const streaming = isProposalStreaming("project_proposal");
+	queueMicrotask(() => {
+		reconcileFollowTail(projectOuterScrollRef.value);
+	});
 
 	if (!proposal) {
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal">
+			<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
 					Waiting for project analysis…
 				</div>
@@ -1724,13 +1876,18 @@ function projectProposalPanel() {
 		`;
 	}
 
-	// `fields` may now contain structured `components` / `workflows` blocks
-	// (Phase 4b). The diff partitioning logic below expects flat strings, so
-	// we coerce any non-string value into a JSON string for display purposes
-	// only — the original structured value is preserved on `proposal.fields`.
+	// `fields` carries structured `components` / `workflows` blocks alongside
+	// flat string fields. The legacy collapsed-fields loop below operates on
+	// strings only — `components` / `workflows` are partitioned OUT and handed
+	// to dedicated views. Other non-string values are JSON-stringified for the
+	// flat Input rows; the original structured value is preserved on
+	// `proposal.fields`.
 	const rawFields = proposal.fields as Record<string, unknown>;
+	const structuredComponents = (rawFields.components as ProposalComponent[] | undefined) ?? [];
+	const structuredWorkflows = (rawFields.workflows as Record<string, ProposalWorkflow> | undefined) ?? {};
 	const fields: Record<string, string> = {};
 	for (const [k, v] of Object.entries(rawFields)) {
+		if (k === "components" || k === "workflows") continue;
 		if (typeof v === "string") fields[k] = v;
 		else if (v == null) fields[k] = "";
 		else {
@@ -1738,28 +1895,18 @@ function projectProposalPanel() {
 		}
 	}
 	const mode = proposal.mode ?? "provisional";
-	const current = proposal.currentConfig;
 	const isRegistered = mode === "registered";
-	const loading = isRegistered && !current;
 
-	/** Get the current value for a given key (for diff comparison). */
-	const currentValueFor = (key: string): string => {
-		if (!current) return "";
-		if (key === "name") return current.name ?? "";
-		return current.config?.[key] ?? "";
-	};
-
-	/** Build union of keys to render: known editable + proposal fields + current config keys. */
+	/** Build union of keys to render: known editable + proposal fields. */
 	const knownKeys = new Set(PROJECT_EDITABLE_FIELDS.map(f => f.key));
 	const extraKeys: string[] = [];
 	for (const k of Object.keys(fields)) {
 		if (k === "root_path") continue;
+		if (PROJECT_LEGACY_COMMAND_KEYS.has(k)) continue;
+		if (PROJECT_STRUCTURED_FIELD_KEYS.has(k)) continue;
+		if (PROJECT_LEGACY_QA_KEYS.has(k)) continue;
+		if (PROJECT_PANEL_HIDDEN_KEYS.has(k)) continue;
 		if (!knownKeys.has(k)) extraKeys.push(k);
-	}
-	if (current) {
-		for (const k of Object.keys(current.config || {})) {
-			if (!knownKeys.has(k) && !extraKeys.includes(k)) extraKeys.push(k);
-		}
 	}
 
 	const handleAccept = async () => {
@@ -1776,105 +1923,107 @@ function projectProposalPanel() {
 
 	const onFieldInput = (key: string, value: string) => {
 		if (!state.activeProjectProposal) return;
+		// Bug B guard: `components` and `workflows` are structured side-tables
+		// owned by dedicated views — never let an Input row clobber them with a
+		// string keystroke value.
+		if (key === "components" || key === "workflows") return;
 		(state.activeProjectProposal.fields as Record<string, unknown>)[key] = value;
-		saveProjectDraft(state.activeProjectProposal.sessionId);
+		// Only persist edits for project-assistant sessions; non-assistant
+		// sessions follow the goal-proposal model (transient, not restored).
+		if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
+			saveProjectDraft(state.activeProjectProposal.sessionId);
+		}
 		renderApp();
 	};
 
-	const renderRow = (key: string, label: string, readOnly = false) => {
+	/** Per-field placeholders — concrete examples, not just the key name repeated. */
+	const PLACEHOLDERS: Record<string, string> = {
+		name: "my-project",
+		worktree_root: "C:\\Users\\me\\my-project-wt   (default: <root>-wt)",
+		worktree_pool_size: "2",
+	};
+
+	const renderRow = (key: string, label: string) => {
 		const proposed = fields[key] ?? "";
-		const cur = currentValueFor(key);
-		const changed = isRegistered && current != null && proposed !== cur;
-		if (readOnly) {
-			return html`
-				<div data-field=${key}>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
-					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${proposed}>
-						${proposed || "—"}
-					</div>
-				</div>
-			`;
-		}
+		const placeholder = PLACEHOLDERS[key] ?? "";
+		const inputType = key === "worktree_pool_size" ? "number" : "text";
 		return html`
-			<div data-field=${key} data-changed=${changed ? "true" : "false"}>
-				<div class="flex items-center gap-2 mb-1.5">
-					<label class="text-xs text-muted-foreground block font-medium">${label}</label>
-					${changed ? html`<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-400 font-medium" data-testid="changed-badge">Changed</span>` : ""}
-				</div>
-				${isRegistered && current != null ? html`
-					<div class="text-[11px] text-muted-foreground mb-1 font-mono truncate" title=${cur}>current: ${cur || "(unset)"}</div>
-				` : ""}
+			<div data-field=${key}>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
 				${Input({
-					type: "text",
+					type: inputType,
 					value: proposed,
-					placeholder: key === "name" ? "Project name" : `e.g. ${key}`,
+					placeholder,
 					onInput: (e: Event) => onFieldInput(key, (e.target as HTMLInputElement).value),
 				})}
 			</div>
 		`;
 	};
 
-	// Partition editable fields into changed vs unchanged (registered mode only).
-	const changedKeys: string[] = [];
-	const unchangedKeys: string[] = [];
-	for (const { key } of PROJECT_EDITABLE_FIELDS) {
-		const proposed = fields[key] ?? "";
-		const cur = currentValueFor(key);
-		if (isRegistered && current != null && proposed === cur) unchangedKeys.push(key);
-		else changedKeys.push(key);
-	}
-	for (const key of extraKeys) {
-		const proposed = fields[key] ?? "";
-		const cur = currentValueFor(key);
-		if (isRegistered && current != null && proposed === cur) unchangedKeys.push(key);
-		else changedKeys.push(key);
-	}
-
+	const curatedKeys: string[] = PROJECT_EDITABLE_FIELDS.map(f => f.key);
 	const labelFor = (key: string): string => {
 		const known = PROJECT_EDITABLE_FIELDS.find(f => f.key === key);
 		return known?.label ?? key;
 	};
 
-	const diffCount = isRegistered && current != null ? changedKeys.filter(k => {
-		const proposed = fields[k] ?? "";
-		return proposed !== currentValueFor(k);
-	}).length : 0;
+	const acceptLabel = isRegistered ? "Apply Changes" : "Accept Project";
+	const acceptDisabled = !fields.name?.trim();
 
-	const acceptLabel = isRegistered
-		? (diffCount > 0 ? `Apply Changes (${diffCount})` : "Apply Changes")
-		: "Accept Project";
+	const activeView = _projectProposalView;
+	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
 
-	const acceptDisabled = !fields.name?.trim() || (isRegistered && diffCount === 0);
+	const settingsView = html`
+		<div data-testid="settings-view" class="flex flex-col gap-4">
+			${renderRow("name", "Project Name")}
+			<div data-field="root_path" data-readonly="true">
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
+				<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || ""}>
+					${fields.root_path || "—"}
+				</div>
+			</div>
+			${curatedKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
+			${extraKeys.length > 0 ? html`
+				<details data-testid="other-settings-group" class="border-t border-border pt-3">
+					<summary class="text-xs text-muted-foreground cursor-pointer select-none font-medium">
+						Other settings (${extraKeys.length})
+					</summary>
+					<p class="text-[11px] text-muted-foreground mt-2 mb-3">
+						Non-standard project.yaml fields. The agent or a previous user added these; edit them here or remove the entry by clearing the value.
+					</p>
+					<div class="flex flex-col gap-4">
+						${extraKeys.map(k => renderRow(k, k))}
+					</div>
+				</details>
+			` : ""}
+		</div>
+	`;
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="project-proposal" data-mode=${mode}>
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				${loading ? html`<div class="text-sm text-muted-foreground" data-testid="loading-current-config">Loading current config…</div>` : ""}
-				${renderRow("name", "Project Name")}
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
-					<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || current?.rootPath || ""}>
-						${fields.root_path || current?.rootPath || "—"}
-					</div>
-				</div>
-				${changedKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
-				${isRegistered && unchangedKeys.length > 0 ? html`
-					<details data-testid="unchanged-group">
-						<summary class="text-xs text-muted-foreground cursor-pointer select-none py-1">No changes (${unchangedKeys.length} fields)</summary>
-						<div class="flex flex-col gap-4 mt-3 pl-2">
-							${unchangedKeys.map(k => renderRow(k, labelFor(k)))}
-						</div>
-					</details>
-				` : ""}
+		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode}>
+			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
+				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
+				<div class="text-[11px] text-muted-foreground font-mono truncate min-w-0" title=${fields.root_path || ""}>${fields.root_path || ""}</div>
+			</div>
+			${projectViewTabs(activeView, onView, {
+				components: structuredComponents.length,
+				workflows: Object.keys(structuredWorkflows).length,
+			})}
+			<div ${ref(projectOuterScrollRef)} class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-5 ${streaming ? STREAMING_BORDER : ""}">
+				${activeView === "components"
+					? projectComponentsView(structuredComponents)
+					: activeView === "workflows"
+					? projectWorkflowsView(structuredWorkflows, structuredComponents)
+					: settingsView}
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+				${streaming ? streamingBadge() : ""}
 				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
-				${Button({
+				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleAccept,
-					disabled: acceptDisabled,
+					disabled: acceptDisabled || streaming,
 					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
-				})}
+				})}</span>
 			</div>
 		</div>
 	`;
@@ -1936,7 +2085,7 @@ function syncProposalFormState(): void {
 
 function goalProposalPanel() {
 	syncProposalFormState();
-	ensureWorkflowsLoaded();
+	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
 	const handleCreateGoal = async () => {
@@ -2020,6 +2169,7 @@ function goalProposalPanel() {
 		onDismiss: handleDismiss,
 		saving: _proposalSaving,
 		createDisabled: !_proposalTitle.trim() || _proposalSaving,
+		streaming: isProposalStreaming("goal_proposal"),
 	});
 }
 

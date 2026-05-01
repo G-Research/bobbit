@@ -149,8 +149,12 @@ export class ModelSelector extends DialogBase {
 		super.firstUpdated(changedProperties);
 		// Wait for dialog to be fully rendered
 		await this.updateComplete;
-		// Focus the search input when dialog opens
-		this.searchInputRef.value?.focus();
+		// Focus the search input when dialog opens. Skip on mobile (<640px) so opening
+		// the model selector doesn't summon the on-screen keyboard, which is jarring
+		// and obscures most of the model list.
+		const isMobile = typeof window !== "undefined" && typeof window.matchMedia === "function"
+			&& !window.matchMedia("(min-width: 640px)").matches;
+		if (!isMobile) this.searchInputRef.value?.focus();
 
 		// Track actual mouse movement
 		this.addEventListener("mousemove", (e: MouseEvent) => {

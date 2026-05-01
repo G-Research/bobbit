@@ -3,9 +3,11 @@ import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
+import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
+import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
@@ -46,9 +48,14 @@ export class RemoteAgent {
 	private _sessionId = "";
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
-	// Assistant message deferred until tool execution completes to avoid
-	// showing it simultaneously in both message-list and streaming-container.
-	private _deferredAssistantMessage: any = null;
+	// Reducer-owned message state. The reducer is the single source of truth
+	// for transcript order; `_state.messages` is mirrored from `reducerState.messages`
+	// after every dispatch so existing UI bindings keep working.
+	private reducerState: ReducerState = initialState();
+	// Streaming preview message id — render filters this from messages so
+	// the same row doesn't appear twice (in message list and streaming container).
+	// Public for the AgentInterface render filter; not part of the RPC surface.
+	streamingMessageId: string | undefined;
 	// Attachments from the most recent prompt, used to enrich the echoed
 	// user message so thumbnails render in the message list.
 	private _pendingAttachments: any[] | null = null;
@@ -63,24 +70,10 @@ export class RemoteAgent {
 	// authoritative for the final `skillExpansions` shape).
 	private _pendingSkillExpansions: any[] | null = null;
 
-	// Messages added via live events (message_end) that might not yet be
-	// reflected in the next server "messages" response.  When a wholesale
-	// messages refresh arrives, any live-event messages missing from the
-	// server list are re-appended so they aren't silently dropped.
-	private _liveEventMessages: any[] = [];
-
 	// Compaction tracking — persists across message refreshes.
 	// Exposed on state so the UI can queue messages during compact.
 	private _isCompacting = false;
 	private _isAborting = false;
-
-	// Synthetic messages added around compaction (/compact user msg + result).
-	// Kept separately so they survive the server's post-compaction messages refresh.
-	private _compactionSyntheticMessages: any[] = [];
-
-	// Pending tool permission cards — in-memory only, survive message refreshes.
-	// Cleared when the user grants/denies or the session restarts.
-	private _pendingPermissionCards: any[] = [];
 
 	// Proposal deferral — when set, incoming messages are stored but
 	// _checkProposals is skipped until runDeferredProposalCheck() is called.
@@ -112,8 +105,7 @@ export class RemoteAgent {
 	/** Defensive cap — if we ever buffer more than this while waiting for a
 	 *  gap to fill, fall back to a snapshot refresh instead of growing forever. */
 	private readonly _pendingEventsMax = 500;
-	/** True while we've asked for a snapshot refresh due to a seq gap / fallback.
-	 *  While set we keep the _liveEventMessages text-merge hack active. */
+	/** True while we've asked for a snapshot refresh due to a seq gap / fallback. */
 	private _inResumeFallback = false;
 
 	// Auto-reconnect state
@@ -188,20 +180,23 @@ export class RemoteAgent {
 	onStatusChange?: (status: string) => void;
 	/** Callback fired when connection status changes (connected/reconnecting/disconnected). */
 	onConnectionStatusChange?: (status: ConnectionStatus) => void;
-	/** Callback fired when a goal proposal is detected in an assistant message. */
-	onGoalProposal?: (proposal: { title: string; spec: string; cwd?: string; workflow?: string }) => void;
+	/** Callback fired when a goal proposal is detected in an assistant message.
+	 *  `streaming === true` means input is still arriving; consumers must keep
+	 *  their `*Edited` gating intact and must not commit destructive actions on
+	 *  streaming-mode fires. */
+	onGoalProposal?: (proposal: { title: string; spec: string; cwd?: string; workflow?: string }, streaming: boolean) => void;
 	/** Callback fired when a role proposal is detected in an assistant message. */
-	onRoleProposal?: (proposal: { name: string; label: string; prompt: string; tools: string; accessory: string }) => void;
+	onRoleProposal?: (proposal: { name: string; label: string; prompt: string; tools: string; accessory: string }, streaming: boolean) => void;
 	/** Callback fired when a tool proposal is detected in an assistant message. */
-	onToolProposal?: (proposal: { tool: string; action: string; content: string }) => void;
+	onToolProposal?: (proposal: { tool: string; action: string; content: string }, streaming: boolean) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
-	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }) => void;
+	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
 	/** Callback fired when a setup proposal is detected in an assistant message. */
-	onSetupProposal?: (proposal: Record<string, string> & { action: string }) => void;
+	onSetupProposal?: (proposal: Record<string, string> & { action: string }, streaming: boolean) => void;
 	/** Callback fired when a workflow proposal is detected in an assistant message. */
-	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }) => void;
+	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
-	onProjectProposal?: (fields: Record<string, unknown>) => void;
+	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
@@ -235,7 +230,7 @@ export class RemoteAgent {
 			thinkingLevel: "medium",
 			imageGenerationModel: null as any,
 			tools: [],
-			messages: [] as any[],
+			messages: [] as OrderedMessage[],
 			isStreaming: false,
 			isCompacting: false,
 			isArchived: false,
@@ -518,6 +513,12 @@ export class RemoteAgent {
 		}
 	}
 
+	/** Dispatch an action to the message reducer and mirror the result. */
+	private apply(action: Action): void {
+		this.reducerState = reduce(this.reducerState, action);
+		this._state.messages = this.reducerState.messages;
+	}
+
 	// ── Agent commands (proxied to gateway) ──────────────────────────
 
 	async prompt(input: string | any | any[], _images?: any[]): Promise<void> {
@@ -551,10 +552,6 @@ export class RemoteAgent {
 				? (input as any).skillExpansions
 				: null;
 
-		// Clear compaction synthetic messages — they were only needed to survive
-		// the post-compaction refresh; a new prompt starts a fresh turn.
-		this._compactionSyntheticMessages = [];
-
 		// Add the user message optimistically so it renders immediately —
 		// but only when the agent is idle. If streaming, the prompt is queued
 		// server-side and the server will echo it in the correct position
@@ -574,8 +571,7 @@ export class RemoteAgent {
 					? { skillExpansions: this._pendingSkillExpansions }
 					: {}),
 			};
-			this._state.messages = [...this._state.messages, optimisticMsg];
-			this._liveEventMessages.push(optimisticMsg);
+			this.apply({ type: "optimistic-prompt", message: optimisticMsg });
 			this.emit({ type: "message_end", message: optimisticMsg });
 		}
 
@@ -598,8 +594,7 @@ export class RemoteAgent {
 			timestamp: Date.now(),
 			id: optimisticId,
 		};
-		this._state.messages = [...this._state.messages, optimisticMsg];
-		this._liveEventMessages.push(optimisticMsg);
+		this.apply({ type: "optimistic-steer", message: optimisticMsg });
 		this.emit({ type: "message_end", message: optimisticMsg });
 		this.send({ type: "steer", text });
 	}
@@ -622,12 +617,15 @@ export class RemoteAgent {
 
 	/** Add or re-add the "Compacting context…" placeholder to the message list. */
 	private _addCompactingPlaceholder(): void {
-		this._state.messages = [...this._state.messages.filter((m: any) => m.id !== "compacting_placeholder"), {
-			role: "assistant",
-			content: [{ type: "text", text: "Compacting context…" }],
-			timestamp: Date.now(),
-			id: "compacting_placeholder",
-		} as any];
+		this.apply({
+			type: "compaction-placeholder",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "Compacting context…" }],
+				timestamp: Date.now(),
+				id: "compacting_placeholder",
+			},
+		});
 	}
 
 	requestMessages(): void {
@@ -669,20 +667,25 @@ export class RemoteAgent {
 	}
 
 	reset(): void {
-		this._state.messages = [];
+		this.reducerState = initialState();
+		this._state.messages = this.reducerState.messages;
 		this._state.streamingMessage = null;
+		this.streamingMessageId = undefined;
 		this._state.isStreaming = false;
 		this._state.pendingToolCalls = new Set();
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
-		this._deferredAssistantMessage = null;
 		this._pendingAttachments = null;
 		this._pendingSkillExpansions = null;
-		this._liveEventMessages = [];
 		this._highestSeq = 0;
 		this._seqInitialized = false;
 		this._pendingEvents = [];
 		this._inResumeFallback = false;
+		// Cross-session isolation: clear per-tag streaming flags so navigating
+		// to another session always starts with all flags false.
+		for (const k of Object.keys(state.proposalStreamingByTag)) {
+			state.proposalStreamingByTag[k] = false;
+		}
 	}
 
 	/** Drain any pending out-of-order events whose predecessor has now arrived. */
@@ -728,9 +731,6 @@ export class RemoteAgent {
 	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
 		// Save the prompt to replay after the session restarts with the new tool
 		this._pendingGrantReplay = lastPromptText;
-		// Clear pending permission cards — the grant will restart the session
-		this._pendingPermissionCards = [];
-
 		this.send({ type: "grant_tool_permission", toolName, scope, group, mode });
 	}
 
@@ -739,9 +739,7 @@ export class RemoteAgent {
 		if (toolName) {
 			this.send({ type: "deny_tool_permission", toolName });
 		}
-		// Remove the tool_permission_needed message from state and pending cards
-		this._pendingPermissionCards = this._pendingPermissionCards.filter((m: any) => m.id !== messageId);
-		this._state.messages = this._state.messages.filter((m: any) => m.id !== messageId);
+		this.apply({ type: "deny-permission-filter", messageId });
 		this.emit({ type: "render" });
 	}
 
@@ -750,7 +748,7 @@ export class RemoteAgent {
 	}
 
 	replaceMessages(msgs: any[]): void {
-		this._state.messages = msgs.map(enrichUserMessage);
+		this.apply({ type: "replace-messages", messages: msgs });
 	}
 
 	/**
@@ -763,7 +761,9 @@ export class RemoteAgent {
 	}
 
 	appendMessage(msg: any): void {
-		this._state.messages = [...this._state.messages, msg];
+		// Treated as a system-notification-shaped append — lands at
+		// (highestSeq + 0.5) so it renders chronologically.
+		this.apply({ type: "system-notification", message: msg });
 	}
 
 	setTitle(title: string): void {
@@ -853,116 +853,14 @@ export class RemoteAgent {
 			case "messages": {
 				const msgs = Array.isArray(msg.data) ? msg.data : msg.data?.messages;
 				if (Array.isArray(msgs)) {
-					this._state.messages = msgs.map(enrichUserMessage);
+					// Server snapshot is authoritative for any id it contains. The
+					// reducer merges in survivors (optimistic, synthetic, permission)
+					// and sorts the result by (_order, _insertionTick).
+					this.apply({ type: "snapshot", messages: msgs });
+					// Streaming preview: if the snapshot contains the streaming
+					// message id, it's no longer in-flight on this client.
+					this.streamingMessageId = undefined;
 
-					// Clear deferred assistant message — the server's message list is
-					// authoritative and already contains it in the correct position.
-					this._deferredAssistantMessage = null;
-
-					// Server snapshot is authoritative for any id it contains, and
-					// for the compaction marker (server persists it under a different
-					// id than our synthetic). Build lookup sets so client-side
-					// buckets (live events / compaction syntheics / permission cards)
-					// only contribute messages the snapshot lacks.
-					const serverIds = new Set<string>(
-						this._state.messages
-							.map((m: any) => m.id)
-							.filter((id: any) => typeof id === "string" && id.length > 0)
-					);
-					const serverHasCompactionMarker = this._state.messages.some((m: any) => {
-						if (m.role !== "assistant") return false;
-						const t = extractText(m);
-						return typeof t === "string" && t.startsWith("Context compacted");
-					});
-
-					const extras: any[] = [];
-
-					// Re-append any live-event messages missing from the server
-					// snapshot. Dedup by id first (authoritative) and only fall
-					// back to text-equality for legacy entries without ids.
-					if (this._liveEventMessages.length > 0) {
-						const serverUserTexts = new Set(
-							this._state.messages
-								.filter((m: any) => m.role === "user" || m.role === "user-with-attachments")
-								.map((m: any) => extractText(m))
-						);
-						for (const liveMsg of this._liveEventMessages) {
-							if (typeof liveMsg.id === "string" && liveMsg.id.length > 0) {
-								if (serverIds.has(liveMsg.id)) continue;
-							} else if (
-								(liveMsg.role === "user" || liveMsg.role === "user-with-attachments") &&
-								serverUserTexts.has(extractText(liveMsg))
-							) {
-								continue;
-							}
-							extras.push(liveMsg);
-						}
-						this._liveEventMessages = [];
-					}
-
-					// Re-append synthetic compaction messages only if the server
-					// snapshot doesn't already represent them. Drop synthetic
-					// compaction-result markers when the server has its own copy
-					// (different id, but assistant text starts with "Context compacted").
-					if (this._compactionSyntheticMessages.length > 0) {
-						const surviving: any[] = [];
-						for (const m of this._compactionSyntheticMessages) {
-							if (typeof m.id === "string" && serverIds.has(m.id)) continue;
-							if (m.role === "assistant" && serverHasCompactionMarker) continue;
-							surviving.push(m);
-						}
-						extras.push(...surviving);
-						// Once the server confirms an equivalent marker, the bucket
-						// has done its job — clear it so subsequent snapshots don't
-						// re-introduce stale entries.
-						if (serverHasCompactionMarker) {
-							this._compactionSyntheticMessages = [];
-						} else {
-							this._compactionSyntheticMessages = surviving;
-						}
-					}
-
-					// Re-append pending tool_permission_needed cards. Drop any whose
-					// id the server snapshot already contains. Also drop a card if
-					// the server snapshot contains any message strictly newer than
-					// the card's timestamp — the server has progressed past the
-					// card's creation point and either resolved it or no longer
-					// considers the tool to be awaiting permission. Live in-flight
-					// cards (created after the snapshot was taken) survive because
-					// no snapshot message is newer than their timestamp.
-					if (this._pendingPermissionCards.length > 0) {
-						const maxServerTs = this._state.messages.reduce((acc: number, m: any) => {
-							const t = typeof m.timestamp === "number" ? m.timestamp : 0;
-							return t > acc ? t : acc;
-						}, 0);
-						const surviving: any[] = [];
-						for (const card of this._pendingPermissionCards) {
-							if (typeof card.id === "string" && serverIds.has(card.id)) continue;
-							const cardTs = typeof card.timestamp === "number" ? card.timestamp : 0;
-							if (maxServerTs > cardTs) continue;
-							surviving.push(card);
-						}
-						this._pendingPermissionCards = surviving;
-						extras.push(...surviving);
-					}
-
-					if (extras.length > 0) {
-						// Stable sort by timestamp (preserve relative order for
-						// equal timestamps via index tagging) so survivors land in
-						// chronological position rather than appended after newer
-						// server messages.
-						const tagged = [
-							...this._state.messages.map((m: any, i: number) => ({ m, i, src: 0 })),
-							...extras.map((m: any, i: number) => ({ m, i: this._state.messages.length + i, src: 1 })),
-						];
-						tagged.sort((a, b) => {
-							const ta = typeof a.m.timestamp === "number" ? a.m.timestamp : 0;
-							const tb = typeof b.m.timestamp === "number" ? b.m.timestamp : 0;
-							if (ta !== tb) return ta - tb;
-							return a.i - b.i;
-						});
-						this._state.messages = tagged.map((t) => t.m);
-					}
 					// Emit message_end for each message so AgentInterface re-renders
 					for (const m of this._state.messages) {
 						this.emit({ type: "message_end", message: m });
@@ -1155,19 +1053,20 @@ export class RemoteAgent {
 			}
 
 			case "gate_verification_started":
-				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				dispatchVerificationEvent(msg);
 				refreshGateStatusForGoal((msg as any).goalId);
 				break;
+			case "gate_verification_phase_started":
 			case "gate_verification_step_complete":
 			case "gate_verification_step_started":
 			case "gate_verification_step_output":
-				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				dispatchVerificationEvent(msg);
 				break;
 
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
-				document.dispatchEvent(new CustomEvent("gate-verification-event", { detail: msg }));
+				dispatchVerificationEvent(msg);
 				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
@@ -1220,17 +1119,13 @@ export class RemoteAgent {
 
 			case "tool_permission_needed": {
 				const perm = msg as any;
-				// The server has aborted the agent turn. Clean up:
-				// 1. Clear any in-progress streaming message
+				// The server has aborted the agent turn. Clean up the streaming
+				// preview — the reducer's permission action handles transcript
+				// insertion. Aborted-turn cleanup (stripping inflight tool error +
+				// agent response) is now the server's responsibility (next snapshot
+				// is authoritative).
 				this._state.streamingMessage = undefined;
-				// 2. Remove messages added after the last user message (tool error + agent response from the aborted turn)
-				const lastUserIdx = this._state.messages.findLastIndex(
-					(m: any) => m.role === "user" || m.role === "user-with-attachments"
-				);
-				if (lastUserIdx >= 0) {
-					this._state.messages = this._state.messages.slice(0, lastUserIdx + 1);
-				}
-				// 3. Add the permission-request card
+				this.streamingMessageId = undefined;
 				const permCard = {
 					role: "tool_permission_needed" as any,
 					toolName: perm.toolName,
@@ -1241,8 +1136,9 @@ export class RemoteAgent {
 					timestamp: Date.now(),
 					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
 				};
-				this._pendingPermissionCards.push(permCard);
-				this._state.messages = [...this._state.messages, permCard as any];
+				const seq = typeof perm.seq === "number" ? perm.seq : undefined;
+				const ts = typeof perm.ts === "number" ? perm.ts : undefined;
+				this.apply({ type: "permission-needed", card: permCard, seq, ts });
 				this.emit({ type: "render" });
 				break;
 			}
@@ -1257,14 +1153,16 @@ export class RemoteAgent {
 				this._state.error = msg.message || "Unknown server error";
 				this._pendingAttachments = null;
 				this._pendingSkillExpansions = null;
-				// Add a dismissable error message to the chat history
-				this._state.messages = [...this._state.messages, {
-					role: "error",
-					content: msg.message || "Unknown server error",
-					code: msg.code,
-					timestamp: Date.now(),
-					id: `err_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-				} as any];
+				this.apply({
+					type: "error",
+					message: {
+						role: "error",
+						content: msg.message || "Unknown server error",
+						code: msg.code,
+						timestamp: Date.now(),
+						id: `err_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+					},
+				});
 				this._appendNotification(msg.message || "Unknown server error", "error");
 				this.emit({ type: "error", error: msg.message });
 				break;
@@ -1314,13 +1212,19 @@ export class RemoteAgent {
 			// During streaming, tool arguments arrive incrementally (e.g. "{}" → {"title":""} → full).
 			// Skip empty objects to avoid firing with no meaningful data.
 			if (Object.keys(input).length === 0) continue;
-			callback(input);
+
+			const tagKey = `${proposalType}_proposal`;
+			if (streaming) {
+				state.proposalStreamingByTag[tagKey] = true;
+			}
+			callback(input, streaming);
 
 			// Only mark as processed on non-streaming calls (message_end, full re-scan).
 			// During streaming we fire the callback repeatedly for live preview sync
 			// without marking processed — so the final complete arguments always fire too.
 			if (!streaming && blockId) {
 				this._processedProposalIds.add(blockId);
+				state.proposalStreamingByTag[tagKey] = false;
 				// Persist to sessionStorage so it survives page refresh
 				if (this._sessionId) {
 					try {
@@ -1489,20 +1393,18 @@ export class RemoteAgent {
 	}
 
 	private _appendNotification(message: string, category: "system" | "task" | "team" | "error"): void {
-		const notif = createSystemNotification(message, category);
-		this._state.messages = [...this._state.messages, notif];
+		const notif: any = createSystemNotification(message, category);
+		// Stamp a stable id so the reducer's id-keyed render works.
+		if (!notif.id) {
+			notif.id = `notif_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+		}
+		this.apply({ type: "system-notification", message: notif });
 		this.emit({ type: "message_end", message: notif });
 	}
 
-	private flushDeferredMessage() {
-		if (this._deferredAssistantMessage) {
-			this._state.messages = [...this._state.messages, this._deferredAssistantMessage];
-			this._state.streamingMessage = null;
-			this._deferredAssistantMessage = null;
-		}
-	}
-
 	private handleAgentEvent(event: any) {
+		// Track current event seq so live-event reducer dispatches use it.
+		const eventSeq = this._highestSeq;
 		// Update local state BEFORE emitting (UI reads state in event handlers)
 		switch (event.type) {
 			case "agent_start":
@@ -1513,11 +1415,16 @@ export class RemoteAgent {
 				break;
 
 			case "agent_end": {
-				this.flushDeferredMessage();
+				this.streamingMessageId = undefined;
 				this._state.isStreaming = false;
 				this._isAborting = false;
 				this._state.streamingMessage = null;
 				this._state.pendingToolCalls = new Set();
+				// Bulk-clear any stuck per-tag streaming flags (safety net for
+				// turns that error out or are aborted before message_end).
+				for (const k of Object.keys(state.proposalStreamingByTag)) {
+					state.proposalStreamingByTag[k] = false;
+				}
 
 				// Notify: beep + favicon badge
 				RemoteAgent.playNotificationBeep();
@@ -1535,11 +1442,6 @@ export class RemoteAgent {
 				break;
 
 			case "message_update":
-				// Flush any deferred assistant message now that a new message
-				// is being streamed — the streaming container will switch to
-				// the new message via setMessage(), so the old one only lives
-				// in message-list from now on.
-				this.flushDeferredMessage();
 				if (event.message) {
 					// Throttle stream updates when content has truncated blocks
 					// to reduce Lit re-render pressure (2x/sec instead of every token).
@@ -1568,42 +1470,32 @@ export class RemoteAgent {
 
 			case "message_end":
 				if (event.message) {
-					if (event.message.role === "assistant") {
+					let msg = event.message;
+					if (msg.role === "assistant") {
 						// Check for proposals in assistant message
-						this._checkToolProposals(event.message);
-						this._checkProposals(event.message);
+						this._checkToolProposals(msg);
+						this._checkProposals(msg);
 
-						// Check whether this assistant message contains tool calls.
-						const hasToolCalls = Array.isArray(event.message.content) &&
-							event.message.content.some((c: any) => c.type === "toolCall");
+						const hasToolCalls = Array.isArray(msg.content) &&
+							msg.content.some((c: any) => c.type === "toolCall");
 
+						// Mark this id as the streaming-preview message so the render
+						// layer can hide it from message-list while the streaming
+						// container still owns it. When there are no tool calls the
+						// streaming container will be cleared by AgentInterface.
 						if (hasToolCalls) {
-							// Defer adding the message to messages[]. The streaming
-							// container still holds this message from the last
-							// message_update, so it will keep rendering the tool
-							// call. By NOT adding to messages[] we avoid a duplicate
-							// in message-list. The deferred message will be flushed
-							// when the next message_update arrives (which replaces
-							// the streaming container content simultaneously).
-							this._deferredAssistantMessage = event.message;
-							// Keep streamingMessage set so the AgentInterface
-							// message_end handler does NOT clear the streaming
-							// container.
+							this.streamingMessageId = typeof msg.id === "string" ? msg.id : undefined;
 						} else {
-							// No tool calls — safe to add immediately.
 							this._state.streamingMessage = null;
-							this._state.messages = [...this._state.messages, event.message];
+							this.streamingMessageId = undefined;
 						}
+						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
 					} else {
-						// Non-assistant messages (user, toolResult).
-						// Flush any deferred assistant message first so it
-						// appears before this message in the correct order.
-						this.flushDeferredMessage();
+						// Non-assistant: streaming container clears.
 						this._state.streamingMessage = null;
+						this.streamingMessageId = undefined;
 
-						let msg = event.message;
-						// Enrich echoed user messages with stashed attachments
-						// so image thumbnails render in the message list.
+						// Enrich echoed user messages with stashed attachments / skill expansions.
 						if (msg.role === "user" && this._pendingAttachments) {
 							msg = {
 								...msg,
@@ -1612,8 +1504,6 @@ export class RemoteAgent {
 							};
 							this._pendingAttachments = null;
 						}
-						// Forward client-supplied skill expansions to the echoed user
-						// message if the server hasn’t already populated them.
 						if (
 							(msg.role === "user" || msg.role === "user-with-attachments") &&
 							this._pendingSkillExpansions &&
@@ -1623,42 +1513,20 @@ export class RemoteAgent {
 							this._pendingSkillExpansions = null;
 						}
 
-						// Deduplicate: if this is a server echo of an optimistic user
-						// message, replace the optimistic one instead of appending.
-						if (msg.role === "user" || msg.role === "user-with-attachments") {
-							const msgText = extractText(msg);
-							const optimisticIdx = this._state.messages.findIndex(
-								(m: any) => m.id?.startsWith("optimistic_") && extractText(m) === msgText
-							);
-							if (optimisticIdx !== -1) {
-								const replacedId = this._state.messages[optimisticIdx].id;
-								const updated = [...this._state.messages];
-								updated[optimisticIdx] = msg;
-								this._state.messages = updated;
-								// Update live tracking: swap optimistic for server-authoritative
-								this._liveEventMessages = this._liveEventMessages
-									.filter((m: any) => m.id !== replacedId);
-								this._liveEventMessages.push(msg);
-								break;
-							}
-						}
-
-						this._state.messages = [...this._state.messages, msg];
+						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
 
 						// Check for review tool results (review_open/review_close JSON)
 						this._checkReviewToolResult(msg);
 
-						// Track user messages from live events so they survive
-						// a wholesale messages refresh (reconnect, compaction).
+						// Notify ask_user_choices cards on user-message echoes.
 						if (msg.role === "user" || msg.role === "user-with-attachments") {
-							this._liveEventMessages.push(msg);
-							// Notify tool_use cards (e.g. ask_user_choices) that the
-							// transcript changed so they can re-scan for response envelopes.
 							if (typeof document !== "undefined") {
 								document.dispatchEvent(new CustomEvent("bobbit-transcript-message"));
 							}
 						}
 					}
+					// Replace the original event reference for downstream subscribers
+					event = { ...event, message: msg };
 				}
 				break;
 
@@ -1727,8 +1595,6 @@ export class RemoteAgent {
 			case "auto_compaction_end": {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
-				// Replace the placeholder with the final result message
-				const filtered = this._state.messages.filter((m: any) => m.id !== "compacting_placeholder");
 				const success = event.type === "compaction_end" ? event.success : !event.aborted;
 				const tokensBefore = (event as any).tokensBefore;
 				let resultText = "Context compacted.";
@@ -1749,12 +1615,7 @@ export class RemoteAgent {
 						timestamp: Date.now(),
 						id: `compact_err_${Date.now()}`,
 					};
-				this._state.messages = [...filtered, resultMsg as any];
-				// Store the result message so it survives the server's messages refresh
-				this._compactionSyntheticMessages = [
-					...this._compactionSyntheticMessages.filter((m: any) => m.role === "user"),
-					resultMsg,
-				];
+				this.apply({ type: "compaction-result", message: resultMsg, success });
 				// Normalize to compaction_end for UI subscribers
 				if (event.type === "auto_compaction_end") {
 					this.emit({ type: "compaction_end", success } as any);
@@ -1768,35 +1629,6 @@ export class RemoteAgent {
 		// Forward event to UI subscribers
 		this.emit(event);
 	}
-}
-
-/**
- * When restoring messages from the server (page refresh, reconnect),
- * user messages with image content arrive as `{ role: "user", content: [...] }`
- * but the UI needs `role: "user-with-attachments"` with an `attachments` array
- * to render image thumbnails. This function reconstructs that format.
- */
-function enrichUserMessage(msg: any): any {
-	if (msg.role !== "user" || !Array.isArray(msg.content)) return msg;
-
-	const imageChunks = msg.content.filter((c: any) => c.type === "image" && c.data);
-	if (imageChunks.length === 0) return msg;
-
-	const attachments = imageChunks.map((img: any, i: number) => ({
-		id: `restored_${i}_${Date.now()}`,
-		type: "image" as const,
-		fileName: `image-${i + 1}.png`,
-		mimeType: img.mimeType || img.media_type || "image/png",
-		size: img.data?.length || 0,
-		content: img.data,
-		preview: img.data,
-	}));
-
-	return {
-		...msg,
-		role: "user-with-attachments",
-		attachments,
-	};
 }
 
 function extractText(message: any): string {

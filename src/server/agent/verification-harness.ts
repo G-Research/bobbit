@@ -448,8 +448,6 @@ export class VerificationHarness {
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
-	/** Limits concurrent LLM review / QA sessions across all goals. */
-	private reviewSemaphore = new Semaphore(6);
 	/**
 	 * Per-rootGoalId semaphores bounding concurrent in-flight subgoal
 	 * verify steps (`runSubgoalStep`). One cap per goal-tree, per design
@@ -512,6 +510,7 @@ export class VerificationHarness {
 	_isGoalPausedForTest(goalId: string): boolean {
 		return this.isGoalPaused(goalId);
 	}
+
 
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
@@ -869,6 +868,11 @@ export class VerificationHarness {
 			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder...`);
 			await session.rpcClient.prompt(reminderPrompt);
+			// Reminder dispatch is fire-and-forget on the RPC channel; the session
+			// stays `idle` for a tick before transitioning to `streaming`. Wait for
+			// the next agent_start so the subsequent waitForIdle race doesn't
+			// resolve instantly against the still-idle status.
+			await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
@@ -1004,7 +1008,7 @@ export class VerificationHarness {
 				return { name: stepName, type: "agent-qa", passed: false, output: `Aborted: goal is ${goalCheck.state}`, duration_ms: Date.now() - startedAt };
 			}
 			result = await this.runAgentQaStep(
-				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role, component: stepDef.component },
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
 			);
@@ -1019,11 +1023,16 @@ export class VerificationHarness {
 
 	private configCascade?: import("./config-cascade.js").ConfigCascade;
 
+	/** Monotonic counter used to stamp `seq` on every broadcast event. */
+	private _verifSeqCounter = 0;
+
+	private readonly broadcastFn: (goalId: string, event: any) => void;
+
 	constructor(
 		stateDir: string,
 		/** @deprecated Resolve per-goal via projectContextManager instead. */
 		private gateStore: GateStore | undefined,
-		private broadcastFn: (goalId: string, event: any) => void,
+		private _rawBroadcastFn: (goalId: string, event: any) => void,
 		private roleStore: RoleStore,
 		private preferencesStore?: PreferencesStore,
 		private sessionManager?: import("./session-manager.js").SessionManager,
@@ -1033,6 +1042,18 @@ export class VerificationHarness {
 		configCascade?: import("./config-cascade.js").ConfigCascade,
 	) {
 		this.configCascade = configCascade;
+		// Wrap the broadcast fn so every gate_verification_* event carries a
+		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
+		// dedupe payloads delivered via per-session WS fan-out (see
+		// src/app/verification-event-bus.ts). The seq is global per harness
+		// instance — simpler than scoping per (goal,gate,signal) and equally
+		// effective since the dedupe key includes signalId.
+		this.broadcastFn = (goalId: string, event: any) => {
+			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_") && event.seq == null) {
+				event.seq = ++this._verifSeqCounter;
+			}
+			this._rawBroadcastFn(goalId, event);
+		};
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
@@ -1093,6 +1114,28 @@ export class VerificationHarness {
 			console.warn(`[verification] Goal "${goalId}" not found in any project context — falling back to server-level projectConfigStore. This likely means the gate will run with wrong commands.`);
 		}
 		return this.projectConfigStore;
+	}
+
+	/**
+	 * Pick a component to source `config.qa_*` from when an agent-qa step
+	 * does not declare `component:` explicitly. Preference order:
+	 *   1. First component whose `config.qa_start_command` is set.
+	 *   2. Component whose `name` matches the project name.
+	 *   3. `components[0]`.
+	 * Returns undefined when no components are configured.
+	 */
+	private resolveDefaultQaComponentName(goalId: string): string | undefined {
+		const pcs = this.resolveProjectConfigStore(goalId);
+		if (!pcs) return undefined;
+		const comps = pcs.getComponents();
+		const hit = comps.find(c => c.config?.qa_start_command);
+		if (hit) return hit.name;
+		const projectName = this.projectContextManager?.getContextForGoal(goalId)?.project?.name;
+		if (projectName) {
+			const nameMatch = comps.find(c => c.name === projectName);
+			if (nameMatch) return nameMatch.name;
+		}
+		return comps[0]?.name;
 	}
 
 	private resolveGateStore(goalId: string): GateStore {
@@ -1841,33 +1884,25 @@ export class VerificationHarness {
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
-								if (this.reviewSemaphore.available === 0) {
-									console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-								}
-								await this.reviewSemaphore.acquire();
-								try {
-									const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-									const maxAttempts = 3;
-									for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-										if (active.cancelled) break;
-										const qaResult = await this.runAgentQaStep(
-											{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-											cwd, signal.goalId, builtinVars,
-											signal.content, signal.metadata,
-											goalSpec, allGateStates, stepSessionId,
-										);
-										result = qaResult;
-										if (qaResult.artifact) {
-											artifact = qaResult.artifact;
-										}
-										const isTransient = isTransientQaError(qaResult.output);
-										if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
-										const delayMs = 2000 * Math.pow(2, attempt - 1);
-										console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-										await new Promise(r => setTimeout(r, delayMs));
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const maxAttempts = 3;
+								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									if (active.cancelled) break;
+									const qaResult = await this.runAgentQaStep(
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
+										cwd, signal.goalId, builtinVars,
+										signal.content, signal.metadata,
+										goalSpec, allGateStates, stepSessionId,
+									);
+									result = qaResult;
+									if (qaResult.artifact) {
+										artifact = qaResult.artifact;
 									}
-								} finally {
-									this.reviewSemaphore.release();
+									const isTransient = isTransientQaError(qaResult.output);
+									if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
+									const delayMs = 2000 * Math.pow(2, attempt - 1);
+									console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
 						} else {
@@ -1875,30 +1910,22 @@ export class VerificationHarness {
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
-								if (this.reviewSemaphore.available === 0) {
-									console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-								}
-								await this.reviewSemaphore.acquire();
-								try {
-									const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-									const maxAttempts = 3;
-									for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-										if (active.cancelled) break;
-										result = await this.runLlmReviewStep(
-											{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-											cwd, builtinVars,
-											signal.content, signal.metadata,
-											goalSpec, allGateStates, signal.goalId, stepSessionId,
-											gate,
-										);
-										const isTransient = isTransientReviewError(result.output);
-										if (result.passed || !isTransient || attempt === maxAttempts) break;
-										const delayMs = 2000 * Math.pow(2, attempt - 1);
-										console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-										await new Promise(r => setTimeout(r, delayMs));
-									}
-								} finally {
-									this.reviewSemaphore.release();
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const maxAttempts = 3;
+								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+									if (active.cancelled) break;
+									result = await this.runLlmReviewStep(
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
+										cwd, builtinVars,
+										signal.content, signal.metadata,
+										goalSpec, allGateStates, signal.goalId, stepSessionId,
+										gate,
+									);
+									const isTransient = isTransientReviewError(result.output);
+									if (result.passed || !isTransient || attempt === maxAttempts) break;
+									const delayMs = 2000 * Math.pow(2, attempt - 1);
+									console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
+									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
 						}
@@ -2421,6 +2448,12 @@ export class VerificationHarness {
 			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
 			await session.rpcClient.prompt(reminderPrompt);
+			// Wait for the agent to actually pick up the reminder before racing
+			// against waitForIdle — see _tryResumeFromSession for rationale. The
+			// live-session path is normally streaming when the reminder fires, but
+			// guard for consistency in case the kickoff turn ended without a tool
+			// call and the session is already idle.
+			await this.sessionManager!.waitForStreaming(sessionId, 10_000).catch(() => {});
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(sessionId, timeoutMs).then(() => ({ type: "idle" as const })),
@@ -2460,11 +2493,48 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Build the kickoff message sent to a QA-tester sub-agent. Exposed as a
+	 * static helper so unit tests can assert that the resolved component name
+	 * is threaded into a `[QA-TEST CONTEXT]` block. The /qa-test skill reads
+	 * this block in Step 1 to disambiguate when multiple components carry
+	 * `config.qa_start_command`.
+	 */
+	static buildQaKickoffMessage(args: {
+		stepName: string;
+		prompt?: string;
+		branch?: string;
+		commit?: string;
+		componentName?: string;
+	}): string {
+		const contextBlock = args.componentName
+			? `[QA-TEST CONTEXT]\ncomponent: ${args.componentName}\n\n`
+			: "";
+		return [
+			`Perform QA testing for: "${args.stepName}".`,
+			`Your working directory is on branch \`${args.branch || "HEAD"}\` at commit \`${args.commit || "HEAD"}\`.`,
+			"",
+			`${contextBlock}${args.prompt || ""}`,
+			"",
+			"## Screenshots",
+			"When taking screenshots for the report, call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its absolute path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src=\"file:///<path>\">` — never paste base64 strings into the report (they bloat the transcript and burn tokens). For smaller files you can also pass `format: \"jpeg\", quality: 75`.",
+			"",
+			"## Submitting Results",
+			"After completing all scenarios, call `verification_result` to submit your results:",
+			'- `verdict`: "pass" or "fail"',
+			"- `summary`: detailed markdown summary — headings, bullet lists, specific findings with file references",
+			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the server reads it directly, so large reports with embedded base64 screenshots work without hitting tool output limits). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
+			"- `report_html`: inline HTML report string (only for small reports; for reports with screenshots, always use report_html_file instead)",
+			"",
+			"This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.",
+		].join("\n");
+	}
+
+	/**
 	 * Spawn a one-shot test-engineer sub-agent to perform QA testing.
 	 * Similar to runLlmReviewViaSession() but with test-engineer role and QA-specific prompt.
 	 */
 	private async runAgentQaStep(
-		step: { name: string; prompt?: string; timeout?: number; role?: string },
+		step: { name: string; prompt?: string; timeout?: number; role?: string; component?: string },
 		cwd: string,
 		goalId: string,
 		builtinVars: Record<string, string>,
@@ -2500,32 +2570,30 @@ export class VerificationHarness {
 		}
 		const combinedPrompt = sections.join("\n");
 
-		// Compute timeout: qa_max_duration_minutes + 5 min buffer
-		const projectVars = this.resolveProjectConfigStore(goalId)?.getWithDefaults() ?? {};
-		const qaMinutes = parseInt(projectVars["qa_max_duration_minutes"] || "10", 10) || 10;
+		// Compute timeout: qa_max_duration_minutes + 5 min buffer.
+		// `qa_max_duration_minutes` lives on the owning component's `config`
+		// map. Most agent-qa steps now declare `component:` explicitly; for
+		// legacy gates without it, fall back to the first component carrying
+		// `qa_start_command`, then a project-name match, then `components[0]`.
+		const pcs = this.resolveProjectConfigStore(goalId);
+		const componentName = step.component
+			?? this.resolveDefaultQaComponentName(goalId)
+			?? "";
+		const qaMinutes = pcs?.getQaMaxDurationMinutes(componentName) ?? 10;
 		const qaTimeoutMs = (qaMinutes + 5) * 60 * 1000;
 		const timeoutMs = Math.max(qaTimeoutMs, (step.timeout || 900) * 1000);
 
-		// Build kickoff message
-		const kickoff = [
-			`Perform QA testing for: "${step.name}".`,
-			`Your working directory is on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`.`,
-			"",
-			step.prompt || "",
-			"",
-			"## Screenshots",
-			"When taking screenshots for the report, call `browser_screenshot(includeBase64=true)`. The screenshot is saved to disk and the tool returns its absolute path in a `[screenshot_file]<path>[/screenshot_file]` text block. Reference screenshots in your HTML report via `<img src=\"file:///<path>\">` — never paste base64 strings into the report (they bloat the transcript and burn tokens). For smaller files you can also pass `format: \"jpeg\", quality: 75`.",
-			"",
-			"## Submitting Results",
-			"After completing all scenarios, call `verification_result` to submit your results:",
-			'- `verdict`: "pass" or "fail"',
-			"- `summary`: detailed markdown summary — headings, bullet lists, specific findings with file references",
-			"- `report_html_file`: path to an HTML report file on disk (PREFERRED — the server reads it directly, so large reports with embedded base64 screenshots work without hitting tool output limits). Write the report in your working directory (e.g. `qa-report.html`) and pass the filename.",
-			"- `report_html`: inline HTML report string (only for small reports; for reports with screenshots, always use report_html_file instead)",
-			"",
-			"This tool call is REQUIRED. Do not emit <verdict> or <qa_report> XML tags.",
-		].join("\n");
-
+		// Build kickoff message via the testable static helper. Threads the
+		// resolved `componentName` into a `[QA-TEST CONTEXT]` block when present,
+		// so the /qa-test skill picks the correct component (see
+		// .claude/skills/qa-test/SKILL.md Step 1).
+		const kickoff = VerificationHarness.buildQaKickoffMessage({
+			stepName: step.name,
+			prompt: step.prompt,
+			branch: builtinVars.branch,
+			commit: builtinVars.commit,
+			componentName,
+		});
 		let qaSessionId: string | undefined;
 		let qaLastErroredToolOutput: string | null = null;
 		let qaErrListenerUnsub: (() => void) | undefined;
@@ -2660,6 +2728,9 @@ export class VerificationHarness {
 			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
 			await session.rpcClient.prompt(qaReminderPrompt);
+			// Wait for the agent to actually pick up the reminder before racing
+			// against waitForIdle — see _tryResumeFromSession for rationale.
+			await this.sessionManager!.waitForStreaming(qaSessionId, 10_000).catch(() => {});
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
 				this.sessionManager!.waitForIdle(qaSessionId, timeoutMs).then(() => ({ type: "idle" as const })),
@@ -2871,6 +2942,19 @@ export class VerificationHarness {
 				console.log(`[verification] Detected JSON/arg-validation glitch in ${subSessionId}, sending targeted retry prompt`);
 			}
 			await rpc.prompt(legacyReminderPrompt);
+			// Wait briefly for the agent to acknowledge the reminder (agent_start)
+			// before racing against agent_end — mirror of SessionManager.waitForStreaming
+			// for the legacy direct-RpcBridge path.
+			await new Promise<void>((resolve) => {
+				const t = setTimeout(() => { try { unsub(); } catch { /* ignore */ } resolve(); }, 10_000);
+				const unsub = rpc.onEvent((event: any) => {
+					if (event.type === "agent_start") {
+						clearTimeout(t);
+						try { unsub(); } catch { /* ignore */ }
+						resolve();
+					}
+				});
+			}).catch(() => {});
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),

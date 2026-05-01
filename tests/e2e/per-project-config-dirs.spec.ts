@@ -9,7 +9,8 @@
  */
 import { test, expect } from "./gateway-harness.js";
 import { apiFetch, readE2EToken, nonGitCwd } from "./e2e-setup.js";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 
 /** Register a project via the REST API and return its id + rootPath.
@@ -132,6 +133,51 @@ test.describe("Per-project Config Directories", () => {
 		expect(leaked, `Custom dir '${resolvedCustomPath}' should NOT appear in system config dirs`).toBeFalsy();
 	});
 
+	test("add custom directory persists across page reload and writes native YAML on disk", async ({ page }) => {
+		// Reviewer-required: spec says config_directories must have reload-persistence
+		// and on-disk native-YAML coverage.
+		await openApp(page, `/settings/${projectId}/directories`);
+		await expect(page.getByText("Add Custom Path")).toBeVisible({ timeout: 15_000 });
+
+		const customPath = `e2e-reload-${Date.now()}`;
+		const resolvedCustomPath = resolve(customPath);
+
+		const pathInput = page.locator("input[type='text'][placeholder*='my-config-dir'], input[type='text'][placeholder*='path']");
+		await pathInput.fill(customPath);
+		const skillsCheckbox = page.locator("label").filter({ hasText: "Skills" }).locator("input[type='checkbox']");
+		await skillsCheckbox.check();
+		await page.getByRole("button", { name: "Add", exact: true }).click();
+		await expect(page.getByText("Saved successfully")).toBeVisible({ timeout: 10_000 });
+
+		// Reload — change must still be visible in the UI after a hard refresh.
+		await page.reload();
+		await expect(page.getByText("Add Custom Path")).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("code", { hasText: resolvedCustomPath })).toBeVisible({ timeout: 10_000 });
+
+		// Disk assertion: project.yaml uses native YAML (no escaped JSON).
+		const rootPath = nonGitCwd();
+		const yamlPath = join(rootPath, ".bobbit", "config", "project.yaml");
+		const yamlText = readFileSync(yamlPath, "utf-8");
+		expect(yamlText, "config_directories must be a real YAML list, not an escaped JSON string")
+			.toMatch(/config_directories:\s*(\n|$)/);
+		// No JSON.stringify-style payload like: config_directories: '[{"path":...
+		expect(yamlText).not.toMatch(/config_directories:\s*['"]\[/);
+		// No backslash-escaped JSON quotes.
+		expect(yamlText).not.toMatch(/\\"path\\"/);
+		// The path appears under it as a native YAML scalar (server stores
+		// the relative path as-typed; the API layer resolves on read).
+		expect(yamlText).toMatch(new RegExp(`path:\\s+${customPath}\\b`));
+
+		// Cleanup: remove the entry via the UI. Walk up to the closest row
+		// container (a flex row containing both the path code element and its
+		// Remove button) and click that row's Remove button.
+		const pathCode = page.locator("code", { hasText: resolvedCustomPath }).first();
+		const removeBtn = pathCode.locator("xpath=ancestor::div[contains(@class,'flex')][1]").locator("button[title='Remove directory']");
+		await removeBtn.click();
+		await expect(page.getByText("Saved successfully")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("code", { hasText: resolvedCustomPath })).not.toBeVisible({ timeout: 5_000 });
+	});
+
 	test("project config dirs API endpoint stores data correctly", async () => {
 		// Direct API test: PUT config_directories to the project endpoint and verify
 		const skillsPath = `api-test-skills-${Date.now()}`;
@@ -141,10 +187,12 @@ test.describe("Per-project Config Directories", () => {
 			{ path: mcpPath, types: ["mcp", "tools"] },
 		];
 
+		// Native-YAML migration: server now rejects JSON-string payloads for
+		// `config_directories`; send the structured array directly.
 		const putResp = await apiFetch(`/api/projects/${projectId}/config`, {
 			method: "PUT",
 			body: JSON.stringify({
-				config_directories: JSON.stringify(customDirs),
+				config_directories: customDirs,
 				skill_directories: null,
 			}),
 		});

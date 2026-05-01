@@ -14,13 +14,19 @@ worktree_root: <optional override>
 sandbox: none | docker
 sandbox_image: bobbit-agent
 sandbox_tokens: [...]               # project-level
-qa_start_command: ...               # project-level (used by agent-qa step type)
-qa_health_check: ...
-qa_browser_entry: ...
-qa_env: { ... }
-config_directories: [...]
+config_directories: [...]           # project-level
 
-components: [Component, ...]        # the only collection
+components:                         # the only collection
+  - name: web
+    repo: "."
+    commands: { build: npm run build, test: npm test }
+    config:                         # opaque key→string map; consumed by skills like /qa-test
+      qa_start_command:        "PORT=$PORT NODE_ENV=test npm start"
+      qa_health_check:         "http://127.0.0.1:$PORT/api/health"
+      qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+      qa_max_duration_minutes: "10"
+      qa_max_scenarios:        "5"
+
 workflows: { id: WorkflowDef, ... } # bespoke, inline
 ```
 
@@ -79,6 +85,46 @@ componentRoot = <branch-container> / (component.repo === "." ? "" : component.re
 
 In single-repo, `<branch-container>` *is* the repo's worktree, so `componentRoot` collapses to `<branch-container>` (with optional `relative_path` appended). In multi-repo, the branch container is a sibling-repo container directory.
 
+### Monorepo subprojects
+
+A **monorepo** is one git repo at `rootPath` containing multiple workspace packages (pnpm/npm/yarn workspaces, Nx, Turbo, Lerna, Cargo workspace, Go workspace, Gradle multi-module). Model each workspace package as its own component, all sharing `repo: "."` with distinct `relative_path` values. The project-assistant scaffolding scan auto-detects these manifests and feeds candidate package paths into the assistant's prompt.
+
+Key rules:
+
+- Every component has `repo: "."` (one git repo for all of them).
+- `relative_path` is the workspace package's path inside the repo (e.g. `packages/api`, `apps/web`, `crates/server`).
+- The component `name` is a slugified version of the package name (`@acme/api` → `api`).
+- `commands` invoke the workspace tool with the package selector — **not** raw `npm run build` from the package directory, because most workspace tools need to be invoked from the repo root with a filter so they pick up shared dependencies and incremental caches.
+- A `worktree_setup_command` is typically only needed once at the root (e.g. `pnpm install --frozen-lockfile`); set it on a single component rather than duplicating across every package.
+
+```yaml
+# pnpm workspace example: 3 components, all repo: ".", distinct relative_path.
+components:
+  - name: api
+    repo: "."
+    relative_path: packages/api
+    worktree_setup_command: pnpm install --frozen-lockfile --prefer-offline
+    commands:
+      build: pnpm --filter @acme/api build
+      test:  pnpm --filter @acme/api test
+      check: pnpm --filter @acme/api check
+  - name: web
+    repo: "."
+    relative_path: apps/web
+    commands:
+      build: pnpm --filter @acme/web build
+      test:  pnpm --filter @acme/web test
+      e2e:   pnpm --filter @acme/web exec playwright test
+  - name: shared
+    repo: "."
+    relative_path: packages/shared
+    commands:
+      build: pnpm --filter @acme/shared build
+      test:  pnpm --filter @acme/shared test
+```
+
+For a monorepo like this, the per-component and all-components fan-out scaffolds are often the right starting point — the assistant should consider them explicitly and recommend them when they fit, but they are not pre-checked by component count. The assistant must justify each workflow it proposes against the project's actual components and commands.
+
 ## 3. Workflow gates
 
 ```yaml
@@ -119,6 +165,30 @@ workflows:
 | `manual` | boolean? | user must explicitly mark passed (no automatic verify) |
 | `metadata` | map? | declared metadata schema for signals; values resolved via `{{agent.X}}`/`{{<gate>.meta.X}}` |
 | `verify` | VerifyStep[] | verification steps (see §4) |
+
+### 3.1 The implementation gate is a Ralph loop
+
+The `implementation` gate's `verify` list is the agent's loop body. When verification
+fails, the gate runner reports the failed steps to the implementing agent, which
+fixes the code and re-signals the gate. The agent circles back through the same
+verify list until it passes — this is the **Ralph loop**.
+
+Practical implications when authoring workflows:
+
+- **Verify steps must be self-contained checks**, not setup actions. The agent
+  re-runs all of them on each iteration; a step that mutates external state
+  (publishes a package, opens a PR) belongs in `ready-to-merge`, not `implementation`.
+- **Phase your steps so cheap signals fail fast**: phase 0 = build, phase 1 = parallel
+  test/check, phase 2 = expensive LLM reviews, phase 3 = optional QA. The runner
+  short-circuits later phases when an earlier phase fails, so the Ralph loop spends
+  its iterations on the cheapest signal that's still red.
+- **Always include a gap-analysis step at design-time AND post-implementation**
+  (except quick-fix). Design-time gap analysis catches missing requirements before
+  the agent burns iterations; post-impl gap analysis catches drift between design
+  and code. The `general`, `feature`, and per-component templates in this guide include both — use them as starting points when they fit the project.
+- **The `description` field on the gate** surfaces in the project-proposal panel
+  and the goal dashboard. Use it to remind reviewers that this gate is a loop, not
+  a checkpoint.
 
 ## 4. Verification step shapes
 
@@ -168,19 +238,20 @@ Reviewer agent. Runs against the diff between the goal's branch and master, with
 
 ### 4.3 `type: agent-qa`
 
-QA agent. Stands up the project-level `qa_start_command` testbed and drives a real browser through scenarios. Requires `qa_start_command` to be set at project level — the validator warns (does not reject) if missing.
+QA agent. Stands up the owning component's `config.qa_start_command` testbed (as identified by the step's `component:` field) and drives a real browser through scenarios. Requires that at least one component carries `config.qa_start_command` — the validator warns (does not reject) if missing.
 
 ```yaml
 - name: "QA testing"
   type: agent-qa
   role: qa-tester
+  component: web                   # which component's config.qa_start_command testbed to start
   phase: 3
   optional: true
   label: Enable QA Testing
   description: Spawn a QA agent that builds, starts the server, and drives a real browser through scenarios.
   prompt: |
-    Stand up the ephemeral testbed (qa_start_command), plan 3-5 scenarios,
-    drive the browser, submit `verification_result`.
+    Stand up the ephemeral testbed (the owning component's `config.qa_start_command`),
+    plan 3-5 scenarios, drive the browser, submit `verification_result`.
 ```
 
 ## 5. Runtime context tokens
@@ -201,11 +272,15 @@ These are substituted by the gate runner before the step executes. **Do not** us
 
 These are the typical gate sets per workflow style. Generators MAY extend, prune, or reorder freely.
 
+> All non-quick-fix flows below include **both** a design-time gap-analysis step
+> (in `design-doc` / `issue-analysis`) and a post-implementation gap-analysis step
+> (in `implementation`, phase 2). See §3.1 — these two checks bracket the Ralph loop.
+
 ### 6.1 `general` — lightweight
 
 ```yaml
-- design-doc       (content, llm-review)
-- implementation   (build, check, unit, e2e in phase 1; llm-review in phase 2)
+- design-doc       (content; design-review + gap-analysis llm-review)
+- implementation   (build/check/unit/e2e in phase 1; gap-analysis + code-review llm-review in phase 2)  # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push, fast-forward, PR exists)
 ```
@@ -213,8 +288,8 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.2 `feature` — full design + impl + multi-review + optional QA
 
 ```yaml
-- design-doc       (content; design + gap-analysis llm-review)
-- implementation   (build/check/unit/e2e, gap+code+security llm-review, optional agent-qa)
+- design-doc       (content; design-review + gap-analysis llm-review)
+- implementation   (build/check/unit/e2e, gap+code+security llm-review, optional agent-qa)             # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push/fast-forward/PR)
 ```
@@ -222,9 +297,9 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.3 `bug-fix` — TDD
 
 ```yaml
-- issue-analysis   (content, llm-review)
+- issue-analysis   (content; analysis + gap-analysis llm-review)
 - reproducing-test (command with expect: failure; metadata declares test_command)
-- implementation   (build/check/unit/e2e, llm-review)
+- implementation   (build/check/unit/e2e, llm-review)                                                  # Ralph loop
 - documentation
 - ready-to-merge
 ```
@@ -232,9 +307,18 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.4 `quick-fix` — minimal
 
 ```yaml
-- implementation   (build/check/unit/e2e)
+- implementation   (build/check/unit/e2e)   # Ralph loop, minimal — no gap analysis
 - ready-to-merge
 ```
+
+### 6.5 Per-component & all-components flows (multi-component projects)
+
+When `components.length > 1`, the project assistant's workflow-suggestion checklist may offer two derived families on top of the canonical templates (no options are pre-checked — the assistant picks them only when they fit the project):
+
+- **Per-component flow** (one entry per component) — a `feature`-shaped workflow scoped to a single component's commands. Built by `buildPerComponentWorkflow(componentName, allComponents)` in `src/server/state-migration/per-component-workflows.ts`. Use when a goal touches only one repo.
+- **All-components fan-out flow** — a single `general`-shaped workflow whose `implementation` gate runs `build`/`check`/`unit`/`e2e` across every component with a `commands` map (data-only components are skipped) using `phase:` to parallelise. Built by `buildAllComponentsWorkflow(components)`.
+
+Both helpers reuse the canonical prompts and `readyToMergeGate()` exported by `seed-default-workflows.ts` so gate semantics stay in one place. Don't hand-roll variants in `project.yaml::workflows` — derive from these helpers instead so renaming a step prompt updates every flow.
 
 ### 6.5 `pr-review` (opt-in)
 
@@ -254,16 +338,6 @@ sandbox_tokens:
   - { key: ANTHROPIC_OAUTH_TOKEN, enabled: true  }
   - { key: GITHUB_TOKEN,          enabled: true  }
 
-qa_build_command: npm run build
-qa_start_command: |
-  PORT=$PORT WORK_DIR=$WORK_DIR BOBBIT_DIR=$WORK_DIR/.bobbit
-  BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1
-  node dist/server/cli.js --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR
-qa_health_check:  http://127.0.0.1:$PORT/api/health
-qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
-qa_max_duration_minutes: 10
-qa_max_scenarios: 5
-
 components:
   - name: bobbit
     repo: "."
@@ -273,6 +347,14 @@ components:
       check: npm run check
       unit:  npx playwright test --config tests/playwright.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
       e2e:   npx playwright test --grep-invert 'mcp-integration|session-lifecycle-ui' --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+    config:
+      # QA testbed config — read by the /qa-test skill via the agent-qa step's component field.
+      # Env vars are inlined into qa_start_command itself; there is no separate qa_env field.
+      qa_start_command: "BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1 BOBBIT_SKIP_NPM_CI=1 node dist/server/cli.js --host 127.0.0.1 --port $PORT --no-tls --auth --cwd $WORK_DIR"
+      qa_health_check:         "http://127.0.0.1:$PORT/api/health"
+      qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+      qa_max_duration_minutes: "10"
+      qa_max_scenarios:        "5"
 
 workflows:
   general:

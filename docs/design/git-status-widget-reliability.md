@@ -2,6 +2,8 @@
 
 Goal spec: the session and goal-dashboard git-status widgets disappear on first-fetch failure, have no safety poll, and the server re-scans the whole working tree on every call with no caching. Make the widget always visible when a repo might exist, resilient to transient failure, and fast on warm cache.
 
+> **Perf revision (2026-04-30).** The server-side worker described in §5 and §7 has been replaced. The host path now lives in `src/server/skills/git-status-native.ts` (`runBatchGitStatusNative`) and fans out direct `git.exe` calls via `child_process.execFile` (argv array, no shell) in two parallel `Promise.all` phases — Phase A resolves branch/primary/porcelain/upstream metadata, Phase B fans out the four ahead/behind counts once Phase A has the primary ref. There is no Git Bash dependency on Windows. The in-server retry loop and the duplicate handler-level retry are both gone — a single `execFile` per git call with a 3s timeout, fast-fail; client-side retry (§2) is the only resilience layer. `GIT_STATUS_TTL_MS` is now `2000` (was `750`) so dashboard fan-out and visibility refreshes coalesce more aggressively. The container path (`containerId` set) preserves the legacy single `docker exec sh -c '<batch>'` round-trip — inside Linux containers `git` is fast and parallel `docker exec` would multiply daemon round-trips. `runBatchGitStatusCount` increments exactly once per `batchGitStatus` call. The numbered constants and code samples below (e.g. `GIT_STATUS_TTL_MS = 750`, `timeout: 15000`, the "Phase A 3s / Phase B 12s" split) reflect the original reliability work and are kept for historical context.
+
 ---
 
 ## 1. Tri-state repo detection

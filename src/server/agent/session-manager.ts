@@ -31,6 +31,7 @@ import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
 import { isTransientReviewError } from "./verification-logic.js";
@@ -243,18 +244,50 @@ const WS_BUFFER_OVERFLOW_BYTES = 4 * 1024 * 1024; // 4 MiB
 const WS_BUFFER_WARN_BYTES = 1 * 1024 * 1024;     // 1 MiB — log only
 const _warnedClients = new WeakSet<WebSocket>();
 
+/**
+ * Tracks clients for which a deferred-terminate re-check is in flight. When
+ * `bufferedAmount` first crosses the overflow threshold we don't terminate
+ * immediately — we schedule a 10 ms re-check. The kernel TCP send buffer
+ * often drains transient spikes within that window (we saw this consistently
+ * on Windows + Playwright workers=3 chasing the ST-DEDUP-01 flake family).
+ * If `bufferedAmount` is still over the threshold during the deferred check,
+ * we terminate. We still attempt the current send — if the client survives,
+ * the frame is delivered; if not, `ws` queues it and discards on close.
+ *
+ * Decision logic lives in `src/server/ws-overflow-guard.ts` for testability.
+ */
+const _pendingOverflowCheck = new WeakSet<WebSocket>();
+
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
 	for (const client of clients) {
 		if (client.readyState !== 1) continue;
 		const buffered = (client as any).bufferedAmount ?? 0;
-		if (buffered > WS_BUFFER_OVERFLOW_BYTES) {
+		const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
+			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+			warnBytes: WS_BUFFER_WARN_BYTES,
+		});
+		if (action.kind === "send-and-defer-check" && !_pendingOverflowCheck.has(client)) {
+			_pendingOverflowCheck.add(client);
 			console.warn(
-				`[ws] dropping client with bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; ` +
-				`client will reconnect. Last msg type=${(msg as any).type}.`,
+				`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
 			);
-			try { client.terminate(); } catch { /* ignore */ }
-			continue;
+			setTimeout(() => {
+				_pendingOverflowCheck.delete(client);
+				if (client.readyState !== 1) return;
+				const bufferedNow = (client as any).bufferedAmount ?? 0;
+				const recheck = decideOverflowAction(bufferedNow, /* isDeferredRecheck */ true, {
+					overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+					warnBytes: WS_BUFFER_WARN_BYTES,
+				});
+				if (recheck.kind === "terminate") {
+					console.warn(
+						`[ws] confirmed overflow after 10ms drain attempt: ${bufferedNow}B; terminating client. ` +
+						`Last msg type=${(msg as any).type}.`,
+					);
+					try { client.terminate(); } catch { /* ignore */ }
+				}
+			}, 10);
 		}
 		if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
 			_warnedClients.add(client);
@@ -319,11 +352,9 @@ export interface SessionManagerOptions {
 	toolManager?: ToolManager;
 	/** Group policy store for resolving group-level default tool grant policies */
 	groupPolicyStore?: ToolGroupPolicyStore;
-	/** Workflow store for injecting into GoalManager */
-	workflowStore?: import("./workflow-store.js").WorkflowStore;
 	/** Preferences store for aigw auto-model detection */
 	preferencesStore?: import("./preferences-store.js").PreferencesStore;
-	/** Project config store for reading project defaults (e.g. default_thinking_level) */
+	/** Project config store for reading project defaults */
 	projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	/** Project context manager for per-project store resolution */
 	projectContextManager?: ProjectContextManager;
@@ -346,7 +377,6 @@ export class SessionManager {
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
-	private workflowStore?: import("./workflow-store.js").WorkflowStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
 	private mcpManager: McpManager | null = null;
@@ -525,7 +555,6 @@ export class SessionManager {
 		this.toolManager = options?.toolManager;
 		this.groupPolicyStore = options?.groupPolicyStore;
 		this.preferencesStore = options?.preferencesStore;
-		this.workflowStore = options?.workflowStore;
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
 		if (this.projectContextManager) {
@@ -537,7 +566,7 @@ export class SessionManager {
 			this._testStore = new SessionStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
-			this._testGoalManager = new GoalManager(new GoalStore(stateDir), options?.workflowStore);
+			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
 	}
@@ -747,7 +776,7 @@ export class SessionManager {
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
-			buildWorkflowList: () => this._buildWorkflowList(),
+			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 		};
 	}
 
@@ -907,9 +936,9 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, setupCommand?: string, targetSize = 2, components?: import("./project-config-store.js").Component[], worktreeRoot?: string): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string): void {
 		if (this.worktreePools.has(projectId)) return;
-		const pool = new WorktreePool({ repoPath, targetSize, setupCommand, components, worktreeRoot });
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -923,9 +952,10 @@ export class SessionManager {
 	}
 
 	/** @deprecated Use initWorktreePoolForProject instead. */
-	initWorktreePool(repoPath: string, setupCommand?: string, targetSize = 2): void {
-		// Legacy shim — uses empty string as key for backward compat
-		this.initWorktreePoolForProject("", repoPath, setupCommand, targetSize);
+	initWorktreePool(repoPath: string, _setupCommand?: string, targetSize = 2): void {
+		// Legacy shim — uses empty string as key for backward compat. setupCommand
+		// is ignored; canonical path is `components[*].worktreeSetupCommand`.
+		this.initWorktreePoolForProject("", repoPath, undefined, targetSize);
 	}
 
 	/** Get the worktree pool for a specific project. */
@@ -988,8 +1018,14 @@ export class SessionManager {
 	}
 
 	/** Build a markdown list of available workflows for the goal assistant prompt. */
-	private _buildWorkflowList(): string {
-		const workflows = this.workflowStore?.getAll();
+	private _buildWorkflowList(projectId?: string): string {
+		let workflows: import("./workflow-store.js").Workflow[] = [];
+		if (projectId && this.configCascade) {
+			workflows = this.configCascade.resolveWorkflows(projectId).map(r => r.item);
+		} else if (projectId && this.projectContextManager) {
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (ctx) workflows = ctx.workflowStore.getAll();
+		}
 		if (!workflows || workflows.length === 0) {
 			return 'Use **general** as a safe default.';
 		}
@@ -1127,7 +1163,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (session.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(session.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				const reattemptId = (this.resolveStoreForSession(session.id).get(session.id) as any)?.reattemptGoalId;
 				if (reattemptId) {
@@ -1917,6 +1953,9 @@ export class SessionManager {
 		// Broadcast to UI clients
 		const roleName = session.role || "general";
 		const role = this.roleManager?.getRole(roleName);
+		// Stamp seq+ts so client reducer can order this frame relative to live
+		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
+		const { seq, ts } = session.eventBuffer.pushFrame();
 		broadcast(session.clients, {
 			type: "tool_permission_needed",
 			toolName,
@@ -1924,6 +1963,8 @@ export class SessionManager {
 			roleName: role?.name ?? roleName,
 			roleLabel: role?.label ?? roleName,
 			lastPromptText: session.lastPromptText,
+			seq,
+			ts,
 		});
 
 		return promise;
@@ -2389,7 +2430,7 @@ export class SessionManager {
 			}
 			assistantGoalSpec += assistantDef.prompt;
 			if (ps.assistantType === "goal") {
-				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList());
+				assistantGoalSpec = assistantGoalSpec.replace('{{AVAILABLE_WORKFLOWS}}', this._buildWorkflowList(ps.projectId));
 				// Inject re-attempt context if this is a re-attempt session
 				if (ps.reattemptGoalId) {
 					const origGoal = this.resolveGoal(ps.reattemptGoalId);
@@ -2822,6 +2863,42 @@ export class SessionManager {
 	}
 
 	/**
+	 * Wait for a session to enter the streaming state.
+	 * Returns immediately if already streaming.
+	 * Rejects on timeout (callers typically `.catch(() => {})` to fall through).
+	 *
+	 * Symmetric to `waitForIdle` — used after dispatching a prompt to a resumed
+	 * session that is currently idle, so the caller can confirm the new turn
+	 * has actually started before racing against `waitForIdle` again.
+	 */
+	waitForStreaming(sessionId: string, timeoutMs = 10_000): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) return Promise.reject(new Error("Session not found"));
+		if (session.status === "streaming") return Promise.resolve();
+
+		return new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				unsub();
+				reject(new Error(`Timeout waiting for session ${sessionId} to start streaming`));
+			}, timeoutMs);
+
+			const unsub = session.rpcClient.onEvent((event: any) => {
+				if (event.type === "agent_start") {
+					clearTimeout(timer);
+					unsub();
+					resolve();
+				}
+				if (event.type === "process_exit") {
+					clearTimeout(timer);
+					unsub();
+					const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+					reject(new Error(`Agent process exited unexpectedly (${reason}) for session ${sessionId}`));
+				}
+			});
+		});
+	}
+
+	/**
 	 * Get the final assistant output from a session's messages.
 	 */
 	async getSessionOutput(sessionId: string): Promise<string> {
@@ -3021,7 +3098,7 @@ export class SessionManager {
 		}
 	}
 
-	/** Apply default_thinking_level from preferences (per-model) or project config (legacy). */
+	/** Apply default thinking level from preferences (per-model). */
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
 		// 0. Role override (highest non-explicit precedence). Failure is non-fatal
 		// — matches the existing thinking-level fallback behaviour.
@@ -3037,13 +3114,10 @@ export class SessionManager {
 			}
 		}
 
-		// Prefer per-model thinking preference, fall back to project config, then "medium"
+		// Use the per-model thinking preference (system-scope), default to "medium".
 		let level: string | undefined;
 		if (this.preferencesStore) {
 			level = this.preferencesStore.get("default.sessionThinkingLevel") as string | undefined;
-		}
-		if (!level && this.projectConfigStore) {
-			level = this.projectConfigStore.get("default_thinking_level");
 		}
 		// Default to "medium" when not configured — matches the Settings page
 		// display default and ensures team/delegate agents get an explicit level
@@ -3780,6 +3854,55 @@ export class SessionManager {
 				execFile("git", ["push", "-u", "origin", targetBranch], { cwd: r.worktreePath, timeout: 30_000 }).catch(() => { /* non-fatal */ });
 			}
 		}
+	}
+
+	/**
+	 * Generate a title for any session by id — live or archived. Returns the
+	 * generated title, or null if no messages were available. Persists the
+	 * title and broadcasts to any connected clients (live sessions only).
+	 * Used by `POST /api/sessions/:id/generate-title` for the rename dialog
+	 * when the user is editing a non-focused session.
+	 */
+	async generateTitleForAnySession(id: string): Promise<string | null> {
+		const live = this.sessions.get(id);
+		if (live && live.status !== "terminated") {
+			const msgsResp = await live.rpcClient.getMessages();
+			if (!msgsResp.success) return null;
+			const messages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(messages) || messages.length === 0) return null;
+			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
+			if (!title) return null;
+			live.title = title;
+			this.resolveStoreForSession(live.id).update(live.id, { title });
+			broadcast(live.clients, { type: "session_title", sessionId: live.id, title });
+			return title;
+		}
+
+		// Archived or dormant — read messages from .jsonl without restoring the agent.
+		const store = this.resolveStoreForId(id);
+		const ps = store?.get(id);
+		if (!ps || !ps.agentSessionFile) return null;
+		let messages: unknown[] = [];
+		try {
+			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			if (content) {
+				for (const line of content.trim().split("\n")) {
+					if (!line.trim()) continue;
+					try {
+						const entry = JSON.parse(line);
+						if (entry.type === "message" && entry.message) messages.push(entry.message);
+					} catch { /* skip malformed */ }
+				}
+			}
+		} catch {
+			messages = [];
+		}
+		if (messages.length === 0) return null;
+		const title = await generateSessionTitle(messages as any[], this.getTitleGenOptions());
+		if (!title) return null;
+		store?.update(id, { title });
+		return title;
 	}
 
 	async autoGenerateTitle(session: SessionInfo): Promise<void> {
@@ -4771,31 +4894,26 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * when sandbox_tokens is not set.
  */
 function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
-	const tokensRaw = projectConfig?.get("sandbox_tokens") || "";
+	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
-	if (tokensRaw) {
+	if (entries.length > 0) {
 		const result: Record<string, string> = {};
-		try {
-			const entries: { key: string; value?: string; enabled: boolean }[] = JSON.parse(tokensRaw);
-			if (Array.isArray(entries)) {
-				const secrets = secretsStore?.getAll() || {};
-				for (const entry of entries) {
-					if (!entry.enabled || !entry.key) continue;
-					// Check secrets store first, then fall back to inline value (pre-migration)
-					const explicitValue = secrets[entry.key] || entry.value;
-					if (explicitValue) {
-						result[entry.key] = explicitValue;
-					} else {
-						// Empty value = resolve from host
-						const resolved = resolveHostTokenValue(entry.key, prefs);
-						if (resolved) {
-							result[entry.key] = resolved;
-						}
-					}
+		const secrets = secretsStore?.getAll() || {};
+		for (const entry of entries) {
+			if (!entry.enabled || !entry.key) continue;
+			// Check secrets store first, then fall back to inline value (pre-migration).
+			const explicitValue = secrets[entry.key] || entry.value;
+			if (explicitValue) {
+				result[entry.key] = explicitValue;
+			} else {
+				// Empty value = resolve from host.
+				const resolved = resolveHostTokenValue(entry.key, prefs);
+				if (resolved) {
+					result[entry.key] = resolved;
 				}
 			}
-		} catch { /* ignore parse errors */ }
+		}
 		return result;
 	}
 

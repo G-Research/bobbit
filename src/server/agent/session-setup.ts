@@ -147,7 +147,7 @@ export interface PipelineContext {
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
-	buildWorkflowList: () => string;
+	buildWorkflowList: (projectId?: string) => string;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -288,7 +288,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 		assistantGoalSpec += assistantDef.prompt;
 		if (plan.assistantType === "goal") {
-			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList());
+			assistantGoalSpec = assistantGoalSpec.replace("{{AVAILABLE_WORKFLOWS}}", ctx.buildWorkflowList(plan.projectId));
 			if (plan.reattemptGoalId) {
 				const origGoal = ctx.goalManager.getGoal(plan.reattemptGoalId);
 				if (origGoal) {
@@ -588,9 +588,14 @@ export async function executeWorktreeAsync(
 		worktreeCwd = preBuiltWorktreePath;
 		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
 	} else {
+		// Resolve setup hook from the default (first) component when available.
+		// Multi-repo session creation goes through the worktree pool / sandbox
+		// path; this fallback handles the single-repo non-sandboxed path.
+		const defaultComponent = ctx.projectConfigStore?.getComponents()?.[0];
+		const setupCommand = defaultComponent?.worktreeSetupCommand || undefined;
 		worktreeCwd = await withRetry(
 			async () => {
-				const result = await createWorktree(plan.repoPath!, plan.branch!);
+				const result = await createWorktree(plan.repoPath!, plan.branch!, { setupCommand });
 				return result.worktreePath;
 			},
 			{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },

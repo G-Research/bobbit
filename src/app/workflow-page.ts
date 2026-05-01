@@ -13,7 +13,7 @@ import {
 } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
-import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
+import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, renderConfigScopeRow, revertOverride } from "./config-scope.js";
 
 // ============================================================================
 // CONSTANTS
@@ -86,6 +86,13 @@ export async function loadWorkflowPageData(): Promise<void> {
 	vstepDragStepIdx = null;
 	vstepDropTarget = null;
 	emptyPhases = new Map();
+	// Workflows are project-scoped only — if the shared config scope is
+	// "system", auto-switch to the first project before fetching. Other
+	// config pages keep their System tab.
+	if (getConfigScope() === "system") {
+		const firstProject = (state.projects || [])[0];
+		if (firstProject) setConfigScope(firstProject.id);
+	}
 	renderApp();
 	workflows = await fetchWorkflowsScoped();
 	loading = false;
@@ -375,7 +382,7 @@ async function handleSave(): Promise<void> {
 			name: editName,
 			description: editDescription,
 			gates: gatesWithDeps,
-		});
+		}, getConfigProjectId() || undefined);
 		if (result) {
 			workflows = await fetchWorkflowsScoped();
 			showEdit(result);
@@ -881,7 +888,7 @@ export async function saveWorkflowFromPanel(): Promise<boolean> {
 				name: editName,
 				description: editDescription,
 				gates: compactedGates,
-			});
+			}, getConfigProjectId() || undefined);
 			if (result) {
 				selectedWorkflow = result;
 				isNew = false;
@@ -1001,15 +1008,12 @@ async function handleScopeChange(scope: string): Promise<void> {
 }
 
 function renderWorkflowRow(wf: Workflow): TemplateResult {
-	const origin = (wf as any).origin as ConfigOrigin | undefined;
-	const overrides = (wf as any).overrides as ConfigOrigin | undefined;
-	const inherited = isInherited(origin);
 	return html`
-		<div class="wf-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
+		<div class="wf-row" tabindex="0" role="button"
 			@click=${() => showEdit(wf)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(wf); } }}>
 			<div class="wf-row-info">
-				<span class="wf-row-name">${wf.name} ${renderOriginBadge(origin, overrides)}</span>
+				<span class="wf-row-name">${wf.name}</span>
 				<span class="wf-row-desc">${wf.description}</span>
 			</div>
 			<div class="wf-row-badges">
@@ -1031,6 +1035,15 @@ function renderWorkflowRow(wf: Workflow): TemplateResult {
 }
 
 function renderListView(): TemplateResult {
+	// No projects — workflows live in projects, so invite the user to add one.
+	if ((state.projects || []).length === 0) {
+		return html`
+			<div class="wf-empty">
+				<p class="wf-empty-title">No projects yet</p>
+				<p class="wf-empty-desc">Workflows live inside projects. Add a project from the sidebar to start defining workflows.</p>
+			</div>
+		`;
+	}
 	if (loading) {
 		return html`
 			<div class="wf-loading">
@@ -1057,7 +1070,15 @@ function renderListView(): TemplateResult {
 	}
 
 	return html`
-		<p class="text-sm text-muted-foreground mb-6" style="max-width: 600px; margin-inline: auto;">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
+		<div style="max-width: 600px; margin: 0 auto 16px;" class="flex items-start gap-4">
+			<p class="text-sm text-muted-foreground flex-1 m-0">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
+			<div class="shrink-0">${Button({
+				variant: "default",
+				size: "sm",
+				onClick: createWorkflowAssistantSession,
+				children: html`<span class="inline-flex items-center gap-1.5 font-semibold">${icon(Plus, "sm")} New Workflow</span>`,
+			})}</div>
+		</div>
 		<div class="wf-list">
 			${workflows.map((wf) => renderWorkflowRow(wf))}
 		</div>
@@ -1266,60 +1287,28 @@ function renderEditView(): TemplateResult {
 // ============================================================================
 
 function renderCustomizeRevertButtons(): TemplateResult | string {
+	// Workflows are project-scoped only — there is no builtin or server
+	// layer to inherit from, so the only meaningful action is reverting a
+	// project-level override (i.e. removing the workflow from project.yaml).
 	if (!selectedWorkflow || isNew) return "";
 	const origin = (selectedWorkflow as any).origin as ConfigOrigin | undefined;
-	if (!origin) return "";
-
-	const scope = getConfigScope();
+	if (origin !== "project") return "";
 	const projectId = getConfigProjectId();
-
-	if (scope === "system") {
-		if (origin === "builtin") {
-			return html`<button class="config-action-btn" @click=${async () => {
-				if (await customizeItem("workflows", selectedWorkflow!.id, "server")) {
-					workflows = await fetchWorkflowsScoped();
-					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
-					if (updated) showEdit(updated);
-				}
-			}}>Customize at Server Level</button>`;
+	return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
+		if (await revertOverride("workflows", selectedWorkflow!.id, "project", projectId)) {
+			workflows = await fetchWorkflowsScoped();
+			const updated = workflows.find(w => w.id === selectedWorkflow!.id);
+			if (updated) showEdit(updated); else showList();
 		}
-		if (origin === "server") {
-			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
-				if (await revertOverride("workflows", selectedWorkflow!.id, "server")) {
-					workflows = await fetchWorkflowsScoped();
-					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
-					if (updated) showEdit(updated); else showList();
-				}
-			}}>Revert to Builtin</button>`;
-		}
-	} else {
-		if (origin === "builtin" || origin === "server") {
-			return html`<button class="config-action-btn" @click=${async () => {
-				if (await customizeItem("workflows", selectedWorkflow!.id, "project", projectId)) {
-					workflows = await fetchWorkflowsScoped();
-					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
-					if (updated) showEdit(updated);
-				}
-			}}>Customize for ${getCurrentProjectName()}</button>`;
-		}
-		if (origin === "project") {
-			return html`<button class="config-action-btn config-action-btn--revert" @click=${async () => {
-				if (await revertOverride("workflows", selectedWorkflow!.id, "project", projectId)) {
-					workflows = await fetchWorkflowsScoped();
-					const updated = workflows.find(w => w.id === selectedWorkflow!.id);
-					if (updated) showEdit(updated); else showList();
-				}
-			}}>Revert to Inherited</button>`;
-		}
-	}
-	return "";
+	}}>Revert to Inherited</button>`;
 }
 
-export function renderWorkflowPage(): TemplateResult {
+export function renderWorkflowPage(opts?: { embedded?: boolean }): TemplateResult {
+	const embedded = !!opts?.embedded;
 	return html`
 		<div class="wf-container">
-			${renderNavBar()}
-			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange) : ""}
+			${embedded ? "" : renderNavBar()}
+			${!embedded && currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange, true) : ""}
 			<div class="wf-body">
 				${currentView === "list" ? renderListView() : renderEditView()}
 			</div>

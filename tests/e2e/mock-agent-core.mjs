@@ -80,6 +80,67 @@ export class MockAgentCore {
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
 		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
 
+		// Live-update flow: two consecutive propose_project tool calls in the
+		// same turn. Checked BEFORE the more general project_proposal substring
+		// match because LIVE_UPDATE_PROPOSAL also contains "proposal".
+		if (text.includes("LIVE_UPDATE_PROPOSAL")) {
+			return { liveUpdateProposal: true };
+		}
+
+		// Per-component config flow: two consecutive propose_project calls.
+		// First emits components with `config:` populated; second emits the
+		// same components without `config:` (only `commands:`). Tests that
+		// the per-component shallow-merge in onProjectProposal preserves the
+		// previously-proposed `config` map.
+		if (text.includes("COMPONENT_CONFIG_PROPOSAL")) {
+			return { componentConfigProposal: true };
+		}
+
+		// Multi-component proposal with structured components + workflows.
+		if (text.includes("MULTI_COMPONENT_PROPOSAL")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Multi Comp Project",
+					root_path: "/tmp/multi-comp",
+					components: [
+						{ name: "api", repo: ".", relative_path: "packages/api", commands: { build: "npm run build:api", test: "npm test --workspace=api" } },
+						{ name: "web", repo: ".", relative_path: "packages/web", commands: { build: "npm run build:web", test: "npm test --workspace=web" } },
+					],
+					workflows: {
+						"feature-api": {
+							id: "feature-api",
+							name: "Feature (api)",
+							description: "Feature flow scoped to the api component.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+						"feature-web": {
+							id: "feature-web",
+							name: "Feature (web)",
+							description: "Feature flow scoped to the web component.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+						"all-components": {
+							id: "all-components",
+							name: "All Components",
+							description: "Fan-out flow that builds every component in parallel.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+					},
+				},
+				output: "Multi-component project proposal submitted.",
+			};
+		}
+
 		if (lower.includes("project_proposal") || lower.includes("project proposal")) {
 			return {
 				tool: "propose_project",
@@ -90,9 +151,19 @@ export class MockAgentCore {
 					test_command: "npm test",
 					typecheck_command: "npm run check",
 					worktree_setup_command: "npm ci",
+					qa_start_command: "npm run dev",
 				},
 				output: "Project proposal submitted.",
 			};
+		}
+
+		// Burst of two consecutive `propose_*` tool calls in two separate
+		// assistant turns, each followed by a toolResult. Used by ST-DEDUP-02
+		// to prove the unified message-ordering reducer keeps both widgets in
+		// order without overwriting (regression: legacy single-slot deferred
+		// assistant message overwrote the first widget when the second arrived).
+		if (lower.includes("proposal_burst")) {
+			return { proposalBurst: true };
 		}
 
 		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
@@ -236,14 +307,37 @@ export class MockAgentCore {
 			return;
 		}
 
+		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>.
+		// Emits N message_update deltas (each with a single tool_use whose input
+		// grows on each delta), then message_end + tool_execution_* + agent_end.
+		// Block id is stable so RemoteAgent's _processedProposalIds dedup engages.
+		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)/);
+		if (proposeStreamMatch) {
+			await this._handleStreamingProposal(proposeStreamMatch[1], parseInt(proposeStreamMatch[2], 10));
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
 		const toolAction = MockAgentCore.respondToPrompt(text);
 
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
 		} else if (toolAction && toolAction.askUserChoices) {
 			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+		} else if (toolAction && toolAction.liveUpdateProposal) {
+			await this._handleLiveUpdateProposal();
+		} else if (toolAction && toolAction.componentConfigProposal) {
+			await this._handleComponentConfigProposal();
 		} else if (toolAction && toolAction.activateSkill) {
 			await this._handleActivateSkill(toolAction.activateSkill);
+		} else if (toolAction && toolAction.proposalBurst) {
+			await this._handleProposalBurst();
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.previewSnapshot) {
@@ -424,11 +518,11 @@ export class MockAgentCore {
 		const questions = multi
 			? [
 				{ question: "Which colors?", options: ["red", "blue", "green"], multi: true, tab_label: "Colors" },
-				{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true, tab_label: "Team size" },
+				{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
 			]
 			: [
 				{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
-				{ question: "Team size?", options: ["small", "medium", "large"], allow_other: true, tab_label: "Team size" },
+				{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
 			];
 
 		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
@@ -556,6 +650,71 @@ export class MockAgentCore {
 		}
 	}
 
+	/**
+	 * Burst two consecutive `propose_*` tool-call assistant turns followed by
+	 * matching toolResults. Each propose_* assistant turn is its own message
+	 * (so the legacy `_deferredAssistantMessage` slot would have overwritten
+	 * the first when the second arrived); the unified reducer keeps both
+	 * widgets in chronological order keyed by their tool_use id.
+	 */
+	async _handleProposalBurst() {
+		const proposals = [
+			{
+				tool: "propose_goal",
+				input: {
+					title: "Burst Goal A",
+					workflow: "general",
+					spec: "first proposal in the burst",
+				},
+			},
+			{
+				tool: "propose_role",
+				input: {
+					name: "burst-role-b",
+					label: "Burst Role B",
+					prompt: "second proposal in the burst",
+					tools: "",
+					accessory: "none",
+				},
+			},
+		];
+		for (const p of proposals) {
+			const toolId = `tool_burst_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+			const toolName = p.tool;
+			this.emit({ type: "tool_execution_start", toolName, toolId, input: p.input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: toolName, arguments: p.input, input: p.input },
+				],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(5);
+			this.emit({ type: "message_end", message: assistantMsg });
+
+			const output = `${toolName} proposal accepted`;
+			this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName,
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+			await this.tick(5);
+		}
+		const finalMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: "BURST_DONE_E2E" }],
+		};
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+	}
+
 	_handleMultiTool(multiTool) {
 		const contentBlocks = [];
 		for (const action of multiTool) {
@@ -608,6 +767,206 @@ export class MockAgentCore {
 				{ type: "text", text: "Preview panel is open and will auto-update." },
 				{ type: "text", text: "__preview_snapshot_v1__\n" + html },
 			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/** Live-update test driver: emit two consecutive propose_project tool
+	 *  calls in the same turn. The first carries components only; the second
+	 *  carries the same components plus a workflows map. This proves the
+	 *  client merges structured side-tables across calls (Bug C live-update
+	 *  fix) and re-renders the panel for each call. */
+	async _handleLiveUpdateProposal() {
+		const components = [
+			{ name: "api", repo: ".", relative_path: "packages/api", commands: { build: "npm run build:api" } },
+			{ name: "web", repo: ".", relative_path: "packages/web", commands: { build: "npm run build:web" } },
+		];
+		const firstInput = {
+			name: "Live Update Project",
+			root_path: "/tmp/live-update",
+			components,
+		};
+		const secondInput = {
+			name: "Live Update Project",
+			root_path: "/tmp/live-update",
+			components,
+			workflows: {
+				"feature-api": {
+					id: "feature-api",
+					name: "Feature (api)",
+					description: "Feature flow scoped to the api component.",
+					gates: [
+						{ id: "design-doc", name: "Design Document", verify: [] },
+						{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+					],
+				},
+				"feature-web": {
+					id: "feature-web",
+					name: "Feature (web)",
+					description: "Feature flow scoped to the web component.",
+					gates: [
+						{ id: "design-doc", name: "Design Document", verify: [] },
+						{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+					],
+				},
+			},
+		};
+
+		const emitOne = (input, label) => {
+			const toolId = `tool_propose_project_${label}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+			this.emit({ type: "tool_execution_start", toolName: "propose_project", toolId, input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "propose_project", arguments: input, input }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			const output = `Proposal (${label}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId, toolName: "propose_project", status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "propose_project", isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "propose_project",
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		emitOne(firstInput, "first");
+		await this.tick(60);
+		emitOne(secondInput, "second");
+	}
+
+	async _handleComponentConfigProposal() {
+		// First call: components carry `config:` populated with qa_* keys.
+		const firstInput = {
+			name: "CompConfig Project",
+			root_path: "/tmp/comp-config",
+			components: [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "npm run build", test: "npm test" },
+					config: {
+						qa_start_command: "PORT=$PORT NODE_ENV=test npm start",
+						qa_health_check: "http://127.0.0.1:$PORT/health",
+						qa_max_duration_minutes: "10",
+					},
+				},
+				{ name: "api", repo: ".", commands: { build: "npm run build:api" } },
+			],
+		};
+		// Second call: same components but WITHOUT `config:` — the per-component
+		// shallow merge in session-manager.onProjectProposal must preserve the
+		// previously-proposed `config` map on web.
+		const secondInput = {
+			name: "CompConfig Project",
+			root_path: "/tmp/comp-config",
+			components: [
+				{ name: "web", repo: ".", commands: { build: "npm run build", test: "npm test" } },
+				{ name: "api", repo: ".", commands: { build: "npm run build:api" } },
+			],
+		};
+
+		const emitOne = (input, label) => {
+			const toolId = `tool_propose_project_${label}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+			this.emit({ type: "tool_execution_start", toolName: "propose_project", toolId, input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "propose_project", arguments: input, input }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			const output = `Proposal (${label}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId, toolName: "propose_project", status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "propose_project", isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "propose_project",
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		emitOne(firstInput, "first");
+		await this.tick(60);
+		emitOne(secondInput, "second");
+	}
+
+	/** Stream a propose_<type> tool_use across N message_update deltas, then
+	 *  emit message_end + tool_execution_start/end. */
+	async _handleStreamingProposal(type, n) {
+		const toolId = `tool_propose_${type}_${Date.now()}`;
+		const toolName = `propose_${type}`;
+		// Per-type input shape — keep the title/name field stable after first delta.
+		const paragraph = (i) => `Paragraph ${i}: ` + "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(2);
+		const growSpec = (count) => Array.from({ length: count }, (_, i) => paragraph(i + 1)).join("\n\n");
+		const buildInput = (deltaIdx) => {
+			const grown = growSpec(deltaIdx + 1);
+			switch (type) {
+				case "goal":
+					return { title: "E2E Streaming Goal", workflow: "general", spec: grown };
+				case "role":
+					return { name: "e2e-stream-role", label: "E2E Stream Role", prompt: grown, tools: "", accessory: "none" };
+				case "tool":
+					return { tool: "e2e_stream_tool", action: "docs", content: grown };
+				case "staff":
+					return { name: "e2e-stream-staff", description: "E2E", prompt: grown, triggers: "[]", cwd: "" };
+				case "setup":
+					return { action: "system-prompt", content: grown };
+				case "workflow":
+					return { id: "e2e-stream-wf", name: "E2E Stream Workflow", description: grown, gates: "[]" };
+				case "project":
+					return { name: "E2E Stream Project", root_path: "/tmp/e2e-stream", build_command: "npm run build" };
+				default:
+					return { spec: grown };
+			}
+		};
+
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+			const input = buildInput(i);
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: toolName, arguments: input, input },
+				],
+			};
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(60);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+
+		// Final message_end carries the complete tool_use block.
+		const finalInput = buildInput(n - 1);
+		const finalMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: toolName, arguments: finalInput, input: finalInput },
+			],
+		};
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+
+		this.emit({ type: "tool_execution_start", toolName, toolId, input: finalInput });
+		const output = "Proposal submitted.";
+		this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: false });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError: false,
+			content: [{ type: "text", text: output }],
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });

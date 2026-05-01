@@ -57,11 +57,6 @@ export interface SeededVerifyStep {
 export interface SeededGate {
 	id: string;
 	name: string;
-	depends_on?: string[];
-	content?: boolean;
-	inject_downstream?: boolean;
-	/** Manual gate — no LLM verify steps, signalled by the user. */
-	manual?: boolean;
 	/**
 	 * Self-documenting gate-level prose (nested goals —
 	 * docs/design/nested-goals.md §14.4). Surfaced in the dashboard's
@@ -69,6 +64,11 @@ export interface SeededGate {
 	 * without external docs.
 	 */
 	description?: string;
+	depends_on?: string[];
+	content?: boolean;
+	inject_downstream?: boolean;
+	/** Manual gate — no LLM verify steps, signalled by the user. */
+	manual?: boolean;
 	metadata?: Record<string, string>;
 	verify?: SeededVerifyStep[];
 }
@@ -80,8 +80,11 @@ export interface SeededWorkflow {
 	gates: SeededGate[];
 }
 
+/** Ralph-loop description applied to canonical implementation gates. */
+export const RALPH_LOOP_DESCRIPTION = "Ralph loop: implement the design, then run the verification suite. Failures circle the agent back to fix-and-retry until the gate passes.";
+
 /** Standard "Ready to Merge" verification gate — identical across all four flows. */
-function readyToMergeGate(): SeededGate {
+export function readyToMergeGate(): SeededGate {
 	return {
 		id: "ready-to-merge",
 		name: "Ready to Merge",
@@ -94,7 +97,7 @@ function readyToMergeGate(): SeededGate {
 	};
 }
 
-const DOC_PROMPT = `Review documentation for the changes on branch {{branch}} vs origin/{{master}}.
+export const DOC_PROMPT = `Review documentation for the changes on branch {{branch}} vs origin/{{master}}.
 
 Run \`git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see all changes.
 Read the key documentation files: AGENTS.md, README.md, and files in docs/.
@@ -114,14 +117,14 @@ The goal spec is:
 
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
-const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, and completeness. Verify:
+export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, and completeness. Verify:
 1. Approach is clearly described with rationale
 2. File changes are listed with specific descriptions
 3. Acceptance criteria are specific and testable
 4. Edge cases and error handling are considered
 5. **E2E test plan** — the design MUST include a section describing browser-based E2E tests that validate the user journey end-to-end. If no E2E test plan section is present, FAIL this review.`;
 
-const GAP_ANALYSIS_DESIGN_PROMPT = `Compare the goal specification to this design document.
+export const GAP_ANALYSIS_DESIGN_PROMPT = `Compare the goal specification to this design document.
 
 The goal spec is:
 {{goal_spec}}
@@ -134,7 +137,7 @@ Identify:
 
 Use your tools to read the design document content from the signal.`;
 
-const GAP_ANALYSIS_IMPL_PROMPT = `Compare the goal specification and design document to the actual implementation on this branch.
+export const GAP_ANALYSIS_IMPL_PROMPT = `Compare the goal specification and design document to the actual implementation on this branch.
 
 The goal spec is:
 {{goal_spec}}
@@ -147,7 +150,7 @@ Identify:
 2. Acceptance criteria not met by the code changes
 3. Implemented behavior that contradicts the specification`;
 
-const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
+export const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
 
 Start with \`git diff --stat origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed.
 Then use \`git diff origin/{{master}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes.
@@ -160,7 +163,7 @@ Check:
 4. Code style — consistent naming, no dead code, clear intent
 5. Test coverage — are new behaviors tested?`;
 
-const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{master}}.
+export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{master}}.
 
 Run \`git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
 
@@ -219,17 +222,20 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				inject_downstream: true,
 				verify: [
 					{ name: "Design review", type: "llm-review", role: "architect", prompt: DESIGN_REVIEW_PROMPT },
+					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", prompt: GAP_ANALYSIS_DESIGN_PROMPT },
 				],
 			},
 			{
 				id: "implementation",
 				name: "Implementation",
+				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
+					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 				],
 			},
@@ -263,6 +269,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 			{
 				id: "implementation",
 				name: "Implementation",
+				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
@@ -276,11 +283,12 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 						name: "QA testing",
 						type: "agent-qa",
 						role: "qa-tester",
+						component: c,
 						phase: 3,
 						optional: true,
 						label: "Enable QA Testing",
 						description: "Spawn a QA agent that builds, starts the server, and drives a real browser through scenarios.",
-						prompt: "Stand up the ephemeral testbed (qa_start_command), plan 3-5 scenarios, drive the browser, submit `verification_result`.",
+						prompt: "Stand up the ephemeral testbed (component config.qa_start_command), plan 3-5 scenarios, drive the browser, submit `verification_result`.",
 					},
 				],
 			},
@@ -331,6 +339,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 			{
 				id: "implementation",
 				name: "Implementation",
+				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["reproducing-test"],
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
@@ -362,6 +371,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 			{
 				id: "implementation",
 				name: "Implementation",
+				description: "Ralph loop (minimal): build, test, review.",
 				verify: [
 					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },

@@ -1,3 +1,10 @@
+/**
+ * Each `on*Proposal` callback now accepts a second `streaming: boolean`
+ * argument. `streaming === true` means input is still arriving; consumers
+ * must keep their `*Edited` gating intact and must not commit destructive
+ * actions on streaming-mode fires. The streaming flag itself is owned by
+ * `state.ts` (see `proposalStreamingByTag` / `isProposalStreaming`).
+ */
 export interface ProposalParser {
 	tag: string;
 	fields: string[];
@@ -32,7 +39,7 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 	},
 	{
 		tag: "setup_proposal",
-		fields: ["action", "content", "language", "framework", "testing", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "session_model", "review_model", "naming_model"],
+		fields: ["action", "content", "language", "framework", "testing", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command"],
 		requiredFields: ["action"],
 		callbackName: "onSetupProposal",
 	},
@@ -44,7 +51,7 @@ export const PROPOSAL_PARSERS: ProposalParser[] = [
 	},
 	{
 		tag: "project_proposal",
-		fields: ["name", "root_path", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "worktree_setup_command", "qa_start_command", "sandbox", "session_model", "review_model", "naming_model"],
+		fields: ["name", "root_path", "build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command", "worktree_setup_command", "worktree_root", "worktree_pool_size"],
 		requiredFields: ["name", "root_path"],
 		callbackName: "onProjectProposal",
 	},

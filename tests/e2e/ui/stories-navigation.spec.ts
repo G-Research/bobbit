@@ -178,12 +178,18 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await expect(s.page.getByText("Tools").first())
 			.toBeVisible({ timeout: 10_000 });
 
-		// Deep link: workflows
+		// Deep link: workflows. The standalone /#/workflows route now
+		// redirects to #/settings/<projectId>/workflows (workflows are
+		// project-scoped). navigateToHash() asserts startsWith("#/workflows")
+		// which would race the redirect, so set the hash directly and wait
+		// for either the pre- or post-redirect form.
 		s.act();
-		await navigateToHash(s.page, "#/workflows");
+		await s.page.evaluate(() => { window.location.hash = "#/workflows"; });
 		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/workflows"), { timeout: 5_000 });
+		await s.page.waitForFunction(() => {
+			const h = window.location.hash;
+			return h.startsWith("#/workflows") || /^#\/settings\/[^/]+\/workflows/.test(h);
+		}, { timeout: 10_000 });
 		await expect(s.page.getByText("Workflows").first())
 			.toBeVisible({ timeout: 10_000 });
 

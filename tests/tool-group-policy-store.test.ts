@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { ToolGroupPolicyStore } = await import("../dist/server/agent/tool-group-policy-store.js");
+const { ToolGroupPolicyStore } = await import("../src/server/agent/tool-group-policy-store.ts");
 
 let tmpDir: string;
 

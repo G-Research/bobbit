@@ -76,7 +76,10 @@ export class ImageModelSelector extends DialogBase {
 	override async firstUpdated(changedProperties: PropertyValues): Promise<void> {
 		super.firstUpdated(changedProperties);
 		await this.updateComplete;
-		this.searchInputRef.value?.focus();
+		// Skip auto-focus on mobile to avoid summoning the on-screen keyboard.
+		const isMobile = typeof window !== "undefined" && typeof window.matchMedia === "function"
+			&& !window.matchMedia("(min-width: 640px)").matches;
+		if (!isMobile) this.searchInputRef.value?.focus();
 		this.addEventListener("keydown", (e: KeyboardEvent) => {
 			const filtered = this.getFilteredModels();
 			if (e.key === "ArrowDown") {

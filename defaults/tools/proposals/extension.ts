@@ -11,6 +11,19 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
+// Legacy top-level QA keys that were moved into per-component `config:` maps.
+// Reject at the top level of `propose_project` payloads with the same message
+// the REST PUT uses, so agents migrate to `components[<name>].config.<key>`.
+const LEGACY_QA_KEYS_REJECTED = [
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+] as const;
+
 export default function (pi: ExtensionAPI) {
 	function ack() {
 		return {
@@ -135,7 +148,6 @@ export default function (pi: ExtensionAPI) {
 			test_unit_command: Type.Optional(Type.String({ description: "Unit test command" })),
 			test_e2e_command: Type.Optional(Type.String({ description: "E2E test command" })),
 			worktree_setup_command: Type.Optional(Type.String({ description: "Worktree setup command" })),
-			qa_start_command: Type.Optional(Type.String({ description: "QA start command" })),
 			sandbox: Type.Optional(Type.String({ description: "Sandbox mode (e.g. 'docker')" })),
 			session_model: Type.Optional(Type.String({ description: "Default session model (provider/model-id)" })),
 			review_model: Type.Optional(Type.String({ description: "Reviewer model (provider/model-id)" })),
@@ -147,10 +159,45 @@ export default function (pi: ExtensionAPI) {
 				relative_path: Type.Optional(Type.String({ description: "Optional sub-path inside the repo" })),
 				worktree_setup_command: Type.Optional(Type.String({ description: "Per-component setup hook" })),
 				commands: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Flat name → shell. Absent ⇒ data-only." })),
+				config: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Per-component opaque key→string config (max 100 entries; consumed by skills like /qa-test, e.g. qa_start_command, qa_health_check, qa_browser_entry, qa_max_duration_minutes, qa_max_scenarios)." })),
 			}), { description: "Project components. Single-repo: one component with repo='.'." })),
 			workflows: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Inline workflows keyed by id; structurally validated server-side." })),
+			config_directories: Type.Optional(Type.Array(Type.Object({
+				path: Type.String(),
+				types: Type.Array(Type.String()),
+			}), { description: "Custom config directories scanned for skills/mcp/tools/agents." })),
+			sandbox_tokens: Type.Optional(Type.Array(Type.Object({
+				key: Type.String(),
+				enabled: Type.Boolean(),
+				value: Type.Optional(Type.String()),
+			}), { description: "Sandbox token list. Server strips `value` to SecretsStore on PUT." })),
 		}),
-		async execute() { return ack(); },
+		async execute(args: Record<string, unknown>) {
+			// Reject the seven legacy top-level qa_* keys — they live on components[*].config now.
+			for (const k of LEGACY_QA_KEYS_REJECTED) {
+				if (k in args) {
+					throw new Error(`${k} has moved to components[].config[]; set components[<name>].config.${k} instead`);
+				}
+			}
+			// Validate per-component `config` maps: max 100 entries, non-empty keys, string values.
+			const components = (args as { components?: Array<{ name?: string; config?: Record<string, unknown> }> }).components;
+			if (Array.isArray(components)) {
+				for (const c of components) {
+					if (!c || !c.config) continue;
+					const entries = Object.entries(c.config);
+					if (entries.length > 100) {
+						throw new Error(`components[${c.name ?? "?"}].config: too many entries (max 100, got ${entries.length})`);
+					}
+					for (const [k, v] of entries) {
+						if (!k) throw new Error(`components[${c.name ?? "?"}].config: empty key`);
+						if (typeof v !== "string") {
+							throw new Error(`components[${c.name ?? "?"}].config.${k}: must be string, got ${typeof v}`);
+						}
+					}
+				}
+			}
+			return ack();
+		},
 	});
 
 	console.log("[proposal-tools] Registered 8 proposal tools");

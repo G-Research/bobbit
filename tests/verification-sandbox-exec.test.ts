@@ -21,7 +21,7 @@ const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
-const { VerificationHarness } = await import("../dist/server/agent/verification-harness.js");
+const { VerificationHarness } = await import("../src/server/agent/verification-harness.ts");
 
 // ---------------------------------------------------------------------------
 // Mock helpers

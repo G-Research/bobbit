@@ -1168,9 +1168,12 @@ export interface Workflow {
 	updatedAt: number;
 }
 
-export async function fetchWorkflows(): Promise<Workflow[]> {
+export async function fetchWorkflows(projectId?: string): Promise<Workflow[]> {
 	try {
-		const res = await gatewayFetch("/api/workflows");
+		const url = projectId
+			? `/api/workflows?projectId=${encodeURIComponent(projectId)}`
+			: "/api/workflows";
+		const res = await gatewayFetch(url);
 		if (!res.ok) return [];
 		const data = await res.json();
 		return data.workflows || [];
@@ -1179,9 +1182,12 @@ export async function fetchWorkflows(): Promise<Workflow[]> {
 	}
 }
 
-export async function fetchWorkflow(id: string): Promise<Workflow | null> {
+export async function fetchWorkflow(id: string, projectId?: string): Promise<Workflow | null> {
 	try {
-		const res = await gatewayFetch(`/api/workflows/${encodeURIComponent(id)}`);
+		const url = projectId
+			? `/api/workflows/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`
+			: `/api/workflows/${encodeURIComponent(id)}`;
+		const res = await gatewayFetch(url);
 		if (!res.ok) return null;
 		return await res.json();
 	} catch {
@@ -1189,11 +1195,15 @@ export async function fetchWorkflow(id: string): Promise<Workflow | null> {
 	}
 }
 
-export async function createWorkflow(workflow: { id: string; name: string; description: string; gates: WorkflowGate[] }): Promise<Workflow | null> {
+export async function createWorkflow(workflow: { id: string; name: string; description: string; gates: WorkflowGate[] }, projectId?: string): Promise<Workflow | null> {
 	try {
-		const res = await gatewayFetch("/api/workflows", {
+		const url = projectId
+			? `/api/workflows?projectId=${encodeURIComponent(projectId)}`
+			: "/api/workflows";
+		const body = projectId ? { ...workflow, projectId } : workflow;
+		const res = await gatewayFetch(url, {
 			method: "POST",
-			body: JSON.stringify(workflow),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({}));

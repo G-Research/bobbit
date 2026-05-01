@@ -314,6 +314,15 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		baseUrl: normalizedUrl,
 		apiKey: "none",
 		api: "openai-completions",
+		// Provider-level header. pi-coding-agent's `resolveConfigValue` runs the
+		// `!cmd` form via `child_process.exec` (shell-interpreted) and drops the
+		// header entirely when stdout is empty — so when BOBBIT_SESSION_ID is
+		// unset, no `x-opencode-session` header is sent (no fallback constant).
+		// The literal here JSON-encodes to:
+		//   "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
+		headers: {
+			"x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`,
+		},
 		models: models.map(m => {
 			if (isClaudeModel(m.id)) {
 				return {
@@ -390,6 +399,18 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	if (existingUrl) {
 		console.log("[aigw] AI Gateway already configured:", existingUrl);
 		setBedrockEnvVars(existingUrl);
+		if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
+			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
+			return true;
+		}
+		try {
+			const models = await discoverAigwModels(existingUrl);
+			writeAigwModelsJson(existingUrl, models);
+			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
+		} catch (err: any) {
+			const msg = err?.message || String(err);
+			console.warn(`[aigw] gateway unreachable on startup (${msg}), keeping existing models.json`);
+		}
 		return true;
 	}
 

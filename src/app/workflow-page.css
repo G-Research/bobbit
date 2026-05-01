@@ -220,10 +220,7 @@
 	display: flex;
 	align-items: center;
 	gap: 2px;
-	opacity: 0;
-	transition: opacity 150ms;
 }
-.wf-row:hover .wf-row-actions { opacity: 1; }
 
 .wf-action-btn {
 	display: flex;
@@ -350,6 +347,40 @@
 .wf-add-gate-btn {
 	align-self: center;
 	margin-top: 4px;
+}
+
+/* Pseudo-card "Add" button — sits at the bottom of a list (e.g. components,
+ * gates) and visually matches the items in the list. Dashed border + plus icon
+ * read as "add another", and clicking expands into a real card. */
+.wf-add-card-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	width: 100%;
+	/* Match .wf-gate-header collapsed-row padding so the button height aligns
+	 * with a collapsed component/gate card. */
+	padding: 8px 12px;
+	border: 1px dashed var(--border);
+	border-radius: 8px;
+	background: transparent;
+	color: var(--muted-foreground);
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 150ms, border-color 150ms, color 150ms;
+}
+@media (max-width: 480px) {
+	.wf-add-card-btn { padding: 6px 8px; gap: 6px; }
+}
+.wf-add-card-btn:hover {
+	background: var(--secondary);
+	border-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+	color: var(--foreground);
+}
+.wf-add-card-btn:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
 }
 
 .wf-empty-artifacts {

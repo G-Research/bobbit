@@ -97,17 +97,29 @@ test.describe("Config page scope navigation", () => {
 		).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("workflows page shows scope row and origin badges", async ({ page }) => {
+	test("workflows page hides System tab and shows project tabs only", async ({ page }) => {
+		// Workflows are project-scoped only — the workflow-page omits the
+		// System tab (see config-scope.ts::renderConfigScopeRow excludeSystem).
+		// #/workflows now redirects synchronously to
+		// #/settings/<projectId>/workflows, so the workflow-page renders
+		// embedded inside the Settings page. The Settings page has its own
+		// top-level "System" tab strip — we scope the assertion to the
+		// embedded workflows-tab content, not the whole page.
 		await openApp(page);
-		await navigateToHash(page, "#/workflows");
+		await page.evaluate(() => { window.location.hash = "#/workflows"; });
+		await page.waitForFunction(
+			() => window.location.hash.includes("settings") && window.location.hash.includes("workflows"),
+			{ timeout: 10_000 },
+		);
 
-		await expect(
-			page.locator("button").filter({ hasText: "System" }).first()
-		).toBeVisible({ timeout: 10_000 });
+		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab).toBeVisible({ timeout: 10_000 });
 
-		await expect(
-			page.locator(".config-origin-badge").first()
-		).toBeVisible({ timeout: 10_000 });
+		// No "System" button inside the workflows tab itself (embedded mode
+		// skips renderConfigScopeRow entirely; this guards against regressions
+		// that re-introduce a system scope tab inside the workflow page).
+		const systemTabs = await tab.locator("button").filter({ hasText: /^System$/ }).count();
+		expect(systemTabs).toBe(0);
 	});
 
 	test("tools page shows scope row", async ({ page }) => {

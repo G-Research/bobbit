@@ -24,8 +24,6 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 
-import { buildDefaultWorkflows } from "./seed-default-workflows.js";
-
 interface MigrateOpts {
 	configDir: string;
 	projectName: string;
@@ -37,9 +35,124 @@ interface MigrateResult {
 	commandKeys?: string[];
 	workflowsMigrated?: number;
 	workflowsDirRemoved?: boolean;
-	/** True if `workflows:` was missing AND no project-local workflows dir existed,
-	 *  and the migration seeded the four canonical default workflows. */
-	workflowsSeeded?: boolean;
+}
+
+/** Legacy top-level QA keys that move into `components[*].config[]`. */
+const LEGACY_QA_KEYS = [
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+] as const;
+
+function shellQuoteSingle(v: string): string {
+	// Single-quote with internal '\'' escape for embedded quotes.
+	return `'${v.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Move legacy top-level qa_* keys onto a target component's `config:` map.
+ *  Inlines `qa_env` entries into `qa_start_command` (single-quoted shell-escape).
+ *  Idempotent: returns `{ changed: false }` when no legacy keys are present. */
+function migrateLegacyQaToComponent(
+	raw: Record<string, unknown>,
+	components: Array<Record<string, unknown>>,
+	projectName: string,
+): { changed: boolean } {
+	// Detect every legacy key that exists on `raw` *at all* — even empty
+	// strings or empty objects — so they get cleaned up. Acceptance: no
+	// top-level qa_* after boot. We split detection from emission below.
+	const keysOnRaw = LEGACY_QA_KEYS.filter(k => k in raw);
+	if (keysOnRaw.length === 0) return { changed: false };
+
+	// Subset that should actually be emitted into the target component's
+	// `config:` map (non-empty values only).
+	const present = keysOnRaw.filter(k => {
+		const v = raw[k];
+		if (v === undefined || v === null) return false;
+		if (typeof v === "string" && v.length === 0) return false;
+		if (typeof v === "object" && v !== null && !Array.isArray(v) && Object.keys(v).length === 0) return false;
+		return true;
+	});
+
+	// If there are only empty legacy keys (nothing to emit), still delete
+	// them so the on-disk shape is clean.
+	if (present.length === 0) {
+		for (const k of keysOnRaw) delete raw[k];
+		return { changed: true };
+	}
+
+	// Pick target component:
+	//   (1) component referenced by the first agent-qa step in any inline workflow
+	//   (2) else component whose `name === projectName`
+	//   (3) else components[0]
+	const wfs = (raw.workflows && typeof raw.workflows === "object" && !Array.isArray(raw.workflows))
+		? raw.workflows as Record<string, { gates?: Array<{ verify?: Array<{ type?: string; component?: string }> }> }>
+		: {};
+	let targetName: string | undefined;
+	outer: for (const wf of Object.values(wfs)) {
+		for (const g of wf.gates ?? []) {
+			for (const s of g.verify ?? []) {
+				if (s.type === "agent-qa" && typeof s.component === "string" && s.component) {
+					// Verify the referenced component actually exists; otherwise fall through.
+					if (components.some(c => typeof c.name === "string" && c.name === s.component)) {
+						targetName = s.component; break outer;
+					}
+				}
+			}
+		}
+	}
+	if (!targetName) {
+		const byName = components.find(c => typeof c.name === "string" && c.name === projectName);
+		if (byName) targetName = byName.name as string;
+	}
+	let usedFallback = false;
+	if (!targetName) {
+		const first = components[0];
+		if (first && typeof first.name === "string") {
+			targetName = first.name;
+			usedFallback = true;
+		}
+	}
+	if (!targetName) return { changed: false };  // genuinely no components
+
+	if (usedFallback) {
+		console.warn(`[migrate] qa_* settings: no agent-qa step or name-match found in ${projectName}; falling back to components[0] = "${targetName}"`);
+	}
+
+	const target = components.find(c => c.name === targetName);
+	if (!target) return { changed: false };
+
+	const cfg: Record<string, string> = (target.config && typeof target.config === "object" && !Array.isArray(target.config))
+		? { ...(target.config as Record<string, string>) } : {};
+
+	// Compose qa_start_command with qa_env inlined.
+	let startCmd = typeof raw.qa_start_command === "string" ? raw.qa_start_command : "";
+	const env = (raw.qa_env && typeof raw.qa_env === "object" && !Array.isArray(raw.qa_env))
+		? raw.qa_env as Record<string, unknown> : {};
+	const envPrefix = Object.entries(env)
+		.filter(([, v]) => v !== undefined && v !== null)
+		.map(([k, v]) => `${k}=${shellQuoteSingle(String(v))}`)
+		.join(" ");
+	if (envPrefix && startCmd) startCmd = `${envPrefix} ${startCmd}`;
+	else if (envPrefix && !startCmd) startCmd = envPrefix;
+
+	if (startCmd) cfg.qa_start_command = startCmd;
+	for (const k of ["qa_build_command", "qa_health_check", "qa_browser_entry"] as const) {
+		const v = raw[k];
+		if (typeof v === "string" && v.length > 0) cfg[k] = v;
+	}
+	for (const k of ["qa_max_duration_minutes", "qa_max_scenarios"] as const) {
+		const v = raw[k];
+		if (typeof v === "number" && Number.isFinite(v)) cfg[k] = String(Math.trunc(v));
+		else if (typeof v === "string" && /^\d+$/.test(v.trim())) cfg[k] = v.trim();
+	}
+
+	if (Object.keys(cfg).length > 0) target.config = cfg;
+	for (const k of LEGACY_QA_KEYS) delete raw[k];
+	return { changed: true };
 }
 
 /** Map legacy `*_command` key → component command name. */
@@ -88,7 +201,7 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 
 	// Bail out if there is genuinely nothing to migrate AND no workflows dir.
 	const hasLegacyCommands = Object.keys(LEGACY_KEY_MAP).some(k => isNonEmpty(raw[k]))
-		|| Object.keys(raw).some(k => k.endsWith("_command") && k !== "qa_start_command" && k !== "qa_build_command" && k !== "worktree_setup_command" && isNonEmpty(raw[k]));
+		|| Object.keys(raw).some(k => k.endsWith("_command") && k !== "worktree_setup_command" && !LEGACY_QA_KEYS.includes(k as typeof LEGACY_QA_KEYS[number]) && isNonEmpty(raw[k]));
 	const hasWorktreeHook = isNonEmpty(raw.worktree_setup_command);
 	const hasWorkflowsDir = fs.existsSync(workflowsDir) && fs.statSync(workflowsDir).isDirectory();
 
@@ -110,7 +223,8 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		if (!k.endsWith("_command")) continue;
 		if (k in LEGACY_KEY_MAP) continue;
 		// Skip project-level fields that happen to end in _command.
-		if (k === "qa_start_command" || k === "qa_build_command" || k === "worktree_setup_command") continue;
+		if (k === "worktree_setup_command") continue;
+		if (LEGACY_QA_KEYS.includes(k as typeof LEGACY_QA_KEYS[number])) continue;  // QA keys move to component config
 		const v = raw[k];
 		if (!isNonEmpty(v)) continue;
 		const newKey = k.slice(0, -"_command".length);
@@ -130,9 +244,8 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 	for (const k of Object.keys(LEGACY_KEY_MAP)) delete next[k];
 	for (const k of Object.keys(next)) {
 		if (k.endsWith("_command")
-			&& k !== "qa_start_command"
-			&& k !== "qa_build_command"
-			&& k !== "worktree_setup_command") {
+			&& k !== "worktree_setup_command"
+			&& !LEGACY_QA_KEYS.includes(k as typeof LEGACY_QA_KEYS[number])) {
 			delete next[k];
 		}
 	}
@@ -142,7 +255,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 	// Migrate `<configDir>/workflows/*.yaml` files into the inline block.
 	let workflowsMigrated = 0;
 	let workflowsDirRemoved = false;
-	let workflowsSeeded = false;
 	const preExistingInlineWorkflows = (raw.workflows && typeof raw.workflows === "object" && !Array.isArray(raw.workflows))
 		? { ...(raw.workflows as Record<string, unknown>) }
 		: {};
@@ -172,17 +284,16 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		}
 	}
 
-	// Seed default workflows if NONE are present (no inline workflows, no project-local dir).
-	// After Follow-up A deleted defaults/workflows/*.yaml, projects with no workflow source
-	// at all would be left with zero workflows — breaking goal creation entirely.
-	if (Object.keys(inlineWorkflows).length === 0) {
-		const defaults = buildDefaultWorkflows(opts.projectName);
-		for (const [id, wf] of Object.entries(defaults)) inlineWorkflows[id] = wf;
-		workflowsSeeded = true;
-	}
+	// No default-workflow seeding. Workflows are the project assistant's
+	// responsibility; a project may legitimately have zero workflows.
 	if (Object.keys(inlineWorkflows).length > 0) {
 		next.workflows = inlineWorkflows;
 	}
+
+	// Migrate legacy top-level qa_* keys onto the chosen component's config map.
+	// Done AFTER inlineWorkflows is wired in so the agent-qa step's `component:` field
+	// (if any) is visible to the target-picker.
+	migrateLegacyQaToComponent(next, [component], opts.projectName);
 
 	// Atomic write.
 	try {
@@ -207,7 +318,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		commandKeys: Object.keys(commands),
 		workflowsMigrated,
 		workflowsDirRemoved,
-		workflowsSeeded,
 	};
 }
 
@@ -234,8 +344,13 @@ function maybeSeedWorkflowsOnly(args: {
 
 	// If a workflows dir is present, migrate it into the inline block (mirrors the
 	// main path so the dir is removed and content is preserved). If neither inline
-	// nor dir, seed defaults.
-	if (hasInlineWorkflows && !hasWorkflowsDir) {
+	// nor dir, this is a no-op — no default seeding. If only legacy top-level qa_*
+	// keys remain, fall through so they get migrated onto the appropriate component's
+	// config (any presence of a legacy qa_* top-level key triggers a write — even
+	// empty values get deleted to satisfy the "no top-level qa_* after boot"
+	// acceptance criterion).
+	const hasLegacyQaTopLevel = LEGACY_QA_KEYS.some(k => k in raw);
+	if (hasInlineWorkflows && !hasWorkflowsDir && !hasLegacyQaTopLevel) {
 		return { migrated: false };
 	}
 
@@ -272,19 +387,18 @@ function maybeSeedWorkflowsOnly(args: {
 		}
 	}
 
-	let workflowsSeeded = false;
-	if (Object.keys(inlineWorkflows).length === 0) {
-		const defaults = buildDefaultWorkflows(componentName);
-		for (const [id, wf] of Object.entries(defaults)) inlineWorkflows[id] = wf;
-		workflowsSeeded = true;
-	}
+	// Migrate any legacy top-level qa_* keys onto the appropriate component's config.
+	// The components array is mutated in place; the same reference is then re-emitted in `next`.
+	const nextComponents = (components ?? []).map(c => ({ ...c }));
+	const nextRaw: Record<string, unknown> = { ...raw, components: nextComponents, workflows: inlineWorkflows };
+	const qaResult = migrateLegacyQaToComponent(nextRaw, nextComponents, projectName);
 
-	if (!workflowsSeeded && workflowsMigrated === 0) {
-		// Nothing changed.
+	if (workflowsMigrated === 0 && !qaResult.changed) {
+		// Nothing changed (no inline dir to migrate, no default seeding, no QA migration).
 		return { migrated: false };
 	}
 
-	const next = { ...raw, workflows: inlineWorkflows };
+	const next = nextRaw;
 	try {
 		fs.mkdirSync(configDir, { recursive: true });
 		const tmp = yamlFile + ".tmp";
@@ -295,9 +409,6 @@ function maybeSeedWorkflowsOnly(args: {
 		return { migrated: false };
 	}
 
-	if (workflowsSeeded) {
-		console.log(`[migrate] project.yaml: seeded default workflows for ${projectName} (component=${componentName})`);
-	}
 	if (workflowsMigrated > 0) {
 		console.log(`[migrate] project.yaml: inlined ${workflowsMigrated} workflow files for ${projectName}`);
 	}
@@ -307,7 +418,6 @@ function maybeSeedWorkflowsOnly(args: {
 		componentName,
 		workflowsMigrated,
 		workflowsDirRemoved,
-		workflowsSeeded,
 	};
 }
 

@@ -1,0 +1,356 @@
+/**
+ * API E2E — components[].config map (per-component opaque key→string).
+ *
+ * Verifies the REST surface for the post-migration component-config model:
+ *
+ *   1. PUT with structured `components: [{ name, repo, config: {...} }]` round-trips.
+ *   2. PUT with any of the seven legacy top-level qa_* keys → HTTP 400 with the
+ *      "moved to components[].config[]" guidance.
+ *   3. GET /api/projects/:id/qa-testing-config returns `{ configured: boolean }`,
+ *      true iff some component has a non-empty `config.qa_start_command`.
+ */
+import { test, expect } from "./in-process-harness.js";
+import { apiFetch } from "./e2e-setup.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+async function registerTmpProject(name: string): Promise<{ id: string; cleanup: () => void }> {
+	const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-"));
+	const res = await apiFetch("/api/projects", {
+		method: "POST",
+		body: JSON.stringify({ name, rootPath: dir }),
+	});
+	expect(res.status).toBe(201);
+	const proj = await res.json();
+	return {
+		id: proj.id,
+		cleanup: () => {
+			apiFetch(`/api/projects/${proj.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		},
+	};
+}
+
+const LEGACY_QA_KEYS = [
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+] as const;
+
+test.describe("Component config map (REST API)", () => {
+	test("PUT structured components[].config round-trips through GET", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-${Date.now()}`);
+		try {
+			const components = [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "npm run build", test: "npm test" },
+					config: {
+						qa_start_command: "PORT=$PORT NODE_ENV=test npm start",
+						qa_health_check: "http://127.0.0.1:$PORT/health",
+						qa_browser_entry: "http://127.0.0.1:$PORT/?token=$TOKEN",
+						qa_max_duration_minutes: "12",
+						qa_max_scenarios: "4",
+					},
+				},
+			];
+			const putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ components }),
+			});
+			expect(putRes.status).toBe(200);
+
+			// Components endpoint round-trips the config map.
+			const getRes = await apiFetch(`/api/projects/${id}/structured`);
+			expect(getRes.status).toBe(200);
+			const structured = await getRes.json();
+			const web = (structured.components ?? []).find((c: any) => c.name === "web");
+			expect(web).toBeTruthy();
+			expect(web.config).toEqual(components[0].config);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("PUT rejects all seven legacy top-level qa_* keys with migration message", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-reject-${Date.now()}`);
+		try {
+			for (const key of LEGACY_QA_KEYS) {
+				// Use a value type that would otherwise be valid (object for
+				// qa_env, number for qa_max_*; string for everything else).
+				const value: unknown = key === "qa_env"
+					? { FOO: "bar" }
+					: key.startsWith("qa_max_")
+						? 10
+						: "node server.js";
+				const res = await apiFetch(`/api/projects/${id}/config`, {
+					method: "PUT",
+					body: JSON.stringify({ [key]: value }),
+				});
+				expect(res.status, `${key} should be rejected at top level`).toBe(400);
+				const body = await res.json();
+				expect(body.error, `${key} error should mention the migration target`).toMatch(/components\[\]\.config\[\]/);
+				expect(body.error).toContain(key);
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("GET /qa-testing-config returns { configured: boolean } based on any component's config.qa_start_command", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-qa-${Date.now()}`);
+		try {
+			// Initially nothing configured.
+			let res = await apiFetch(`/api/projects/${id}/qa-testing-config`);
+			expect(res.status).toBe(200);
+			let body = await res.json();
+			expect(body).toEqual({ configured: false });
+
+			// Add a component with no qa_start_command — still false.
+			let putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", commands: { build: "npm run build" } }],
+				}),
+			});
+			expect(putRes.status).toBe(200);
+			res = await apiFetch(`/api/projects/${id}/qa-testing-config`);
+			body = await res.json();
+			expect(body).toEqual({ configured: false });
+
+			// Add qa_start_command on the component → configured: true.
+			putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{
+						name: "web",
+						repo: ".",
+						commands: { build: "npm run build" },
+						config: { qa_start_command: "PORT=$PORT npm start" },
+					}],
+				}),
+			});
+			expect(putRes.status).toBe(200);
+			res = await apiFetch(`/api/projects/${id}/qa-testing-config`);
+			body = await res.json();
+			expect(body).toEqual({ configured: true });
+
+			// Empty string for qa_start_command → still false.
+			putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{
+						name: "web",
+						repo: ".",
+						commands: { build: "npm run build" },
+						config: { qa_start_command: "" },
+					}],
+				}),
+			});
+			expect(putRes.status).toBe(200);
+			res = await apiFetch(`/api/projects/${id}/qa-testing-config`);
+			body = await res.json();
+			expect(body).toEqual({ configured: false });
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("POST /api/projects with components[].config round-trips through GET /structured", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-"));
+		let projectId: string | undefined;
+		try {
+			const components = [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "npm run build" },
+					config: {
+						qa_start_command: "PORT=$PORT npm start",
+						qa_max_scenarios: "7",
+					},
+				},
+			];
+			const res = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `comp-cfg-post-${Date.now()}`,
+					rootPath: dir,
+					components,
+				}),
+			});
+			expect(res.status).toBe(201);
+			const proj = await res.json();
+			projectId = proj.id;
+
+			const structured = await (await apiFetch(`/api/projects/${proj.id}/structured`)).json();
+			const web = (structured.components ?? []).find((c: any) => c.name === "web");
+			expect(web, "component must be persisted on POST").toBeTruthy();
+			expect(web.config, "components[].config must round-trip through POST /api/projects").toEqual(components[0].config);
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${projectId}?force=1`, { method: "DELETE" }).catch(() => {});
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	});
+
+	test("PUT with legacy flat build_command preserves existing components[0].config", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-legacy-flat-${Date.now()}`);
+		try {
+			// Seed structured components with QA config.
+			const seedConfig = {
+				qa_start_command: "PORT=$PORT npm start",
+				qa_max_scenarios: "5",
+			};
+			let putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", commands: { build: "old build" }, config: seedConfig }],
+				}),
+			});
+			expect(putRes.status).toBe(200);
+
+			// Now PUT only a legacy flat build_command (no `components` field).
+			putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ build_command: "npm run build:new" }),
+			});
+			expect(putRes.status).toBe(200);
+
+			const structured = await (await apiFetch(`/api/projects/${id}/structured`)).json();
+			const web = (structured.components ?? []).find((c: any) => c.name === "web");
+			expect(web).toBeTruthy();
+			expect(web.commands?.build, "legacy build_command must update commands.build").toBe("npm run build:new");
+			expect(web.config, "existing components[0].config must NOT be wiped by legacy flat-key PUT").toEqual(seedConfig);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("PUT rejects components[].config with non-string values", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-nonstring-${Date.now()}`);
+		try {
+			const res = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", config: { qa_max_scenarios: 5 } }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/must be string/);
+			expect(body.error).toContain("qa_max_scenarios");
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("PUT rejects components[].config with empty key", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-emptykey-${Date.now()}`);
+		try {
+			const res = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", config: { "": "v" } }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/empty key/);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("PUT rejects components[].config with > 100 entries", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-toomany-${Date.now()}`);
+		try {
+			const cfg: Record<string, string> = {};
+			for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
+			const res = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", config: cfg }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/too many entries/);
+			expect(body.error).toMatch(/got 101/);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("POST /api/projects rejects components[].config with non-string values", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-bad-"));
+		try {
+			const res = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `comp-cfg-post-bad-${Date.now()}`,
+					rootPath: dir,
+					components: [{ name: "web", repo: ".", config: { qa_max_scenarios: 5 } }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/must be string/);
+		} finally {
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	});
+
+	test("POST /api/projects rejects components[].config with > 100 entries", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-toomany-"));
+		try {
+			const cfg: Record<string, string> = {};
+			for (let i = 0; i <= 100; i++) cfg[`k${i}`] = String(i);
+			const res = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `comp-cfg-post-toomany-${Date.now()}`,
+					rootPath: dir,
+					components: [{ name: "web", repo: ".", config: cfg }],
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.error).toMatch(/too many entries/);
+		} finally {
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	});
+
+	test("GET /api/projects/:id/config strips legacy top-level qa_* keys", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-strip-${Date.now()}`);
+		try {
+			// Set components.config (legitimate path).
+			const putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{
+						name: "web", repo: ".",
+						config: {
+							qa_start_command: "node s.js",
+							qa_max_scenarios: "3",
+						},
+					}],
+				}),
+			});
+			expect(putRes.status).toBe(200);
+
+			const cfg = await (await apiFetch(`/api/projects/${id}/config`)).json();
+			for (const key of LEGACY_QA_KEYS) {
+				expect(cfg[key], `${key} must not appear at top level of GET config`).toBeUndefined();
+			}
+		} finally {
+			cleanup();
+		}
+	});
+});

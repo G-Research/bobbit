@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { mcpPolicyPrefix } = await import("../dist/server/agent/tool-activation.js");
+const { mcpPolicyPrefix } = await import("../src/server/agent/tool-activation.ts");
 
 describe("mcpPolicyPrefix", () => {
 	it("extracts mcp__<server> for canonical mcp__<server>__<tool> names", () => {

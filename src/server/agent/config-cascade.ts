@@ -37,7 +37,6 @@ export interface ResolvedPolicy {
  */
 export interface ServerStores {
 	getRoles(): Role[];
-	getWorkflows(): Workflow[];
 	getTools(): ToolInfo[];
 	getToolGroupPolicies(): Record<string, GrantPolicy>;
 }
@@ -64,17 +63,17 @@ export class ConfigCascade {
 	// ── Workflows ────────────────────────────────────────────────
 
 	resolveWorkflows(projectId?: string): ResolvedItem<Workflow>[] {
-		// Builtin workflows no longer exist — workflows live inline in each
-		// project's project.yaml::workflows block. The builtin layer always
-		// returns []. Hidden workflows (e.g. test-only fixtures injected via
-		// project config) are still filtered out for API/UI surfaces.
-		return this.resolve<Workflow>(
-			this.builtins.getWorkflows(),
-			w => w.id,
-			projectId,
-			this.serverStores.getWorkflows(),
-			ctx => ctx.workflowStore.getAllLocal(),
-		).filter(r => !r.item.hidden);
+		// Workflows are project-scoped only — they live inline in each
+		// project's project.yaml::workflows block. There is no builtin or
+		// server-scope layer. Without a projectId, the cascade returns [].
+		// Hidden workflows (e.g. test-only fixtures injected via project
+		// config) are filtered out for API/UI surfaces.
+		if (!projectId) return [];
+		const ctx = this.projectContextManager.getOrCreate(projectId);
+		if (!ctx) return [];
+		return ctx.workflowStore.getAllLocal()
+			.filter(w => !w.hidden)
+			.map(item => ({ item, origin: "project" as const }));
 	}
 
 	// ── Tools ────────────────────────────────────────────────────

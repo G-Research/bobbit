@@ -114,9 +114,12 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		await sendMessage(page, "PROJECT_PROPOSAL");
 		await expect(page.getByText("Accept Project").first()).toBeVisible({ timeout: 15_000 });
 
-		// Verify form fields are present
-		await expect(page.getByText("Project Name").first()).toBeVisible();
-		await expect(page.getByText("Root Path").first()).toBeVisible();
+		// Verify form fields are present — Project Name + Root Path live in the
+		// Settings tab of the proposal panel (Components is the default tab).
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await panel.locator('[data-testid="view-tab-settings"]').click();
+		await expect(panel.getByText("Project Name").first()).toBeVisible();
+		await expect(panel.getByText("Root Path").first()).toBeVisible();
 
 		// Click Accept
 		await page.getByText("Accept Project").first().click();
@@ -211,6 +214,69 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		// Provisional project should still be visible (persisted server-side)
 		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
 		await expect(sidebar.getByText(dirBasename).first()).toBeVisible();
+
+		// Cleanup
+		const prov = await findProvisionalProject(dir);
+		await deleteSession(sessionId);
+		if (prov) await cleanupProject(prov.id);
+		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+	});
+
+	test("panel updates live across two propose_project calls", async ({ page }) => {
+		await openApp(page);
+
+		const { dir, sessionId } = await addProjectViaDialog(page, "live-update");
+
+		// Wait for the auto-prompt round trip so the panel is mounted.
+		await waitForAgentResponse(page);
+
+		// Drive the mock agent to emit two consecutive propose_project tool calls
+		// in the same turn — first with components only, then with components +
+		// workflows. This proves Bug C: the second call's workflows must land.
+		await sendMessage(page, "LIVE_UPDATE_PROPOSAL");
+
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 15_000 });
+
+		// Components view is the default — both components should render.
+		await expect(panel.locator('[data-testid="component-card-api"]')).toBeVisible({ timeout: 15_000 });
+		await expect(panel.locator('[data-testid="component-card-web"]')).toBeVisible();
+
+		// Switch to Workflows tab — workflow cards from the SECOND proposal must
+		// be present. If the merge dropped them, this fails.
+		await panel.locator('[data-testid="view-tab-workflows"]').click();
+		await expect(panel.locator('[data-testid="workflow-card-feature-api"]')).toBeVisible({ timeout: 10_000 });
+		await expect(panel.locator('[data-testid="workflow-card-feature-web"]')).toBeVisible();
+
+		// Cleanup
+		const prov = await findProvisionalProject(dir);
+		await deleteSession(sessionId);
+		if (prov) await cleanupProject(prov.id);
+		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+	});
+
+	test("multi-component proposal shows per-component + all-components workflow cards", async ({ page }) => {
+		await openApp(page);
+
+		const { dir, sessionId } = await addProjectViaDialog(page, "multi-comp");
+		await waitForAgentResponse(page);
+
+		await sendMessage(page, "MULTI_COMPONENT_PROPOSAL");
+
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 15_000 });
+
+		// Both components render in the default Components view.
+		await expect(panel.locator('[data-testid="component-card-api"]')).toBeVisible({ timeout: 15_000 });
+		await expect(panel.locator('[data-testid="component-card-web"]')).toBeVisible();
+
+		// Switch to Workflows tab.
+		await panel.locator('[data-testid="view-tab-workflows"]').click();
+
+		// Per-component + all-components cards must be visible.
+		await expect(panel.locator('[data-testid="workflow-card-feature-api"]')).toBeVisible({ timeout: 10_000 });
+		await expect(panel.locator('[data-testid="workflow-card-feature-web"]')).toBeVisible();
+		await expect(panel.locator('[data-testid="workflow-card-all-components"]')).toBeVisible();
 
 		// Cleanup
 		const prov = await findProvisionalProject(dir);

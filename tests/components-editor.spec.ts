@@ -1,5 +1,5 @@
 /**
- * Settings \u2192 Components editor (Phase 4b) \u2014 round-trip & PUT-payload helpers.
+ * Settings → Components editor (Phase 4b) — round-trip & PUT-payload helpers.
  *
  * Exercises pure helpers from src/app/components-editor.ts via a file://
  * fixture (no server needed). Acceptance criterion 7.
@@ -50,23 +50,21 @@ test("componentToEditState turns a normal component into editable rows", async (
 	expect(result.repo).toBe("api");
 	expect(result.relative_path).toBe("packages/api");
 	expect(result.worktree_setup_command).toBe("npm ci");
-	expect(result.dataOnly).toBe(false);
 	expect(result.commands).toEqual([
 		{ key: "build", value: "npm run build" },
 		{ key: "test", value: "npm test" },
 	]);
 });
 
-test("componentToEditState marks a no-commands component data-only", async ({ page }) => {
+test("componentToEditState gives a no-commands component an empty commands list", async ({ page }) => {
 	const result = await page.evaluate(() => (window as any).componentToEditState({
 		name: "fixtures",
 		repo: "fixtures",
 	}));
-	expect(result.dataOnly).toBe(true);
 	expect(result.commands).toEqual([]);
 });
 
-test("editStateToComponent strips empty rows and respects dataOnly toggle", async ({ page }) => {
+test("editStateToComponent strips empty rows", async ({ page }) => {
 	const result = await page.evaluate(() => (window as any).editStateToComponent({
 		name: "web",
 		repo: "web",
@@ -77,17 +75,15 @@ test("editStateToComponent strips empty rows and respects dataOnly toggle", asyn
 			{ key: "", value: "ignored" },
 			{ key: "test", value: "  " },
 		],
-		dataOnly: false,
 	}));
 	expect(result).toEqual({ name: "web", repo: "web", commands: { build: "npm run build" } });
 });
 
-test("editStateToComponent on dataOnly drops commands entirely", async ({ page }) => {
+test("editStateToComponent omits commands when the list is empty (data-only)", async ({ page }) => {
 	const result = await page.evaluate(() => (window as any).editStateToComponent({
 		name: "shared",
 		repo: "shared",
-		commands: [{ key: "build", value: "npm run build" }],
-		dataOnly: true,
+		commands: [],
 	}));
 	expect(result).toEqual({ name: "shared", repo: "shared" });
 	expect(result.commands).toBeUndefined();
@@ -98,37 +94,74 @@ test("editStateToComponent defaults missing repo to '.'", async ({ page }) => {
 		name: "main",
 		repo: "",
 		commands: [],
-		dataOnly: true,
 	}));
 	expect(result.repo).toBe(".");
 });
 
-test("buildSavePayload composes the structured PUT body", async ({ page }) => {
+test("buildSavePayload composes the structured PUT body (components only — workflows owned by Workflows tab, worktree_root by General tab)", async ({ page }) => {
 	const result = await page.evaluate(() => (window as any).buildSavePayload(
 		[
-			{ name: "main", repo: ".", commands: [{ key: "build", value: "npm run build" }], dataOnly: false },
-			{ name: "fixtures", repo: "fixtures", commands: [], dataOnly: true },
+			{ name: "main", repo: ".", commands: [{ key: "build", value: "npm run build" }] },
+			{ name: "fixtures", repo: "fixtures", commands: [] },
 		],
 		{ general: { name: "General", gates: [] } },
-		"/tmp/wt",
 	));
 	expect(result.components).toHaveLength(2);
 	expect(result.components[0]).toEqual({ name: "main", repo: ".", commands: { build: "npm run build" } });
 	expect(result.components[1]).toEqual({ name: "fixtures", repo: "fixtures" });
-	expect(result.workflows).toEqual({ general: { name: "General", gates: [] } });
-	expect(result.worktree_root).toBe("/tmp/wt");
+	// Components save no longer ships workflows: re-sending unchanged workflows would
+	// trip the server's structural validator against components without commands
+	// (a common state for fresh projects). The Workflows tab has its own save path.
+	expect(result.workflows).toBeUndefined();
+	expect(result.worktree_root).toBeUndefined();
 });
 
-test("round-trip: data-only \u2194 commands toggle preserves shape", async ({ page }) => {
+test("componentToEditState surfaces config as editable rows", async ({ page }) => {
+	const result = await page.evaluate(() => (window as any).componentToEditState({
+		name: "web",
+		repo: ".",
+		config: { qa_start_command: "PORT=$PORT npm start", qa_max_duration_minutes: "10" },
+	}));
+	expect(result.config).toEqual([
+		{ key: "qa_start_command", value: "PORT=$PORT npm start" },
+		{ key: "qa_max_duration_minutes", value: "10" },
+	]);
+});
+
+test("editStateToComponent serializes config and strips empty keys", async ({ page }) => {
+	const result = await page.evaluate(() => (window as any).editStateToComponent({
+		name: "web",
+		repo: ".",
+		commands: [],
+		config: [
+			{ key: "qa_start_command", value: "PORT=$PORT npm start" },
+			{ key: "", value: "ignored" },
+			{ key: "qa_max_scenarios", value: "5" },
+		],
+	}));
+	expect(result).toEqual({
+		name: "web",
+		repo: ".",
+		config: { qa_start_command: "PORT=$PORT npm start", qa_max_scenarios: "5" },
+	});
+});
+
+test("editStateToComponent omits config when the list is empty", async ({ page }) => {
+	const result = await page.evaluate(() => (window as any).editStateToComponent({
+		name: "web",
+		repo: ".",
+		commands: [],
+		config: [],
+	}));
+	expect(result.config).toBeUndefined();
+});
+
+test("round-trip: clearing commands turns a component data-only", async ({ page }) => {
 	const result = await page.evaluate(() => {
 		const w = window as any;
 		const initial = { name: "x", repo: "x", commands: { build: "npm run build" } };
 		const edit = w.componentToEditState(initial);
-		// User toggles data-only on
-		edit.dataOnly = true;
-		const out1 = w.editStateToComponent(edit);
-		// User toggles back; commands rows survive in edit state and re-emerge.
-		edit.dataOnly = false;
+		const out1 = w.editStateToComponent({ ...edit, commands: [] });
 		const out2 = w.editStateToComponent(edit);
 		return { out1, out2 };
 	});
