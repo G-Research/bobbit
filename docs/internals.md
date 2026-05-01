@@ -831,6 +831,25 @@ Existing users have a `bobbit-session-visited` map in `localStorage` from before
 
 ---
 
+## Archived-session state push on auth
+
+Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame — the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder (`claude-opus-4-6`) until a manual reload.
+
+### Helper and call sites
+
+`buildArchivedStatePayload(archived, sessionManager, sessionId)` in `src/server/ws/handler.ts` returns the data block for `{ type: "state", data }` and is the single source of truth for archived state shape. Two call sites:
+
+- **Archived auth-ok branch.** Right after `session_title`, the handler builds the payload and sends it. This is the fix — the footer now reads the persisted model on first connect, with no round-trip required.
+- **Legacy `get_state` handler.** The same helper drives the response, so the reconnect path stays consistent with first-connect.
+
+The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow, maxTokens, reasoning}` from `inferMeta(archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. Persisted `modelProvider`/`modelId` come from the archived row in the session store.
+
+The footer model picker remains read-only/disabled for archived sessions — the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from `tests/e2e/ui/archived-session-model.spec.ts`.
+
+Client-side, the `claude-opus-4-6` placeholder default in `src/app/remote-agent.ts` is unchanged — it only matters before the server `state` frame arrives, which is now immediate.
+
+---
+
 ## Tool access policies
 
 All tool access uses a **grant policy** system enforced by a single `tool_call` guard extension. Every tool resolves to one of three policy values:
@@ -961,6 +980,57 @@ This is what makes "my `code-reviewer` role always runs on opus" work without ch
 ### UI
 
 The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to **Prompt** and **Tool Access**, labelled **Model**. It reuses the model picker and thinking dropdown components from the settings page, with a leading "(use default)" option that maps to the empty string → omitted from YAML. The standard origin badge / Customize / Revert flow operates on the whole role record, so touching either field flips builtin→overridden and Revert clears them along with any other overrides.
+
+---
+
+## Spawn-time model pinning
+
+Non-pool agent processes are spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single `model_change` event. The legacy path — boot with the CLI's hardcoded default, then call `setModel` ~13 ms later — still runs as a fallback for paths that don't know the model at spawn time (worktree pool claim, aigw cold-cache discovery).
+
+### Bridge options and CLI flags
+
+`RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
+
+- `initialModel?: string` — literal `<provider>/<modelId>`.
+- `initialThinkingLevel?: string` — one of `off|minimal|low|medium|high`.
+
+`buildAgentArgs(options)` in the same file translates them to `--model <provider>/<modelId>` and `--thinking <level>` and prepends them to the agent argv. Malformed values (no `/`, unknown level) are silently dropped — the post-spawn helpers will still bind correctly.
+
+### Resolution helpers
+
+`SessionManager.resolveInitialModel(role, projectId)` and `resolveInitialThinkingLevelForSession(session)` mirror the precedence used at session start:
+
+1. Role override (`role.model` / `role.thinkingLevel` from the resolved cascade).
+2. `default.sessionModel` / `default.sessionThinkingLevel` preference (or `default.reviewModel` for verification sub-sessions).
+3. `undefined` — the aigw best-ranked fallback runs post-spawn via `tryAutoSelectModel` and emits a second `model_change` only on a cold cache.
+
+`resolveBridgeOptions` in `src/server/agent/session-setup.ts` is the single call site for the normal-create pipeline; `session-manager.ts` re-runs the helpers at the role-respawn and force-abort respawn sites; `verification-harness.ts` does it at all three reviewer/QA sub-session sites; `server.ts` does it at the continue-archived endpoint. The pinned values are stored on `session.spawnPinnedModel` and `session.spawnPinnedThinkingLevel`.
+
+### Skip-setModel branch preserves hard-fail-on-mismatch
+
+`applyModelString` and `applyReviewModelOverrides` in `src/server/agent/review-model-override.ts` accept `skipSetModel?: boolean`. When `true`, the helper skips the `setModel` RPC but still calls `rpc.getState()` and throws on mismatch — the same contract as the unconditional `setModel` path. `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` and the three verification sub-session sites set `skipSetModel: true` exactly when `session.spawnPinnedModel` equals the model they would otherwise bind. Net effect: the read-back verification still runs, but the redundant `setModel` RPC (and its `model_change` event) is elided.
+
+### Pool-claimed sessions
+
+Pool worktrees pre-spawn the agent process before role/goal is known, so they cannot pin at spawn time. Pool-claim sessions go through `resolveBridgeOptions` like any other session — the helpers may still pin a model when one happens to be resolvable — but in practice the pre-spawned agent boots with the CLI default and the post-spawn `setModel` runs unconditionally. Two `model_change` events on this path is documented and acceptable.
+
+### Out of scope
+
+- The client-side placeholder default (`anthropic/claude-opus-4-6`) seeded in `src/app/remote-agent.ts` until the first server `state` frame arrives. Replacing it with `null` would require auditing every `state.model` consumer.
+- Patching pi-coding-agent to suppress its own initial `model_change` when spawned with `--model`. The current behaviour is benign — the event simply matches the bound model.
+
+### Key files
+
+| File | Role |
+|---|---|
+| `src/server/agent/rpc-bridge.ts` | `RpcBridgeOptions.initialModel`/`initialThinkingLevel`, `buildAgentArgs` |
+| `src/server/agent/session-setup.ts` | `resolveBridgeOptions` injects pinned values into `bridgeOptions`; persists them onto the session |
+| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevelForSession`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
+| `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
+| `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
+| `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
+| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection |
+| `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
 
 ---
 
