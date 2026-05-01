@@ -70,7 +70,20 @@ Run normally (no capture, identical to master):
 npm run test:e2e -- bg-wait-steer-flow.spec.ts
 ```
 
-The canonical worked example is [`tests/e2e/ui/bg-wait-steer-flow.spec.ts`](../tests/e2e/ui/bg-wait-steer-flow.spec.ts) — the test PR #433 added.
+The canonical worked example is [`tests/e2e/ui/bg-wait-steer-flow.spec.ts`](../tests/e2e/ui/bg-wait-steer-flow.spec.ts) — the test PR #433 added. Additional migrated specs that follow the same pattern: `queue-ui.spec.ts`, `jump-to-bottom.spec.ts`, `ask-user-choices-ui.spec.ts`, and `stories-streaming.spec.ts`. Use them as templates when picking beat boundaries for queue/steer flows, scroll-state interactions, ask-widget round-trips, and reconnect-mid-stream dedup respectively.
+
+## Transcript-fidelity invariant
+
+[`tests/e2e/ui/transcript-fidelity.spec.ts`](../tests/e2e/ui/transcript-fidelity.spec.ts) is a generic regression guard for the bug class that PRs #436 and #437 fixed: the live DOM diverging from the server snapshot. The post-refresh DOM is hydrated from the persisted message snapshot — it is the ground truth of "what really happened in this session". The live DOM is the result of streaming reducer state. After a multi-cycle `STREAM_BURST:3` mock-agent burst, the two views must agree exactly: same number of messages, same fingerprints, same order, no live-only duplicates.
+
+The assertion shape:
+
+1. Drive `STREAM_BURST:3` (three cycles of [propose_goal + chunked-text + bash_bg.wait + chunked-text]) to idle.
+2. Snapshot the live DOM transcript (role + dynamic-text-stripped fingerprint per `<user-message>` / `<assistant-message>` / `<tool-message>` in DOM order).
+3. Hard-refresh the page; snapshot again from the rehydrated server snapshot.
+4. Assert: counts equal; no live fingerprint appears more than once; live\[i].fp === refresh\[i].fp at every index.
+
+This is the assertion pattern the prototype used to *find* the bugs PRs #436 and #437 fixed; without it on master, the next bug in the same class — reducer-correct but renderer-visible, or transient-dup that needs multi-cycle accumulation to manifest — is only caught after a user reports it. If this test fails on master and the failure traces to a real bug, fix the production code in the same PR (precedent: PRs #433, #436, #437).
 
 ## Beat capture rules
 
