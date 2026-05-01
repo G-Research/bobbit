@@ -87,6 +87,8 @@ describe("Children tool extension — registration", () => {
 		// see tests/tool-extension-plan.test.ts for their dedicated coverage.
 		assert.deepEqual(names, [
 			"goal_decide_mutation",
+			"goal_inspect_child",
+			"goal_list_children",
 			"goal_merge_child",
 			"goal_pause",
 			"goal_plan_propose",

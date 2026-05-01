@@ -1,0 +1,34 @@
+name: goal_inspect_child
+description: |-
+  Read a child goal's gate state — list/status/content/verification — from the parent's team-lead session. The standard `gate_inspect` / `gate_status` / `gate_list` tools are scoped to the calling session's own goal; this tool lets the parent inspect any child's gates.
+
+  Resolution: `childGoalId` may be any non-archived descendant of the current goal (immediate child or deeper). The response shape mirrors the corresponding REST endpoints — see the `docs:` field for paths and bodies.
+summary: "Inspect a child goal's gates from the parent session."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Three modes depending on parameters:
+  - `{childGoalId}` (no `gateId`) → GET `/api/goals/:childGoalId/gates` — list all gates.
+  - `{childGoalId, gateId}` → GET `/api/goals/:childGoalId/gates/:gateId` — gate detail with latest verification output.
+  - `{childGoalId, gateId, section: "content"}` → GET `/api/goals/:childGoalId/gates/:gateId/content` — markdown body of the gate's latest signal.
+  - `{childGoalId, gateId, section: "signals"}` → GET `/api/goals/:childGoalId/gates/:gateId/signals` — full signal history.
+  - `{childGoalId, gateId, section: "verification"}` → same as gate detail (verification is inline on the latest signal).
+detail_docs: |-
+  ## Purpose
+
+  Cross-goal gate inspection from the parent's team-lead session. The MCP team-lead session is scoped to its own goal for `gate_inspect`/`gate_status`/`gate_list` (which is correct — those tools shouldn't reach into arbitrary goals). For parent-pattern goals overseeing children, the parent legitimately needs to see the child's reviewer outputs without dropping to curl.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `childGoalId` | string | **Yes** | Non-archived descendant of the current goal. |
+  | `gateId` | string | No | Specific gate id. Omit to list all gates with status. |
+  | `section` | `"content"` \| `"verification"` \| `"signals"` | No | When `gateId` is given, drill into a section. |
+
+  ## Errors
+
+  - **404 Goal not found** — the child id doesn't resolve.
+  - **404 Gate not found** — the named gate isn't in the child's workflow.

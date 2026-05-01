@@ -5,12 +5,15 @@ toolPolicies:
   edit: never
   bash_bg: never
   delegate: never
-  # Read-only access to the plan: when the spec-auditor runs as the
-  # "Spec completeness" verify step for a `parent`-workflow plan-review
-  # gate, they need to fetch the current plan to check that every
-  # acceptance criterion is covered by some subgoal step. Mutations
-  # stay team-lead-only via the `Children` group default of `ask`.
+  # Read-only access to the plan and child-goal state: when the spec-auditor
+  # runs as the "Spec completeness" verify step for a `parent`-workflow
+  # plan-review gate, they need to fetch the current plan and inspect any
+  # children to check that every acceptance criterion is covered by some
+  # subgoal step. Mutations stay team-lead-only via the `Children` group
+  # default of `ask`.
   goal_plan_status: allow
+  goal_list_children: allow
+  goal_inspect_child: allow
 createdAt: 1775322000000
 updatedAt: 1775322000000
 promptTemplate: |

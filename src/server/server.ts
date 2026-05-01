@@ -4927,7 +4927,16 @@ async function handleApiRoute(
 			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
 		} catch { /* ignore */ }
 
-		// Reject if verification is already running for this gate+commit
+		// Reject if verification is already running for this gate+commit.
+		// Two escape hatches against stuck locks (BUG-9 from PR #409 live test):
+		//   - the existing zombie-session sweep (`areVerificationSessionsAlive`)
+		//   - a 60-minute age threshold: any verification older than that is
+		//     considered stale regardless of its session state, on the
+		//     pragmatic assumption that no LLM verify step legitimately runs
+		//     for an hour.
+		//   - explicit `?force=1` query param: caller takes responsibility for
+		//     blowing away the lock.
+		const forceParam = url.searchParams.get("force") === "1";
 		if (commitSha !== "unknown") {
 			const activeVers = verificationHarness.getActiveVerifications(goalId);
 			const runningDup = activeVers.find(v => {
@@ -4937,14 +4946,23 @@ async function handleApiRoute(
 				return s?.commitSha === commitSha;
 			});
 			if (runningDup) {
-				// Check if sessions are actually alive — auto-cancel zombies
 				const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
-				if (!alive) {
-					console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
+				const ageMs = Date.now() - (runningDup.startedAt ?? 0);
+				const STALE_AGE_MS = 60 * 60 * 1000;
+				const staleByAge = ageMs > STALE_AGE_MS;
+				if (!alive || staleByAge || forceParam) {
+					const reason = !alive ? "zombie session" : (staleByAge ? `age ${Math.floor(ageMs / 60000)}min > 60min threshold` : "force=1");
+					console.log(`[api] Auto-cancelling stale verification ${runningDup.signalId} for gate ${gateId} (${reason})`);
 					await verificationHarness.cancelStaleVerifications(goalId, gateId);
 					// Fall through to create new signal
 				} else {
-					json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
+					json({
+						error: "Verification already in progress for this commit",
+						existingSignalId: runningDup.signalId,
+						ageMs,
+						startedAt: runningDup.startedAt,
+						hint: "Pass `?force=1` on the URL to force-cancel this verification and start a new one.",
+					}, 409);
 					return;
 				}
 			}

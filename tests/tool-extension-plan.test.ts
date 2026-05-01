@@ -83,6 +83,8 @@ describe("Children tool extension — goal_plan_* registration", () => {
 		const names = registered.map(t => t.name).sort();
 		assert.deepEqual(names, [
 			"goal_decide_mutation",
+			"goal_inspect_child",
+			"goal_list_children",
 			"goal_merge_child",
 			"goal_pause",
 			"goal_plan_propose",

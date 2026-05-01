@@ -3,12 +3,15 @@ label: Architect
 accessory: set-square
 toolPolicies:
   edit: never
-  # Read-only access to the plan: when the architect runs as the verify
-  # step for a `parent`-workflow plan-review gate, they need to fetch the
-  # current plan to assess DAG correctness. Mutations stay team-lead-only
+  # Read-only access to the plan and child-goal state: when the architect
+  # runs as the verify step for a `parent`-workflow plan-review gate or any
+  # cross-goal review, they need to fetch the current plan and inspect
+  # spawned children to assess DAG correctness. Mutations stay team-lead-only
   # via the `Children` group default of `ask`. See
   # docs/design/nested-goals.md §6.
   goal_plan_status: allow
+  goal_list_children: allow
+  goal_inspect_child: allow
 createdAt: 1775322000000
 updatedAt: 1775322000000
 promptTemplate: |

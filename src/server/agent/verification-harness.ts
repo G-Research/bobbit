@@ -1276,6 +1276,47 @@ export class VerificationHarness {
 		if (!this.notifyTeamLeadFn) return;
 		const verb = status === "passed" ? "PASSED" : "FAILED";
 		this.notifyTeamLeadFn(goalId, `Gate verification ${verb}: "${gateId}". ${status === "passed" ? "Downstream work for this gate can now proceed." : "Check the verification output, fix the issues, and re-signal the gate."}`);
+
+		// Bubble notable child-gate transitions UP to the parent team-lead so
+		// parent-pattern goals (which orchestrate via `goal_spawn_child` and
+		// have no direct workers) actually hear about their children's progress.
+		// Without this, the parent team-lead has to poll — which the agent-memory
+		// v0.1-foundation team-lead reported as the BUG-7 notifications gap.
+		//
+		// We notify on:
+		//   - `ready-to-merge` (any verdict): the parent's harness will perform
+		//     the local merge; the parent should know the child is awaiting it.
+		//   - `goal-plan` (any verdict): rare for a child, but if it fires,
+		//     the parent may need to escalate.
+		//   - any FAILED gate: the child is stuck; the parent may need to
+		//     intervene, prompt the user, or archive.
+		//
+		// We deliberately DO NOT notify the parent on every child gate-pass
+		// (e.g. design-doc, implementation, documentation): that would be
+		// noise. The granularity the parent cares about is "this child is
+		// done" or "this child is stuck".
+		const pcm = this.projectContextManager;
+		if (!pcm) return;
+		const childCtx = pcm.getContextForGoal(goalId);
+		const child = childCtx?.goalStore.get(goalId);
+		if (!child?.parentGoalId) return; // top-level goal — no parent to notify
+
+		const notable = gateId === "ready-to-merge" || gateId === "goal-plan" || status === "failed";
+		if (!notable) return;
+
+		const parentVerb = status === "passed" ? "PASSED" : "FAILED";
+		const parentMsg =
+			`Child goal "${child.title}" (${goalId}) gate verification ${parentVerb}: "${gateId}". ` +
+			(gateId === "ready-to-merge" && status === "passed"
+				? "The parent harness will now perform the local merge."
+				: status === "failed"
+				? "Check the child's verification output and decide whether to nudge, escalate, or archive."
+				: "Use goal_plan_status / list_children to see the latest tree state.");
+		try {
+			this.notifyTeamLeadFn(child.parentGoalId, parentMsg);
+		} catch (err) {
+			console.warn(`[verification] Failed to notify parent ${child.parentGoalId} of child ${goalId} ${gateId} ${status}:`, err);
+		}
 	}
 
 	/**

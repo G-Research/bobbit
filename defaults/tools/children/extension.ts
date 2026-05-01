@@ -289,6 +289,91 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ── goal_list_children ────────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_list_children",
+		label: "List Child Goals",
+		description: [
+			"List all immediate non-archived child goals of the current goal, with their current",
+			"state, branch, planId linkage, and per-gate status. Use this instead of polling",
+			"goal_plan_status when you just need to know which children exist and what state",
+			"they're in.",
+		].join(" "),
+		promptSnippet: "List all immediate child goals of this goal.",
+		parameters: Type.Object({}),
+		async execute() {
+			try {
+				const result = await getJson(`/api/goals/${goalId}?include=tree`);
+				if (!result.ok) return err("goal_list_children", result.status, result.data);
+				const data = result.data as { descendants?: unknown[] } | undefined;
+				const all = Array.isArray(data?.descendants) ? data.descendants as Array<Record<string, unknown>> : [];
+				// Filter to immediate children only (parentGoalId === goalId).
+				const children = all.filter(g => g.parentGoalId === goalId && !g.archived).map(g => ({
+					goalId: g.id,
+					title: g.title,
+					state: g.state,
+					branch: g.branch,
+					headSha: g.headSha,
+					spawnedFromPlanId: g.spawnedFromPlanId,
+					setupStatus: g.setupStatus,
+				}));
+				return ok({ children });
+			} catch (e) {
+				return netErr("goal_list_children", e);
+			}
+		},
+	});
+
+	// ── goal_inspect_child ───────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_inspect_child",
+		label: "Inspect Child Goal Gate",
+		description: [
+			"Read a child goal's gate state — list/status/content/verification — from the parent's",
+			"team-lead session. The standard `gate_inspect` / `gate_status` / `gate_list` tools are",
+			"scoped to the calling session's own goal; this tool lets the parent inspect any child's",
+			"gates (the child must be a non-archived descendant of this goal).",
+		].join(" "),
+		promptSnippet: "Inspect a child goal's gates from the parent session.",
+		parameters: Type.Object({
+			childGoalId: Type.String({ description: "Id of the child (or transitive descendant) goal whose gate to inspect." }),
+			gateId: Type.Optional(Type.String({ description: "Specific gate id. Omit to list all gates with status." })),
+			section: Type.Optional(Type.Union([
+				Type.Literal("content"),
+				Type.Literal("verification"),
+				Type.Literal("signals"),
+			], { description: "When `gateId` is given, drill into a section. Defaults to a status summary." })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const child = params.childGoalId;
+				if (!params.gateId) {
+					const result = await getJson(`/api/goals/${encodeURIComponent(child)}/gates`);
+					if (!result.ok) return err("goal_inspect_child", result.status, result.data);
+					return ok(result.data);
+				}
+				if (params.section === "content") {
+					const result = await getJson(`/api/goals/${encodeURIComponent(child)}/gates/${encodeURIComponent(params.gateId)}/content`);
+					if (!result.ok) return err("goal_inspect_child", result.status, result.data);
+					return ok(result.data);
+				}
+				if (params.section === "signals") {
+					const result = await getJson(`/api/goals/${encodeURIComponent(child)}/gates/${encodeURIComponent(params.gateId)}/signals`);
+					if (!result.ok) return err("goal_inspect_child", result.status, result.data);
+					return ok(result.data);
+				}
+				// Default + section==='verification' both fall through to the
+				// gate detail endpoint, which carries the latest signal's
+				// verification output inline.
+				const result = await getJson(`/api/goals/${encodeURIComponent(child)}/gates/${encodeURIComponent(params.gateId)}`);
+				if (!result.ok) return err("goal_inspect_child", result.status, result.data);
+				return ok(result.data);
+			} catch (e) {
+				return netErr("goal_inspect_child", e);
+			}
+		},
+	});
+
 	// ── goal_set_policy ──────────────────────────────────────────────────────────────────────
 	pi.registerTool({
 		name: "goal_set_policy",

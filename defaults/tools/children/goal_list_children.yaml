@@ -1,0 +1,39 @@
+name: goal_list_children
+description: |-
+  List all immediate non-archived child goals of the current goal. Returns goalId, title, state, branch, headSha, spawnedFromPlanId, and setupStatus per child. Use this instead of polling `goal_plan_status` when you just need to know which children exist and what state they're in.
+summary: "List all immediate child goals of the current goal."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  GETs `GET /api/goals/:id?include=tree` and filters `descendants` to immediate children only (`parentGoalId === goalId && !archived`). Returns a slim projection per child.
+detail_docs: |-
+  ## Purpose
+
+  Quick read of the child goals directly under this goal. Filters out archived children, transitive descendants, and ancestors — only the immediate next-tier shows up. Use the standard `gate_inspect` / `gate_status` tools (or `goal_inspect_child` for cross-goal inspection) to drill into a specific child's gate state.
+
+  ## Parameters
+
+  None.
+
+  ## Response shape
+
+  ```
+  {
+    "children": [
+      {
+        "goalId": "722dcd8e-...",
+        "title": "domain-and-ports (v0.1 leaf)",
+        "state": "complete",
+        "branch": "goal/domain-and-722dcd8e",
+        "headSha": "49f9f61...",
+        "spawnedFromPlanId": "v0.1-domain-and-ports",
+        "setupStatus": "ready"
+      },
+      ...
+    ]
+  }
+  ```
+
+  Empty `children: []` means no immediate children exist.

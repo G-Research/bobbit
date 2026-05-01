@@ -60,12 +60,14 @@ function mockToolManager(tools: Record<string, { grantPolicy?: string }> = {}) {
 	};
 }
 
-describe("architect role \u2014 goal_plan_status override", () => {
-	it("YAML declares goal_plan_status: allow", () => {
+describe("architect role \u2014 read-only Children overrides", () => {
+	it("YAML declares the three read-only Children tools as allow", () => {
 		const role = loadRoleYaml("architect");
 		assert.ok(role.toolPolicies, "architect must define toolPolicies");
-		assert.equal(role.toolPolicies!.goal_plan_status, "allow",
-			"architect.toolPolicies.goal_plan_status must be 'allow' so the plan-review verify step can fetch the plan without prompting");
+		for (const tool of ["goal_plan_status", "goal_list_children", "goal_inspect_child"]) {
+			assert.equal(role.toolPolicies![tool], "allow",
+				`architect.toolPolicies.${tool} must be 'allow' so plan-review and cross-goal inspection can run without prompting`);
+		}
 	});
 
 	it("resolveGrantPolicy prioritises the role override over the Children group default", () => {
@@ -104,12 +106,14 @@ describe("architect role \u2014 goal_plan_status override", () => {
 	});
 });
 
-describe("spec-auditor role \u2014 goal_plan_status override", () => {
-	it("YAML declares goal_plan_status: allow", () => {
+describe("spec-auditor role \u2014 read-only Children overrides", () => {
+	it("YAML declares the three read-only Children tools as allow", () => {
 		const role = loadRoleYaml("spec-auditor");
 		assert.ok(role.toolPolicies, "spec-auditor must define toolPolicies");
-		assert.equal(role.toolPolicies!.goal_plan_status, "allow",
-			"spec-auditor.toolPolicies.goal_plan_status must be 'allow' for the 'Spec completeness' plan-review verify step");
+		for (const tool of ["goal_plan_status", "goal_list_children", "goal_inspect_child"]) {
+			assert.equal(role.toolPolicies![tool], "allow",
+				`spec-auditor.toolPolicies.${tool} must be 'allow' for plan-review verify steps and cross-goal coverage checks`);
+		}
 	});
 
 	it("resolveGrantPolicy prioritises the role override over the Children group default", () => {
@@ -152,12 +156,14 @@ describe("other reviewer roles (least-privilege)", () => {
 	// silently, these tests fail \u2014 a deliberate \"is this really needed?\"
 	// circuit-breaker.
 	for (const roleName of ["code-reviewer", "security-reviewer", "qa-tester"]) {
-		it(`${roleName} does NOT silently get goal_plan_status: allow`, () => {
+		it(`${roleName} does NOT silently get the read-only Children overrides`, () => {
 			const role = loadRoleYaml(roleName);
-			const override = role.toolPolicies?.goal_plan_status;
-			assert.equal(override, undefined,
-				`${roleName} should not have goal_plan_status override unless it runs on a plan gate. ` +
-				`If you need to add one, document why in the role YAML and update this test.`);
+			for (const tool of ["goal_plan_status", "goal_list_children", "goal_inspect_child"]) {
+				const override = role.toolPolicies?.[tool];
+				assert.equal(override, undefined,
+					`${roleName} should not have ${tool} override unless it runs on a plan gate. ` +
+					`If you need to add one, document why in the role YAML and update this test.`);
+			}
 		});
 	}
 });
