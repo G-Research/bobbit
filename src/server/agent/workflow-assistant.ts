@@ -82,9 +82,9 @@ For \`type: command\` there are exactly **three** shapes \u2014 pick one per ste
 { "name": "Code quality review", "type": "llm-review", "role": "code-reviewer", "prompt": "Review the code changes on branch {{branch}} vs origin/{{master}}..." }
 \`\`\`
 
-**\`agent-qa\`** \u2014 spawn a QA agent (project must have \`qa_start_command\` configured):
+**\`agent-qa\`** \u2014 spawn a QA agent. The step's \`component\` field selects which component's \`config:\` map the QA skill reads (\`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\`); at least one component must have \`config.qa_start_command\` set:
 \`\`\`json
-{ "name": "QA testing", "type": "agent-qa", "role": "qa-tester", "prompt": "..." }
+{ "name": "QA testing", "type": "agent-qa", "role": "qa-tester", "component": "web", "prompt": "..." }
 \`\`\`
 
 \`expect\` can be \`"success"\` (default, exit 0) or \`"failure"\` (non-zero exit; pair with \`error_pattern\` metadata for TDD gates).
