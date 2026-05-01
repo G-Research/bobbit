@@ -185,8 +185,28 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			});
 
 			const serverIds = new Set<string>();
+			// Equivalence sets keyed on toolCallId — the snapshot is authoritative
+			// for any toolCall it contains, even when the live row landed without
+			// a string id (e.g. mock-agent toolResult message_ends, real LLM
+			// toolResult rows that omit `id`). Without these, an id-less live
+			// row passes the survivor filter and the snapshot's id'd copy is
+			// added on top → duplicate (Bug 2 / scenario 08 bg-3).
+			const serverToolResultToolCallIds = new Set<string>();
+			const serverAssistantToolCallIds = new Set<string>();
 			for (const m of snapshotRows) {
 				if (typeof m.id === "string" && m.id.length > 0) serverIds.add(m.id);
+				if (m.role === "toolResult") {
+					const tcid = (m as any).toolCallId;
+					if (typeof tcid === "string" && tcid.length > 0) {
+						serverToolResultToolCallIds.add(tcid);
+					}
+				} else if (m.role === "assistant" && Array.isArray((m as any).content)) {
+					for (const c of (m as any).content) {
+						if (c?.type === "toolCall" && typeof c.id === "string" && c.id.length > 0) {
+							serverAssistantToolCallIds.add(c.id);
+						}
+					}
+				}
 			}
 			const serverHasCompactionMarker = snapshotRows.some((m) => {
 				if (m.role !== "assistant") return false;
@@ -204,6 +224,21 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				if (m._origin === "server") {
 					// Live-event server rows: drop if snapshot has matching id.
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
+					// Defence in depth: also drop id-less (or synthetic-id'd) live
+					// rows whose toolCallId-equivalent is represented in the snapshot.
+					// Server snapshot is authoritative for any toolCall it contains.
+					if (m.role === "toolResult") {
+						const tcid = (m as any).toolCallId;
+						if (typeof tcid === "string" && serverToolResultToolCallIds.has(tcid)) continue;
+					} else if (m.role === "assistant" && Array.isArray((m as any).content)) {
+						const hasMatchingToolCall = (m as any).content.some(
+							(c: any) =>
+								c?.type === "toolCall" &&
+								typeof c.id === "string" &&
+								serverAssistantToolCallIds.has(c.id),
+						);
+						if (hasMatchingToolCall) continue;
+					}
 					survivors.push(m);
 					continue;
 				}

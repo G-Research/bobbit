@@ -60,3 +60,5 @@ tests/fixtures/verification-dedup-bundle.js
 tests/fixtures/verification-dedup-bundle.css
 tests/fixtures/follow-tail-bundle.js
 tests/fixtures/follow-tail-bundle.css
+tests/fixtures/streaming-message-container-bundle.js
+tests/fixtures/streaming-message-container-bundle.css
