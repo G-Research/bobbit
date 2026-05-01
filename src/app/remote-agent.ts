@@ -9,6 +9,7 @@ import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
+import { computeStreamingMessageId } from "./streaming-message-id.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -1580,7 +1581,7 @@ export class RemoteAgent {
 						// container still owns it. When there are no tool calls the
 						// streaming container will be cleared by AgentInterface.
 						if (hasToolCalls) {
-							this.streamingMessageId = typeof msg.id === "string" ? msg.id : undefined;
+							this.streamingMessageId = computeStreamingMessageId(msg);
 						} else {
 							this._state.streamingMessage = null;
 							this.streamingMessageId = undefined;
