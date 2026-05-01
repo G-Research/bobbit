@@ -185,10 +185,10 @@ test.describe("Editable proposals — UX parity matrix @parity", () => {
 						page.locator("button").filter({ hasText: "Settings" }).first(),
 					).toBeVisible({ timeout: 20_000 });
 
-					// Give the rehydrate path a chance to land.
-					await page.waitForTimeout(500);
-
-					await expect(panel).toBeHidden();
+					// Rehydrate path lands inline with the WS handshake; the
+					// dismissal-fingerprint check runs synchronously when
+					// session-manager processes the proposal_update event.
+					await expect(panel).toBeHidden({ timeout: 5_000 });
 				},
 			);
 
