@@ -117,7 +117,7 @@ components:
       test:  pnpm --filter @acme/shared test
 ```
 
-Because `components.length > 1`, the assistant's workflow-suggestion checklist will pre-check the per-component flows and the all-components fan-out flow — those are the right defaults for a monorepo.
+For a monorepo like this, the per-component and all-components fan-out scaffolds are often the right starting point — the assistant should consider them explicitly and recommend them when they fit, but they are not pre-checked by component count. The assistant must justify each workflow it proposes against the project's actual components and commands.
 
 ## 3. Workflow gates
 
@@ -179,7 +179,7 @@ Practical implications when authoring workflows:
 - **Always include a gap-analysis step at design-time AND post-implementation**
   (except quick-fix). Design-time gap analysis catches missing requirements before
   the agent burns iterations; post-impl gap analysis catches drift between design
-  and code. The seeded `general`, `feature`, and per-component flows include both.
+  and code. The `general`, `feature`, and per-component templates in this guide include both — use them as starting points when they fit the project.
 - **The `description` field on the gate** surfaces in the project-proposal panel
   and the goal dashboard. Use it to remind reviewers that this gate is a loop, not
   a checkpoint.
@@ -306,7 +306,7 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 
 ### 6.5 Per-component & all-components flows (multi-component projects)
 
-When `components.length > 1`, the project assistant's workflow-suggestion checklist offers two derived families on top of the canonical four:
+When `components.length > 1`, the project assistant's workflow-suggestion checklist may offer two derived families on top of the canonical templates (no options are pre-checked — the assistant picks them only when they fit the project):
 
 - **Per-component flow** (one entry per component) — a `feature`-shaped workflow scoped to a single component's commands. Built by `buildPerComponentWorkflow(componentName, allComponents)` in `src/server/state-migration/per-component-workflows.ts`. Use when a goal touches only one repo.
 - **All-components fan-out flow** — a single `general`-shaped workflow whose `implementation` gate runs `build`/`check`/`unit`/`e2e` across every component with a `commands` map (data-only components are skipped) using `phase:` to parallelise. Built by `buildAllComponentsWorkflow(components)`.
