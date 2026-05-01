@@ -57,6 +57,7 @@ single-goal users are unaffected — every field defaults sensibly.
 | `acceptanceCriteria` | `string[]?` | Parsed from the spec's `## Acceptance criteria` section at goal creation. Used by the mutation classifier to detect dropped criteria. |
 | `replanCount` | number | Counts post-freeze mutations. Goal auto-pauses at `> 5`. |
 | `paused` | boolean | When true, the verification harness skips ticks for this goal. Required by `strict` policy before applying restructure mutations. |
+| `spawnedFromPlanId` | string? | When this goal was spawned by a parent's subgoal verify step, the `planId` of that step. Used for two distinct mechanisms (see the JSDoc on `src/server/agent/goal-store.ts::PersistedGoal`): (1) `GET /api/goals/:id/plan` resolves planSteps' `child` field via `resolvePlanStepChild` walking by this field, including archived children where `archived: true && state === "complete"` represents the success terminal state; (2) verification-harness `runSubgoalStep` idempotency — re-binds to an existing child by `(parentGoalId, spawnedFromPlanId)` instead of spawning a duplicate. The tier-based preference order at `78e58586` (live in-progress → archived+complete → live other state → archived non-complete) prevents zombie siblings from shadowing the merged child. |
 
 All fields are optional. A goal without any of them behaves exactly as
 goals did before nested goals existed.
@@ -133,6 +134,26 @@ A subgoal verify step:
 2. Waits for the child's `ready-to-merge` gate to pass.
 3. Locally merges the child's branch into the current goal's branch.
 4. The verify step passes when the merge succeeds.
+5. After a clean merge, **auto-archives the child goal and tears down
+   its team** (`c95f8f60`). Once the child's branch is integrated and
+   the parent has accepted, the child's worktree + team-lead session
+   have served their purpose; leaving them live clutters the dashboard
+   and pins disk + memory. The same auto-archive pattern fires from
+   four merge sites symmetrically:
+   - `runSubgoalStep` post-merge (this path — harness poll loop)
+   - eager-merge IIFE in `notifyTeamLead` on a child's ready-to-merge
+     bubble (`e39a5b53` — fires when the harness poll loop has already
+     terminated)
+   - `integrate-child` REST route when team-leads call `goal_merge_child`
+     directly via the MCP tool (`658f2da7`)
+   - `execution`-gate-signal reconciliation that detects manual
+     `git merge` from the terminal via `git merge-base --is-ancestor`
+     (`6aaee3aa`)
+
+   Merge conflicts do NOT archive the child — the work-in-progress
+   stays live so the team-lead can fix and retry. Archived children
+   render in the Children tab with an "Archived" / "Merged" badge
+   (§8 "Recovery scenarios" + §11 "UI cheatsheet").
 
 Any gate, in any workflow, can host subgoal verify steps. The canonical
 home is the `execution` gate of the built-in `parent` workflow, but
@@ -739,16 +760,45 @@ child goals…" button that opens the goal dashboard.
 
 ### Goal dashboard tabs
 
-Standard tabs (`spec`, `tasks`, `agents`, `commits`, `gates`) plus, for
-parent goals:
+Standard tabs (`spec`, `agents`, `commits`, `gates`) plus, conditionally:
 
 - **Plan** — DAG SVG laid out left-to-right by phase. Each card shows
   title, truncated spec, workflow, suggested role, and current child
-  state (pending / running / passed / failed). Edit mode is enabled
-  before `goal-plan` is signalled, or any time the goal is paused.
-- **Children** — card list of children with last verification verdict
-  and live agent count. Click a card to navigate to that child's
-  dashboard.
+  state (pending / running / passed / failed / needs-input). Edit mode
+  is enabled before `goal-plan` is signalled, or any time the goal is
+  paused.
+
+  **Visibility**: the Plan tab renders if EITHER condition holds (per
+  `shouldShowPlanTab(goal, goals?)` at `04977a18`):
+  1. **Formal plan path**: the goal's workflow includes a `goal-plan`
+     gate (e.g. the built-in `parent` workflow). The Plan tab shows
+     the snapshotted `execution.verify[]` subgoal steps.
+  2. **Living plan path** (added at `a993f838`): the goal has any
+     non-archived children, regardless of workflow. The plan is
+     synthesised from live children by `plan-synthesis.ts::buildPlanSteps`,
+     clustering them into phases by `createdAt` timestamp gap (default
+     60s window). Children spawned in the same turn cluster into one
+     phase; sequentially-spawned children land in successive phases.
+
+  Living-plan goals show "Living plan — reflects current children" in
+  the status row (vs "Frozen" for approved formal plans). The synthesis
+  recomputes from the live goals tree on every render, so the Plan tab
+  is a living document — plan-evolution is automatic when children
+  spawn / archive / state-change. Goals with a formal plan that ALSO
+  spawn ad-hoc children via `goal_spawn_child` get the formal plan +
+  orphan children appended to phases past the formal max phase.
+
+- **Tasks** — standard task list (added at `04977a18`'s
+  `shouldShowTasksTab` predicate). HIDDEN when the goal is plan- or
+  children-driven AND has zero tasks (avoids redundant "Tasks (0)" next
+  to a populated Plan tab); kept visible whenever taskCount > 0 even on
+  parent goals (defensive against partial migration).
+- **Children** — card list of children (live + archived together,
+  matching the Agents tab's live + dismissed pattern at `04977a18`).
+  Each card shows last verification verdict, live agent count, and an
+  archived-status badge ("Merged" green for `archived && state ===
+  complete` / "Archived" muted for non-complete). Click a card to
+  navigate to that child's dashboard.
 
 Child goal dashboards render a **← back to parent** breadcrumb showing
 the chain of ancestors.
@@ -819,21 +869,32 @@ Standard 409 body shapes:
 
 ## 13. Tools the team-lead uses
 
-The `Children` tool group ships with six tools. By default,
-`team-lead` is the only role with `allow` policy on the group.
+The `Children` tool group ships with the following tools. By default,
+`team-lead` is the only role with `allow` policy on the group;
+`architect` and `spec-auditor` get per-tool `allow` overrides for the
+three read-only tools (`goal_plan_status`, `goal_list_children`,
+`goal_inspect_child`).
 
 | Tool | Purpose |
 |---|---|
 | `goal_spawn_child` | Spawn a child goal under the current goal. Subject to the divergence policy when the plan is frozen. |
 | `goal_plan_propose` | Replace the verify[] of a named gate (default `execution`) with a proposed list of subgoal steps. |
-| `goal_plan_status` | Return the current plan plus live child-goal states. Cheap; call before proposing mutations. |
-| `goal_merge_child` | Locally merge a completed child's branch into the current goal's branch. Usually called by the harness, not by hand. Fails on conflict. |
+| `goal_plan_status` | Return the current plan plus live child-goal states. Cheap; call before proposing mutations. **Read-only.** |
+| `goal_list_children` | Slim projection of immediate non-archived children (state, branch, gate status). Complements `goal_plan_status` when you don't need the full plan. **Read-only.** |
+| `goal_inspect_child` | Inspect a child goal's gates from the parent session (BUG-13 fix at `27c0d08d`). Three modes: list all gates, gate detail, gate content / signal history. **Read-only.** Cross-goal reach: `gate_inspect` is scoped to the caller's own goal, this is the cross-goal version. |
+| `goal_merge_child` | Locally merge a completed child's branch into the current goal's branch. Usually fired automatically (eager-merge IIFE on ready-to-merge bubble at `e39a5b53`); team-leads may call directly to retry after manual conflict resolution. Fails on conflict; the route auto-archives the child after a clean merge (`658f2da7`). |
 | `goal_pause` | Suspend verification-harness ticks for this goal-tree. Required by `strict` before applying restructure mutations. |
 | `goal_resume` | Resume verification-harness ticks. |
+| `goal_set_policy` | Mutate `divergencePolicy` / `maxConcurrentChildren` on the current goal mid-flight (added at `9719b5c4`). Avoids the legacy "archive + recreate" workaround when the user wants to relax a policy on a running goal-tree. |
+| `goal_decide_mutation` | Approve or reject a buffered plan mutation by `requestId` (added at `9719b5c4`). Server-side companion to the pending-mutation banner; resolves the buffered entry and broadcasts `goal_mutation_resolved` so the dashboard banner clears. |
+| `goal_archive_child` | Archive a child (or descendant) goal record manually (added at `2f5f0f7d`). Use for zombie cleanup when interrupted spawns leave childless workflow shells, or when a manual `git merge` from the terminal pre-empted the four auto-archive paths. The single-repo branch ref is preserved (deferred to the 7-day session purge); multi-repo archives eagerly delete per-repo branches. |
 
 > See `docs/design/nested-goals.md` §5 for the tool YAML and policy
 > defaults, and §14 for the system-prompt stanzas that teach team-leads
-> when to use each.
+> when to use each. The historical design doc lists the original six;
+> the additional five were added during the PR #409 live-test cycle as
+> documented in the AGENTS.md "Spawn a child goal" recipe and the
+> debugging keyword index.
 
 ---
 
