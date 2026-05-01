@@ -469,6 +469,24 @@ export function buildMidGoalNestingStanza(opts: { divergencePolicy?: "strict" | 
 		"user to pause / amend the root spec / un-pause.\n\n" +
 		"**The plan is in service of the spec.** Never drop or contradict an\n" +
 		"acceptance criterion to make a mutation classifiable as fix-up.\n\n" +
+		"**Archiving completed children.** When `runSubgoalStep` performs the\n" +
+		"local merge of a child branch into yours, the harness automatically\n" +
+		"tears down the child's team and archives the child goal record (see\n" +
+		"`verification-harness.ts::runSubgoalStep` post-merge cleanup). You\n" +
+		"don't need to call `goal_archive_child` on those.\n\n" +
+		"BUT — if you ever spot a child whose state is `complete` and whose\n" +
+		"branch is already merged into yours but the goal record is still live\n" +
+		"(`archived: false`), call `goal_archive_child(childGoalId)` yourself.\n" +
+		"This happens for children merged BEFORE the auto-archive logic landed,\n" +
+		"or for children merged via the manual `goal_merge_child` tool. Use\n" +
+		"`goal_list_children` to spot stragglers — anything `state: complete`\n" +
+		"with `archived: false` is a candidate.\n\n" +
+		"Same goes for ZOMBIE shells — children created by an interrupted spawn\n" +
+		"that have no workflow gates and no team. The goal-plan re-signal path\n" +
+		"reconciles them automatically (since c95f8f60), but if you spot one in\n" +
+		"the meantime (visible in `goal_list_children` with `setupStatus`\n" +
+		"missing or `error`, or via `goal_inspect_child` returning empty\n" +
+		"`gates: []`), use `goal_archive_child(zombieId)` to clean up.\n\n" +
 		"**Restate acceptance criteria verbatim in at least one subgoal spec — paraphrasing risks losing adherence-check coverage.** When you draft\n" +
 		"a subgoal's `spec` field, **copy the exact wording** of every root-goal\n" +
 		"acceptance criterion that subgoal is responsible for — at least once, in\n" +

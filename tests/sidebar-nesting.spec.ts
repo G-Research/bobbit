@@ -26,6 +26,7 @@ declare global {
 	interface Window {
 		MAX_GOAL_DEPTH: number;
 		getChildGoalsFrom: (parentId: string, goals: any[]) => any[];
+		getArchivedChildGoalsFrom: (parentId: string, goals: any[]) => any[];
 		countDescendantsFrom: (goalId: string, goals: any[]) => number;
 		computeChildCountBadge: (parentId: string, goals: any[]) => { complete: number; total: number; label: string } | null;
 		decideRender: (goal: any, depth: number, goals: any[]) => { kind: "leaf" } | { kind: "show-more"; count: number } | { kind: "recurse"; childIds: string[] };
@@ -700,5 +701,89 @@ test.describe("SB-00: Sidebar hierarchy and nesting", () => {
 		);
 		expect(cat.section).toBe("delegate");
 		expect(cat.parentSessionId).toBe("parent1");
+	});
+});
+
+// Pinned regression: when `state.showArchived` is on, archived child
+// goals must render INLINE under their parent (mirrors archived-session
+// behaviour) rather than being dumped to a flat per-project bucket.
+// `getArchivedChildGoalsFrom` is the parallel of `getChildGoalsFrom`
+// but selects archived children; rendering is gated upstream by the
+// caller checking `state.showArchived`.
+test.describe("SB-NEST-ARCH: getArchivedChildGoalsFrom — archived-child enumeration", () => {
+	test("returns immediate archived children only, not live children", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const ids = await page.evaluate(() => {
+			const goals = [
+				{ id: "root", parentGoalId: undefined, createdAt: 1, archived: false },
+				{ id: "live-child", parentGoalId: "root", createdAt: 2, archived: false },
+				{ id: "archived-child", parentGoalId: "root", createdAt: 3, archived: true },
+			];
+			return window.getArchivedChildGoalsFrom("root", goals).map(g => g.id);
+		});
+		expect(ids).toEqual(["archived-child"]);
+	});
+
+	test("returns multiple archived children sorted by createdAt ASC", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const ids = await page.evaluate(() => {
+			const goals = [
+				{ id: "root", parentGoalId: undefined, createdAt: 1, archived: false },
+				{ id: "later-archived", parentGoalId: "root", createdAt: 99, archived: true },
+				{ id: "early-archived", parentGoalId: "root", createdAt: 5, archived: true },
+				{ id: "mid-archived", parentGoalId: "root", createdAt: 50, archived: true },
+			];
+			return window.getArchivedChildGoalsFrom("root", goals).map(g => g.id);
+		});
+		expect(ids).toEqual(["early-archived", "mid-archived", "later-archived"]);
+	});
+
+	test("returns empty list when no archived children exist", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const ids = await page.evaluate(() => {
+			const goals = [
+				{ id: "root", parentGoalId: undefined, createdAt: 1, archived: false },
+				{ id: "a", parentGoalId: "root", createdAt: 2, archived: false },
+				{ id: "b", parentGoalId: "root", createdAt: 3, archived: false },
+			];
+			return window.getArchivedChildGoalsFrom("root", goals).map(g => g.id);
+		});
+		expect(ids).toEqual([]);
+	});
+
+	test("does not return grandchildren — only IMMEDIATE archived children", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const ids = await page.evaluate(() => {
+			const goals = [
+				{ id: "root", parentGoalId: undefined, createdAt: 1, archived: false },
+				{ id: "child", parentGoalId: "root", createdAt: 2, archived: false },
+				{ id: "archived-grandchild", parentGoalId: "child", createdAt: 3, archived: true },
+			];
+			return window.getArchivedChildGoalsFrom("root", goals).map(g => g.id);
+		});
+		expect(ids).toEqual([]);
+	});
+
+	test("is the exact dual of getChildGoalsFrom — their union covers all immediate children", async ({ page }) => {
+		// Defensive invariant: live + archived children of a parent should
+		// equal all goals with that parentGoalId. No leak in either direction.
+		await page.goto(TEST_PAGE);
+		const { live, archived, all } = await page.evaluate(() => {
+			const goals = [
+				{ id: "root", parentGoalId: undefined, createdAt: 1, archived: false },
+				{ id: "a", parentGoalId: "root", createdAt: 2, archived: false },
+				{ id: "b", parentGoalId: "root", createdAt: 3, archived: true },
+				{ id: "c", parentGoalId: "root", createdAt: 4, archived: false },
+				{ id: "d", parentGoalId: "root", createdAt: 5, archived: true },
+			];
+			return {
+				live: window.getChildGoalsFrom("root", goals).map(g => g.id),
+				archived: window.getArchivedChildGoalsFrom("root", goals).map(g => g.id),
+				all: goals.filter(g => g.parentGoalId === "root").map(g => g.id),
+			};
+		});
+		expect(live).toEqual(["a", "c"]);
+		expect(archived).toEqual(["b", "d"]);
+		expect([...live, ...archived].sort()).toEqual(all.sort());
 	});
 });

@@ -642,6 +642,18 @@ export function getChildGoalsFrom(parentId: string, goals: Goal[]): Goal[] {
 		.sort((a, b) => a.createdAt - b.createdAt);
 }
 
+/** Immediate ARCHIVED child goals of `parentId`, sorted by createdAt ASC.
+ *  Pure function over the supplied goals array — mirrors
+ *  `getChildGoalsFrom` but selects archived children. Used by the
+ *  sidebar to render archived children inline under their live parent
+ *  when `showArchived` is on, so the tree relationship is preserved
+ *  (rather than dumping them to a flat per-project bucket). */
+export function getArchivedChildGoalsFrom(parentId: string, goals: Goal[]): Goal[] {
+	return goals
+		.filter(g => g.parentGoalId === parentId && !!g.archived)
+		.sort((a, b) => a.createdAt - b.createdAt);
+}
+
 /** Live wrapper around `getChildGoalsFrom` that reads `state.goals`. */
 export function getChildGoals(parentId: string): Goal[] {
 	return getChildGoalsFrom(parentId, state.goals);
@@ -912,6 +924,20 @@ export function renderGoalGroup(goal: Goal, depth: number = 0): TemplateResult {
 							title="Open goal dashboard to view nested children"
 						>Show ${countDescendants(goal.id)} more child goals…</button>`
 						: childGoals.map(c => renderGoalGroup(c, depth + 1))) : ""}
+					${(() => {
+						// Archived children rendered INLINE under their parent
+						// when `showArchived` is on. Preserves the tree relationship
+						// instead of dumping completed/archived children into a flat
+						// per-project archived bucket. Recursion into archived trees
+						// (e.g. an archived parent showing its archived children
+						// inside the project's Archived bucket) is also driven by
+						// this branch.
+						if (!state.showArchived) return "";
+						if (depth >= MAX_GOAL_DEPTH) return "";
+						const archivedChildren = getArchivedChildGoalsFrom(goal.id, state.goals);
+						if (archivedChildren.length === 0) return "";
+						return html`${archivedChildren.map(c => html`<div class="opacity-60">${renderGoalGroup(c, depth + 1)}</div>`)}`;
+					})()}
 					${state.showArchived ? (() => {
 						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");

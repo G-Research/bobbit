@@ -41,6 +41,14 @@ function getChildGoalsFrom(parentId, goals) {
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
+/** Immediate ARCHIVED child goals of `parentId`, sorted by createdAt ASC. */
+function getArchivedChildGoalsFrom(parentId, goals) {
+  return goals
+    .filter(g => g.parentGoalId === parentId && !!g.archived)
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
 /** Count all transitive non-archived descendants of `goalId`. Cycle-safe. */
 function countDescendantsFrom(goalId, goals) {
   const byParent = new Map();
@@ -111,6 +119,7 @@ function buildLinearChain(depth) {
 
 window.MAX_GOAL_DEPTH = MAX_GOAL_DEPTH;
 window.getChildGoalsFrom = getChildGoalsFrom;
+window.getArchivedChildGoalsFrom = getArchivedChildGoalsFrom;
 window.countDescendantsFrom = countDescendantsFrom;
 window.computeChildCountBadge = computeChildCountBadge;
 window.decideRender = decideRender;
