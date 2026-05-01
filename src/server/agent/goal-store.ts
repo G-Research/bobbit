@@ -196,6 +196,27 @@ export class GoalStore {
 								// loaded yet (they may follow in the array). Instead
 								// rely on the second pass below.
 							}
+							// Lazy migration for snake_case → camelCase coercion on the
+							// goal's snapshotted `workflow.gates`. Goals created before the
+							// builtin-config normalization fix carry `depends_on: [...]` and
+							// `dependsOn: undefined` on each gate, which crashes the
+							// gate-signal route in `server.ts` (and any other consumer that
+							// reads camelCase). Apply the same coercion `normalizeGate`
+							// performs, in-place. We deliberately don't pull in
+							// `normalizeWorkflow` here to keep this file circular-import-
+							// free (it lives downstream of workflow-store.ts).
+							if (g.workflow && Array.isArray(g.workflow.gates)) {
+								for (const gate of g.workflow.gates as any[]) {
+									if (gate && typeof gate === "object") {
+										if (!Array.isArray(gate.dependsOn)) {
+											gate.dependsOn = Array.isArray(gate.depends_on) ? gate.depends_on : [];
+										}
+										if (gate.injectDownstream === undefined && gate.inject_downstream !== undefined) {
+											gate.injectDownstream = gate.inject_downstream === true;
+										}
+									}
+								}
+							}
 							this.goals.set(g.id, g);
 						}
 					}
