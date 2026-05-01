@@ -24,8 +24,6 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 
-import { buildDefaultWorkflows } from "./seed-default-workflows.js";
-
 interface MigrateOpts {
 	configDir: string;
 	projectName: string;
@@ -37,9 +35,6 @@ interface MigrateResult {
 	commandKeys?: string[];
 	workflowsMigrated?: number;
 	workflowsDirRemoved?: boolean;
-	/** True if `workflows:` was missing AND no project-local workflows dir existed,
-	 *  and the migration seeded the four canonical default workflows. */
-	workflowsSeeded?: boolean;
 }
 
 /** Map legacy `*_command` key → component command name. */
@@ -142,7 +137,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 	// Migrate `<configDir>/workflows/*.yaml` files into the inline block.
 	let workflowsMigrated = 0;
 	let workflowsDirRemoved = false;
-	let workflowsSeeded = false;
 	const preExistingInlineWorkflows = (raw.workflows && typeof raw.workflows === "object" && !Array.isArray(raw.workflows))
 		? { ...(raw.workflows as Record<string, unknown>) }
 		: {};
@@ -172,14 +166,8 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		}
 	}
 
-	// Seed default workflows if NONE are present (no inline workflows, no project-local dir).
-	// After Follow-up A deleted defaults/workflows/*.yaml, projects with no workflow source
-	// at all would be left with zero workflows — breaking goal creation entirely.
-	if (Object.keys(inlineWorkflows).length === 0) {
-		const defaults = buildDefaultWorkflows(opts.projectName);
-		for (const [id, wf] of Object.entries(defaults)) inlineWorkflows[id] = wf;
-		workflowsSeeded = true;
-	}
+	// No default-workflow seeding. Workflows are the project assistant's
+	// responsibility; a project may legitimately have zero workflows.
 	if (Object.keys(inlineWorkflows).length > 0) {
 		next.workflows = inlineWorkflows;
 	}
@@ -207,7 +195,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		commandKeys: Object.keys(commands),
 		workflowsMigrated,
 		workflowsDirRemoved,
-		workflowsSeeded,
 	};
 }
 
@@ -234,7 +221,7 @@ function maybeSeedWorkflowsOnly(args: {
 
 	// If a workflows dir is present, migrate it into the inline block (mirrors the
 	// main path so the dir is removed and content is preserved). If neither inline
-	// nor dir, seed defaults.
+	// nor dir, this is a no-op — no default seeding.
 	if (hasInlineWorkflows && !hasWorkflowsDir) {
 		return { migrated: false };
 	}
@@ -272,15 +259,8 @@ function maybeSeedWorkflowsOnly(args: {
 		}
 	}
 
-	let workflowsSeeded = false;
-	if (Object.keys(inlineWorkflows).length === 0) {
-		const defaults = buildDefaultWorkflows(componentName);
-		for (const [id, wf] of Object.entries(defaults)) inlineWorkflows[id] = wf;
-		workflowsSeeded = true;
-	}
-
-	if (!workflowsSeeded && workflowsMigrated === 0) {
-		// Nothing changed.
+	if (workflowsMigrated === 0) {
+		// Nothing changed (no inline dir to migrate, and no default seeding).
 		return { migrated: false };
 	}
 
@@ -295,9 +275,6 @@ function maybeSeedWorkflowsOnly(args: {
 		return { migrated: false };
 	}
 
-	if (workflowsSeeded) {
-		console.log(`[migrate] project.yaml: seeded default workflows for ${projectName} (component=${componentName})`);
-	}
 	if (workflowsMigrated > 0) {
 		console.log(`[migrate] project.yaml: inlined ${workflowsMigrated} workflow files for ${projectName}`);
 	}
@@ -307,7 +284,6 @@ function maybeSeedWorkflowsOnly(args: {
 		componentName,
 		workflowsMigrated,
 		workflowsDirRemoved,
-		workflowsSeeded,
 	};
 }
 
