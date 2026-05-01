@@ -724,10 +724,17 @@ export function createGateway(config: GatewayConfig) {
 	const builtinConfigProvider = new BuiltinConfigProvider();
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
 	// Direct store lookups (roleStore.get()) transparently fall back to
-	// builtins, so no seeding to disk is needed. Workflows are project-
-	// scoped only — no system layer, no builtin layer.
+	// builtins, so no seeding to disk is needed.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
+	// Workflows: PR #402 removed the user-mutable system scope, but the
+	// canonical builtins (parent in particular) MUST remain available as a
+	// read-only safety net so projects whose `project.yaml::workflows` map
+	// doesn't list `parent` can still spawn nested-goals children. See
+	// `BuiltinConfigProvider.getWorkflows()` for the rationale on the
+	// component-name placeholder. Apply to all existing AND any future
+	// project context created via `getOrCreate`.
+	projectContextManager.setBuiltinWorkflows(builtinConfigProvider.getWorkflows());
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
@@ -5934,7 +5941,11 @@ async function handleApiRoute(
 				}
 			}
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			// Use err.message rather than String(err): the latter formats Error
+			// instances as `Error: <msg>`, double-wrapping when the caller
+			// already prefixes (e.g. tool extensions surfacing the body verbatim).
+			const msg = err instanceof Error ? err.message : String(err);
+			json({ error: msg }, 400);
 		}
 		return;
 	}

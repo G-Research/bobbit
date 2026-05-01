@@ -32,8 +32,8 @@ detail_docs: |-
   |------|------|----------|-------------|
   | `title` | string | **Yes** | Short title for the child goal (max 200 chars). |
   | `spec` | string | **Yes** | Markdown spec. Restate every acceptance criterion you intend the child to cover **verbatim** — the server's adherence check uses substring matching, so paraphrased criteria fail. A `## Covers` heading listing the criteria is a safe convention. |
-  | `workflowId` | string | No | Workflow id resolved through the cascade (inline → ancestor inline → project → server → builtin). Defaults to `feature`. |
-  | `inlineWorkflow` | object | No | Inline workflow YAML object — overrides `workflowId` and is snapshotted onto the child. |
+  | `workflowId` | string | No | Workflow id resolved through the cascade (inline → ancestor inline → project → server → builtin). Defaults to `feature`. The canonical built-ins `general`, `feature`, `bug-fix`, `quick-fix`, and **`parent`** are always available as a read-only safety net even when the project's `project.yaml::workflows` map does not list them — same-id project entries shadow the builtin. |
+  | `inlineWorkflow` | object | No | Inline workflow YAML object — overrides `workflowId` and is snapshotted onto the child. **Do NOT use this to recreate the `parent` workflow shape** — prefer `workflowId: "parent"` so future updates to the canonical `parent` definition (e.g. additional readiness checks on the integration gate) flow through without manual sync. Only use `inlineWorkflow` for genuinely bespoke shapes. |
   | `suggestedRole` | string | No | Hint for the team-lead seed role. |
   | `enabledOptionalSteps` | string[] | No | Workflow optional-step ids to enable. |
   | `planId` | string | No | Stable id for idempotency. Server generates one if omitted. Re-spawning with the same `planId` returns the existing child (200 + `alreadySpawned: true`). |
@@ -41,6 +41,16 @@ detail_docs: |-
   ## When to use
 
   See the decomposition decision rule in the description. In short: when the work deserves its own design / review / merge cycle. Otherwise prefer `team_spawn` (cohesive review cycle) or `task_create` (single tracked deliverable).
+
+  ## `workflowId` vs `inlineWorkflow`
+
+  Prefer `workflowId` over `inlineWorkflow` whenever a built-in shape fits. The canonical builtins (`general`, `feature`, `bug-fix`, `quick-fix`, `parent`) are seeded as a read-only layer beneath every project's workflow store, so they are always available. Project-defined workflows in `project.yaml` shadow same-id builtins.
+
+  Only reach for `inlineWorkflow` when:
+  - You need a one-off custom gate sequence that doesn't make sense to add to the project's `project.yaml::workflows` map.
+  - The shape is genuinely bespoke (not a near-copy of a canonical builtin with a tweak or two).
+
+  Do **not** use `inlineWorkflow` to recreate the `parent` workflow shape locally. The `parent` definition can drift over time (e.g. additional integration-gate readiness checks); a `workflowId: "parent"` reference picks up those updates automatically, an inline copy does not.
 
   ## Errors
 

@@ -3,6 +3,7 @@ import { ProjectRegistry } from "./project-registry.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
+import type { Workflow } from "./workflow-store.js";
 
 /**
  * Minimal session-resolver surface needed by the search orphan filter.
@@ -23,9 +24,24 @@ export class ProjectContextManager {
   private registry: ProjectRegistry;
   private sessionResolver: SessionResolver | null = null;
   private _sessionResolverWarned = false;
+  private _builtinWorkflows: Workflow[] = [];
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
+  }
+
+  /**
+   * Set the canonical builtin workflows (parent + general/feature/bug-fix/quick-fix).
+   * Applied to every existing AND lazily-created context's workflow store.
+   * Project-defined workflows in `project.yaml` shadow same-id builtins.
+   *
+   * Called once at server boot from `BuiltinConfigProvider.getWorkflows()`.
+   */
+  setBuiltinWorkflows(workflows: Workflow[]): void {
+    this._builtinWorkflows = workflows;
+    for (const ctx of this.contexts.values()) {
+      ctx.workflowStore.setBuiltins(workflows);
+    }
   }
 
   /**
@@ -55,6 +71,11 @@ export class ProjectContextManager {
 
     ctx = new ProjectContext(project);
     ctx.open();
+    // Apply builtin workflows to lazily-created contexts the same way
+    // the boot-time loop does for pre-existing ones.
+    if (this._builtinWorkflows.length > 0) {
+      ctx.workflowStore.setBuiltins(this._builtinWorkflows);
+    }
     this.contexts.set(projectId, ctx);
     return ctx;
   }

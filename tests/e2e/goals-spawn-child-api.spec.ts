@@ -503,3 +503,101 @@ test.describe("Nested-goals REST — spawn-child / integrate-child / pause / res
 		}
 	});
 });
+
+// User-feedback regression (Issue 5 + 6 from the agent-memory live test):
+// brand-new projects with their own `workflows:` map in `project.yaml` used
+// to lose access to the `parent` workflow entirely — spawn-child returned
+// `400 {error: "Error: Workflow not found: parent"}` (note the double
+// `Error:` prefix from `String(err)` instead of `err.message`).
+test.describe("spawn-child — canonical builtins available regardless of project's workflows map", () => {
+	test("spawn child with workflowId='parent' from a parent goal on a feature workflow succeeds", async () => {
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+
+		// Parent goal on `feature` workflow — mirrors the agent-memory
+		// build-charter setup that surfaced the bug.
+		const parentResp = await createGoalRaw({
+			title: `Feature Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "feature",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		try {
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: `Parent-workflow Child ${Date.now()}`,
+					spec: "child runs the parent decomposition flow",
+					workflowId: "parent",
+					planId: "plan-parent-shape",
+				}),
+			});
+			expect(spawnResp.status).toBe(201);
+			const spawn = await spawnResp.json();
+			expect(spawn.childGoalId).toBeTruthy();
+
+			const child = await getGoal(spawn.childGoalId);
+			expect(child.workflowId).toBe("parent");
+			expect(child.workflow).toBeTruthy();
+			// The canonical parent workflow shape must be intact.
+			const gateIds = (child.workflow.gates as Array<{ id: string }>).map(g => g.id);
+			expect(gateIds).toEqual([
+				"charter",
+				"plan-review",
+				"goal-plan",
+				"execution",
+				"integration",
+				"ready-to-merge",
+			]);
+
+			await apiFetch(`/api/goals/${spawn.childGoalId}`, { method: "DELETE" }).catch(() => { });
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+
+	test("spawn-child 400 body uses err.message (no double 'Error:' prefix)", async () => {
+		// Issue 6: the catch-all returned `String(err)` which formats Error
+		// instances as `"Error: <msg>"`, double-wrapping when consumers prefix
+		// the body verbatim. Now uses `err.message`.
+		const projectId = await defaultProjectId();
+		const parentResp = await createGoalRaw({
+			title: `Err-shape Parent ${Date.now()}`,
+			cwd: nonGitCwd(),
+			team: false,
+			worktree: false,
+			workflowId: "general",
+			projectId,
+			autoStartTeam: false,
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+
+		try {
+			const spawnResp = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Bad Child",
+					spec: "x",
+					workflowId: "genuinely-does-not-exist-12345",
+				}),
+			});
+			expect(spawnResp.status).toBe(400);
+			const body = await spawnResp.json();
+			expect(typeof body.error).toBe("string");
+			// Bug repro: `String(err)` would have produced "Error: Workflow not found: ...".
+			// Fixed shape: bare "Workflow not found: ..." with no leading "Error:".
+			expect(body.error).not.toMatch(/^Error:\s/);
+			expect(body.error).toContain("Workflow not found");
+			expect(body.error).toContain("genuinely-does-not-exist-12345");
+		} finally {
+			await apiFetch(`/api/goals/${parent.id}`, { method: "DELETE" }).catch(() => { });
+		}
+	});
+});

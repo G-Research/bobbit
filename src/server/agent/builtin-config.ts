@@ -18,6 +18,7 @@ import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
+import { buildDefaultWorkflows } from "../state-migration/seed-default-workflows.js";
 
 export class BuiltinConfigProvider {
 	private readonly builtinsDir: string;
@@ -40,11 +41,40 @@ export class BuiltinConfigProvider {
 	}
 
 	/**
-	 * Workflows are project-scoped only; this method exists for shape compat
-	 * with the cascade and may be removed once `ServerStores` drops it.
+	 * Canonical builtin workflows seeded as the lowest-priority layer for every
+	 * project's workflow store. Project-defined workflows in `project.yaml`
+	 * shadow same-id builtins; this layer guarantees that structural
+	 * infrastructure (notably the `parent` workflow used by the nested-goals
+	 * feature) is always available even when a project's `project.yaml`
+	 * declares its own `workflows:` map without listing it.
+	 *
+	 * Component name defaults to `"app"` because builtin workflows are seeded
+	 * **before** a project's components are known. The component name only
+	 * appears in `type: command` verify steps (build/check/unit/e2e/lint),
+	 * which are defaults that any project either:
+	 *   - re-declares in its own `workflows:` (shadows the builtin entirely), or
+	 *   - relies on per-component scaffolds from `buildPerComponentWorkflow`.
+	 *
+	 * The structural layer (gates, dependencies, manual flags, prompts, the
+	 * `parent` workflow's whole shape) is component-independent.
+	 *
+	 * Pre-PR #402 these workflows were also user-mutable at the system scope.
+	 * That scope was removed; the builtins remain as a read-only safety net.
 	 */
 	getWorkflows(): Workflow[] {
-		return [];
+		const seeded = buildDefaultWorkflows("app");
+		const out: Workflow[] = [];
+		for (const [id, wf] of Object.entries(seeded)) {
+			out.push({
+				id,
+				name: wf.name,
+				description: wf.description ?? "",
+				gates: wf.gates as Workflow["gates"],
+				createdAt: 0,
+				updatedAt: 0,
+			});
+		}
+		return out;
 	}
 
 	getTools(): ToolInfo[] {
