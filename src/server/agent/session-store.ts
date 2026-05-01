@@ -234,13 +234,44 @@ export class SessionStore {
 		return Array.from(this.sessions.values());
 	}
 
+	/**
+	 * Fields whose persistence is required for the session to survive a hard
+	 * restart (kill -9, OS crash, container OOM). When any of these change we
+	 * flush synchronously instead of going through the 1s save debounce —
+	 * otherwise the gateway can advertise the session as `idle` to the API
+	 * before the recovery-critical disk write has landed, and a kill in that
+	 * window archives the session on next boot.
+	 *
+	 * Lower-frequency by nature, so synchronous writes are not a perf concern.
+	 * `lastActivity` / `lastReadAt` are intentionally excluded — they fire on
+	 * every event and benefit from coalescing.
+	 */
+	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
+		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
+		"repoWorktrees", "poolId", "archived", "archivedAt",
+		"sandboxed", "projectId", "goalId", "delegateOf",
+		"role", "assistantType", "taskId", "staffId",
+		"teamGoalId", "teamLeadSessionId", "worktreeDegraded",
+		"modelProvider", "modelId",
+	];
+
 	/** Update a subset of fields for an existing session */
 	update(id: string, updates: Partial<UpdatableSessionFields>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
 		this.generation++;
 		Object.assign(existing, updates);
-		this.save(); // debounced — frequent field updates
+
+		// Recovery-critical fields must survive a hard kill — flush synchronously.
+		const critical = SessionStore.RECOVERY_CRITICAL_FIELDS.some(f => f in updates);
+		if (critical) {
+			// If a debounced save is pending, cancel it — saveNow supersedes it.
+			if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+			this.saveNow();
+		} else {
+			this.save(); // debounced — high-frequency, non-critical (lastActivity, lastReadAt, drafts, queue)
+		}
+
 		// Only notify on meaningful field changes (skip high-frequency activity updates)
 		if (updates.title !== undefined || updates.archived !== undefined || updates.role !== undefined || updates.goalId !== undefined) {
 			this.onIndexUpdate?.(existing);
