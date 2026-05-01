@@ -1,38 +1,25 @@
 /**
  * Client-side proposal-type registry. The single plugin point that
- * Slice E will hang the per-type bespoke side-effects, validation,
+ * Slice E hangs the per-type bespoke side-effects, validation,
  * accept handlers, and renderer hookups off.
  *
- * In Slice D this file ships:
- *   - the `ProposalType` union
- *   - the `ProposalSlot` interface (mirror of server's TypedProposal projection)
- *   - the `ProposalTypePlugin` interface
- *   - a `PROPOSAL_TYPE_REGISTRY` table whose `mergeFields` is filled in
- *     for all six types (the only piece needed before the cutover so
- *     `RemoteAgent.onProposal` can fold streaming partials correctly)
- *
- * `onFirstEmit`, `validate`, `accept`, `renderPanel` are intentionally
- * stubbed with a TODO. Slice E will populate them by lifting the
- * existing per-type logic verbatim from `session-manager.ts` /
- * `render.ts`. Do NOT delete the legacy onXProposal callbacks until
- * Slice E swaps the call sites — see Slice D scope notes.
+ * For accept handlers: per design Slice E retains the existing per-type
+ * accept paths at their original call sites (createGoal, acceptProjectProposal,
+ * role/staff/tool/workflow accept endpoints, workflow PUT). The plugin's
+ * `accept` hook is reserved for future consolidation. `renderPanel` is
+ * unused for Slice E and reserved for future work.
  */
+
+// NOTE: We do NOT import `./state.js` at module load — state.ts touches
+// `localStorage` at module init which would break node-only unit tests of
+// the registry's pure mergeFields helpers. The onFirstEmit hooks lazy-import
+// the state object via a getter that's threaded through at call time. See
+// `getStateForFirstEmit` below.
 
 export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "workflow", "role", "tool", "staff"];
 
-/**
- * In-memory projection of a proposal for the active session. Mirrors the
- * server's `proposal_update` payload shape (see `src/server/ws/protocol.ts`).
- *
- * `mode` is project-only (provisional vs registered); other types leave it
- * undefined.
- *
- * `rev` increments on every merge. Slice E uses it to gate one-shot
- * side-effects (`onFirstEmit`) — `prev == null` is the canonical first-emit
- * predicate, but `rev` also gives renderers a cheap reactivity key.
- */
 export interface ProposalSlot {
 	sessionId: string;
 	fields: Record<string, unknown>;
@@ -48,28 +35,13 @@ export interface ProposalFirstEmitOpts {
 
 export interface ProposalTypePlugin {
 	type: ProposalType;
-	/**
-	 * Merge an incoming (possibly partial) field bag into the prior projection.
-	 * For most types this is a plain `{ ...prev, ...incoming }`. Two carry-forwards:
-	 *   - project: keep prior `components` / `workflows` when the incoming partial
-	 *     omits them (lifted from session-manager.ts::onProjectProposal Bug-C fix).
-	 *   - goal: keep prior `spec` body when incoming partial only updates frontmatter
-	 *     (so a streaming frontmatter partial doesn't blank the spec mid-stream).
-	 */
 	mergeFields(prev: Record<string, unknown>, incoming: Record<string, unknown>): Record<string, unknown>;
-
-	// ---- Slice E will fill these in ----
-	/** Auto-select the right tab on the very first emit per session. */
 	onFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): void;
-	/** Synchronous structural validation for the accept button. Returns error messages. */
 	validate(fields: Record<string, unknown>): string[];
-	/** Submit the proposal. Routes per-type to the right REST endpoint. */
 	accept(slot: ProposalSlot): Promise<void>;
-	/** Bespoke per-type panel renderer. Slice E will plumb the actual templates through. */
 	renderPanel(): unknown;
 }
 
-/** Default mergeFields = plain object spread. role/tool/staff/workflow use this. */
 function defaultMerge(
 	prev: Record<string, unknown>,
 	incoming: Record<string, unknown>,
@@ -77,7 +49,6 @@ function defaultMerge(
 	return { ...prev, ...incoming };
 }
 
-/** Project carries forward `components` / `workflows` when the incoming partial omits them. */
 function projectMerge(
 	prev: Record<string, unknown>,
 	incoming: Record<string, unknown>,
@@ -88,14 +59,11 @@ function projectMerge(
 	return merged;
 }
 
-/** Goal preserves `spec` body across frontmatter-only partials. */
 function goalMerge(
 	prev: Record<string, unknown>,
 	incoming: Record<string, unknown>,
 ): Record<string, unknown> {
 	const merged: Record<string, unknown> = { ...prev, ...incoming };
-	// If the incoming partial has no `spec` key (or has an empty-string spec
-	// while we already have a non-empty one), preserve the prior spec.
 	if (!("spec" in incoming) && "spec" in prev) {
 		merged.spec = prev.spec;
 	} else if (
@@ -109,55 +77,131 @@ function goalMerge(
 	return merged;
 }
 
-// ---- Stubs for Slice E ----
-// Each stub throws / no-ops so a misordered cutover surfaces immediately
-// instead of silently dropping behaviour.
+// ---- onFirstEmit lifters ----
 
-function todoFirstEmit(_slot: ProposalSlot, _opts: ProposalFirstEmitOpts): void {
-	// TODO(slice-e): lift per-type onFirstEmit body from session-manager.ts.
-	// goal:    state.previewPanelActiveTab = "goal"; mobile flips previewPanelTab="goal".
-	// project: state.previewPanelActiveTab = "project"; mobile flips previewPanelTab="project".
-	// role/tool/staff/workflow: state.assistantTab = "preview" when assistant session; etc.
+function clearCollapseKey(sessionId: string): void {
+	try {
+		if (typeof localStorage !== "undefined") {
+			localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`);
+		}
+	} catch { /* ignore */ }
 }
 
-function todoValidate(_fields: Record<string, unknown>): string[] {
-	// TODO(slice-e): lift per-type structural validation from existing accept handlers.
-	return [];
+/** Lazily resolve the mutable state singleton at call time so this module's
+ *  load-time graph stays node-safe. */
+function getState(): any {
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	return (globalThis as any).bobbitState ?? {};
+}
+
+function goalFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): void {
+	const s = getState();
+	if (opts.isAssistant) {
+		s.assistantHasProposal = true;
+		if (s.assistantTab === "chat" && opts.isMobile) {
+			s.assistantTab = "preview";
+		}
+	} else {
+		s.previewPanelActiveTab = "goal";
+		clearCollapseKey(slot.sessionId);
+		if (opts.isMobile) s.previewPanelTab = "goal";
+	}
+}
+
+function projectFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): void {
+	const s = getState();
+	if (opts.isAssistant) {
+		s.assistantHasProposal = true;
+		if (s.assistantTab === "chat" && opts.isMobile) {
+			s.assistantTab = "preview";
+		}
+	} else {
+		s.previewPanelActiveTab = "project";
+		clearCollapseKey(slot.sessionId);
+		if (opts.isMobile) s.previewPanelTab = "project";
+	}
+}
+
+function assistantOnlyFirstEmit(_slot: ProposalSlot, opts: ProposalFirstEmitOpts): void {
+	const s = getState();
+	s.assistantHasProposal = true;
+	if (s.assistantTab === "chat" && opts.isMobile) {
+		s.assistantTab = "preview";
+	}
+}
+
+// ---- validators ----
+
+function requireKeys(fields: Record<string, unknown>, keys: string[]): string[] {
+	const errs: string[] = [];
+	for (const k of keys) {
+		const v = fields[k];
+		if (typeof v !== "string" || v.trim() === "") {
+			errs.push(`${k} is required`);
+		}
+	}
+	return errs;
+}
+
+function goalValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["title", "spec"]);
+}
+
+function projectValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["name", "root_path"]);
+}
+
+function roleValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["name", "label", "prompt"]);
+}
+
+function staffValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["name", "prompt"]);
+}
+
+function toolValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["tool", "action", "content"]);
+}
+
+function workflowValidate(fields: Record<string, unknown>): string[] {
+	return requireKeys(fields, ["id", "name"]);
 }
 
 async function todoAccept(_slot: ProposalSlot): Promise<void> {
-	// TODO(slice-e): lift per-type accept body from session-manager.ts
-	// (createGoal / acceptProjectProposal / role+staff accept endpoints / workflow PUT / tool PUT).
-	throw new Error("ProposalTypePlugin.accept is not yet wired (Slice E).");
+	throw new Error("Slice E: per-type accept handlers retained at original sites");
 }
 
 function todoRenderPanel(): unknown {
-	// TODO(slice-e): wire to existing bespoke panel renderers in render.ts
-	// (goalPreviewPanel, projectProposalPanel, rolePreviewPanel, etc.).
 	return undefined;
 }
 
-function makePlugin(type: ProposalType, mergeFields: ProposalTypePlugin["mergeFields"]): ProposalTypePlugin {
+interface PluginConfig {
+	mergeFields: ProposalTypePlugin["mergeFields"];
+	onFirstEmit: ProposalTypePlugin["onFirstEmit"];
+	validate: ProposalTypePlugin["validate"];
+}
+
+function makePlugin(type: ProposalType, cfg: PluginConfig): ProposalTypePlugin {
 	return {
 		type,
-		mergeFields,
-		onFirstEmit: todoFirstEmit,
-		validate: todoValidate,
+		mergeFields: cfg.mergeFields,
+		onFirstEmit: cfg.onFirstEmit,
+		validate: cfg.validate,
 		accept: todoAccept,
 		renderPanel: todoRenderPanel,
 	};
 }
 
 export const PROPOSAL_TYPE_REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
-	goal: makePlugin("goal", goalMerge),
-	project: makePlugin("project", projectMerge),
-	workflow: makePlugin("workflow", defaultMerge),
-	role: makePlugin("role", defaultMerge),
-	tool: makePlugin("tool", defaultMerge),
-	staff: makePlugin("staff", defaultMerge),
+	goal: makePlugin("goal", { mergeFields: goalMerge, onFirstEmit: goalFirstEmit, validate: goalValidate }),
+	project: makePlugin("project", { mergeFields: projectMerge, onFirstEmit: projectFirstEmit, validate: projectValidate }),
+	workflow: makePlugin("workflow", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: workflowValidate }),
+	role: makePlugin("role", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: roleValidate }),
+	tool: makePlugin("tool", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: toolValidate }),
+	staff: makePlugin("staff", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: staffValidate }),
 };
 
-/** Type guard for narrowing arbitrary strings to `ProposalType`. */
 export function isProposalType(s: unknown): s is ProposalType {
 	return typeof s === "string" && (PROPOSAL_TYPES as readonly string[]).includes(s);
 }
+
