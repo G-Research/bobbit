@@ -432,16 +432,19 @@ Here's the typical flow for a team goal with a workflow:
      workflowGateId="design-doc")
    → Agent gets the goal spec in its system prompt (no upstream deps for first gate)
 
-5. Agent produces the design and signals the gate:
+5. Agent produces the design, pushes its branch, marks task complete.
+   Team Lead merges the branch and signals the gate:
    gate_signal(gate_id="design-doc", content="# Design\n\n...")
    → Server runs verification (if configured) → gate status: passed
+   (Only the team lead can call gate_signal — see "Signaling a gate" above.)
 
 6. Team Lead spawns next agent with upstream context:
    team_spawn(role="coder", task="Implement the design",
      workflowGateId="implementation")
    → Agent receives the passed design-doc content in its system prompt
 
-7. Agent completes implementation and signals:
+7. Agent completes implementation, pushes branch, marks task complete.
+   Team Lead merges the branch and signals the gate:
    gate_signal(gate_id="implementation")
    → Verification runs (npm run check + LLM review) → gate status: passed
 
