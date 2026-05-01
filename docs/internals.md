@@ -774,6 +774,180 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ---
 
+## Editable proposals
+
+Every `propose_*` payload (`goal`, `project`, `workflow`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth; the in-memory `state.activeProposals[type]` slot is a parsed projection rebuilt on every change. Two new tools — `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` — let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+
+### Why
+
+Agents previously had to re-emit the entire payload via `propose_*` to tweak one field. For a fully-elaborated `propose_project` call (components, workflows, gate DAGs, verify steps) this meant streaming kilobytes of YAML to change a single command string — expensive in tokens and wall-clock time, and easy to drift between successive emissions. The file-on-disk model lets `edit_proposal` patch the draft in place using the same `old_text`/`new_text` contract the agent already uses for source code, with atomic rollback so a malformed edit cannot corrupt the stored form.
+
+The refactor also unified the six per-type proposal slots into one keyed map and lifted the goal-proposal UX behaviours (draft persistence, dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, per-session scoping) so every type inherits them. Bespoke per-type renderers (project's Components/Workflows/Diff, workflow's gate graph, goal's spec markdown) are unchanged — only the surrounding plumbing was rewritten.
+
+Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
+
+### On-disk layout
+
+```
+.bobbit/state/proposal-drafts/
+  <sessionId>/
+    goal.md         # markdown body + YAML frontmatter (title/cwd/workflow/options)
+    project.yaml    # native YAML matching the propose_project arg shape
+    workflow.yaml
+    role.yaml
+    tool.yaml
+    staff.yaml
+```
+
+Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields — see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write, cleaned up on session archive by `session-manager.ts::terminateSession` (fire-and-forget `fs.rm`).
+
+Path safety: `sessionId` is validated against `/^[A-Za-z0-9_-]+$/` and `type` against the union literal, so no traversal is possible.
+
+### Server module: `proposal-files.ts`
+
+`src/server/proposals/proposal-files.ts` owns the disk lifecycle and has no WebSocket or session-manager imports. The atomic-rollback contract is in `editProposalFile`:
+
+1. Read current content.
+2. Apply exact-string replacement (first-and-only-occurrence rule, identical to the builtin `edit` tool). Empty `new_text` deletes.
+3. Write to `<file>.tmp`.
+4. Parse via the per-type plugin in `proposal-types.ts` and run the required-field whitelist.
+5. On any parse/validate failure: unlink the `.tmp`, return a `ParseError` with structured `code`, file on disk untouched.
+6. On success: `fs.rename` `.tmp` → final path.
+
+Structured error codes (returned to the agent in the tool result and as `400` JSON bodies on the REST endpoint):
+
+| Code | Meaning |
+|---|---|
+| `FILE_NOT_FOUND` | No prior `propose_<type>` in this session. |
+| `OLD_TEXT_NOT_FOUND` | `old_text` does not match the file. |
+| `OLD_TEXT_NOT_UNIQUE` | `old_text` matches multiple times — ambiguous. |
+| `FRONTMATTER_MALFORMED` | `goal.md` frontmatter fence is broken. |
+| `YAML_PARSE_ERROR` | The post-edit YAML body fails to parse. |
+| `MISSING_REQUIRED_FIELD` | Per-type required-field whitelist failed. |
+| `STRUCTURAL_VALIDATION_FAILED` | Project YAML fails the same structural validator used by `PUT /api/projects/:id/config`. |
+
+Per-type metadata lives in `src/server/proposals/proposal-types.ts`: `filename`, `serialize(args) → body`, `parse(body) → ParseResult`, `requiredFields[]`. Adding a new proposal type means adding a plugin entry plus the matching client-side entry in `PROPOSAL_TYPE_REGISTRY`.
+
+### Unified client state
+
+The six legacy slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit slots for `tool`/`workflow`) are collapsed into one map in `src/app/state.ts`:
+
+```ts
+activeProposals: Partial<Record<ProposalType, ProposalSlot>>;
+
+interface ProposalSlot {
+  sessionId: string;
+  fields: Record<string, unknown>;  // parsed projection
+  streaming: boolean;                // mirrors proposalStreamingByTag for legacy panels
+  mode?: "provisional" | "registered"; // project only
+  rev: number;                       // monotonic; UI re-render hint
+}
+```
+
+`src/app/proposal-registry.ts` exports `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, and `PROPOSAL_TYPE_REGISTRY`. Each plugin contributes:
+
+- `mergeFields(prev, incoming)` — streaming shallow-merge. Project carries `components` and `workflows` forward when the partial omits them; goal carries the markdown body across frontmatter-only deltas; the others use a plain spread.
+- `onFirstEmit(slot, opts)` — tab auto-select on the first emit (e.g. project flips `previewPanelActiveTab="project"`, mobile flips the assistant tab).
+- `validate(fields)` — returns blocking errors that disable the submit button.
+- `accept(slot)` — reserved hook; current accept paths (`createGoal`, `acceptProjectProposal`, role/staff/tool/workflow accept endpoints) are unchanged.
+
+Unified draft + dismissal helpers in `src/app/proposal-helpers.ts` replace the per-type ad-hoc managers:
+
+- `saveProposalDraft(sid, type)` / `loadProposalDraft(sid, type)` / `deleteProposalDraft(sid, type)`
+- `markProposalDismissed(sid, type, fields)` / `isProposalDismissed(sid, type, fields)` / `clearProposalDismissed(sid, type)`
+
+LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId}`; the legacy `bobbit-goal-proposal-dismissed-<sid>` key is migrated once on first read.
+
+### Flow: `propose_*` → file-seed → broadcast → parsed projection
+
+```
+agent calls propose_<type>(args)
+  └─> defaults/tools/proposals/extension.ts execute()
+        └─> POST /api/sessions/:id/proposal/:type/seed { args }
+              └─> writeProposalFile (serialize + write)
+                    └─> parseProposalFile
+                          └─> _broadcastToSession({ type: "proposal_update",
+                                                       proposalType, fields,
+                                                       streaming: false,
+                                                       source: "seed" })
+                                └─> client remote.onProposal(type, fields, false)
+                                      └─> mergeFields, onFirstEmit (if first), renderApp
+```
+
+`edit_proposal` follows the same flow except the entry point is `POST /api/sessions/:id/proposal/:type/edit` and `source: "edit"`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
+
+### Dual-fire: legacy streaming path coexists
+
+The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolProposals` continues to fire the legacy per-type `onXProposal` callbacks during streaming, so partial deltas flow into the panel as the model types them. The unified `remote.onProposal` callback is the WS-driven path — it handles `proposal_update` (sources `seed`, `edit`, `rehydrate`) and `proposal_cleared`. Both paths funnel into the same `state.activeProposals[type]` slot via the plugin's `mergeFields`. The streaming-partial path provides UX responsiveness; the file-derived path provides the canonical projection and restart survival.
+
+### Restart survival via rehydrate-on-attach
+
+On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. Because the file IS the source of truth, no separate persistence layer is needed — a server restart mid-edit, a browser reload, or a session resume all yield the same broadcasted projection.
+
+Session archive cleans the directory: `session-manager.ts::terminateSession` fire-and-forgets `fs.rm` of the per-session dir. An in-flight `editProposalFile` racing with cleanup is harmless — `unlink` on a missing dir is a no-op.
+
+### Accept lifecycle
+
+The per-type accept handlers (`createGoal`, `acceptProjectProposal`, etc.) are unchanged. After a successful accept, the client fires `DELETE /api/sessions/:id/proposal/:type` which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
+
+### Tool surface
+
+| Tool | Group | Purpose |
+|---|---|---|
+| `view_proposal` | Proposals | `{ type }` → raw file body, or `404 {code:"FILE_NOT_FOUND"}` pointing at the matching `propose_*`. |
+| `edit_proposal` | Proposals | `{ type, old_text, new_text }` → post-edit body on success, structured error otherwise. Failed edits do NOT modify the file. |
+| `propose_<type>` | Proposals | Unchanged surface; now also seeds the file via the `/seed` REST endpoint as a side effect of `execute()`. |
+
+Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementation: `defaults/tools/proposals/extension.ts`.
+
+### REST endpoints
+
+Four endpoints, full reference in [docs/rest-api.md — Proposal drafts](rest-api.md#proposal-drafts):
+
+- `GET /api/sessions/:id/proposal/:type` — read raw body
+- `POST /api/sessions/:id/proposal/:type/seed` — called by `propose_*` `execute()`
+- `POST /api/sessions/:id/proposal/:type/edit` — surgical edit
+- `DELETE /api/sessions/:id/proposal/:type` — clean up after accept
+
+### Per-type panel testids
+
+Each proposal preview panel exposes `data-panel="<type>-proposal"` for E2E targeting. The project panel keeps its three-view structure (`view-tab-{components|workflows|diff}`) on top of the unified slot — see [Project-proposal panel structure](#project-proposal-panel-structure).
+
+### Out of scope
+
+- Diff/undo history of edits. Agents see the latest file contents only.
+- Concurrent multi-agent edits to the same proposal (single-session model preserved).
+- Refactoring the bespoke per-type preview forms.
+
+### Key files
+
+| Path | Purpose |
+|---|---|
+| `src/server/proposals/proposal-files.ts` | Atomic file API (`writeProposalFile`, `editProposalFile`, `parseProposalFile`, `deleteProposalFile`). |
+| `src/server/proposals/proposal-types.ts` | Per-type plugins: filename, serialize, parse, requiredFields. |
+| `src/server/server.ts` | Four REST handlers (regex-routed at `/api/sessions/:id/proposal/:type[/edit\|/seed]`). |
+| `src/server/ws/protocol.ts` | `proposal_update` / `proposal_cleared` server messages. |
+| `src/server/ws/handler.ts` | Rehydrate-on-attach. |
+| `src/server/agent/session-manager.ts::terminateSession` | Per-session directory cleanup. |
+| `src/app/proposal-registry.ts` | `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, `PROPOSAL_TYPE_REGISTRY`. |
+| `src/app/proposal-helpers.ts` | Unified draft + dismissal helpers. |
+| `src/app/state.ts::activeProposals` | Unified slot map. |
+| `src/app/session-manager.ts::remote.onProposal` | Unified WS-driven callback. |
+| `src/app/remote-agent.ts` | WS dispatch + legacy `_checkToolProposals` dual-fire. |
+| `defaults/tools/proposals/{view,edit}_proposal.yaml` | Tool descriptors. |
+| `defaults/tools/proposals/extension.ts` | Tool registration; `propose_*` `execute()` POSTs to `/seed`. |
+
+### Tests
+
+- `tests/proposal-files.test.ts` — unit: write/read/edit/parse/delete round-trip, atomic-rollback, path-traversal rejection.
+- `tests/proposal-registry.test.ts` — unit: per-type `mergeFields` and validators.
+- `tests/proposal-helpers.test.ts` — unit: unified draft + dismissal.
+- `tests/e2e/proposal-edit-api.spec.ts` — API E2E: edit-before-propose, restart survival, malformed-edit rollback (SHA-256 byte-equal pre/post).
+- `tests/e2e/ui/proposal-edit-flow.spec.ts` — browser E2E: project propose → edit → accept happy path.
+- `tests/e2e/ui/proposal-types-uX-parity.spec.ts` — parametrised across all six types: dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, restart survival.
+
+---
+
 ## Read/unread state
 
 The sidebar shows an "unseen activity" dot on sessions that have new activity since the user last looked. Read state is **server-side**: a `lastReadAt` timestamp on each `PersistedSession`, mutated only by the user navigating to a session.

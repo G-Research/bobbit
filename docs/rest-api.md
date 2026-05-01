@@ -30,6 +30,55 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 
 
+### Proposal drafts
+
+In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}` so the agent can tweak them via `view_proposal` / `edit_proposal` without re-emitting the full payload. The file is the single source of truth; the in-memory client slot (`state.activeProposals[type]`) is a parsed projection. See [docs/internals.md — Editable proposals](internals.md#editable-proposals) and [docs/design/editable-proposals.md](design/editable-proposals.md).
+
+`<type>` is one of `goal | project | workflow | role | tool | staff`. `goal` files are markdown with YAML frontmatter; the others are native YAML.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
+| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, broadcasts `proposal_update {source:"seed"}`. `200 {ok:true}` on success; `400` with structured error on parse/validate failure. |
+| `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit"}`, returns `200 {ok:true, newContent}`. On failure: file unchanged, returns 4xx with structured error. |
+| `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. |
+
+#### Error response shape
+
+All 4xx responses for the edit / seed endpoints share the same JSON shape:
+
+```json
+{
+  "ok": false,
+  "code": "YAML_PARSE_ERROR",
+  "message": "<human-readable detail, ≤ 1 KB>",
+  "line": 12,
+  "col": 5,
+  "field": "components"
+}
+```
+
+`line`, `col`, and `field` are optional and present when the underlying validator supplies them.
+
+#### Structured error codes
+
+| Code | Status | Endpoint(s) | When |
+|---|---|---|---|
+| `INVALID_BODY` | `400` | edit, seed | Body is not JSON, or required keys are wrong type. |
+| `FILE_NOT_FOUND` | `404` | GET, edit | No prior `propose_<type>` in this session. The `message` names the matching `propose_*` tool. |
+| `OLD_TEXT_NOT_FOUND` | `400` | edit | `old_text` does not occur in the file. |
+| `OLD_TEXT_NOT_UNIQUE` | `400` | edit | `old_text` matches multiple times — ambiguous. Caller must extend `old_text` with surrounding context. |
+| `FRONTMATTER_MALFORMED` | `400` | edit, seed | `goal.md` frontmatter fence is broken or unparseable. |
+| `YAML_PARSE_ERROR` | `400` | edit, seed | Post-edit YAML body fails to parse. |
+| `MISSING_REQUIRED_FIELD` | `400` | edit, seed | Per-type required-field whitelist failed (`field` set). |
+| `STRUCTURAL_VALIDATION_FAILED` | `400` | edit, seed | Project YAML fails the structural validator shared with `PUT /api/projects/:id/config`. |
+
+**Atomic rollback.** Any failure in `edit` or `seed` after the per-type parse step leaves the file on disk byte-for-byte identical to its pre-call state — the implementation writes to `<file>.tmp` and `fs.rename`s only after parse + validate succeed. A failed edit followed by `GET` returns the original body unchanged.
+
+**Path safety.** `:id` is validated against `/^[A-Za-z0-9_-]+$/` and `:type` against the union literal; invalid values return `400 {error:"Unknown proposal type: ..."}` before any disk access.
+
+**Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate"}` per surviving file, so reloading a browser or restarting the server mid-edit yields the same UI state without a separate persistence layer.
+
 ### Review Annotations
 
 Per-session review annotations are stored server-side so they survive browser close/reopen, server restart, and are visible from any connected client (on refresh). Annotations are stored in `.bobbit/state/review-annotations-{sessionId}.json`. The client `AnnotationStore` uses a cache-first pattern: reads are synchronous from an in-memory cache, writes update the cache immediately and send async server requests.
