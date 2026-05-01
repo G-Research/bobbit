@@ -5733,10 +5733,19 @@ async function handleApiRoute(
 			return;
 		}
 		// Shape-validate optional pass-throughs the same way POST /api/goals does.
+		// Defense-in-depth: the spawn-child route shares the same inlineWorkflow
+		// pass-through as POST /api/goals, so it must run the same full schema
+		// validation — not just the shallow object check. Returns the same
+		// 400 body shape: { field, error }. See nested-goals task F3.
 		let inlineWorkflow: any | undefined;
 		if (body?.inlineWorkflow !== undefined) {
 			if (!body.inlineWorkflow || typeof body.inlineWorkflow !== "object" || Array.isArray(body.inlineWorkflow)) {
-				json({ error: "inlineWorkflow must be an object" }, 400);
+				json({ field: "inlineWorkflow", error: "inlineWorkflow must be an object" }, 400);
+				return;
+			}
+			const shapeErr = validateInlineWorkflowShape(body.inlineWorkflow);
+			if (shapeErr) {
+				json({ field: "inlineWorkflow", error: shapeErr }, 400);
 				return;
 			}
 			inlineWorkflow = body.inlineWorkflow;

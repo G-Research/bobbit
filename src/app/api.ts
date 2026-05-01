@@ -1336,6 +1336,34 @@ export async function fetchGateContent(goalId: string, gateId: string): Promise<
 	}
 }
 
+/**
+ * Signal a manual gate (no body) for the given goal/gate. Used by the
+ * Plan tab's "Approve plan" button (nested-goals task F3) to signal the
+ * `goal-plan` gate, which the server treats as a freeze marker on the
+ * `execution` gate's `verify[]`. Returns true on 2xx, false otherwise.
+ * The caller relies on the WS `goal_plan_frozen` broadcast to re-render
+ * the Plan tab as frozen — no client-side state mutation needed here.
+ */
+export async function signalManualGate(
+	goalId: string,
+	gateId: string,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+			method: "POST",
+			body: JSON.stringify({}),
+		});
+		if (!res.ok) {
+			let error: string | undefined;
+			try { error = (await res.json())?.error; } catch { /* ignore */ }
+			return { ok: false, status: res.status, error };
+		}
+		return { ok: true, status: res.status };
+	} catch (err) {
+		return { ok: false, status: 0, error: String(err) };
+	}
+}
+
 // ============================================================================
 // STAFF API
 // ============================================================================

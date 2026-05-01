@@ -5,7 +5,7 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, approveMutation, rejectMutation, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, approveMutation, rejectMutation, signalManualGate, type GateState, type GateSignal } from "./api.js";
 import { countDescendantsFrom, getChildGoals } from "./render-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
@@ -1958,6 +1958,37 @@ export function isPlanEditable(
 	return (gp?.status ?? "pending") !== "passed";
 }
 
+/** Pure helper: should the Plan tab show the "Approve plan" button?
+ *
+ *  Visible iff:
+ *    - plan is editable (goal-plan gate not yet passed), AND
+ *    - there is at least one plan step to approve, AND
+ *    - the goal is not paused (paused goals require resume before freeze).
+ *
+ *  See nested-goals task F3 + docs/design/nested-goals.md §10.2. The
+ *  freeze itself happens server-side when the `goal-plan` gate is
+ *  signalled — see `seed-default-workflows.ts::parent.yaml`. */
+export function shouldShowApprovePlanButton(
+	editable: boolean,
+	stepCount: number,
+	paused: boolean,
+): boolean {
+	return editable && stepCount > 0 && !paused;
+}
+
+/** Click handler for the Plan tab's "Approve plan" button. POSTs an
+ *  empty signal to `goal-plan`; on success the WS `goal_plan_frozen`
+ *  broadcast re-renders the Plan tab as frozen. On failure surfaces a
+ *  basic alert so the user knows the click didn't take. */
+async function approvePlanClick(goalId: string): Promise<void> {
+	const result = await signalManualGate(goalId, "goal-plan");
+	if (!result.ok) {
+		const msg = result.error || `Failed to approve plan (HTTP ${result.status})`;
+		// eslint-disable-next-line no-alert
+		alert(msg);
+	}
+}
+
 /** Resolve a plan node's display state by joining `subgoal.childGoalId`
  *  against the goal snapshot. Falls back to "pending" when the child has
  *  not been spawned yet. */
@@ -2137,6 +2168,14 @@ function renderPlanTab(): TemplateResult {
 							aria-pressed="${planEditMode ? "true" : "false"}"
 							@click=${togglePlanEditMode}>
 							${planEditMode ? "Done editing" : "Edit"}
+						</button>
+					` : nothing}
+					${shouldShowApprovePlanButton(editable, steps.length, goal.paused === true) ? html`
+						<button class="plan-approve-btn primary"
+							data-testid="approve-plan-btn"
+							title="Signal the goal-plan gate to freeze the execution plan"
+							@click=${() => approvePlanClick(goal.id)}>
+							Approve plan
 						</button>
 					` : nothing}
 				</div>
