@@ -3091,13 +3091,20 @@ export class SessionManager {
 			if (slash > 0 && slash < sessionModelPref.length - 1) {
 				const provider = sessionModelPref.slice(0, slash);
 				const modelId = sessionModelPref.slice(slash + 1);
+				const preSpawnPinned = spawnPinned && session.spawnPinnedModel === sessionModelPref;
 				try {
-					if (!(spawnPinned && session.spawnPinnedModel === sessionModelPref)) {
-						await session.rpcClient.setModel(provider, modelId);
-					}
+					// Route through applyModelString to preserve the hard-fail-on-mismatch
+					// contract (read-back via getState()) regardless of whether we skipped
+					// the redundant setModel RPC because the spawn already pinned the same model.
+					await applyModelString(session.rpcClient, sessionModelPref, {
+						sessionManager: this,
+						sessionId: session.id,
+						contextLabel: "default.sessionModel",
+						skipSetModel: preSpawnPinned,
+					});
 					this._writeModelNameFile(session.id, sessionModelPref);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${spawnPinned && session.spawnPinnedModel === sessionModelPref ? " (spawn-pinned)" : ""}`);
+					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
 					broadcast(session.clients, {
 						type: "state",
 						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },

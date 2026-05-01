@@ -5484,6 +5484,11 @@ async function handleApiRoute(
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
+		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
+		// redundant initial `model_change` event with its hardcoded default.
+		if (ps.modelProvider && ps.modelId) {
+			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
 			createOpts.roleName = role.name;
@@ -5508,24 +5513,10 @@ async function handleApiRoute(
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
 		if (ps.modelProvider && ps.modelId) {
-			// Fire-and-forget: set the model and persist. For worktree sessions the
-			// agent isn't ready yet, so setModel can fail — persist regardless so
-			// later restore picks it up.
-			const provider = ps.modelProvider;
-			const modelId = ps.modelId;
-			(async () => {
-				try {
-					// Wait briefly for the session to become idle if it's still preparing
-					for (let i = 0; i < 40; i++) {
-						const s = sessionManager.getSession(newSession.id);
-						if (s && (s.status === "idle" || s.status === "streaming")) break;
-						await new Promise(r => setTimeout(r, 50));
-					}
-					const s = sessionManager.getSession(newSession.id);
-					if (s) await s.rpcClient.setModel(provider, modelId).catch(() => {});
-				} catch { /* best-effort */ }
-				sessionManager.persistSessionModel(newSession.id, provider, modelId);
-			})().catch(() => {});
+			// Model is pinned at spawn via createOpts.initialModel above; just
+			// persist the choice so a later restore picks it up. No redundant
+			// post-spawn setModel — that's the whole point of spawn-time pinning.
+			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
 		}
 
 		json({
