@@ -178,12 +178,16 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await expect(s.page.getByText("Tools").first())
 			.toBeVisible({ timeout: 10_000 });
 
-		// Deep link: workflows
+		// Deep link: workflows. #/workflows redirects synchronously to
+		// #/settings/<projectId>/workflows (master commit 0fd63978); accept
+		// either form so the predicate matches before and after redirect.
 		s.act();
 		await navigateToHash(s.page, "#/workflows");
 		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/workflows"), { timeout: 5_000 });
+		await s.page.waitForFunction(() => {
+			const h = window.location.hash;
+			return h.startsWith("#/workflows") || /^#\/settings\/[^/]+\/workflows/.test(h);
+		}, { timeout: 5_000 });
 		await expect(s.page.getByText("Workflows").first())
 			.toBeVisible({ timeout: 10_000 });
 
