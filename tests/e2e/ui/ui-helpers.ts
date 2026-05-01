@@ -71,7 +71,16 @@ export async function navigateToHash(page: Page, hash: string): Promise<void> {
 	// params). `contains` is enough to prove the navigation happened —
 	// tests that care about the exact form use `url_equals` separately.
 	for (let attempt = 0; attempt < 3; attempt++) {
-		await page.evaluate((h) => { window.location.hash = h; }, hash);
+		// Set hash AND immediately read it back in the same evaluate. Some app
+		// routes redirect synchronously on the first hashchange (e.g.
+		// `#/workflows` → `#/settings/<projectId>/workflows`), so by the time
+		// the next polling tick fires the prefix may have moved on. The
+		// captured value is the proof we need that the assignment landed.
+		const initial = await page.evaluate((h) => {
+			window.location.hash = h;
+			return window.location.hash;
+		}, hash);
+		if (initial.startsWith(hash)) return;
 		try {
 			await page.waitForFunction(
 				(h) => window.location.hash.startsWith(h),
