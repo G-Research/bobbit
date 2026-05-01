@@ -1186,6 +1186,28 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const merged: Record<string, unknown> = { ...prevFields, ...fields };
 			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
 			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
+			// Per-component shallow merge: when both prev and incoming carry
+			// `components`, merge entries by name so a partial component update
+			// (e.g. only `commands`) doesn't clobber the previously-proposed
+			// `config` (or vice versa) on that component.
+			if (Array.isArray(fields.components) && Array.isArray((prevFields as Record<string, unknown>).components)) {
+				const prevComps = (prevFields as Record<string, unknown>).components as Array<Record<string, unknown>>;
+				const prevByName = new Map<string, Record<string, unknown>>();
+				for (const pc of prevComps) {
+					if (pc && typeof pc === "object" && typeof pc.name === "string") prevByName.set(pc.name, pc);
+				}
+				merged.components = (fields.components as Array<Record<string, unknown>>).map(c => {
+					if (!c || typeof c !== "object" || typeof c.name !== "string") return c;
+					const prev = prevByName.get(c.name);
+					if (!prev) return c;
+					return {
+						...prev,
+						...c,
+						commands: c.commands ?? prev.commands,
+						config: c.config ?? prev.config,
+					};
+				});
+			}
 			state.activeProjectProposal = { sessionId, fields: merged, mode };
 			state.assistantHasProposal = true;
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
@@ -1794,18 +1816,29 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 
 	// Write config fields
 	const configFields: Record<string, string> = {};
+	// `qa_start_command` and other qa_* keys are no longer top-level config
+	// fields — they live inside each component's `config:` map and are
+	// round-tripped via the structured `components` payload below.
 	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
 		'test_unit_command', 'test_e2e_command', 'worktree_setup_command',
-		'qa_start_command', 'sandbox'];
+		'sandbox'];
 	for (const key of CONFIG_KEYS) {
 		const v = fields[key];
 		if (typeof v === "string" && v) configFields[key] = v;
 	}
-	if (Object.keys(configFields).length > 0) {
+	// Round-trip structured `components` (with each component's `commands`
+	// and `config` maps) on the provisional path too — mirrors the registered
+	// path so per-component QA config (config.qa_start_command etc.) survives
+	// project promotion.
+	const configPayload: Record<string, unknown> = { ...configFields };
+	if (Array.isArray((fields as Record<string, unknown>).components)) {
+		configPayload.components = (fields as Record<string, unknown>).components;
+	}
+	if (Object.keys(configPayload).length > 0) {
 		try {
 			await gatewayFetch(`/api/projects/${projectId}/config`, {
 				method: 'PUT',
-				body: JSON.stringify(configFields),
+				body: JSON.stringify(configPayload),
 			});
 		} catch (err) {
 			console.error('[project-proposal] Config write error:', err);
