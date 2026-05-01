@@ -6069,7 +6069,19 @@ async function handleApiRoute(
 			if (child.workflow) {
 				targetCtx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
 			}
-			json({ childGoalId: child.id, planId: planId ?? null }, 201);
+			// Surface enough state in the response that the caller can tell
+			// whether the team is already booting or whether worktree setup
+			// is still pending. Without this, team-leads polled
+			// /api/goals/<childId>/team/agents 30s after a 201 and saw `[]`,
+			// not knowing whether the team-spawn was queued, in flight, or
+			// silently broken. Live test feedback (PR #409 ISSUE 2).
+			json({
+				childGoalId: child.id,
+				planId: planId ?? null,
+				setupStatus: child.setupStatus,
+				autoStartTeam: child.autoStartTeam,
+				branch: child.branch,
+			}, 201);
 			// WS event per §9. Branch may not exist yet (worktree setup is async)
 			// — reading from goal record at this point still gives the planned name.
 			broadcastToGoal(parentGoalId, {

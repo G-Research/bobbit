@@ -324,6 +324,37 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ── goal_archive_child ────────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "goal_archive_child",
+		label: "Archive Child Goal",
+		description: [
+			"Archive a child (or descendant) goal. Use this to clean up zombie shells — children",
+			"that exist as goal records but never got their workflow + team properly",
+			"materialised (e.g. interrupted by a server restart mid-spawn). Archived children",
+			"are filtered out of `goal_list_children` and the spawnedFromPlanId reconciliation",
+			"path, so the harness will spawn a fresh replacement on next execution-gate signal.",
+			"",
+			"Idempotent: archiving an already-archived goal is a no-op. Does NOT cascade to",
+			"the child's own children — use `?recursive=1` for that.",
+		].join(" "),
+		promptSnippet: "Archive a child goal record (zombie cleanup).",
+		parameters: Type.Object({
+			childGoalId: Type.String({ description: "Id of the child goal to archive." }),
+			recursive: Type.Optional(Type.Boolean({ description: "If true, archive the child's entire subtree depth-first. Default false." })),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const qs = params.recursive ? "?recursive=1" : "";
+				const result = await requestJson("DELETE", `/api/goals/${encodeURIComponent(params.childGoalId)}${qs}`);
+				if (!result.ok) return err("goal_archive_child", result.status, result.data);
+				return ok(result.data);
+			} catch (e) {
+				return netErr("goal_archive_child", e);
+			}
+		},
+	});
+
 	// ── goal_inspect_child ───────────────────────────────────────────────────────────────
 	pi.registerTool({
 		name: "goal_inspect_child",

@@ -98,6 +98,7 @@ describe("architect role \u2014 read-only Children overrides", () => {
 			"goal_resume",
 			"goal_decide_mutation",
 			"goal_set_policy",
+			"goal_archive_child",
 		]) {
 			const policy = resolveGrantPolicy(tool, "Children", role as any, tm as any, gps as any);
 			assert.equal(policy, "ask",
@@ -142,6 +143,7 @@ describe("spec-auditor role \u2014 read-only Children overrides", () => {
 			"goal_resume",
 			"goal_decide_mutation",
 			"goal_set_policy",
+			"goal_archive_child",
 		]) {
 			const policy = resolveGrantPolicy(tool, "Children", role as any, tm as any, gps as any);
 			assert.equal(policy, "ask",

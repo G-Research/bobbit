@@ -1,0 +1,38 @@
+name: goal_archive_child
+description: |-
+  Archive a child (or descendant) goal. Use this to clean up zombie shells — children that exist as goal records but never got their workflow + team properly materialised (e.g. interrupted by a server restart mid-spawn). Archived children are filtered out of `goal_list_children` and the spawnedFromPlanId reconciliation path, so the harness will spawn a fresh replacement on next execution-gate signal.
+
+  Idempotent: archiving an already-archived goal is a no-op. Does NOT cascade to the child's own children — use `recursive=true` for that.
+summary: "Archive a child goal record (zombie cleanup or manual decision)."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  DELETEs `DELETE /api/goals/:childGoalId` (with optional `?recursive=1`). The child's worktree, branch, and team-lead session are torn down per the standard archival path. The buffered-mutation map is also pruned of any entries targeting the archived goal.
+detail_docs: |-
+  ## Purpose
+
+  Operational cleanup tool for nested-goals trees. Two main use cases:
+  1. **Zombie shell cleanup**: a child goal record exists but workflow/team were never materialised (interrupted spawn). Archiving frees the slot so the harness will re-spawn.
+  2. **Manual decision to abandon a child**: e.g. the team-lead determines a planned subgoal is no longer needed.
+
+  ## Parameters
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `childGoalId` | string | **Yes** | Id of the child goal to archive. |
+  | `recursive` | boolean | No | If `true`, archive the entire subtree rooted at this child (depth-first). Default `false` — leaves grandchildren live, which is a structural bug if the child had any (use `goal_list_children` first to confirm). |
+
+  ## Errors
+
+  - **404 Goal not found** — the named child has already been archived or never existed.
+  - **409** — depending on edge-case state (e.g. archive in progress).
+
+  ## Side effects
+
+  - The child's worktree is removed.
+  - The child's remote branch is push-deleted (gated by `shouldSkipRemotePush()` so test mode doesn't touch the remote).
+  - The child's team-lead session terminates.
+  - Any buffered mutations targeting the archived goal are dropped.
+  - WebSocket event `goal_archived` is broadcast to subscribers of the goal's tree.
