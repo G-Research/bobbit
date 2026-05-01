@@ -185,8 +185,25 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			});
 
 			const serverIds = new Set<string>();
+			const optimisticTextCredits = new Map<string, number>();
 			for (const m of snapshotRows) {
 				if (typeof m.id === "string" && m.id.length > 0) serverIds.add(m.id);
+				if (m.role === "user" || m.role === "user-with-attachments") {
+					const text = extractText(m);
+					optimisticTextCredits.set(text, (optimisticTextCredits.get(text) ?? 0) + 1);
+				}
+			}
+			// Text fallback is multiplicity-aware. If the snapshot merely re-states
+			// user messages already present as server rows in local state, those rows
+			// consume the text credits first so a new optimistic repeat of the same
+			// text is not accidentally hidden.
+			for (const m of state.messages) {
+				if (m._origin !== "server") continue;
+				if (m.role !== "user" && m.role !== "user-with-attachments") continue;
+				if (typeof m.id !== "string" || !serverIds.has(m.id)) continue;
+				const text = extractText(m);
+				const count = optimisticTextCredits.get(text) ?? 0;
+				if (count > 0) optimisticTextCredits.set(text, count - 1);
 			}
 			const serverHasCompactionMarker = snapshotRows.some((m) => {
 				if (m.role !== "assistant") return false;
@@ -208,9 +225,20 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					continue;
 				}
 				if (m._origin === "optimistic") {
-					// Optimistic prompts/steers always survive — server echo will
-					// reconcile via id/text on a later live-event.
+					// Optimistic prompts/steers survive only until the server snapshot
+					// represents them. Snapshots often arrive after reconnect/tab wake
+					// without a matching live echo, so reconcile by id and by user text
+					// here too; otherwise the optimistic row stays at the tail and the
+					// transcript appears out of order.
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
+					if (m.role === "user" || m.role === "user-with-attachments") {
+						const text = extractText(m);
+						const count = optimisticTextCredits.get(text) ?? 0;
+						if (count > 0) {
+							optimisticTextCredits.set(text, count - 1);
+							continue;
+						}
+					}
 					survivors.push(m);
 					continue;
 				}

@@ -57,6 +57,13 @@ export class PromptQueue {
 		return true;
 	}
 
+	/** Put messages back at the front, preserving their order. */
+	prepend(messages: QueuedMessage | QueuedMessage[]): void {
+		const items = Array.isArray(messages) ? messages : [messages];
+		if (items.length === 0) return;
+		this.queue = [...items, ...this.queue];
+	}
+
 	/** Pop the next message from the front of the queue. Returns undefined if empty. */
 	dequeue(): QueuedMessage | undefined {
 		return this.queue.shift();

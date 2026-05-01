@@ -5259,8 +5259,10 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
+			const willParkOnErrorCap = !!session.lastTurnErrored && (session.consecutiveErrorTurns ?? 0) >= 3;
+			const dispatchesImmediately = session.status === "idle" && !willParkOnErrorCap;
 			await sessionManager.enqueuePrompt(body.sessionId, message);
-			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
+			json({ ok: true, status: dispatchesImmediately ? "dispatched" : "queued" });
 		} catch (err) {
 			json({ error: String(err) }, 500);
 		}
