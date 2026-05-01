@@ -7,8 +7,13 @@ report with a per-test WebM video and clickable thumbnail strip. The report
 is for human review — a debugging artifact you can scrub through long after
 the run finishes.
 
-When `TIER25=1` is **not** set, every Tier 2.5 mechanism is a no-op. The
-opted-in tests behave identically to current master.
+When `RECORDSCREEN=1` is **not** set, every Tier 2.5 mechanism is a no-op.
+The opted-in tests behave identically to current master.
+
+> The env var is named `RECORDSCREEN` because that's literally what it does
+> — turn on screen recording / video reporting for the test run. The
+> "Tier 2.5" label is a design-doc category for the layer; the runtime
+> activation flag is `RECORDSCREEN`.
 
 ## What is Tier 2.5
 
@@ -19,13 +24,13 @@ A Tier 2.5 test is a **regular browser E2E test** with two changes:
 
 That's it. All existing assertions, helpers, and `gateway-harness` semantics carry over unchanged.
 
-When `TIER25=1`:
+When `RECORDSCREEN=1`:
 
 - A red cursor dot is injected so clicks are visible in screenshots.
 - Each `rec.capture(label)` writes one PNG (~50ms) and appends an entry to an in-memory list.
 - At end of run, the `tier-2-5-reporter` walks every `beats.jsonl`, runs ffmpeg-static to encode a WebM (each beat held for 1500ms) plus a thumbnail strip, and writes `tests/results/tier-2-5/report.html`. The report path is printed to stdout.
 
-When `TIER25` is unset:
+When `RECORDSCREEN` is unset:
 
 - The cursor overlay is not injected.
 - `BeatRecorder` methods early-return with **zero** filesystem activity.
@@ -56,7 +61,7 @@ test("my test", async ({ page, rec }) => {
 Run with capture on:
 
 ```bash
-TIER25=1 npm run test:e2e -- bg-wait-steer-flow.spec.ts
+RECORDSCREEN=1 npm run test:e2e -- bg-wait-steer-flow.spec.ts
 ```
 
 Run normally (no capture, identical to master):
@@ -86,9 +91,9 @@ caught PR #433 and PR #436. Copy them.
 ## Performance budget
 
 - One `rec.capture()` call costs ~50ms (one Playwright viewport screenshot, no extra waits).
-- 5–15 beats per test → ~250–750ms of test wall-time when `TIER25=1`.
+- 5–15 beats per test → ~250–750ms of test wall-time when `RECORDSCREEN=1`.
 - ffmpeg encoding at end of run: ~200ms per test (VP9, ~200 KB per video).
-- A 200-test suite with `TIER25=1` typically adds ~30s wall-time vs the default run.
+- A 200-test suite with `RECORDSCREEN=1` typically adds ~30s wall-time vs the default run.
 - Default off. Forever. There is no "always-on" mode and there should never be one — capture is a debugging tool, not a continuous-integration check.
 
 ## What Tier 2.5 is NOT
@@ -103,7 +108,7 @@ This list is non-negotiable. Each item below was tried, rejected, and would re-i
 - **Don't auto-launch Chrome from the test.** The test writes the report to disk and prints its path; opening it is the user's job (or a one-line shell command). `child_process.spawn`-to-open-browser was tried and added flakiness for no value.
 - **Don't `Read` the report file from an agent.** It's hundreds of KB of text + base64 thumbnails; burning agent context to summarize an HTML report is a waste. The report is for human eyes.
 - **Don't make assertions on text fingerprints when DOM-element counts work.** Two cards with identical text fingerprints but separate DOM nodes is the bug, not the absence of one. Count nodes (`document.querySelectorAll("tool-message").length`).
-- **No always-on video capture.** Default off, opt-in via `TIER25=1`, no project-config knob, no `default-on` mode. Forever.
+- **No always-on video capture.** Default off, opt-in via `RECORDSCREEN=1`, no project-config knob, no `default-on` mode. Forever.
 
 ## Mock trigger reference
 
@@ -136,14 +141,14 @@ When in doubt about exact event semantics, read the header comment in `mock-agen
 The fixture's plumbing is a few small files that nest cleanly into the existing E2E setup:
 
 - **`tests/e2e/ui/cursor-overlay.ts`** — `CURSOR_OVERLAY_SCRIPT` string, fed to Playwright's `addInitScript`. Self-contained IIFE, idempotent (`window.__protoCursorInstalled` guard). Red dot tracks pointer events, flashes yellow on mousedown.
-- **`tests/e2e/ui/beat-recorder.ts`** — `class BeatRecorder { capture(label); flush() }`. Each `capture()` writes one viewport PNG to `<testInfo.outputDir>/beats/<idx-padded-4>.png` and appends a record. `flush()` writes JSONL to `<testInfo.outputDir>/beats.jsonl`. Off-switch: every method early-returns when `TIER25 !== "1"`.
+- **`tests/e2e/ui/beat-recorder.ts`** — `class BeatRecorder { capture(label); flush() }`. Each `capture()` writes one viewport PNG to `<testInfo.outputDir>/beats/<idx-padded-4>.png` and appends a record. `flush()` writes JSONL to `<testInfo.outputDir>/beats.jsonl`. Off-switch: every method early-returns when `RECORDSCREEN !== "1"`.
 - **`tests/e2e/ui/fixtures.ts`** — extends `baseTest` from `../gateway-harness.js` with a `rec: BeatRecorder` fixture. Conditionally injects the cursor overlay, auto-flushes after `use(rec)`. Re-exports `expect` from Playwright.
 - **`tests/e2e/report/tier-2-5-reporter.ts`** — Playwright `Reporter`. On `onEnd`, walks the test-results tree for `beats.jsonl`, encodes each test's `beats/*.png` into a 1500ms-per-beat WebM via ffmpeg-static, generates 240px thumbnails, and emits `tests/results/tier-2-5/report.html`. All references in the HTML are relative paths — **no base64 inlining**.
-- **`playwright-e2e.config.ts`** — gated reporter registration: when `TIER25=1`, the reporter is appended to the `reporter` array; otherwise the file is never loaded.
+- **`playwright-e2e.config.ts`** — gated reporter registration: when `RECORDSCREEN=1`, the reporter is appended to the `reporter` array; otherwise the file is never loaded.
 
 ## Output layout
 
-When `TIER25=1`, end of run produces:
+When `RECORDSCREEN=1`, end of run produces:
 
 ```
 tests/results/tier-2-5/

@@ -4,7 +4,7 @@
  * directory by `BeatRecorder.flush()`, then emits a single self-contained
  * HTML report at `tests/results/tier-2-5/report.html`.
  *
- * Registered only when `process.env.TIER25 === "1"` (see the gated entry in
+ * Registered only when `process.env.RECORDSCREEN === "1"` (see the gated entry in
  * `playwright-e2e.config.ts`). When unregistered, this file is never loaded
  * — zero overhead.
  *
