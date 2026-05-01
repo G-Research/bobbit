@@ -365,6 +365,36 @@ describe("migrateProjectYaml", () => {
 		assert.equal(comps[1].config, undefined);
 	});
 
+	it("target component fallback: agent-qa step references a non-existent component", () => {
+		// Workflow's agent-qa step points at "web" but components[] only has "api".
+		// Picker should ignore the dangling reference and fall back through name-match
+		// (no name match here either) to components[0] = "api".
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, yaml.stringify({
+			components: [{ name: "api", repo: "." }],
+			workflows: {
+				default: {
+					name: "Default",
+					description: "",
+					gates: [
+						{ id: "impl", name: "Impl", verify: [{ name: "qa", type: "agent-qa", component: "web", prompt: "x" }] },
+					],
+				},
+			},
+			qa_start_command: "node server.js",
+		}));
+
+		migrateProjectYaml({ configDir, projectName: "unrelated" });
+
+		const out = readYaml(yamlFile);
+		const comps = out.components as any[];
+		// Migration must NOT silently no-op — the legacy key must be removed and
+		// the QA config must land on components[0] via the components[0] fallback.
+		assert.equal(out.qa_start_command, undefined, "legacy qa_start_command must be removed");
+		assert.equal(comps[0].name, "api");
+		assert.equal((comps[0].config as Record<string, string>).qa_start_command, "node server.js");
+	});
+
 	it("target component fallback: components[0] when no agent-qa step or name match", () => {
 		const yamlFile = path.join(configDir, "project.yaml");
 		fs.writeFileSync(yamlFile, yaml.stringify({

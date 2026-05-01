@@ -1892,6 +1892,7 @@ async function handleApiRoute(
 						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
 						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
 						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+						config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
 					}));
 					newCtx.projectConfigStore.setComponents(normalized);
 					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
@@ -2166,12 +2167,18 @@ async function handleApiRoute(
 						? legacyHook.trim()
 						: existing[0]?.worktreeSetupCommand;
 					if (hookValue) defaultComponent.worktree_setup_command = hookValue;
+					// Preserve existing per-component config (qa_* keys etc.) — the legacy
+					// flat-key write path must not silently wipe it.
+					if (existing[0]?.config && Object.keys(existing[0].config).length > 0) {
+						defaultComponent.config = { ...existing[0].config };
+					}
 					// Replace the first component but preserve any additional components on disk.
 					const remaining = existing.slice(1).map(c => {
 						const entry: Record<string, unknown> = { name: c.name, repo: c.repo };
 						if (c.relativePath) entry.relative_path = c.relativePath;
 						if (c.worktreeSetupCommand) entry.worktree_setup_command = c.worktreeSetupCommand;
 						if (c.commands) entry.commands = c.commands;
+						if (c.config && Object.keys(c.config).length > 0) entry.config = { ...c.config };
 						return entry;
 					});
 					components = [defaultComponent, ...remaining];

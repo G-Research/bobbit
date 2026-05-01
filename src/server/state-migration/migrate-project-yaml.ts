@@ -87,7 +87,10 @@ function migrateLegacyQaToComponent(
 		for (const g of wf.gates ?? []) {
 			for (const s of g.verify ?? []) {
 				if (s.type === "agent-qa" && typeof s.component === "string" && s.component) {
-					targetName = s.component; break outer;
+					// Verify the referenced component actually exists; otherwise fall through.
+					if (components.some(c => typeof c.name === "string" && c.name === s.component)) {
+						targetName = s.component; break outer;
+					}
 				}
 			}
 		}

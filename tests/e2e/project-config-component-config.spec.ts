@@ -162,6 +162,76 @@ test.describe("Component config map (REST API)", () => {
 		}
 	});
 
+	test("POST /api/projects with components[].config round-trips through GET /structured", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-comp-cfg-post-"));
+		let projectId: string | undefined;
+		try {
+			const components = [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "npm run build" },
+					config: {
+						qa_start_command: "PORT=$PORT npm start",
+						qa_max_scenarios: "7",
+					},
+				},
+			];
+			const res = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `comp-cfg-post-${Date.now()}`,
+					rootPath: dir,
+					components,
+				}),
+			});
+			expect(res.status).toBe(201);
+			const proj = await res.json();
+			projectId = proj.id;
+
+			const structured = await (await apiFetch(`/api/projects/${proj.id}/structured`)).json();
+			const web = (structured.components ?? []).find((c: any) => c.name === "web");
+			expect(web, "component must be persisted on POST").toBeTruthy();
+			expect(web.config, "components[].config must round-trip through POST /api/projects").toEqual(components[0].config);
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${projectId}?force=1`, { method: "DELETE" }).catch(() => {});
+			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
+	});
+
+	test("PUT with legacy flat build_command preserves existing components[0].config", async () => {
+		const { id, cleanup } = await registerTmpProject(`comp-cfg-legacy-flat-${Date.now()}`);
+		try {
+			// Seed structured components with QA config.
+			const seedConfig = {
+				qa_start_command: "PORT=$PORT npm start",
+				qa_max_scenarios: "5",
+			};
+			let putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					components: [{ name: "web", repo: ".", commands: { build: "old build" }, config: seedConfig }],
+				}),
+			});
+			expect(putRes.status).toBe(200);
+
+			// Now PUT only a legacy flat build_command (no `components` field).
+			putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ build_command: "npm run build:new" }),
+			});
+			expect(putRes.status).toBe(200);
+
+			const structured = await (await apiFetch(`/api/projects/${id}/structured`)).json();
+			const web = (structured.components ?? []).find((c: any) => c.name === "web");
+			expect(web).toBeTruthy();
+			expect(web.commands?.build, "legacy build_command must update commands.build").toBe("npm run build:new");
+			expect(web.config, "existing components[0].config must NOT be wiped by legacy flat-key PUT").toEqual(seedConfig);
+		} finally {
+			cleanup();
+		}
+	});
+
 	test("GET /api/projects/:id/config strips legacy top-level qa_* keys", async () => {
 		const { id, cleanup } = await registerTmpProject(`comp-cfg-strip-${Date.now()}`);
 		try {
