@@ -16,9 +16,9 @@
 // the state object via a getter that's threaded through at call time. See
 // `getStateForFirstEmit` below.
 
-export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
+export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
 
-export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "workflow", "role", "tool", "staff"];
+export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "role", "tool", "staff"];
 
 export interface ProposalSlot {
 	sessionId: string;
@@ -185,10 +185,6 @@ function toolValidate(fields: Record<string, unknown>): string[] {
 	return requireKeys(fields, ["tool", "action", "content"]);
 }
 
-function workflowValidate(fields: Record<string, unknown>): string[] {
-	return requireKeys(fields, ["id", "name"]);
-}
-
 async function todoAccept(_slot: ProposalSlot): Promise<void> {
 	throw new Error("Slice E: per-type accept handlers retained at original sites");
 }
@@ -217,7 +213,6 @@ function makePlugin(type: ProposalType, cfg: PluginConfig): ProposalTypePlugin {
 export const PROPOSAL_TYPE_REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
 	goal: makePlugin("goal", { mergeFields: goalMerge, onFirstEmit: goalFirstEmit, validate: goalValidate }),
 	project: makePlugin("project", { mergeFields: projectMerge, onFirstEmit: projectFirstEmit, validate: projectValidate }),
-	workflow: makePlugin("workflow", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: workflowValidate }),
 	role: makePlugin("role", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: roleValidate }),
 	tool: makePlugin("tool", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: toolValidate }),
 	staff: makePlugin("staff", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: staffValidate }),

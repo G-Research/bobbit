@@ -42,7 +42,7 @@ function sha(p: string): string {
 describe("proposalFilePath", () => {
 	it("places goal as .md and others as .yaml", () => {
 		assert.match(proposalFilePath(stateDir, sid, "goal"), /goal\.md$/);
-		for (const t of ["project", "workflow", "role", "tool", "staff"] as ProposalType[]) {
+		for (const t of ["project", "role", "tool", "staff"] as ProposalType[]) {
 			assert.match(proposalFilePath(stateDir, sid, t), new RegExp(`${t}\\.yaml$`));
 		}
 	});
@@ -93,7 +93,6 @@ describe("goal proposal round-trip", () => {
 describe("yaml proposals round-trip", () => {
 	const cases: Array<{ type: ProposalType; fields: Record<string, unknown> }> = [
 		{ type: "project", fields: { name: "P", root_path: "/tmp/p" } },
-		{ type: "workflow", fields: { id: "wf-1", name: "WF", gates: [] } },
 		{ type: "role", fields: { name: "r", label: "Role", prompt: "do x" } },
 		{ type: "tool", fields: { tool: "t", action: "create", content: "yaml: 1" } },
 		{ type: "staff", fields: { name: "s", prompt: "you are…" } },

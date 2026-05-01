@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Terminal, TestTube, Trash2 } from "lucide";
+import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Sparkles, Terminal, TestTube, Trash2 } from "lucide";
 import {
 	createWorkflow,
 	updateWorkflow,
@@ -760,179 +760,23 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 }
 
 // ============================================================================
-// WORKFLOW ASSISTANT SESSION
+// OPEN PROJECT ASSISTANT (replaces the legacy workflow assistant)
+//
+// Workflows are designed and edited via the project assistant now — it owns
+// the full project.yaml including the inline workflows: block. Opening it
+// from the workflows page seeds an edit session against the current project.
 // ============================================================================
 
-export async function createWorkflowAssistantSession(): Promise<void> {
+export async function openProjectAssistantForWorkflows(): Promise<void> {
 	if (state.creatingSession) return;
-	state.creatingSession = true;
-	renderApp();
-	try {
-		// Initialize empty edit state for the panel
-		initAssistantEditState();
-		const res = await gatewayFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ assistantType: "workflow" }),
-		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
-		const { id } = await res.json();
-		const { connectToSession } = await import("./session-manager.js");
-		await connectToSession(id, false, { assistantType: "workflow" });
-	} catch (err) {
-		console.error("Failed to create workflow assistant session:", err);
-	} finally {
-		state.creatingSession = false;
-		renderApp();
+	const projectId = getConfigProjectId();
+	const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
+	if (!project?.rootPath) {
+		console.warn("openProjectAssistantForWorkflows: no active project with rootPath");
+		return;
 	}
-}
-
-export async function editWorkflowWithAssistant(wf: Workflow): Promise<void> {
-	if (state.creatingSession) return;
-	state.creatingSession = true;
-	renderApp();
-	try {
-		populateAssistantEditState(wf);
-		const res = await gatewayFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ assistantType: "workflow" }),
-		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
-		const { id } = await res.json();
-		const { connectToSession } = await import("./session-manager.js");
-		await connectToSession(id, false, { assistantType: "workflow", workflowEditContext: { id: wf.id, name: wf.name } });
-	} catch (err) {
-		console.error("Failed to create workflow assistant session:", err);
-	} finally {
-		state.creatingSession = false;
-		renderApp();
-	}
-}
-
-// ============================================================================
-// ASSISTANT PANEL EDIT FORM (exported for use in render.ts)
-// ============================================================================
-
-/** Initialize empty edit state for the assistant panel (new workflow). */
-export function initAssistantEditState(): void {
-	isNew = true;
-	selectedWorkflow = null;
-	editId = "";
-	editName = "";
-	editDescription = "";
-	editGates = [];
-	saving = false;
-	expandedGateIndices = new Set();
-	expandedVStepKeys = new Set();
-	dragIndex = null;
-	dropTargetIndex = null;
-	vstepDragGateIdx = null;
-	vstepDragStepIdx = null;
-	vstepDropTarget = null;
-	emptyPhases = new Map();
-}
-
-/** Populate edit state from a fetched workflow (after assistant creates/updates it). */
-export function populateAssistantEditState(wf: Workflow): void {
-	selectedWorkflow = wf;
-	isNew = false;
-	editId = wf.id;
-	editName = wf.name;
-	editDescription = wf.description;
-	editGates = wf.gates.map((g) => ({
-		...g,
-		dependsOn: [...g.dependsOn],
-		verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined,
-		metadata: g.metadata ? { ...g.metadata } : undefined,
-	}));
-	saving = false;
-	// Expand all gates so the user can see what was created
-	expandedGateIndices = new Set(wf.gates.map((_, i) => i));
-}
-
-/** Populate edit state directly from a proposal (no API fetch — workflow doesn't exist yet). */
-export function populateFromProposal(data: { id: string; name: string; description: string; gates: WorkflowGate[] }): void {
-	// If editing an existing workflow and proposal ID matches, keep update mode
-	if (selectedWorkflow && data.id === selectedWorkflow.id) {
-		isNew = false;
-		// selectedWorkflow stays set — save will use updateWorkflow()
-	} else {
-		selectedWorkflow = null;
-		isNew = true;
-	}
-	editId = data.id;
-	editName = data.name;
-	editDescription = data.description;
-	editGates = data.gates.map((g) => ({
-		...g,
-		dependsOn: [...(g.dependsOn || [])],
-		verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined,
-		metadata: g.metadata ? { ...g.metadata } : undefined,
-	}));
-	saving = false;
-	expandedGateIndices = new Set(data.gates.map((_, i) => i));
-}
-
-/** Save workflow from the assistant panel (no navigation). */
-export async function saveWorkflowFromPanel(): Promise<boolean> {
-	saving = true;
-	renderApp();
-
-	try {
-		// Compact phases before saving
-		const compactedGates = compactPhases(editGates);
-
-		if (!selectedWorkflow) {
-			// Create new
-			const result = await createWorkflow({
-				id: editId,
-				name: editName,
-				description: editDescription,
-				gates: compactedGates,
-			}, getConfigProjectId() || undefined);
-			if (result) {
-				selectedWorkflow = result;
-				isNew = false;
-				workflows = await fetchWorkflowsScoped();
-				renderApp();
-				return true;
-			}
-		} else {
-			// Update existing
-			const ok = await updateWorkflow(selectedWorkflow.id, {
-				name: editName,
-				description: editDescription,
-				gates: compactedGates,
-			}, getConfigProjectId() || undefined);
-			if (ok) {
-				workflows = await fetchWorkflowsScoped();
-				const updated = workflows.find((w) => w.id === selectedWorkflow!.id);
-				if (updated) {
-					selectedWorkflow = updated;
-				}
-				renderApp();
-				return true;
-			}
-		}
-	} finally {
-		saving = false;
-		renderApp();
-	}
-	return false;
-}
-
-/** Get whether the form is currently saving. */
-export function isWorkflowSaving(): boolean {
-	return saving;
-}
-
-/** Get whether the form can be saved. */
-export function canSaveWorkflow(): boolean {
-	return !saving && (isNew ? !!editId.trim() && !!editName.trim() : !!editName.trim());
-}
-
-/** Render the workflow edit form for the assistant panel. */
-export function renderWorkflowEditPanel(): TemplateResult {
-	return renderEditView();
+	const { createProjectAssistantSession } = await import("./dialogs.js");
+	await createProjectAssistantSession(project.rootPath, false, { projectId, existingProjectName: project.name || "" });
 }
 
 // ============================================================================
@@ -986,8 +830,8 @@ function renderNavBar(): TemplateResult {
 				${Button({
 					variant: "default",
 					size: "sm",
-					onClick: createWorkflowAssistantSession,
-					children: html`<span class="inline-flex items-center gap-1.5 font-semibold">${icon(Plus, "sm")} New Workflow</span>`,
+					onClick: openProjectAssistantForWorkflows,
+					children: html`<span class="inline-flex items-center gap-1.5 font-semibold">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
 				})}
 			</div>
 		</div>
@@ -1020,9 +864,6 @@ function renderWorkflowRow(wf: Workflow): TemplateResult {
 				<span class="wf-badge">${wf.gates.length} gate${wf.gates.length !== 1 ? "s" : ""}</span>
 			</div>
 			<div class="wf-row-actions">
-				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); editWorkflowWithAssistant(wf); }} title="Edit with Assistant">
-					${icon(MessageSquare, "sm")}
-				</button>
 				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(wf); }} title="Edit">
 					${icon(Pencil, "sm")}
 				</button>
@@ -1062,21 +903,22 @@ function renderListView(): TemplateResult {
 				<p class="wf-empty-desc">Workflows define gates — checkpoints a goal must pass through, with dependency ordering and automated verification.</p>
 				${Button({
 					variant: "default",
-					onClick: showNewEdit,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Plus, "sm")} Create your first workflow</span>`,
+					onClick: openProjectAssistantForWorkflows,
+					children: html`<span class="inline-flex items-center gap-1.5" data-testid="open-project-assistant-from-workflows-empty">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
 				})}
+				<p class="text-xs text-muted-foreground mt-2">Or use the manual editor: <button class="underline" @click=${showNewEdit}>create one by hand</button>.</p>
 			</div>
 		`;
 	}
 
 	return html`
-		<div style="max-width: 600px; margin: 0 auto 16px;" class="flex items-start gap-4">
+		<div class="wf-list-header flex items-start gap-4">
 			<p class="text-sm text-muted-foreground flex-1 m-0">Workflows define the stages (gates) a goal goes through \u2014 like design \u2192 implement \u2192 test \u2192 review. They ensure quality by enforcing order and verification.</p>
 			<div class="shrink-0">${Button({
 				variant: "default",
 				size: "sm",
-				onClick: createWorkflowAssistantSession,
-				children: html`<span class="inline-flex items-center gap-1.5 font-semibold">${icon(Plus, "sm")} New Workflow</span>`,
+				onClick: openProjectAssistantForWorkflows,
+				children: html`<span class="inline-flex items-center gap-1.5 font-semibold" data-testid="open-project-assistant-from-workflows">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
 			})}</div>
 		</div>
 		<div class="wf-list">
@@ -1306,7 +1148,7 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 export function renderWorkflowPage(opts?: { embedded?: boolean }): TemplateResult {
 	const embedded = !!opts?.embedded;
 	return html`
-		<div class="wf-container">
+		<div class="wf-container ${embedded ? "wf-container-embedded" : ""}">
 			${embedded ? "" : renderNavBar()}
 			${!embedded && currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange, true) : ""}
 			<div class="wf-body">
