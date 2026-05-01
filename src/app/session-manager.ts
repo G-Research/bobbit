@@ -22,6 +22,7 @@ import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
+import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -1814,32 +1815,31 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
 	if (!promoted) return;
 
-	// Write config fields
-	const configFields: Record<string, string> = {};
-	// `qa_start_command` and other qa_* keys are no longer top-level config
-	// fields — they live inside each component's `config:` map and are
-	// round-tripped via the structured `components` payload below.
-	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
-		'test_unit_command', 'test_e2e_command', 'worktree_setup_command',
-		'sandbox'];
-	for (const key of CONFIG_KEYS) {
-		const v = fields[key];
-		if (typeof v === "string" && v) configFields[key] = v;
-	}
-	// Round-trip structured `components` (with each component's `commands`
-	// and `config` maps) on the provisional path too — mirrors the registered
-	// path so per-component QA config (config.qa_start_command etc.) survives
-	// project promotion.
-	const configPayload: Record<string, unknown> = { ...configFields };
-	if (Array.isArray((fields as Record<string, unknown>).components)) {
-		configPayload.components = (fields as Record<string, unknown>).components;
-	}
-	if (Object.keys(configPayload).length > 0) {
+	// Write config fields. Forward every proposed field — including structured
+	// `components` / `workflows` — to the config endpoint via the shared
+	// `buildProjectConfigDiff` helper. Mirrors the registered-mode accept path
+	// so the provisional accept doesn't silently drop the assistant's proposed
+	// workflows and components. Per-component QA config (`config.qa_start_command`
+	// etc.) rides through inside `components[].config`.
+	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
+	if (Object.keys(diff).length > 0) {
 		try {
-			await gatewayFetch(`/api/projects/${projectId}/config`, {
+			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 				method: 'PUT',
-				body: JSON.stringify(configPayload),
+				body: JSON.stringify(diff),
 			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				const details = Array.isArray(data?.details) && data.details.length > 0
+					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+					: "";
+				const { showConnectionError } = await import("./dialogs.js");
+				showConnectionError(
+					data?.error || `Config write failed (${res.status})`,
+					details || (data?.error ?? ""),
+				);
+				return;
+			}
 		} catch (err) {
 			console.error('[project-proposal] Config write error:', err);
 		}
@@ -1886,11 +1886,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	renderApp();
 }
 
-/** Best-effort JSON.parse used by registered-proposal acceptance to coerce
- *  string-shaped `components`/`workflows` fields back into structured form. */
-function safeParseJson(text: string): unknown {
-	try { return JSON.parse(text); } catch { return undefined; }
-}
+
 
 /** Registered-mode accept: apply the proposal's full config payload to the
  *  live project without terminating or navigating away. The server diffs
@@ -1922,26 +1918,7 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	//    persisted state; empty/null values are skipped client-side. Native-YAML
 	//    migrated fields ride through as structured payloads (server rejects
 	//    JSON-encoded strings) — parse if the agent supplied them as a string.
-	const diff: Record<string, unknown> = {};
-	const NATIVE_FIELDS = new Set(["config_directories", "sandbox_tokens", "components", "workflows"]);
-	// Legacy top-level QA keys are rejected at the wire (HTTP 400) — they live
-	// inside components[].config[] now. Drop them client-side so an older mock
-	// agent that still emits e.g. top-level `qa_start_command` doesn't make
-	// the entire Apply Changes flow fail.
-	const REJECTED_LEGACY_QA_KEYS = new Set([
-		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
-		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
-	]);
-	for (const [k, v] of Object.entries(fields)) {
-		if (k === "name" || k === "root_path") continue;
-		if (REJECTED_LEGACY_QA_KEYS.has(k)) continue;
-		if (v === undefined || v === null || v === "") continue;
-		if (NATIVE_FIELDS.has(k)) {
-			diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
-		} else {
-			diff[k] = v;
-		}
-	}
+	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
 	if (Object.keys(diff).length > 0) {
 		try {
 			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {

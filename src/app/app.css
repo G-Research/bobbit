@@ -58,6 +58,38 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
+	min-width: 0;
+}
+
+/* Project-proposal panel: prevent horizontal overflow from long gate ids,
+ * dep lists, inline commands, or LLM-review prompts. The flex chain above
+ * supplies min-w-0; here we make sure leaf content wraps rather than pushes. */
+[data-panel="project-proposal"] .wf-list,
+[data-panel="project-proposal"] .wf-gate-card,
+[data-panel="project-proposal"] .wf-gate-body-inner,
+[data-panel="project-proposal"] .wf-vstep-card,
+[data-panel="project-proposal"] .wf-vstep-fields,
+[data-panel="project-proposal"] .wf-phase-group,
+[data-panel="project-proposal"] .wf-phase-body {
+	min-width: 0;
+	max-width: 100%;
+}
+[data-panel="project-proposal"] .wf-gate-header {
+	flex-wrap: wrap;
+	row-gap: 4px;
+	min-width: 0;
+}
+[data-panel="project-proposal"] .wf-gate-pill {
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+[data-panel="project-proposal"] pre,
+[data-panel="project-proposal"] code {
+	max-width: 100%;
+	white-space: pre-wrap;
+	word-break: break-word;
+	overflow-wrap: anywhere;
 }
 
 /* Mobile: the fixed app-header overlays the top of #app-main. The chat
