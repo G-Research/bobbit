@@ -22,6 +22,7 @@ import {
 export { hasChildGoals } from "./goal-dashboard-tab-visibility.js";
 import { planEdgePaths } from "./plan-edge-paths.js";
 import { resolvePlanNodeState as resolvePlanNodeStateFn } from "./plan-node-state.js";
+import { buildPlanSteps, isAdHocPlan } from "./plan-synthesis.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -1568,8 +1569,8 @@ function setTab(tab: DashboardTab): void {
  *  The helpers live there so they're importable from Node-style unit tests
  *  without pulling in the dashboard's DOM/lit/state plumbing. See
  *  docs/design/nested-goals.md §10.2 + §10.3. */
-export function shouldShowPlanTab(goal: Goal | null | undefined): boolean {
-	return _shouldShowPlanTab(goal as any);
+export function shouldShowPlanTab(goal: Goal | null | undefined, goals?: Goal[]): boolean {
+	return _shouldShowPlanTab(goal as any, goals as any);
 }
 export function shouldShowChildrenTab(goal: Goal | null | undefined, goals: Goal[]): boolean {
 	return _shouldShowChildrenTab(goal as any, goals as any);
@@ -1665,7 +1666,7 @@ function renderTabBar(): TemplateResult {
 	const passedCount = gates.filter(g => g.status === "passed").length;
 	const gateCountStr = wfTotal > 0 ? `${passedCount}/${wfTotal}` : String(gates.length);
 
-	const showPlan = shouldShowPlanTab(currentGoal);
+	const showPlan = shouldShowPlanTab(currentGoal, state.goals);
 	const showChildren = shouldShowChildrenTab(currentGoal, state.goals);
 	const childCountStr = showChildren ? String(countDescendantsFrom(currentGoal!.id, state.goals)) : "";
 
@@ -1923,10 +1924,27 @@ export interface PlanStep {
 /** Pure helper: extract subgoal verify steps from a goal snapshot.
  *  Returns [] when the workflow / execution gate / verify array is missing
  *  or contains only non-subgoal steps. */
-export function extractPlanSteps(goal: Goal | null | undefined): PlanStep[] {
+/** Extract the FORMAL plan steps from a goal's snapshotted workflow.
+ *  Used internally by `extractPlanSteps`; exported for unit tests. */
+export function extractFormalPlanSteps(goal: Goal | null | undefined): PlanStep[] {
 	const exec = goal?.workflow?.gates.find(g => g.id === "execution");
 	const verify = (exec?.verify ?? []) as PlanStep[];
 	return verify.filter(s => s && s.type === "subgoal" && s.subgoal && typeof s.subgoal.planId === "string");
+}
+
+/** The complete Plan-tab step list: formal steps from the snapshotted
+ *  workflow, augmented (or replaced when no formal plan exists) by
+ *  synthesis from live children. The plan stays a living document —
+ *  recomputed from the current goals tree every render. See
+ *  `plan-synthesis.ts::buildPlanSteps` and the (post-PR #409) user
+ *  feedback: "the whole plan idea and view is really useful... make
+ *  sure it remains a living document/thing as the plan changes over
+ *  time and evolves." */
+export function extractPlanSteps(goal: Goal | null | undefined): PlanStep[] {
+	if (!goal) return [];
+	const formal = extractFormalPlanSteps(goal);
+	const combined = buildPlanSteps(goal.id, formal as any, state.goals as any) as PlanStep[];
+	return combined;
 }
 
 /** Pure helper: group plan steps into topological columns by `phase`. Within
@@ -2141,7 +2159,11 @@ function renderPlanTab(): TemplateResult {
 	const goal = currentGoal;
 	if (!goal) return html`<div class="tab-empty">No goal loaded.</div>`;
 
+	const formalSteps = extractFormalPlanSteps(goal);
 	const steps = extractPlanSteps(goal);
+	const adHoc = isAdHocPlan(formalSteps as any, steps.length);
+	const hasFormal = formalSteps.length > 0;
+	const hasOrphans = hasFormal && steps.length > formalSteps.length;
 	const editable = isPlanEditable(goal, gates);
 
 	if (steps.length === 0) {
@@ -2152,7 +2174,7 @@ function renderPlanTab(): TemplateResult {
 					<span class="plan-tab-status ${editable ? "editable" : "frozen"}">${editable ? "Editable" : "Frozen"}</span>
 				</div>
 				<div class="tab-empty" data-testid="plan-tab-empty">
-					No plan yet — the team-lead will propose one once the charter passes.
+					No plan yet — the team-lead will propose one once the charter passes, or spawn ad-hoc children via <code>goal_spawn_child</code>.
 				</div>
 			</div>
 		`;
@@ -2168,13 +2190,22 @@ function renderPlanTab(): TemplateResult {
 		: null;
 	const selectedState = selected ? resolvePlanNodeState(selected, state.goals) : null;
 
+	// Status label: distinguish formal-frozen / formal-editable / living-
+	// (ad-hoc) plans. Living plans are inherently dynamic — they refresh
+	// from live children every render — so the label is always "Living".
+	const statusKind: "editable" | "frozen" | "living" = adHoc ? "living" : (editable ? "editable" : "frozen");
+	const statusLabel =
+		statusKind === "living" ? "Living plan — reflects current children" :
+		statusKind === "editable" ? (goal.paused ? "Paused — editable" : "Editable — plan not yet approved") :
+		"Frozen — plan approved";
+
 	return html`
-		<div class="plan-tab" data-testid="plan-tab">
+		<div class="plan-tab" data-testid="plan-tab" data-plan-kind="${statusKind}">
 			<div class="plan-tab-header">
-				<span class="plan-tab-title">Plan — ${steps.length} subgoal${steps.length === 1 ? "" : "s"} across ${columns.length} phase${columns.length === 1 ? "" : "s"}</span>
+				<span class="plan-tab-title">Plan — ${steps.length} subgoal${steps.length === 1 ? "" : "s"} across ${columns.length} phase${columns.length === 1 ? "" : "s"}${hasOrphans ? html` <span style="color:var(--text-tertiary);font-weight:400;font-size:11px;margin-left:6px;">(includes ${steps.length - formalSteps.length} ad-hoc child${(steps.length - formalSteps.length) === 1 ? "" : "ren"})</span>` : nothing}</span>
 				<div style="display:flex;gap:8px;align-items:center;">
-					<span class="plan-tab-status ${editable ? "editable" : "frozen"}" data-testid="plan-tab-status">
-						${editable ? (goal.paused ? "Paused — editable" : "Editable — plan not yet approved") : "Frozen — plan approved"}
+					<span class="plan-tab-status ${statusKind}" data-testid="plan-tab-status">
+						${statusLabel}
 					</span>
 					${editable ? html`
 						<button class="plan-edit-btn"

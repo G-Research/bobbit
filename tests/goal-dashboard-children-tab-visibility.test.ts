@@ -71,12 +71,19 @@ describe("shouldShowChildrenTab — visibility independent of goal-plan gate", (
 		const c2 = goal({ id: "c2", parentGoalId: "g-root" });
 		const goals = [parent, c1, c2];
 		assert.equal(shouldShowChildrenTab(parent, goals), true);
-		// Plan tab still hidden — workflow has no goal-plan gate.
+		// Plan tab now ALSO visible — living-plan path. Post-PR #409 user
+		// feedback: a goal with children has an implicit plan (the children
+		// themselves, clustered into phases by createdAt), regardless of
+		// which workflow created it. See `plan-synthesis.ts::buildPlanSteps`.
+		assert.equal(shouldShowPlanTab(parent, goals), true);
+		// Without the goals array, fallback to the formal-plan-only rule:
 		assert.equal(shouldShowPlanTab(parent), false);
 		// And the Children rule is independent of the workflow shape entirely:
 		const noWf = goal({ id: "g-bare" });
 		const cBare = goal({ id: "c-bare", parentGoalId: "g-bare" });
 		assert.equal(shouldShowChildrenTab(noWf, [noWf, cBare]), true);
+		// Living-plan path also fires for the bare-workflow case.
+		assert.equal(shouldShowPlanTab(noWf, [noWf, cBare]), true);
 	});
 
 	it("CT-3: goal with children + workflow has goal-plan gate → both Plan AND Children tabs visible", () => {
@@ -88,14 +95,16 @@ describe("shouldShowChildrenTab — visibility independent of goal-plan gate", (
 		assert.equal(shouldShowChildrenTab(parent, goals), true);
 	});
 
-	it("CT-4: a workflow gate named `plan` (not `goal-plan`) does NOT enable Plan tab — strict id match", () => {
+	it("CT-4: a workflow gate named `plan` (not `goal-plan`) and no children does NOT enable Plan tab — strict id match", () => {
 		// Defence against a future workflow author choosing `plan` as the gate
-		// id; the Plan tab is keyed on the literal `goal-plan` id.
+		// id; the formal-plan path is keyed on the literal `goal-plan` id.
 		const g = goal({
 			id: "g1",
 			workflow: { gates: [{ id: "plan" }, { id: "execution" }] },
 		});
 		assert.equal(shouldShowPlanTab(g), false);
+		// And without children, the living-plan fallback also doesn't fire.
+		assert.equal(shouldShowPlanTab(g, [g]), false);
 	});
 
 	it("CT-5: archived descendants do not trigger the Children tab", () => {

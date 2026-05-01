@@ -20,11 +20,26 @@ export interface GoalLike {
 }
 
 /** Pure predicate: should the Plan tab be visible for this goal?
- *  True iff the goal's (snapshotted) workflow includes a `goal-plan` gate. */
-export function shouldShowPlanTab(goal: GoalLike | null | undefined): boolean {
+ *
+ *  Two ways to qualify:
+ *    (a) the workflow includes a `goal-plan` gate (formal plan path)
+ *    (b) the goal has any non-archived children (living-plan path)
+ *
+ *  Rationale (post-PR #409 user feedback): the Plan tab is a powerful
+ *  visualisation regardless of which workflow created the goal. Even
+ *  goals on `general` / `feature` / `bug-fix` that spawned children
+ *  ad-hoc via `goal_spawn_child` have an implicit plan — the children
+ *  themselves. Surfacing it makes the nesting feature consistently
+ *  useful. The plan content for the (b) path is synthesised from the
+ *  live children by `plan-synthesis.ts::buildPlanSteps`. */
+export function shouldShowPlanTab(goal: GoalLike | null | undefined, goals?: GoalLike[]): boolean {
 	const gates = goal?.workflow?.gates;
-	if (!gates || gates.length === 0) return false;
-	return gates.some(g => g.id === "goal-plan");
+	if (gates && gates.some(g => g.id === "goal-plan")) return true;
+	// Living-plan fallback: any non-archived child qualifies.
+	if (goal && goals) {
+		return hasChildGoals(goal.id, goals);
+	}
+	return false;
 }
 
 /** Pure predicate: does this goal have at least one immediate, non-archived
