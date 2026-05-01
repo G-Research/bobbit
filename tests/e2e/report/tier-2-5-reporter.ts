@@ -42,10 +42,43 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
-import ffmpegPathImport from "ffmpeg-static";
-// ffmpeg-static exports a string path on Node, but its TS type is the
-// module namespace under some bundler resolutions. Coerce defensively.
-const ffmpegPath: string | null = ffmpegPathImport as unknown as string | null;
+
+/**
+ * Resolve an ffmpeg binary at runtime.
+ *
+ * Resolution order:
+ *   1. `process.env.FFMPEG_PATH` if set & non-empty AND it accepts `-version`.
+ *   2. System `ffmpeg` on `PATH` if it accepts `-version`.
+ *   3. `null` — caller must skip encoding and emit a warning.
+ *
+ * Each candidate is probed with a 5s-timeout `spawnSync(cmd, ["-version"])`.
+ * Exported for unit testing.
+ */
+export function resolveFfmpeg(): string | null {
+	const envPath = process.env.FFMPEG_PATH;
+	if (envPath && envPath.trim().length > 0) {
+		try {
+			const r = spawnSync(envPath, ["-version"], {
+				timeout: 5000,
+				stdio: "ignore",
+			});
+			if (r.status === 0) return envPath;
+		} catch {
+			/* fall through */
+		}
+	}
+	try {
+		const r = spawnSync("ffmpeg", ["-version"], {
+			timeout: 5000,
+			stdio: "ignore",
+			shell: process.platform === "win32",
+		});
+		if (r.status === 0) return "ffmpeg";
+	} catch {
+		/* fall through */
+	}
+	return null;
+}
 
 /** Each beat is held this long in the encoded video. */
 const BEAT_HOLD_MS = 1500;
@@ -136,9 +169,16 @@ function escapeHtml(s: string): string {
 		.replace(/'/g, "&#39;");
 }
 
-function renderReport(tests: CapturedTest[]): string {
+function renderReport(tests: CapturedTest[], ffmpegMissing: boolean): string {
 	const totalBeats = tests.reduce((a, t) => a + t.beats.length, 0);
 	const totalBytes = tests.reduce((a, t) => a + (t.videoBytes ?? 0), 0);
+	const banner = ffmpegMissing
+		? `<div style="background:#fff3cd;border:1px solid #ffe69c;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#664d03">
+    <strong>ffmpeg not found.</strong> Videos and per-beat thumbnails were skipped.
+    Install ffmpeg (<code>apt install ffmpeg</code> / <code>brew install ffmpeg</code> / <code>choco install ffmpeg</code>)
+    or set <code>FFMPEG_PATH</code> to the binary path, then re-run with <code>RECORDSCREEN=1</code>.
+  </div>`
+		: "";
 	return `<!doctype html>
 <html><head><meta charset="utf-8"/>
 <title>Tier 2.5 — beat report</title>
@@ -172,6 +212,7 @@ function renderReport(tests: CapturedTest[]): string {
 </head>
 <body>
 <h1>Tier 2.5 — beat report</h1>
+${banner}
 <p style="color:var(--muted);max-width:780px">
   Each test below captures a labeled <em>beat</em> at every meaningful UX moment.
   The video holds each beat for ${BEAT_HOLD_MS} ms so you can read the labels
@@ -324,15 +365,22 @@ class Tier25Reporter implements Reporter {
 		mkdirSync(join(OUTPUT_ROOT, "videos"), { recursive: true });
 		mkdirSync(join(OUTPUT_ROOT, "thumbs"), { recursive: true });
 
-		const ffmpeg = ffmpegPath ?? "ffmpeg";
-
-		for (const t of tests) {
-			await encodeVideo(t, ffmpeg);
-			await encodeThumbnails(t, ffmpeg);
+		const ffmpeg = resolveFfmpeg();
+		if (ffmpeg === null) {
+			// eslint-disable-next-line no-console
+			console.warn(
+				"[tier-2-5] ffmpeg not found; videos and thumbnails skipped. " +
+					"Install ffmpeg (apt/brew/choco) or set FFMPEG_PATH=/abs/path/to/ffmpeg.",
+			);
+		} else {
+			for (const t of tests) {
+				await encodeVideo(t, ffmpeg);
+				await encodeThumbnails(t, ffmpeg);
+			}
 		}
 
 		const reportPath = join(OUTPUT_ROOT, "report.html");
-		writeFileSync(reportPath, renderReport(tests), "utf-8");
+		writeFileSync(reportPath, renderReport(tests, ffmpeg === null), "utf-8");
 
 		// eslint-disable-next-line no-console
 		console.log(`\n[tier-2-5] report: file:///${reportPath.replace(/\\/g, "/")}`);
