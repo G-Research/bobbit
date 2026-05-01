@@ -40,6 +40,17 @@ test.describe("PromptQueue", () => {
 		expect(q.dequeue()).toBeUndefined();
 	});
 
+	test("prepend puts failed dispatches back at the front without reordering them", () => {
+		const q = new PromptQueue();
+		q.enqueue("C");
+		const a = { id: "a", text: "A", isSteered: false, createdAt: 1 };
+		const b = { id: "b", text: "B", isSteered: false, createdAt: 2 };
+
+		q.prepend([a, b]);
+
+		expect(q.toArray().map(m => m.text)).toEqual(["A", "B", "C"]);
+	});
+
 	test("steer reordering: steered messages sort before non-steered, stable within groups", () => {
 		const q = new PromptQueue();
 		const a = q.enqueue("A");
