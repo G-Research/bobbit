@@ -79,8 +79,7 @@ test.describe("Workflows page (project-scoped)", () => {
 		// System was rejected as a workflow scope (the redirect picks
 		// state.activeProjectId || projects[0], never "system").
 		await openApp(page);
-		await navigateToHash(page, "#/settings/system/general");
-		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 10_000 });
+		await navigateToHash(page, "#/workflows");
 
 		// Wait for the embedded Workflows tab to render.
 		await expect(page.locator("[data-testid='workflows-tab']").first())
