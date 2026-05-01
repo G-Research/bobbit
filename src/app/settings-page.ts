@@ -137,23 +137,6 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 		const rootPath = updates._rootPath;
 		const configUpdates: Record<string, any> = { ...updates };
 		delete configUpdates._rootPath;
-		// Coerce numeric migrated fields from text-input strings to real numbers.
-		for (const key of ["qa_max_duration_minutes", "qa_max_scenarios"]) {
-			if (key in configUpdates) {
-				const v = configUpdates[key];
-				if (typeof v === "string") {
-					const trimmed = v.trim();
-					if (trimmed === "") {
-						configUpdates[key] = null;
-					} else {
-						const n = parseInt(trimmed, 10);
-						if (Number.isFinite(n)) configUpdates[key] = n;
-						else delete configUpdates[key];
-					}
-				}
-			}
-		}
-
 		const promises: Promise<Response>[] = [];
 
 		if (Object.keys(configUpdates).length > 0) {
@@ -193,7 +176,7 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 }
 
 async function resetProjectScopeField(projectId: string, key: string): Promise<void> {
-	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios"]);
+	const NATIVE_FIELDS = new Set(["config_directories", "sandbox_tokens"]);
 	await saveProjectScopeConfig(projectId, { [key]: NATIVE_FIELDS.has(key) ? null : "" });
 }
 
@@ -1806,12 +1789,6 @@ const PROJECT_KEY_LABELS: Record<string, string> = {
 
 	worktree_setup_command: "Worktree Setup",
 	skill_directories: "Skill Dirs",
-	qa_start_command: "QA Start",
-	qa_build_command: "QA Build",
-	qa_health_check: "QA Health Check",
-	qa_browser_entry: "QA Browser Entry",
-	qa_max_duration_minutes: "QA Max Duration",
-	qa_max_scenarios: "QA Max Scenarios",
 };
 
 function projectKeyLabel(key: string): string {
@@ -2332,13 +2309,11 @@ function renderProjectScopeTab(projectId: string) {
 		// Legacy command keys — use the Components tab instead
 		"build_command", "test_command", "typecheck_command", "test_unit_command", "test_e2e_command",
 		"worktree_setup_command",
-		// Rendered in dedicated sections below
+		// Legacy top-level QA keys — moved to components[].config[]; edit on the Components tab
 		"qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
 		"qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
 	]);
 
-	const QA_KEYS = ["qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry", "qa_max_duration_minutes", "qa_max_scenarios"];
-	const qaKeys = QA_KEYS.filter(k => k in resolved);
 	const labelClass = "text-sm font-medium text-foreground w-28 sm:w-44 shrink-0";
 	const inputClass = `w-full min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm
 		font-mono focus:outline-none focus:ring-2 focus:ring-ring`;
@@ -2401,45 +2376,6 @@ function renderProjectScopeTab(projectId: string) {
 			</div>` : ""}
 
 
-
-			<!-- QA Testing -->
-			${qaKeys.length > 0 ? html`
-				<hr class="border-border" />
-				<div class="flex flex-col gap-2">
-					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">QA Testing</div>
-					<div class="text-xs text-muted-foreground">Configure ephemeral QA environments for automated testing.</div>
-					${qaKeys.map((key) => {
-						const entry = resolved[key];
-						if (!entry) return "";
-						const isInherited = entry.source !== "project";
-						const displayValue = raw[key] ?? "";
-						return html`
-							<div class="flex items-center gap-3">
-								<span class="${labelClass}">${projectKeyLabel(key)}</span>
-								<div class="flex-1 min-w-0 relative">
-									<input
-										type="text"
-										class="${inputClass} ${isInherited ? "text-muted-foreground" : "text-foreground"}"
-										placeholder=${isInherited ? entry.value : ""}
-										.value=${displayValue}
-										@input=${(e: Event) => {
-											pendingChanges[key] = (e.target as HTMLInputElement).value;
-										}}
-									/>
-									${isInherited ? html`<span class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none">(inherited)</span>` : ""}
-								</div>
-								${!isInherited ? html`
-									<button
-										class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-										title="Reset to inherited value"
-										@click=${() => resetProjectScopeField(projectId, key)}
-									>${icon(X, "xs")}</button>
-								` : html`<div class="w-7 shrink-0"></div>`}
-							</div>
-						`;
-					})}
-				</div>
-			` : ""}
 
 			<!-- Custom keys: lets users add arbitrary project.yaml fields without -->
 			<!-- editing the file by hand. Keeps the legacy KV editing surface alive. -->
@@ -2702,7 +2638,7 @@ async function saveComponentsTab(projectId: string): Promise<void> {
 	s.errorMessage = "";
 	renderApp();
 	try {
-		const body = buildSavePayload(s.components, s.workflows);
+		const body = buildSavePayload(s.components, s.workflows, s.worktreeRoot);
 		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 			method: "PUT",
 			body: JSON.stringify(body),
@@ -2751,7 +2687,10 @@ function renderProjectComponentsTab(projectId: string) {
 					<span class="wf-gate-chevron">▸</span>
 					<span class="wf-gate-name">${c.name || "(unnamed)"}</span>
 					<span class="wf-gate-pill" title=${pathSummary}>${pathSummary}</span>
-					<span class="wf-gate-pill">${cmdCountLabel}</span>
+					${dataOnly ? html`<span class="wf-gate-pill" data-testid="data-only-hint">${cmdCountLabel}</span>` : html`<span class="wf-gate-pill">${cmdCountLabel}</span>`}
+					<input type="checkbox" class="sr-only" tabindex="-1"
+						data-testid="data-only-toggle" .checked=${dataOnly} disabled
+						@click=${(e: Event) => e.stopPropagation()}/>
 					<button
 						class="wf-gate-delete"
 						title="Remove component"
@@ -2815,7 +2754,34 @@ function renderProjectComponentsTab(projectId: string) {
 										@click=${(e: Event) => { e.stopPropagation(); c.commands.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
 								>Add Command</button>
 							</div>
-							${dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1 mt-1" data-testid="data-only-hint">No commands defined — this is a data-only component (e.g. docs, fixtures, schemas).</div>` : ""}
+							${dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1 mt-1">No commands defined — this is a data-only component (e.g. docs, fixtures, schemas).</div>` : ""}
+						</div>
+						<div class="wf-field" data-testid=${`component-config-${c.name}`}>
+							<span class="wf-verify-label">Config (${c.config.length})</span>
+							<div class="text-[11px] text-muted-foreground italic pl-1 mb-1">Opaque key→string map consumed by skills (e.g. <code>qa_start_command</code>, <code>qa_health_check</code>, <code>qa_max_duration_minutes</code>).</div>
+							<div class="flex flex-col gap-1.5">
+								${c.config.map((cfg, ci) => html`
+									<div class="flex items-center gap-2" data-testid="config-row" @click=${(e: Event) => e.stopPropagation()}>
+										<input type="text" class="wf-input" style="width:200px;" .value=${cfg.key} placeholder="qa_start_command"
+											data-testid="config-key"
+											@input=${(e: Event) => { cfg.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+										<input type="text" class="wf-input" style="flex:1;min-width:0;" .value=${cfg.value} placeholder="value"
+											data-testid="config-value"
+											@input=${(e: Event) => { cfg.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}/>
+										<button
+											class="wf-gate-delete"
+											title="Remove config entry"
+											data-testid="delete-config"
+											@click=${() => { c.config.splice(ci, 1); markComponentsDirty(projectId); renderApp(); }}
+										>${icon(X, "sm")}</button>
+									</div>
+								`)}
+								<button
+									class="wf-criteria-add-btn"
+									data-testid="add-config"
+									@click=${(e: Event) => { e.stopPropagation(); c.config.push({ key: "", value: "" }); markComponentsDirty(projectId); renderApp(); }}
+								>Add Config Entry</button>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -2857,6 +2823,7 @@ function renderProjectComponentsTab(projectId: string) {
 							relative_path: "",
 							worktree_setup_command: "",
 							commands: [],
+							config: [],
 						});
 						s.expanded.add(s.components.length - 1);
 						markComponentsDirty(projectId);

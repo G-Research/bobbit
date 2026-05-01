@@ -111,7 +111,7 @@ Callers should always pass an explicit `projectId` when one is available. `cwd`-
 
 `SessionManager` does not hold default store fields (`this.store`, `this.costTracker`, etc.). All store access goes through PCM resolution. `TeamManager`, `StaffManager`, and `VerificationHarness` follow the same pattern — they resolve stores per-goal or per-entity via PCM, with no fallback store references. `resolveStoreForId()` returns `null` instead of falling back, and callers use optional chaining.
 
-**Verification harness project config resolution.** `VerificationHarness` resolves `ProjectConfigStore` per-goal via the private `resolveProjectConfigStore(goalId)` helper (alongside `resolveGateStore` etc.), not the server-level `projectConfigStore` injected at construction. This is what makes `{{project.*}}` substitution (e.g. `typecheck_command`, `test_unit_command`, `qa_max_duration_minutes`) pull from the **goal's owning project** config rather than the server's default. All four call sites — command-type verify steps in `runVerification`, LLM-review retry prompts in `_rerunLlmReviewStep`, agent-QA retry prompts in `_rerunAgentQaStep`, and the QA timeout lookup — go through the helper. If `projectContextManager` is unset (tests, legacy wiring) the helper silently falls back to the injected store; if it is set but the goal is not found in any context, the helper logs a `[verification]` warning and falls back, so the class of bug is diagnosable from logs.
+**Verification harness project config resolution.** `VerificationHarness` resolves `ProjectConfigStore` per-goal via the private `resolveProjectConfigStore(goalId)` helper (alongside `resolveGateStore` etc.), not the server-level `projectConfigStore` injected at construction. This is what makes `{{project.*}}` substitution (e.g. `typecheck_command`, `test_unit_command`) and the `agent-qa` step's `qa_max_duration_minutes` lookup (now `getQaMaxDurationMinutes(componentName)`) pull from the **goal's owning project** config rather than the server's default. All four call sites — command-type verify steps in `runVerification`, LLM-review retry prompts in `_rerunLlmReviewStep`, agent-QA retry prompts in `_rerunAgentQaStep`, and the QA timeout lookup — go through the helper. If `projectContextManager` is unset (tests, legacy wiring) the helper silently falls back to the injected store; if it is set but the goal is not found in any context, the helper logs a `[verification]` warning and falls back, so the class of bug is diagnosable from logs.
 
 This design prevents a class of data corruption bugs where missing `projectId` values silently route data to the wrong project's store.
 
@@ -342,6 +342,8 @@ Each registered project can override system-level settings (from `project.yaml`)
 
 **Settings UI**: The settings page has a two-tier layout. The top scope row selects System or a specific project. Sub-tabs within each scope show the relevant settings. Per-project tabs show inherited system values as placeholders with an "(inherited)" badge; overrides show normal text with a "×" reset button. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID (backwards-compatible: `#/settings/shortcuts` maps to `#/settings/system/shortcuts`).
 
+**Per-component editors**: The project Settings tab renders one card per component with editable `commands` and `config` key-value tables (sibling editors with the same shape — add/delete row controls, key/value inputs). Both tables persist via the same `PUT /api/projects/:id/config` payload by sending the `components` array with the edited entry. There are no longer top-level `qa_*` fields on the Settings page — QA settings live exclusively under the relevant component's `config:` map (see [Multi-repo & components](#multi-repo--components)).
+
 **Sidebar shortcut**: Project headers in the sidebar show a gear icon on hover that navigates directly to `#/settings/<project-id>/project`.
 
 **Mid-session project proposals**: Any agent session — regular, goal, staff, or non-project assistant — can call the `propose_project` tool to suggest changes to the current project's config, not just the project-assistant flow. The motivation is that agents often discover a missing test command, a better worktree setup, or a stale model preference while working on a goal; forcing the user into a separate project-assistant session just to accept that fix loses context. When a proposal arrives, the preview panel grows a "Project" tab showing a diff of the proposed fields against the current `project.yaml` (loaded via `GET /api/projects/:id/config`) and registry record. Unchanged fields collapse into a "No changes" group; `root_path` is read-only. The accept handler branches on whether the project is provisional:
@@ -349,7 +351,7 @@ Each registered project can override system-level settings (from `project.yaml`)
 - **Provisional** (project-assistant flow, unchanged): promote via `POST /api/projects/:id/promote`, write config via `PUT /api/projects/:id/config`, then terminate the assistant session and navigate to landing.
 - **Registered** (new path): `PUT /api/projects/:id/config` for project.yaml fields and `PUT /api/projects/:id` for the project name if it changed. The session stays connected and the agent continues where it left off — no navigation, no termination.
 
-The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`, plus project-defined custom keys. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
 
 ### Project-proposal panel structure
 
@@ -357,13 +359,13 @@ The `propose_project` preview panel (`src/app/render.ts::projectProposalPanel`, 
 
 | Tab (testid) | Renderer | Purpose |
 |---|---|---|
-| `view-tab-components` | `projectComponentsView` | One card per component (`component-card-${name}`): `repo`, `relative_path`, `worktree_setup_command`, `commands` chips. Data-only components (no `commands` map) are flagged. |
+| `view-tab-components` | `projectComponentsView` | One card per component (`component-card-${name}`): `repo`, `relative_path`, `worktree_setup_command`, `commands` chips, plus a per-component `Config` key-value table (`component-config-${name}`) listing entries from `components[*].config` (e.g. `qa_start_command`, `qa_max_duration_minutes`). Data-only components (no `commands` map) are flagged. |
 | `view-tab-workflows` | `projectWorkflowsView` | One card per workflow (`workflow-card-${id}`) showing the gate DAG (`gate-node-${gateId}`) and each gate's verify steps with type-coloured badges (`step-badge-${type}` for `command` / `llm-review` / `agent-qa`, plus `expect:failure`). Step refs to `(component, command)` link back to the component card. |
-| `view-tab-diff` | `projectDiffView` | When a previous proposal exists in the same session, shows added/changed/removed components and gates rather than raw YAML field diffs. |
+| `view-tab-diff` | `projectDiffView` | When a previous proposal exists in the same session, shows added/changed/removed components and gates rather than raw YAML field diffs. Component diffs include per-key adds/removes/changes for `commands` and `config` (e.g. `+ web.config.qa_start_command`, `~ web.config.qa_max_scenarios: "3" → "5"`). |
 
 The legacy field block at the bottom keeps the original editable-input rows (`name`, plus changed-vs-unchanged partition for `build_command` / `test_command` / etc.) for the small project-level scalar fields the diff views don't surface. `root_path` is read-only.
 
-**Live-update guarantee.** Across repeated `propose_project` calls in one session, the panel must always reflect the latest payload. The mechanism is a shallow-merge in `session-manager.ts::onProjectProposal`: incoming flat fields win, but `components` and `workflows` carry over from the prior proposal when the new payload omits them (a streaming partial may not include both). The render path treats `components`/`workflows` as structured side-tables, never as legacy `Input` rows — `onFieldInput` early-returns for those two keys to prevent a stray keystroke from clobbering the structured value (Bug B), and the proposal tool's serialisation never JSON-stringifies them onto the flat field map (Bug A). The shallow-merge is Bug C's fix.
+**Live-update guarantee.** Across repeated `propose_project` calls in one session, the panel must always reflect the latest payload. The mechanism is a shallow-merge in `session-manager.ts::onProjectProposal`: incoming flat fields win, but `components` and `workflows` carry over from the prior proposal when the new payload omits them (a streaming partial may not include both). The shallow-merge also runs **per component** — entries are matched by `name` and missing `commands` / `config` on the incoming entry are carried over from the prev entry, so a partial re-emit (e.g. updating only `commands` on `web`) does not clobber the previous `config` map on the same component. The render path treats `components`/`workflows` as structured side-tables, never as legacy `Input` rows — `onFieldInput` early-returns for those two keys to prevent a stray keystroke from clobbering the structured value (Bug B), and the proposal tool's serialisation never JSON-stringifies them onto the flat field map (Bug A). The shallow-merge is Bug C's fix.
 
 **Workflow-suggestion checklist (G2).** After the assistant has settled on the components, the project-assistant prompt instructs it to present a single `ask_user_choices` multi-select of workflows it has designed for this specific project. **No options are pre-checked by component count or by canonical name** — the assistant must justify each suggestion against the discovered components and commands. The per-component and all-components scaffolds (`buildPerComponentWorkflow(componentName, allComponents)` and `buildAllComponentsWorkflow(components)` in `src/server/state-migration/per-component-workflows.ts`) are offered as adaptable starting points the assistant chooses explicitly when they fit; they reuse the canonical helpers and prompt strings (`readyToMergeGate()`, `DESIGN_REVIEW_PROMPT`, `GAP_ANALYSIS_DESIGN_PROMPT`, `GAP_ANALYSIS_IMPL_PROMPT`, `CODE_REVIEW_PROMPT`, `DOC_PROMPT`, `RALPH_LOOP_DESCRIPTION`) exported from `seed-default-workflows.ts` so gate semantics stay in one place. `buildDefaultWorkflows()` itself is internal to that module — no caller invokes it as a fallback. See [No default workflow scaffold](#no-default-workflow-scaffold).
 
@@ -375,23 +377,22 @@ The legacy field block at the bottom keeps the original editable-input rows (`na
 
 ### Native-YAML project.yaml fields
 
-Five fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings or quoted numbers:
+Two fields in `project.yaml` are stored as native YAML structures rather than JSON-encoded strings:
 
 | Field | Shape |
 |---|---|
 | `config_directories` | `{ path: string; types: string[] }[]` |
-| `qa_env` | `Record<string, string>` |
 | `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (the secret `value` is split into `SecretsStore` on PUT — unchanged) |
-| `qa_max_duration_minutes` | `number` |
-| `qa_max_scenarios` | `number` |
+
+(`qa_env`, `qa_max_duration_minutes`, and `qa_max_scenarios` used to live here too — they have moved into per-component `config:` maps, see [Multi-repo & components](#multi-repo--components).)
 
 The motivation is editability and diff-friendliness: hand-editing a JSON-string-inside-YAML field is painful and produces noisy diffs in `propose_project` previews and PRs.
 
 **Lazy-migration loader.** `ProjectConfigStore` accepts both the native shape and the legacy form (JSON-string for the array/map fields, quoted numeric strings for the two numeric fields). Legacy values are parsed transparently into structured side-tables; malformed legacy strings log a warning and fall back to the default. The store sets `isDirty()` on legacy load so the next save rewrites the file in native form — no separate migration step.
 
-**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()`, `getQaEnv()`, `getSandboxTokens()`, `getQaMaxDurationMinutes()`, and `getQaMaxScenarios()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store.
+**Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()` and `getSandboxTokens()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store. QA budgets and the start/health/browser-entry strings live on `Component.config: Record<string, string>` and are read via `getComponentConfig(name)`, `getQaMaxDurationMinutes(componentName)`, and `isQaConfiguredOnAnyComponent()`.
 
-**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these five keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form.
+**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these two keys with 400 — the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form. The same endpoints reject the seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) with a migration message pointing at `components[<name>].config[<key>]`.
 
 ### Per-project palette
 
@@ -441,7 +442,6 @@ name: myapp
 rootPath: /home/me/w/myapp
 worktree_root: /home/me/wt    # optional override
 sandbox: docker               # project-level
-qa_start_command: …           # project-level (testbed, not a component build)
 config_directories: […]       # project-level
 
 components:                   # the only collection in project.yaml
@@ -454,6 +454,12 @@ components:                   # the only collection in project.yaml
       check: npm run check
       unit:  npx playwright test ...
       e2e:   npx playwright test ...
+    config:                   # opaque key→string map; consumed by skills like /qa-test
+      qa_start_command:        "PORT=$PORT NODE_ENV=test node dist/server.js"
+      qa_health_check:         "http://127.0.0.1:$PORT/api/health"
+      qa_browser_entry:        "http://127.0.0.1:$PORT/?token=$TOKEN"
+      qa_max_duration_minutes: "10"
+      qa_max_scenarios:        "5"
 
 workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
   general: { name: General, gates: [...] }
@@ -464,7 +470,7 @@ workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
 - Mode is **inferred**, not declared: any `component.repo !== "."` makes the project multi-repo. In multi-repo mode, `rootPath` is a container directory holding sibling git repos; in single-repo mode, `rootPath` is the repo itself.
 - The default component's `name` matches the project's `name` (e.g. `bobbit` → `components[0].name == "bobbit"`). This keeps gate output, branch names, and UI labels meaningful from day one. `migrate-project-yaml.ts` enforces this on first boot for legacy single-repo projects.
 - `commands` is an **opaque `{ name: shell }` map** with no fixed schema. The project assistant tends to use names like `build`/`test`/`check`/`e2e`/`lint` because those are the typical gate verb categories, but any name is allowed (`migrate`, `seed`, `bench`, `gen-types`, …).
-- `qa_*` fields stay project-level because they describe an ephemeral testbed for the whole project, not a per-component build. The `agent-qa` step type implicitly references them.
+- `config` is a sibling **opaque `{ name: string }` map** on each component (max 100 entries; values are strict strings — numeric budgets are stringified). It carries arbitrary skill-consumed settings; the `/qa-test` skill reads `qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_max_duration_minutes`, and `qa_max_scenarios` from here. The `agent-qa` workflow step's `component:` field selects which component's `config` map is read at run time. Inline env vars directly into `qa_start_command` (e.g. `PORT=$PORT NODE_ENV=test npm start`) — there is no separate `qa_env` field; the server never spread `qa_env` into a child env, it was only ever inlined by agents at author time.
 
 **Component schema** (`Component` in `project-config-store.ts`):
 
@@ -475,6 +481,7 @@ workflows:                    # inline; replaces .bobbit/config/workflows/*.yaml
 | `relative_path` | no | Sub-path within the repo. Default `""` (component at repo root). |
 | `worktree_setup_command` | no | Per-component runtime hook (see below). |
 | `commands` | no | Flat `{name: shell}` map. **Absent ⇒ data-only component.** |
+| `config` | no | Opaque flat `{key: string}` map (max 100 entries). Consumed by skills like `/qa-test` (which reads `qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_max_duration_minutes`, `qa_max_scenarios`). Numeric budgets are stringified. |
 
 **Data-only components** (a component with no `commands`) declare a repo as part of the project so it gets provisioned on every goal/session worktree set, even though it contributes no workflow steps. Use cases:
 
@@ -499,7 +506,7 @@ The **multi-repo invariant** — every configured repo is checked out as a sibli
 
 Free-form `{ run }` steps that need a different working directory use `cd ... && ...` inside the `run` string. This keeps the schema small and the working-dir rule unambiguous: it is structurally derived from the component, or it is the per-branch container root.
 
-`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution.
+`llm-review` and `agent-qa` step shapes are unchanged — they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution. `agent-qa` additionally carries an optional `component:` field that selects which component's `config:` map the `/qa-test` skill reads (and which workspace to start). When omitted, the verification harness falls back to the first component whose `config.qa_start_command` is set, then to a name-match against the project, then to `components[0]`.
 
 The workflow validator (`workflow-validator.ts`) rejects, at load time:
 

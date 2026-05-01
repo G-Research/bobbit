@@ -22,6 +22,7 @@ import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
+import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -1186,6 +1187,28 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const merged: Record<string, unknown> = { ...prevFields, ...fields };
 			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
 			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
+			// Per-component shallow merge: when both prev and incoming carry
+			// `components`, merge entries by name so a partial component update
+			// (e.g. only `commands`) doesn't clobber the previously-proposed
+			// `config` (or vice versa) on that component.
+			if (Array.isArray(fields.components) && Array.isArray((prevFields as Record<string, unknown>).components)) {
+				const prevComps = (prevFields as Record<string, unknown>).components as Array<Record<string, unknown>>;
+				const prevByName = new Map<string, Record<string, unknown>>();
+				for (const pc of prevComps) {
+					if (pc && typeof pc === "object" && typeof pc.name === "string") prevByName.set(pc.name, pc);
+				}
+				merged.components = (fields.components as Array<Record<string, unknown>>).map(c => {
+					if (!c || typeof c !== "object" || typeof c.name !== "string") return c;
+					const prev = prevByName.get(c.name);
+					if (!prev) return c;
+					return {
+						...prev,
+						...c,
+						commands: c.commands ?? prev.commands,
+						config: c.config ?? prev.config,
+					};
+				});
+			}
 			state.activeProjectProposal = { sessionId, fields: merged, mode };
 			state.assistantHasProposal = true;
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
@@ -1792,21 +1815,31 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
 	if (!promoted) return;
 
-	// Write config fields
-	const configFields: Record<string, string> = {};
-	const CONFIG_KEYS = ['build_command', 'test_command', 'typecheck_command',
-		'test_unit_command', 'test_e2e_command', 'worktree_setup_command',
-		'qa_start_command', 'sandbox'];
-	for (const key of CONFIG_KEYS) {
-		const v = fields[key];
-		if (typeof v === "string" && v) configFields[key] = v;
-	}
-	if (Object.keys(configFields).length > 0) {
+	// Write config fields. Forward every proposed field — including structured
+	// `components` / `workflows` — to the config endpoint via the shared
+	// `buildProjectConfigDiff` helper. Mirrors the registered-mode accept path
+	// so the provisional accept doesn't silently drop the assistant's proposed
+	// workflows and components. Per-component QA config (`config.qa_start_command`
+	// etc.) rides through inside `components[].config`.
+	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
+	if (Object.keys(diff).length > 0) {
 		try {
-			await gatewayFetch(`/api/projects/${projectId}/config`, {
+			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 				method: 'PUT',
-				body: JSON.stringify(configFields),
+				body: JSON.stringify(diff),
 			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				const details = Array.isArray(data?.details) && data.details.length > 0
+					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
+					: "";
+				const { showConnectionError } = await import("./dialogs.js");
+				showConnectionError(
+					data?.error || `Config write failed (${res.status})`,
+					details || (data?.error ?? ""),
+				);
+				return;
+			}
 		} catch (err) {
 			console.error('[project-proposal] Config write error:', err);
 		}
@@ -1853,11 +1886,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	renderApp();
 }
 
-/** Best-effort JSON.parse used by registered-proposal acceptance to coerce
- *  string-shaped `components`/`workflows` fields back into structured form. */
-function safeParseJson(text: string): unknown {
-	try { return JSON.parse(text); } catch { return undefined; }
-}
+
 
 /** Registered-mode accept: apply the proposal's full config payload to the
  *  live project without terminating or navigating away. The server diffs
@@ -1889,17 +1918,7 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	//    persisted state; empty/null values are skipped client-side. Native-YAML
 	//    migrated fields ride through as structured payloads (server rejects
 	//    JSON-encoded strings) — parse if the agent supplied them as a string.
-	const diff: Record<string, unknown> = {};
-	const NATIVE_FIELDS = new Set(["config_directories", "qa_env", "sandbox_tokens", "qa_max_duration_minutes", "qa_max_scenarios", "components", "workflows"]);
-	for (const [k, v] of Object.entries(fields)) {
-		if (k === "name" || k === "root_path") continue;
-		if (v === undefined || v === null || v === "") continue;
-		if (NATIVE_FIELDS.has(k)) {
-			diff[k] = typeof v === "string" ? safeParseJson(v) ?? v : v;
-		} else {
-			diff[k] = v;
-		}
-	}
+	const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
 	if (Object.keys(diff).length > 0) {
 		try {
 			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {

@@ -70,8 +70,24 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
-	proc.stderr!.on("data", (c: Buffer) => { stderr += c; });
-	proc.stdout!.on("data", () => {});
+	let stdout = "";
+	const logTap = process.env.BOBBIT_TEST_GW_LOG;
+	let logFh: number | null = null;
+	if (logTap) {
+		try {
+			const { openSync } = require("node:fs");
+			logFh = openSync(logTap, "a");
+		} catch {}
+	}
+	proc.stderr!.on("data", (c: Buffer) => {
+		stderr += c;
+		if (logFh !== null) { try { require("node:fs").writeSync(logFh, c); } catch {} }
+	});
+	proc.stdout!.on("data", (c: Buffer) => {
+		stdout += c;
+		if (logFh !== null) { try { require("node:fs").writeSync(logFh, c); } catch {} }
+	});
+	void stdout;
 	const deadline = Date.now() + 120_000;
 	while (Date.now() < deadline) {
 		if (proc.exitCode !== null) throw new Error(`Gateway exited (${proc.exitCode}):\n${stderr}`);

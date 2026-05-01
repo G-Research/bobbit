@@ -22,6 +22,8 @@ export interface ProposalComponent {
 	relative_path?: string;
 	worktree_setup_command?: string;
 	commands?: Record<string, string>;
+	/** Opaque per-component key→string map (consumed by skills like /qa-test). Read-only in this view. */
+	config?: Record<string, string>;
 }
 
 export interface ProposalVerifyStep {
@@ -124,6 +126,7 @@ export function componentsView(components: ProposalComponent[]): TemplateResult 
 
 function componentRow(c: ProposalComponent): TemplateResult {
 	const cmds = c.commands ? Object.entries(c.commands) : [];
+	const cfgEntries = c.config ? Object.entries(c.config) : [];
 	const dataOnly = cmds.length === 0;
 	const componentId = `comp-${c.name}`;
 	// Path summary in the collapsed row: omit `.` (uninformative for single-repo).
@@ -148,6 +151,7 @@ function componentRow(c: ProposalComponent): TemplateResult {
 						: html`<span class="wf-badge">${cmds.length} cmd${cmds.length === 1 ? "" : "s"}</span>`
 					}
 					${c.worktree_setup_command ? html`<span class="wf-badge">setup</span>` : ""}
+					${cfgEntries.length > 0 ? html`<span class="wf-badge">${cfgEntries.length} cfg</span>` : ""}
 				</div>
 			</summary>
 			<div class="wf-proposal-gates">
@@ -183,6 +187,21 @@ function componentRow(c: ProposalComponent): TemplateResult {
 							<pre class="text-[11px] m-0 p-2 rounded bg-secondary/40 overflow-x-auto"><code>${c.worktree_setup_command}</code></pre>
 						</div>
 					` : ""}
+					<div data-testid="component-config-${c.name}">
+						<div class="text-[11px] text-muted-foreground mb-1.5">Config</div>
+						${cfgEntries.length === 0
+							? html`<div class="text-[11px] text-muted-foreground italic" data-testid="component-config-empty-${c.name}">No config entries</div>`
+							: html`
+								<div class="flex flex-col gap-1.5">
+									${cfgEntries.map(([k, v]) => html`
+										<div class="flex items-baseline gap-2" data-testid="component-config-row-${c.name}-${k}">
+											<code class="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium font-mono" style="flex-shrink:0;">${k}</code>
+											<span class="text-[12px] font-mono break-all">${v}</span>
+										</div>
+									`)}
+								</div>
+							`}
+					</div>
 				</div>
 			</div>
 		</details>

@@ -893,6 +893,7 @@ export class SessionManager {
 			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
 			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
 			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
+			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
 		};
 	}
 
@@ -2843,7 +2844,10 @@ export class SessionManager {
 			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
 			// pass its path so executeWorktreeAsync skips createWorktree.
 			executeWorktreeAsync(plan, session, ctx, unnamed?.worktreePath).then(() => {
-				// Persist session metadata now that the agent is running (tracked for terminate)
+				// agentSessionFile is now persisted synchronously by spawnAgent before
+				// status flips to idle (see session-setup.ts). The post-resolve persist
+				// here is redundant but kept as a safety net for re-attempts where the
+				// agent may rotate its session file mid-run.
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });

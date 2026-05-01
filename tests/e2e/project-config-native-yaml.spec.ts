@@ -1,16 +1,18 @@
 /**
  * API E2E — Native-YAML migration for project.yaml fields.
  *
- * Covers the five migrated fields:
+ * After the component-config migration, only two migrated fields remain:
  *   - config_directories
- *   - qa_env
  *   - sandbox_tokens
- *   - qa_max_duration_minutes
- *   - qa_max_scenarios
+ *
+ * The seven legacy QA top-level keys (qa_start_command, qa_build_command,
+ * qa_health_check, qa_browser_entry, qa_env, qa_max_duration_minutes,
+ * qa_max_scenarios) have moved into `components[].config` and are now
+ * REJECTED at the top level of PUT payloads with HTTP 400.
  *
  * Verifies:
  *   1. PUT with structured payloads persists, GET returns structured.
- *   2. On-disk project.yaml contains zero JSON-encoded strings / numeric strings.
+ *   2. On-disk project.yaml contains zero JSON-encoded strings.
  *   3. PUT rejects legacy JSON-string payloads with 400.
  *   4. Loading a legacy-format fixture parses correctly and a single save
  *      rewrites it in native form.
@@ -52,13 +54,10 @@ test.describe("Native-YAML project.yaml fields", () => {
 					{ path: "/shared/skills", types: ["skills"] },
 					{ path: "/team/tools", types: ["tools", "mcp"] },
 				],
-				qa_env: { FOO: "bar", BAZ: "qux" },
 				sandbox_tokens: [
 					{ key: "GITHUB_TOKEN", enabled: true },
 					{ key: "NPM_TOKEN", enabled: false },
 				],
-				qa_max_duration_minutes: 15,
-				qa_max_scenarios: 7,
 			};
 			const putRes = await apiFetch(`/api/projects/${id}/config`, {
 				method: "PUT",
@@ -72,23 +71,20 @@ test.describe("Native-YAML project.yaml fields", () => {
 			const cfg = await getRes.json();
 			expect(Array.isArray(cfg.config_directories)).toBe(true);
 			expect(cfg.config_directories).toEqual(payload.config_directories);
-			expect(cfg.qa_env).toEqual(payload.qa_env);
 			expect(Array.isArray(cfg.sandbox_tokens)).toBe(true);
 			expect(cfg.sandbox_tokens).toEqual([
 				{ key: "GITHUB_TOKEN", enabled: true, value: "" },
 				{ key: "NPM_TOKEN", enabled: false, value: "" },
 			]);
-			expect(cfg.qa_max_duration_minutes).toBe(15);
-			expect(cfg.qa_max_scenarios).toBe(7);
+			// Legacy top-level qa_* keys are stripped from GET responses.
+			expect(cfg.qa_env).toBeUndefined();
+			expect(cfg.qa_max_duration_minutes).toBeUndefined();
+			expect(cfg.qa_max_scenarios).toBeUndefined();
 
 			// On-disk YAML is native (no escaped JSON, no quoted numbers)
 			const text = readProjectYaml(rootPath);
 			expect(text).not.toMatch(/\[\{\\"/);     // escaped JSON array
 			expect(text).not.toMatch(/'\{\\"/);      // escaped JSON object
-			expect(text).not.toMatch(/qa_max_duration_minutes:\s*"\d+"/);
-			expect(text).not.toMatch(/qa_max_scenarios:\s*"\d+"/);
-			expect(text).toMatch(/qa_max_duration_minutes:\s*15/);
-			expect(text).toMatch(/qa_max_scenarios:\s*7/);
 			// Sandbox token `value` field never on disk.
 			expect(text).not.toMatch(/value:/);
 		} finally {
@@ -99,7 +95,7 @@ test.describe("Native-YAML project.yaml fields", () => {
 	test("PUT rejects legacy JSON-string payloads for migrated fields", async () => {
 		const { id, cleanup } = await registerTmpProject(`nyaml-reject-${Date.now()}`);
 		try {
-			for (const field of ["config_directories", "qa_env", "sandbox_tokens"]) {
+			for (const field of ["config_directories", "sandbox_tokens"]) {
 				const res = await apiFetch(`/api/projects/${id}/config`, {
 					method: "PUT",
 					body: JSON.stringify({ [field]: JSON.stringify([{ path: "/x", types: ["skills"] }]) }),
@@ -108,13 +104,19 @@ test.describe("Native-YAML project.yaml fields", () => {
 				const body = await res.json();
 				expect(body.error).toMatch(/structured/i);
 			}
-			// Numeric fields: a string-encoded number must also be rejected.
-			for (const field of ["qa_max_duration_minutes", "qa_max_scenarios"]) {
+			// Legacy top-level qa_* keys are rejected entirely with the
+			// migration guidance message.
+			for (const field of [
+				"qa_env", "qa_start_command", "qa_build_command", "qa_health_check",
+				"qa_browser_entry", "qa_max_duration_minutes", "qa_max_scenarios",
+			]) {
 				const res = await apiFetch(`/api/projects/${id}/config`, {
 					method: "PUT",
 					body: JSON.stringify({ [field]: "15" }),
 				});
-				expect(res.status, `${field} should reject string payload`).toBe(400);
+				expect(res.status, `${field} should be rejected at top level`).toBe(400);
+				const body = await res.json();
+				expect(body.error).toMatch(/components\[\]\.config\[\]/);
 			}
 		} finally {
 			cleanup();
@@ -129,11 +131,7 @@ test.describe("Native-YAML project.yaml fields", () => {
 			mkdirSync(cfgDir, { recursive: true });
 			const legacyYaml = [
 				`config_directories: '${JSON.stringify([{ path: "/legacy", types: ["skills"] }])}'`,
-				`qa_env: '${JSON.stringify({ FOO: "bar" })}'`,
 				`sandbox_tokens: '${JSON.stringify([{ key: "GITHUB_TOKEN", enabled: true }])}'`,
-				`qa_max_duration_minutes: "20"`,
-				`qa_max_scenarios: "4"`,
-				`qa_start_command: "node server.js"`,
 			].join("\n") + "\n";
 			writeFileSync(join(cfgDir, "project.yaml"), legacyYaml);
 
@@ -149,23 +147,17 @@ test.describe("Native-YAML project.yaml fields", () => {
 				const getRes = await apiFetch(`/api/projects/${proj.id}/config`);
 				const cfg = await getRes.json();
 				expect(cfg.config_directories).toEqual([{ path: "/legacy", types: ["skills"] }]);
-				expect(cfg.qa_env).toEqual({ FOO: "bar" });
-				expect(cfg.qa_max_duration_minutes).toBe(20);
-				expect(cfg.qa_max_scenarios).toBe(4);
 
 				// Trigger a save: edit a flat key.
 				const putRes = await apiFetch(`/api/projects/${proj.id}/config`, {
 					method: "PUT",
-					body: JSON.stringify({ qa_health_check: "http://localhost/health" }),
+					body: JSON.stringify({ build_command: "echo build" }),
 				});
 				expect(putRes.status).toBe(200);
 
-				// On-disk YAML is now native — no escaped JSON, no quoted numbers.
+				// On-disk YAML is now native — no escaped JSON.
 				const text = readFileSync(join(cfgDir, "project.yaml"), "utf-8");
 				expect(text).not.toMatch(/\[\{\\"/);
-				expect(text).not.toMatch(/qa_max_duration_minutes:\s*"\d+"/);
-				expect(text).toMatch(/qa_max_duration_minutes:\s*20/);
-				expect(text).toMatch(/qa_max_scenarios:\s*4/);
 			} finally {
 				await apiFetch(`/api/projects/${proj.id}?force=1`, { method: "DELETE" }).catch(() => {});
 			}
@@ -180,18 +172,19 @@ test.describe("Native-YAML project.yaml fields", () => {
 			// Set, then clear, then confirm cleared.
 			await apiFetch(`/api/projects/${id}/config`, {
 				method: "PUT",
-				body: JSON.stringify({ qa_max_duration_minutes: 42 }),
+				body: JSON.stringify({
+					config_directories: [{ path: "/x", types: ["skills"] }],
+				}),
 			});
 			let cfg = await (await apiFetch(`/api/projects/${id}/config`)).json();
-			expect(cfg.qa_max_duration_minutes).toBe(42);
+			expect(cfg.config_directories).toEqual([{ path: "/x", types: ["skills"] }]);
 
 			await apiFetch(`/api/projects/${id}/config`, {
 				method: "PUT",
-				body: JSON.stringify({ qa_max_duration_minutes: null }),
+				body: JSON.stringify({ config_directories: null }),
 			});
 			cfg = await (await apiFetch(`/api/projects/${id}/config`)).json();
-			// After clear, returns the default.
-			expect(cfg.qa_max_duration_minutes).toBe(10);
+			expect(cfg.config_directories).toEqual([]);
 		} finally {
 			cleanup();
 		}

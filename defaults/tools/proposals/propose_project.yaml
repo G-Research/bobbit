@@ -1,6 +1,6 @@
 name: propose_project
 description: "Submit a project proposal for user review. Works both for new/provisional projects (from the project assistant) and mid-session for the currently registered project — in the latter case, the user sees a diff of the proposed fields against the current project.yaml and accepting writes the changes via PUT /api/projects/:id/config without ending the session."
-summary: "Propose a project with name, root_path, and optional command fields. Usable mid-session to edit the current project's config."
+summary: "Propose a project with name, root_path, components (each with optional commands and config), and workflows."
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -8,11 +8,17 @@ group: Proposals
 docs: >-
   Parameters: name (required), root_path (required), build_command, test_command,
   typecheck_command, test_unit_command, test_e2e_command, worktree_setup_command,
-  qa_start_command, sandbox, components, workflows, config_directories (array of
-  {path, types[]}), qa_env (object), sandbox_tokens (array of {key, enabled}),
-  qa_max_duration_minutes (number), qa_max_scenarios (number). Native-YAML fields
-  (config_directories, qa_env, sandbox_tokens, qa_max_duration_minutes,
-  qa_max_scenarios) MUST be sent as structured types — the server rejects
-  JSON-encoded strings for these fields with 400.
-  Also works mid-session against an already-registered project: the user reviews
-  a diff and accepts without terminating the session.
+  sandbox, components, workflows, config_directories (array of {path, types[]}),
+  sandbox_tokens (array of {key, enabled}). Each component accepts a
+  `config: Record<string, string>` map of opaque key→string entries (max 100 per
+  component); QA-testing keys live there now (qa_start_command, qa_health_check,
+  qa_browser_entry, qa_max_duration_minutes, qa_max_scenarios — all stringified).
+  Inline env vars directly into qa_start_command (e.g. "PORT=$PORT NODE_ENV=test
+  npm start"); there is no separate qa_env field. Native-YAML fields
+  (config_directories, sandbox_tokens) MUST be sent as structured types — the
+  server rejects JSON-encoded strings for these fields with 400. Top-level
+  qa_start_command / qa_build_command / qa_health_check / qa_browser_entry /
+  qa_env / qa_max_duration_minutes / qa_max_scenarios are rejected with 400 and
+  a message pointing at components[].config[]. Also works mid-session against an
+  already-registered project: the user reviews a diff and accepts without
+  terminating the session.

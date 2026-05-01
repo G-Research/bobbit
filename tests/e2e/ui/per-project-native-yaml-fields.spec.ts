@@ -181,56 +181,23 @@ test.describe("Per-project native-YAML field editing", () => {
 		}
 	});
 
-	test("qa_env: PUT structured payload persists across reload and writes native YAML", async ({ page }) => {
-		// `qa_env` has no dedicated UI editor in settings-page.ts. Drive it
-		// through the same REST endpoint the Settings page calls
-		// (`PUT /api/projects/:id/config`) while a Settings page session
-		// is open. This covers the round-trip + native-YAML on-disk
-		// requirement from the spec.
-		const { id, rootPath, cleanup } = await registerProject(`e2e-nyaml-qe-${Date.now()}`);
+	test("qa_env: top-level PUT is rejected (moved to components[].config)", async ({ page }) => {
+		// After the component-config migration, `qa_env` (and the other six
+		// legacy top-level qa_* keys) are rejected at the top level of
+		// `PUT /api/projects/:id/config`. The Settings page no longer
+		// surfaces qa_env directly; per-component config is the new home.
+		const { id, cleanup } = await registerProject(`e2e-nyaml-qe-${Date.now()}`);
 		try {
 			await openApp(page, `/settings/${id}/project`);
-			// Wait for the Commands tab to load (it is the project-scope
-			// "Commands" page, route id `project`).
 			await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
 
-			const envKey = `E2E_QA_VAR_${Date.now()}`;
-			const envValue = "hello-native-yaml";
 			const putResp = await apiFetch(`/api/projects/${id}/config`, {
 				method: "PUT",
-				body: JSON.stringify({ qa_env: { [envKey]: envValue } }),
+				body: JSON.stringify({ qa_env: { FOO: "bar" } }),
 			});
-			expect(putResp.status).toBe(200);
-
-			// Reload — round-trip the GET endpoint to confirm persistence.
-			await page.reload();
-			await expect(
-				page.getByRole("button", { name: "Settings", exact: true }),
-			).toBeVisible({ timeout: 15_000 });
-
-			const getResp = await apiFetch(`/api/projects/${id}/config`);
-			expect(getResp.status).toBe(200);
-			const cfg = await getResp.json();
-			expect(cfg.qa_env, "qa_env should round-trip as a structured object").toEqual({ [envKey]: envValue });
-
-			// On-disk YAML uses native form: a real mapping with no quoting.
-			const yamlText = readProjectYaml(rootPath);
-			expect(yamlText).toMatch(/qa_env:/);
-			assertNoEscapedJsonForField(yamlText, "qa_env");
-			expect(yamlText).toMatch(new RegExp(`${envKey}:\\s+${envValue}`));
-
-			// Cleanup: clear qa_env.
-			const clearResp = await apiFetch(`/api/projects/${id}/config`, {
-				method: "PUT",
-				body: JSON.stringify({ qa_env: null }),
-			});
-			expect(clearResp.status).toBe(200);
-			const clearedCfg = await (await apiFetch(`/api/projects/${id}/config`)).json();
-			// After clear, the field is absent or empty.
-			expect(
-				clearedCfg.qa_env === undefined ||
-				(typeof clearedCfg.qa_env === "object" && Object.keys(clearedCfg.qa_env).length === 0),
-			).toBe(true);
+			expect(putResp.status).toBe(400);
+			const body = await putResp.json();
+			expect(body.error).toMatch(/components\[\]\.config\[\]/);
 		} finally {
 			cleanup();
 		}
