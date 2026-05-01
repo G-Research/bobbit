@@ -859,7 +859,6 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 - `src/server/agent/project-registry.ts` — no schema change; just bumping migration call.
 - `src/server/agent/workflow-store.ts` → renamed/refactored to `InlineWorkflowStore`; new step union types.
 - `src/server/agent/workflow-manager.ts` — uses `InlineWorkflowStore`; integrates validator.
-- `src/server/agent/workflow-assistant.ts` — system prompt refers to authoring guide; emits inline workflows via `propose_project`.
 - `src/server/agent/project-assistant.ts` — repo scan; per-component command detection; default component name = project name; emits full `propose_project` payload incl. workflows.
 - `src/server/agent/goal-manager.ts` — pool-first setup; per-repo worktree map; multi-repo branch.
 - `src/server/agent/session-manager.ts` — pool claim with temp branch; rename on first prompt; sweeper hookup.

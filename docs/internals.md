@@ -296,7 +296,7 @@ The project assistant guides users through registering a new project directory. 
 
 **Provisional projects**: When a project assistant session is created (Path B or C), the server registers a **provisional project** via `ProjectRegistry.registerProvisional(name, rootPath)` with `provisional: true`. The assistant session is assigned to this provisional project's real `projectId` — so it has proper project isolation from the start, with its own store directory. The sidebar renders provisional projects as normal project folders but with a "(setting up)" badge, and suppresses action buttons (Add Goal, Add Staff, etc.) while the project remains provisional. Because this is server-side state, it survives page refreshes — unlike the previous `state.pendingProjects` client-side approach. If the session is terminated without accepting a proposal, the provisional project is cleaned up via `DELETE /api/projects/:id`.
 
-When the agent calls `propose_project`, the client populates `state.activeProjectProposal` and shows a **preview form** in the right panel (similar to goal proposals) with editable fields: project name, build/test/typecheck commands, and worktree setup command. The user reviews and clicks "Accept" — only then does the client promote the provisional project via `POST /api/projects/:id/promote` (which clears the `provisional` flag and updates the name) and write all config fields to `project.yaml` via `PUT /api/projects/:id/config`. The config write is atomic — all keys are validated before any are written, so a validation failure leaves the existing config unchanged. The client deduplicates proposal acceptance by tracking processed tool_use block IDs in `sessionStorage`, preventing re-fires on message re-scan (reconnect, refresh). This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
+When the agent calls `propose_project`, the client populates `state.activeProposals["project"]` and shows a **preview form** in the right panel (similar to goal proposals) with editable fields: project name, build/test/typecheck commands, and worktree setup command. The user reviews and clicks "Accept" — only then does the client promote the provisional project via `POST /api/projects/:id/promote` (which clears the `provisional` flag and updates the name) and write all config fields to `project.yaml` via `PUT /api/projects/:id/config`. The config write is atomic — all keys are validated before any are written, so a validation failure leaves the existing config unchanged. The client deduplicates proposal acceptance by tracking processed tool_use block IDs in `sessionStorage`, preventing re-fires on message re-scan (reconnect, refresh). This ensures goal workflows can run effectively with build, test, and type-check commands configured from the start.
 
 **Auto-import path**: If `POST /api/projects/detect` reports `.bobbit/` already exists, the UI skips the assistant entirely and registers the project immediately with the auto-detected name (from `package.json` or directory basename). Existing `.bobbit/config/` settings are preserved as-is.
 
@@ -330,7 +330,7 @@ Each registered project can override system-level settings (from `project.yaml`)
 - **Provisional** (project-assistant flow, unchanged): promote via `POST /api/projects/:id/promote`, write config via `PUT /api/projects/:id/config`, then terminate the assistant session and navigate to landing.
 - **Registered** (new path): `PUT /api/projects/:id/config` for project.yaml fields and `PUT /api/projects/:id` for the project name if it changed. The session stays connected and the agent continues where it left off — no navigation, no termination.
 
-The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProjectProposal` (proposal + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
+The generic `PUT /api/projects/:id/config` endpoint is a passthrough KV writer (validates keys contain no dots, clears on empty string / `null`, otherwise writes), so any scalar `project.yaml` field is accepted — `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, plus project-defined custom keys. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 and a message pointing at `components[<name>].config[<key>]`. Model preferences (`session_model`, `review_model`, `naming_model`) live outside `project.yaml` in the preferences store and are handled by `propose_setup` rather than `propose_project`. Key modules: `session-manager.ts::acceptProjectProposal` (dispatcher), `render.ts::projectProposalPanel` (diff UI), `state.activeProposals["project"]` (proposal slot with `fields` + `mode` + `currentConfig` snapshot). Full spec: [design/mid-session-project-proposals.md](design/mid-session-project-proposals.md).
 
 ### Project-proposal panel structure
 
@@ -590,7 +590,7 @@ This means crash recovery doesn't require the user to manually clean up pool det
 | Normal (assistant) | `POST /api/sessions` for assistant types (goal/project/tool) | No | No |
 | Worktree | `POST /api/sessions` for non-goal, non-assistant sessions in a git repo | Yes (auto) | No |
 | Delegate | Parent session spawns a child via the `delegate` tool | Inherits parent cwd | No |
-| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | Yes — archived transcript |
+| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | No — agent CLI rehydrates from a clone of the source `.jsonl` (no system-prompt injection) |
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
@@ -598,13 +598,14 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 
 **Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or staff wake refresh), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** — `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently — failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
-**Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. Three invocation points fan out from `runComponentSetups()`:
+**Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. The legacy `setupCommand` parameter on `createWorktree` / `createWorktreeSet` and the `setupWorktreeDeps` helper have been removed; every site invokes `runComponentSetups()` directly:
 
 | Site | When it runs | How components are resolved |
 |---|---|---|
 | `WorktreePool._fill()` (single-repo and multi-repo) | After every successful pool prebuild, before the entry is published into the pool | `componentsResolver: () => Component[]` closure passed at construction — invoked **fresh per fill** so live edits to `project.yaml` take effect on the next replenishment without a server restart |
 | `StaffManager.refreshWorktree()` | On each wake cycle for non-sandboxed staff, after rebasing the worktree onto the primary branch | `ctx.projectConfigStore.getComponents()` |
-| `session-setup.ts` (single-repo on-demand) | Fallback `createWorktree` path when the pool is empty | `components[0].worktreeSetupCommand` passed via `opts.setupCommand` to `createWorktree` |
+| `goal-manager.ts::setupWorktree` (single-repo and multi-repo) | When the pool is empty/disabled or claim fails, after `createWorktree` / `createWorktreeSet` succeeds | `componentsResolver(goal.projectId)` |
+| `session-setup.ts::executeWorktreeAsync` (single-repo on-demand) | Fallback `createWorktree` path when the pool is empty | `ctx.projectConfigStore.getComponents()` — honours each component's `relativePath` via `componentRoot()` |
 
 **Why the per-fill resolver matters.** Pool entries can sit in the pool for hours; if components were captured at pool construction time, a user who fixes a wrong setup command in `project.yaml` would still get stale entries baked with the old command until the server restarted. The closure pattern guarantees the next fill picks up edits.
 
@@ -614,7 +615,7 @@ Continue-Archived sessions are covered in detail under [Continue-Archived sessio
 [worktree-pool] running setup for components: <names>
 ```
 
-This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper.
+This exists specifically because the source-of-truth migration regressed silently once: three consumers (`server.ts`, `staff-manager.ts`, `git.ts::readWorktreeSetupCommand`) kept reading the migrated-away top-level key, `setupWorktreeDeps("")` no-oped, and every team lead's first build failed with an empty `node_modules`. The log makes any future regression immediately visible. A companion regression-guard unit test (`tests/worktree-pool.test.ts`) `grep`s `src/` for `.get("worktree_setup_command")` and fails on any hit outside the migration helper. A sibling guard in `tests/worktree-setup-fallback.test.ts` enforces the inverse direction: it fails if any source file passes a `setupCommand` argument to `createWorktree` / `createWorktreeSet`, or references the deleted `setupWorktreeDeps` helper, so a future caller cannot reintroduce the legacy plumbing that bypassed `componentRoot()` and ran setup hooks at the wrong cwd.
 
 **`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
 
@@ -693,23 +694,34 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 
 **Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, no `assistantType`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. See [docs/rest-api.md — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table.
 
-**Seed context**: The archived transcript (loaded via `sessionManager.getArchivedMessages()`) is rendered by `buildSeedContext()` in `src/server/agent/continue-archived.ts`:
+**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB — any non-trivial session was truncated. The endpoint now clones the source `.jsonl` byte-for-byte and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Full transcript fidelity, no byte budget, no system-prompt section, no Summary vs Full distinction. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
-- **Full mode**: `renderMessagesAsText()` flattens each message to `### <role>\n\n<body>`, rendering tool calls/results inline, dropping internal thinking blocks and base64 images. The output is capped at 128 KB (`SEED_TOTAL_BUDGET`).
-- **Summary mode**: The transcript (capped at 60 KB input for the model call) is sent to the configured naming model with a bullet-point prompt covering goal, decisions, files touched, open threads. On model failure the helper falls back to full mode — users never get an empty seed.
+**Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
-The resulting string is passed to `createSession()` as `opts.seedContext` (with `seedContextSourceId` for attribution) and flows through `SessionSetupPlan.seedContext` → `PromptParts.seedContext` → `assembleSystemPrompt()` in `src/server/agent/system-prompt.ts`, which emits it under a `## Prior Session Transcript` heading with an instruction telling the agent the text is context-only and not an implicit request to act. The same content appears in the system-prompt tokens view (labeled `Prior Session Transcript` with a `Continued from archived session <id>` source) so users can see token cost impact.
+1. Resolve the source `agentSessionFile` from `getPersistedSession(archivedId)`. Falls back to `sessionManager.recoverSessionFile(ps)` (promoted to public) for legacy persisted rows that never carried the field. Missing on both paths → **404**.
+2. Compute the destination path via `formatAgentSessionFilePath(cwd, createdAtMs, sessionId)` in `src/server/agent/agent-session-path.ts`. Format matches the agent CLI's own naming — `<globalAgentDir()>/sessions/--<cwd-slug>--/<isoTs>_<uuid>.jsonl` — so the path round-trips through `recoverSessionFile`'s parser regex.
+3. Copy via `sessionFileCopy(srcCtx, srcPath, dstCtx, dstPath, mgr)` in `src/server/agent/session-fs.ts`. Two-tier dispatch mirroring `sessionFileDelete`:
+   - **host↔host**: `fs.copyFileSync` after `mkdirSync({recursive:true})`.
+   - **same-project sandboxed↔same-project sandboxed**: `docker exec cp` inside the container.
+   - **host↔sandbox** or **cross-project sandboxed**: throws `CrossRealmCopyError` → handler returns **422**.
+   Other copy failures unlink the destination and return **500** with cleanup.
+4. Best-effort `copyToolContentDirIfPresent(srcId, dstId, stateDir)` recursively copies `<stateDir>/tool-content/<srcId>/` if present. The directory does not exist on disk today — `GET /api/sessions/:id/tool-content/:mi/:bi` reads through `rpcClient.getMessages()` from the JSONL — but the helper is shipped as defensive forward-compat for any future on-disk cache.
+5. Build `createSession` opts with `preExistingAgentSessionFile: <destPath>`. The `seedContext` / `seedContextSourceId` opts have been removed entirely — they had no other callers.
+6. Inside the session-setup pipeline (`src/server/agent/session-setup.ts`), `persistOnce` writes the cloned path as `agentSessionFile` on the `PersistedSession` row **before** spawn, so a hard kill between persist and spawn cannot strand the clone. After `rpcClient.start()` succeeds and before `persistSessionMetadata`, the pipeline issues `{type: "switch_session", sessionPath: plan.preExistingAgentSessionFile}` — the same RPC restart-resume uses (`session-manager.ts::restoreSession`). The agent CLI loads the cloned transcript before the user's first prompt.
 
-**Title**: The new session is titled `Continued: <original title>` and the title is marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
+**Title**: The new session is titled `Continued: <original title>` and marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
 
 **Key files:**
 
-- `src/server/agent/continue-archived.ts` — seed-context builder (rendering + summarization + budgets)
-- `src/server/server.ts` — `POST /api/sessions/:archivedId/continue` handler (scope gate, settings extraction, session creation)
-- `src/server/agent/session-setup.ts` — `SessionSetupPlan.seedContext` + `seedContextSourceId` fields
-- `src/server/agent/system-prompt.ts` — `Prior Session Transcript` section assembly
-- `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`
-- `src/ui/components/ContinueSessionChooser.ts` — mode chooser dialog (Summary vs Full, with large-transcript warning)
+- `src/server/agent/continue-archived.ts` — trimmed to `copyToolContentDirIfPresent` + `cleanupFailedContinue`. All transcript-stringification helpers (`buildSeedContext`, `formatFullTranscript`, `summarizeTranscript`, `renderMessagesAsText`, `truncateStringToBudget`, `callNamingModel`, `SEED_TOTAL_BUDGET`, `SUMMARY_INPUT_BUDGET`) are gone.
+- `src/server/agent/agent-session-path.ts` — `formatAgentSessionFilePath`, sibling to `recoverSessionFile`'s parser regex.
+- `src/server/agent/session-fs.ts` — `sessionFileCopy` with the four-row dispatch matrix and `CrossRealmCopyError`.
+- `src/server/server.ts` — `POST /api/sessions/:archivedId/continue` handler (scope gate, copy, session creation, cleanup-on-failure).
+- `src/server/agent/session-manager.ts` — `recoverSessionFile` is public; `createSession` opts carry `preExistingAgentSessionFile?: string` (no `seedContext` plumbing).
+- `src/server/agent/session-setup.ts` — `SessionSetupPlan.preExistingAgentSessionFile`; both `spawnAgent` and `executeWorktreeAsync` issue `switch_session` after `rpcClient.start()` succeeds, before `persistSessionMetadata`. `persistOnce` writes the path up front.
+- `src/server/agent/system-prompt.ts` — `seedContext` / `seedContextSource` and the `## Prior Session Transcript` section have been removed from `PromptParts`.
+- `src/ui/components/AgentInterface.ts` — footer renderer, keyed by `[data-continue-archived-footer]`.
+- `src/ui/components/ContinueSessionChooser.ts` — confirm-only modal (no mode radio, no large-transcript warning, empty POST body).
 
 ### Archived session WS handshake
 
@@ -794,6 +806,180 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ---
 
+## Editable proposals
+
+Every `propose_*` payload (`goal`, `project`, `workflow`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth; the in-memory `state.activeProposals[type]` slot is a parsed projection rebuilt on every change. Two new tools — `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` — let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+
+### Why
+
+Agents previously had to re-emit the entire payload via `propose_*` to tweak one field. For a fully-elaborated `propose_project` call (components, workflows, gate DAGs, verify steps) this meant streaming kilobytes of YAML to change a single command string — expensive in tokens and wall-clock time, and easy to drift between successive emissions. The file-on-disk model lets `edit_proposal` patch the draft in place using the same `old_text`/`new_text` contract the agent already uses for source code, with atomic rollback so a malformed edit cannot corrupt the stored form.
+
+The refactor also unified the six per-type proposal slots into one keyed map and lifted the goal-proposal UX behaviours (draft persistence, dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, per-session scoping) so every type inherits them. Bespoke per-type renderers (project's Components/Workflows/Diff, workflow's gate graph, goal's spec markdown) are unchanged — only the surrounding plumbing was rewritten.
+
+Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
+
+### On-disk layout
+
+```
+.bobbit/state/proposal-drafts/
+  <sessionId>/
+    goal.md         # markdown body + YAML frontmatter (title/cwd/workflow/options)
+    project.yaml    # native YAML matching the propose_project arg shape
+    workflow.yaml
+    role.yaml
+    tool.yaml
+    staff.yaml
+```
+
+Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields — see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write, cleaned up on session archive by `session-manager.ts::terminateSession` (fire-and-forget `fs.rm`).
+
+Path safety: `sessionId` is validated against `/^[A-Za-z0-9_-]+$/` and `type` against the union literal, so no traversal is possible.
+
+### Server module: `proposal-files.ts`
+
+`src/server/proposals/proposal-files.ts` owns the disk lifecycle and has no WebSocket or session-manager imports. The atomic-rollback contract is in `editProposalFile`:
+
+1. Read current content.
+2. Apply exact-string replacement (first-and-only-occurrence rule, identical to the builtin `edit` tool). Empty `new_text` deletes.
+3. Write to `<file>.tmp`.
+4. Parse via the per-type plugin in `proposal-types.ts` and run the required-field whitelist.
+5. On any parse/validate failure: unlink the `.tmp`, return a `ParseError` with structured `code`, file on disk untouched.
+6. On success: `fs.rename` `.tmp` → final path.
+
+Structured error codes (returned to the agent in the tool result and as `400` JSON bodies on the REST endpoint):
+
+| Code | Meaning |
+|---|---|
+| `FILE_NOT_FOUND` | No prior `propose_<type>` in this session. |
+| `OLD_TEXT_NOT_FOUND` | `old_text` does not match the file. |
+| `OLD_TEXT_NOT_UNIQUE` | `old_text` matches multiple times — ambiguous. |
+| `FRONTMATTER_MALFORMED` | `goal.md` frontmatter fence is broken. |
+| `YAML_PARSE_ERROR` | The post-edit YAML body fails to parse. |
+| `MISSING_REQUIRED_FIELD` | Per-type required-field whitelist failed. |
+| `STRUCTURAL_VALIDATION_FAILED` | Project YAML fails the same structural validator used by `PUT /api/projects/:id/config`. |
+
+Per-type metadata lives in `src/server/proposals/proposal-types.ts`: `filename`, `serialize(args) → body`, `parse(body) → ParseResult`, `requiredFields[]`. Adding a new proposal type means adding a plugin entry plus the matching client-side entry in `PROPOSAL_TYPE_REGISTRY`.
+
+### Unified client state
+
+The six legacy slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit slots for `tool`/`workflow`) are collapsed into one map in `src/app/state.ts`:
+
+```ts
+activeProposals: Partial<Record<ProposalType, ProposalSlot>>;
+
+interface ProposalSlot {
+  sessionId: string;
+  fields: Record<string, unknown>;  // parsed projection
+  streaming: boolean;                // mirrors proposalStreamingByTag for legacy panels
+  mode?: "provisional" | "registered"; // project only
+  rev: number;                       // monotonic; UI re-render hint
+}
+```
+
+`src/app/proposal-registry.ts` exports `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, and `PROPOSAL_TYPE_REGISTRY`. Each plugin contributes:
+
+- `mergeFields(prev, incoming)` — streaming shallow-merge. Project carries `components` and `workflows` forward when the partial omits them; goal carries the markdown body across frontmatter-only deltas; the others use a plain spread.
+- `onFirstEmit(slot, opts)` — tab auto-select on the first emit (e.g. project flips `previewPanelActiveTab="project"`, mobile flips the assistant tab).
+- `validate(fields)` — returns blocking errors that disable the submit button.
+- `accept(slot)` — reserved hook; current accept paths (`createGoal`, `acceptProjectProposal`, role/staff/tool/workflow accept endpoints) are unchanged.
+
+Unified draft + dismissal helpers in `src/app/proposal-helpers.ts` replace the per-type ad-hoc managers:
+
+- `saveProposalDraft(sid, type)` / `loadProposalDraft(sid, type)` / `deleteProposalDraft(sid, type)`
+- `markProposalDismissed(sid, type, fields)` / `isProposalDismissed(sid, type, fields)` / `clearProposalDismissed(sid, type)`
+
+LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId}`; the legacy `bobbit-goal-proposal-dismissed-<sid>` key is migrated once on first read.
+
+### Flow: `propose_*` → file-seed → broadcast → parsed projection
+
+```
+agent calls propose_<type>(args)
+  └─> defaults/tools/proposals/extension.ts execute()
+        └─> POST /api/sessions/:id/proposal/:type/seed { args }
+              └─> writeProposalFile (serialize + write)
+                    └─> parseProposalFile
+                          └─> _broadcastToSession({ type: "proposal_update",
+                                                       proposalType, fields,
+                                                       streaming: false,
+                                                       source: "seed" })
+                                └─> client remote.onProposal(type, fields, false)
+                                      └─> mergeFields, onFirstEmit (if first), renderApp
+```
+
+`edit_proposal` follows the same flow except the entry point is `POST /api/sessions/:id/proposal/:type/edit` and `source: "edit"`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
+
+### Dual-fire: legacy streaming path coexists
+
+The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolProposals` continues to fire the legacy per-type `onXProposal` callbacks during streaming, so partial deltas flow into the panel as the model types them. The unified `remote.onProposal` callback is the WS-driven path — it handles `proposal_update` (sources `seed`, `edit`, `rehydrate`) and `proposal_cleared`. Both paths funnel into the same `state.activeProposals[type]` slot via the plugin's `mergeFields`. The streaming-partial path provides UX responsiveness; the file-derived path provides the canonical projection and restart survival.
+
+### Restart survival via rehydrate-on-attach
+
+On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. Because the file IS the source of truth, no separate persistence layer is needed — a server restart mid-edit, a browser reload, or a session resume all yield the same broadcasted projection.
+
+Session archive cleans the directory: `session-manager.ts::terminateSession` fire-and-forgets `fs.rm` of the per-session dir. An in-flight `editProposalFile` racing with cleanup is harmless — `unlink` on a missing dir is a no-op.
+
+### Accept lifecycle
+
+The per-type accept handlers (`createGoal`, `acceptProjectProposal`, etc.) are unchanged. After a successful accept, the client fires `DELETE /api/sessions/:id/proposal/:type` which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
+
+### Tool surface
+
+| Tool | Group | Purpose |
+|---|---|---|
+| `view_proposal` | Proposals | `{ type }` → raw file body, or `404 {code:"FILE_NOT_FOUND"}` pointing at the matching `propose_*`. |
+| `edit_proposal` | Proposals | `{ type, old_text, new_text }` → post-edit body on success, structured error otherwise. Failed edits do NOT modify the file. |
+| `propose_<type>` | Proposals | Unchanged surface; now also seeds the file via the `/seed` REST endpoint as a side effect of `execute()`. |
+
+Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementation: `defaults/tools/proposals/extension.ts`.
+
+### REST endpoints
+
+Four endpoints, full reference in [docs/rest-api.md — Proposal drafts](rest-api.md#proposal-drafts):
+
+- `GET /api/sessions/:id/proposal/:type` — read raw body
+- `POST /api/sessions/:id/proposal/:type/seed` — called by `propose_*` `execute()`
+- `POST /api/sessions/:id/proposal/:type/edit` — surgical edit
+- `DELETE /api/sessions/:id/proposal/:type` — clean up after accept
+
+### Per-type panel testids
+
+Each proposal preview panel exposes `data-panel="<type>-proposal"` for E2E targeting. The project panel keeps its three-view structure (`view-tab-{components|workflows|diff}`) on top of the unified slot — see [Project-proposal panel structure](#project-proposal-panel-structure).
+
+### Out of scope
+
+- Diff/undo history of edits. Agents see the latest file contents only.
+- Concurrent multi-agent edits to the same proposal (single-session model preserved).
+- Refactoring the bespoke per-type preview forms.
+
+### Key files
+
+| Path | Purpose |
+|---|---|
+| `src/server/proposals/proposal-files.ts` | Atomic file API (`writeProposalFile`, `editProposalFile`, `parseProposalFile`, `deleteProposalFile`). |
+| `src/server/proposals/proposal-types.ts` | Per-type plugins: filename, serialize, parse, requiredFields. |
+| `src/server/server.ts` | Four REST handlers (regex-routed at `/api/sessions/:id/proposal/:type[/edit\|/seed]`). |
+| `src/server/ws/protocol.ts` | `proposal_update` / `proposal_cleared` server messages. |
+| `src/server/ws/handler.ts` | Rehydrate-on-attach. |
+| `src/server/agent/session-manager.ts::terminateSession` | Per-session directory cleanup. |
+| `src/app/proposal-registry.ts` | `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, `PROPOSAL_TYPE_REGISTRY`. |
+| `src/app/proposal-helpers.ts` | Unified draft + dismissal helpers. |
+| `src/app/state.ts::activeProposals` | Unified slot map. |
+| `src/app/session-manager.ts::remote.onProposal` | Unified WS-driven callback. |
+| `src/app/remote-agent.ts` | WS dispatch + legacy `_checkToolProposals` dual-fire. |
+| `defaults/tools/proposals/{view,edit}_proposal.yaml` | Tool descriptors. |
+| `defaults/tools/proposals/extension.ts` | Tool registration; `propose_*` `execute()` POSTs to `/seed`. |
+
+### Tests
+
+- `tests/proposal-files.test.ts` — unit: write/read/edit/parse/delete round-trip, atomic-rollback, path-traversal rejection.
+- `tests/proposal-registry.test.ts` — unit: per-type `mergeFields` and validators.
+- `tests/proposal-helpers.test.ts` — unit: unified draft + dismissal.
+- `tests/e2e/proposal-edit-api.spec.ts` — API E2E: edit-before-propose, restart survival, malformed-edit rollback (SHA-256 byte-equal pre/post).
+- `tests/e2e/ui/proposal-edit-flow.spec.ts` — browser E2E: project propose → edit → accept happy path.
+- `tests/e2e/ui/proposal-types-uX-parity.spec.ts` — parametrised across all six types: dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, restart survival.
+
+---
+
 ## Read/unread state
 
 The sidebar shows an "unseen activity" dot on sessions that have new activity since the user last looked. Read state is **server-side**: a `lastReadAt` timestamp on each `PersistedSession`, mutated only by the user navigating to a session.
@@ -824,22 +1010,39 @@ Existing users have a `bobbit-session-visited` map in `localStorage` from before
 
 ### `lastActivity` preservation across restart
 
-`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but `restoreSession()` re-issues every historical rpc event into the session as part of replay. Without a guard, every replayed event would call `session.lastActivity = Date.now()` and clobber the persisted value with restore time — making every session look like it was just active.
+`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but three paths in `session-manager.ts` install rpc-event listeners that mutate `session.lastActivity` after re-attaching to a fresh `RpcBridge`:
 
-`restoreSession()` already keeps a `restoring` flag (used to suppress cost tracking during replay). The `lastActivity` bump is gated on the same flag — replay-phase rpc events are observed for transcript reconstruction but do not update the timestamp. The first event after `restoring` flips to `false` is the first one that bumps `lastActivity`, so the persisted timestamp survives intact until genuine new activity occurs. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+- `restoreSession()` — server startup restores persisted sessions concurrently (CONCURRENCY=5).
+- The role-restart path — swaps the bridge after a role change.
+- The abort-restart path (`restoreFromAbort`) — swaps the bridge after a force-abort.
+
+All three bridges emit `switch_session` history replay frames followed by lifecycle frames on resume (`agent_start`, `agent_idle`, `connection_state`, `state`, `session_title`, etc.). Without a guard, every one of those frames would call `session.lastActivity = Date.now()` and clobber the persisted value. The original guard — a `restoring` / `switchingSession` flag flipped to `false` after `switch_session` resolves — was insufficient because lifecycle frames continue to fire after the flag clears, and under concurrent restore every restored session ended up clustered at restart time with identical timestamps.
+
+**Single source of truth**: the exported helper `isUserVisibleActivity(event)` at the top of `src/server/agent/session-manager.ts`. It returns `true` only for events that represent real new turn activity:
+
+- `message_update`
+- `message_end`
+- `tool_execution_start`
+- `tool_execution_end`
+- `agent_end`
+
+Everything else returns `false`, including all lifecycle frames, `auto_compaction_*`, `process_exit`, container `died`/`recovered` events, and `gate_verification_*` frames. All three rpc-event listeners now wrap the `session.lastActivity = Date.now()` bump in `if (isUserVisibleActivity(event))`. The pre-existing `restoring` / `switchingSession` flags are retained for cost-tracking but no longer relied on for `lastActivity`. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+
+Locked by `tests/session-restore-last-activity.test.ts` — source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
 
 ### Key files
 
 | File | Role |
 |---|---|
 | `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
-| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `restoring`-flag gate on `lastActivity` |
+| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `isUserVisibleActivity()` filter applied at `restoreSession`, role-restart, and abort-restart event listeners |
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
+| `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
 | `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
 
 ---
@@ -2038,7 +2241,7 @@ When modifying scroll behaviour: do not introduce new timers, do not widen the 1
 
 ### Proposal panel scroll lock invariant
 
-The seven proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow`, `setup` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
+The six proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` — the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
 
 The logic lives in **`src/app/follow-tail.ts`** (`reconcileFollowTail(el)`), called from a `queueMicrotask` at the end of each panel's render so it fires after the synchronous DOM commit but before paint. The same three rules apply:
 
@@ -2050,15 +2253,15 @@ Lock state is stored in a module-private `WeakMap<HTMLElement, LockState>` keyed
 
 Textarea selection (`selectionStart` / `selectionEnd`) is captured on `select`, `keyup`, and `click`, then re-applied via `setSelectionRange(...)` after every reconcile branch (positive delta, zero delta, and shrink) — `setSelectionRange` is a state mutation per the WHATWG spec and applies even when the textarea is not the active element, so the caret is in the right place when focus returns. The DOMException some browsers throw on detached/hidden inputs is swallowed.
 
-**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The seven panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
+**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The six panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start — exactly when the user would perceive a snap.
 
 When modifying proposal-panel scroll behaviour: route through `reconcileFollowTail` rather than touching `scrollTop` or `setSelectionRange` directly; do not introduce timer-based intent heuristics; do not widen the 5px tail. See `src/app/follow-tail.ts` and the panel render functions in `src/app/render.ts`. Behavioural twin test: `tests/follow-tail.spec.ts`.
 
 ### Proposal streaming flag
 
-`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`, `workflow_proposal`, `setup_proposal`. Read via the `isProposalStreaming(tag)` accessor.
+`state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` — `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`. Read via the `isProposalStreaming(tag)` accessor.
 
-A per-tag map rather than a single boolean because the seven panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
+A per-tag map rather than a single boolean because the six panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
 
 **Why the flag exists.** Without it the Create / Apply / Save buttons are clickable mid-stream and a user can submit before the spec/title has finished streaming, producing a goal/role/tool with truncated content. The flag drives (a) the `disabled` state of each panel's primary submit, (b) the `streamingBadge()` + `STREAMING_BORDER` indicator, and (c) consumers in `session-manager.ts` that may want to suppress destructive side-effects on streaming-mode fires.
 
@@ -2071,11 +2274,21 @@ A per-tag map rather than a single boolean because the seven panels can be in in
 Transcript ordering is a single-source-of-truth concern owned by the pure reducer in `src/app/message-reducer.ts`. `RemoteAgent.handleServerMessage` / `handleAgentEvent` are thin dispatchers that translate WebSocket frames into actions and apply them via `reduce(state, action)`; the reducer's `messages` array is the canonical render input — there are no client-only buckets and no render-time sort. The invariant is:
 
 - **Every message carries an `_order: number` and `_insertionTick: number`, and the reducer sorts by `(_order ASC, _insertionTick ASC)` exactly once per `apply()`.** Server live events use the monotonic per-session `seq` (positive integer). Snapshot rows use `_order = SNAPSHOT_ORDER_FLOOR + i` (≡ `-1_000_000_000 + i`) so every snapshot order is strictly less than every live `seq`, no coordination required. `tool_permission_needed` frames are stamped via `EventBuffer.pushFrame()` and treated like a live event. Synthetics (compaction marker, system notifications, error rows) sit at `highestSeq + 0.5`. Optimistic prompts/steers sit at `Number.MAX_SAFE_INTEGER - 1e9 + tick` so they always tail-position until the server echo replaces them by id (or by text fallback when the optimistic id is `^optimistic_`).
-- **The server snapshot is authoritative for any id it contains.** On a `snapshot` action the reducer drops every prior row whose id appears in the snapshot, then merges in the surviving client-only rows (optimistic / synthetic / permission). Permission cards survive iff their id is not in the snapshot **and** no snapshot row has a greater `_order` — the old `_pendingPermissionCards` `maxServerTs` cutoff is gone. The synthetic compaction marker also falls back to a text-prefix check (`"Context compacted"`) so a legacy snapshot row without a stable id still wins.
+- **The server snapshot is authoritative for any id it contains.** On a `snapshot` action the reducer drops every prior row whose id appears in the snapshot, then merges in the surviving client-only rows (optimistic / synthetic / permission). Permission cards survive iff their id is not in the snapshot **and** no snapshot row has a greater `_order` — the old `_pendingPermissionCards` `maxServerTs` cutoff is gone. The synthetic compaction marker also falls back to a text-prefix check (`"Context compacted"`) so a legacy snapshot row without a stable id still wins. The survivor filter additionally drops live server-origin `toolResult` rows and `toolCall`-bearing `assistant` rows whose `toolCallId` (resp. assistant-content `toolCall.id`) matches a snapshot row — toolResult `message_end` frames frequently arrive without a string `id` (real LLM streams, mock-agent transcripts), and id-only equivalence would let the un-id'd live row pass through alongside the snapshot's id'd copy (Bug 2 / scenario 08 bg-3, regression-tested by `tests/dual-render-bg3.test.ts`).
 - **Render trusts the reducer verbatim.** `MessageList.buildRenderItems` keys every row by id (synthetic fallback `synth:${origin}:${order}:${tick}` for rows without server ids) — no `msg:${i}` index keys, no render-time sort. The streaming-message preview is hidden at render time when `state.streamingMessage?.id === m.id`; the old `_deferredAssistantMessage` mutable slot is gone.
 - **Thirteen actions cover every transcript mutation.** `live-event`, `snapshot`, `optimistic-prompt`, `optimistic-steer`, `permission-needed`, `permission-resolved`, `compaction-placeholder`, `compaction-result`, `system-notification`, `error`, `deny-permission-filter`, `replace-messages`, `reset`. If a new transcript-touching code path can't be expressed as one of these, add a new action — do not bypass the reducer with a direct push. The pre-reducer mechanisms `_deferredAssistantMessage`, `_liveEventMessages`, `_pendingPermissionCards`, `_compactionSyntheticMessages`, `flushDeferredMessage`, optimistic-text dedupe, the snapshot-merge stable-sort by `(timestamp, insertionOrder)`, and `MessageList.buildRenderItems` index keys have all been deleted; if you find yourself wanting to reintroduce one, the design is wrong.
 
 When extending transcript handling: every new transcript mutation goes through a new action in the reducer — do **not** push directly into `state.messages` from `RemoteAgent`. Compute `_order` from `seq` (live), `SNAPSHOT_ORDER_FLOOR + i` (snapshot), `highestSeq + 0.5` (synthetic), or the optimistic sentinel (user-typed). Reconciliation always goes id-first; text fallback is reserved for the optimistic-prompt and compaction-marker paths and nowhere else. Pinned by `tests/message-reducer.test.ts` (12 scenarios incl. proposal burst and `ask_user_choices` envelope routing) and the ST-DEDUP-02 / ST-DEDUP-03 / ST-DEDUP-04 stories in `tests/e2e/ui/stories-streaming.spec.ts`. Full design: [`docs/design/unified-message-ordering-reducer.md`](design/unified-message-ordering-reducer.md).
+
+### Streaming message id (synthetic fallback)
+
+When an assistant `message_end` carries tool calls, the streaming container in `AgentInterface.ts` keeps owning the rendered card until the next event arrives, while the same message is also appended to `state.messages` by the reducer. The visible-messages filter hides the duplicate by id-equality (`m.id !== streamingMessageId`). Real LLM streams sometimes deliver `message_end` without a string `id` (undefined / null / numeric / `0` / `""`); the historical inline check `typeof msg.id === "string" ? msg.id : undefined` demoted `streamingMessageId` to `undefined`, the `!streamingMessageId` short-circuit opened the filter, and the card rendered twice — each instance with its own `<bg-process-renderer>` and its own `Date.now()` start time, diverging visibly during a parked `bash_bg.wait` where no further events arrive to reconcile.
+
+The canonical key is computed by `computeStreamingMessageId(msg)` in `src/app/streaming-message-id.ts`: prefer a non-empty string `msg.id`, otherwise fall back to `synth:tc:<firstToolCallId>` (toolCall ids are stable across `message_update` deltas), otherwise `undefined`. Both sites in `src/app/remote-agent.ts` — the `streamingMessageId` field assignment **and** the `id` stamped onto the reducer entry before the `live-event` action — must go through the helper, or the two diverge and the filter's id-equality check fails. The defensive `if (streamingMessage && m === streamingMessage) return false` guard in `AgentInterface.renderMessages` is belt-and-braces for the case where the streaming message is the same object reference as a row in `messages`; it does not replace the id-equality path because production hits the separate-objects case via the reducer's `live-event` append.
+
+Follow-up not in this fix: `BgProcessRenderer.getCallStart` keys its start-time WeakMap on the `params` object identity rather than on `bgId`. Two render paths produce two distinct `params` objects → two start times. Re-keying on `bgId` would mask the *visible* dual-timer symptom even if the dual-render itself recurred for some other reason — worth doing as defence in depth, but a separate goal.
+
+Regression tests: `tests/dual-render-noid-message.test.ts` (id=undefined/null/numeric/empty-string cases), `tests/message-reducer.test.ts`, `tests/e2e/ui/bg-wait-no-dup.spec.ts`.
 
 ---
 

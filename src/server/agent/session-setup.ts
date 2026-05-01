@@ -117,10 +117,13 @@ export interface SessionSetupPlan {
 	instructions?: string;
 	context?: Record<string, string>;
 
-	// Continue-Archived: seed context injected into the system prompt, plus
-	// the source archived session ID for prompt-section provenance.
-	seedContext?: string;
-	seedContextSourceId?: string;
+	/**
+	 * Continue-Archived: a `.jsonl` path that has already been cloned from the
+	 * source archived session. When set, `spawnAgent` issues a `switch_session`
+	 * RPC against this path immediately after `rpcClient.start()` so the agent
+	 * CLI rehydrates from it (same mechanism `restoreSession` uses).
+	 */
+	preExistingAgentSessionFile?: string;
 }
 
 /**
@@ -405,8 +408,6 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools,
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
-			seedContext: plan.seedContext,
-			seedContextSource: plan.seedContextSourceId,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
@@ -482,7 +483,10 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		id: session.id,
 		title: session.title,
 		cwd: session.cwd,
-		agentSessionFile: "",
+		// Continue-Archived: when the cloned JSONL path is known up front, persist
+		// it so a hard kill before spawn doesn't lose the cloned transcript.
+		// Otherwise the agent CLI populates this field via persistSessionMetadata.
+		agentSessionFile: plan.preExistingAgentSessionFile || "",
 		createdAt: session.createdAt,
 		lastActivity: session.lastActivity,
 		goalId: plan.goalId,
@@ -578,18 +582,37 @@ export async function executeWorktreeAsync(
 		worktreeCwd = preBuiltWorktreePath;
 		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
 	} else {
-		// Resolve setup hook from the default (first) component when available.
 		// Multi-repo session creation goes through the worktree pool / sandbox
 		// path; this fallback handles the single-repo non-sandboxed path.
-		const defaultComponent = ctx.projectConfigStore?.getComponents()?.[0];
-		const setupCommand = defaultComponent?.worktreeSetupCommand || undefined;
 		worktreeCwd = await withRetry(
 			async () => {
-				const result = await createWorktree(plan.repoPath!, plan.branch!, { setupCommand });
+				const result = await createWorktree(plan.repoPath!, plan.branch!);
 				return result.worktreePath;
 			},
 			{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
 		);
+
+		// Per-component setup — non-fatal on failure. Routes through the canonical
+		// resolver so component.relativePath is honored.
+		const components = ctx.projectConfigStore?.getComponents() ?? [];
+		if (components.length > 0) {
+			try {
+				const { runComponentSetups } = await import("../skills/worktree-setup.js");
+				const { execFile } = await import("node:child_process");
+				const { promisify } = await import("node:util");
+				const pExecFile = promisify(execFile);
+				await runComponentSetups({
+					components,
+					branchContainer: worktreeCwd,
+					primaryWorktreeRoot: plan.repoPath!,
+					exec: async (cmd, cwd, env) => {
+						await pExecFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+					},
+				});
+			} catch (err) {
+				console.warn(`[session-setup] runComponentSetups failed for session ${session.id} (non-fatal):`, err);
+			}
+		}
 	}
 
 	// For sandboxed sessions, set sandboxBranch so applySandboxWiring() creates
@@ -698,6 +721,19 @@ export async function executeWorktreeAsync(
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 
+	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
+	if (plan.preExistingAgentSessionFile) {
+		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			switchTimeout,
+		);
+		if (!switchResp.success) {
+			await rpcClient.stop().catch(() => {});
+			throw new Error(`switch_session failed: ${switchResp.error}`);
+		}
+	}
+
 	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
 	// a kill (crash, taskkill, OS shutdown) in the gap between idle and the
 	// post-spawn fire-and-forget persist archives the session on next boot,
@@ -791,6 +827,20 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
+
+	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
+	// before we persist or flip to idle. Same RPC the restart-resume path uses.
+	if (plan.preExistingAgentSessionFile) {
+		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
+		const switchResp = await rpcClient.sendCommand(
+			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
+			switchTimeout,
+		);
+		if (!switchResp.success) {
+			await rpcClient.stop().catch(() => {});
+			throw new Error(`switch_session failed: ${switchResp.error}`);
+		}
+	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);

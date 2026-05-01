@@ -88,7 +88,6 @@ A unified registry (`assistant-registry.ts`) maps assistant types to their promp
 - `role` — Role creation assistant
 - `tool` — Tool management assistant
 - `staff` — Staff agent creation assistant
-- `setup` — Project setup wizard
 
 Sessions created with an `assistantType` get the corresponding system prompt automatically. Assistant prompts can be edited via their YAML files and are reloaded on change.
 

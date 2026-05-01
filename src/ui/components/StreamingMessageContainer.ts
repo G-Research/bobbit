@@ -173,6 +173,11 @@ export class StreamingMessageContainer extends LitElement {
 			// Cancel any pending updates since we're clearing
 			this._pendingMessage = null;
 			this._updateScheduled = false;
+			// Clear the flag synchronously: no rAF was scheduled in this branch,
+			// so without this reset the flag would stay sticky-true and the next
+			// batched setMessage(msg, false) rAF would silently drop its delta
+			// (the !_immediateUpdate guard inside the rAF would short-circuit).
+			this._immediateUpdate = false;
 			return;
 		}
 

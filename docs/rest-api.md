@@ -22,13 +22,62 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Create a new session cloned from an archived one, seeded with its transcript. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a byte-for-byte clone of the archived session's `.jsonl`. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 
+
+### Proposal drafts
+
+In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}` so the agent can tweak them via `view_proposal` / `edit_proposal` without re-emitting the full payload. The file is the single source of truth; the in-memory client slot (`state.activeProposals[type]`) is a parsed projection. See [docs/internals.md — Editable proposals](internals.md#editable-proposals) and [docs/design/editable-proposals.md](design/editable-proposals.md).
+
+`<type>` is one of `goal | project | workflow | role | tool | staff`. `goal` files are markdown with YAML frontmatter; the others are native YAML.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
+| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, broadcasts `proposal_update {source:"seed"}`. `200 {ok:true}` on success; `400` with structured error on parse/validate failure. |
+| `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit"}`, returns `200 {ok:true, newContent}`. On failure: file unchanged, returns 4xx with structured error. |
+| `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. |
+
+#### Error response shape
+
+All 4xx responses for the edit / seed endpoints share the same JSON shape:
+
+```json
+{
+  "ok": false,
+  "code": "YAML_PARSE_ERROR",
+  "message": "<human-readable detail, ≤ 1 KB>",
+  "line": 12,
+  "col": 5,
+  "field": "components"
+}
+```
+
+`line`, `col`, and `field` are optional and present when the underlying validator supplies them.
+
+#### Structured error codes
+
+| Code | Status | Endpoint(s) | When |
+|---|---|---|---|
+| `INVALID_BODY` | `400` | edit, seed | Body is not JSON, or required keys are wrong type. |
+| `FILE_NOT_FOUND` | `404` | GET, edit | No prior `propose_<type>` in this session. The `message` names the matching `propose_*` tool. |
+| `OLD_TEXT_NOT_FOUND` | `400` | edit | `old_text` does not occur in the file. |
+| `OLD_TEXT_NOT_UNIQUE` | `400` | edit | `old_text` matches multiple times — ambiguous. Caller must extend `old_text` with surrounding context. |
+| `FRONTMATTER_MALFORMED` | `400` | edit, seed | `goal.md` frontmatter fence is broken or unparseable. |
+| `YAML_PARSE_ERROR` | `400` | edit, seed | Post-edit YAML body fails to parse. |
+| `MISSING_REQUIRED_FIELD` | `400` | edit, seed | Per-type required-field whitelist failed (`field` set). |
+| `STRUCTURAL_VALIDATION_FAILED` | `400` | edit, seed | Project YAML fails the structural validator shared with `PUT /api/projects/:id/config`. |
+
+**Atomic rollback.** Any failure in `edit` or `seed` after the per-type parse step leaves the file on disk byte-for-byte identical to its pre-call state — the implementation writes to `<file>.tmp` and `fs.rename`s only after parse + validate succeed. A failed edit followed by `GET` returns the original body unchanged.
+
+**Path safety.** `:id` is validated against `/^[A-Za-z0-9_-]+$/` and `:type` against the union literal; invalid values return `400 {error:"Unknown proposal type: ..."}` before any disk access.
+
+**Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate"}` per surviving file, so reloading a browser or restarting the server mid-edit yields the same UI state without a separate persistence layer.
 
 ### Review Annotations
 
@@ -689,18 +738,11 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new session that mirrors the settings of an archived, non-goal, non-delegate session and seeds the archived transcript into the new session's system prompt. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new session whose agent CLI rehydrates from a byte-for-byte clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
 
-**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships.
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus a verbatim copy of the source `.jsonl`, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless, no byte budget, no system-prompt injection.
 
-**Request body**:
-
-```json
-{ "mode": "summary" | "full" }
-```
-
-- `"full"` — injects the archived transcript verbatim (subject to the 128 KB seed-context budget enforced in `src/server/agent/continue-archived.ts`).
-- `"summary"` — asks the configured naming model to produce a bullet-point recap of the archived conversation. Falls back to `"full"` if the naming model is unavailable.
+**Request body**: empty (or absent). A legacy `mode` field is tolerated but ignored — there is no Summary vs Full distinction any more, and no transcript truncation. See [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) for the design rationale.
 
 **Success response** (`201 Created`):
 
@@ -719,16 +761,15 @@ The new session's title is marked as generated, which prevents the first-message
 
 | Status | Meaning |
 |---|---|
-| `400` | `mode` is missing or not `"summary"` / `"full"` |
-| `404` | Archived session not found, or its transcript (`.jsonl`) is missing or empty |
+| `404` | Archived session not found, or its transcript (`.jsonl`) is missing on disk and `recoverSessionFile` cannot locate it |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
-| `422` | Source is a goal, delegate, team member, or assistant session — not eligible for continuation |
-| `500` | Seed-context construction or session creation failed unexpectedly (see server logs) |
+| `422` | Source is a goal, delegate, team member, or assistant session — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |
+| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied) — the destination file is unlinked and no session row is created. See server logs. |
 
 **Scope gate**: The endpoint refuses goal-linked, delegate, team, and assistant sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead.
 
-**Seed context injection**: The archived messages are rendered by `buildSeedContext()` in `src/server/agent/continue-archived.ts` and passed to `createSession()` as `opts.seedContext` (plus `seedContextSourceId` for attribution). The session-setup plan propagates it to `PromptParts.seedContext`, and `assembleSystemPrompt()` in `src/server/agent/system-prompt.ts` emits it under a `## Prior Session Transcript` heading with a directive telling the agent it's context-only — not a request to act.
+**Cross-realm rejection**: `sessionFileCopy` (`src/server/agent/session-fs.ts`) supports host↔host and same-project sandboxed↔same-project sandboxed copies only. Host↔sandbox and cross-project sandboxed copies throw `CrossRealmCopyError`, which the handler maps to **422**. The user can re-register the project with matching sandbox config and retry. See [docs/internals.md — Continue-Archived sessions](internals.md#continue-archived-sessions) for the full mechanism.
 
 ### Large content truncation
 

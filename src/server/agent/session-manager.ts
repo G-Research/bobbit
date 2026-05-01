@@ -1,6 +1,7 @@
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
@@ -73,6 +74,30 @@ export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "a
  * terminal assistant message OR on an explicit `retryLastPrompt` call.
  */
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
+
+/**
+ * Returns true only for rpc events that represent genuine new user-visible
+ * activity (a message, tool call, or end-of-turn). Lifecycle frames the
+ * agent CLI emits automatically on resume (agent_start, agent_idle,
+ * connection_state, state, session_title, etc.) return false so they don't
+ * clobber the persisted `lastActivity` timestamp on restore / role-restart /
+ * abort-restart paths.
+ *
+ * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
+ */
+export function isUserVisibleActivity(event: any): boolean {
+	if (!event || typeof event.type !== "string") return false;
+	switch (event.type) {
+		case "message_update":
+		case "message_end":
+		case "tool_execution_start":
+		case "tool_execution_end":
+		case "agent_end":
+			return true;
+		default:
+			return false;
+	}
+}
 
 /**
  * Build a user-visible system-prefix explaining that the previous turn
@@ -1423,6 +1448,18 @@ export class SessionManager {
 		// arrive seconds apart. The dispatch is triggered by the tool_result
 		// event handler in _handleAgentEvent().
 		// If the agent is idle, they'll drain normally via drainQueue.
+		//
+		// SPECIAL CASE: bash_bg.wait. A wait long-poll has no natural tool
+		// boundary — it sits indefinitely until the bg process exits or the
+		// wait is aborted. Without intervention, a steer-on-queue while the
+		// agent is parked in wait would be deferred for the entire wait
+		// duration. Mirror deliverLiveSteer's behaviour: when the session is
+		// streaming and there is at least one active wait, abort all waits so
+		// the agent unblocks at once. The underlying bg process keeps
+		// running; only the wait long-poll is cancelled, which is exactly
+		// what the user expects from the Steer button.
+		const bg = (this as any).bgProcessManager;
+		if (bg && session.status === "streaming") bg.abortAllWaits(session.id);
 
 		this.broadcastQueue(session);
 		return true;
@@ -2502,11 +2539,14 @@ export class SessionManager {
 		const unsub = rpcClient.onEvent((event: any) => {
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
-			// timestamp with Date.now(). Gate on the restoring flag so only
-			// genuine post-restore activity bumps it.
+			// timestamp with Date.now(). Gate on the restoring flag AND on
+			// isUserVisibleActivity so post-resume lifecycle frames (agent_start,
+			// agent_idle, connection_state, state, session_title) don't clobber it.
 			if (!restoring) {
-				session.lastActivity = Date.now();
-				restoreStore.update(ps.id, { lastActivity: session.lastActivity });
+				if (isUserVisibleActivity(event)) {
+					session.lastActivity = Date.now();
+					restoreStore.update(ps.id, { lastActivity: session.lastActivity });
+				}
 			}
 
 			this.handleAgentLifecycle(session, event);
@@ -2568,7 +2608,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; seedContext?: string; seedContextSourceId?: string; initialModel?: string; initialThinkingLevel?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
@@ -2663,10 +2703,9 @@ export class SessionManager {
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
-				seedContext: opts?.seedContext,
-				seedContextSourceId: opts?.seedContextSourceId,
 				initialModel: opts?.initialModel,
 				initialThinkingLevel: opts?.initialThinkingLevel,
+				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				bridgeOptions: { cwd },
 			};
 
@@ -2719,10 +2758,9 @@ export class SessionManager {
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
-			seedContext: opts?.seedContext,
-			seedContextSourceId: opts?.seedContextSourceId,
 			initialModel: opts?.initialModel,
 			initialThinkingLevel: opts?.initialThinkingLevel,
+			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			bridgeOptions: { cwd },
 		};
 
@@ -3649,8 +3687,10 @@ export class SessionManager {
 		let switchingSession = true;
 		const roleStore = this.resolveStoreForSession(id);
 		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = Date.now();
-			roleStore.update(id, { lastActivity: session.lastActivity });
+			if (isUserVisibleActivity(event)) {
+				session.lastActivity = Date.now();
+				roleStore.update(id, { lastActivity: session.lastActivity });
+			}
 			this.handleAgentLifecycle(session, event);
 			const truncated = truncateLargeToolContent(event);
 			emitSessionEvent(session, truncated);
@@ -3713,11 +3753,6 @@ export class SessionManager {
 	}
 
 	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
-		return this.getNamingModelOptions();
-	}
-
-	/** Public accessor for the naming-model config — used by continue-archived summarization. */
-	getNamingModelOptions(): { namingModel?: string; aigwUrl?: string; thinkingLevel?: string } {
 		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
 		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
 		const namingThinking = this.preferencesStore?.get("default.namingThinkingLevel") as string | undefined;
@@ -3966,6 +4001,12 @@ export class SessionManager {
 			const modelNameFile = path.join(bobbitStateDir(), "model-name-" + id + ".txt");
 			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
 		} catch { /* ignore */ }
+
+		// Clean up per-session proposal-drafts directory (fire-and-forget).
+		// Same pattern as eagerDeleteRemoteSessionBranch — never blocks; missing
+		// dir is harmless. See docs/design/editable-proposals.md §4.
+		fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", id), { recursive: true, force: true })
+			.catch(err => console.warn(`[session-manager] proposal-drafts cleanup failed for ${id}:`, err));
 
 		// Broadcast session_archived event before closing clients
 		const archivedAt = Date.now();
@@ -4246,8 +4287,12 @@ export class SessionManager {
 	 * Try to recover a session's .jsonl file when agentSessionFile is empty.
 	 * The agent CLI stores files as: <sessionsDir>/<cwd-slug>/<timestamp>_<uuid>.jsonl
 	 * We scan the CWD-derived directory for a .jsonl created close to the session's createdAt.
+	 *
+	 * Public so the continue-archived REST handler can resolve the source
+	 * `.jsonl` path for legacy persisted sessions whose `agentSessionFile`
+	 * field was never populated.
 	 */
-	private recoverSessionFile(ps: PersistedSession): string | null {
+	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
 			const sessionsDir = path.join(globalAgentDir(), "sessions");
 			// The agent CLI slugifies the CWD: replace non-alphanumeric chars with '-', wrap in '--'
@@ -4642,8 +4687,10 @@ export class SessionManager {
 			let switchingSession = true;
 			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
-				session.lastActivity = Date.now();
-				abortStore.update(id, { lastActivity: session.lastActivity });
+				if (isUserVisibleActivity(event)) {
+					session.lastActivity = Date.now();
+					abortStore.update(id, { lastActivity: session.lastActivity });
+				}
 
 				this.handleAgentLifecycle(session, event);
 

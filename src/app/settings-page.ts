@@ -92,6 +92,7 @@ let _listening = false;
 
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
+let settingsPlayFinishSound = true;
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -107,6 +108,22 @@ let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
 const _projectScopePending = new Map<string, Record<string, any>>();
 /** Per-project transient state for the "Add custom key" composer in the Project tab. */
 const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
+
+/**
+ * Invalidate ALL cached project-config UI state for one project so the next
+ * Settings render fetches fresh values. Wipes both the `/config{,/resolved}`
+ * cache that drives the Project tab and the `/structured` cache that drives
+ * the Components tab. Call this from any site outside `settings-page.ts`
+ * that mutates project config — e.g. the `propose_project` accept paths in
+ * `session-manager.ts` — to keep the Settings page coherent without forcing
+ * a hard page reload. Skips invalidation when the Components tab has unsaved
+ * (dirty) edits so the user's in-flight work isn't silently overwritten.
+ */
+export function invalidateProjectScopeConfig(projectId: string): void {
+	projectScopeConfigCache.delete(projectId);
+	const comp = _componentsTabState.get(projectId);
+	if (comp && !comp.dirty) _componentsTabState.delete(projectId);
+}
 
 function loadProjectScopeConfig(projectId: string): void {
 	const cached = projectScopeConfigCache.get(projectId);
@@ -1806,6 +1823,8 @@ function loadGeneralSettings() {
 				if (res.ok) {
 					const prefs = await res.json();
 					settingsShowTimestamps = !!prefs.showTimestamps;
+					// Default ON when unset — only an explicit `false` opts out.
+					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					renderApp();
 				}
 			} catch {}
@@ -1820,6 +1839,21 @@ async function toggleShowTimestamps(): Promise<void> {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ showTimestamps: settingsShowTimestamps }),
+		});
+	} catch {}
+}
+
+async function togglePlayFinishSound(): Promise<void> {
+	settingsPlayFinishSound = !settingsPlayFinishSound;
+	// Apply synchronously to the dataset so the gate flips without waiting on
+	// the preferences_changed broadcast — mirrors the runtime path used by the
+	// playNotificationBeep() guard.
+	document.documentElement.dataset.playAgentFinishSound = settingsPlayFinishSound ? "true" : "false";
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ playAgentFinishSound: settingsPlayFinishSound }),
 		});
 	} catch {}
 }
@@ -1840,6 +1874,21 @@ function renderGeneralTab() {
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
 					Display timestamps next to user and assistant messages.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-play-finish-sound"
+						.checked=${settingsPlayFinishSound}
+						@change=${togglePlayFinishSound}
+					/>
+					<span class="text-sm font-medium text-foreground">Play sound when an agent finishes</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Play a short notification beep when an agent finishes its turn.
 				</p>
 			</div>
 		</div>
@@ -2803,7 +2852,7 @@ function renderProjectComponentsTab(projectId: string) {
 							const project = (state.projects || []).find((p: any) => p.id === projectId) as any;
 							if (!project?.rootPath) return;
 							const { createProjectAssistantSession } = await import("./dialogs.js");
-							await createProjectAssistantSession(project.rootPath, false, { projectId });
+							await createProjectAssistantSession(project.rootPath, false, { projectId, existingProjectName: project.name || "" });
 						},
 						children: html`<span class="inline-flex items-center gap-1.5 font-semibold" data-testid="open-project-assistant">${icon(Sparkles, "sm")} Open Project Assistant</span>`,
 					})}

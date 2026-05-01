@@ -6,7 +6,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, WandSparkles, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -20,13 +20,14 @@ import {
 	getSidebarData,
 	isProposalStreaming,
 } from "./state.js";
-import { createGoal, createRole, gatewayFetch, refreshSessions, dismissSetup, fetchSandboxStatus } from "./api.js";
+import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
+import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, renderSetupBanner, launchSetupWizard, isSetupWizardActive, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -49,10 +50,6 @@ function worktreePreviewPath(cwd: string, title: string): string {
 	const base = lastSlash > 0 ? normalized.slice(lastSlash + 1) : normalized;
 	const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 10) || "untitled";
 	return `${parent}/${base}-wt/goal-${slug}-xxxxxxxx/`;
-}
-
-function skipSetup(): void {
-	dismissSetup();
 }
 
 import { cwdCombobox } from "./cwd-combobox.js";
@@ -164,7 +161,6 @@ function renderMobileLanding() {
 					`;
 					})()}
 				</div>
-				${renderSetupBanner(true)}
 				<search-box
 					.query=${state.searchQuery}
 					.showControls=${!!state.searchQuery}
@@ -180,19 +176,7 @@ function renderMobileLanding() {
 								<button class="text-xs text-muted-foreground underline" title="Retry" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
-							? (!state.setupComplete && !isSetupWizardActive())
-								? html`<div class="text-center py-12">
-										<div class="text-muted-foreground mb-3 empty-state-icon">${icon(WandSparkles, "lg")}</div>
-										<p class="text-lg font-medium text-foreground mb-1">Welcome to Bobbit</p>
-										<p class="text-sm text-muted-foreground mb-4">Set up your project to get the best results from AI agents</p>
-										${Button({
-											variant: "default",
-											onClick: () => launchSetupWizard(),
-											children: html`<span class="inline-flex items-center gap-1.5">${icon(WandSparkles, "sm")} Start Setup</span>`,
-										})}
-										<button class="block mx-auto mt-3 text-xs text-muted-foreground hover:underline cursor-pointer bg-transparent border-none" @click=${skipSetup}>Skip setup</button>
-									</div>`
-								: html`<div class="text-center py-12">
+							? html`<div class="text-center py-12">
 									<div class="text-muted-foreground mb-3 empty-state-icon">${icon(Server, "lg")}</div>
 									<p class="text-base text-muted-foreground mb-4">No goals or sessions yet</p>
 									<div class="flex items-center justify-center gap-2">
@@ -486,9 +470,6 @@ const toolRendererPreviewRef = createRef<HTMLDivElement>();
 const toolOuterScrollRef = createRef<HTMLDivElement>();
 const staffPromptPreviewRef = createRef<HTMLDivElement>();
 const staffPromptTextareaRef = createRef<HTMLTextAreaElement>();
-const setupSystemPromptRef = createRef<HTMLTextAreaElement>();
-const setupOuterScrollRef = createRef<HTMLDivElement>();
-const workflowEditWrapperRef = createRef<HTMLDivElement>();
 const projectOuterScrollRef = createRef<HTMLDivElement>();
 
 // ============================================================================
@@ -729,7 +710,7 @@ function goalPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
-		state.activeGoalProposal = null;
+		delete state.activeProposals.goal;
 		const projectId = state.previewProjectId || undefined;
 		state.previewProjectId = "";
 		const workflowId = _selectedWorkflowId || "general";
@@ -761,6 +742,9 @@ function goalPreviewPanel() {
 			autoStartTeam,
 		});
 
+		// Slice E: drop the on-disk proposal file once accepted.
+		if (sessionId && goal) void deleteProposalFile(sessionId, "goal");
+
 		// If this is a re-attempt, archive the old goal and link the new one
 		if (reattemptGoalId && goal) {
 			await gatewayFetch(`/api/goals/${reattemptGoalId}`, { method: "DELETE" });
@@ -784,7 +768,7 @@ function goalPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="goal-proposal">
 			${renderGoalForm({
 				title: state.previewTitle,
 				spec: state.previewSpec,
@@ -885,7 +869,7 @@ function rolePreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
-		state.activeRoleProposal = null;
+		delete state.activeProposals.role;
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteRoleDraft(sessionId);
@@ -910,6 +894,9 @@ function rolePreviewPanel() {
 			accessory: state.rolePreviewAccessory,
 		});
 
+		// Slice E: drop the on-disk proposal file once accepted.
+		if (sessionId) void deleteProposalFile(sessionId, "role");
+
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
@@ -929,7 +916,7 @@ function rolePreviewPanel() {
 		.filter(Boolean);
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="role-proposal">
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1104,7 +1091,7 @@ function toolPreviewPanel() {
 	const total = checklistItems.length;
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="tool-proposal">
 			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
 				<!-- Tool name header -->
 				<div>
@@ -1389,7 +1376,7 @@ function staffPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
-		state.activeStaffProposal = null;
+		delete state.activeProposals.staff;
 		localStorage.removeItem("gateway.sessionId");
 		setHashRoute("landing");
 		state.appView = "authenticated";
@@ -1410,6 +1397,8 @@ function staffPreviewPanel() {
 			projectId: state.activeProjectId || undefined,
 			sandboxed,
 		});
+		// Slice E: drop the on-disk proposal file once accepted.
+		if (sessionId) void deleteProposalFile(sessionId, "staff");
 		if (sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
@@ -1424,7 +1413,7 @@ function staffPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="staff-proposal">
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1539,266 +1528,6 @@ function staffPreviewPanel() {
 // ASSISTANT PREVIEW DISPATCH
 // ============================================================================
 
-// ============================================================================
-// SETUP PREVIEW PANEL (setup wizard split-screen)
-// ============================================================================
-
-const SETUP_CMD_LABELS: Record<string, string> = {
-	build_command: "Build",
-	test_command: "Test",
-	typecheck_command: "Type Check",
-	test_unit_command: "Test (Unit)",
-	test_e2e_command: "Test (E2E)",
-
-};
-
-async function saveSetupForm(): Promise<void> {
-	state.setupFormSaving = true;
-	renderApp();
-	try {
-		// 1. Save project config (commands)
-		const configBody: Record<string, string | null> = {};
-		for (const [key, value] of Object.entries(state.setupFormCommands)) {
-			configBody[key] = value || null;
-		}
-		await gatewayFetch("/api/project-config", { method: "PUT", body: JSON.stringify(configBody) });
-
-		// 2. Save system prompt context
-		if (state.setupFormSystemPrompt.trim()) {
-			await gatewayFetch("/api/system-prompt-context", {
-				method: "PUT",
-				body: JSON.stringify({ context: state.setupFormSystemPrompt }),
-			});
-		}
-
-		// 3. Save model preferences
-		const prefBody: Record<string, string | null> = {};
-		if (state.setupFormModels.session_model) prefBody["default.sessionModel"] = state.setupFormModels.session_model;
-		if (state.setupFormModels.review_model) prefBody["default.reviewModel"] = state.setupFormModels.review_model;
-		if (state.setupFormModels.naming_model) prefBody["default.namingModel"] = state.setupFormModels.naming_model;
-		if (Object.keys(prefBody).length > 0) {
-			await gatewayFetch("/api/preferences", { method: "PUT", body: JSON.stringify(prefBody) });
-		}
-
-		// 4. Mark setup complete
-		await gatewayFetch("/api/setup-status/dismiss", { method: "POST" });
-		state.setupComplete = true;
-		state.setupFormSaved = true;
-	} catch (err) {
-		console.error("[setup] Save failed:", err);
-	}
-	state.setupFormSaving = false;
-	renderApp();
-}
-
-function setupPreviewPanel() {
-	const streaming = isProposalStreaming("setup_proposal");
-	queueMicrotask(() => {
-		reconcileFollowTail(setupSystemPromptRef.value);
-		reconcileFollowTail(setupOuterScrollRef.value);
-	});
-	const handleDone = () => { backToSessions(); };
-
-	const stack = state.setupFormStack;
-	const cmds = state.setupFormCommands;
-	const models = state.setupFormModels;
-	const hasStack = !!(stack.language || stack.framework || stack.testing);
-	const hasCmds = Object.values(cmds).some(v => !!v);
-	const hasPrompt = !!state.setupFormSystemPrompt.trim();
-	const canSave = hasCmds || hasPrompt;
-
-	const sectionLabel = (text: string) => html`<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">${text}</div>`;
-	const cmdInput = (key: string) => html`
-		<div class="flex items-center gap-3">
-			<span class="text-sm font-medium text-foreground w-28 sm:w-36 shrink-0">${SETUP_CMD_LABELS[key] || key}</span>
-			<input
-				type="text"
-				class="flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
-					focus:outline-none focus:ring-2 focus:ring-ring ${cmds[key] ? "text-foreground" : "text-muted-foreground"}"
-				placeholder="detecting..."
-				.value=${cmds[key] || ""}
-				@input=${(e: Event) => {
-					state.setupFormCommands[key] = (e.target as HTMLInputElement).value;
-					state.setupFormCommandsEdited[key] = true;
-					state.setupFormSaved = false;
-					renderApp();
-				}}
-			/>
-		</div>
-	`;
-	const modelInput = (key: string, label: string) => html`
-		<div class="flex items-center gap-3">
-			<span class="text-sm font-medium text-foreground w-28 sm:w-36 shrink-0">${label}</span>
-			<input
-				type="text"
-				class="flex-1 min-w-0 px-3 py-1.5 rounded-md border border-input bg-background text-sm font-mono
-					focus:outline-none focus:ring-2 focus:ring-ring ${(models as any)[key] ? "text-foreground" : "text-muted-foreground"}"
-				placeholder="(use default)"
-				.value=${(models as any)[key] || ""}
-				@input=${(e: Event) => {
-					(state.setupFormModels as any)[key] = (e.target as HTMLInputElement).value;
-					(state.setupFormModelsEdited as any)[key] = true;
-					state.setupFormSaved = false;
-					renderApp();
-				}}
-			/>
-		</div>
-	`;
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div ${ref(setupOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
-				<!-- Header -->
-				<div>
-					<div class="text-lg font-semibold flex items-center gap-2">
-						${icon(WandSparkles, "sm")}
-						Project Setup
-					</div>
-					${state.setupFormSaved ? html`
-						<div class="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-500/15 text-green-700 dark:text-green-400">
-							<span class="text-green-500">&#10003;</span> Saved
-						</div>
-					` : ""}
-				</div>
-
-				<!-- Detected stack badges -->
-				${hasStack ? html`
-					<div class="flex flex-col gap-2">
-						${sectionLabel("Detected Stack")}
-						<div class="flex flex-wrap gap-2">
-							${stack.language ? html`<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">${stack.language}</span>` : ""}
-							${stack.framework ? html`<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">${stack.framework}</span>` : ""}
-							${stack.testing ? html`<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">${stack.testing}</span>` : ""}
-						</div>
-					</div>
-				` : ""}
-
-				<!-- Commands -->
-				<div class="flex flex-col gap-2">
-					${sectionLabel("Commands")}
-					${Object.keys(SETUP_CMD_LABELS).map(key => cmdInput(key))}
-				</div>
-
-				<hr class="border-border" />
-
-				<!-- Models -->
-				<div class="flex flex-col gap-2">
-					${sectionLabel("Default Models")}
-					${modelInput("session_model", "Session")}
-					${modelInput("review_model", "Review")}
-					${modelInput("naming_model", "Naming")}
-				</div>
-
-				<hr class="border-border" />
-
-				<!-- System prompt context -->
-				<div class="flex flex-col gap-2">
-					${sectionLabel("System Prompt \u2014 Project Context")}
-					<textarea
-						${ref(setupSystemPromptRef)}
-						class="w-full min-h-[120px] px-3 py-2 rounded-md border border-input bg-background text-sm
-							font-mono focus:outline-none focus:ring-2 focus:ring-ring resize-y ${streaming ? STREAMING_BORDER : ""}"
-						placeholder="The assistant will draft project-specific directives here..."
-						.value=${state.setupFormSystemPrompt}
-						@input=${(e: Event) => {
-							state.setupFormSystemPrompt = (e.target as HTMLTextAreaElement).value;
-							state.setupFormSystemPromptEdited = true;
-							state.setupFormSaved = false;
-							renderApp();
-						}}
-					></textarea>
-				</div>
-			</div>
-
-			<!-- Footer -->
-			<div class="shrink-0 flex items-center justify-between px-5 py-3 border-t border-border">
-				<div class="text-xs text-muted-foreground">
-					${state.setupFormSaved ? html`<span class="text-green-600 dark:text-green-400">&#10003; Saved to config files</span>` : ""}
-				</div>
-				<div class="flex items-center gap-2">
-					${streaming ? streamingBadge() : ""}
-					${Button({ variant: "ghost", onClick: handleDone, children: "Done" })}
-					<span data-testid="proposal-primary-submit">${Button({
-						variant: "default",
-						onClick: saveSetupForm,
-						disabled: !canSave || state.setupFormSaving || streaming,
-						children: state.setupFormSaving ? "Saving\u2026" : "Save Setup",
-					})}</span>
-				</div>
-			</div>
-		</div>
-	`;
-}
-
-let _workflowPageModule: typeof import("./workflow-page.js") | null = null;
-function ensureWorkflowPageLoaded() {
-	if (!_workflowPageModule) {
-		import("./workflow-page.js").then(mod => { _workflowPageModule = mod; renderApp(); });
-	}
-}
-
-function workflowPreviewPanel() {
-	ensureWorkflowPageLoaded();
-	const streaming = isProposalStreaming("workflow_proposal");
-	queueMicrotask(() => {
-		reconcileFollowTail(workflowEditWrapperRef.value);
-	});
-
-	const handleCreateWorkflow = async () => {
-		if (_workflowPageModule) {
-			const ok = await _workflowPageModule.saveWorkflowFromPanel();
-			if (!ok) return;
-		}
-		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-		state.assistantType = null;
-		localStorage.removeItem("gateway.sessionId");
-		state.appView = "authenticated";
-		if (sessionId) {
-			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-			clearSessionModel(sessionId);
-		}
-		await refreshSessions();
-		setHashRoute("workflows");
-		renderApp();
-	};
-
-	if (!_workflowPageModule) {
-		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading editor...</div>
-			</div>
-		`;
-	}
-
-	const { renderWorkflowEditPanel, isWorkflowSaving, canSaveWorkflow } = _workflowPageModule;
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-			<div ${ref(workflowEditWrapperRef)} class="flex-1 overflow-y-auto p-4 ${streaming ? STREAMING_BORDER : ""}">
-				${renderWorkflowEditPanel()}
-			</div>
-			<div class="flex items-center justify-between p-3 border-t border-border">
-				<div></div>
-				<div class="flex items-center gap-2">
-					${streaming ? streamingBadge() : ""}
-					<span data-testid="proposal-primary-submit">${Button({
-						variant: "default",
-						size: "sm",
-						onClick: handleCreateWorkflow,
-						disabled: !canSaveWorkflow() || streaming,
-						children: isWorkflowSaving() ? "Creating\u2026" : "Create Workflow",
-					})}</span>
-				</div>
-			</div>
-		</div>
-	`;
-}
-
 /** Editable scalars shown in the proposal panel's Settings tab.
  *  Components are the canonical home for build/test/typecheck/setup commands —
  *  those legacy keys are still accepted on the wire (back-compat) but hidden
@@ -1859,7 +1588,7 @@ export function resetProjectProposalPanel(): void {
 }
 
 function projectProposalPanel() {
-	const proposal = state.activeProjectProposal;
+	const proposal = state.activeProposals.project;
 	const streaming = isProposalStreaming("project_proposal");
 	queueMicrotask(() => {
 		reconcileFollowTail(projectOuterScrollRef.value);
@@ -1915,22 +1644,23 @@ function projectProposalPanel() {
 
 	const handleDismiss = () => {
 		if (proposal?.sessionId) deleteProjectDraft(proposal.sessionId);
-		state.activeProjectProposal = undefined;
+		delete state.activeProposals.project;
 		state.assistantHasProposal = false;
 		renderApp();
 	};
 
 	const onFieldInput = (key: string, value: string) => {
-		if (!state.activeProjectProposal) return;
+		const slot = state.activeProposals.project;
+		if (!slot) return;
 		// Bug B guard: `components` and `workflows` are structured side-tables
 		// owned by dedicated views — never let an Input row clobber them with a
 		// string keystroke value.
 		if (key === "components" || key === "workflows") return;
-		(state.activeProjectProposal.fields as Record<string, unknown>)[key] = value;
+		(slot.fields as Record<string, unknown>)[key] = value;
 		// Only persist edits for project-assistant sessions; non-assistant
 		// sessions follow the goal-proposal model (transient, not restored).
 		if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
-			saveProjectDraft(state.activeProjectProposal.sessionId);
+			saveProjectDraft(slot.sessionId);
 		}
 		renderApp();
 	};
@@ -2034,8 +1764,6 @@ function getAssistantPreviewPanel(type: string) {
 		case "role": return rolePreviewPanel();
 		case "tool": return toolPreviewPanel();
 		case "staff": return staffPreviewPanel();
-		case "setup": return setupPreviewPanel();
-		case "workflow": return workflowPreviewPanel();
 		case "project":
 		case "project-scaffolding":
 			return projectProposalPanel();
@@ -2063,7 +1791,7 @@ let _proposalInitializedFrom: string | null = null;
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeGoalProposal;
+	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
 	if (!proposal) return;
 	// Use a simple identity check to avoid re-initializing on every render
 	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
@@ -2110,7 +1838,7 @@ function goalProposalPanel() {
 				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
 				autoStartTeam,
 			});
-			state.activeGoalProposal = null;
+			delete state.activeProposals.goal;
 			_proposalEnabledOptionalSteps = [];
 			_proposalInitializedFrom = null;
 			if (goal) {
@@ -2123,8 +1851,8 @@ function goalProposalPanel() {
 	};
 
 	const handleDismiss = () => {
-		const dismissed = state.activeGoalProposal;
-		state.activeGoalProposal = null;
+		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+		delete state.activeProposals.goal;
 		_proposalInitializedFrom = null;
 		_proposalEnabledOptionalSteps = [];
 		_proposalAutoStartTeam = true;
@@ -2282,8 +2010,8 @@ const PREVIEW_SWIPE_SCRIPT = `<script>
 function hasUnifiedPanel(): boolean {
 	return !state.assistantType && (
 		state.isPreviewSession ||
-		state.activeGoalProposal != null ||
-		state.activeProjectProposal != null ||
+		state.activeProposals.goal != null ||
+		state.activeProposals.project != null ||
 		state.reviewPanelOpen
 	);
 }
@@ -2293,8 +2021,8 @@ function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "pro
 	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
-	if (state.activeGoalProposal != null) tabs.push("goal");
-	if (state.activeProjectProposal != null) tabs.push("project");
+	if (state.activeProposals.goal != null) tabs.push("goal");
+	if (state.activeProposals.project != null) tabs.push("project");
 	return tabs;
 }
 
@@ -2420,76 +2148,6 @@ function setupPreviewSwipe(): void {
 		renderApp();
 	}, { passive: true });
 }
-
-// ============================================================================
-// ASSISTANT SWIPE (mobile) — goal / role / tool assistants
-// ============================================================================
-
-/** Touch-swipe between the assistant chat pane and its preview pane.
- *  Left swipe on chat → show preview.  Right swipe on preview → show chat. */
-function setupAssistantSwipe(): void {
-	if ((window as any).__assistantSwipeListening) return;
-	(window as any).__assistantSwipeListening = true;
-
-	let startX = 0, startY = 0, captured = false, decided = false;
-	const el = document.getElementById("app")!;
-
-	el.addEventListener("touchstart", (e: TouchEvent) => {
-		if (!state.assistantType) return;
-		startX = e.touches[0].clientX;
-		startY = e.touches[0].clientY;
-		captured = false;
-		decided = false;
-	}, { passive: true });
-
-	el.addEventListener("touchmove", (e: TouchEvent) => {
-		if (!state.assistantType) return;
-		if (decided && !captured) return;
-		const dx = e.touches[0].clientX - startX;
-		const dy = e.touches[0].clientY - startY;
-		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-			decided = true;
-			// On chat tab: capture leftward swipes.  On preview tab: capture rightward swipes.
-			if (state.assistantTab === "chat") {
-				captured = dx < 0 && Math.abs(dx) > Math.abs(dy);
-			} else {
-				captured = dx > 0 && Math.abs(dx) > Math.abs(dy);
-			}
-			if (captured) {
-				const track = document.querySelector(".assistant-slider__track") as HTMLElement | null;
-				if (track) track.style.transition = "none";
-			}
-		}
-		if (captured) {
-			const track = document.querySelector(".assistant-slider__track") as HTMLElement | null;
-			if (track) {
-				const base = state.assistantTab === "chat" ? 0 : -50;
-				const dragPercent = (dx / track.parentElement!.clientWidth) * 50;
-				track.style.transform = `translateX(${Math.max(-50, Math.min(0, base + dragPercent))}%)`;
-			}
-		}
-	}, { passive: true });
-
-	el.addEventListener("touchend", (e: TouchEvent) => {
-		if (!captured) return;
-		const track = document.querySelector(".assistant-slider__track") as HTMLElement | null;
-		if (track) {
-			track.style.transition = "transform 0.3s ease-out";
-			const dx = e.changedTouches[0].clientX - startX;
-			const threshold = track.parentElement!.clientWidth * 0.2;
-			if (state.assistantTab === "chat" && dx < -threshold) {
-				state.assistantTab = "preview";
-			} else if (state.assistantTab === "preview" && dx > threshold) {
-				state.assistantTab = "chat";
-			}
-			track.style.transform = `translateX(${state.assistantTab === "chat" ? 0 : -50}%)`;
-		}
-		captured = false;
-		decided = false;
-		renderApp();
-	}, { passive: true });
-}
-
 
 // ============================================================================
 // RENDER APP
@@ -2739,10 +2397,10 @@ export function doRenderApp(): void {
 				>Chat</button>
 				<button
 					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
-					title="${state.assistantType === "workflow" ? "Editor" : "Preview"}"
+					title="Preview"
 					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
 				>
-					${state.assistantType === "workflow" ? "Editor" : "Preview"}${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
+					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
 				</button>
 			</div>
 		`;
@@ -2771,14 +2429,14 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "review"; renderApp(); }}
 					>Review</button>
 				` : ""}
-				${state.activeGoalProposal != null ? html`
+				${state.activeProposals.goal != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
 						title="Goal"
 						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
 					>Goal <span class="goal-tab-dot"></span></button>
 				` : ""}
-				${state.activeProjectProposal != null ? html`
+				${state.activeProposals.project != null ? html`
 					<button
 						class="goal-tab-pill ${state.previewPanelTab === "project" ? "goal-tab-pill--active" : ""}"
 						title="Project"
@@ -2863,21 +2521,21 @@ export function doRenderApp(): void {
 	const unifiedPreviewPanel = () => {
 		// Auto-correct tab if the active tab's content is no longer available
 		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeGoalProposal != null ? "goal" : (state.activeProjectProposal != null ? "project" : "preview"));
-		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : "preview"));
+		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeProposals.goal != null) {
 			state.previewPanelActiveTab = "goal";
-		} else if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal == null && state.isPreviewSession) {
+		} else if (state.previewPanelActiveTab === "goal" && state.activeProposals.goal == null && state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
-		} else if (state.previewPanelActiveTab === "project" && state.activeProjectProposal == null) {
+		} else if (state.previewPanelActiveTab === "project" && state.activeProposals.project == null) {
 			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
-				: (state.activeGoalProposal != null ? "goal"
+				: (state.activeProposals.goal != null ? "goal"
 				: (state.reviewPanelOpen ? "review" : "preview"));
 		}
 
 		const showPreviewTab = state.isPreviewSession;
-		const showGoalTab = state.activeGoalProposal != null;
+		const showGoalTab = state.activeProposals.goal != null;
 		const showReviewTab = state.reviewPanelOpen;
-		const showProjectTab = state.activeProjectProposal != null;
+		const showProjectTab = state.activeProposals.project != null;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -2951,10 +2609,10 @@ export function doRenderApp(): void {
 		if (tab === "review" && state.reviewPanelOpen) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${reviewPaneContent()}</div>`;
 		}
-		if (tab === "goal" && state.activeGoalProposal != null) {
+		if (tab === "goal" && state.activeProposals.goal != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${goalProposalPanel()}</div>`;
 		}
-		if (tab === "project" && state.activeProjectProposal != null) {
+		if (tab === "project" && state.activeProposals.project != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
 		}
 		return html``;
@@ -3081,21 +2739,6 @@ export function doRenderApp(): void {
 		}
 
 		if (desktop) {
-			if (!state.setupComplete && !isSetupWizardActive()) {
-				return html`
-					<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
-						<div class="text-muted-foreground empty-state-icon">${icon(WandSparkles, "lg")}</div>
-						<p class="text-lg font-medium text-foreground">Welcome to Bobbit</p>
-						<p class="text-sm text-muted-foreground">Set up your project to get the best results from AI agents</p>
-						${Button({
-							variant: "default",
-							onClick: () => launchSetupWizard(),
-							children: html`<span class="inline-flex items-center gap-1.5">${icon(WandSparkles, "sm")} Start Setup</span>`,
-						})}
-						<button class="text-xs text-muted-foreground hover:underline cursor-pointer bg-transparent border-none" @click=${skipSetup}>Skip setup</button>
-					</div>
-				`;
-			}
 			return html`
 				<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
 					<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>
@@ -3174,7 +2817,6 @@ export function doRenderApp(): void {
 		`, app);
 		ensureMobileScrollTracking();
 		setupPreviewSwipe();
-		setupAssistantSwipe();
 		requestAnimationFrame(() => {
 			const headerEl = document.getElementById("app-header");
 			if (headerEl) {

@@ -381,6 +381,9 @@ async function initApp() {
 					if (prefs.showTimestamps) {
 						document.documentElement.dataset.showTimestamps = "true";
 					}
+					// Apply playAgentFinishSound — default ON when unset.
+					document.documentElement.dataset.playAgentFinishSound =
+						prefs.playAgentFinishSound === false ? "false" : "true";
 				}
 			} catch {}
 
@@ -558,7 +561,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen);
 			if (hasPanel) {
 				// If fullscreen, exit fullscreen and collapse in one step
 				if (state.previewPanelFullscreen) {
@@ -663,6 +666,9 @@ async function initApp() {
 			}
 			// Apply showTimestamps
 			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			// Apply playAgentFinishSound — default ON when unset.
+			document.documentElement.dataset.playAgentFinishSound =
+				prefs.playAgentFinishSound === false ? "false" : "true";
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();

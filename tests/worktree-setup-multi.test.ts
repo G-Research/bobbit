@@ -45,6 +45,23 @@ describe("runComponentSetups", () => {
 		assert.equal(calls[2].sourceRepo, path.join(primaryWorktreeRoot, "docs"));
 	});
 
+	it("single-repo (repo='.') with relativePath resolves cwd to branchContainer/<relativePath>", async () => {
+		const calls: Array<{ cwd: string; sourceRepo: string }> = [];
+		await runComponentSetups({
+			components: [{ name: "app", repo: ".", relativePath: "app", worktreeSetupCommand: "echo ok" }],
+			branchContainer: "/wt/feat-x",
+			primaryWorktreeRoot: "/repo",
+			exec: async (_cmd, cwd, env) => {
+				calls.push({ cwd, sourceRepo: env.SOURCE_REPO ?? "" });
+			},
+		});
+		// cwd must honor relativePath — the bug was running at branchContainer
+		// instead of branchContainer/app.
+		assert.equal(calls[0].cwd, path.join("/wt/feat-x", "app"));
+		assert.ok(calls[0].cwd.endsWith(`${path.sep}app`), `expected cwd to end with /app, got ${calls[0].cwd}`);
+		assert.equal(calls[0].sourceRepo, path.join("/repo", "app"));
+	});
+
 	it("single-repo (repo='.') resolves cwd to branchContainer itself", async () => {
 		const calls: Array<{ cwd: string; sourceRepo: string }> = [];
 		await runComponentSetups({
