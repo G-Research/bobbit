@@ -14,6 +14,7 @@ import { createAndConnectSession, connectToSession, startReattempt, terminateSes
 import { showGoalDialog, showNewGoalDialogForChild } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
+import { coerceWorkflowGatesForRender, type SafeWorkflowGate } from "./workflow-gate-coercion.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -917,9 +918,15 @@ interface GatePipelineNode {
 	dependsOn: string[];
 }
 
-/** Compute dependency depth for each workflow gate via BFS from roots. */
+/** Compute dependency depth for each workflow gate via BFS from roots.
+ *
+ *  Caller must pass `wfGates` already coerced via
+ *  `coerceWorkflowGatesForRender` so `dependsOn` is guaranteed to be a
+ *  string[]. The `unknown` array shape that arrives from the goal
+ *  snapshot is NOT safe to walk directly — see the regression history
+ *  documented in `workflow-gate-coercion.ts`. */
 function computeGateDepthLevels(
-	wfGates: Array<{ id: string; name: string; dependsOn: string[] }>,
+	wfGates: Array<SafeWorkflowGate>,
 	statusMap: Map<string, GateState>,
 ): GatePipelineNode[][] {
 	const depthMap = new Map<string, number>();
@@ -1456,8 +1463,11 @@ function renderMetaRows(goal: Goal): TemplateResult {
 // ============================================================================
 
 function renderGatePipeline(): TemplateResult {
-	const wfGates = currentGoal?.workflow?.gates;
-	if (!wfGates || wfGates.length === 0) return html``;
+	// Defensive coercion — see `workflow-gate-coercion.ts`. A snapshot with a
+	// missing or non-array `dependsOn` would otherwise throw inside the
+	// pipeline / checklist render and silently blank the entire Gates tab.
+	const wfGates = coerceWorkflowGatesForRender(currentGoal?.workflow?.gates);
+	if (wfGates.length === 0) return html``;
 
 	const statusMap = getGateStatusMap();
 	const levels = computeGateDepthLevels(wfGates, statusMap);
@@ -2355,29 +2365,32 @@ function renderSpecTab(): TemplateResult {
 // ============================================================================
 
 function renderGatesTab(): TemplateResult {
-	const hasWorkflow = currentGoal?.workflow && currentGoal.workflow.gates.length > 0;
+	// Coerce up-front so the empty-state check works against the same
+	// renderer-safe view the checklist below sees. A workflow whose `gates`
+	// array is malformed (every entry filtered) renders the empty state
+	// instead of throwing.
+	const safeGates = coerceWorkflowGatesForRender(currentGoal?.workflow?.gates);
 
-	if (!hasWorkflow) {
+	if (safeGates.length === 0) {
 		return html`<div class="tab-empty">${svgGate}<span>No workflow gates defined</span></div>`;
 	}
 
 	return html`
 		<div class="tab-panel-inner">
-			${renderGateChecklist()}
+			${renderGateChecklist(safeGates)}
 		</div>
 	`;
 }
 
-function renderGateChecklist(): TemplateResult {
+function renderGateChecklist(wfGates: SafeWorkflowGate[]): TemplateResult {
 	if (!currentGoal?.workflow) return nothing as any;
 
-	const wfGates = currentGoal.workflow.gates;
 	const statusMap = getGateStatusMap();
 
 	// Topological sort for display order
 	const visited = new Set<string>();
-	const sorted: typeof wfGates = [];
-	const gateMap = new Map(wfGates.map(g => [g.id, g]));
+	const sorted: SafeWorkflowGate[] = [];
+	const gateMap = new Map(wfGates.map(g => [g.id, g] as const));
 	function visit(id: string) {
 		if (visited.has(id)) return;
 		visited.add(id);
@@ -2453,7 +2466,7 @@ function renderGateChecklist(): TemplateResult {
 }
 
 function renderGateDetail(
-	_wfGate: NonNullable<Goal["workflow"]>["gates"][number],
+	_wfGate: SafeWorkflowGate,
 	gs: GateState | undefined,
 ): TemplateResult {
 	const signals = gs?.signals ?? [];
