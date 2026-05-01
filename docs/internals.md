@@ -998,7 +998,7 @@ Non-pool agent processes are spawned with the desired model and reasoning level 
 
 ### Resolution helpers
 
-`SessionManager.resolveInitialModel(role, projectId)` and `resolveInitialThinkingLevelForSession(session)` mirror the precedence used at session start:
+`SessionManager.resolveInitialModel(role, projectId)` and `resolveInitialThinkingLevel(role, projectId)` mirror the precedence used at session start:
 
 1. Role override (`role.model` / `role.thinkingLevel` from the resolved cascade).
 2. `default.sessionModel` / `default.sessionThinkingLevel` preference (or `default.reviewModel` for verification sub-sessions).
@@ -1025,7 +1025,7 @@ Pool worktrees pre-spawn the agent process before role/goal is known, so they ca
 |---|---|
 | `src/server/agent/rpc-bridge.ts` | `RpcBridgeOptions.initialModel`/`initialThinkingLevel`, `buildAgentArgs` |
 | `src/server/agent/session-setup.ts` | `resolveBridgeOptions` injects pinned values into `bridgeOptions`; persists them onto the session |
-| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevelForSession`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
+| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevel`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
