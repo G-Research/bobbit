@@ -22,6 +22,7 @@ import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkil
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { resolvePlanStepChild } from "./agent/resolve-plan-step-child.js";
+import { substituteBuiltinComponent, PLACEHOLDER_COMPONENT_NAME } from "./agent/substitute-builtin-component.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
@@ -746,6 +747,35 @@ export function createGateway(config: GatewayConfig) {
 	// component-name placeholder. Apply to all existing AND any future
 	// project context created via `getOrCreate`.
 	projectContextManager.setBuiltinWorkflows(builtinConfigProvider.getWorkflows());
+
+	// One-time backfill: existing goal records whose snapshotted
+	// `workflow.gates[].verify[].component === "app"` were created BEFORE
+	// the per-project component-name substitution fix shipped. Rewrite
+	// them in-place using the project's primary component name. Live
+	// test (PR #409 v0.1-foundation): Anna's goal 317cdb83 was created
+	// pre-fix and got stuck on the parent integration gate with
+	// `component "app" not found`. Idempotent: a second boot finds no
+	// `component: "app"` references and is a no-op.
+	{
+		let rewroteAny = false;
+		for (const ctx of projectContextManager.all()) {
+			const primary = ctx.projectConfigStore.getComponents()[0]?.name;
+			if (!primary || primary === PLACEHOLDER_COMPONENT_NAME) continue;
+			for (const goal of ctx.goalStore.getAll()) {
+				if (goal.archived) continue;
+				if (!goal.workflow) continue;
+				const rewritten = substituteBuiltinComponent(goal.workflow, primary);
+				if (rewritten !== goal.workflow) {
+					ctx.goalStore.update(goal.id, { workflow: rewritten });
+					rewroteAny = true;
+					console.log(`[boot-migration] Rewrote goal ${goal.id} snapshot: component "${PLACEHOLDER_COMPONENT_NAME}" → "${primary}"`);
+				}
+			}
+		}
+		if (rewroteAny) {
+			console.log("[boot-migration] component-name placeholder backfill complete.");
+		}
+	}
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
