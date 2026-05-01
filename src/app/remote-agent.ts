@@ -1276,10 +1276,16 @@ export class RemoteAgent {
 			if (streaming) {
 				state.proposalStreamingByTag[tagKey] = true;
 			}
-			if (callback) callback(input, streaming);
+			// Slice E gap-closure: run the unified onProposal BEFORE the legacy
+			// per-type callback so plugin.mergeFields sees the un-mutated prev
+			// slot. Several legacy callbacks (goal/role/staff) overwrite
+			// state.activeProposals[type].fields with the incoming partial verbatim,
+			// which would leave nothing for mergeFields to preserve if onProposal
+			// ran second.
 			if (this.onProposal && isProposalType(proposalType)) {
 				this.onProposal(proposalType, input, streaming);
 			}
+			if (callback) callback(input, streaming);
 
 			// Only mark as processed on non-streaming calls (message_end, full re-scan).
 			// During streaming we fire the callback repeatedly for live preview sync
@@ -1363,10 +1369,10 @@ export class RemoteAgent {
 				if (missing) continue;
 
 				console.warn(`[proposal] Detected legacy XML <${parser.tag}> block — this format is deprecated, use propose_* tools instead`);
-				if (callback) callback(normalized);
 				if (this.onProposal && proposalType) {
 					this.onProposal(proposalType, normalized, false);
 				}
+				if (callback) callback(normalized);
 			}
 		}
 	}

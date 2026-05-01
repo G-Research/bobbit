@@ -1053,12 +1053,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onGoalProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			if (state.assistantType === "goal") {
-				state.activeProposals.goal = {
-					sessionId,
-					fields: proposal as unknown as Record<string, unknown>,
-					streaming: false,
-					rev: (state.activeProposals.goal?.rev ?? 0) + 1,
-				};
+				// Slice E: state.activeProposals.goal is owned by the unified
+				// onProposal callback (which runs before us with mergeFields).
+				// Legacy callback only handles form-mirror state + summarisation.
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
 				if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
@@ -1081,30 +1078,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Persist draft to IndexedDB
 				saveGoalDraft(sessionId);
 			} else {
-				// Non-goal-assistant session: check if this proposal was previously dismissed
-				if (isProposalDismissed(sessionId, proposal)) return;
-				// Show inline preview panel — only auto-switch tabs on the first proposal
-				const isFirstProposal = state.activeProposals.goal == null;
-				state.activeProposals.goal = {
-					sessionId,
-					fields: proposal as unknown as Record<string, unknown>,
-					streaming: false,
-					rev: (state.activeProposals.goal?.rev ?? 0) + 1,
-				};
+				// Non-goal-assistant session: dismissal short-circuit + project-id
+				// inference. The unified onProposal callback (already fired above)
+				// owns the slot + auto-tab-select side-effect; we still need to
+				// roll back the slot if the user previously dismissed this proposal.
+				if (isProposalDismissed(sessionId, proposal)) {
+					delete state.activeProposals.goal;
+					return;
+				}
 				// Set projectId from current session so the goal is created in the correct project
 				const currentSess = state.gatewaySessions.find(s => s.id === sessionId);
 				if (currentSess?.projectId) {
 					state.previewProjectId = currentSess.projectId;
-				}
-				if (isFirstProposal) {
-					state.previewPanelActiveTab = "goal";
-					// Un-collapse panel on desktop
-					const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
-					localStorage.removeItem(collapseKey);
-					// On mobile, switch to the goal tab so user sees the goal form
-					if (!isDesktop()) {
-						state.previewPanelTab = "goal";
-					}
 				}
 			}
 			renderApp();
@@ -1112,12 +1097,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onRoleProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
-			state.activeProposals.role = {
-				sessionId,
-				fields: proposal as unknown as Record<string, unknown>,
-				streaming: false,
-				rev: (state.activeProposals.role?.rev ?? 0) + 1,
-			};
+			// Slice E: state.activeProposals.role owned by unified onProposal.
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
 			if (!state.rolePreviewLabelEdited) state.rolePreviewLabel = proposal.label;
 			if (!state.rolePreviewPromptEdited) state.rolePreviewPrompt = proposal.prompt;
@@ -1193,12 +1173,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		remote.onStaffProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
-			state.activeProposals.staff = {
-				sessionId,
-				fields: proposal as unknown as Record<string, unknown>,
-				streaming: false,
-				rev: (state.activeProposals.staff?.rev ?? 0) + 1,
-			};
+			// Slice E: state.activeProposals.staff owned by unified onProposal.
 			if (!state.staffPreviewNameEdited) state.staffPreviewName = proposal.name;
 			if (!state.staffPreviewDescriptionEdited) state.staffPreviewDescription = proposal.description;
 			if (!state.staffPreviewPromptEdited) state.staffPreviewPrompt = proposal.prompt;
@@ -1211,43 +1186,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			renderApp();
 		};
 
-		remote.onProjectProposal = async (fields: Record<string, unknown>, _streaming = false) => {
+		remote.onProjectProposal = async (_fields: Record<string, unknown>, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
-			const session = state.gatewaySessions.find(s => s.id === sessionId);
-			const project = state.projects.find(p => p.id === session?.projectId);
-			const mode: "provisional" | "registered" = project?.provisional ? "provisional" : "registered";
-			const prev = state.activeProposals.project;
-			const isFirstProposal = prev == null;
-			// Bug C fix: shallow-merge structured side-tables (`components`,
-			// `workflows`) so a streaming partial that lacks one of them doesn't
-			// drop the prior structured value. Incoming flat fields still win.
-			const prevFields = prev?.fields ?? {};
-			const merged: Record<string, unknown> = { ...prevFields, ...fields };
-			if (!("components" in fields) && "components" in prevFields) merged.components = (prevFields as Record<string, unknown>).components;
-			if (!("workflows" in fields) && "workflows" in prevFields) merged.workflows = (prevFields as Record<string, unknown>).workflows;
-			state.activeProposals.project = {
-				sessionId,
-				fields: merged,
-				mode,
-				streaming: false,
-				rev: (prev?.rev ?? 0) + 1,
-			};
-			state.assistantHasProposal = true;
-			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
-				if (state.assistantTab === "chat" && !isDesktop()) {
-					state.assistantTab = "preview";
-				}
-			} else if (isFirstProposal) {
-				// Non-assistant session: first proposal auto-selects the new Project tab.
-				state.previewPanelActiveTab = "project";
-				const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
-				localStorage.removeItem(collapseKey);
-				if (!isDesktop()) state.previewPanelTab = "project";
-			}
-			// Persist only for project-assistant sessions (the session is dedicated
-			// to producing this proposal, so reload should restore work in progress).
-			// For non-assistant sessions, the proposal is transient — same model as
-			// goal proposals: it lives only as long as the user stays on this session.
+			// Slice E: state.activeProposals.project + mode + tab side-effects are
+			// owned by the unified onProposal callback (with plugin.mergeFields
+			// preserving structured side-tables). The legacy callback now only
+			// triggers the project-assistant draft save.
 			if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				saveProjectDraft(sessionId);
 			}

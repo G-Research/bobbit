@@ -74,15 +74,33 @@ function migrateLegacyDismissalKeyIfGoal(sessionId: string, type: ProposalType):
 }
 
 /**
- * Stable, content-only fingerprint for the dismissed-proposal check.
- * `JSON.stringify` over the sorted keys of the field bag — sufficient for
- * "the user dismissed this exact proposal text" matching across reloads.
+ * Normalise per-type fields so the fingerprint is stable across the
+ * file-on-disk round-trip (Slice B). The goal serializer appends a
+ * trailing newline to `spec` (markdown body); the parser returns it
+ * verbatim. Without this normalisation a dismissal recorded pre-reload
+ * (in-memory "Body.") wouldn't match the post-rehydrate fingerprint
+ * ("Body.\n") and dismissal stickiness silently breaks for goal.
  */
-function fingerprint(fields: Record<string, unknown>): string {
+function normaliseFieldsForFingerprint(
+	type: ProposalType,
+	fields: Record<string, unknown>,
+): Record<string, unknown> {
+	if (type !== "goal") return fields;
+	const out: Record<string, unknown> = { ...fields };
+	if (typeof out.spec === "string") out.spec = out.spec.replace(/\s+$/u, "");
+	return out;
+}
+
+/**
+ * Stable, content-only fingerprint for the dismissed-proposal check.
+ * `JSON.stringify` over the sorted keys of the (normalised) field bag.
+ */
+function fingerprint(type: ProposalType, fields: Record<string, unknown>): string {
 	try {
-		const keys = Object.keys(fields).sort();
+		const normalised = normaliseFieldsForFingerprint(type, fields);
+		const keys = Object.keys(normalised).sort();
 		const ordered: Record<string, unknown> = {};
-		for (const k of keys) ordered[k] = fields[k];
+		for (const k of keys) ordered[k] = normalised[k];
 		return JSON.stringify(ordered);
 	} catch {
 		return "";
@@ -98,7 +116,7 @@ export function isProposalDismissed(
 	try {
 		const stored = localStorage.getItem(dismissalKey(sessionId, type));
 		if (!stored) return false;
-		return stored === fingerprint(fields);
+		return stored === fingerprint(type, fields);
 	} catch {
 		return false;
 	}
@@ -111,7 +129,7 @@ export function markProposalDismissed(
 ): void {
 	migrateLegacyDismissalKeyIfGoal(sessionId, type);
 	try {
-		localStorage.setItem(dismissalKey(sessionId, type), fingerprint(fields));
+		localStorage.setItem(dismissalKey(sessionId, type), fingerprint(type, fields));
 	} catch {
 		/* ignore quota errors */
 	}

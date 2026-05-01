@@ -132,6 +132,49 @@ export class MockAgentCore {
 			};
 		}
 
+		// Editable-proposals + parity matchers must precede the generic
+		// `project_proposal` substring match below — EDITABLE_PROPOSAL_*
+		// and PROJECT_PROPOSAL_PARITY both contain that substring.
+		if (text.includes("EDITABLE_PROPOSAL_INITIAL")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Editable",
+					root_path: "/tmp/editable",
+					build_command: "echo old",
+					test_command: "echo test",
+				},
+				output: "Project proposal seeded with echo old.",
+			};
+		}
+		if (text.includes("EDITABLE_PROPOSAL_EDIT")) {
+			return {
+				tool: "edit_proposal",
+				input: { type: "project", old_text: "echo old", new_text: "echo new" },
+				output: "Edit applied.",
+			};
+		}
+		if (text.includes("PROJECT_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_project",
+				input: { name: "Parity Project", root_path: "/tmp/parity-project", build_command: "echo parity-edited" },
+				output: "Project proposal partial submitted.",
+			};
+		}
+		if (text.includes("PROJECT_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Parity Project",
+					root_path: "/tmp/parity-project",
+					build_command: "echo parity",
+					test_command: "echo parity-test",
+					components: [{ name: "core", repo: ".", commands: { build: "echo build-core" } }],
+				},
+				output: "Project proposal submitted.",
+			};
+		}
+
 		if (lower.includes("project_proposal") || lower.includes("project proposal")) {
 			return {
 				tool: "propose_project",
@@ -157,33 +200,11 @@ export class MockAgentCore {
 			return { proposalBurst: true };
 		}
 
-		// Editable-proposals flow: initial seed (build_command="echo old")
-		// followed by an edit_proposal that surgically replaces it.
-		if (text.includes("EDITABLE_PROPOSAL_INITIAL")) {
-			return {
-				tool: "propose_project",
-				input: {
-					name: "Editable",
-					root_path: "/tmp/editable",
-					build_command: "echo old",
-					test_command: "echo test",
-				},
-				output: "Project proposal seeded with echo old.",
-			};
-		}
-		if (text.includes("EDITABLE_PROPOSAL_EDIT")) {
-			return {
-				tool: "edit_proposal",
-				input: { type: "project", old_text: "echo old", new_text: "echo new" },
-				output: "Edit applied.",
-			};
-		}
-
-		// UX-parity matrix triggers — one per ProposalType pair.
-		// _PARITY emits the full propose_<type> with a recognisable scalar.
-		// _PARITY_EDIT emits a tiny propose_<type> partial that only touches one
-		// scalar; the unified onProposal mergeFields path must preserve every
-		// other prior field.
+		// UX-parity matrix triggers for assistant-only types (workflow / role /
+		// tool / staff). _PARITY emits a full propose_<type>; _PARITY_EDIT emits
+		// a partial that touches one scalar so mergeFields preservation is
+		// exercised. Goal + project parity triggers live above (they must precede
+		// the generic substring matchers).
 		if (text.includes("GOAL_PROPOSAL_PARITY_EDIT")) {
 			return {
 				tool: "propose_goal",
@@ -196,26 +217,6 @@ export class MockAgentCore {
 				tool: "propose_goal",
 				input: { title: "Parity Goal A", workflow: "general", spec: "Body A.", cwd: "/tmp/parity-goal" },
 				output: "Goal proposal submitted.",
-			};
-		}
-		if (text.includes("PROJECT_PROPOSAL_PARITY_EDIT")) {
-			return {
-				tool: "propose_project",
-				input: { name: "Parity Project", root_path: "/tmp/parity-project", build_command: "echo parity-edited" },
-				output: "Project proposal partial submitted.",
-			};
-		}
-		if (text.includes("PROJECT_PROPOSAL_PARITY")) {
-			return {
-				tool: "propose_project",
-				input: {
-					name: "Parity Project",
-					root_path: "/tmp/parity-project",
-					build_command: "echo parity",
-					test_command: "echo parity-test",
-					components: [{ name: "core", repo: ".", commands: { build: "echo build-core" } }],
-				},
-				output: "Project proposal submitted.",
 			};
 		}
 		if (text.includes("WORKFLOW_PROPOSAL_PARITY_EDIT")) {

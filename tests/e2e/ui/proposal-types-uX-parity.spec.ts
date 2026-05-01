@@ -211,11 +211,17 @@ test.describe("Editable proposals — UX parity matrix @parity", () => {
 
 				// Mark this proposal dismissed via the typed helper. Equivalent
 				// to the user clicking Dismiss — works regardless of whether
-				// the type's bespoke panel is currently visible.
+				// the type's bespoke panel is currently visible. Mirrors the
+				// per-type normalisation that the production helper applies
+				// (goal: trim trailing whitespace from `spec` so the file-on-disk
+				// round-trip newline doesn't shift the fingerprint).
 				await page.evaluate(
 					({ sid, type }) => {
 						const s = (window as any).bobbitState;
-						const fields = s?.activeProposals?.[type]?.fields ?? {};
+						const fields = { ...(s?.activeProposals?.[type]?.fields ?? {}) };
+						if (type === "goal" && typeof fields.spec === "string") {
+							fields.spec = fields.spec.replace(/\s+$/u, "");
+						}
 						const key = `bobbit-${type}-proposal-dismissed-${sid}`;
 						const sorted = Object.keys(fields).sort();
 						const ordered: Record<string, unknown> = {};
@@ -279,11 +285,14 @@ test.describe("Editable proposals — UX parity matrix @parity", () => {
 				const fields = await readSlotFields(page, fx.type);
 				expect(fields).not.toBeNull();
 
-				// Mark dismissed and clear the slot.
+				// Mark dismissed and clear the slot (same normalisation as above).
 				await page.evaluate(
 					({ sid, type }) => {
 						const s = (window as any).bobbitState;
-						const f = s?.activeProposals?.[type]?.fields ?? {};
+						const f: Record<string, unknown> = { ...(s?.activeProposals?.[type]?.fields ?? {}) };
+						if (type === "goal" && typeof f.spec === "string") {
+							f.spec = (f.spec as string).replace(/\s+$/u, "");
+						}
 						const key = `bobbit-${type}-proposal-dismissed-${sid}`;
 						const sorted = Object.keys(f).sort();
 						const ordered: Record<string, unknown> = {};
