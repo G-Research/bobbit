@@ -1,14 +1,14 @@
 /**
- * Unit tests for WorktreePool — Phase 3 claim sequence.
+ * Unit tests for WorktreePool — claim sequence.
  *
  * Real git is required; uses a freshly-init'd repo in a temp directory.
  * Tests focus on:
- *   - happy-path claim renames branch + moves directory
- *   - degraded fallback when `git worktree move` fails (we simulate by
- *     creating a directory at the destination so move refuses)
+ *   - happy-path claim renames branch + moves directory to the final
+ *     `session/<id8>` name in one synchronous step
+ *   - claim() returns null when the directory rename fails so the caller
+ *     falls back to createWorktree (no half-renamed persistent state)
  *   - BOBBIT_TEST_NO_PUSH=1 skips push (asserted indirectly by ensuring
  *     no remote is configured and claim still succeeds)
- *   - claimUnnamed returns the entry as-is and keeps the pool branch
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -64,7 +64,7 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 		assert.equal(isPoolBranch("master"), false);
 	});
 
-	it("happy path: claim renames branch and moves directory", async () => {
+	it("happy path: claim renames branch and moves directory to session/<id8>", async () => {
 		const repo = await makeRepo();
 		try {
 			const pool = new WorktreePool({ repoPath: repo, targetSize: 1 });
@@ -75,25 +75,25 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 			}
 			assert.equal(pool.size, 1, "pool should have one entry after fill");
 
-			const claim = await pool.claim("session/test-12345678");
+			const claim = await pool.claim("session/abcd1234");
 			assert.ok(claim, "claim should succeed");
-			assert.equal(claim!.branchName, "session/test-12345678");
+			assert.equal(claim!.branchName, "session/abcd1234");
 			assert.equal(claim!.degraded, false);
 
 			// Verify the branch was renamed (no `pool/_pool-*` branch left).
 			const { stdout: branchList } = await execFile("git", ["branch", "--list"], { cwd: repo });
-			assert.ok(branchList.includes("session/test-12345678"), "target branch should exist");
+			assert.ok(branchList.includes("session/abcd1234"), "target branch should exist");
 			assert.ok(!branchList.includes("pool/_pool-"), "pool branch should be gone");
 
 			// Verify the directory was moved (path basename is the flattened slug).
-			assert.equal(path.basename(claim!.worktreePath), "session-test-12345678");
+			assert.equal(path.basename(claim!.worktreePath), "session-abcd1234");
 			assert.ok(fs.existsSync(claim!.worktreePath), "new worktree dir should exist");
 		} finally {
 			await rmRepo(repo);
 		}
 	});
 
-	it("degraded fallback: branch renamed even when move target exists", async () => {
+	it("directory-rename failure returns null so caller falls back to createWorktree", async () => {
 		const repo = await makeRepo();
 		try {
 			const pool = new WorktreePool({ repoPath: repo, targetSize: 1 });
@@ -106,24 +106,26 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 			// Pre-create a *file* at the destination path — `git worktree move`
 			// refuses with "target already exists" rather than touching it.
 			const wtRoot = path.resolve(repo, "..", `${path.basename(repo)}-wt`);
-			const blocker = path.join(wtRoot, "session-blocked-deadbeef");
+			const blocker = path.join(wtRoot, "session-deadbeef");
 			fs.writeFileSync(blocker, "in the way");
 
-			const claim = await pool.claim("session/blocked-deadbeef");
-			assert.ok(claim, "claim should still succeed in degraded mode");
-			assert.equal(claim!.branchName, "session/blocked-deadbeef");
-			assert.equal(claim!.degraded, true, "degraded flag must be true on move failure");
-			// Worktree path stays at the original pool location (basename starts with pool-_pool-).
-			assert.ok(
-				path.basename(claim!.worktreePath).startsWith("pool-_pool-"),
-				`expected pool-_pool- prefix, got ${claim!.worktreePath}`,
-			);
+			const claim = await pool.claim("session/deadbeef");
+			assert.equal(claim, null, "claim must return null on dir-rename failure (no half-state)");
+
+			// Branch must not be left renamed: the pool branch should be gone
+			// (entry was cleaned up) AND the target branch should not be present.
+			const { stdout: branchList } = await execFile("git", ["branch", "--list"], { cwd: repo });
+			assert.ok(!branchList.includes("session/deadbeef"), "target branch must not be left behind");
 		} finally {
 			await rmRepo(repo);
 		}
 	});
 
-	it("claimUnnamed returns entry without renaming and yields a poolId", async () => {
+	it("setTitle does not trigger any branch rename (regression: branch is stable post-claim)", async () => {
+		// Sanity check: there is no public API on WorktreePool that performs a
+		// post-claim rename. Verifies the absence of `claimUnnamed` / first-prompt
+		// rename helpers — if someone re-introduces them, this test still passes,
+		// but the symbol-grep guard below catches the regression.
 		const repo = await makeRepo();
 		try {
 			const pool = new WorktreePool({ repoPath: repo, targetSize: 1 });
@@ -133,11 +135,17 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 			}
 			assert.equal(pool.size, 1);
 
-			const u = pool.claimUnnamed();
-			assert.ok(u, "claimUnnamed should succeed when pool is warm");
-			assert.ok(u!.branchName.startsWith("pool/_pool-"), `branch should retain pool prefix, got ${u!.branchName}`);
-			assert.ok(u!.poolId.startsWith("_pool-"), `poolId should be _pool-<hex>, got ${u!.poolId}`);
-			assert.ok(fs.existsSync(u!.worktreePath));
+			const claim = await pool.claim("session/cafebabe");
+			assert.ok(claim);
+			const branchBefore = claim!.branchName;
+			const pathBefore = claim!.worktreePath;
+
+			// Simulate "first prompt": there's no API that renames a claimed entry.
+			// Verify branch + path are byte-stable in our records (and on disk).
+			const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: pathBefore });
+			assert.equal(stdout.trim(), branchBefore, "branch on disk must equal claimed branch");
+			assert.equal(branchBefore, "session/cafebabe");
+			assert.ok(fs.existsSync(pathBefore));
 		} finally {
 			await rmRepo(repo);
 		}
@@ -191,9 +199,8 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 			}
 			assert.equal(pool.size, 1, "pool should have one entry");
 
-			// Peek without claiming — use claimUnnamed which preserves the entry path.
-			const u = pool.claimUnnamed();
-			assert.ok(u, "claimUnnamed should succeed");
+			const u = await pool.claim("session/abcd1234");
+			assert.ok(u, "claim should succeed");
 			const marker = path.join(u!.worktreePath, "SETUP_RAN");
 			assert.ok(
 				fs.existsSync(marker),
@@ -218,7 +225,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1);
-			const u = pool.claimUnnamed();
+			const u = await pool.claim("session/abcd1234");
 			assert.ok(u);
 			// Worktree is fully usable; just no SETUP_RAN file.
 			assert.ok(fs.existsSync(path.join(u!.worktreePath, ".git")));
@@ -244,7 +251,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1);
-			const u = pool.claimUnnamed();
+			const u = await pool.claim("session/abcd1234");
 			assert.ok(u);
 			assert.equal(
 				fs.existsSync(path.join(u!.worktreePath, "SETUP_RAN")),
@@ -255,6 +262,38 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 			delete process.env.BOBBIT_SKIP_NPM_CI;
 			await rmRepo(repo);
 		}
+	});
+});
+
+describe("Regression: rename helpers and claimUnnamed must stay deleted", () => {
+	it("no source file references renameSessionFromPool / claimUnnamed / UnnamedClaim", () => {
+		const srcRoot = path.resolve(__dirname, "..", "src");
+		const banned = /(renameSessionFromPool|_renameSessionFromPoolMultiRepo|claimUnnamed|UnnamedClaim)/;
+		const hits: string[] = [];
+		function scan(dir: string) {
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				const p = path.join(dir, entry.name);
+				if (entry.isDirectory()) { scan(p); continue; }
+				if (!entry.name.endsWith(".ts")) continue;
+				const body = fs.readFileSync(p, "utf-8");
+				if (banned.test(body)) hits.push(path.relative(srcRoot, p));
+			}
+		}
+		scan(srcRoot);
+		assert.deepEqual(
+			hits,
+			[],
+			`Files reference removed rename/claimUnnamed symbols: ${hits.join(", ")}`,
+		);
+	});
+
+	it("moveWorktree is no longer exported from src/server/skills/git.ts", () => {
+		const gitTs = path.resolve(__dirname, "..", "src", "server", "skills", "git.ts");
+		const body = fs.readFileSync(gitTs, "utf-8");
+		assert.equal(/export\s+(async\s+)?function\s+moveWorktree\b/.test(body), false,
+			"moveWorktree must be inlined into worktree-pool.ts (design §14)");
+		assert.equal(/export\s+class\s+WorktreeMoveError\b/.test(body), false,
+			"WorktreeMoveError must be removed from skills/git.ts");
 	});
 });
 

@@ -1,18 +1,16 @@
 /**
- * Phase 3 worktree pool flow — API E2E.
+ * Worktree pool flow \u2014 API E2E.
  *
- * Asserts:
- *   1. After registering a git-repo project, the pool warms with `pool/_pool-*`
- *      branches (visible via `GET /api/worktree-pool`).
- *   2. Creating a worktree session against the project claims an unnamed entry,
- *      so the persisted `branch` is `pool/_pool-<id>` rather than the legacy
- *      `session/new-session-<id>` placeholder.
- *   3. Setting a title via PATCH renames the worktree onto `session/<slug>-<id>`.
- *   4. Goal creation also routes through the pool (the goal's persisted
- *      `branch` is the goal branch, but its `worktreePath` ends up under the
- *      goal-branch slug rather than failing).
- *   5. Pool replenishes after claims so subsequent sessions don't fall through
- *      to createWorktree.
+ * Stepwise lifecycle assertion (per design \u00a716.1 of
+ * docs/design/remove-session-worktree-rename.md):
+ *
+ *   1. Pool warms with `pool/_pool-*` branches.
+ *   2. `POST /api/sessions` claims one and produces `session/<id8>`
+ *      IMMEDIATELY (no first-prompt rename).
+ *   3. Sending a prompt does NOT rename the branch.
+ *   4. `PATCH /api/sessions/:id { title }` is metadata-only \u2014 branch unchanged.
+ *   5. Goal creation also routes through the pool (the goal's persisted
+ *      `branch` is the goal branch; the pool replenishes for the next claim).
  */
 import { test, expect } from "./in-process-harness.js";
 
@@ -39,7 +37,7 @@ async function waitForPool(projectId: string, target: number, timeoutMs = 30_000
 	return 0;
 }
 
-test.describe.serial("Phase 3 worktree pool flow", () => {
+test.describe.serial("Worktree pool flow", () => {
 	let repoPath: string;
 	let projectId: string;
 
@@ -61,12 +59,12 @@ test.describe.serial("Phase 3 worktree pool flow", () => {
 		projectId = project.id;
 	});
 
-	test("pool warms with pool/_pool-* entries and session creation claims one", async () => {
-		// Wait for pool to fill.
+	test("pool warms; session claim produces session/<id8> immediately and is stable across title changes", async () => {
+		// Step 1 \u2014 wait for pool fill.
 		const ready = await waitForPool(projectId, 1);
 		expect(ready).toBeGreaterThan(0);
 
-		// 3. Create a worktree session — should claim a pool entry.
+		// Step 2 \u2014 create a worktree session and read its persisted branch.
 		const sessResp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: repoPath, worktree: true, projectId }),
@@ -76,43 +74,40 @@ test.describe.serial("Phase 3 worktree pool flow", () => {
 		const sessionId = session.id;
 		expect(sessionId).toBeTruthy();
 
-		// 4. The session's persisted branch should be a pool branch (not the
-		//    legacy `session/new-session-*` placeholder). Allow a short wait
-		//    while the worktree pipeline persists structural fields.
+		// IMMEDIATELY (before any prompt): branch must be session/<id8>, NOT
+		// `pool/_pool-*` and NOT the legacy `session/new-session-*` placeholder.
+		// Allow a short wait for the worktree pipeline to persist structural fields.
 		let branch: string | undefined;
 		for (let i = 0; i < 50; i++) {
 			const detail = await apiFetch(`/api/sessions/${sessionId}`).then(r => r.status === 200 ? r.json() : null);
 			if (detail && typeof detail.branch === "string") {
 				branch = detail.branch;
-				if (branch && branch.startsWith("pool/_pool-")) break;
+				if (branch && branch.startsWith("session/")) break;
 			}
 			await new Promise(r => setTimeout(r, 200));
 		}
-		expect(branch).toMatch(/^pool\/_pool-/);
+		expect(branch).toMatch(/^session\/[a-f0-9]{8}$/);
+		expect(branch).not.toMatch(/^pool\//);
+		expect(branch).not.toMatch(/^session\/new-session-/);
 
-		// 5. Pool should replenish (eventually back to target).
+		const branchAtCreation = branch!;
+
+		// Step 3 \u2014 pool should replenish.
 		const replenished = await waitForPool(projectId, 1, 30_000);
 		expect(replenished).toBeGreaterThan(0);
 
-		// 6. Setting a title via PATCH triggers the pool-rename helper, moving
-		//    the session onto its real `session/<slug>-<id>` branch.
+		// Step 4 \u2014 setting a title is metadata-only; branch must NOT change.
 		const patch = await apiFetch(`/api/sessions/${sessionId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ title: "Cool task title" }),
 		});
 		expect(patch.status === 200 || patch.status === 204).toBe(true);
 
-		// Wait for rename — happens fire-and-forget.
-		let renamed: string | undefined;
-		for (let i = 0; i < 60; i++) {
-			const detail = await apiFetch(`/api/sessions/${sessionId}`).then(r => r.status === 200 ? r.json() : null);
-			if (detail && typeof detail.branch === "string" && detail.branch.startsWith("session/")) {
-				renamed = detail.branch;
-				break;
-			}
-			await new Promise(r => setTimeout(r, 200));
-		}
-		expect(renamed).toMatch(/^session\/cool-task-title/);
+		// Give any (unwanted) async work a chance to land, then re-read.
+		await new Promise(r => setTimeout(r, 1_500));
+		const afterPatch = await apiFetch(`/api/sessions/${sessionId}`).then(r => r.json());
+		expect(afterPatch.title).toBe("Cool task title");
+		expect(afterPatch.branch).toBe(branchAtCreation);
 	});
 
 	test("goal creation claims a pool entry (goal branch persisted, not error state)", async () => {
