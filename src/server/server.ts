@@ -1043,34 +1043,11 @@ export function createGateway(config: GatewayConfig) {
 			// we just restored an interrupted-mid-turn session whose continuation
 			// re-prompt is still in flight'. Without this, an interrupted delegate
 			// would be reported as completed with stale pre-restart output before
-			// it actually resumed work.
-			const wasStreamingBeforeRestore = new Set<string>();
-			try {
-				const sessionsJsonPath = path.join(stateDir, "sessions.json");
-				if (fs.existsSync(sessionsJsonPath)) {
-					const raw = fs.readFileSync(sessionsJsonPath, "utf-8");
-					const rows = JSON.parse(raw) as Array<{ id?: string; wasStreaming?: boolean }>;
-					for (const r of rows) {
-						if (r && typeof r.id === "string" && r.wasStreaming) wasStreamingBeforeRestore.add(r.id);
-					}
-				}
-				// Per-project session stores live under stateDir/projects/<id>/sessions.json
-				const projectsDir = path.join(stateDir, "projects");
-				if (fs.existsSync(projectsDir)) {
-					for (const projectDir of fs.readdirSync(projectsDir)) {
-						const sf = path.join(projectsDir, projectDir, "sessions.json");
-						if (!fs.existsSync(sf)) continue;
-						try {
-							const rows = JSON.parse(fs.readFileSync(sf, "utf-8")) as Array<{ id?: string; wasStreaming?: boolean }>;
-							for (const r of rows) {
-								if (r && typeof r.id === "string" && r.wasStreaming) wasStreamingBeforeRestore.add(r.id);
-							}
-						} catch { /* ignore one-project parse failure */ }
-					}
-				}
-			} catch (err) {
-				console.warn("[delegate-harness] Failed to capture wasStreaming pre-restore flags:", err);
-			}
+			// it actually resumed work. Routes through SessionManager so multi-
+			// project (per-project session stores under each project root's
+			// `.bobbit/state`) is handled correctly without filesystem path
+			// guessing.
+			const wasStreamingBeforeRestore = sessionManager.getPreRestoreWasStreaming();
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();

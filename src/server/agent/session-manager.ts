@@ -485,6 +485,42 @@ export class SessionManager {
 			})();
 		};
 		this._terminationListeners.push(termFn);
+
+		// Race protection on the restart-resume path: the resumed agent may
+		// finish its continuation turn (firing `agent_end`) BEFORE this
+		// listener was attached. Without this poll, the delegate would
+		// silently sit idle forever and the parent's `/wait` would time out.
+		// We watch the session for a short window and if it goes (or stays)
+		// idle while we hold the listener, drain a synthetic `completed` so
+		// the parent unwedges. submitOnce() guarantees at-most-once delivery,
+		// so a real `agent_end` racing this poll is safe — first to fire wins.
+		const raceWindowDeadline = Date.now() + 30_000;
+		const pollIdleAfterAttach = () => {
+			if (submitted) return;
+			const current = this.sessions.get(childSessionId);
+			if (!current) {
+				submitOnce({ status: "failed", output: "", error: "Delegate session disappeared" });
+				return;
+			}
+			if (current.status === "idle") {
+				void (async () => {
+					let output = "";
+					try { output = await this.getSessionOutput(childSessionId); } catch { /* best-effort */ }
+					submitOnce({ status: "completed", output });
+				})();
+				return;
+			}
+			if (Date.now() < raceWindowDeadline) {
+				setTimeout(pollIdleAfterAttach, 200);
+			}
+			// Past the race window without going idle: trust the listener; if
+			// the session ever does go idle later, agent_end will fire and
+			// the listener catches it.
+		};
+		// Defer the first poll to the next microtask so the caller has a
+		// chance to observe `attachDelegateCompletionListener()` returning
+		// before we start checking state.
+		setTimeout(pollIdleAfterAttach, 50);
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
@@ -2170,6 +2206,28 @@ export class SessionManager {
 	 * Restore sessions from disk on startup.
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
+	/**
+	 * Snapshot the set of session ids whose `wasStreaming` flag is true on
+	 * disk. Must be called BEFORE `restoreSessions()` because that path
+	 * synchronously flips the flag back to false on disk for any restored
+	 * session it re-prompts to continue. Used by the delegate-resume loop
+	 * (server.ts) to distinguish "idle because finished cleanly" from
+	 * "idle because we're mid-resume of an interrupted turn". Routes
+	 * through projectContextManager so multi-project (per-project session
+	 * stores under each project root's `.bobbit/state`) is handled
+	 * correctly — not via filesystem path-guessing.
+	 */
+	getPreRestoreWasStreaming(): Set<string> {
+		const out = new Set<string>();
+		const persisted = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: (this._testStore?.getLive() ?? []);
+		for (const ps of persisted) {
+			if (ps.wasStreaming) out.add(ps.id);
+		}
+		return out;
+	}
+
 	async restoreSessions(): Promise<void> {
 		// Initialize search service (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the service and wires callbacks)
