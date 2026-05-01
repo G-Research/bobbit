@@ -171,6 +171,89 @@ test.describe("CT-Delegate: restart resilience (browser)", () => {
 			createdAt: Date.now(),
 		});
 		expect(result).toEqual({ status: "completed", output: "post-restart-output" });
+		// Latch retained until acknowledge() (durability invariant); shell cleared.
 		expect(harness.getActiveDelegateSessionIds().has(childId)).toBe(false);
+		harness.acknowledge(parentId, toolUseId);
+	});
+
+	test("DUI-06: parallel delegates (N=3) survive restart simulation independently (UI)", async ({ page, gateway }) => {
+		// Browser-context coverage of the parallel-delegate restart case
+		// (D-RST-04 at the API layer). Each parallel slot uses a synthesized
+		// `${toolUseId}#${i}` key per the design §7; the harness must track
+		// each independently across a simulated restart.
+		const projectId = await defaultProjectId();
+		const parentId = await createSession({ projectId });
+		const childIds = await Promise.all([
+			createSession({ projectId }),
+			createSession({ projectId }),
+			createSession({ projectId }),
+		]);
+		const baseToolUseId = `tu_dui06_${Date.now()}`;
+		const slotKeys = childIds.map((_, i) => `${baseToolUseId}#${i}`);
+
+		const harness = gateway.sessionManager.getDelegateHarness();
+
+		// Live path: record metadata for each parallel slot.
+		for (let i = 0; i < 3; i++) {
+			harness.recordActive({
+				parentSessionId: parentId,
+				toolUseId: slotKeys[i],
+				delegateSessionId: childIds[i],
+				cwd: "",
+				instructions: `DUI-06 slot ${i}`,
+				timeoutMs: 30_000,
+				createdAt: Date.now(),
+			});
+		}
+		for (const id of childIds) expect(harness.getActiveDelegateSessionIds().has(id)).toBe(true);
+
+		// Simulate restart: rejectAllForSession (in-memory clear), then
+		// re-record to reflect the on-disk persisted shape and reload.
+		harness.rejectAllForSession(parentId, "simulated restart");
+		for (let i = 0; i < 3; i++) {
+			harness.recordActive({
+				parentSessionId: parentId,
+				toolUseId: slotKeys[i],
+				delegateSessionId: childIds[i],
+				cwd: "",
+				instructions: `DUI-06 slot ${i}`,
+				timeoutMs: 30_000,
+				createdAt: Date.now(),
+			});
+		}
+		harness.resumeInterruptedDelegates();
+
+		// Mount the UI — sidebar must continue to reflect the parent + child
+		// sessions while the parallel delegates are mid-flight.
+		const token = readE2EToken();
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}`);
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first())
+			.toBeVisible({ timeout: 20_000 });
+
+		// Each slot completes independently — submit results in interleaved
+		// order.  All three latch (no awaiters registered yet post-restart).
+		expect(harness.submit(parentId, slotKeys[2], { status: "completed", output: "slot-2" })).toBe(false);
+		expect(harness.submit(parentId, slotKeys[0], { status: "completed", output: "slot-0" })).toBe(false);
+		expect(harness.submit(parentId, slotKeys[1], { status: "failed", output: "", error: "slot-1-fail" })).toBe(false);
+
+		// Parent re-registers each slot — each gets its own latched result,
+		// independently keyed.
+		const results = await Promise.all(
+			slotKeys.map((tu, i) => harness.register({
+				parentSessionId: parentId,
+				toolUseId: tu,
+				delegateSessionId: childIds[i],
+				cwd: "",
+				instructions: `DUI-06 slot ${i}`,
+				timeoutMs: 30_000,
+				createdAt: Date.now(),
+			})),
+		);
+		expect(results[0]).toMatchObject({ status: "completed", output: "slot-0" });
+		expect(results[1]).toMatchObject({ status: "failed", error: "slot-1-fail" });
+		expect(results[2]).toMatchObject({ status: "completed", output: "slot-2" });
+
+		// Acknowledge to flush latches off disk.
+		for (const tu of slotKeys) harness.acknowledge(parentId, tu);
 	});
 });

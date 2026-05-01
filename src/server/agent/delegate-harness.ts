@@ -188,14 +188,21 @@ export class DelegateHarness {
 			});
 		}
 
-		// Drain any latched result first — submit-before-register is supported
-		// (and is the whole point of restart-survival). Clear any shell at the
-		// same time: the latch is the result the shell was holding the slot for.
+		// Drain any latched result — submit-before-register is supported (and
+		// is the whole point of restart-survival). Durability invariant: the
+		// latch must NOT be deleted here, because the `/api/internal/delegate/wait`
+		// handler acknowledges only AFTER `res.end()` flushes the body to the
+		// parent. If we deleted the latch synchronously and the gateway
+		// crashed between this return and the HTTP flush, the result would
+		// be lost — a retried `/wait` would see no latch and park forever.
+		// Instead we leave the latch in place; the matching `acknowledge()`
+		// call from the handler clears it once the parent has demonstrably
+		// received the bytes. The shell is cleared (it's purely metadata
+		// for `getActiveDelegateSessionIds()` and not part of the durable
+		// result record).
 		const existingLatched = this.latched.get(key);
 		if (existingLatched) {
-			this.latched.delete(key);
-			this.shells.delete(key);
-			this._persist();
+			if (this.shells.delete(key)) this._persist();
 			return Promise.resolve(existingLatched);
 		}
 

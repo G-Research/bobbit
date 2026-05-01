@@ -58,7 +58,7 @@ describe("DelegateHarness", () => {
 		assert.deepEqual(h.getActiveDelegates(), []);
 	});
 
-	it("submit before register latches; subsequent register drains and clears the latch", async () => {
+	it("submit before register latches; subsequent register drains; latch persists until acknowledge", async () => {
 		const h = new DelegateHarness(stateDir);
 		const result: DelegateResultPayload = { status: "completed", output: "early" };
 		const drained = h.submit("parent-1", "tu_1", result);
@@ -67,12 +67,19 @@ describe("DelegateHarness", () => {
 		const got = await h.register(makeActive());
 		assert.deepEqual(got, result);
 
-		// Latch is gone — a second register should not auto-resolve.
-		let resolved = false;
-		const second = h.register(makeActive({ toolUseId: "tu_1" }));
-		second.then(() => { resolved = true; }, () => { /* superseded later */ });
-		await new Promise(r => setTimeout(r, 5));
-		assert.equal(resolved, false);
+		// Durability invariant: the latch must persist across register() so
+		// a crash between register-return and HTTP-flush doesn't lose the
+		// result. A retried register() returns the same latched value
+		// (idempotent redelivery). Only `acknowledge()` clears it.
+		const retried = await h.register(makeActive());
+		assert.deepEqual(retried, result, "second register returns the same latched result (durability)");
+
+		// Acknowledge clears the latch. Subsequent register returns the
+		// synthetic already-delivered idempotency payload.
+		h.acknowledge("parent-1", "tu_1");
+		const third = await h.register(makeActive());
+		assert.equal(third.status, "completed");
+		assert.match(third.error || "", /already.delivered|idempotent.retry/i);
 	});
 
 	it("register against an existing pending key supersedes the prior resolver", async () => {
@@ -153,13 +160,50 @@ describe("DelegateHarness", () => {
 		const drained = b.submit(active.parentSessionId, active.toolUseId, result);
 		assert.equal(drained, false, "shell has no awaiter; must latch");
 
-		// Parent re-registers on B → drains the latch.
+		// Parent re-registers on B → drains the latch (latch retained on disk
+		// until the HTTP handler explicitly acknowledges; this is the durability
+		// invariant for restart-survival of a re-delivered result).
 		const got = await b.register(active);
 		assert.deepEqual(got, result);
 
-		// Persisted state is now empty.
+		// Latch retained pending acknowledge; shell cleared.
 		const persistedB = JSON.parse(fs.readFileSync(persistPath, "utf-8"));
-		assert.deepEqual(persistedB, { pending: [], latched: [] });
+		assert.equal(persistedB.pending.length, 0, "shell cleared");
+		assert.equal(persistedB.latched.length, 1, "latch retained until acknowledge");
+
+		// Acknowledge clears the latch.
+		assert.equal(b.acknowledge(active.parentSessionId, active.toolUseId), true);
+		assert.deepEqual(JSON.parse(fs.readFileSync(persistPath, "utf-8")), { pending: [], latched: [] });
+	});
+
+	it("register-after-restart durability: latch survives even if redelivery crashes mid-flush", async () => {
+		// Models the high-severity bug from code-review #7: latched result
+		// must remain on disk while the redelivery HTTP response is being
+		// written, so a crash mid-flush still leaves a recoverable record
+		// for the parent's retried /wait.
+		const a = new DelegateHarness(stateDir);
+		a.recordActive(makeActive());
+		a.submit("parent-1", "tu_1", { status: "completed", output: "durable-redelivery" });
+
+		// Simulate restart: new harness instance picks up the latched result
+		// from disk. Parent's /wait POST arrives — register() returns the
+		// latched value but DOES NOT delete it (durability hold).
+		const b = new DelegateHarness(stateDir);
+		const first = await b.register(makeActive());
+		assert.equal(first.output, "durable-redelivery");
+		assert.equal(JSON.parse(fs.readFileSync(persistPath, "utf-8")).latched.length, 1);
+
+		// Crash mid-HTTP-write: another harness instance comes up and the
+		// parent retries /wait. Latch is still there; second register() drains
+		// the same value (still no acknowledge yet).
+		const c = new DelegateHarness(stateDir);
+		const retry = await c.register(makeActive());
+		assert.equal(retry.output, "durable-redelivery");
+		assert.equal(JSON.parse(fs.readFileSync(persistPath, "utf-8")).latched.length, 1);
+
+		// Parent's HTTP flush finally succeeds — acknowledge clears the latch.
+		assert.equal(c.acknowledge("parent-1", "tu_1"), true);
+		assert.deepEqual(JSON.parse(fs.readFileSync(persistPath, "utf-8")), { pending: [], latched: [] });
 	});
 
 	it("submit on pending: durability — result is latched on disk before resolving the awaiter", async () => {
