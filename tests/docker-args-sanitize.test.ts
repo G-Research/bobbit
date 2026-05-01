@@ -8,7 +8,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildDockerRunArgs, type DockerRunConfig } from "../dist/server/agent/docker-args.js";
+import { buildDockerRunArgs, type DockerRunConfig } from "../src/server/agent/docker-args.ts";
 
 /** Minimal config that exercises all code paths. */
 function baseConfig(overrides: Partial<DockerRunConfig> = {}): DockerRunConfig {

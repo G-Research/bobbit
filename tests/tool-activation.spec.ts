@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { computeToolActivationArgs } from "../dist/server/agent/tool-activation.js";
-import type { ToolProvider } from "../dist/server/agent/tool-manager.js";
+import { computeToolActivationArgs } from "../src/server/agent/tool-activation.ts";
+import type { ToolProvider } from "../src/server/agent/tool-manager.ts";
 
 /**
  * Unit tests for computeToolActivationArgs — the logic that maps role tool

@@ -5,4 +5,6 @@ export default defineConfig({
 	testMatch: "**/*.spec.ts",
 	testIgnore: ["e2e/**", "fullstack/**", "manual-integration/**"],
 	timeout: 15_000,
+	fullyParallel: true,
+	workers: process.env.CI ? 2 : "50%",
 });

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { PromptQueue } from "../dist/server/agent/prompt-queue.js";
-import type { QueuedMessage } from "../dist/server/ws/protocol.js";
+import { PromptQueue } from "../src/server/agent/prompt-queue.ts";
+import type { QueuedMessage } from "../src/server/ws/protocol.ts";
 
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const SYSTEM_PREFIX_RE = /^\[SYSTEM: previous turn failed with: .+\. Ignore the incomplete last turn and handle the following\.\]\n\n/;

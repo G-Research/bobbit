@@ -21,7 +21,7 @@ const TEST_BOBBIT_DIR = process.platform === "win32"
 process.env.PI_CODING_AGENT_DIR = TEST_AGENT_DIR;
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
-const { containerPathToHost, hostPathToContainer } = await import("../dist/server/agent/rpc-bridge.js");
+const { containerPathToHost, hostPathToContainer } = await import("../src/server/agent/rpc-bridge.ts");
 
 describe("containerPathToHost (bind-mount fallback)", () => {
 	it("translates agent sessions path", () => {
