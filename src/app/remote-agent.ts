@@ -1581,7 +1581,16 @@ export class RemoteAgent {
 						// container still owns it. When there are no tool calls the
 						// streaming container will be cleared by AgentInterface.
 						if (hasToolCalls) {
-							this.streamingMessageId = computeStreamingMessageId(msg);
+							const sid = computeStreamingMessageId(msg);
+							this.streamingMessageId = sid;
+							// Stamp the synthetic id onto the reducer entry too, so the
+							// visible-messages filter's id-equality check can hide the
+							// in-flight row even when the upstream `msg.id` is missing
+							// (undefined / null / numeric). Single source of truth via
+							// `computeStreamingMessageId` so the two cannot diverge.
+							if (sid && (typeof msg.id !== "string" || msg.id.length === 0)) {
+								msg = { ...msg, id: sid };
+							}
 						} else {
 							this._state.streamingMessage = null;
 							this.streamingMessageId = undefined;
