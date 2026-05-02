@@ -32,6 +32,7 @@ import {
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
+import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -551,9 +552,10 @@ export class VerificationHarness {
 			} catch (err) {
 				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
 				// Mark as failed and update gate
+				const resumeErrorStep = { name: "Resume Error", type: "command" as const, passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 };
 				this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 					status: "failed",
-					steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 }],
+					steps: [resumeErrorStep],
 				});
 				this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
 				this.broadcastFn(v.goalId, {
@@ -564,7 +566,8 @@ export class VerificationHarness {
 					type: "gate_status_changed",
 					goalId: v.goalId, gateId: v.gateId, status: "failed",
 				});
-				this.notifyTeamLead(v.goalId, v.gateId, "failed");
+				const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+				this.notifyTeamLead(v.goalId, v.gateId, "failed", { steps: [resumeErrorStep], goalBranch });
 			}
 		}
 
@@ -736,7 +739,8 @@ export class VerificationHarness {
 			}
 			console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
 		} else {
-			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus);
+			const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: resolvedSteps, goalBranch });
 			console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
 		}
 	}
@@ -1149,10 +1153,22 @@ export class VerificationHarness {
 		}
 	}
 
-	private notifyTeamLead(goalId: string, gateId: string, status: string): void {
+	private notifyTeamLead(
+		goalId: string,
+		gateId: string,
+		status: string,
+		failureContext?: { steps?: ReadonlyArray<{ name: string; type: string; passed: boolean; output?: string }>; goalBranch?: string },
+	): void {
 		if (!this.notifyTeamLeadFn) return;
-		const verb = status === "passed" ? "PASSED" : "FAILED";
-		this.notifyTeamLeadFn(goalId, `Gate verification ${verb}: "${gateId}". ${status === "passed" ? "Downstream work for this gate can now proceed." : "Check the verification output, fix the issues, and re-signal the gate."}`);
+		if (status === "passed") {
+			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
+			return;
+		}
+		// Failure path — use Lesson 4.18 actionable message when step detail is available.
+		const steps = failureContext?.steps ?? [];
+		const goalBranch = failureContext?.goalBranch;
+		const message = buildVerificationFailureMessage(gateId, steps, goalBranch);
+		this.notifyTeamLeadFn(goalId, message);
 	}
 
 	/**
@@ -1309,7 +1325,7 @@ export class VerificationHarness {
 					type: "gate_status_changed",
 					goalId: signal.goalId, gateId: signal.gateId, status,
 				});
-				this.notifyTeamLead(signal.goalId, signal.gateId, status);
+				this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 				return;
 			}
 
@@ -1709,16 +1725,17 @@ export class VerificationHarness {
 				gateId: signal.gateId,
 				status,
 			});
-			this.notifyTeamLead(signal.goalId, signal.gateId, status);
+			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
 			if (active.cancelled) {
 				this.activeVerifications.delete(signal.id);
 				this._persistActive();
 				return;
 			}
+			const errorStep = { name: "Error", type: "command" as const, passed: false, output: err.message, duration_ms: 0 };
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
-				steps: [{ name: "Error", type: "command", passed: false, output: err.message, duration_ms: 0 }],
+				steps: [errorStep],
 			});
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
 			this.activeVerifications.delete(signal.id);
@@ -1737,7 +1754,7 @@ export class VerificationHarness {
 				gateId: signal.gateId,
 				status: "failed",
 			});
-			this.notifyTeamLead(signal.goalId, signal.gateId, "failed");
+			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch });
 		}
 	}
 
