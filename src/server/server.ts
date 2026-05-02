@@ -89,6 +89,7 @@ import {
 	isProposalType,
 	parseProposalFile,
 	readProposalFile,
+	restoreSnapshot,
 	writeProposalFile,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
@@ -7136,7 +7137,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -7209,11 +7210,12 @@ async function handleApiRoute(
 						sessionId,
 						proposalType,
 						fields: result.parsed.fields,
+						rev: result.rev,
 						streaming: false,
 						source: "edit",
 					});
 				}
-				json({ ok: true, newContent: result.newContent });
+				json({ ok: true, newContent: result.newContent, rev: result.rev });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
@@ -7233,7 +7235,7 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
 				if (!parsed.ok) {
 					json(parsed, 400);
@@ -7245,11 +7247,49 @@ async function handleApiRoute(
 						sessionId,
 						proposalType,
 						fields: parsed.value.fields,
+						rev: writeRes.rev,
 						streaming: false,
 						source: "seed",
 					});
 				}
-				json({ ok: true });
+				json({ ok: true, rev: writeRes.rev });
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/:type/restore — restore a snapshot
+		if (suffix === "/restore" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") {
+				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
+				return;
+			}
+			const rev = (body as { rev?: unknown }).rev;
+			if (typeof rev !== "number" || !Number.isInteger(rev) || rev < 1) {
+				json({ ok: false, code: "INVALID_BODY", message: "rev must be a positive integer" }, 400);
+				return;
+			}
+			try {
+				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				if (!result.ok) {
+					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
+					json(result, status);
+					return;
+				}
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: result.fields,
+						rev: result.newRev,
+						streaming: false,
+						source: "restore",
+					});
+				}
+				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}

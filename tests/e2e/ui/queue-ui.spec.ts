@@ -4,7 +4,7 @@
  * Tests queue pills, steer, abort, and draft persistence through the browser.
  * Uses the gateway-harness (spawned gateway process) for real browser interaction.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import {
 	createSession,
 	connectWs,
@@ -22,7 +22,7 @@ test.describe("Queue UI E2E", () => {
 		await waitForHealth();
 	});
 
-	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort @smoke", async ({ page }) => {
+	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort @smoke", async ({ page, rec }) => {
 		// PI-10: Queue a message, click Steer, verify delivery WITHOUT aborting.
 		// The mock agent emits [STEER_RECEIVED] text when it gets a steer RPC,
 		// which appears in the chat as visible text.
@@ -34,12 +34,14 @@ test.describe("Queue UI E2E", () => {
 		// Navigate to session
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await rec.capture("Empty composer ready");
 
 		// Send a message to make agent busy (tool call with 3s delay)
 		await sendMessage(page, "STAY_BUSY:3000 working");
 
 		// Wait for streaming status (the stop button appears)
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await rec.capture("Agent busy — Stop button visible");
 
 		// PI-10 step 1: Queue a message while agent is streaming
 		const textarea = page.locator("textarea").first();
@@ -49,11 +51,13 @@ test.describe("Queue UI E2E", () => {
 		// Queued pill appears with muted styling and Steer button
 		await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".steer-btn")).toHaveCount(1);
+		await rec.capture("Follow-up queued — pill + Steer button visible");
 
 		// PI-10 step 2: Click Steer → pill shows "Sent", dispatched immediately
 		await page.locator(".steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".sent-indicator")).toContainText("Sent");
+		await rec.capture("Steer clicked — Sent badge visible");
 
 		// PI-10 step 3: Agent receives the steer at the next tool boundary.
 		// The mock agent emits [STEER_RECEIVED] which appears in chat.
@@ -61,9 +65,10 @@ test.describe("Queue UI E2E", () => {
 		await expect(
 			page.getByText("STEER_RECEIVED").first(),
 		).toBeVisible({ timeout: 10_000 });
+		await rec.capture("STEER_RECEIVED rendered in chat");
 	});
 
-	test("PI-10b: batch steer — two pills promoted, both delivered without abort", async ({ page }) => {
+	test("PI-10b: batch steer — two pills promoted, both delivered without abort", async ({ page, rec }) => {
 		// PI-10b: Queue two messages, click Steer on each, verify both are
 		// delivered as a batch mid-turn without requiring abort.
 		const sessionId = await createSession();
@@ -72,10 +77,12 @@ test.describe("Queue UI E2E", () => {
 		await openApp(page);
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await rec.capture("Empty composer ready");
 
 		// Make agent busy (tool call with 3s delay)
 		await sendMessage(page, "STAY_BUSY:3000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await rec.capture("Agent busy — Stop button visible");
 
 		// PI-10b steps 1-2: Queue two messages
 		const textarea = page.locator("textarea").first();
@@ -86,6 +93,7 @@ test.describe("Queue UI E2E", () => {
 		await textarea.fill("batch steer B");
 		await textarea.press("Enter");
 		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
+		await rec.capture("Two messages queued — both pills visible");
 
 		// PI-10b step 3: Click Steer on pill 1
 		await page.locator(".queue-pill .steer-btn").first().click();
@@ -94,6 +102,7 @@ test.describe("Queue UI E2E", () => {
 		// PI-10b step 4: Click Steer on pill 2
 		await page.locator(".queue-pill .steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toHaveCount(2, { timeout: 3_000 });
+		await rec.capture("Both pills steered — Sent x2");
 
 		// PI-10b step 5: Agent receives both steers at the next tool boundary.
 		// The mock agent emits [STEER_RECEIVED] in chat.
@@ -101,9 +110,10 @@ test.describe("Queue UI E2E", () => {
 		await expect(
 			page.getByText("STEER_RECEIVED").first(),
 		).toBeVisible({ timeout: 10_000 });
+		await rec.capture("STEER_RECEIVED rendered");
 	});
 
-	test("story 22: draft text persists across page reload", async ({ page }) => {
+	test("story 22: draft text persists across page reload", async ({ page, rec }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
@@ -112,11 +122,13 @@ test.describe("Queue UI E2E", () => {
 		// Navigate to session
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await rec.capture("Empty composer");
 
 		// Type draft text (don't send) — use fill which fires input event
 		const draftText = "my unsent draft for persistence test";
 		const textarea = page.locator("textarea").first();
 		await textarea.fill(draftText);
+		await rec.capture("Draft typed");
 
 		// Wait for the debounced draft save to complete.
 		// The client saves via PUT /api/sessions/:id/draft with type=prompt and data={text, gen}.
@@ -131,6 +143,7 @@ test.describe("Queue UI E2E", () => {
 
 		// Reload the page
 		await page.reload();
+		await rec.capture("After reload");
 
 		// Wait for app to load
 		await expect(
@@ -140,6 +153,7 @@ test.describe("Queue UI E2E", () => {
 		// Navigate back to the same session
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await rec.capture("Session reopened");
 
 		// Draft restore is async (fires after session connects, messages load, and
 		// _setupPromptDraftHandlers runs). A Lit re-render can race with the restore,
@@ -148,9 +162,10 @@ test.describe("Queue UI E2E", () => {
 			const val = await page.locator("textarea").first().inputValue();
 			expect(val).toBe(draftText);
 		}).toPass({ intervals: [500, 1000, 1000, 2000, 2000], timeout: 20_000 });
+		await rec.capture("Draft restored in textarea");
 	});
 
-	test("story 9: edit pill — remove, modify, re-queue at end", async ({ page }) => {
+	test("story 9: edit pill — remove, modify, re-queue at end", async ({ page, rec }) => {
 		// Note: onEditQueued is wired in AgentInterface by a separate task.
 		// This test verifies the full edit flow via WS API (remove + re-queue)
 		// and validates the UI reflects all changes correctly. When onEditQueued
@@ -181,6 +196,7 @@ test.describe("Queue UI E2E", () => {
 			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 			await expect(page.locator(".pill-text").nth(0)).toContainText("edit me");
 			await expect(page.locator(".pill-text").nth(1)).toContainText("keep me");
+			await rec.capture("Two pills queued in order");
 
 			// Simulate edit: remove the first pill
 			conn.send({ type: "remove_queued", messageId: q2.queue![0].id });
@@ -189,6 +205,7 @@ test.describe("Queue UI E2E", () => {
 			// UI should show only "keep me"
 			await expect(page.locator(".queue-pill")).toHaveCount(1, { timeout: 5_000 });
 			await expect(page.locator(".pill-text").first()).toContainText("keep me");
+			await rec.capture("First pill removed");
 
 			// Re-queue modified version — should appear AFTER "keep me"
 			conn.send({ type: "prompt", text: "edited message" });
@@ -198,6 +215,7 @@ test.describe("Queue UI E2E", () => {
 			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 			await expect(page.locator(".pill-text").nth(0)).toContainText("keep me");
 			await expect(page.locator(".pill-text").nth(1)).toContainText("edited message");
+			await rec.capture("Edited message re-queued at end");
 		} finally {
 			conn.close();
 		}

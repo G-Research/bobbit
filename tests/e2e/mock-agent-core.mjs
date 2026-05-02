@@ -1584,20 +1584,25 @@ export class MockAgentCore {
 		// source of truth (Slice B) is populated during E2E. Awaited so the seed
 		// completes before message_end fires — the rehydrate path on reload depends
 		// on the file already existing.
+	let revMarker = undefined;
 		if (typeof toolAction.tool === "string" && toolAction.tool.startsWith("propose_")) {
-			await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+			revMarker = await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
 		}
 		// edit_proposal tool: shell to the gateway edit endpoint so the file
 		// updates and the server broadcasts proposal_update {source:"edit"}.
 		if (toolAction.tool === "edit_proposal" && toolAction.input?.type) {
-			await this._editProposal(
+			revMarker = await this._editProposal(
 				toolAction.input.type,
 				toolAction.input.old_text ?? "",
 				toolAction.input.new_text ?? "",
 			);
 		}
+		let effectiveOutput = output;
+		if (typeof revMarker === "number" && revMarker > 0) {
+			effectiveOutput = `${effectiveOutput}\n__proposal_rev_v1__:${revMarker}`;
+		}
 
-		this.emit({ type: "tool_execution_update", toolId, toolName: toolAction.tool, status: "complete", output });
+		this.emit({ type: "tool_execution_update", toolId, toolName: toolAction.tool, status: "complete", output: effectiveOutput });
 		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: toolAction.tool, isError });
 
 		const assistantMsg = {
@@ -1615,7 +1620,7 @@ export class MockAgentCore {
 			toolCallId: toolId,
 			toolName: toolAction.tool,
 			isError,
-			content: [{ type: "text", text: output }],
+			content: [{ type: "text", text: effectiveOutput }],
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
@@ -1641,7 +1646,7 @@ export class MockAgentCore {
 	/** Generic gateway POST helper used by seed / edit endpoints. */
 	_gatewayPost(pathname, body) {
 		const creds = this._gatewayCreds();
-		if (!creds) return Promise.resolve();
+		if (!creds) return Promise.resolve(null);
 		const { gwUrl, token } = creds;
 		const payload = JSON.stringify(body);
 		return new Promise((resolve) => {
@@ -1655,28 +1660,36 @@ export class MockAgentCore {
 						"Content-Length": Buffer.byteLength(payload),
 					},
 					timeout: 5_000,
-				}, (res) => { res.on("data", () => {}); res.on("end", resolve); });
-				req.on("timeout", () => { req.destroy(); resolve(); });
-				req.on("error", () => resolve());
+				}, (res) => {
+					let buf = "";
+					res.on("data", (chunk) => { buf += chunk.toString(); });
+					res.on("end", () => {
+						try { resolve(buf ? JSON.parse(buf) : null); } catch { resolve(null); }
+					});
+				});
+				req.on("timeout", () => { req.destroy(); resolve(null); });
+				req.on("error", () => resolve(null));
 				req.write(payload);
 				req.end();
-			} catch { resolve(); }
+			} catch { resolve(null); }
 		});
 	}
 
-	_seedProposal(type, args) {
+	async _seedProposal(type, args) {
 		const creds = this._gatewayCreds();
-		if (!creds) return Promise.resolve();
-		return this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
+		if (!creds) return undefined;
+		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
+		return body && typeof body === "object" && typeof body.rev === "number" ? body.rev : undefined;
 	}
 
-	_editProposal(type, oldText, newText) {
+	async _editProposal(type, oldText, newText) {
 		const creds = this._gatewayCreds();
-		if (!creds) return Promise.resolve();
-		return this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/edit`, {
+		if (!creds) return undefined;
+		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/edit`, {
 			old_text: oldText,
 			new_text: newText,
 		});
+		return body && typeof body === "object" && typeof body.rev === "number" ? body.rev : undefined;
 	}
 
 	/** Handle RPC command. Returns response data or undefined. */

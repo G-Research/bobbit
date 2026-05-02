@@ -1181,7 +1181,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// resolution, goal title summarisation, workflow JSON parse → populateFromProposal,
 		// per-type form-mirror state). The plugin.mergeFields shallow-merge guarantees
 		// the second invocation per propose_* tool-use is idempotent.
-		remote.onProposal = (type, fields, _streaming) => {
+		remote.onProposal = (type, fields, _streaming, serverRev?: number) => {
 			if (activeSessionId() !== sessionId) return;
 			if (fields === null) {
 				// proposal_cleared event from DELETE / accept
@@ -1202,6 +1202,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (isFirstEmit && isProposalDismissedTyped(sessionId, type, merged)) {
 				return;
 			}
+			// Server-stamped rev (from proposal_update events) is the source of truth.
+			// Fall back to client-incremented for streaming-partial / legacy paths.
+			const nextRev = (typeof serverRev === "number" && serverRev > 0)
+				? serverRev
+				: (prev?.rev ?? 0) + 1;
 			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
@@ -1209,7 +1214,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				mode: type === "project"
 					? (prev?.mode ?? resolveProjectMode(sessionId))
 					: undefined,
-				rev: (prev?.rev ?? 0) + 1,
+				rev: nextRev,
 			};
 			state.activeProposals[type] = slot;
 			state.assistantHasProposal = true;
@@ -1224,13 +1229,47 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Listen for "Open proposal" button clicks from ProposalRenderer tool cards.
 		// Routes the event to the same callbacks already wired above.
-		const proposalOpenHandler = ((e: CustomEvent) => {
+		const proposalOpenHandler = (async (e: Event) => {
+			const ce = e as CustomEvent;
 			if (activeSessionId() !== sessionId) return;
-			const { type, fields } = e.detail || {};
-			if (!type || !fields) return;
+			const { type, fields, rev } = ce.detail || {};
+			if (!type || !isProposalType(type)) return;
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
-			if (isProposalType(type)) clearProposalDismissedTyped(sessionId, type);
+			clearProposalDismissedTyped(sessionId, type);
+
+			// Snapshot-restore branch — server is authoritative; the broadcast
+			// rebuilds the slot via remote.onProposal. We also fan out to the
+			// legacy per-type callback so per-form state (state.previewTitle
+			// etc.) is populated.
+			if (typeof rev === "number" && Number.isFinite(rev) && rev > 0) {
+				try {
+					const { restoreProposalSnapshot } = await import("./api.js");
+					const res = await restoreProposalSnapshot(sessionId, type, rev);
+					if (res && (res as any).ok) {
+						const restoredFields = (res as any).fields as Record<string, unknown> | undefined;
+						if (restoredFields) {
+							const legacyMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
+								goal: remote.onGoalProposal,
+								role: remote.onRoleProposal,
+								tool: remote.onToolProposal,
+								staff: remote.onStaffProposal,
+								project: remote.onProjectProposal,
+							};
+							const legacyCb = legacyMap[type];
+							if (legacyCb) legacyCb(restoredFields, false);
+						}
+					} else {
+						console.warn(`[proposal] restore failed:`, res);
+					}
+				} catch (err) {
+					console.warn("[proposal] restore threw:", err);
+				}
+				return;
+			}
+
+			// Legacy fields path (archived sessions with no rev marker).
+			if (!fields) return;
 			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
@@ -1240,12 +1279,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			};
 			const cb = callbackMap[type];
 			if (cb) cb(fields, /* streaming */ false);
-			// Also fire the unified callback so the activeProposals slot
-			// is populated for types whose legacy callback doesn't write to it
-			// (tool). Idempotent for goal/role/staff/project (the
-			// legacy callback already wrote the slot, plugin.mergeFields
-			// shallow-merges).
-			if (isProposalType(type) && remote.onProposal) {
+			if (remote.onProposal) {
 				remote.onProposal(type, fields as Record<string, unknown>, false);
 			}
 		}) as EventListener;

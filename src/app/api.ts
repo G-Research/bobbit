@@ -1751,6 +1751,29 @@ export async function loadDraftFromServer(sessionId: string, type: string): Prom
 	}
 }
 
+/** Restore a proposal snapshot to the live draft. Returns server JSON or null on error. */
+export async function restoreProposalSnapshot(
+	sessionId: string,
+	type: string,
+	rev: number,
+): Promise<{ ok: true; newRev: number; fields: Record<string, unknown> } | { ok: false; code?: string; message?: string } | null> {
+	try {
+		const res = await gatewayFetch(
+			`/api/sessions/${encodeURIComponent(sessionId)}/proposal/${encodeURIComponent(type)}/restore`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ rev }),
+			},
+		);
+		const body = await res.json().catch(() => null);
+		return body as any;
+	} catch (err) {
+		console.error("[proposal] restoreProposalSnapshot failed:", err);
+		return null;
+	}
+}
+
 /** Delete a draft from the server. Fire-and-forget — errors are logged, not thrown. */
 export async function deleteDraftFromServer(sessionId: string, type: string): Promise<void> {
 	try {

@@ -14,7 +14,7 @@ import { inferMeta } from "../agent/aigw-manager.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
-import { listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
+import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
 /**
@@ -334,11 +334,13 @@ export function handleWebSocketConnection(
 					for (const proposalType of types) {
 						const parsed = await parseProposalFile(stateDir, sessionId, proposalType);
 						if (parsed.ok) {
+							const rev = await latestRev(stateDir, sessionId, proposalType);
 							send(ws, {
 								type: "proposal_update",
 								sessionId,
 								proposalType,
 								fields: parsed.value.fields,
+								rev,
 								streaming: false,
 								source: "rehydrate",
 							});

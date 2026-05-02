@@ -10,7 +10,7 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { apiFetch, waitForHealth } from "../e2e-setup.js";
 import { SpecContext, defineStory } from "./spec-framework.js";
 import { CT_01, CT_02, CT_05, CT_06 } from "./spec-contracts.js";
@@ -34,7 +34,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// CT-01-a: Send message and observe streaming lifecycle
 	// ---------------------------------------------------------------
 
-	test("CT-01-a: Send message and observe streaming lifecycle @smoke", async () => {
+	test("CT-01-a: Send message and observe streaming lifecycle @smoke", async ({ rec }) => {
 		s.begin(defineStory({
 			id: "CT-01-a",
 			title: "Send message and observe streaming lifecycle",
@@ -49,13 +49,16 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		// act
 		s.act();
+		await rec.capture("Empty session ready");
 		await s.send_message("STAY_BUSY:3000 hello world");
 
 		// assert
 		s.assert();
 		await s.wait_for_streaming();
+		await rec.capture("Streaming — Stop button visible");
 		await s.editor.can("stop_streaming");
 		await s.wait_for_idle();
+		await rec.capture("Idle — turn complete");
 		await s.editor.can("send_message");
 		await s.editor.is_focused();
 		await s.message_list.contains_text("hello world");
@@ -209,7 +212,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// path production uses. Pre-fix: clients see duplicate assistant and
 	// toolResult messages. Post-fix (seq+ts on envelope, client dedupe by seq):
 	// replayed events are dropped and the message list stays stable.
-	test("ST-DEDUP-01: Reconnect mid-stream does not duplicate or reorder events", async () => {
+	test("ST-DEDUP-01: Reconnect mid-stream does not duplicate or reorder events", async ({ rec }) => {
 		s.begin(defineStory({
 			id: "ST-DEDUP-01",
 			title: "Reconnect mid-stream does not duplicate or reorder events",
@@ -230,6 +233,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		// and produces a deterministic unique-token echo we can count.
 		await s.send_message("please run the bash tool and echo BOBBIT_TOOL_TEST_OK_12345");
 		await s.wait_for_idle();
+		await rec.capture("Bash tool turn complete");
 
 		// Snapshot the authoritative DOM counts right after the turn ends.
 		// We count rendered custom elements (not appState, which isn't exposed on
@@ -260,6 +264,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(replayResp.status).toBe(200);
 		const replayBody = await replayResp.json() as { replayed: number; bufferSize: number };
 		expect(replayBody.replayed).toBeGreaterThan(0);
+		await rec.capture(`Replayed ${replayBody.replayed} buffered events`);
 
 		// Give the client a short window to process replayed frames, then poll
 		// in-page until DOM counts stabilise for ~500ms (5 ticks × 100ms).
@@ -307,6 +312,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(post.assistant).toBe(baseline.assistant);
 		expect(post.tool).toBe(baseline.tool);
 		expect(post.user).toBe(baseline.user);
+		await rec.capture("Post-replay DOM stable — no duplicates");
 	});
 
 	// ---------------------------------------------------------------
@@ -320,7 +326,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// overwrote the first. Post-fix: the unified reducer keys every
 	// transcript row by (_order, _insertionTick) — both widgets land in
 	// chronological order and stay rendered.
-	test("ST-DEDUP-02: Proposal burst keeps both widgets in order", async () => {
+	test("ST-DEDUP-02: Proposal burst keeps both widgets in order", async ({ rec }) => {
 		s.begin(defineStory({
 			id: "ST-DEDUP-02",
 			title: "Proposal burst keeps both widgets in order",
@@ -335,8 +341,10 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		// act
 		s.act();
+		await rec.capture("Empty session before burst");
 		await s.send_message("please run a proposal_burst for E2E");
 		await s.wait_for_idle();
+		await rec.capture("Burst complete — idle");
 
 		// Wait for the closing assistant message that signals the burst is done.
 		await expect.poll(
@@ -363,6 +371,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(counts.goalProposals).toBe(1);
 		expect(counts.roleProposals).toBe(1);
 		expect(counts.order).toEqual(["goal", "role"]);
+		await rec.capture("Both widgets rendered in order");
 	});
 
 	// ---------------------------------------------------------------
@@ -373,7 +382,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// after a full burst lands, replaying every buffered event must NOT
 	// produce a second copy of either widget. The reducer's id-keyed render
 	// keys + seq-stamped live-event dedup ensure stability.
-	test("ST-DEDUP-03: Mid-burst reconnect / replay preserves widgets exactly once", async () => {
+	test("ST-DEDUP-03: Mid-burst reconnect / replay preserves widgets exactly once", async ({ rec }) => {
 		s.begin(defineStory({
 			id: "ST-DEDUP-03",
 			title: "Mid-burst reconnect preserves widgets exactly once",
@@ -388,6 +397,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		await s.send_message("please run a proposal_burst for E2E");
 		await s.wait_for_idle();
+		await rec.capture("Burst complete");
 
 		const countWidgets = async () => await s.page.evaluate(() => {
 			const body = document.body.textContent || "";
@@ -413,6 +423,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		s.act();
 		const replayResp = await apiFetch(`/api/internal/test/replay-buffered-events/${sessionId}`, { method: "POST" });
 		expect(replayResp.status).toBe(200);
+		await rec.capture("Replay dispatched");
 
 		// Wait for DOM to stabilise.
 		await s.page.waitForFunction(() => {
@@ -438,6 +449,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		expect(after.goal).toBe(1);
 		expect(after.role).toBe(1);
 		expect(after.assistant).toBe(before.assistant);
+		await rec.capture("Post-replay — widgets unique");
 	});
 
 	// ---------------------------------------------------------------
@@ -459,7 +471,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// reducer keys every transcript row by (_order, _insertionTick) and the
 	// envelope-scan walks the messages in transcript order — answers route
 	// to exactly the matching tool_use_id.
-	test("ST-DEDUP-04: ask_user_choices envelope routes answers to the correct card", async () => {
+	test("ST-DEDUP-04: ask_user_choices envelope routes answers to the correct card", async ({ rec }) => {
 		s.begin(defineStory({
 			id: "ST-DEDUP-04",
 			title: "ask_user_choices envelope routes to the correct card",
@@ -476,11 +488,13 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		await s.send_message("please use ask_user_choices");
 		await s.wait_for_idle();
 		await expect(s.page.locator("ask-user-choices-widget")).toHaveCount(1, { timeout: 20_000 });
+		await rec.capture("Widget A rendered");
 
 		// Second widget.
 		await s.send_message("please use ask_user_choices again");
 		await s.wait_for_idle();
 		await expect(s.page.locator("ask-user-choices-widget")).toHaveCount(2, { timeout: 20_000 });
+		await rec.capture("Widget B rendered — two cards");
 
 		// act — answer the SECOND widget.
 		s.act();
@@ -510,6 +524,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		// (b) widget A is still interactive — its envelope never landed.
 		await expect(widgetA.locator(".ask-submit")).toBeVisible();
 		await expect(widgetA.locator('input[type="radio"]').first()).toBeEnabled();
+		await rec.capture("B read-only, A still interactive");
 
 		// (c) RemoteAgent.findAskResponseAnswers routes by toolUseId — B has
 		//     answers, A is null. This is the reducer's transcript-ordering

@@ -936,12 +936,29 @@ Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementatio
 
 ### REST endpoints
 
-Four endpoints, full reference in [docs/rest-api.md — Proposal drafts](rest-api.md#proposal-drafts):
+Five endpoints, full reference in [docs/rest-api.md — Proposal drafts](rest-api.md#proposal-drafts):
 
 - `GET /api/sessions/:id/proposal/:type` — read raw body
 - `POST /api/sessions/:id/proposal/:type/seed` — called by `propose_*` `execute()`
 - `POST /api/sessions/:id/proposal/:type/edit` — surgical edit
+- `POST /api/sessions/:id/proposal/:type/restore` — restore prior revision snapshot (writes new snapshot at `currentRev+1`)
 - `DELETE /api/sessions/:id/proposal/:type` — clean up after accept
+
+### Revision snapshots
+
+Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also writes an immutable per-rev snapshot alongside the live draft. This makes the chat transcript a navigable timeline: the "Open proposal" button on every `propose_*` and `edit_proposal` tool card restores the panel to *exactly* the revision that existed immediately after that call.
+
+**Why.** Before snapshots, the panel only ever held the latest revision on disk. Users couldn't tell which revision was live, and clicking the *original* propose card after later edits silently re-dispatched the original payload — destroying every later edit. Snapshots make rollback explicit (a real `rev = currentRev + 1` write that appears in the timeline) and reversible.
+
+- **On-disk layout.** Snapshots live under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>`. Filename grammar `^(\d+)\.(md|yaml)$`; integer rev recovered by `readdir` + `parseInt` (no metadata file). Cleaned up with the rest of the per-session draft directory on session terminate — no separate retention logic.
+- **Rev counter source of truth.** Server-side, implicit. `latestRev()` scans the history dir; `writeSnapshot` writes `latestRev() + 1`. The server stamps `rev` on every `proposal_update` WS event (`source: "seed" | "edit" | "restore" | "rehydrate"`) — clients overwrite `slot.rev` with the server value, never client-increment.
+- **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult` and route the "Open proposal" button through `POST /api/sessions/:id/proposal/:type/restore` `{rev}`. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
+- **Restore semantics.** `restoreSnapshot` reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The rollback itself is therefore a real revision — monotonic counter, no silent state loss.
+- **Non-fatal snapshot failures.** Snapshot-write failures (disk full, permission denied) leave the live draft committed and broadcast `rev: 0`. Clients treat `rev: 0` as "snapshot system unavailable" — the panel still renders, but the rev badge and "Open proposal" snapshot path are disabled. Mid-restore crash between live rename and snapshot write is benign: the next write recomputes `latestRev` from the dir and picks the same number, overwriting consistently.
+- **Edit failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot — the rev counter only advances on successful disk writes. The `EditProposalRenderer` shows the error code on failed cards but no "Open proposal" button.
+- **Streaming partials don't bump rev.** The dual-fire `_checkToolProposals` streaming path emits in-memory `proposal_update` events from in-flight tool calls; only the gateway-side `seed` POST writes the file. Rev advances exactly once per completed tool call.
+
+Full design (file format, error codes, restore-handler edge cases, test plan): [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
 ### Per-type panel testids
 

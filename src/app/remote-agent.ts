@@ -229,6 +229,7 @@ export class RemoteAgent {
 		type: ProposalType,
 		fields: Record<string, unknown> | null,
 		streaming: boolean,
+		rev?: number,
 	) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
@@ -1131,12 +1132,13 @@ export class RemoteAgent {
 
 			case "proposal_update": {
 				// Slice D: server-pushed proposal projection (post-edit / post-seed /
-				// rehydrate-on-attach). Always non-streaming — streaming partials
+				// rehydrate-on-attach / restore). Always non-streaming — streaming partials
 				// flow through the inline tool_use scan in `_checkToolProposals`.
 				const pType = (msg as any).proposalType;
 				const fields = (msg as any).fields;
+				const rev = typeof (msg as any).rev === "number" ? (msg as any).rev as number : undefined;
 				if (this.onProposal && isProposalType(pType) && fields && typeof fields === "object") {
-					this.onProposal(pType, fields as Record<string, unknown>, false);
+					this.onProposal(pType, fields as Record<string, unknown>, false, rev);
 				}
 				break;
 			}
