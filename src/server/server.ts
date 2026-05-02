@@ -17,6 +17,7 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
+import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -1184,6 +1185,22 @@ export function createGateway(config: GatewayConfig) {
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
 				});
+			}
+
+			// Phase 3 nested goals — boot-time backfill of state=complete on
+			// archived goals whose ready-to-merge gate already passed. Closes
+			// the Lesson 4.2 gap on records produced by code paths predating
+			// archiveGoalAfterMerge. Wrapped in try/catch — backfill failure
+			// must not block boot (Lesson 4.11 — endless-restart guard).
+			for (const ctx of projectContextManager.all()) {
+				try {
+					const result = ctx.goalManager.backfillCompleteState(ctx.gateStore);
+					if (result.backfilled > 0) {
+						console.log(`[goal-manager] backfillCompleteState project=${ctx.project.id} backfilled=${result.backfilled} skipped=${result.skipped}`);
+					}
+				} catch (err) {
+					console.warn(`[goal-manager] backfillCompleteState failed for project ${ctx.project.id} (non-fatal):`, err);
+				}
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -4639,6 +4656,17 @@ async function handleApiRoute(
 		}
 		if (body?.metadata) {
 			gateStore.updateGateMetadata(goalId, gateId, body.metadata);
+		}
+
+		// Phase 3 nested goals — freeze the parent workflow's execution.verify[]
+		// when the team-lead signals the goal-plan gate. After this point any
+		// changes to execution.verify[] route through the mutation classifier
+		// (Phase 4). See SUBGOALS-SPEC §3.6 / docs/_phase-3-notes.md and
+		// src/server/agent/parent-workflow-freeze.ts for the pure helper.
+		const freezeUpdate = computePlanFreezeUpdate(goal, gateId);
+		if (freezeUpdate.freeze && freezeUpdate.workflow) {
+			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeUpdate.workflow });
+			console.log(`[gate-signal] Plan frozen for goal ${goalId} (execution.verify[] now immutable except via mutation classifier)`);
 		}
 
 		// Broadcast signal received
