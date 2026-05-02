@@ -245,6 +245,17 @@ export class GoalManager {
 			}
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(wf));
+		} else if (workflowId) {
+			// Lesson 4.3: workflowId given but neither resolvedWorkflow nor a
+			// workflowStore is available — this is the silent-fail path that
+			// produced workflow-less child goals on PR #409. Fail loudly
+			// instead of producing a gateless goal whose `ready-to-merge`
+			// can never pass. The legacy "no workflowId, no workflowStore →
+			// workflow undefined" path below is preserved for assistant
+			// sessions and test fixtures.
+			throw new Error(
+				`GoalManager.createGoal: workflowId="${workflowId}" given but neither resolvedWorkflow nor workflowStore was provided. This is Lesson 4.3 — see docs/_phase-1-notes.md.`,
+			);
 		} else if (!workflowId && workflowStore) {
 			// Default to "general" workflow when none specified.
 			const defaultWf = workflowStore.get("general");
