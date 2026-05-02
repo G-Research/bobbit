@@ -2460,6 +2460,42 @@ export class VerificationHarness {
 				childGoalId = persistedStep.subgoal.childGoalId;
 			}
 		}
+
+		// Invalidate stale childGoalId pointing at an archived NON-COMPLETE
+		// child (e.g. a dupe that was archived after the team-lead manually
+		// cleaned up post-restart). Without this invalidation, the wait
+		// loop below polls the dupe's ready-to-merge gate forever (it's
+		// archived, so no progress will ever happen) and the verification
+		// stays stuck.
+		//
+		// Live test (PR #409 v0.2-embeddings team-lead-4285af30 bug report):
+		// post-restart, harness re-spawned 4 dupes (31c49942, 7f736b47,
+		// 75dea8b6, 6010be40), team-lead manually archived them after
+		// confirming the originals' work was already merged. But the active
+		// record still pointed at the dupes, so every gate_signal execution
+		// re-entered runSubgoalStep, took tier-1 (cached dupe ID), failed
+		// the archived+complete short-circuit (state was 'in-progress'/
+		// 'shelved', not 'complete'), and ran the wait loop forever.
+		//
+		// The fix: if the cached child is archived AND not state=complete,
+		// it's a dead pointer. Invalidate and fall through to tier-3
+		// resolvePlanStepChild which uses success-aware tier preference
+		// (live in-progress > archived+complete > others) and finds the
+		// real merged-and-archived original.
+		if (childGoalId) {
+			const cachedChild = parentCtx.goalStore.get(childGoalId);
+			if (cachedChild?.archived && cachedChild.state !== "complete") {
+				console.log(`[verification] Cached childGoalId ${childGoalId} for plan ${sg.planId} points at archived+${cachedChild.state} — invalidating, will re-resolve via tier-3.`);
+				childGoalId = undefined;
+				// Wipe the active record so we don't re-pick the same dud.
+				const av = this.activeVerifications.get(signal.id);
+				if (av && av.steps[stepIndex]?.subgoal) {
+					delete av.steps[stepIndex].subgoal;
+					this._persistActive();
+				}
+			}
+		}
+
 		if (!childGoalId && typeof (parentCtx.goalStore as any).getAll === "function") {
 			// Walk by spawnedFromPlanId via the shared resolvePlanStepChild
 			// helper. Includes archived children — "archived" here means
