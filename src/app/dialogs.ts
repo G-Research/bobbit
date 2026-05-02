@@ -1933,12 +1933,12 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 							children: html`
 								<div class="flex gap-2 justify-end">
 									${Button({ variant: "ghost", onClick: () => cleanup({ paused: 0 }), children: "Cancel", disabled: working })}
-									${Button({
+									<span data-testid="cascade-pause-confirm">${Button({
 										variant: "default",
 										disabled: working,
 										onClick: () => doConfirm(),
 										children: working ? "Pausing…" : (cascade ? `Pause goal + ${descendantCount} descendant${descendantCount === 1 ? "" : "s"}` : "Pause goal"),
-									})}
+									})}</span>
 								</div>
 							`,
 						})}
