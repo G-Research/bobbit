@@ -821,7 +821,20 @@ function renderProjectContent(
 	const isProvisional = !!project.provisional;
 	const ungroupedExp = isUngroupedExpanded(project.id);
 	const maxDepth = _getNestedDepthCap(project.id);
-	const forest = buildNestedGoalForest(goals as any, { maxDepth });
+	// Preserve hierarchy for archived goals: when "See Archived" is on, fold
+	// archived goals into the live forest so they appear nested under their
+	// (live) parent — matches how archived sub-agents already nest under
+	// their live team-lead. The bottom "Archived" section only shows archived
+	// goals whose parent is ALSO archived (i.e. orphaned-from-live chains),
+	// to avoid duplicating goals across two locations.
+	const liveAndArchivedForForest = state.showArchived
+		? [...goals, ...archivedGoals.filter(ag => {
+			// Include archived goal in forest only if its parent is alive (so it nests under a live row).
+			if (!ag.parentGoalId) return false;
+			return goals.some(g => g.id === ag.parentGoalId && !g.archived);
+		})]
+		: goals;
+	const forest = buildNestedGoalForest(liveAndArchivedForForest as any, { maxDepth, includeArchived: state.showArchived });
 	return html`
 		${forest.map((node, i) => html`
 			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
@@ -859,7 +872,16 @@ function renderProjectContent(
 			` : ""}
 		</div>
 		${!isProvisional && staff ? renderStaffSidebarSection(staff, project.id) : ""}
-		${!isProvisional ? renderProjectArchivedSection(project, archivedGoals, standaloneArchivedSessions) : ""}
+		${!isProvisional ? renderProjectArchivedSection(
+			project,
+			// Bottom-section archived goals: only those whose parent is NOT
+			// a live goal (otherwise they're already shown nested under it
+			// in the live forest above). Top-level archived (no parent) and
+			// archived-under-archived chains stay here, with their own
+			// hierarchy preserved.
+			archivedGoals.filter(ag => !ag.parentGoalId || !goals.some(g => g.id === ag.parentGoalId && !g.archived)),
+			standaloneArchivedSessions,
+		) : ""}
 	`;
 }
 

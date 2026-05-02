@@ -1,6 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
+import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import {
 	state,
 	renderApp,
@@ -351,6 +352,32 @@ export function bucketArchivedByProject(
  * `variant: "desktop"` matches the original tight desktop styling.
  * `variant: "mobile"` uses larger touch targets and typography.
  */
+/**
+ * Render the bottom Archived-section's goal list with hierarchy preserved.
+ * Pure intra-archived nesting: goals whose parent is also archived nest
+ * under that parent; truly orphaned (parent missing or non-archived) goals
+ * surface at the top via the helper's orphan-promotion. Indentation uses
+ * the same 16px-per-level scheme as the live forest.
+ */
+function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean): TemplateResult {
+	const forest = buildNestedGoalForest(archivedGoals as any, { maxDepth: 5, includeArchived: true });
+	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[] }): TemplateResult => {
+		const indentPx = node.depth * 16;
+		const goal = node.goal as Goal;
+		return html`
+			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
+				${isMobile
+					? html`<div class="opacity-60">${renderGoalGroup(goal, { descendantCount: node.descendantCount })}</div>`
+					: renderGoalGroup(goal, { descendantCount: node.descendantCount })}
+			</div>
+			${node.children.map((c: any) => renderArcNode(c))}
+		`;
+	};
+	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+		${forest.map(node => renderArcNode(node))}
+	</div>`;
+}
+
 export function renderProjectArchivedSection(
 	project: Project,
 	archivedGoals: Goal[],
@@ -379,9 +406,7 @@ export function renderProjectArchivedSection(
 			</button>
 			${expanded ? html`
 				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${archivedGoals.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
-					${archivedGoals.map(goal => isMobile ? html`<div class="opacity-60">${renderGoalGroup(goal)}</div>` : renderGoalGroup(goal))}
-				</div>` : ""}
+				${archivedGoals.length > 0 ? renderArchivedGoalsForest(archivedGoals, isMobile) : ""}
 				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${standaloneArchivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${standaloneArchivedSessions.map(s => html`
