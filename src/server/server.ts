@@ -21,6 +21,10 @@ import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
+import { classifyMutation, type ClassifierPlanStep } from "./agent/plan-mutation.js";
+import { DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "./agent/plan-mutation-store.js";
+import { parseAcceptanceCriteria } from "../shared/parse-acceptance-criteria.js";
+import type { Workflow } from "./agent/workflow-store.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -3301,6 +3305,503 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Phase 4: Nested-goal endpoints ───────────────────────────────
+	// SUBGOALS-SPEC §5 / docs/_phase-4-notes.md. Each route below is the
+	// REST surface for one of the team-lead-only `goal_*` tools shipped in
+	// `defaults/tools/children/`. Cascade-affecting routes require an
+	// explicit `cascade` parameter — the server is policy-agnostic and the
+	// UI is the cascade-policy authority. Omitting `cascade` returns 422.
+
+	// Helpers shared by the routes below.
+
+	/**
+	 * Walk descendants of a goal in BFS order. Returns the descendants in
+	 * the order encountered (parent first then children). Caller is
+	 * responsible for deciding archive order (deepest-first via `.reverse()`
+	 * is convenient for cascade-archive).
+	 */
+	function listDescendants(goalId: string): PersistedGoal[] {
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) return [];
+		const all = ctx.goalStore.getAll();
+		const out: PersistedGoal[] = [];
+		const seen = new Set<string>([goalId]);
+		const queue: string[] = [goalId];
+		while (queue.length > 0) {
+			const cur = queue.shift()!;
+			for (const g of all) {
+				if (g.parentGoalId === cur && !seen.has(g.id)) {
+					seen.add(g.id);
+					out.push(g);
+					queue.push(g.id);
+				}
+			}
+		}
+		return out;
+	}
+
+	/** Cancel any in-flight verifications for a goal (best-effort). */
+	async function cancelAllVerifications(goalId: string): Promise<void> {
+		for (const active of verificationHarness.getActiveVerifications(goalId)) {
+			try {
+				await verificationHarness.cancelStaleVerifications(goalId, active.gateId);
+			} catch (err) {
+				console.error(`[api] cancelAllVerifications: error cancelling verification for ${goalId}/${active.gateId}:`, err);
+			}
+		}
+	}
+
+	/**
+	 * Apply a (validated) plan replacement to a parent-workflow goal. Updates
+	 * the goal's workflow snapshot in place, persists, and broadcasts a
+	 * `goal_state_changed` event.
+	 */
+	async function applyPlanSteps(
+		goal: PersistedGoal,
+		proposedSteps: ClassifierPlanStep[],
+		goalManager: GoalManager,
+	): Promise<{ workflow: Workflow }> {
+		if (!goal.workflow) {
+			throw new Error("applyPlanSteps: goal has no workflow snapshot");
+		}
+		const executionGate = goal.workflow.gates.find(g => g.id === "execution");
+		if (!executionGate) {
+			throw new Error("applyPlanSteps: workflow missing execution gate");
+		}
+		const newVerify = proposedSteps.map((s, idx) => ({
+			name: s.title ?? s.subgoal?.title ?? `step-${idx}`,
+			type: "subgoal" as const,
+			phase: s.phase,
+			subgoal: {
+				planId: s.planId,
+				title: s.title ?? s.subgoal?.title ?? "",
+				spec: s.spec ?? s.subgoal?.spec ?? "",
+				...(s.subgoal?.workflowId !== undefined ? { workflowId: s.subgoal.workflowId } : {}),
+				...(s.subgoal?.suggestedRole !== undefined ? { suggestedRole: s.subgoal.suggestedRole } : {}),
+			},
+		}));
+		const updatedGate = { ...executionGate, verify: newVerify };
+		const workflow: Workflow = {
+			...goal.workflow,
+			gates: goal.workflow.gates.map(g => g.id === "execution" ? updatedGate : g),
+			updatedAt: Date.now(),
+		};
+		// Persist via store.update so updatedAt and generation tick.
+		goalManager.getGoalStore().update(goal.id, { workflow });
+		broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
+		return { workflow };
+	}
+
+	/**
+	 * Read the current execution.verify[] subgoal-typed steps from a goal.
+	 * Returns an empty array when the goal has no workflow / no execution
+	 * gate / no verify[].
+	 */
+	function readPlanSteps(goal: PersistedGoal): ClassifierPlanStep[] {
+		const exec = goal.workflow?.gates.find(g => g.id === "execution");
+		const verify = exec?.verify ?? [];
+		return verify
+			.filter(v => v.type === "subgoal" && v.subgoal)
+			.map(v => ({
+				planId: v.subgoal!.planId,
+				title: v.subgoal!.title,
+				spec: v.subgoal!.spec,
+				phase: v.phase,
+				subgoal: {
+					planId: v.subgoal!.planId,
+					title: v.subgoal!.title,
+					spec: v.subgoal!.spec,
+					...(v.subgoal!.workflowId !== undefined ? { workflowId: v.subgoal!.workflowId } : {}),
+					...(v.subgoal!.suggestedRole !== undefined ? { suggestedRole: v.subgoal!.suggestedRole } : {}),
+				},
+			}));
+	}
+
+	// POST /api/goals/:id/spawn-child — idempotent on planId.
+	const spawnChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/spawn-child$/);
+	if (spawnChildMatch && req.method === "POST") {
+		const parentId = spawnChildMatch[1];
+		const parent = getGoalAcrossProjects(parentId);
+		if (!parent) { json({ error: "Parent goal not found" }, 404); return; }
+		const body = await readBody(req).catch(() => null);
+		if (!body) { json({ error: "Missing body" }, 400); return; }
+		const planId = typeof body.planId === "string" ? body.planId.trim() : "";
+		const title = typeof body.title === "string" ? body.title.trim() : "";
+		const spec = typeof body.spec === "string" ? body.spec : "";
+		if (!planId) { json({ error: "planId is required" }, 400); return; }
+		if (!title) { json({ error: "title is required" }, 400); return; }
+		if (!spec) { json({ error: "spec is required" }, 400); return; }
+		const workflowId = typeof body.workflowId === "string" ? body.workflowId : "feature";
+		const suggestedRole = typeof body.suggestedRole === "string" ? body.suggestedRole : undefined;
+
+		const ctx = projectContextManager.getContextForGoal(parentId);
+		if (!ctx) { json({ error: "Project context not found for parent goal" }, 404); return; }
+		const goalManager = ctx.goalManager;
+
+		// Idempotency: search for an existing child with this (parentId, planId).
+		const existing = ctx.goalStore.getAll().find(g =>
+			g.parentGoalId === parentId && g.spawnedFromPlanId === planId,
+		);
+		if (existing) {
+			json({ id: existing.id, alreadyExists: true });
+			return;
+		}
+
+		try {
+			const child = await goalManager.createGoal(title, parent.cwd, {
+				spec,
+				workflowId,
+				projectId: parent.projectId,
+				sandboxed: parent.sandboxed,
+				parentGoalId: parentId,
+			});
+			// Lesson 4.1: stamp spawnedFromPlanId IMMEDIATELY — no awaits between.
+			await goalManager.updateGoal(child.id, { spawnedFromPlanId: planId });
+			void suggestedRole; // Reserved for future per-child role hint persistence.
+			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
+			json({ id: child.id }, 201);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			// createGoal throws on cycle violations and missing parent.
+			if (/cycle|ancestor/i.test(msg)) { json({ error: msg }, 400); return; }
+			json({ error: msg }, 400);
+		}
+		return;
+	}
+
+	// PATCH /api/goals/:id/plan — submit a plan or replan; classifier-driven.
+	const planPatchMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
+	if (planPatchMatch && req.method === "PATCH") {
+		const id = planPatchMatch[1];
+		const goal = getGoalAcrossProjects(id);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.workflowId !== "parent") {
+			json({ error: "PATCH /plan only valid on parent-workflow goals", code: "NOT_PARENT_WORKFLOW" }, 400);
+			return;
+		}
+		const body = await readBody(req).catch(() => null);
+		if (!body || !Array.isArray(body.proposedSteps)) {
+			json({ error: "proposedSteps[] is required" }, 400);
+			return;
+		}
+		const proposedSteps = body.proposedSteps as ClassifierPlanStep[];
+
+		const ctx = projectContextManager.getContextForGoal(id);
+		if (!ctx) { json({ error: "Project context not found for goal" }, 404); return; }
+		const planMutationStore = ctx.planMutationStore;
+		const goalManager = ctx.goalManager;
+
+		// Locate root for criteria source.
+		const rootGoalId = goal.rootGoalId ?? goal.id;
+		const root = ctx.goalStore.get(rootGoalId) ?? goal;
+		const criteria = root.acceptanceCriteria ?? parseAcceptanceCriteria(root.spec ?? "");
+
+		const current = readPlanSteps(goal);
+		const verdict = classifyMutation({
+			current,
+			proposed: proposedSteps,
+			rootAcceptanceCriteria: criteria,
+			rootSpec: root.spec ?? "",
+		});
+
+		const policy = goal.divergencePolicy ?? "balanced";
+
+		// Decision matrix from SUBGOALS-SPEC §3.6.
+		// criteria-drop is the only kind that's always 409.
+		if (verdict.kind === "criteria-drop") {
+			json({
+				kind: verdict.kind,
+				summary: verdict.summary,
+				diff: verdict.diff,
+				uncoveredCriteria: verdict.uncoveredCriteria,
+				code: "CRITERIA_DROP",
+				error: "Plan would leave acceptance criteria uncovered",
+			}, 409);
+			return;
+		}
+
+		// restructure: 409 unless paused; on paused → require approval.
+		if (verdict.kind === "restructure" && !goal.paused) {
+			json({
+				kind: verdict.kind,
+				summary: verdict.summary,
+				diff: verdict.diff,
+				code: "RESTRUCTURE_REQUIRES_PAUSE",
+				error: "Restructure requires the goal to be paused first",
+			}, 409);
+			return;
+		}
+
+		// noop: apply directly (no-op effectively).
+		if (verdict.kind === "noop") {
+			json({ kind: verdict.kind, summary: verdict.summary, applied: true });
+			return;
+		}
+
+		// fix-up under balanced/autonomous → apply directly. Under strict → approval.
+		if (verdict.kind === "fix-up" && (policy === "balanced" || policy === "autonomous")) {
+			try {
+				await applyPlanSteps(goal, proposedSteps, goalManager);
+				await goalManager.updateGoal(goal.id, { replanCount: (goal.replanCount ?? 0) + 1 });
+				json({ kind: verdict.kind, summary: verdict.summary, applied: true });
+			} catch (err) {
+				json({ error: err instanceof Error ? err.message : String(err) }, 500);
+			}
+			return;
+		}
+
+		// expansion always, restructure on paused, fix-up on strict → approval flow.
+		const requestId = randomUUID();
+		const now = Date.now();
+		const pending: PendingMutation = {
+			goalId: goal.id,
+			requestId,
+			kind: verdict.kind,
+			proposedSteps,
+			summary: verdict.summary,
+			diff: verdict.diff,
+			...(verdict.uncoveredCriteria ? { uncoveredCriteria: verdict.uncoveredCriteria } : {}),
+			createdAt: now,
+			expiresAt: now + DEFAULT_MUTATION_TTL_MS,
+		};
+		planMutationStore.put(pending);
+		broadcastToAll({
+			type: "mutation_pending",
+			goalId: goal.id,
+			requestId,
+			kind: verdict.kind,
+			summary: verdict.summary,
+		});
+		json({
+			kind: verdict.kind,
+			summary: verdict.summary,
+			diff: verdict.diff,
+			requestId,
+			requiresApproval: true,
+		});
+		return;
+	}
+
+	// GET /api/goals/:id/plan — return the current plan + per-step child projection.
+	const planGetMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
+	if (planGetMatch && req.method === "GET") {
+		const id = planGetMatch[1];
+		const goal = getGoalAcrossProjects(id);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const ctx = projectContextManager.getContextForGoal(id);
+		if (!ctx) { json({ error: "Project context not found for goal" }, 404); return; }
+		const gateId = url.searchParams.get("gateId") ?? "execution";
+		const gate = goal.workflow?.gates.find(g => g.id === gateId);
+		const verify = gate?.verify ?? [];
+		const allGoals = ctx.goalStore.getAll();
+		const steps = verify
+			.filter(v => v.type === "subgoal" && v.subgoal)
+			.map(v => {
+				const sg = v.subgoal!;
+				// Reproduce harness tier preference for the child projection
+				// (Lesson 4.19): live-active > archived-complete > live-other > archived-other.
+				const matches = allGoals.filter(g => g.parentGoalId === id && g.spawnedFromPlanId === sg.planId);
+				const sortByCreatedDesc = (arr: PersistedGoal[]) => arr.slice().sort((a, b) => b.createdAt - a.createdAt);
+				const tier1 = sortByCreatedDesc(matches.filter(g => !g.archived && g.state === "in-progress"))[0];
+				const tier2 = !tier1 ? sortByCreatedDesc(matches.filter(g => g.archived === true && g.state === "complete"))[0] : undefined;
+				const tier3 = !tier1 && !tier2 ? sortByCreatedDesc(matches.filter(g => !g.archived && g.state !== "in-progress"))[0] : undefined;
+				const tier4 = !tier1 && !tier2 && !tier3 ? sortByCreatedDesc(matches.filter(g => g.archived === true && g.state !== "complete"))[0] : undefined;
+				const child = tier1 ?? tier2 ?? tier3 ?? tier4;
+				return {
+					planId: sg.planId,
+					title: sg.title,
+					spec: sg.spec,
+					phase: v.phase,
+					...(sg.workflowId !== undefined ? { workflowId: sg.workflowId } : {}),
+					...(sg.suggestedRole !== undefined ? { suggestedRole: sg.suggestedRole } : {}),
+					...(child ? {
+						childGoalId: child.id,
+						childState: child.state,
+						childArchived: !!child.archived,
+					} : {}),
+				};
+			});
+		const ctxForGate = projectContextManager.getContextForGoal(id);
+		const gateState = ctxForGate?.gateStore.getGate(id, gateId)?.status ?? "pending";
+		const frozen = gate?.metadata?.frozen === "true";
+		json({
+			steps,
+			gateState,
+			frozen,
+			replanCount: goal.replanCount ?? 0,
+		});
+		return;
+	}
+
+	// POST /api/goals/:id/integrate-child/:childId — local merge + auto-archive.
+	const integrateChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/integrate-child\/([^/]+)$/);
+	if (integrateChildMatch && req.method === "POST") {
+		const parentId = integrateChildMatch[1];
+		const childId = integrateChildMatch[2];
+		const parent = getGoalAcrossProjects(parentId);
+		const child = getGoalAcrossProjects(childId);
+		if (!parent) { json({ error: "Parent goal not found" }, 404); return; }
+		if (!child) { json({ error: "Child goal not found" }, 404); return; }
+		// Security: child must declare us as parent.
+		if (child.parentGoalId !== parentId) {
+			json({ error: `Child ${childId} parentGoalId="${child.parentGoalId}" does not match path parent ${parentId}`, code: "PARENT_MISMATCH" }, 400);
+			return;
+		}
+		const ctx = projectContextManager.getContextForGoal(parentId);
+		if (!ctx) { json({ error: "Project context not found" }, 404); return; }
+		const goalManager = ctx.goalManager;
+		try {
+			const outcome = await goalManager.mergeChild(parentId, childId);
+			if (outcome.merged || outcome.alreadyMerged) {
+				try { await teamManager.teardownTeam(childId); } catch (err) {
+					console.warn(`[api] integrate-child: teardownTeam error (non-fatal):`, err);
+				}
+				await goalManager.archiveGoalAfterMerge(childId);
+				broadcastToAll({ type: "goal_state_changed", goalId: childId });
+				broadcastToAll({ type: "goal_state_changed", goalId: parentId });
+				json({ merged: true, alreadyMerged: !!outcome.alreadyMerged, pushed: !!outcome.pushed });
+				return;
+			}
+			if (outcome.conflict) {
+				json({ conflict: true, output: outcome.output ?? "" }, 409);
+				return;
+			}
+			json({ error: "Unexpected merge outcome", output: outcome.output ?? "" }, 500);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const code = (err as any)?.code;
+			if (code === "PARENT_MISMATCH") { json({ error: msg, code }, 400); return; }
+			json({ error: msg }, 500);
+		}
+		return;
+	}
+
+	// POST /api/goals/:id/pause — cascade required.
+	const pauseMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pause$/);
+	if (pauseMatch && req.method === "POST") {
+		const id = pauseMatch[1];
+		const goal = getGoalAcrossProjects(id);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const body = await readBody(req).catch(() => null);
+		if (!body || typeof body.cascade !== "boolean") {
+			json({ error: "cascade (boolean) is required", code: "CASCADE_REQUIRED" }, 422);
+			return;
+		}
+		const cascade: boolean = body.cascade;
+		const goalManager = getGoalManagerForGoal(id);
+		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendants(id) : [])];
+		let count = 0;
+		for (const g of targets) {
+			if (g.paused === true) continue;
+			await goalManager.updateGoal(g.id, { paused: true });
+			await cancelAllVerifications(g.id);
+			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
+			count++;
+		}
+		json({ paused: count });
+		return;
+	}
+
+	// POST /api/goals/:id/resume — cascade required.
+	const resumeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/resume$/);
+	if (resumeMatch && req.method === "POST") {
+		const id = resumeMatch[1];
+		const goal = getGoalAcrossProjects(id);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const body = await readBody(req).catch(() => null);
+		if (!body || typeof body.cascade !== "boolean") {
+			json({ error: "cascade (boolean) is required", code: "CASCADE_REQUIRED" }, 422);
+			return;
+		}
+		const cascade: boolean = body.cascade;
+		const goalManager = getGoalManagerForGoal(id);
+		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendants(id) : [])];
+		let count = 0;
+		for (const g of targets) {
+			if (g.paused !== true) continue;
+			await goalManager.updateGoal(g.id, { paused: false });
+			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
+			count++;
+		}
+		json({ resumed: count });
+		return;
+	}
+
+	// POST /api/goals/:id/mutation/:requestId/decision — approve/reject queued mutation.
+	const mutationDecisionMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/mutation\/([^/]+)\/decision$/);
+	if (mutationDecisionMatch && req.method === "POST") {
+		const goalId = mutationDecisionMatch[1];
+		const requestId = mutationDecisionMatch[2];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const body = await readBody(req).catch(() => null);
+		const decision = body?.decision;
+		if (decision !== "approve" && decision !== "reject") {
+			json({ error: "decision must be 'approve' or 'reject'" }, 400);
+			return;
+		}
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) { json({ error: "Project context not found" }, 404); return; }
+		const planMutationStore = ctx.planMutationStore;
+		const goalManager = ctx.goalManager;
+		const pending = planMutationStore.get(goalId, requestId);
+		if (!pending) { json({ error: "Mutation request not found", code: "REQUEST_NOT_FOUND" }, 404); return; }
+		if (decision === "reject") {
+			planMutationStore.remove(goalId, requestId);
+			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision });
+			json({ applied: false });
+			return;
+		}
+		// approve: apply the proposed steps and bump replanCount.
+		try {
+			await applyPlanSteps(goal, pending.proposedSteps, goalManager);
+			const newReplanCount = (goal.replanCount ?? 0) + 1;
+			const updates: { replanCount: number; paused?: boolean } = { replanCount: newReplanCount };
+			if (newReplanCount > 5 && !goal.paused) updates.paused = true;
+			await goalManager.updateGoal(goal.id, updates);
+			planMutationStore.remove(goalId, requestId);
+			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused: !!updates.paused });
+			json({ applied: true, replanCount: newReplanCount, autoPaused: !!updates.paused });
+		} catch (err) {
+			json({ error: err instanceof Error ? err.message : String(err) }, 500);
+		}
+		return;
+	}
+
+	// PATCH /api/goals/:id/policy — set divergencePolicy / maxConcurrentChildren.
+	const policyMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/policy$/);
+	if (policyMatch && req.method === "PATCH") {
+		const id = policyMatch[1];
+		const goal = getGoalAcrossProjects(id);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const body = await readBody(req).catch(() => null);
+		if (!body) { json({ error: "Missing body" }, 400); return; }
+		const goalManager = getGoalManagerForGoal(id);
+		const updates: { divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number } = {};
+		if (body.divergencePolicy !== undefined) {
+			if (body.divergencePolicy !== "strict" && body.divergencePolicy !== "balanced" && body.divergencePolicy !== "autonomous") {
+				json({ error: "divergencePolicy must be one of strict|balanced|autonomous" }, 400);
+				return;
+			}
+			updates.divergencePolicy = body.divergencePolicy;
+		}
+		if (body.maxConcurrentChildren !== undefined) {
+			const n = Number(body.maxConcurrentChildren);
+			if (!Number.isFinite(n) || n < 1 || n > 8) {
+				json({ error: "maxConcurrentChildren must be a number in [1, 8]" }, 400);
+				return;
+			}
+			updates.maxConcurrentChildren = n;
+		}
+		await goalManager.updateGoal(id, updates);
+		broadcastToAll({ type: "goal_state_changed", goalId: id });
+		json({ ok: true });
+		return;
+	}
+
+	// END Phase 4 endpoints. The legacy DELETE handler below is extended
+	// in-place to support `?cascade=true|false` (422 if missing).
+
 	// Routes with goal :id parameter
 	const goalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)$/);
 	if (goalMatch) {
@@ -3335,56 +3836,72 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			// Cancel any in-flight gate verifications (terminates reviewer sessions)
-			for (const active of verificationHarness.getActiveVerifications(id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(id, active.gateId);
-				} catch (err) {
-					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
-				}
+			// Phase 4: explicit `cascade` query parameter is required. The UI is
+			// the cascade-policy authority; the server is policy-agnostic.
+			// Missing `cascade` → 422. `cascade=false` with descendants → 409
+			// `{ code: "HAS_DESCENDANTS", count }` so the UI can show a
+			// confirmation dialog.
+			const cascadeParam = url.searchParams.get("cascade");
+			if (cascadeParam !== "true" && cascadeParam !== "false") {
+				json({ error: "cascade query param required (true|false)", code: "CASCADE_REQUIRED" }, 422);
+				return;
 			}
-			// Capture agent branches BEFORE teardown erases the team store entry.
-			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
-			// mutates teamEntry.agents in place via dismissRole(), so we must
-			// snapshot the branch names into a fresh string[] now — reading
-			// teamEntry.agents after teardown returns an empty array.
-			const goalProjectCtx = projectContextManager.getContextForGoal(id);
-			const teamEntry = goalProjectCtx?.teamStore.get(id);
-			const agentBranches: string[] = [];
-			if (teamEntry?.agents) {
-				for (const a of teamEntry.agents) {
-					if (a.branch) agentBranches.push(a.branch);
-				}
-			}
-			// Include the team-lead's own session branch if it differs from goal.branch.
-			if (teamEntry?.teamLeadSessionId) {
-				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-				if (tl?.branch) agentBranches.push(tl.branch);
+			const cascade = cascadeParam === "true";
+			const targetGoal = getGoalAcrossProjects(id);
+			if (!targetGoal) { json({ error: "Goal not found" }, 404); return; }
+			const descendants = listDescendants(id);
+			if (!cascade && descendants.length > 0) {
+				json({ code: "HAS_DESCENDANTS", count: descendants.length, error: `${descendants.length} descendant(s) — pass cascade=true to archive recursively` }, 409);
+				return;
 			}
 
-			// Tear down any active team first (dismisses agents, cleans up their worktrees)
-			const teamState = teamManager.getTeamState(id);
-			if (teamState) {
-				try {
-					await teamManager.teardownTeam(id);
-				} catch (err) {
-					console.error(`[api] Error tearing down team for goal ${id}:`, err);
+			// Archive deepest-first: descendants in BFS order; reverse for
+			// deepest-first traversal. The parent itself is archived last.
+			const archiveOrder: PersistedGoal[] = [...descendants].reverse();
+			archiveOrder.push(targetGoal);
+			let archivedCount = 0;
+			for (const g of archiveOrder) {
+				const gid = g.id;
+				// Cancel any in-flight gate verifications (terminates reviewer sessions)
+				for (const active of verificationHarness.getActiveVerifications(gid)) {
+					try {
+						await verificationHarness.cancelStaleVerifications(gid, active.gateId);
+					} catch (err) {
+						console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
+					}
 				}
+				// Snapshot agent branches BEFORE teardown.
+				const goalProjectCtx = projectContextManager.getContextForGoal(gid);
+				const teamEntry = goalProjectCtx?.teamStore.get(gid);
+				const agentBranches: string[] = [];
+				if (teamEntry?.agents) {
+					for (const a of teamEntry.agents) {
+						if (a.branch) agentBranches.push(a.branch);
+					}
+				}
+				if (teamEntry?.teamLeadSessionId) {
+					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+					if (tl?.branch) agentBranches.push(tl.branch);
+				}
+				// Tear down any active team first.
+				const teamState = teamManager.getTeamState(gid);
+				if (teamState) {
+					try { await teamManager.teardownTeam(gid); }
+					catch (err) { console.error(`[api] Error tearing down team for goal ${gid}:`, err); }
+				}
+				const deleteGoalMgr = getGoalManagerForGoal(gid);
+				await deleteGoalMgr.archiveGoal(gid);
+				const archivedGoal = deleteGoalMgr.getGoal(gid);
+				if (archivedGoal?.repoPath) {
+					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+						console.warn(`[api] Remote branch cleanup failed for goal ${gid}:`, err);
+					});
+				}
+				prStatusStore.remove(gid);
+				broadcastToAll({ type: "goal_state_changed", goalId: gid });
+				archivedCount++;
 			}
-			// Archive instead of hard-delete — tasks, gates, team state remain intact
-			const deleteGoalMgr = getGoalManagerForGoal(id);
-			await deleteGoalMgr.archiveGoal(id);
-
-			// Fire-and-forget: clean up remote branches for this goal
-			const archivedGoal = deleteGoalMgr.getGoal(id);
-			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
-					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
-				});
-			}
-
-			prStatusStore.remove(id);
-			json({ ok: true });
+			json({ ok: true, archived: archivedCount });
 			return;
 		}
 	}
