@@ -335,21 +335,19 @@
 					if (rendered()) return;
 					showBanner("Something went wrong", true);
 				}, 10000);
-				// Cleanup hook — when the WS reaches connected (#app gets
-				// data-connected="true" from main.ts) the skeleton fades out.
-				// We never auto-hide on data-rendered alone: the rendered
-				// authenticated shell is empty until the WS lands, and the user
-				// would see it flash blank for a beat. Watchdog banners are
-				// dropped on data-rendered though, since their job is just to
-				// gate against "Lit never rendered" failures.
+				// Cleanup hook — once Lit has rendered (#app gets
+				// data-rendered="true" from main.ts after the first renderApp())
+				// hide the skeleton. The skeleton uses `position: fixed; inset: 0`
+				// and would otherwise intercept pointer events on every page that
+				// doesn't reach a WS-connected session (settings, workflow editor,
+				// role manager, etc). data-connected is a stronger signal but it
+				// only fires on session pages — not safe to gate the skeleton on.
 				var observer = new MutationObserver(function() {
 					var app = document.getElementById("app");
 					if (!app) return;
 					if (app.getAttribute("data-rendered") === "true") {
 						var wd = document.querySelector(".bobbit-watchdog");
 						if (wd) wd.remove();
-					}
-					if (app.getAttribute("data-connected") === "true") {
 						var sk = document.querySelector("[data-bobbit-skeleton]");
 						if (sk) sk.classList.add("--hide");
 						var pill = document.querySelector("[data-bobbit-pill]");
