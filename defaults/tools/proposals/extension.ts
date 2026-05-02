@@ -51,23 +51,29 @@ function sessionId(): string | undefined {
  * streaming path still delivers the partial to the UI. We log to stderr
  * so a regression is visible in the agent log without breaking the turn.
  */
-async function seedProposal(type: ProposalType, args: unknown): Promise<void> {
+async function seedProposal(type: ProposalType, args: unknown): Promise<number | undefined> {
 	const sid = sessionId();
 	if (!sid) {
 		console.error(`[proposal-tools] BOBBIT_SESSION_ID not set; cannot seed ${type} proposal`);
-		return;
+		return undefined;
 	}
 	try {
-		const { status, bodyText } = await callGateway(
+		const { status, bodyText, bodyJson } = await callGateway(
 			`/api/sessions/${encodeURIComponent(sid)}/proposal/${type}/seed`,
 			"POST",
 			{ args },
 		);
 		if (status < 200 || status >= 300) {
 			console.error(`[proposal-tools] seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`);
+			return undefined;
 		}
+		if (bodyJson && typeof bodyJson === "object" && typeof (bodyJson as any).rev === "number") {
+			return (bodyJson as any).rev as number;
+		}
+		return undefined;
 	} catch (err) {
 		console.error(`[proposal-tools] seed ${type} threw:`, (err as Error)?.message ?? err);
+		return undefined;
 	}
 }
 
@@ -81,9 +87,11 @@ const PROPOSAL_TYPE_ENUM = Type.Union([
 ], { description: "Proposal type" });
 
 export default function (pi: ExtensionAPI) {
-	function ack() {
+	function ack(rev?: number) {
+		const lines = ["Proposal submitted. Waiting for user response."];
+		if (typeof rev === "number" && rev > 0) lines.push(`__proposal_rev_v1__:${rev}`);
 		return {
-			content: [{ type: "text" as const, text: "Proposal submitted. Waiting for user response." }],
+			content: [{ type: "text" as const, text: lines.join("\n") }],
 			details: undefined,
 		};
 	}
@@ -101,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 			workflow: Type.Optional(Type.String({ description: "Workflow ID (e.g. \"general\", \"feature\", \"bug-fix\")" })),
 			options: Type.Optional(Type.String({ description: "Comma-separated step names for optional steps (e.g. \"QA testing\")" })),
 		}),
-		async execute(_id, args) { await seedProposal("goal", args); return ack(); },
+		async execute(_id, args) { const rev = await seedProposal("goal", args); return ack(rev); },
 	});
 
 	// ── propose_role ──────────────────────────────────────────────────
@@ -117,7 +125,7 @@ export default function (pi: ExtensionAPI) {
 			tools: Type.Optional(Type.String({ description: "Comma-separated list of allowed tools" })),
 			accessory: Type.Optional(Type.String({ description: "Accessory configuration" })),
 		}),
-		async execute(_id, args) { await seedProposal("role", args); return ack(); },
+		async execute(_id, args) { const rev = await seedProposal("role", args); return ack(rev); },
 	});
 
 	// ── propose_tool ──────────────────────────────────────────────────
@@ -131,7 +139,7 @@ export default function (pi: ExtensionAPI) {
 			action: Type.String({ description: "Action type (e.g. \"create\", \"update\")" }),
 			content: Type.String({ description: "Tool definition content (YAML)" }),
 		}),
-		async execute(_id, args) { await seedProposal("tool", args); return ack(); },
+		async execute(_id, args) { const rev = await seedProposal("tool", args); return ack(rev); },
 	});
 
 	// ── propose_staff ─────────────────────────────────────────────────
@@ -147,7 +155,7 @@ export default function (pi: ExtensionAPI) {
 			triggers: Type.Optional(Type.String({ description: "Trigger conditions" })),
 			cwd: Type.Optional(Type.String({ description: "Working directory" })),
 		}),
-		async execute(_id, args) { await seedProposal("staff", args); return ack(); },
+		async execute(_id, args) { const rev = await seedProposal("staff", args); return ack(rev); },
 	});
 
 	// ── propose_project ───────────────────────────────────────────────
@@ -189,7 +197,7 @@ export default function (pi: ExtensionAPI) {
 				value: Type.Optional(Type.String()),
 			}), { description: "Sandbox token list. Server strips `value` to SecretsStore on PUT." })),
 		}),
-		async execute(_id, args) { await seedProposal("project", args); return ack(); },
+		async execute(_id, args) { const rev = await seedProposal("project", args); return ack(rev); },
 	});
 
 	// ── view_proposal ─────────────────────────────────────────────────
@@ -272,8 +280,11 @@ export default function (pi: ExtensionAPI) {
 				// Server returns structured JSON for both success (200) and most
 				// failure modes (400/404). Pass it through verbatim so the agent
 				// sees `{ok, code, message, newContent?}` exactly as the spec lays out.
-				const text = bodyJson !== undefined ? JSON.stringify(bodyJson, null, 2) : bodyText;
+				let text = bodyJson !== undefined ? JSON.stringify(bodyJson, null, 2) : bodyText;
 				const isError = status < 200 || status >= 300;
+				if (!isError && bodyJson && typeof (bodyJson as any).rev === "number" && (bodyJson as any).rev > 0) {
+					text += `\n__proposal_rev_v1__:${(bodyJson as any).rev}`;
+				}
 				return {
 					content: [{ type: "text" as const, text }],
 					...(isError ? { isError: true } : {}),
