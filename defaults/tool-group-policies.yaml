@@ -1,4 +1,11 @@
 Ask: allow
+# Children group: nested-goal lifecycle tools (goal_spawn_child,
+# goal_plan_propose, goal_plan_status, goal_merge_child, goal_pause,
+# goal_resume, goal_archive_child, goal_decide_mutation, goal_set_policy).
+# Default `ask` so any non-team-lead role that gets the catalog must
+# explicitly approve. Per-role allow lives in `defaults/roles/team-lead.yaml`
+# (`always-allow`); every contributor role declares `never`.
+Children: ask
 # Skills group: gates the `activate_skill` tool, which lets the model autonomously
 # invoke any discovered slash skill mid-turn (Agent Skills level-1 progressive
 # disclosure). Set to `never` project-wide to suppress autonomous activation;

@@ -1,0 +1,22 @@
+name: goal_set_policy
+description: "Set the goal's divergence policy and concurrency cap"
+summary: "Update divergencePolicy and maxConcurrentChildren on the current goal."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Optional: `divergencePolicy` (`"strict" | "balanced" | "autonomous"`), `maxConcurrentChildren` (1..8). Both default unset (server defaults: `"balanced"`, 3). `maxConcurrentChildren` is only consulted on root goals; children store the value but the harness reads the root's. Returns 200 `{ ok: true }`.
+detail_docs: >-
+  ## Purpose
+
+
+  Adjust how the mutation classifier handles diff verdicts and how many
+  child goals can run in parallel under this tree.
+
+
+  ## Bounds
+
+
+  `maxConcurrentChildren` is clamped to 1..8 by the harness (Section
+  3.5) regardless of what's stored. Defaults: 3 if unset.

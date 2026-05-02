@@ -1,0 +1,48 @@
+name: goal_spawn_child
+description: "Spawn a child goal idempotently keyed by planId"
+summary: "Create or return an existing child goal under the current goal, keyed by planId."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Required: `planId`, `title`, `spec`. Optional: `workflowId` (defaults to "feature"), `suggestedRole`. Idempotent: re-calling with the same `planId` returns the existing child id (200) instead of creating a duplicate. The child's branch is created off the parent's branch HEAD; child's `ready-to-merge` will merge LOCALLY into the parent (no remote PR raised). Cycle prevention: cannot spawn a child whose id appears in the parent's ancestor chain.
+detail_docs: >-
+  ## Purpose
+
+
+  Spawn a child goal under the current goal. Used by the team-lead of a
+  parent-workflow goal to create the children referenced in its
+  `execution.verify[]` plan. The harness's `runSubgoalStep` handler also
+  calls this REST endpoint internally; this tool is the agent-facing
+  surface for ad-hoc / pre-plan spawning.
+
+
+  ## Idempotency
+
+
+  Idempotent on `planId` — re-calling with the same `planId` under the
+  same parent returns the existing child id with no side effects.
+  Re-spawn is suppressed at every layer (verification harness, REST
+  handler, this tool). Lesson 4.1 — `spawnedFromPlanId` is stamped
+  immediately after `createGoal` so a crash in between cannot strand the
+  child in a state where the next call sees no match and spawns a
+  duplicate.
+
+
+  ## Branch topology
+
+
+  The child's branch is `goal/<slug>-<id8>`, created off the parent's
+  branch HEAD (not `origin/master`). When the child's `ready-to-merge`
+  gate passes, its branch is merged LOCALLY into the parent — no remote
+  PR is raised. Only the root goal's `ready-to-merge` raises a PR (to
+  `master`).
+
+
+  ## Returns
+
+
+  `{ id: string }` — the child goal's id. Use it in subsequent
+  `goal_merge_child`, `goal_pause`, `goal_resume`, `goal_archive_child`
+  calls.
