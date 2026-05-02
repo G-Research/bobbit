@@ -1921,22 +1921,43 @@ function buildChildSummaries(parentGoalId: string, includeArchived: boolean): Ch
 
 function renderChildCard(s: ChildCardSummary): TemplateResult {
 	const g = s.goal;
-	const stateClass = g.archived && g.state === "complete"
-		? "complete"
-		: g.paused
-			? "paused"
-			: g.state === "shelved"
-				? "failed"
-				: g.state;
+	// Resolution order matters: archived must short-circuit BEFORE state-string
+	// fallback, otherwise an archived in-progress goal renders as "Running"
+	// because g.state stayed "in-progress" through the soft-delete (the data
+	// layer never rewrites state on archive — Lesson 4.2 success terminal is
+	// the ONLY case where state moves to "complete" alongside archive).
+	const stateClass: "complete" | "paused" | "failed" | "archived" | "in-progress" | "todo" | "shelved" =
+		g.archived && g.state === "complete"
+			? "complete"
+			: g.archived
+				? "archived"
+				: g.paused
+					? "paused"
+					: g.state === "shelved"
+						? "failed"
+						: (g.state as "in-progress" | "todo");
+	const stateLabel =
+		stateClass === "complete" ? "Done"
+			: stateClass === "archived" ? "Archived"
+				: stateClass === "paused" ? "Paused"
+					: stateClass === "failed" ? "Failed"
+						: stateClass === "in-progress" ? "Running"
+							: "Todo";
+	const stateChip =
+		stateClass === "complete" ? "complete"
+			: stateClass === "archived" ? "skipped"
+				: stateClass === "in-progress" ? "in-progress"
+					: stateClass === "failed" ? "skipped"
+						: "todo";
 	const costStr = s.cost > 0 ? `$${s.cost.toFixed(2)}` : "—";
 	const progressStr = s.gatesTotal > 0 ? `${s.gatesPassed}/${s.gatesTotal}` : "—";
 	return html`
 		<div class="child-card" data-testid="child-card-${g.id}"
-			style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;background:var(--card);min-width:0;"
+			style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;background:var(--card);min-width:0;${g.archived ? "opacity:0.7;" : ""}"
 			@click=${() => setHashRoute("goal-dashboard", g.id)}>
 			<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-				<span class="status-chip ${statusChipClass(stateClass === "complete" ? "complete" : (stateClass === "in-progress" ? "in-progress" : (stateClass === "failed" ? "skipped" : "todo")))}" data-testid="child-card-state">
-					<span class="dot"></span>${stateClass === "in-progress" ? "Running" : stateClass === "complete" ? "Done" : stateClass === "failed" ? "Failed" : stateClass === "paused" ? "Paused" : "Todo"}
+				<span class="status-chip ${statusChipClass(stateChip)}" data-testid="child-card-state">
+					<span class="dot"></span>${stateLabel}
 				</span>
 				${g.paused ? html`<span class="meta-tag" data-testid="child-card-paused" style="background:var(--secondary);color:var(--muted-foreground);font-size:10px;padding:1px 6px;border-radius:6px;">paused</span>` : nothing}
 			</div>
