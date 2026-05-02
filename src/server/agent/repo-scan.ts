@@ -169,6 +169,12 @@ export async function scanRepos(
 
 	if (!fs.existsSync(rootAbs)) return out;
 
+	// Resolve the root once so the symlink check below tolerates ancestor-level
+	// symlinks (e.g. macOS `/tmp` → `/private/tmp`). We only want to reject
+	// symlinks that escape the rootPath, not those introduced by the OS itself.
+	let rootReal = rootAbs;
+	try { rootReal = fs.realpathSync(rootAbs); } catch { /* leave as rootAbs */ }
+
 	const rootHasGit = hasGit(rootAbs);
 	if (rootHasGit) {
 		out.push({ folder: ".", hasGit: true, detectedCommands: detectCommands(rootAbs) });
@@ -186,11 +192,14 @@ export async function scanRepos(
 		if (SKIP_NAMES.has(name)) continue;
 
 		const absChild = path.join(rootAbs, name);
-		// Symlink protection: warn + skip if realpath doesn't match.
+		// Symlink protection: skip only if the child's realpath escapes the
+		// root's realpath. Ancestor-level symlinks (e.g. /tmp → /private/tmp)
+		// are tolerated because `realChild` will share `rootReal` as a prefix.
 		try {
-			const real = fs.realpathSync(absChild);
-			if (real !== absChild) {
-				console.warn(`[repo-scan] Skipping symlinked entry: ${absChild} -> ${real}`);
+			const realChild = fs.realpathSync(absChild);
+			const expected = path.join(rootReal, name);
+			if (realChild !== expected) {
+				console.warn(`[repo-scan] Skipping symlinked entry: ${absChild} -> ${realChild}`);
 				continue;
 			}
 		} catch { /* realpath may fail on dangling symlink */ continue; }
