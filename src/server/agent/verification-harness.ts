@@ -3067,6 +3067,30 @@ export class VerificationHarness {
 				return { passed: result.verdict, output: result.summary, sessionId };
 			}
 
+			// `waitForIdle` won the race — but the agent CLI may have flipped
+			// the session to `idle` BEFORE its outgoing `verification_result`
+			// tool POST hit the server. Live test (PR #409 0e4fc54c plan-
+			// approval UX, Eve Olution's bug report): reviewer sessions ran
+			// for 84-151s, all reviewers DID call verification_result, but
+			// the harness's `finally` block deleted `pendingResults`
+			// microseconds before the POST arrived — the agent saw a 404
+			// "No pending verification for this session" but interpreted it
+			// as success ("verification submitted"), then went idle.
+			//
+			// Wait an additional grace window for resultPromise to resolve
+			// before treating it as a real timeout. The grace window is
+			// short (5s) — enough to absorb network/IPC latency between the
+			// agent flipping to idle and its tool POST arriving — but not so
+			// long that a genuinely-stuck agent delays the reminder cycle.
+			const graceResult = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				new Promise<{ type: "timeout" }>(resolve => setTimeout(() => resolve({ type: "timeout" }), 5_000)),
+			]);
+			if (graceResult.type === "result") {
+				console.log(`[verification] Late tool POST won grace window for ${sessionId} ("${step.name}") — honoring verdict.`);
+				return { passed: graceResult.verdict, output: graceResult.summary, sessionId };
+			}
+
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
 			// fall back to the generic reminder.
@@ -3087,6 +3111,17 @@ export class VerificationHarness {
 
 			if (result2.type === "result") {
 				return { passed: result2.verdict, output: result2.summary, sessionId };
+			}
+
+			// Same grace window after the reminder cycle — the agent's tool
+			// POST might still arrive after waitForIdle resolved.
+			const graceResult2 = await Promise.race([
+				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),
+				new Promise<{ type: "timeout" }>(resolve => setTimeout(() => resolve({ type: "timeout" }), 5_000)),
+			]);
+			if (graceResult2.type === "result") {
+				console.log(`[verification] Late tool POST won post-reminder grace window for ${sessionId} ("${step.name}") — honoring verdict.`);
+				return { passed: graceResult2.verdict, output: graceResult2.summary, sessionId };
 			}
 
 			// Hard failure

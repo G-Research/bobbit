@@ -8743,7 +8743,18 @@ async function handleApiRoute(
 		}
 		const resolver = verificationHarness.pendingResults.get(body.sessionId);
 		if (!resolver) {
-			json({ error: "No pending verification for this session" }, 404);
+			// IMPORTANT: do not change this error string casually — the
+			// reviewer agent's prompt instructs it to surface the message
+			// verbatim, not paraphrase it as "submitted successfully". Live
+			// test (PR #409 0e4fc54c, Eve Olution's bug report): reviewers
+			// were saying "The verification has been submitted with verdict
+			// pass" after receiving a 404 because the message was vague.
+			// The harness-side grace window (verification-harness.ts) closes
+			// the timing window that produced this 404 in the first place;
+			// this clearer message is defence-in-depth for any residual race.
+			json({
+				error: "VERIFICATION_RESULT_NOT_ACCEPTED: harness has already declared this verification cycle complete (timed out or cancelled). Your verdict was NOT recorded. The harness will spawn a fresh reviewer if a re-signal is needed; you should NOT report this as a successful submission.",
+			}, 404);
 			return;
 		}
 		// Support report_html_file: server reads file directly (avoids tool output limits for large reports)
