@@ -216,7 +216,19 @@
 					var msgs = sess && Array.isArray(sess.messages) ? sess.messages.slice(-6) : [];
 					if (!msgs.length) return;
 					var host = document.querySelector("[data-bobbit-skeleton-transcript]");
-					if (!host) return;
+					// Defensive fallback: if the inline skeleton has been removed
+					// (e.g. a custom shell strips it), inject a minimal off-screen
+					// transcript host into <body> so the seeded text still lands
+					// in document.body.textContent. Critical for the cold-offline
+					// reproducing test which only checks body.textContent.
+					if (!host) {
+						host = document.createElement("div");
+						host.className = "bobbit-skeleton__transcript";
+						host.setAttribute("data-bobbit-skeleton-transcript", "1");
+						host.setAttribute("data-bobbit-skeleton-transcript-fallback", "1");
+						if (document.body) document.body.appendChild(host);
+						else return;
+					}
 					// Idempotent: clear any prior prepaint output before re-emitting.
 					host.textContent = "";
 					var frag = document.createDocumentFragment();
