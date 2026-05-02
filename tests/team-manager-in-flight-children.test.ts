@@ -90,10 +90,49 @@ describe("anyInFlightChild", () => {
 	});
 
 	it("treats unknown future states as in-flight", () => {
-		// If a future state name is added (e.g. "paused"), the predicate
-		// should suppress the nudge until we explicitly classify it. Listed
-		// terminals are an allowlist, not a denylist.
-		const goals: InFlightCandidateGoal[] = [{ parentGoalId: PARENT, state: "paused" }];
+		// If a future state name is added (e.g. "hibernating"), the
+		// predicate should suppress the nudge until we explicitly classify
+		// it. Listed terminals are an allowlist, not a denylist.
+		const goals: InFlightCandidateGoal[] = [{ parentGoalId: PARENT, state: "hibernating" }];
+		assert.equal(anyInFlightChild(PARENT, goals), true);
+	});
+
+	it("PAUSED child does NOT count as in-flight (parent must be nudged to investigate)", () => {
+		// Live test (PR #409 v0.2-embeddings, issue 11): Brisket's child
+		// v0.2 was paused (state: in-progress, paused: true) with execution=
+		// failed. Pre-fix `anyInFlightChild` returned true (state non-
+		// terminal, archived false), so Brisket was eternally skipped on
+		// the idle nudge. A paused child can't make progress on its own —
+		// only the parent (or user) can act. Treating paused as in-flight
+		// suppresses the parent indefinitely. Now paused is excluded.
+		const goals: InFlightCandidateGoal[] = [
+			{ parentGoalId: PARENT, state: "in-progress", paused: true },
+		];
+		assert.equal(anyInFlightChild(PARENT, goals), false);
+	});
+
+	it("PAUSED child mixed with truly-active siblings: still returns true (other children are in-flight)", () => {
+		// If only ONE child is paused but others are actually progressing,
+		// the parent shouldn't be nudged — the active children are making
+		// progress.
+		const goals: InFlightCandidateGoal[] = [
+			{ parentGoalId: PARENT, state: "in-progress", paused: true },
+			{ parentGoalId: PARENT, state: "in-progress", paused: false },
+		];
+		assert.equal(anyInFlightChild(PARENT, goals), true);
+	});
+
+	it("paused: false (explicit) is in-flight", () => {
+		const goals: InFlightCandidateGoal[] = [
+			{ parentGoalId: PARENT, state: "in-progress", paused: false },
+		];
+		assert.equal(anyInFlightChild(PARENT, goals), true);
+	});
+
+	it("paused: undefined (default) is in-flight (defensive: don't change baseline behaviour)", () => {
+		const goals: InFlightCandidateGoal[] = [
+			{ parentGoalId: PARENT, state: "in-progress" }, // paused undefined
+		];
 		assert.equal(anyInFlightChild(PARENT, goals), true);
 	});
 

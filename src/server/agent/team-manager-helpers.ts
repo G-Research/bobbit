@@ -15,14 +15,21 @@ export interface InFlightCandidateGoal {
 	parentGoalId?: string;
 	archived?: boolean;
 	state?: string;
+	paused?: boolean;
 }
 
 /**
  * Returns true if `goals` contains at least one immediate child of
- * `parentId` that is non-archived AND not in a terminal state.
+ * `parentId` that is ACTIVELY in flight — non-archived, non-terminal,
+ * AND not paused.
  *
  * Terminal states: `complete` and `shelved`. Anything else (`todo`,
- * `in-progress`, undefined, future state) is treated as "still in flight".
+ * `in-progress`, undefined, future state) is treated as "in flight"
+ * for the live-progress check. EXCEPT paused children: a paused goal
+ * can't make progress on its own — only the parent (or user) can act
+ * to resume / fix / archive it. Treating paused as in-flight would
+ * suppress the parent's nudge indefinitely, leaving the tree silent
+ * even when the parent's own attention is what's needed.
  *
  * Used to suppress the team-lead idle nudge for parent-pattern goals
  * that orchestrate via `goal_spawn_child` rather than `team_spawn`. Such
@@ -31,6 +38,13 @@ export interface InFlightCandidateGoal {
  * queue. Nudging them produces noise that pulls the lead into pointless
  * tool calls.
  *
+ * Live test (PR #409 v0.2-embeddings): Brisket's child v0.2 was paused
+ * (state: in-progress, paused: true) with execution=failed but all 4
+ * Phase 1 leaf branches actually merged into v0.2's branch. The parent
+ * needed to know v0.2 is stuck-on-pause so they could investigate —
+ * but `anyInFlightChild` returned true (v0.2 was non-archived,
+ * non-terminal) and Brisket got eternally skipped on the idle nudge.
+ *
  * Pure: no side effects, no I/O.
  */
 export function anyInFlightChild(parentId: string, goals: readonly InFlightCandidateGoal[]): boolean {
@@ -38,6 +52,7 @@ export function anyInFlightChild(parentId: string, goals: readonly InFlightCandi
 		if (g.parentGoalId !== parentId) continue;
 		if (g.archived) continue;
 		if (g.state === "complete" || g.state === "shelved") continue;
+		if (g.paused === true) continue; // paused = parent's responsibility
 		return true;
 	}
 	return false;
