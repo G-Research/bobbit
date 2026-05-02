@@ -653,7 +653,7 @@ function renderGoalBadge(goalId: string) {
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
  * Mobile:  dashboard button always visible. No double-click (no hover hint).
  */
-export function renderGoalGroup(goal: Goal) {
+export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number }) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
 	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
@@ -784,6 +784,15 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}</span>
+				${(opts?.descendantCount ?? 0) > 0 ? html`
+					<span
+						class="shrink-0 font-semibold text-muted-foreground"
+						data-testid="sidebar-descendant-badge"
+						style="background:var(--secondary);padding:0 0.3333em;border-radius:0.5em;line-height:1.1667em;font-size:0.75em;"
+						title="${opts!.descendantCount} descendant goal${opts!.descendantCount === 1 ? "" : "s"}">
+						${opts!.descendantCount}
+					</span>
+				` : nothing}
 				${renderGoalBadge(goal.id)}
 				${mobile
 					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`

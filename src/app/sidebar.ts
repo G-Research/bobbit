@@ -796,20 +796,10 @@ function renderNestedNode(
 ): TemplateResult | typeof nothing {
 	const indentPx = node.depth * 16;
 	const goal = node.goal as unknown as Goal;
-	const showCount = node.descendantCount > 0;
 	return html`
 		<div data-testid="sidebar-nested-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
-			<div class="relative" data-testid="sidebar-goal-row">
-				${renderGoalGroup(goal)}
-				${showCount ? html`
-					<span
-						class="absolute pointer-events-none text-[9px] font-semibold text-muted-foreground"
-						data-testid="sidebar-descendant-badge"
-						style="right:6px;top:2px;background:var(--secondary);padding:0 4px;border-radius:6px;"
-						title="${node.descendantCount} descendant goal${node.descendantCount === 1 ? "" : "s"}">
-						(${node.descendantCount})
-					</span>
-				` : nothing}
+			<div data-testid="sidebar-goal-row">
+				${renderGoalGroup(goal, { descendantCount: node.descendantCount })}
 			</div>
 		</div>
 		${node.children.map(c => renderNestedNode(projectId, c))}
