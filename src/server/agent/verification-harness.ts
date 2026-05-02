@@ -28,6 +28,7 @@ import {
 	canSkipAllSteps,
 	detectJsonValidationError,
 	isPreImplementationGate,
+	shouldSuppressRestartInterrupt,
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
@@ -131,6 +132,40 @@ export const VERIFICATION_RESULT_REMINDER =
 	"You went idle without submitting your results. " +
 	"Call the `verification_result` tool now with your verdict and summary. " +
 	"This is REQUIRED — the verification system only receives results through this tool.";
+
+/**
+ * Lesson 4.8 — Build a context-rich reminder for live (not resumed) reviewers
+ * who emit their verdict as chat-text and end the turn instead of calling
+ * `verification_result`.
+ *
+ * The two-sentence legacy `VERIFICATION_RESULT_REMINDER` consistently failed
+ * to elicit a tool call: with no kickoff context attached, the model treats
+ * the reminder as a continuation of its previous (chat-text) reply. The
+ * context-rich version:
+ *
+ *   1. Leads with `## STOP — verification_result not called` so the agent
+ *      treats it as a hard correction, not a continuation.
+ *   2. States explicitly that any chat-text verdict is INVISIBLE to the gate.
+ *   3. Tells the agent to call the tool with whatever opinion it ALREADY
+ *      formed — no re-investigation.
+ *   4. Re-attaches the FULL original kickoff after a `---` separator, so the
+ *      agent has the original task spec back in context.
+ *
+ * Wire this into BOTH the LLM-review reminder path and the agent-QA reminder
+ * path. The resume path (`_tryResumeFromSession`) keeps the legacy terse
+ * reminder because it doesn't have access to rebuild the kickoff.
+ */
+export function buildContextRichReminder(originalKickoff: string): string {
+	return `## STOP — verification_result not called
+
+Your previous turn ended without calling \`verification_result\`. Any chat-text verdict is INVISIBLE to the gate.
+
+Call \`verification_result\` now with whatever opinion you ALREADY FORMED — do not re-investigate. Use status="pass" if your investigation was satisfactory, "fail" otherwise.
+
+---
+
+${originalKickoff}`;
+}
 
 /**
  * The `verification_result` tool is now a standard goal tool registered in
@@ -621,10 +656,23 @@ export class VerificationHarness {
 
 		// Compute overall result
 		const allPassed = resolvedSteps.every(r => r.passed);
-		const status = allPassed ? "passed" as const : "failed" as const;
+
+		// Lesson 4.6 — Restart-interrupt suppression. If every failed step is a
+		// restart-interrupt (per RESTART_INTERRUPT_MARKERS or empty-output
+		// review/QA), don't mark the gate failed — the work being verified
+		// hasn't actually been judged. Persist the verification record honestly
+		// (so `gate_status` reflects what really happened) but leave the gate
+		// `pending` so a re-signal will run a fresh verification.
+		//
+		// Predicate is conjunctive: a single real failure poisons the gate
+		// (real failures should still surface as failed even if some sibling
+		// steps got restart-interrupted).
+		const suppressedByRestart = !allPassed && shouldSuppressRestartInterrupt(resolvedSteps);
+		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
+		const gateStatus = suppressedByRestart ? "pending" as const : persistedStatus;
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
-			status,
+			status: persistedStatus,
 			steps: resolvedSteps.map(r => ({
 				name: r.name,
 				type: r.type as "command" | "llm-review" | "agent-qa",
@@ -633,19 +681,31 @@ export class VerificationHarness {
 				duration_ms: r.duration_ms,
 			})),
 		});
-		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, status);
+		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
 		this.broadcastFn(v.goalId, {
 			type: "gate_verification_complete",
-			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status,
+			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: persistedStatus,
 		});
 		this.broadcastFn(v.goalId, {
 			type: "gate_status_changed",
-			goalId: v.goalId, gateId: v.gateId, status,
+			goalId: v.goalId, gateId: v.gateId, status: gateStatus,
 		});
-		this.notifyTeamLead(v.goalId, v.gateId, status);
-
-		console.log(`[verification] Resumed verification ${v.signalId}: ${status}`);
+		if (suppressedByRestart) {
+			// Benign nudge — the team-lead should re-signal, not investigate a
+			// phantom regression. notifyTeamLead is keyed off the gate status
+			// string so we send a custom message rather than the standard one.
+			if (this.notifyTeamLeadFn) {
+				this.notifyTeamLeadFn(
+					v.goalId,
+					`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
+				);
+			}
+			console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
+		} else {
+			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus);
+			console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
+		}
 	}
 
 	/**
@@ -1861,10 +1921,14 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
+			// fall back to the context-rich reminder (Lesson 4.8). The legacy
+			// terse reminder did not elicit a tool call when the agent had emitted
+			// its verdict as chat-text and ended turn — re-attaching the kickoff
+			// puts the spec back in context so the agent has something to call
+			// the tool with.
 			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
+			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
+			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "context-rich"} reminder`);
 			await session.rpcClient.prompt(reminderPrompt);
 			// Wait for the agent to actually pick up the reminder before racing
 			// against waitForIdle — see _tryResumeFromSession for rationale. The
@@ -2164,10 +2228,12 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
+			// fall back to the context-rich reminder (Lesson 4.8). Re-attaching
+			// the kickoff in the reminder restores the QA test plan to context
+			// so the agent has the spec back when it tries again.
 			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
-			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
+			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
+			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "context-rich"} reminder`);
 			await session.rpcClient.prompt(qaReminderPrompt);
 			// Wait for the agent to actually pick up the reminder before racing
 			// against waitForIdle — see _tryResumeFromSession for rationale.
