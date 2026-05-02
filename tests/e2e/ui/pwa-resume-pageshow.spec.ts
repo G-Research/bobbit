@@ -65,10 +65,10 @@ test.describe("PWA pageshow {persisted:true} → no reload, fresh WS open", () =
 			});
 		});
 
-		// Wait briefly so any startup-time WS open is captured before our
-		// baseline snapshot below — we only care about NEW opens after the
-		// pageshow event.
-		await page.waitForTimeout(250);
+		// Yield to the page so any in-flight startup-time WebSocket
+		// constructions are captured before we take the baseline. Event-driven:
+		// wait for the next animation frame instead of wall-clock sleeping.
+		await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
 		const baseline = await page.evaluate(() => ({
 			ws: (window as any).__wsOpens.length,
 			reloads: (window as any).__reloadCalls,
@@ -89,23 +89,24 @@ test.describe("PWA pageshow {persisted:true} → no reload, fresh WS open", () =
 		});
 
 		// Allow up to 1.5 s for the handler to react and open a fresh WS.
-		const observed = await page.evaluate(async () => {
-			const deadline = Date.now() + 1500;
-			while (Date.now() < deadline) {
-				await new Promise((r) => setTimeout(r, 50));
-				const w = window as any;
-				if (w.__wsOpens.length > 0) {
-					// Keep polling a bit further so we catch reload races, but
-					// we have at least one open — break early.
-					break;
-				}
-			}
-			return {
-				ws: (window as any).__wsOpens.length,
-				reloads: (window as any).__reloadCalls,
-				lastWsUrls: ((window as any).__wsOpens as any[]).map((o) => o.url),
-			};
-		});
+		// Event-driven via page.waitForFunction (rAF-polled). If no new WS
+		// opens within the budget, fall through and let the assertion below
+		// produce the canonical "pageshow handler not registered" message.
+		const baselineWs = baseline.ws;
+		try {
+			await page.waitForFunction(
+				(prev: number) => ((window as any).__wsOpens.length as number) > prev,
+				baselineWs,
+				{ timeout: 1500, polling: "raf" },
+			);
+		} catch {
+			/* deliberate: we want the failing assertion below */
+		}
+		const observed = await page.evaluate(() => ({
+			ws: (window as any).__wsOpens.length,
+			reloads: (window as any).__reloadCalls,
+			lastWsUrls: ((window as any).__wsOpens as any[]).map((o) => o.url),
+		}));
 
 		const newWsOpens = observed.ws - baseline.ws;
 		const newReloads = observed.reloads - baseline.reloads;
