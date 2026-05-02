@@ -385,6 +385,22 @@ export class GoalManager {
 			}
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(wf));
+		} else if (workflowId && !workflowStore && !resolvedWorkflow) {
+			// Tier 4-fail-loudly: caller asked for a specific workflowId but
+			// neither passed `resolvedWorkflow` (config-cascade hit) nor
+			// constructed GoalManager with a `workflowStore` to look it up
+			// in. Pre-fix this case silently fell through and produced a
+			// goal with `workflow: undefined` — no gates initialised, no
+			// ready-to-merge to bubble back to a parent. Live test (PR
+			// #409 v0.2-embeddings, context-fencing leaf 48c314fd): the
+			// harness's runSubgoalStep called createGoal with
+			// workflowId: "feature" but the per-project GoalManager was
+			// constructed without a workflowStore (project-context.ts bug).
+			// Result: workflow-less leaf, gates never created, parent's
+			// runSubgoalStep wait loop polled forever. Throw loudly so a
+			// future regression surfaces at spawn-time, not 30 minutes
+			// later when the parent's gate stays stuck.
+			throw new Error(`createGoal: workflowId=${workflowId} given but no workflowStore wired — cannot look it up. Pass \`resolvedWorkflow\` directly or construct GoalManager with a workflowStore.`);
 		} else if (!workflowId && workflowStore) {
 			// Tier 5: default to "general".
 			const defaultWf = workflowStore.get("general");

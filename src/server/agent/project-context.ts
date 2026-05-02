@@ -69,7 +69,6 @@ export class ProjectContext {
     this.colorStore = new ColorStore(this.stateDir);
     this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
     this.costTracker = new CostTracker(this.stateDir);
-    this.goalManager = new GoalManager(this.goalStore);
     this.secretsStore = new SecretsStore(this.stateDir);
 
     // Instantiate config stores with project-scoped config directory.
@@ -80,6 +79,19 @@ export class ProjectContext {
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
+
+    // GoalManager MUST receive the project's workflowStore. Without it,
+    // `createGoal({ workflowId: "feature" })` silently produces a goal
+    // with `workflow: undefined` (no gates initialised, no
+    // ready-to-merge to bubble back to the parent). Live test (PR #409
+    // v0.2-embeddings, context-fencing leaf 48c314fd): harness's
+    // `runSubgoalStep` spawned the child with `workflowId: "feature"`,
+    // GoalManager hit the Tier-4 branch but workflowStore was
+    // undefined, code silently fell through, child got `workflow: null`
+    // and `state: complete` once its coder finished. No gates ever
+    // existed, so `ready-to-merge` could never pass, so the parent's
+    // `runSubgoalStep` never received the bubble.
+    this.goalManager = new GoalManager(this.goalStore, this.workflowStore);
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */
