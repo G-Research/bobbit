@@ -807,12 +807,14 @@ export class VerificationHarness {
 					duration_ms: Date.now() - step.startedAt,
 				});
 			} else {
-				// No session and not an llm-review — cannot recover
+				// Non-command, non-subgoal, non-resumable step (rare —
+				// would be a future verify-step type without a session
+				// id and without a command rerun path).
 				resolvedSteps.push({
 					name: step.name,
 					type: step.type,
 					passed: false,
-					output: "Step was running but had no session ID — cannot resume after restart.",
+					output: "Step was running but had no session ID — cannot resume after restart. Re-signal the gate to retry.",
 					duration_ms: Date.now() - step.startedAt,
 				});
 			}
@@ -820,6 +822,74 @@ export class VerificationHarness {
 
 		// Compute overall result
 		const allPassed = resolvedSteps.every(r => r.passed);
+
+		// Suppress restart-interrupt false-negatives. If the ONLY reason
+		// the gate would fail is that one or more steps were interrupted
+		// by the server restart (no rerun path exists), don't mark the
+		// gate failed and don't notify the team-lead. Instead, surface a
+		// transient "interrupted by restart" status so the team-lead can
+		// re-signal cleanly.
+		//
+		// Live test (PR #409 0e4fc54c plan-approval UX): every gateway
+		// restart hit Eve's implementation gate mid-verification and
+		// produced a false-negative "Step was running but had no session
+		// ID — cannot resume after restart" failure. Four such restarts
+		// in a row were sent as user-visible noise. The team-lead spent
+		// turns repeatedly re-signalling instead of moving forward.
+		//
+		// Detection: a step's output starts with "Step was running but
+		// had no session ID" or "Step was interrupted by server restart".
+		// All FAILED steps must match this pattern (a real verification
+		// failure shouldn't be papered over).
+		const RESTART_INTERRUPT_MARKERS = [
+			"Step was running but had no session ID",
+			"Step was interrupted by server restart",
+		];
+		const failedSteps = resolvedSteps.filter(r => !r.passed);
+		const allFailuresAreRestartInterrupts =
+			failedSteps.length > 0 &&
+			failedSteps.every(r => RESTART_INTERRUPT_MARKERS.some(m => r.output.includes(m)));
+
+		if (!allPassed && allFailuresAreRestartInterrupts) {
+			console.log(`[verification] Resumed verification ${v.signalId}: ALL ${failedSteps.length} failed step(s) are restart-interrupts — suppressing gate failure, leaving signal as 'running' for team-lead to re-signal.`);
+			// Do NOT mark gate failed. Update the signal record with the
+			// step results (so the team-lead's gate_status output is
+			// honest) but keep gate state at whatever it was before
+			// (typically 'running' or 'pending'). The team-lead's existing
+			// re-signal flow handles cleanup.
+			this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
+				status: "failed",
+				steps: resolvedSteps.map(r => ({
+					name: r.name,
+					type: r.type as "command" | "llm-review" | "agent-qa",
+					passed: r.passed,
+					output: r.output,
+					duration_ms: r.duration_ms,
+				})),
+			});
+			// Mark the gate pending so the team-lead can simply re-signal.
+			this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "pending");
+			this.broadcastFn(v.goalId, {
+				type: "gate_status_changed",
+				goalId: v.goalId, gateId: v.gateId, status: "pending",
+			});
+			// Notify the team-lead with a benign message via the
+			// non-failure path. We can't use `notifyTeamLead` because it
+			// only handles "passed" / "failed" — it'd produce a verbose
+			// failure-with-merge-gap-diagnostic message we want to avoid.
+			// Send a plain steered message via the notify function
+			// directly.
+			if (this.notifyTeamLeadFn) {
+				const goalForMsg = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
+				const goalTitle = goalForMsg?.title || v.goalId.slice(0, 8);
+				this.notifyTeamLeadFn(
+					v.goalId,
+					`[restart-resume] Verification of gate "${v.gateId}" on goal "${goalTitle}" was interrupted by a server restart. ${failedSteps.length} step(s) couldn't be resumed (no session id). The gate has been reset to 'pending' — re-signal the gate to retry. This is NOT a real verification failure.`,
+				);
+			}
+			return;
+		}
+
 		const status = allPassed ? "passed" as const : "failed" as const;
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
@@ -1315,6 +1385,18 @@ export class VerificationHarness {
 
 	private notifyTeamLead(goalId: string, gateId: string, status: string): void {
 		if (!this.notifyTeamLeadFn) return;
+
+		// Restart-interrupt suppression path: gate stays pending after a
+		// resume that found ALL failed steps were restart-interrupts. Send
+		// a benign one-liner so the team-lead just re-signals.
+		if (status === "pending") {
+			const goalForCtx = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+			const goalLabel = goalForCtx?.title ? `"${goalForCtx.title}"` : goalId.slice(0, 8);
+			const msg = `Gate verification for goal ${goalLabel} "${gateId}" was interrupted by a server restart. The gate has been reset to PENDING. Simply re-signal the gate to retry from a clean state.`;
+			this.notifyTeamLeadFn(goalId, msg);
+			return;
+		}
+
 		const verb = status === "passed" ? "PASSED" : "FAILED";
 
 		// For failures, surface the actual failed-step names + a brief output
