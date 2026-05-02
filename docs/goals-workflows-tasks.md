@@ -12,6 +12,37 @@ A **goal** is a unit of work with a title, spec (markdown), working directory, a
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). When enabled, the server automatically calls `teamManager.startTeam()` after worktree setup completes — no manual "Start Team" click needed. If auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable; the user can start the team manually. The retry-setup handler also respects this flag.
 
+#### Nested goals (Phase 1 data model)
+
+Goals can nest. A nested goal IS a goal — same record shape, same store, same gates, same workflow snapshot, same team-lead session. The only difference is a handful of optional fields on `PersistedGoal` that establish the parent/child relationship and a few root-only policy fields. Phase 1 adds the data model; the verification harness `subgoal` step type that consumes it lands in Phase 3.
+
+| Field                   | Type                                          | Where set                                                                                  | Meaning                                                                                                                                                              |
+| ----------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parentGoalId`          | `string?`                                     | At creation only (never updated thereafter)                                                | Parent goal ID. Undefined for root goals.                                                                                                                            |
+| `rootGoalId`            | `string?`                                     | Auto-derived at creation                                                                   | Root of this goal's tree. Equals `id` for root, equals `parent.rootGoalId ?? parent.id` for children. Defensive `?? parent.id` covers legacy parents missing the field. |
+| `mergeTarget`           | `"master" \| "parent"?`                       | Auto-derived at creation                                                                   | Where this goal's branch merges. `"master"` for root (raises a PR via `ready-to-merge`). `"parent"` for children (local merge into parent's branch — no remote PR).     |
+| `divergencePolicy`      | `"strict" \| "balanced" \| "autonomous"?`     | REST (root only)                                                                           | Mutation policy for post-freeze plan changes. Default `"balanced"`. Inert on sub-goals (forward-compat); harness consults the root's value.                          |
+| `maxConcurrentChildren` | `number?`                                     | REST (root only)                                                                           | Max parallel children across the tree. Default 3, hard max 8. Inert on sub-goals.                                                                                    |
+| `acceptanceCriteria`    | `string[]?`                                   | Auto-populated from `## Acceptance criteria` in the spec markdown                          | Used by the criteria-coverage check (Phase 4) to gate `criteria-drop` mutations.                                                                                     |
+| `spawnedFromPlanId`     | `string?`                                     | Stamped by the harness immediately after `createGoal` in `runSubgoalStep` (Lesson 4.1)     | Subgoal idempotency key. Lookup by `(parentGoalId, planId)` rescues children stranded by mid-spawn restart.                                                          |
+| `paused`                | `boolean?`                                    | REST (any goal)                                                                            | User can pause a goal mid-flight. Children may inherit via cascade. A paused child does NOT suppress the parent's idle nudge (Lesson 4.13).                          |
+| `replanCount`           | `number?`                                     | Bumped by REST classifier on every successful post-freeze mutation                         | Auto-pause trigger when `> 5` (human review required).                                                                                                               |
+
+**Derivation rules** (applied at `createGoal`):
+
+- `parentGoalId === undefined` → `rootGoalId = id`, `mergeTarget = "master"` (root goal).
+- `parentGoalId` set → walk parent chain (capped at 64 deep) for cycle prevention; `rootGoalId = parent.rootGoalId ?? parent.id`; `mergeTarget = "parent"`.
+
+**Lazy migration**: existing `goals.json` files written before Phase 1 load unchanged — every new field reads as `undefined`. The data layer never backfills defaults; defaults are computed at use sites. Top-level goals created post-Phase-1 have `rootGoalId = id` and `mergeTarget = "master"` stamped explicitly.
+
+**Inheritance**: `divergencePolicy` and `maxConcurrentChildren` are root-only and **NOT** auto-inherited by children. The harness consults the root's value at runtime. Sub-goals can persist their own value but it's inert.
+
+**Security**: `parentGoalId` is set only at creation (never updated). `rootGoalId` and `mergeTarget` are server-derived only — never accept these from a client. Cycle prevention's depth cap of 64 guards against DoS via a self-referential or arbitrarily deep parent chain. `acceptanceCriteria` is plain text extracted from markdown and must not be rendered as HTML.
+
+**Criteria-coverage check** (full implementation Phase 4): walks the union of {root spec, remaining subgoal step specs} for each acceptance criterion using a whitespace-normalised, case-insensitive substring match. Hashes don't work — they fail the moment the team-lead paraphrases. Team-leads MUST quote criteria verbatim in subgoal specs (a `## Covers` heading is the convention).
+
+The verbatim list of fields, types, and validation rules is the source of truth for `src/server/agent/goal-store.ts::PersistedGoal`. The pure helper that parses the criteria from spec markdown lives at `src/shared/parse-acceptance-criteria.ts`.
+
 ### Workflows
 
 A **workflow** is a reusable template that defines which gates a goal must pass, their dependency relationships (a DAG), and verification configs. Workflows live **inline in `project.yaml::workflows`** — the project assistant generates a bespoke block per project from [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD authoring guide is the single source of truth for workflow patterns; the runtime never reads it.
