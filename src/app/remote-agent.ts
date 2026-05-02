@@ -11,20 +11,14 @@ import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnsw
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
 
-// Stream A hook: scheduleSave is loaded dynamically so this module degrades
-// gracefully if `./ui-snapshot.js` hasn't landed yet. Wrapped in try/catch at
-// every call site so a save error never blocks a reducer dispatch.
-let _scheduleSave: ((s: any) => void) | null = null;
-// Dynamic import via a runtime-constructed specifier so neither TS nor Vite
-// statically resolve the path — Stream A's `./ui-snapshot.js` may not exist
-// at build time. If the module is present at runtime, hook scheduleSave;
-// otherwise the call site no-ops via the null guard.
-{
-	const spec = "./ui-snapshot" + ".js";
-	(new Function("s", "return import(s)"))(spec)
-		.then((m: any) => { _scheduleSave = m?.scheduleSave ?? null; })
-		.catch(() => { /* module not present yet — ignore */ });
-}
+// Stream A hook: persist UI state on every reducer dispatch so a hard reload
+// (or iOS PWA snapshot restore) can repaint the last-rendered view from
+// localStorage before the WS reconnects. `ui-snapshot.ts` is now part of the
+// app bundle, so we import it statically; in production it lands in the same
+// chunk as remote-agent.ts and Vite resolves it at build time. Wrapped in
+// try/catch at every call site so a save error never blocks a dispatch.
+import { scheduleSave as _scheduleSaveFn } from "./ui-snapshot.js";
+const _scheduleSave: ((s: any) => void) | null = _scheduleSaveFn;
 
 /** sessionStorage key used by the soft heartbeat (Stream D §6.4). */
 const HEARTBEAT_KEY = "bobbit:heartbeat";

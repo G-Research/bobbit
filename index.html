@@ -28,6 +28,17 @@
 				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 				z-index: 0;
 				transition: opacity 200ms ease-out;
+				/*
+				 * Never capture clicks. The skeleton is purely visual — a
+				 * placeholder while Lit boots. If the real UI mounts on top of
+				 * us before the watchdog removes us (multi-context tests, slow
+				 * MutationObserver, etc.) every click would otherwise be
+				 * intercepted by this fixed-position overlay. The watchdog
+				 * still hides us via .--hide once #app[data-rendered=true]
+				 * fires, but pointer-events:none is the unconditional safety
+				 * net.
+				 */
+				pointer-events: none;
 			}
 			.bobbit-skeleton.--hide {
 				opacity: 0;

@@ -68,12 +68,21 @@ function cacheIfOk(req, response) {
 	return response;
 }
 
+// What counts as "app shell" for stale-while-revalidate. Hashed
+// `/assets/*` URLs are deliberately EXCLUDED (and bypassed entirely
+// below). They're content-addressed via the bundler hash; the
+// browser's HTTP cache + ETags handle them perfectly. Routing them
+// through the SW risks (a) serving stale content during a build hash
+// bump, or (b) falling through to a gateway SPA-fallback that returns
+// `index.html` for an unknown asset URL during teardown — which trips
+// browser MIME enforcement ("Failed to load module script: Expected a
+// JavaScript-or-Wasm module script but the server responded with a
+// MIME type of text/html").
 function isShellPath(pathname) {
 	return (
 		pathname === "/" ||
 		pathname === "/index.html" ||
-		pathname === "/manifest.json" ||
-		pathname.startsWith("/assets/")
+		pathname === "/manifest.json"
 	);
 }
 
@@ -87,6 +96,10 @@ self.addEventListener("fetch", (event) => {
 
 	// Never touch API or WebSocket traffic — must always hit the gateway.
 	if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws")) return;
+
+	// Bypass the SW entirely for hashed `/assets/*` URLs (see
+	// `isShellPath` for rationale).
+	if (url.pathname.startsWith("/assets/")) return;
 
 	const isNavigate = req.mode === "navigate";
 	const isShell = isNavigate || isShellPath(url.pathname);
