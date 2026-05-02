@@ -91,6 +91,16 @@ export interface Goal {
 	reattemptOf?: string;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	/** Nested-goals fields (Phase 1 data model). All optional; lazy-migrated. */
+	parentGoalId?: string;
+	rootGoalId?: string;
+	mergeTarget?: "master" | "parent";
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren?: number;
+	acceptanceCriteria?: string[];
+	spawnedFromPlanId?: string;
+	paused?: boolean;
+	replanCount?: number;
 	workflow?: {
 		id: string;
 		name: string;
