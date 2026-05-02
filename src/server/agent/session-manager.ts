@@ -2125,6 +2125,41 @@ export class SessionManager {
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
 
+		// Guard against unrecoverable zombie sessions. After a chaotic
+		// teardown (e.g. multiple gateway processes fighting over a port,
+		// or a worker spawn that died before agentSessionFile was
+		// persisted), the row may exist with `status: terminated` but no
+		// `agentSessionFile` / no `worktreePath` / no `role`. There is
+		// nothing for `restoreSession` to rehydrate from — calling it
+		// would either no-op silently or throw deep in the bridge setup.
+		// Archive the row so the UI clears the dead card cleanly, and
+		// throw a structured error so the caller (UI "Restart Agent"
+		// button or our own `_dispatchPromptWithReviveOnDeadBridge`) can
+		// surface a sensible message.
+		//
+		// Live test (PR #409 dashboard subgoal): user reported screenshot
+		// of "Coder: Russell Throw" + "Coder: Cosmo Kramer" sitting in the
+		// sidebar with the "Agent process not running" error and the
+		// "Restart Agent" button disappearing the row when clicked. The
+		// row didn't truly disappear — it stayed in goals.json as a zombie
+		// with role:null + agentSessionFile:null because restartAgent
+		// threw partway through and the UI's optimistic remove ran first.
+		// We use !agentSessionFile && !role as the zombie predicate — a
+		// healthy session always has BOTH (role assigned at spawn,
+		// agentSessionFile set as soon as the agent process writes its
+		// first line). PersistedSession has no `status` field; runtime
+		// status lives on SessionInfo, not on disk.
+		if (!ps.agentSessionFile && !ps.role) {
+			console.warn(`[session-manager] restartAgent: session ${sessionId} is unrecoverable (no agentSessionFile, no role) — auto-archiving instead.`);
+			try { await session.rpcClient.stop(); } catch { /* already dead */ }
+			session.unsubscribe();
+			this.sessions.delete(sessionId);
+			this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: Date.now() });
+			const err: Error & { code?: string } = new Error("Session is unrecoverable (no agent session file). Archived.");
+			err.code = "SESSION_UNRECOVERABLE_ARCHIVED";
+			throw err;
+		}
+
 		// Save state that must survive the restart
 		const clients = new Set(session.clients);
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
