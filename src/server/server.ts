@@ -19,6 +19,8 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
+import type { Workflow } from "./agent/workflow-store.js";
+import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -3165,12 +3167,45 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Resolve workflow through the config cascade (builtin → server → project)
-			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+			// Resolve workflow:
+			//   1. Inline workflow snapshot in body.workflow (Phase 5b inline-YAML
+			//      flow) — caller owns the full definition; bypass cascade.
+			//   2. Config cascade (builtin → server → project) by workflowId.
+			//   3. Built-in defaults — auto-seeded when the project has zero
+			//      workflows so the user can create a goal without first running
+			//      project setup. Falls back to "general" from buildDefaultWorkflows.
+			let resolvedWorkflow: Workflow | undefined;
+			let resolvedWorkflowId = workflowId;
+			const inlineWorkflow = body?.workflow;
+			if (inlineWorkflow && typeof inlineWorkflow === "object") {
+				// Inline path — Phase 5b new-goal dialog "Advanced: paste inline
+				// workflow YAML". The client has already parsed and validated
+				// the YAML. Snapshot it directly onto the goal, no cascade.
+				resolvedWorkflow = inlineWorkflow as Workflow;
+				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
+			} else {
+				const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+				resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+				// Auto-seed defaults if cascade + project store are both empty.
+				// The project assistant normally seeds workflows, but a user who
+				// creates a project via the simple New Project flow + immediately
+				// tries a goal would otherwise hit NO_WORKFLOWS_MSG. Seed once,
+				// preserve the user's flow, log so it's diagnosable.
+				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
+					const projName = resolved.project.name || "project";
+					const seeds = buildDefaultWorkflows(projName);
+					seeds.parent = buildParentWorkflow();
+					for (const wf of Object.values(seeds)) {
+						targetCtx.workflowStore.put(wf as unknown as Workflow);
+					}
+					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
+					// Re-resolve after seeding.
+					resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+				}
+			}
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
-				workflowId,
+				workflowId: resolvedWorkflowId,
 				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
