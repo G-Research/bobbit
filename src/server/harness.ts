@@ -80,7 +80,10 @@ let restarting = false;
 
 function launchServer(): void {
 	console.log(`\n[harness] Launching server (port ${PORT})...`);
-	child = spawn("node", [CLI_PATH, ...forwardedArgs], {
+	// Use process.execPath (absolute path to the same node running this
+	// process) rather than bare "node" — prevents `spawn node ENOENT`
+	// when PATH is sanitised by an outer launcher.
+	child = spawn(process.execPath, [CLI_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
 		env: { ...process.env },

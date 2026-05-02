@@ -171,7 +171,10 @@ function probeHealth(): Promise<boolean> {
 function launchHarness(): void {
 	console.log(`\n[watchdog] Launching harness (port ${PORT})...`);
 
-	harnessChild = spawn("node", [HARNESS_PATH, ...forwardedArgs], {
+	// Use process.execPath (absolute path to the same node running this
+	// process) rather than bare "node" — prevents `spawn node ENOENT`
+	// when PATH is sanitised by an outer launcher.
+	harnessChild = spawn(process.execPath, [HARNESS_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
 		env: { ...process.env },

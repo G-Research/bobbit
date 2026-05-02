@@ -222,7 +222,18 @@ export class RpcBridge {
 			const tlsEnv = fs.existsSync(caCertPath)
 				? { NODE_EXTRA_CA_CERTS: caCertPath }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
-			this.process = spawn("node", [cliPath, ...args], {
+			// Use the SAME node binary that's running the gateway, not bare
+			// "node" from PATH. Live test (PR #409): every dev-server
+			// restart triggered a flood of `spawn node ENOENT` errors during
+			// session restoration. The harness was launching the gateway via
+			// `npm run dev:harness` which sanitised PATH — child processes
+			// spawned by the gateway couldn't find node on PATH and failed
+			// with ENOENT. Symptoms: "Coder: Cosmo Kramer" / "Coder: Pretzel"
+			// rows showed "Agent process not running", Restart Agent button
+			// triggered the same ENOENT, sessions piled up as zombies.
+			// `process.execPath` is the absolute path to the node binary
+			// running this gateway — always resolvable, never sanitised.
+			this.process = spawn(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
 				env: {
