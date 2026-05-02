@@ -4,6 +4,7 @@ import "../ui/components/CommentableMarkdown.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
+import yaml from "yaml";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
@@ -758,6 +759,11 @@ interface GoalFormConfig {
 	 * proposal-panel call site — the goal-dashboard view stays read-only.
 	 */
 	commentable?: boolean;
+
+	// Phase 5b: inline workflow YAML (acceptance criterion §8.12)
+	inlineWorkflowYaml?: string;
+	inlineWorkflowYamlError?: string;
+	onInlineWorkflowYamlChange?: (e: Event) => void;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -955,6 +961,23 @@ function renderGoalForm(config: GoalFormConfig) {
 				}
 			</div>
 		</div>
+		${config.onInlineWorkflowYamlChange !== undefined ? html`
+			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-workflow-yaml">
+				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Advanced: paste inline workflow YAML</summary>
+				<div class="mt-2 flex flex-col gap-1">
+					<textarea
+						class="w-full min-h-[120px] max-h-[300px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+						placeholder="# Optional: paste a workflow YAML snapshot to attach to this goal&#10;# (overrides workflow ID resolution from the project/server cascade)"
+						.value=${config.inlineWorkflowYaml ?? ""}
+						data-testid="goal-inline-workflow-yaml-textarea"
+						@input=${config.onInlineWorkflowYamlChange}
+					></textarea>
+					${config.inlineWorkflowYamlError ? html`
+						<div class="text-[11px] text-destructive" data-testid="goal-inline-workflow-yaml-error">${config.inlineWorkflowYamlError}</div>
+					` : ""}
+				</div>
+			</details>
+		` : ""}
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
@@ -976,7 +999,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || !!config.inlineWorkflowYamlError,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
 			</div>
@@ -1039,6 +1062,10 @@ function goalPreviewPanel() {
 		_goalAutoStartTeam = true;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		_assistantEnabledOptionalSteps = [];
+		const inlineWorkflow = _assistantInlineWorkflowParsed;
+		_assistantInlineWorkflowYaml = "";
+		_assistantInlineWorkflowYamlError = "";
+		_assistantInlineWorkflowParsed = undefined;
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
@@ -1058,6 +1085,7 @@ function goalPreviewPanel() {
 			projectId,
 			enabledOptionalSteps,
 			autoStartTeam,
+			workflow: inlineWorkflow,
 		});
 
 		// Slice E: drop the on-disk proposal file once accepted.
@@ -1148,6 +1176,15 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
+				inlineWorkflowYaml: _assistantInlineWorkflowYaml,
+				inlineWorkflowYamlError: _assistantInlineWorkflowYamlError,
+				onInlineWorkflowYamlChange: (e: Event) => {
+					_assistantInlineWorkflowYaml = (e.target as HTMLTextAreaElement).value;
+					const v = _validateInlineWorkflowYaml(_assistantInlineWorkflowYaml);
+					_assistantInlineWorkflowYamlError = v.error ?? "";
+					_assistantInlineWorkflowParsed = v.parsed;
+					renderApp();
+				},
 			})}
 		</div>
 	`;
@@ -2205,6 +2242,29 @@ let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
+/** Phase 5b — inline workflow YAML for the goal proposal panel. */
+let _proposalInlineWorkflowYaml = "";
+let _proposalInlineWorkflowYamlError = "";
+let _proposalInlineWorkflowParsed: unknown | undefined;
+/** Same fields for the assistant-driven goal proposal entry. */
+let _assistantInlineWorkflowYaml = "";
+let _assistantInlineWorkflowYamlError = "";
+let _assistantInlineWorkflowParsed: unknown | undefined;
+
+/** Validate inline workflow YAML — synchronous since `yaml` is statically imported. */
+function _validateInlineWorkflowYaml(yamlText: string): { parsed?: unknown; error?: string } {
+	const trimmed = yamlText.trim();
+	if (!trimmed) return { parsed: undefined };
+	try {
+		const parsed = yaml.parse(trimmed);
+		if (parsed == null || typeof parsed !== "object") return { error: "Workflow must be a YAML mapping (object)." };
+		const obj = parsed as Record<string, unknown>;
+		if (!Array.isArray(obj.gates)) return { error: "Workflow must declare a `gates: []` array." };
+		return { parsed };
+	} catch (err) {
+		return { error: err instanceof Error ? err.message : String(err) };
+	}
+}
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
@@ -2271,6 +2331,10 @@ function goalProposalPanel() {
 			_proposalSandboxed = false;
 			const autoStartTeam = _proposalAutoStartTeam;
 			_proposalAutoStartTeam = true;
+			const inlineWorkflow = _proposalInlineWorkflowParsed;
+			_proposalInlineWorkflowYaml = "";
+			_proposalInlineWorkflowYamlError = "";
+			_proposalInlineWorkflowParsed = undefined;
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 				spec: _proposalSpec,
 				workflowId: _proposalWorkflowId || undefined,
@@ -2278,6 +2342,7 @@ function goalProposalPanel() {
 				projectId: state.previewProjectId || undefined,
 				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
 				autoStartTeam,
+				workflow: inlineWorkflow,
 			});
 			delete state.activeProposals.goal;
 			_proposalEnabledOptionalSteps = [];
@@ -2342,6 +2407,15 @@ function goalProposalPanel() {
 		createDisabled: !_proposalTitle.trim() || _proposalSaving,
 		streaming: isProposalStreaming("goal_proposal"),
 		commentable: true,
+		inlineWorkflowYaml: _proposalInlineWorkflowYaml,
+		inlineWorkflowYamlError: _proposalInlineWorkflowYamlError,
+		onInlineWorkflowYamlChange: (e: Event) => {
+			_proposalInlineWorkflowYaml = (e.target as HTMLTextAreaElement).value;
+			const v = _validateInlineWorkflowYaml(_proposalInlineWorkflowYaml);
+			_proposalInlineWorkflowYamlError = v.error ?? "";
+			_proposalInlineWorkflowParsed = v.parsed;
+			renderApp();
+		},
 	});
 }
 

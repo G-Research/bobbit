@@ -1177,6 +1177,31 @@ export class RemoteAgent {
 				this.onGoalSetupEvent?.();
 				break;
 
+			case "goal_state_changed":
+			case "goal_child_spawned":
+			case "cost_changed": {
+				// Phase 5b: bump dashboard plan-tab re-render and re-fetch the
+				// goal list so the sidebar nesting + tree-cost reflect the change.
+				// Throttling lives inside the dashboard (`schedulePlanRerender`).
+				import("./goal-dashboard.js").then(m => m.notifyGoalEventForDashboard?.()).catch(() => {});
+				import("./api.js").then(m => m.refreshSessions()).catch(() => {});
+				break;
+			}
+
+			case "mutation_pending": {
+				// Phase 5b: synthesise a chat-bubble card asking the user to
+				// approve / reject the pending plan mutation. The UI surfaces it
+				// via a dedicated proposal-style entry in state.activeProposals.
+				import("./session-manager.js").then(m => m.handleMutationPendingEvent?.(msg as any)).catch(() => {});
+				break;
+			}
+
+			case "mutation_decided": {
+				// Cleanup: drop any pending mutation card for this requestId.
+				import("./session-manager.js").then(m => m.handleMutationDecidedEvent?.(msg as any)).catch(() => {});
+				break;
+			}
+
 			case "task_changed": {
 				const task = msg.task as any;
 				if (task && !task._deleted) {
@@ -1628,6 +1653,27 @@ export class RemoteAgent {
 		}
 		this.apply({ type: "system-notification", message: notif });
 		this.emit({ type: "message_end", message: notif });
+	}
+
+	/** Phase 5b: append a `mutation-pending` chat card. Dedupe by `requestId`. */
+	public appendMutationPendingCard(opts: { goalId: string; requestId: string; kind: "fix-up" | "expansion" | "restructure" | "criteria-drop"; summary: string }): void {
+		const card: any = {
+			role: "mutation-pending",
+			goalId: opts.goalId,
+			requestId: opts.requestId,
+			kind: opts.kind,
+			summary: opts.summary,
+			timestamp: new Date().toISOString(),
+			id: `mut_${opts.requestId}`,
+		};
+		this.apply({ type: "mutation-pending", message: card });
+		this.emit({ type: "message_end", message: card });
+	}
+
+	/** Phase 5b: update a `mutation-pending` card to its decided state. */
+	public markMutationDecided(requestId: string, decision: "approve" | "reject"): void {
+		const id = `mut_${requestId}`;
+		this.apply({ type: "mutation-update", messageId: id, patch: { decided: decision === "approve" ? "approved" : "rejected" } });
 	}
 
 	private handleAgentEvent(event: any) {
