@@ -19,6 +19,7 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
+import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -4811,22 +4812,12 @@ async function handleApiRoute(
 		// Phase 3 nested goals — freeze the parent workflow's execution.verify[]
 		// when the team-lead signals the goal-plan gate. After this point any
 		// changes to execution.verify[] route through the mutation classifier
-		// (Phase 4). See SUBGOALS-SPEC §3.6 / docs/_phase-3-notes.md.
-		if (gateId === "goal-plan" && goal.workflowId === "parent" && goal.workflow) {
-			const executionGate = goal.workflow.gates.find(g => g.id === "execution");
-			if (executionGate) {
-				const updatedGate = {
-					...executionGate,
-					metadata: { ...(executionGate.metadata ?? {}), frozen: "true" },
-				};
-				const updatedWorkflow = {
-					...goal.workflow,
-					gates: goal.workflow.gates.map(g => g.id === "execution" ? updatedGate : g),
-					updatedAt: Date.now(),
-				};
-				gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: updatedWorkflow });
-				console.log(`[gate-signal] Plan frozen for goal ${goalId} (execution.verify[] now immutable except via mutation classifier)`);
-			}
+		// (Phase 4). See SUBGOALS-SPEC §3.6 / docs/_phase-3-notes.md and
+		// src/server/agent/parent-workflow-freeze.ts for the pure helper.
+		const freezeUpdate = computePlanFreezeUpdate(goal, gateId);
+		if (freezeUpdate.freeze && freezeUpdate.workflow) {
+			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeUpdate.workflow });
+			console.log(`[gate-signal] Plan frozen for goal ${goalId} (execution.verify[] now immutable except via mutation classifier)`);
 		}
 
 		// Broadcast signal received
