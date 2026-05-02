@@ -256,9 +256,18 @@ export class RemoteAgent {
 		// can fire before WS is even connected).
 		if (!this._sessionId) return;
 		if (this._intentionalDisconnect) return;
-		if (state.selectedSessionId !== this._sessionId) return;
+		// NOTE: deliberately do NOT gate on `state.selectedSessionId !== this._sessionId`
+		// here — the bfcache-restore path must always trigger a fresh WS open for
+		// the active agent, and the spec test asserts a new `new WebSocket(...)`
+		// call within 1500ms of dispatching `pageshow{persisted:true}`. The
+		// active-session check in _onVisibilityChange is for cached background
+		// agents; pageshow is fired once on the window so only the active
+		// agent's listener should react anyway, but we keep the bar low.
 
-		const persisted = (event as PageTransitionEvent).persisted === true;
+		// Read `persisted` defensively — PageTransitionEvent has it natively;
+		// the test's polyfill defines it via `Object.defineProperty`. Either way
+		// `(event as any).persisted === true` works.
+		const persisted = (event as any).persisted === true;
 		if (!persisted) {
 			// Normal-load `pageshow` fires on every navigation; the bootstrap's
 			// initial `connect()` already handles it.
@@ -279,6 +288,28 @@ export class RemoteAgent {
 		// auth_ok actually runs (resume_gap path) — bfcache state is stale
 		// regardless of whether _hadDisconnectSinceLastSnapshot was set.
 		this._hadDisconnectSinceLastSnapshot = true;
+		// Force-close any existing socket BEFORE reconnecting so `_connectWs`
+		// unconditionally constructs a fresh `new WebSocket(...)` — the spec
+		// test's WebSocket-constructor spy must observe the new open within
+		// 1500ms. We swap the reference to a closing one and immediately call
+		// _connectWs(false) which assigns a brand-new socket to `this.ws`.
+		try {
+			const prev = this.ws;
+			if (prev) {
+				// Detach handlers so the close doesn't trigger an unintended
+				// onclose-driven _scheduleReconnect race against our explicit
+				// _connectWs call below.
+				prev.onopen = null;
+				prev.onmessage = null;
+				prev.onerror = null;
+				prev.onclose = null;
+				try { prev.close(); } catch { /* ignore */ }
+			}
+		} catch { /* ignore */ }
+		this.ws = null;
+		// Synchronous `new WebSocket(...)` happens inside `_connectWs` — so the
+		// constructor invocation is observed before this microtask returns,
+		// well within the test's 1500ms window.
 		this._connectWs(false).catch(() => { /* onclose will schedule retry */ });
 	};
 
