@@ -11,6 +11,7 @@ import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
+import { computeTreeCost } from "./agent/cost-tracker.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
@@ -6772,6 +6773,41 @@ async function handleApiRoute(
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
 		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
 		json(cost);
+		return;
+	}
+
+	// GET /api/goals/:goalId/tree-cost — sum of cost across the descendant goal tree (Lesson 4.21)
+	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
+	if (goalTreeCostMatch && req.method === "GET") {
+		const goalId = goalTreeCostMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) {
+			json({ error: "Goal not found" }, 404);
+			return;
+		}
+		// Determine the rollup root: a child's tree rolls up to its rootGoalId,
+		// a top-level goal is its own root.
+		const rootGoalId = goal.rootGoalId ?? goal.id;
+		if (!goal.projectId) {
+			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
+			return;
+		}
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) {
+			json({ error: "Goal project context not found" }, 404);
+			return;
+		}
+		// All goals (live + archived) — children of an archived root may still
+		// have meaningful cost data attached.
+		const allGoals = ctx.goalStore.getAll();
+		const costTracker = sessionManager.getCostTracker(goal.projectId);
+		const result = computeTreeCost(
+			rootGoalId,
+			allGoals,
+			costTracker,
+			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
+		);
+		json(result);
 		return;
 	}
 
