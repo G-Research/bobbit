@@ -7,8 +7,17 @@ import yaml from "yaml";
 // `project.rootPath` to compute on-disk locations. Reject `..` segments and
 // absolute paths to prevent path traversal that would let an authenticated
 // caller create or clobber files outside the project's declared rootPath.
+//
+// `path.isAbsolute()` is OS-aware (a Windows path on POSIX is "relative" to
+// node), so we ALSO reject Windows-style absolute paths explicitly. This keeps
+// the predicate identical on macOS, Linux, and Windows — a project.yaml
+// authored on Windows must be rejected on Linux too.
 export function isSafeRelPath(p: string): boolean {
 	if (path.isAbsolute(p)) return false;
+	// Windows drive-letter absolute (e.g. "C:\Windows", "c:/Users/x").
+	if (/^[a-zA-Z]:[\\/]/.test(p) || /^[a-zA-Z]:$/.test(p)) return false;
+	// Windows UNC path (e.g. "\\server\share\file").
+	if (/^[\\/]{2}/.test(p)) return false;
 	if (p.includes("\0")) return false;
 	const parts = p.split(/[\\/]+/).filter(s => s.length > 0);
 	return !parts.some(seg => seg === "..");

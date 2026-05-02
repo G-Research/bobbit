@@ -16,6 +16,7 @@ import { SearchService } from "../search/search-service.js";
 import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
+import { PlanMutationStore } from "./plan-mutation-store.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -45,6 +46,7 @@ export class ProjectContext {
   readonly costTracker: CostTracker;
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
+  readonly planMutationStore: PlanMutationStore;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -69,17 +71,26 @@ export class ProjectContext {
     this.colorStore = new ColorStore(this.stateDir);
     this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
     this.costTracker = new CostTracker(this.stateDir);
-    this.goalManager = new GoalManager(this.goalStore);
     this.secretsStore = new SecretsStore(this.stateDir);
+    this.planMutationStore = new PlanMutationStore(this.stateDir);
 
     // Instantiate config stores with project-scoped config directory.
     // ProjectConfigStore must come before WorkflowStore — the inline
-    // workflow store reads workflows from project.yaml.
+    // workflow store reads workflows from project.yaml. WorkflowStore
+    // must be constructed before GoalManager so the manager can resolve
+    // workflow snapshots without callers having to thread the store
+    // through every createGoal call (Lesson 4.3 — see
+    // docs/_phase-1-notes.md).
     this.roleStore = new RoleStore(this.configDir);
     this.projectConfigStore = new ProjectConfigStore(this.configDir);
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
+
+    // GoalManager depends on workflowStore (Lesson 4.3). Constructed
+    // after the config stores above so the project's WorkflowStore is
+    // available for workflow-id resolution at goal creation time.
+    this.goalManager = new GoalManager(this.goalStore, this.workflowStore);
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */

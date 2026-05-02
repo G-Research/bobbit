@@ -347,6 +347,131 @@ export async function cleanupWorktree(
 }
 
 /**
+ * Result of a local merge of a child goal's branch into its parent.
+ *
+ * Exactly one of `merged`, `alreadyMerged`, or `conflict` is true; the others
+ * are false. `output` carries the raw stdout/stderr from `git merge` for
+ * forensic logging.
+ */
+export interface MergeChildResult {
+	merged: boolean;
+	conflict: boolean;
+	alreadyMerged: boolean;
+	output: string;
+}
+
+/**
+ * Locally merge `childBranch` into `parentBranch` from inside `parentCwd`
+ * (the parent goal's worktree). Wraps `git merge --no-ff` and aborts on
+ * conflict so the parent worktree is left clean.
+ *
+ * Contract:
+ *   - The current branch in `parentCwd` MUST equal `parentBranch` — guards
+ *     against merging into the wrong tree (security / data-safety).
+ *   - `git fetch origin <childBranch>` is best-effort: child branches may be
+ *     local-only (siblings spawned but not yet pushed); fetch failure is
+ *     non-fatal.
+ *   - "Already up to date" / "Already up-to-date" output → `alreadyMerged`.
+ *   - On conflict: runs `git merge --abort` so the parent worktree returns
+ *     to a clean state. Caller decides whether to surface to the user.
+ *   - On clean merge: returns `{ merged: true }` with the merge-commit
+ *     message in `output` (caller may push afterwards — gated by
+ *     `shouldSkipRemotePush()`).
+ *
+ * Anti-pattern (see SUBGOALS-SPEC §9): NEVER auto-resolve conflicts.
+ * Escalate to the user.
+ */
+export async function mergeChildBranchLocal(
+	parentBranch: string,
+	childBranch: string,
+	parentCwd: string,
+): Promise<MergeChildResult> {
+	if (!parentBranch || !childBranch) {
+		throw new Error(`mergeChildBranchLocal: parentBranch and childBranch are required (got "${parentBranch}", "${childBranch}")`);
+	}
+	if (!fs.existsSync(parentCwd)) {
+		throw new Error(`mergeChildBranchLocal: parentCwd does not exist: ${parentCwd}`);
+	}
+
+	// Verify the parent worktree is actually checked out on parentBranch.
+	// Mismatch is a programming error — prevents merging child into the
+	// wrong tree (e.g. into master or a sibling goal).
+	let currentBranch = "";
+	try {
+		const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: parentCwd, timeout: 5_000 });
+		currentBranch = stdout.toString().trim();
+	} catch (err) {
+		throw new Error(`mergeChildBranchLocal: failed to read current branch in ${parentCwd}: ${err instanceof Error ? err.message : err}`);
+	}
+	if (currentBranch !== parentBranch) {
+		throw new Error(
+			`mergeChildBranchLocal: parentCwd "${parentCwd}" is on branch "${currentBranch}", expected "${parentBranch}"`,
+		);
+	}
+
+	// Best-effort fetch — child branch may be local-only.
+	try {
+		await execFile("git", ["fetch", "origin", childBranch], { cwd: parentCwd, timeout: 30_000 });
+	} catch {
+		// non-fatal
+	}
+
+	// Attempt the merge.
+	let mergeStdout = "";
+	let mergeStderr = "";
+	let mergeExitCode = 0;
+	try {
+		const { stdout, stderr } = await execFile("git", [
+			"merge", "--no-ff", childBranch,
+			"-m", `Merge child goal branch ${childBranch} into ${parentBranch}`,
+		], { cwd: parentCwd, timeout: 60_000 });
+		mergeStdout = stdout.toString();
+		mergeStderr = stderr.toString();
+	} catch (err: any) {
+		mergeStdout = err?.stdout?.toString() ?? "";
+		mergeStderr = err?.stderr?.toString() ?? (err instanceof Error ? err.message : String(err));
+		mergeExitCode = typeof err?.code === "number" ? err.code : 1;
+	}
+
+	const combinedOutput = `${mergeStdout}${mergeStderr ? "\n" + mergeStderr : ""}`.trim();
+
+	// "Already up to date" — exit code 0, no merge commit produced.
+	if (mergeExitCode === 0 && /Already up[- ]to[- ]date/i.test(combinedOutput)) {
+		return { merged: false, alreadyMerged: true, conflict: false, output: combinedOutput };
+	}
+
+	if (mergeExitCode !== 0) {
+		// Distinguish conflict (unmerged paths in `git status --porcelain`)
+		// from other failures. Conflict markers in porcelain output are
+		// the two-letter codes UU, AU, UA, DU, UD, AA, DD.
+		let porcelain = "";
+		try {
+			const { stdout } = await execFile("git", ["status", "--porcelain"], { cwd: parentCwd, timeout: 5_000 });
+			porcelain = stdout.toString();
+		} catch {
+			// ignore — fall through with empty porcelain
+		}
+		const hasUnmerged = /^(UU|AU|UA|DU|UD|AA|DD) /m.test(porcelain);
+		if (hasUnmerged) {
+			// Abort so the parent worktree returns to a clean state.
+			try {
+				await execFile("git", ["merge", "--abort"], { cwd: parentCwd, timeout: 10_000 });
+			} catch {
+				// best-effort — if abort itself fails the worktree is in a
+				// genuinely broken state, but we still surface the conflict.
+			}
+			return { merged: false, alreadyMerged: false, conflict: true, output: combinedOutput };
+		}
+		// Non-conflict failure (e.g. "fatal: not something we can merge" /
+		// no upstream / unknown ref). Surface as a thrown error — caller
+		// must distinguish a true config bug from a content conflict.
+		throw new Error(`mergeChildBranchLocal: merge failed (exit ${mergeExitCode}): ${combinedOutput}`);
+	}
+
+	return { merged: true, alreadyMerged: false, conflict: false, output: combinedOutput };
+}
+
+/**
  * Recover a worktree whose directory is missing but whose branch still exists.
  *
  * This happens when a worktree directory is deleted (e.g. by cleanup, crash,

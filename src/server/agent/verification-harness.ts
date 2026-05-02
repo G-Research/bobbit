@@ -28,9 +28,11 @@ import {
 	canSkipAllSteps,
 	detectJsonValidationError,
 	isPreImplementationGate,
+	shouldSuppressRestartInterrupt,
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
+import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -133,6 +135,40 @@ export const VERIFICATION_RESULT_REMINDER =
 	"This is REQUIRED — the verification system only receives results through this tool.";
 
 /**
+ * Lesson 4.8 — Build a context-rich reminder for live (not resumed) reviewers
+ * who emit their verdict as chat-text and end the turn instead of calling
+ * `verification_result`.
+ *
+ * The two-sentence legacy `VERIFICATION_RESULT_REMINDER` consistently failed
+ * to elicit a tool call: with no kickoff context attached, the model treats
+ * the reminder as a continuation of its previous (chat-text) reply. The
+ * context-rich version:
+ *
+ *   1. Leads with `## STOP — verification_result not called` so the agent
+ *      treats it as a hard correction, not a continuation.
+ *   2. States explicitly that any chat-text verdict is INVISIBLE to the gate.
+ *   3. Tells the agent to call the tool with whatever opinion it ALREADY
+ *      formed — no re-investigation.
+ *   4. Re-attaches the FULL original kickoff after a `---` separator, so the
+ *      agent has the original task spec back in context.
+ *
+ * Wire this into BOTH the LLM-review reminder path and the agent-QA reminder
+ * path. The resume path (`_tryResumeFromSession`) keeps the legacy terse
+ * reminder because it doesn't have access to rebuild the kickoff.
+ */
+export function buildContextRichReminder(originalKickoff: string): string {
+	return `## STOP — verification_result not called
+
+Your previous turn ended without calling \`verification_result\`. Any chat-text verdict is INVISIBLE to the gate.
+
+Call \`verification_result\` now with whatever opinion you ALREADY FORMED — do not re-investigate. Use status="pass" if your investigation was satisfactory, "fail" otherwise.
+
+---
+
+${originalKickoff}`;
+}
+
+/**
  * The `verification_result` tool is now a standard goal tool registered in
  * `.bobbit/config/tools/tasks/extension.ts` — no generated extension needed.
  * It calls POST /api/internal/verification-result using the same api() helper
@@ -180,7 +216,25 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: "running" | "passed" | "failed" | "skipped" | "waiting"; phase?: number; durationMs?: number; output?: string; startedAt: number; sessionId?: string }>;
+	steps: Array<{
+		name: string;
+		type: string;
+		status: "running" | "passed" | "failed" | "skipped" | "waiting";
+		phase?: number;
+		durationMs?: number;
+		output?: string;
+		startedAt: number;
+		sessionId?: string;
+		/**
+		 * Subgoal-step cache — populated by `runSubgoalStep` after the child is
+		 * spawned (Lesson 4.1). Tier-1.5 lookup reads `childGoalId` to short-
+		 * circuit tier resolution; staleness invalidation wipes it (Lesson 4.2).
+		 */
+		subgoal?: {
+			childGoalId?: string;
+			planId?: string;
+		};
+	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
@@ -366,6 +420,21 @@ export class VerificationHarness {
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
 
+	/**
+	 * Per-rootGoalId concurrency caps for `runSubgoalStep`. Lazily created on
+	 * first acquire; capacity is resolved via
+	 * `goalManager.resolveRootMaxConcurrentChildren(rootGoalId)` at creation
+	 * time. See SUBGOALS-SPEC §3.5 and Lesson 4.21 (single semaphore shared by
+	 * the whole tree).
+	 */
+	private rootSubgoalSemaphores = new Map<string, Semaphore>();
+
+	/** Override hook for tests so they can stub the spawn/wait/merge sub-steps. */
+	_subgoalHooks?: {
+		waitForReadyToMerge?: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled">;
+		setupChildAndStartTeam?: (childGoalId: string) => Promise<void>;
+	};
+
 
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
@@ -483,9 +552,10 @@ export class VerificationHarness {
 			} catch (err) {
 				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
 				// Mark as failed and update gate
+				const resumeErrorStep = { name: "Resume Error", type: "command" as const, passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 };
 				this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 					status: "failed",
-					steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 }],
+					steps: [resumeErrorStep],
 				});
 				this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
 				this.broadcastFn(v.goalId, {
@@ -496,7 +566,8 @@ export class VerificationHarness {
 					type: "gate_status_changed",
 					goalId: v.goalId, gateId: v.gateId, status: "failed",
 				});
-				this.notifyTeamLead(v.goalId, v.gateId, "failed");
+				const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+				this.notifyTeamLead(v.goalId, v.gateId, "failed", { steps: [resumeErrorStep], goalBranch });
 			}
 		}
 
@@ -621,10 +692,23 @@ export class VerificationHarness {
 
 		// Compute overall result
 		const allPassed = resolvedSteps.every(r => r.passed);
-		const status = allPassed ? "passed" as const : "failed" as const;
+
+		// Lesson 4.6 — Restart-interrupt suppression. If every failed step is a
+		// restart-interrupt (per RESTART_INTERRUPT_MARKERS or empty-output
+		// review/QA), don't mark the gate failed — the work being verified
+		// hasn't actually been judged. Persist the verification record honestly
+		// (so `gate_status` reflects what really happened) but leave the gate
+		// `pending` so a re-signal will run a fresh verification.
+		//
+		// Predicate is conjunctive: a single real failure poisons the gate
+		// (real failures should still surface as failed even if some sibling
+		// steps got restart-interrupted).
+		const suppressedByRestart = !allPassed && shouldSuppressRestartInterrupt(resolvedSteps);
+		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
+		const gateStatus = suppressedByRestart ? "pending" as const : persistedStatus;
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
-			status,
+			status: persistedStatus,
 			steps: resolvedSteps.map(r => ({
 				name: r.name,
 				type: r.type as "command" | "llm-review" | "agent-qa",
@@ -633,19 +717,32 @@ export class VerificationHarness {
 				duration_ms: r.duration_ms,
 			})),
 		});
-		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, status);
+		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
 		this.broadcastFn(v.goalId, {
 			type: "gate_verification_complete",
-			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status,
+			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: persistedStatus,
 		});
 		this.broadcastFn(v.goalId, {
 			type: "gate_status_changed",
-			goalId: v.goalId, gateId: v.gateId, status,
+			goalId: v.goalId, gateId: v.gateId, status: gateStatus,
 		});
-		this.notifyTeamLead(v.goalId, v.gateId, status);
-
-		console.log(`[verification] Resumed verification ${v.signalId}: ${status}`);
+		if (suppressedByRestart) {
+			// Benign nudge — the team-lead should re-signal, not investigate a
+			// phantom regression. notifyTeamLead is keyed off the gate status
+			// string so we send a custom message rather than the standard one.
+			if (this.notifyTeamLeadFn) {
+				this.notifyTeamLeadFn(
+					v.goalId,
+					`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
+				);
+			}
+			console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
+		} else {
+			const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: resolvedSteps, goalBranch });
+			console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
+		}
 	}
 
 	/**
@@ -1056,10 +1153,22 @@ export class VerificationHarness {
 		}
 	}
 
-	private notifyTeamLead(goalId: string, gateId: string, status: string): void {
+	private notifyTeamLead(
+		goalId: string,
+		gateId: string,
+		status: string,
+		failureContext?: { steps?: ReadonlyArray<{ name: string; type: string; passed: boolean; output?: string }>; goalBranch?: string },
+	): void {
 		if (!this.notifyTeamLeadFn) return;
-		const verb = status === "passed" ? "PASSED" : "FAILED";
-		this.notifyTeamLeadFn(goalId, `Gate verification ${verb}: "${gateId}". ${status === "passed" ? "Downstream work for this gate can now proceed." : "Check the verification output, fix the issues, and re-signal the gate."}`);
+		if (status === "passed") {
+			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
+			return;
+		}
+		// Failure path — use Lesson 4.18 actionable message when step detail is available.
+		const steps = failureContext?.steps ?? [];
+		const goalBranch = failureContext?.goalBranch;
+		const message = buildVerificationFailureMessage(gateId, steps, goalBranch);
+		this.notifyTeamLeadFn(goalId, message);
 	}
 
 	/**
@@ -1216,7 +1325,7 @@ export class VerificationHarness {
 					type: "gate_status_changed",
 					goalId: signal.goalId, gateId: signal.gateId, status,
 				});
-				this.notifyTeamLead(signal.goalId, signal.gateId, status);
+				this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 				return;
 			}
 
@@ -1468,6 +1577,18 @@ export class VerificationHarness {
 								this.commandSemaphore.release();
 							}
 							}
+						} else if (step.type === "subgoal") {
+							// Phase 3 nested goals — see SUBGOALS-SPEC §2 / §5,
+							// docs/_phase-3-notes.md, and Lessons 4.1, 4.2, 4.4, 4.19.
+							active.steps[index].startedAt = Date.now();
+							this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_started",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								startedAt: active.steps[index].startedAt,
+								phase,
+							});
+							result = await this.runSubgoalStep(step, signal, active, index);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -1604,16 +1725,17 @@ export class VerificationHarness {
 				gateId: signal.gateId,
 				status,
 			});
-			this.notifyTeamLead(signal.goalId, signal.gateId, status);
+			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
 			if (active.cancelled) {
 				this.activeVerifications.delete(signal.id);
 				this._persistActive();
 				return;
 			}
+			const errorStep = { name: "Error", type: "command" as const, passed: false, output: err.message, duration_ms: 0 };
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
-				steps: [{ name: "Error", type: "command", passed: false, output: err.message, duration_ms: 0 }],
+				steps: [errorStep],
 			});
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
 			this.activeVerifications.delete(signal.id);
@@ -1632,7 +1754,7 @@ export class VerificationHarness {
 				gateId: signal.gateId,
 				status: "failed",
 			});
-			this.notifyTeamLead(signal.goalId, signal.gateId, "failed");
+			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch });
 		}
 	}
 
@@ -1834,10 +1956,14 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
+			// fall back to the context-rich reminder (Lesson 4.8). The legacy
+			// terse reminder did not elicit a tool call when the agent had emitted
+			// its verdict as chat-text and ended turn — re-attaching the kickoff
+			// puts the spec back in context so the agent has something to call
+			// the tool with.
 			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
+			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
+			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "context-rich"} reminder`);
 			await session.rpcClient.prompt(reminderPrompt);
 			// Wait for the agent to actually pick up the reminder before racing
 			// against waitForIdle — see _tryResumeFromSession for rationale. The
@@ -2114,10 +2240,12 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
+			// fall back to the context-rich reminder (Lesson 4.8). Re-attaching
+			// the kickoff in the reminder restores the QA test plan to context
+			// so the agent has the spec back when it tries again.
 			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
-			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
+			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
+			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "context-rich"} reminder`);
 			await session.rpcClient.prompt(qaReminderPrompt);
 			// Wait for the agent to actually pick up the reminder before racing
 			// against waitForIdle — see _tryResumeFromSession for rationale.
@@ -2514,5 +2642,391 @@ export class VerificationHarness {
 			});
 		});
 	}
+
+	// ── Phase 3 — Nested goals (subgoal verify-step) ──────────────────────
+	//
+	// SUBGOALS-SPEC §2 / §5. The 7-step skeleton in `runSubgoalStep` is the
+	// single integration point for the feature. Lessons 4.1, 4.2, 4.4, 4.13,
+	// 4.19 are encoded inline; do not collapse the structure without re-
+	// reading those lessons in docs/_phase-3-notes.md.
+
+	/**
+	 * Acquire (or lazily create) the concurrency-cap semaphore for this tree.
+	 * SUBGOALS-SPEC §3.5: single shared semaphore keyed by rootGoalId, default
+	 * 3, hard max 8. See `goalManager.resolveRootMaxConcurrentChildren`.
+	 */
+	private _acquireRootSubgoalSemaphore(rootGoalId: string, goalId: string): Semaphore {
+		let sem = this.rootSubgoalSemaphores.get(rootGoalId);
+		if (!sem) {
+			const ctx = this.projectContextManager?.getContextForGoal(goalId);
+			const cap = ctx?.goalManager.resolveRootMaxConcurrentChildren(rootGoalId) ?? 3;
+			sem = new Semaphore(cap);
+			this.rootSubgoalSemaphores.set(rootGoalId, sem);
+		}
+		return sem;
+	}
+
+	/**
+	 * Tier-based plan-step child resolution (Lesson 4.19, SUBGOALS-SPEC §4.19).
+	 *
+	 * Returns the most relevant child for `(parentGoalId, planId)` along with
+	 * the tier source so callers can short-circuit the success terminal vs.
+	 * spawn fresh vs. fall through. Tie-break within a tier: most recent
+	 * `createdAt`.
+	 *
+	 * Tiers:
+	 *   1.  Live in-progress
+	 *   1.5 Cached pointer on `active.steps[stepIndex].subgoal.childGoalId`
+	 *       (tier-1 / tier-2 verified). Stale archived-non-complete pointer
+	 *       INVALIDATES (Lesson 4.2).
+	 *   2.  Archived + state=complete (success terminal)
+	 *   3.  Live other (todo / paused / awaiting setup)
+	 *   4.  Archived + non-complete (shelved dupe)
+	 *   5.  Rescue: parentGoalId+title match where spawnedFromPlanId is unset
+	 *       (Lesson 4.1 defensive path). On hit, planId is back-filled.
+	 *
+	 * The cached pointer is wiped from `active` AND persisted via
+	 * `_persistActive` whenever the resolved child is archived-non-complete or
+	 * tier-1.5 mismatches the live state.
+	 */
+	resolvePlanStepChild(
+		parentGoalId: string,
+		planId: string,
+		opts?: {
+			expectedTitle?: string;
+			active?: ActiveVerification;
+			stepIndex?: number;
+		},
+	): {
+		child?: import("./goal-store.js").PersistedGoal;
+		source: "live-active" | "cached-pointer" | "archived-complete" | "live-other" | "archived-other" | "rescue" | "none";
+	} {
+		const ctx = this.projectContextManager?.getContextForGoal(parentGoalId);
+		if (!ctx) return { source: "none" };
+		const goalStore = ctx.goalStore;
+
+		const all = goalStore.getAll();
+		const matchPlan = all.filter(g =>
+			g.parentGoalId === parentGoalId && g.spawnedFromPlanId === planId,
+		);
+		const sortByCreatedDesc = <T extends { createdAt: number }>(arr: T[]) =>
+			arr.slice().sort((a, b) => b.createdAt - a.createdAt);
+
+		// Tier 1: live in-progress
+		const tier1 = sortByCreatedDesc(matchPlan.filter(g => !g.archived && g.state === "in-progress"))[0];
+		if (tier1) return { child: tier1, source: "live-active" };
+
+		// Tier 1.5: cached pointer on the active step. Verify it still points at
+		// a healthy candidate; otherwise invalidate (Lesson 4.2).
+		const cachedId = opts?.active && opts?.stepIndex !== undefined
+			? opts.active.steps[opts.stepIndex]?.subgoal?.childGoalId
+			: undefined;
+		if (cachedId) {
+			const cached = goalStore.get(cachedId);
+			if (cached) {
+				if (cached.archived && cached.state === "complete") {
+					return { child: cached, source: "cached-pointer" };
+				}
+				if (!cached.archived) {
+					return { child: cached, source: "cached-pointer" };
+				}
+				// archived && state !== "complete" → stale pointer; wipe.
+				if (opts?.active && opts?.stepIndex !== undefined && opts.active.steps[opts.stepIndex]) {
+					const st = opts.active.steps[opts.stepIndex];
+					if (st.subgoal) st.subgoal.childGoalId = undefined;
+					this._persistActive();
+				}
+			} else {
+				// pointed-at goal vanished — wipe the pointer
+				if (opts?.active && opts?.stepIndex !== undefined && opts.active.steps[opts.stepIndex]) {
+					const st = opts.active.steps[opts.stepIndex];
+					if (st.subgoal) st.subgoal.childGoalId = undefined;
+					this._persistActive();
+				}
+			}
+		}
+
+		// Tier 2: archived + complete (success terminal)
+		const tier2 = sortByCreatedDesc(matchPlan.filter(g => g.archived === true && g.state === "complete"))[0];
+		if (tier2) return { child: tier2, source: "archived-complete" };
+
+		// Tier 3: live other (todo / paused / awaiting setup)
+		const tier3 = sortByCreatedDesc(matchPlan.filter(g => !g.archived && g.state !== "in-progress"))[0];
+		if (tier3) return { child: tier3, source: "live-other" };
+
+		// Tier 4: archived + non-complete (shelved dupe)
+		const tier4 = sortByCreatedDesc(matchPlan.filter(g => g.archived === true && g.state !== "complete"))[0];
+		if (tier4) return { child: tier4, source: "archived-other" };
+
+		// Tier 5: rescue by (parentGoalId, title) on undefined planId — back-fill
+		// spawnedFromPlanId so future lookups take the cheap tier-1 path.
+		if (opts?.expectedTitle) {
+			const rescue = sortByCreatedDesc(all.filter(g =>
+				g.parentGoalId === parentGoalId &&
+				g.spawnedFromPlanId === undefined &&
+				g.title === opts.expectedTitle,
+			))[0];
+			if (rescue) {
+				try {
+					ctx.goalManager.updateGoal(rescue.id, { spawnedFromPlanId: planId }).catch(() => {});
+				} catch { /* defensive */ }
+				return { child: rescue, source: "rescue" };
+			}
+		}
+
+		return { source: "none" };
+	}
+
+	/**
+	 * Subgoal verify-step handler — the entire feature in one method.
+	 *
+	 * SUBGOALS-SPEC §2 / §5. Each numbered block encodes one or more lessons:
+	 *  1. Resolve descriptor.
+	 *  2. Tier-based child lookup (Lesson 4.19).
+	 *  3. Stale archived non-complete invalidation (Lesson 4.2).
+	 *  4. Success terminal short-circuit.
+	 *  5. Workflow-less complete-child recovery (Lesson 4.4).
+	 *  6. Spawn (Lesson 4.1: stamp planId IMMEDIATELY) + worktree/team start.
+	 *  7. Wait for ready-to-merge.
+	 *  8. mergeChild + archive + teardown.
+	 *  9. Concurrency cap (§3.5).
+	 *
+	 * Test budget: ~12-15 unit tests (one per lesson + happy paths). The
+	 * complexity here is irreducible — every numbered block is a real bug
+	 * we already shipped once on PR #409 and don't intend to ship again.
+	 */
+	async runSubgoalStep(
+		step: VerifyStep,
+		signal: GateSignal,
+		active: ActiveVerification,
+		stepIndex: number,
+	): Promise<{ passed: boolean; output: string }> {
+		// ── 1. Resolve descriptor ─────────────────────────────────────
+		const sg = step.subgoal;
+		if (!sg || !sg.planId || !sg.title || sg.spec === undefined || sg.spec === null) {
+			throw new Error(
+				`runSubgoalStep: step "${step.name}" is missing required subgoal fields (planId, title, spec)`,
+			);
+		}
+		const planId = sg.planId;
+		const parentGoalId = signal.goalId;
+
+		const ctx = this.projectContextManager?.getContextForGoal(parentGoalId);
+		if (!ctx) {
+			return { passed: false, output: `runSubgoalStep: parent goal ${parentGoalId} not found in any project context` };
+		}
+		const parent = ctx.goalStore.get(parentGoalId);
+		if (!parent) {
+			return { passed: false, output: `runSubgoalStep: parent goal ${parentGoalId} not found` };
+		}
+		const goalManager = ctx.goalManager;
+		const teamManager = this.teamManager;
+		const rootGoalId = parent.rootGoalId ?? parent.id;
+
+		// Tag the active step with the planId early so cancellation paths /
+		// restart-resume can correlate without spawn having succeeded yet.
+		if (active.steps[stepIndex]) {
+			if (!active.steps[stepIndex].subgoal) {
+				active.steps[stepIndex].subgoal = { planId };
+			} else {
+				active.steps[stepIndex].subgoal!.planId = planId;
+			}
+			this._persistActive();
+		}
+
+		// ── 2 + 3. Tier resolution + stale-pointer invalidation ──────
+		let resolved = this.resolvePlanStepChild(parentGoalId, planId, {
+			expectedTitle: sg.title,
+			active,
+			stepIndex,
+		});
+
+		// Lesson 4.2: an archived non-complete child is a dead pointer; wipe and
+		// fall through to spawn. resolvePlanStepChild already handled tier-1.5
+		// pointer wipe; this guard handles the case where the resolved child
+		// itself is archived-non-complete (tier-4 hit).
+		if (resolved.source === "archived-other" && resolved.child) {
+			if (active.steps[stepIndex]?.subgoal) {
+				active.steps[stepIndex].subgoal!.childGoalId = undefined;
+				this._persistActive();
+			}
+			resolved = { source: "none" };
+		}
+
+		// ── 4. Success terminal short-circuit ─────────────────────────
+		if (resolved.child && resolved.child.archived === true && resolved.child.state === "complete") {
+			return { passed: true, output: `Subgoal already complete + archived (${resolved.source}): ${resolved.child.id}` };
+		}
+
+		// ── 5. Workflow-less complete-child recovery (Lesson 4.4) ─────
+		// Predicate is conjunctive AND narrow: state=complete + !archived + !workflow.
+		if (
+			resolved.child &&
+			resolved.child.state === "complete" &&
+			!resolved.child.archived &&
+			!resolved.child.workflow
+		) {
+			const childId = resolved.child.id;
+			try {
+				const outcome = await goalManager.mergeChild(parentGoalId, childId);
+				if (outcome.merged || outcome.alreadyMerged) {
+					try { await teamManager?.teardownTeam(childId); } catch { /* non-fatal */ }
+					await goalManager.archiveGoalAfterMerge(childId);
+					return { passed: true, output: `Recovered workflow-less complete child ${childId} (${outcome.merged ? "merged" : "already merged"})` };
+				}
+				if (outcome.conflict) {
+					return {
+						passed: false,
+						output: `Workflow-less child ${childId} has merge conflict — manual recovery required: see docs/nested-goals.md §recovery. ${truncateForOutput(outcome.output)}`,
+					};
+				}
+			} catch (err) {
+				return { passed: false, output: `Workflow-less child recovery failed: ${err instanceof Error ? err.message : String(err)}` };
+			}
+		}
+
+		// ── 6 + 7 + 8 + 9. Acquire semaphore → spawn or use existing → wait → merge ──
+		const sem = this._acquireRootSubgoalSemaphore(rootGoalId, parentGoalId);
+		await sem.acquire();
+		try {
+			let childGoalId: string;
+			if (resolved.child) {
+				// Existing live child (tier-1 / tier-3 / tier-5 / cached). Re-tag
+				// the cached pointer in case tier-5 just back-filled the planId
+				// or tier-1.5 was the path here.
+				childGoalId = resolved.child.id;
+				if (active.steps[stepIndex]?.subgoal) {
+					active.steps[stepIndex].subgoal!.childGoalId = childGoalId;
+					this._persistActive();
+				}
+			} else {
+				// Spawn a fresh child. Lesson 4.1: stamp spawnedFromPlanId
+				// IMMEDIATELY after createGoal — no other awaits or calls in
+				// between. The very next line MUST be the updateGoal call.
+				const child = await goalManager.createGoal(sg.title, parent.cwd, {
+					spec: sg.spec,
+					workflowId: sg.workflowId ?? "feature",
+					projectId: parent.projectId,
+					sandboxed: parent.sandboxed,
+					parentGoalId,
+				});
+				await goalManager.updateGoal(child.id, { spawnedFromPlanId: planId });
+				// END Lesson 4.1 critical sequence.
+
+				childGoalId = child.id;
+				if (active.steps[stepIndex]) {
+					active.steps[stepIndex].subgoal = { childGoalId, planId };
+					this._persistActive();
+				}
+
+				// Trigger worktree setup + team start (asynchronously kicked off;
+				// `waitForReadyToMerge` polls the gate state regardless of when
+				// setup completes). Wired via the existing setupWorktreeAndStartTeam
+				// callback if available; otherwise the test hook can stub the
+				// whole thing.
+				if (this._subgoalHooks?.setupChildAndStartTeam) {
+					try { await this._subgoalHooks.setupChildAndStartTeam(childGoalId); } catch (err) {
+						console.warn(`[verification] setupChildAndStartTeam hook failed for ${childGoalId}:`, err);
+					}
+				} else if (teamManager) {
+					goalManager.setupWorktreeAndStartTeam(childGoalId, async () => {
+						return teamManager.startTeam(childGoalId);
+					}).catch((err) => {
+						console.warn(`[verification] setupWorktreeAndStartTeam failed for child ${childGoalId} (non-fatal):`, err);
+					});
+				}
+			}
+
+			// ── 7. Wait for ready-to-merge ───────────────────────────
+			const waitOutcome = await this._waitForChildReadyToMerge(parentGoalId, childGoalId, active);
+			if (waitOutcome === "cancelled") {
+				return { passed: false, output: "Cancelled" };
+			}
+			if (waitOutcome === "archived-complete") {
+				return { passed: true, output: `Subgoal already complete + archived (during wait): ${childGoalId}` };
+			}
+			if (waitOutcome === "archived-other") {
+				// Archived externally with a non-complete state — fall back to
+				// tier resolution next signal; do NOT crash. Treat as failure
+				// for THIS step so the harness re-runs naturally on re-signal.
+				return { passed: false, output: `Subgoal ${childGoalId} archived externally (state != complete) — re-signal to re-resolve` };
+			}
+			// ready-to-merge passed — proceed to merge.
+
+			// ── 8. Merge + archive ────────────────────────────────────
+			const outcome = await goalManager.mergeChild(parentGoalId, childGoalId);
+			if (outcome.merged || outcome.alreadyMerged) {
+				try { await teamManager?.teardownTeam(childGoalId); } catch { /* non-fatal */ }
+				await goalManager.archiveGoalAfterMerge(childGoalId);
+				return { passed: true, output: `Subgoal merged + archived (${outcome.merged ? "merged" : "already merged"}): ${childGoalId}` };
+			}
+			if (outcome.conflict) {
+				return {
+					passed: false,
+					output: `Merge conflict between child ${childGoalId} and parent ${parentGoalId} — manual resolution required. See docs/nested-goals.md §conflicts. Conflict diagnostic: ${truncateForOutput(outcome.output)}`,
+				};
+			}
+			return { passed: false, output: `Unexpected merge outcome (no merged/alreadyMerged/conflict flag): ${truncateForOutput(outcome.output)}` };
+		} finally {
+			sem.release();
+		}
+	}
+
+	/**
+	 * Wait for a child goal's `ready-to-merge` gate to pass, or for a terminal
+	 * exit condition. Default polling interval 500 ms.
+	 *
+	 * Exit conditions:
+	 *   - active.cancelled → "cancelled"
+	 *   - child.archived && state === "complete" → "archived-complete"
+	 *   - child.archived && state !== "complete" → "archived-other"
+	 *   - ready-to-merge gate state === "passed" → "passed"
+	 *
+	 * Paused children continue waiting (Lesson 4.13 — paused != failed).
+	 */
+	private async _waitForChildReadyToMerge(
+		_parentGoalId: string,
+		childGoalId: string,
+		active: ActiveVerification,
+	): Promise<"passed" | "archived-complete" | "archived-other" | "cancelled"> {
+		// Test seam: allow callers to swap in a deterministic resolver.
+		if (this._subgoalHooks?.waitForReadyToMerge) {
+			const aborter = { aborted: !!active.cancelled };
+			// keep aborter.aborted in sync with active.cancelled (best effort)
+			const sync = setInterval(() => { aborter.aborted = !!active.cancelled; }, 50);
+			try {
+				return await this._subgoalHooks.waitForReadyToMerge(childGoalId, aborter);
+			} finally {
+				clearInterval(sync);
+			}
+		}
+
+		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
+		if (!ctx) return "archived-other"; // child evaporated — equivalent to external archive
+		const POLL_MS = 500;
+		while (true) {
+			if (active.cancelled) return "cancelled";
+			const child = ctx.goalStore.get(childGoalId);
+			if (!child) return "archived-other";
+			if (child.archived === true) {
+				return child.state === "complete" ? "archived-complete" : "archived-other";
+			}
+			const rtm = ctx.gateStore.getGate(childGoalId, "ready-to-merge");
+			if (rtm?.status === "passed") return "passed";
+			// paused / pending / failed all continue the wait — only an external
+			// archive or a passed ready-to-merge is terminal.
+			await new Promise(r => setTimeout(r, POLL_MS));
+		}
+	}
+}
+
+/**
+ * Truncate a multi-line output blob for inclusion in a step's `output` field
+ * without bloating the gate-status payload. Mirrors the convention used by
+ * `runCommandStep` (last 5KB).
+ */
+function truncateForOutput(s: string | undefined, max = 4000): string {
+	if (!s) return "";
+	return s.length > max ? `…${s.slice(-max)}` : s;
 }
 

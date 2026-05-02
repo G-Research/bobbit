@@ -1,0 +1,31 @@
+name: goal_decide_mutation
+description: "Approve or reject a queued plan-mutation request"
+summary: "Resolve a pending mutation request raised by goal_plan_propose."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Required: `requestId` (from a prior `goal_plan_propose` response), `decision` (`"approve" | "reject"`). On approve: the proposed steps replace the goal's `execution.verify[]`, `replanCount` is incremented, and the goal is auto-paused if `replanCount > 5` (per SUBGOALS-SPEC §3.6). On reject: the request is discarded, no state change. Returns 200 `{ applied: boolean }`.
+detail_docs: >-
+  ## Purpose
+
+
+  Resolve a pending plan-mutation request. The flow is:
+
+  1. Agent calls `goal_plan_propose`.
+
+  2. If the classifier requires user approval, server returns
+     `{ requestId, requiresApproval: true }`.
+
+  3. UI surfaces the diff to the user; user approves or rejects.
+
+  4. UI (or agent on user's behalf) calls `goal_decide_mutation`.
+
+
+  ## Auto-pause guard
+
+
+  After an approve, `replanCount` is incremented. If it exceeds 5 the
+  goal is auto-paused (`paused: true`) so a human is forced to inspect
+  the plan churn before more replans land. Resume via `goal_resume`.

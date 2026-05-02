@@ -162,6 +162,89 @@ export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfi
 	});
 }
 
+/**
+ * Nesting context — populated by callers (session-manager) when assembling
+ * the team-lead system prompt for a goal that is part of a nested-goals tree.
+ * When `team` is true and `nestingContext` is set, three stanzas are folded
+ * into the prompt:
+ *   - Stanza A (top-level root):   parentGoalId === undefined
+ *   - Stanza B (child team-lead):  parentGoalId !== undefined
+ *   - Stanza C (decision rule):    always included for team goals
+ *
+ * For non-team goals (assistant sessions, single-agent sessions), pass
+ * `team: false` (or omit entirely) and no stanzas render.
+ */
+export interface NestingContext {
+	/** Is this a team-lead session? */
+	team?: boolean;
+	/** Current goal's branch (for Stanza B's "Your branch (X) merges INTO" line). */
+	goalBranch?: string;
+	/** Set when this goal has a parent (i.e. it is a child team-lead). */
+	parent?: { id: string; title: string; branch?: string };
+	/** Set when this goal has a non-self root (i.e. it is a child or grandchild). */
+	root?: { id: string; title: string; branch?: string };
+}
+
+/**
+ * Build the nesting-awareness section for the team-lead system prompt.
+ * Returns undefined when `ctx` is not a team goal — caller can skip.
+ *
+ * Stanza A (top-level root) appears when `ctx.parent` is undefined; Stanza B
+ * (child team-lead) appears when `ctx.parent` is set; Stanza C (decision
+ * rule for `subgoal` vs `team_spawn` vs `task_create`) appears for every
+ * team goal regardless of role in the tree.
+ */
+export function buildNestingContextSection(ctx: NestingContext): string | undefined {
+	if (!ctx.team) return undefined;
+
+	const parts: string[] = [];
+
+	if (!ctx.parent) {
+		// Stanza A — top-level root
+		parts.push(
+			"## Goal nesting context (TOP-LEVEL ROOT)\n\n" +
+			"You are the team lead of a TOP-LEVEL (root) goal. This is the only goal in the tree that opens a pull request to `master`.\n\n" +
+			"**Your special responsibilities:**\n" +
+			"- After ready-to-merge passes, raise the PR via `gh pr create`. Child goals MUST NOT raise PRs.\n" +
+			"- Decide whether to decompose this work into nested sub-goals: see \"When to use subgoal vs team_spawn vs task_create\" below.\n" +
+			"- The root's `maxConcurrentChildren` (default 3, max 8) caps parallelism for the WHOLE tree — your tool `goal_set_policy` adjusts it.\n" +
+			"- The root's `divergencePolicy` (strict / balanced / autonomous) controls how mid-flight plan mutations are classified — see plan-mutation classifier docs."
+		);
+	} else {
+		// Stanza B — child team-lead
+		const parentTitle = ctx.parent.title || ctx.parent.id;
+		const parentId = ctx.parent.id;
+		const rootTitle = ctx.root?.title || ctx.root?.id || parentTitle;
+		const rootId = ctx.root?.id || parentId;
+		const parentBranch = ctx.parent.branch || `parent's branch`;
+		const goalBranch = ctx.goalBranch || `your branch`;
+		parts.push(
+			"## Goal nesting context (CHILD GOAL)\n\n" +
+			`You are the team lead of a CHILD goal. Parent: \`${parentTitle}\` (id: \`${parentId}\`). Root: \`${rootTitle}\` (id: \`${rootId}\`).\n\n` +
+			"**Critical constraints:**\n" +
+			`- Your branch (\`${goalBranch}\`) merges INTO the parent's branch (\`${parentBranch}\`) LOCALLY when ready-to-merge passes. The parent's team-lead handles that merge automatically — you do not call \`git merge\` yourself.\n` +
+			"- **DO NOT raise a PR.** Only the root team-lead raises a PR (to `master`). If you call `gh pr create`, you create work the root must clean up.\n" +
+			`- Your worktree was created off \`${parentBranch}\` HEAD at spawn time. Sibling goals spawned later see your committed work after the parent's merge.\n` +
+			"- If a sibling completed before you started, you should already see their commits via the parent's branch tip.\n" +
+			"- You can decompose YOUR work into deeper nested sub-goals if useful — same `parent` workflow + `goal_spawn_child` tool. There is no depth cap (the renderer limits visual depth, not the data model)."
+		);
+	}
+
+	// Stanza C — always present for team goals
+	parts.push(
+		"## When to use `subgoal` vs `team_spawn` vs `task_create`\n\n" +
+		"You have THREE delegation primitives. Pick the right one:\n\n" +
+		"| Tool | Lifetime | Branch | Best for |\n" +
+		"|---|---|---|---|\n" +
+		"| `task_create` | Sub-second to minutes | Same branch (no worktree) | Tracking work items, todos, dependencies between work units within this goal |\n" +
+		"| `team_spawn` | Minutes to hours | New worktree on a sub-branch of THIS goal's branch (e.g. `goal-X-coder-Y`) | Code-writing, review, QA — work that ends with the agent merging back into your goal branch |\n" +
+		"| `subgoal` (via `goal_spawn_child` or via the `subgoal` verify-step in your plan) | Hours to days | Whole new goal record, own goal branch off YOUR branch HEAD, own team-lead, own ready-to-merge gate, own PR-or-local-merge | Independent units of work that themselves benefit from a full goal lifecycle (charter / plan / execution / integration / merge) — e.g. version slices (v0.1, v0.2, v1.0) of a feature, or distinct sub-features that each need their own coder + reviewer + QA flow |\n\n" +
+		"Rule of thumb: if the work is small enough to verify in one gate signal, use `task_create` or `team_spawn`. If it's large enough to need its own gates and team, use `subgoal`. **Subgoals are not free** — each one spawns a full team-lead session and a worktree. Don't decompose a 10-minute task into a subgoal."
+	);
+
+	return parts.join("\n\n");
+}
+
 export interface PromptParts {
 	/** Path to the global system prompt file (config/system-prompt.md) */
 	baseSystemPromptPath?: string;
@@ -201,6 +284,11 @@ export interface PromptParts {
 	 *  When non-empty, an "Available Skills" section is injected into the system prompt.
 	 *  Skills with `disable-model-invocation: true` should be filtered out by the caller. */
 	skillsCatalog?: SlashSkill[];
+	/** Nested-goals awareness — when set on a team goal, three stanzas are
+	 *  injected into the prompt explaining the goal's role in the tree
+	 *  (root vs child) and the `subgoal` / `team_spawn` / `task_create`
+	 *  decision rule. See `buildNestingContextSection`. */
+	nestingContext?: NestingContext;
 }
 
 /** Max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -312,6 +400,13 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 				: "# Goal";
 			sections.push(header + "\n\n" + effectiveGoalSpec.trim());
 		}
+	}
+
+	// 3.5. Goal nesting context (Phase 6) — three stanzas for team-lead sessions
+	// describing root/child role + the subgoal/team_spawn/task_create decision rule.
+	if (parts.nestingContext) {
+		const nesting = buildNestingContextSection(parts.nestingContext);
+		if (nesting) sections.push(nesting);
 	}
 
 	// 4. Tool documentation
@@ -432,6 +527,14 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	// 4. Role prompt
 	if (parts.rolePrompt?.trim()) {
 		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
+	}
+
+	// 4.5. Goal nesting context (Phase 6) — see _assembleSystemPrompt for shape.
+	if (parts.nestingContext) {
+		const nesting = buildNestingContextSection(parts.nestingContext);
+		if (nesting) {
+			sections.push({ label: "Goal Nesting", source: parts.nestingContext.parent ? "Child team-lead" : "Top-level team-lead", content: nesting, tokens: estimateTokens(nesting) });
+		}
 	}
 
 	// 7. Tool docs
