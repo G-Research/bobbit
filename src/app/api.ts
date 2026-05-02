@@ -890,25 +890,60 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
 }
 
 export async function deleteGoal(id: string): Promise<void> {
-	const { confirmAction } = await import("./dialogs.js");
 	const goal = state.goals.find((g) => g.id === id);
-	const goalTitle = goal?.title || "this goal";
-	const sessionsUnderGoal = state.gatewaySessions.filter((s) => s.goalId === id);
+	if (!goal) return;
+	const goalTitle = goal.title || "this goal";
 
-	let message = `Are you sure you want to delete "${goalTitle}"?`;
-	if (sessionsUnderGoal.length > 0) {
-		message += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
+	// Count non-archived descendants client-side; the dialog uses this to
+	// decide whether to show the cascade-confirmation flow or fall through
+	// to the legacy single-goal confirm.
+	const { countDescendants, showArchiveGoalDialog } = await import("./dialogs.js");
+	const descendants = countDescendants(id);
+
+	if (descendants === 0) {
+		// Legacy path — single-goal archive confirmation.
+		const { confirmAction } = await import("./dialogs.js");
+		const confirmed = await confirmAction("Archive Goal", `Archive "${goalTitle}"? It will move to the archived section.`, "Archive", false);
+		if (!confirmed) return;
+		try {
+			await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
+			setHashRoute("landing");
+			await refreshSessions();
+		} catch (err) {
+			showConnectionError("Failed to archive goal", err instanceof Error ? err.message : String(err));
+		}
+		return;
 	}
 
-	const confirmed = await confirmAction("Archive Goal", `Archive "${goalTitle}"? It will move to the archived section.`, "Archive", false);
-	if (!confirmed) return;
-
-	try {
-		await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
+	// Cascade flow — pre-flight + dialog. The dialog handles all REST calls.
+	const result = await showArchiveGoalDialog(goal);
+	if (result.archived > 0) {
 		setHashRoute("landing");
 		await refreshSessions();
-	} catch (err) {
-		showConnectionError("Failed to archive goal", err instanceof Error ? err.message : String(err));
+	}
+}
+
+/** Pause a goal with cascade UX (Phase 5b). */
+export async function pauseGoalWithDialog(id: string): Promise<void> {
+	const goal = state.goals.find((g) => g.id === id);
+	if (!goal) return;
+	const { countDescendants, showPauseGoalDialog } = await import("./dialogs.js");
+	const descendants = countDescendants(id);
+	const result = await showPauseGoalDialog(goal, descendants);
+	if (result.paused > 0) {
+		await refreshSessions();
+	}
+}
+
+/** Resume a goal with cascade UX (Phase 5b). */
+export async function resumeGoalWithDialog(id: string): Promise<void> {
+	const goal = state.goals.find((g) => g.id === id);
+	if (!goal) return;
+	const { countDescendants, showResumeGoalDialog } = await import("./dialogs.js");
+	const descendants = countDescendants(id);
+	const result = await showResumeGoalDialog(goal, descendants);
+	if (result.resumed > 0) {
+		await refreshSessions();
 	}
 }
 

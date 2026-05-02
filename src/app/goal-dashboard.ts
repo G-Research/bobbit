@@ -5,7 +5,7 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
@@ -1260,6 +1260,9 @@ function renderNavBar(goal: Goal): TemplateResult {
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
+					${goal.paused
+						? html`<button class="btn-icon" data-testid="goal-resume-btn" @click=${() => resumeGoalWithDialog(goal.id)} title="Resume goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Resume</span></button>`
+						: html`<button class="btn-icon" data-testid="goal-pause-btn" @click=${() => pauseGoalWithDialog(goal.id)} title="Pause goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>Pause</span></button>`}
 					${prStatus?.state === "MERGED" && !teamActive
 						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
 						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>`}
