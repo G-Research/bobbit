@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import { html } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
@@ -34,6 +34,7 @@ import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, H
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
+import { buildNestedGoalForest, type NestedGoalNode } from "./sidebar-nesting.js";
 
 // ============================================================================
 // PROJECT EXPANSION STATE
@@ -746,6 +747,78 @@ function renderProjectArchivedSection(
 	return renderSharedProjectArchivedSection(project, archivedGoals, standaloneArchivedSessions, "desktop");
 }
 
+/**
+ * Per-project key for the "Show N more child goals" expansion state.
+ * When the user clicks the truncation row, we bump the depth cap by 5 to
+ * surface the next layer of nesting. Persists in module memory for the
+ * lifetime of the SPA — losing this on reload is fine, the cap default of
+ * 5 is the documented limit anyway.
+ */
+const _expandedNestedDepthByProject: Map<string, number> = new Map();
+const DEFAULT_NESTED_DEPTH_CAP = 5;
+const NESTED_DEPTH_INCREMENT = 5;
+
+function _getNestedDepthCap(projectId: string): number {
+	return _expandedNestedDepthByProject.get(projectId) ?? DEFAULT_NESTED_DEPTH_CAP;
+}
+
+function _expandNestedDepth(projectId: string): void {
+	const cur = _getNestedDepthCap(projectId);
+	_expandedNestedDepthByProject.set(projectId, cur + NESTED_DEPTH_INCREMENT);
+	renderApp();
+}
+
+/** Render the "Show N more child goals…" affordance when the depth cap clipped. */
+function renderTruncationRow(projectId: string, count: number, depth: number) {
+	const indentPx = depth * 16;
+	return html`
+		<div
+			class="flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors text-[10px] text-muted-foreground italic"
+			data-testid="sidebar-show-more-children"
+			style="padding-left:${indentPx + HEADER_CHEVRON_W}px;"
+			@click=${(e: Event) => { e.stopPropagation(); _expandNestedDepth(projectId); }}
+			title="Reveal deeper nested goals">
+			Show ${count} more child goal${count === 1 ? "" : "s"}…
+		</div>
+	`;
+}
+
+/**
+ * Recursively render a NestedGoalNode and its children with per-depth indent.
+ * Each node uses the existing `renderGoalGroup` for the actual row content,
+ * wrapped in a div whose `padding-left` produces a 16px indent per nesting
+ * level (matches the Phase 5b spec). When the helper signals
+ * `truncatedChildrenCount > 0`, a "Show N more" affordance is emitted.
+ */
+function renderNestedNode(
+	projectId: string,
+	node: NestedGoalNode,
+): TemplateResult | typeof nothing {
+	const indentPx = node.depth * 16;
+	const goal = node.goal as unknown as Goal;
+	const showCount = node.descendantCount > 0;
+	return html`
+		<div data-testid="sidebar-nested-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
+			<div class="relative" data-testid="sidebar-goal-row">
+				${renderGoalGroup(goal)}
+				${showCount ? html`
+					<span
+						class="absolute pointer-events-none text-[9px] font-semibold text-muted-foreground"
+						data-testid="sidebar-descendant-badge"
+						style="right:6px;top:2px;background:var(--secondary);padding:0 4px;border-radius:6px;"
+						title="${node.descendantCount} descendant goal${node.descendantCount === 1 ? "" : "s"}">
+						(${node.descendantCount})
+					</span>
+				` : nothing}
+			</div>
+		</div>
+		${node.children.map(c => renderNestedNode(projectId, c))}
+		${node.truncatedChildrenCount && node.truncatedChildrenCount > 0
+			? renderTruncationRow(projectId, node.truncatedChildrenCount, node.depth + 1)
+			: nothing}
+	`;
+}
+
 /** Render goals and sessions for a single project (used in multi-project mode). */
 function renderProjectContent(
 	project: Project,
@@ -757,10 +830,12 @@ function renderProjectContent(
 ) {
 	const isProvisional = !!project.provisional;
 	const ungroupedExp = isUngroupedExpanded(project.id);
+	const maxDepth = _getNestedDepthCap(project.id);
+	const forest = buildNestedGoalForest(goals as any, { maxDepth });
 	return html`
-		${goals.map((goal, i) => html`
+		${forest.map((node, i) => html`
 			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
-			${renderGoalGroup(goal)}
+			${renderNestedNode(project.id, node)}
 		`)}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
