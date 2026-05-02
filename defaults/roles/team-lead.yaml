@@ -12,6 +12,15 @@ toolPolicies:
   gate_signal: always-allow
   gate_status: always-allow
   gate_inspect: always-allow
+  goal_spawn_child: always-allow
+  goal_plan_propose: always-allow
+  goal_plan_status: always-allow
+  goal_merge_child: always-allow
+  goal_pause: always-allow
+  goal_resume: always-allow
+  goal_archive_child: always-allow
+  goal_decide_mutation: always-allow
+  goal_set_policy: always-allow
 createdAt: 1773875507369
 updatedAt: 1775088361805
 promptTemplate: |

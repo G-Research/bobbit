@@ -1,0 +1,27 @@
+name: goal_plan_status
+description: "Read the current plan + child-goal projection"
+summary: "Return the goal's frozen plan with each child's resolved state."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Optional: `gateId` (default `"execution"`). Returns `{ steps, gateState, frozen, replanCount }` where each step includes its resolved `childGoalId` (when one was spawned) plus the child's `state` and `archived` flag. Use this to drive the "Plan" tab and to decide which children need attention.
+detail_docs: >-
+  ## Purpose
+
+
+  Read the current frozen plan + the projection of each child's state.
+  Cheap — pulls directly from the persisted store. Use it in lieu of
+  calling `gate_inspect` for the entire `execution.verify[]` payload.
+
+
+  ## Returns
+
+
+  `{ steps: PlanStep[], gateState: "pending" | "passed" | "failed",
+  frozen: boolean, replanCount: number }` where each `PlanStep` is `{
+  planId, title, spec, phase?, workflowId?, suggestedRole?, childGoalId?,
+  childState?, childArchived? }`. `childGoalId` is resolved via the same
+  tier-based preference the harness uses (Lesson 4.19) — live > archived
+  + complete > live other > archived non-complete.
