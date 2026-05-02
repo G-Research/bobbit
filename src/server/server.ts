@@ -6496,7 +6496,10 @@ async function handleApiRoute(
 			// goes blind — BUG-3 partial fix (cef6257f) had this gap; live
 			// test (PR #409 team-lead-317cdb83) surfaced it after Phase 2.
 			if (!childGoalId) {
-				const best = resolvePlanStepChild(goalId, sg.planId, planCtx.goalStore.getAll());
+				// Pass the planStep's title for tier-4 orphan-child fallback
+				// (rescues server-restart-stranded children whose
+				// spawnedFromPlanId never persisted).
+				const best = resolvePlanStepChild(goalId, sg.planId, planCtx.goalStore.getAll(), sg.title);
 				if (best) childGoalId = best.id;
 			}
 			if (childGoalId) {

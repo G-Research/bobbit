@@ -162,3 +162,66 @@ describe("resolvePlanStepChild — tier-based preference (BUG #2 regression)", (
 		assert.equal(result?.id, "live-todo");
 	});
 });
+
+describe("resolvePlanStepChild — tier-4 title fallback (orphan-child rescue)", () => {
+	// Live test (PR #409 v0.2-embeddings-mcp-retrieval): 4 Phase 2
+	// leaves spawned BEFORE the spawnedFromPlanId-on-spawn change
+	// shipped (interrupted by server restart). They have state=complete
+	// but spawnedFromPlanId=null. Title-fallback rescues them.
+
+	it("THE bug: rescues orphan child by title when no spawnedFromPlanId match", () => {
+		const goals = [
+			{ id: "orphan", parentGoalId: "p1", state: "complete" as const, title: "streaming-scrubber (v0.2 leaf)", spawnedFromPlanId: undefined, createdAt: 1000 },
+		];
+		const result = resolvePlanStepChild("p1", "v0.2-streaming-scrubber", goals, "streaming-scrubber (v0.2 leaf)");
+		assert.equal(result?.id, "orphan");
+	});
+
+	it("does NOT rescue when planTitle is not supplied", () => {
+		const goals = [
+			{ id: "orphan", parentGoalId: "p1", state: "complete" as const, title: "streaming-scrubber", spawnedFromPlanId: undefined, createdAt: 1000 },
+		];
+		// No planTitle arg.
+		const result = resolvePlanStepChild("p1", "v0.2-streaming-scrubber", goals);
+		assert.equal(result, undefined);
+	});
+
+	it("does NOT match a child that has a DIFFERENT spawnedFromPlanId (would be re-binding)", () => {
+		// Defensive: a child legitimately spawned for a DIFFERENT planId
+		// must not be rebound just because its title matches another
+		// planStep's title. Tier-4 only matches truly-orphan children.
+		const goals = [
+			{ id: "taken", parentGoalId: "p1", state: "complete" as const, title: "streaming-scrubber", spawnedFromPlanId: "v0.2-different", createdAt: 1000 },
+		];
+		const result = resolvePlanStepChild("p1", "v0.2-streaming-scrubber", goals, "streaming-scrubber");
+		assert.equal(result, undefined);
+	});
+
+	it("does NOT match a child of a DIFFERENT parent", () => {
+		const goals = [
+			{ id: "orphan", parentGoalId: "p2", state: "complete" as const, title: "streaming-scrubber", spawnedFromPlanId: undefined, createdAt: 1000 },
+		];
+		const result = resolvePlanStepChild("p1", "v0.2-streaming-scrubber", goals, "streaming-scrubber");
+		assert.equal(result, undefined);
+	});
+
+	it("prefers spawnedFromPlanId match over title match (tier 1-3 wins over tier 4)", () => {
+		// Both kinds present — the proper linkage wins. Title-fallback
+		// only fires when no spawnedFromPlanId match exists.
+		const goals = [
+			{ id: "properly-linked", parentGoalId: "p1", state: "complete" as const, title: "different-title", spawnedFromPlanId: "v0.2-storage", createdAt: 1000 },
+			{ id: "orphan-by-title", parentGoalId: "p1", state: "complete" as const, title: "matches-the-plan-title", spawnedFromPlanId: undefined, createdAt: 2000 },
+		];
+		const result = resolvePlanStepChild("p1", "v0.2-storage", goals, "matches-the-plan-title");
+		assert.equal(result?.id, "properly-linked");
+	});
+
+	it("among multiple orphans matching by title, applies tier preference", () => {
+		const goals = [
+			{ id: "orphan-shelved", parentGoalId: "p1", state: "shelved" as const, archived: true, title: "X", spawnedFromPlanId: undefined, createdAt: 2000 },
+			{ id: "orphan-live", parentGoalId: "p1", state: "in-progress" as const, title: "X", spawnedFromPlanId: undefined, createdAt: 1000 },
+		];
+		const result = resolvePlanStepChild("p1", "v0.2-x", goals, "X");
+		assert.equal(result?.id, "orphan-live");
+	});
+});

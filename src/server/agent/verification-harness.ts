@@ -2386,13 +2386,28 @@ export class VerificationHarness {
 			// duplicate or stall on dep-sat. Live test (PR #409 team-lead-
 			// 317cdb83): after Phase 2 trio merged + auto-archived, planSteps
 			// lost their child linkage and Phase 3 didn't auto-spawn.
+			// Pass sg.title for tier-4 orphan-child fallback (rescues
+			// server-restart-stranded children whose spawnedFromPlanId
+			// never persisted before the cef6257f fix).
 			const best = resolvePlanStepChild(
 				signal.goalId,
 				sg.planId,
-				(parentCtx.goalStore as any).getAll() as Array<{ id: string; parentGoalId?: string; archived?: boolean; spawnedFromPlanId?: string; createdAt?: number }>,
+				(parentCtx.goalStore as any).getAll() as Array<{ id: string; parentGoalId?: string; archived?: boolean; spawnedFromPlanId?: string; createdAt?: number; title?: string }>,
+				sg.title,
 			);
 			if (best) {
 				childGoalId = best.id;
+				// Defensive: when matched via tier-4 title fallback, the
+				// child has no spawnedFromPlanId. Persist it now so future
+				// lookups take the cheap tier-1/2/3 path.
+				const childRec = parentCtx.goalStore.get(best.id);
+				if (childRec && !childRec.spawnedFromPlanId) {
+					try {
+						parentCtx.goalManager.updateGoal(best.id, { spawnedFromPlanId: sg.planId });
+					} catch (err) {
+						console.warn(`[verification] Failed to persist spawnedFromPlanId on title-fallback rescue for ${best.id}:`, err);
+					}
+				}
 				// Persist the linkage on the active record so subsequent
 				// re-entries take the cheap (a) path.
 				const av = this.activeVerifications.get(signal.id);
