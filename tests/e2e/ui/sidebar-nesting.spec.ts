@@ -80,10 +80,10 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 		await expect(child2Row).toHaveAttribute("data-depth", "1");
 		await expect(grandchildRow).toHaveAttribute("data-depth", "2");
 
-		// Parent shows the descendant-count badge "(3)".
+		// Parent shows the descendant-count badge — pill-style, just "3".
 		const badge = parentRow.locator(`[data-testid="sidebar-descendant-badge"]`).first();
 		await expect(badge).toBeVisible();
-		await expect(badge).toContainText("(3)");
+		await expect(badge).toContainText("3");
 	});
 
 	test("child row dashboard button is reachable + navigates", async ({ page }) => {
