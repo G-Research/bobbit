@@ -2634,6 +2634,67 @@ export class VerificationHarness {
 					mergedAt: resolvedChild.archivedAt ?? Date.now(),
 				};
 			}
+
+			// Degenerate-state recovery: a child with `state: complete` but
+			// `archived: null` AND `!workflow` is from an in-flight
+			// regression where createGoal silently produced a workflow-less
+			// goal (the bug fixed at a1767a89). The coder did the work and
+			// state was set to complete somehow, but there are no gates so
+			// `ready-to-merge` can never pass and the wait loop below would
+			// poll forever. Live test (PR #409 v0.2-embeddings,
+			// context-fencing leaf 48c314fd-d853-4935-ac5c-da2220e8b9b9).
+			//
+			// Recovery: try to merge the child's branch into the parent
+			// using the same path as the normal happy-path, then archive
+			// the child. If merge fails (conflict), fall through to the
+			// wait loop — the team-lead will need to manually intervene.
+			if (resolvedChild && !resolvedChild.archived
+				&& resolvedChild.state === "complete"
+				&& !resolvedChild.workflow) {
+				console.log(`[verification] Detected workflow-less complete child ${childGoalId} for plan ${sg.planId} — attempting degenerate-state merge.`);
+				try {
+					const mergeResult = await goalManager.mergeChild(signal.goalId, childGoalId);
+					if (mergeResult.merged) {
+						const mergedAt = Date.now();
+						if (this.teamManager) {
+							await this.teamManager.teardownTeam(childGoalId).catch(() => { /* best-effort */ });
+						}
+						await goalManager.archiveGoalAfterMerge(childGoalId).catch(() => { /* best-effort */ });
+						return {
+							passed: true,
+							output: `Subgoal ${sg.title} recovered from workflow-less complete state — branch merged + archived.`,
+							childGoalId,
+							mergedAt,
+						};
+					}
+					// merged: false, alreadyMerged: true — already integrated;
+					// just archive.
+					if ((mergeResult as any).alreadyMerged) {
+						if (this.teamManager) {
+							await this.teamManager.teardownTeam(childGoalId).catch(() => { /* best-effort */ });
+						}
+						await goalManager.archiveGoalAfterMerge(childGoalId).catch(() => { /* best-effort */ });
+						return {
+							passed: true,
+							output: `Subgoal ${sg.title} recovered from workflow-less complete state — branch already merged, archived.`,
+							childGoalId,
+							mergedAt: Date.now(),
+						};
+					}
+					return {
+						passed: false,
+						output: `Subgoal ${sg.title} is in degenerate complete-but-workflow-less state and merge failed: ${(mergeResult as any).error || "unknown"}. Team-lead must manually merge \`${resolvedChild.branch}\` and call goal_archive_child.`,
+						childGoalId,
+					};
+				} catch (err) {
+					console.warn(`[verification] Degenerate-state merge failed for ${childGoalId}:`, err);
+					return {
+						passed: false,
+						output: `Subgoal ${sg.title} is in degenerate complete-but-workflow-less state and merge threw: ${(err as Error).message}. Team-lead must manually merge \`${resolvedChild.branch}\` and call goal_archive_child.`,
+						childGoalId,
+					};
+				}
+			}
 		}
 
 		// 3. Wait loop — poll child's ready-to-merge gate (cheap; in-memory
