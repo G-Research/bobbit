@@ -129,6 +129,11 @@ function renderMobileLanding() {
 							@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}>
 							${icon(Wrench, "xs")} Tools
 						</button>
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
+							title="View skills"
+							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
+							${icon(Zap, "xs")} Skills
+						</button>
 					</div>
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
@@ -140,11 +145,6 @@ function renderMobileLanding() {
 								setHashRoute("settings", `${projectId}/workflows`, true);
 							}}>
 							${icon(WorkflowIcon, "xs")} Workflows
-						</button>
-						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
-							title="View skills"
-							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
-							${icon(Zap, "xs")} Skills
 						</button>
 						<button
 							data-new-goal-trigger
