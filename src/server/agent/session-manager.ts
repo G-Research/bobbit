@@ -2277,9 +2277,42 @@ export class SessionManager {
 			: (this._testStore?.getLive() ?? []);
 		if (persisted.length === 0) return;
 
+		// Sweep zombie reviewer sessions BEFORE restore. `llm-review-*`
+		// sessions are ephemeral by design — spawned by the verification
+		// harness for a single review step, then terminated in a `finally`
+		// block. They have no purpose after a gateway restart: their
+		// verification context is gone, the harness has moved on, and
+		// restoring them just produces a leaked subprocess that consumes
+		// tokens and pretends to work. The team-manager's boot-sweep
+		// already unregisters them from the team-store; this archives the
+		// underlying SessionStore record so the API stops returning them
+		// and the UI doesn't render a phantom card.
+		//
+		// Live test (PR #409 Eve+Gizmo verification timeouts): 6 leaked
+		// llm-review-* sessions accumulated in bobbit-suubro/.bobbit/state/
+		// sessions.json across multiple restarts, all `archived: null`,
+		// some 17 hours old. The team-store boot-sweep cleaned the team
+		// records but the SessionStore records persisted, so the API kept
+		// returning them as live sessions and consumed restore time on
+		// every gateway boot.
+		const leakedReviewers = persisted.filter(ps =>
+			typeof ps.id === "string" && ps.id.startsWith("llm-review-")
+		);
+		if (leakedReviewers.length > 0) {
+			for (const ps of leakedReviewers) {
+				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
+			}
+			console.log(`[session-manager] Auto-archived ${leakedReviewers.length} leaked llm-review-* session(s) on boot.`);
+		}
+		// Re-fetch the live list after archive so we don't try to restore
+		// the records we just archived.
+		const persistedAfterSweep = this.projectContextManager
+			? [...this.projectContextManager.getAllLiveSessions()]
+			: (this._testStore?.getLive() ?? []);
+
 		// Separate regular sessions from delegate sessions
-		const regular = persisted.filter(ps => !ps.delegateOf);
-		const delegates = persisted.filter(ps => !!ps.delegateOf);
+		const regular = persistedAfterSweep.filter(ps => !ps.delegateOf);
+		const delegates = persistedAfterSweep.filter(ps => !!ps.delegateOf);
 
 		console.log(`[session-manager] Restoring ${regular.length} session(s), deferring ${delegates.length} delegate(s)...`);
 
