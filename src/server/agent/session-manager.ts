@@ -1343,6 +1343,56 @@ export class SessionManager {
 	}
 
 	/**
+	 * Lesson 4.9 — Auto-revive a dead RPC bridge before dispatching a brand-new
+	 * prompt. Used ONLY at the two new-prompt sites in `enqueuePrompt` (the
+	 * error-recovery branch and the idle+empty branch) — NOT in steady-state
+	 * retry/drain paths, which should fail loudly so a real bridge death
+	 * surfaces in logs.
+	 *
+	 * Symptom this protects against: post-restart, a session's persisted record
+	 * is restored but its in-process RPC bridge is dead. The WS layer ack's the
+	 * prompt but the agent never sees it because `rpcClient.prompt()` throws
+	 * "Agent process not running" — and the user gets a phantom-stuck session
+	 * with no recovery affordance.
+	 *
+	 * Invariant: callers MUST refetch the session entry from `this.sessions`
+	 * after this returns, because `restartAgent` deletes and re-creates it.
+	 * That's why this helper returns the (possibly fresh) `SessionInfo` rather
+	 * than letting the caller hold onto a stale reference.
+	 */
+	private async _dispatchPromptWithReviveOnDeadBridge(
+		sessionId: string,
+		dispatchText: string,
+		images: Array<{ type: "image"; data: string; mimeType: string }> | undefined,
+	): Promise<void> {
+		let session = this.sessions.get(sessionId);
+		if (!session) return;
+
+		if (!session.rpcClient.running) {
+			console.log(
+				`[session-manager] Session ${sessionId} has dead RPC bridge — auto-reviving via restartAgent before new-prompt dispatch.`,
+			);
+			try {
+				await this.restartAgent(sessionId);
+			} catch (err: any) {
+				// If restartAgent throws (e.g. SESSION_UNRECOVERABLE_ARCHIVED), let
+				// the error propagate to the WS layer so the user sees something
+				// actionable instead of an opaque "Agent process not running".
+				console.error(`[session-manager] auto-revive of session ${sessionId} failed:`, err);
+				throw err;
+			}
+			// restartAgent deletes the entry and re-adds via restoreSession, so
+			// re-resolve before issuing the prompt.
+			session = this.sessions.get(sessionId);
+			if (!session) {
+				throw new Error(`Session ${sessionId} not found after auto-revive`);
+			}
+		}
+
+		await session.rpcClient.prompt(dispatchText, images);
+	}
+
+	/**
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
 	 * If the agent is idle but queue has items, enqueue and drain.
@@ -1431,7 +1481,8 @@ export class SessionManager {
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
-			await session.rpcClient.prompt(prefixedDispatch, opts?.images);
+			// Lesson 4.9 — auto-revive a dead bridge before new-prompt dispatch.
+			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, prefixedDispatch, opts?.images);
 			return;
 		}
 
@@ -1440,7 +1491,8 @@ export class SessionManager {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			session.lastPromptText = dispatchText;
 			session.lastPromptImages = opts?.images;
-			await session.rpcClient.prompt(dispatchText, opts?.images);
+			// Lesson 4.9 — auto-revive a dead bridge before new-prompt dispatch.
+			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, dispatchText, opts?.images);
 			return;
 		}
 
@@ -2240,6 +2292,37 @@ export class SessionManager {
 
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
+
+		// Lesson 4.10 — Detect unrecoverable zombie records BEFORE attempting
+		// `restoreSession`. A row with neither an agent session file nor a role
+		// has nothing for `restoreSession` to bootstrap from — it would throw
+		// partway through and leave the row dangling forever (sidebar shows
+		// "Agent process not running", clicking Restart Agent throws again).
+		// Symptom on PR #409: "Coder: Russell Throw" rows that ate clicks
+		// silently because the UI optimistically removed the row before the
+		// throw propagated.
+		//
+		// Resolution: archive the row so it disappears from the active sidebar,
+		// and surface a structured `code: SESSION_UNRECOVERABLE_ARCHIVED` error
+		// the UI can recognise and message instead of opaquely re-throwing
+		// "Agent process not running".
+		if (!ps.agentSessionFile && !ps.role) {
+			console.warn(
+				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
+				`(no agentSessionFile, no role) — archiving instead of restarting.`,
+			);
+			try {
+				this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: Date.now() });
+			} catch (err) {
+				console.error(`[session-manager] Failed to archive zombie session ${sessionId}:`, err);
+			}
+			const zombieErr: Error & { code?: string } = new Error(
+				`Session ${sessionId} could not be restarted — neither an agent session file nor ` +
+				`a role was persisted. The session has been archived; create a fresh session to continue.`,
+			);
+			zombieErr.code = "SESSION_UNRECOVERABLE_ARCHIVED";
+			throw zombieErr;
+		}
 
 		// Save state that must survive the restart
 		const clients = new Set(session.clients);
