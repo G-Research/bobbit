@@ -1379,7 +1379,7 @@ export class SessionManager {
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
-			await session.rpcClient.prompt(prefixedDispatch, opts?.images);
+			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, prefixedDispatch, opts?.images);
 			return;
 		}
 
@@ -1388,7 +1388,7 @@ export class SessionManager {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			session.lastPromptText = dispatchText;
 			session.lastPromptImages = opts?.images;
-			await session.rpcClient.prompt(dispatchText, opts?.images);
+			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, dispatchText, opts?.images);
 			return;
 		}
 
@@ -2061,6 +2061,56 @@ export class SessionManager {
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 			broadcast(restored.clients, { type: "session_status", status: "idle" });
 		}
+	}
+
+	/**
+	 * Dispatch a prompt to the agent, transparently reviving a dead RPC
+	 * bridge if necessary. Wraps `session.rpcClient.prompt` so the
+	 * caller doesn't need to know whether the agent process is alive.
+	 *
+	 * Live test (PR #409): post-restart, several team-lead sessions
+	 * (Con Fident, Howl, Meg Awatt) had their persisted records
+	 * restored but their in-process RPC bridges were dead (process died
+	 * during restoreSession, or never came up cleanly). Prompts were
+	 * ack'd by the WS layer and entered enqueuePrompt, which called
+	 * `session.rpcClient.prompt(...)` — throws "Agent process not
+	 * running" synchronously from sendCommand. The error propagated
+	 * up but the session stayed in the broken state, and the user (or
+	 * parent team-lead) had no recovery path except teardown + restart
+	 * the team manually.
+	 *
+	 * Fix: detect the dead bridge BEFORE dispatching, call restartAgent
+	 * to revive, then dispatch on the fresh bridge.
+	 */
+	private async _dispatchPromptWithReviveOnDeadBridge(
+		sessionId: string,
+		dispatchText: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+	): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) throw new Error(`Session not found: ${sessionId}`);
+
+		// `running` is true iff the rpcClient has a live child process.
+		// On post-restart sessions whose restoreSession failed silently
+		// (or whose subprocess died after start()), this is false.
+		if (!session.rpcClient.running) {
+			console.log(`[session-manager] Detected dead RPC bridge for ${sessionId} during prompt dispatch — reviving via restartAgent.`);
+			try {
+				await this.restartAgent(sessionId);
+			} catch (err) {
+				console.error(`[session-manager] restartAgent failed for ${sessionId}, falling through to dispatch (will likely throw):`, err);
+			}
+			// restartAgent re-creates the session entry; re-resolve.
+			const revived = this.sessions.get(sessionId);
+			if (!revived) {
+				throw new Error(`Session ${sessionId} not found after restartAgent`);
+			}
+			await revived.rpcClient.prompt(dispatchText, images);
+			return;
+		}
+
+		// Bridge is alive — dispatch normally.
+		await session.rpcClient.prompt(dispatchText, images);
 	}
 
 	/**
