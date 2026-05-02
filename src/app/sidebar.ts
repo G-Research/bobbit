@@ -989,10 +989,29 @@ export function renderSidebar() {
 							}
 							const projectMap = new Map<string, ProjectBucket>();
 							for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [] });
+							// Phase 5b: child goals spawned via `goal_spawn_child` may have
+							// no `projectId` of their own — they inherit it from the parent.
+							// Walk the parentGoalId chain to resolve a project bucket for
+							// such goals; without this fallback, nested children would never
+							// appear in the sidebar.
+							const projectIdForGoal = (g: Goal): string | undefined => {
+								if (g.projectId) return g.projectId;
+								let cursor: Goal | undefined = g;
+								const seen = new Set<string>();
+								while (cursor && cursor.parentGoalId && !seen.has(cursor.id)) {
+									seen.add(cursor.id);
+									const parent = state.goals.find(p => p.id === cursor!.parentGoalId);
+									if (!parent) break;
+									if (parent.projectId) return parent.projectId;
+									cursor = parent;
+								}
+								return undefined;
+							};
 							for (const g of filteredGoals) {
-								if (!g.projectId) { console.warn("[sidebar] orphaned goal with no projectId — skipping", g.id); continue; }
-								const bucket = projectMap.get(g.projectId);
-								if (!bucket) { console.warn("[sidebar] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
+								const pid = projectIdForGoal(g);
+								if (!pid) { console.warn("[sidebar] orphaned goal with no projectId — skipping", g.id); continue; }
+								const bucket = projectMap.get(pid);
+								if (!bucket) { console.warn("[sidebar] goal has no matching project bucket — skipping", g.id, pid); continue; }
 								bucket.goals.push(g);
 							}
 							for (const s of filteredUngrouped) {
