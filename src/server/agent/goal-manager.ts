@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, shouldSkipRemotePush } from "../skills/git.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
+import type { GateStore } from "./gate-store.js";
+
+const pExecFile = promisify(execFileCb);
 
 /**
  * Sanitize a goal title into a valid git branch name.
@@ -20,6 +25,18 @@ function toBranchName(title: string): string {
 
 /** Defensive cap on parent-chain walks. See deriveNestingFields(). */
 export const NESTING_WALK_DEPTH_CAP = 64;
+
+/**
+ * Outcome of `GoalManager.mergeChild`. Extends the underlying
+ * `MergeChildResult` with push status — the push is best-effort and never
+ * fails the merge.
+ */
+export interface MergeChildOutcome extends MergeChildResult {
+	/** True when `git push origin <parent.branch>` succeeded (or push was skipped via `shouldSkipRemotePush`). */
+	pushed: boolean;
+	/** Error message from a failed push — non-fatal, surfaced for logging. */
+	pushError?: string;
+}
 
 /**
  * Pure helper for the nested-goals lineage derivation. Given a new goal's id
@@ -294,15 +311,47 @@ export class GoalManager {
 		}
 	}
 
+	/**
+	 * Phase 2 — resolve the start point for a child goal's worktree branch.
+	 * Returns `parent.branch` when the goal is a child (parentGoalId set
+	 * AND the parent has a branch). Returns undefined for top-level goals,
+	 * for orphan rows where the parent is missing, and for parents without
+	 * a branch (no-worktree assistant goals etc.) — falling back to the
+	 * existing default-of-origin/master behaviour.
+	 */
+	private _resolveChildBaseBranch(goal: PersistedGoal): string | undefined {
+		if (!goal.parentGoalId) return undefined;
+		const parent = this.store.get(goal.parentGoalId);
+		if (!parent || !parent.branch) {
+			console.warn(
+				`[goal-manager] Child goal ${goal.id} has parentGoalId="${goal.parentGoalId}" but parent has no branch — falling back to origin/master`,
+			);
+			return undefined;
+		}
+		return parent.branch;
+	}
+
 	private async _doSetupWorktree(goal: PersistedGoal): Promise<void> {
 		// Compute subdirectory offset: the difference between the preliminary
 		// worktreePath (repo root level) and goal.cwd (which may include offset).
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
 
+		// Phase 2 (nested goals): when this goal has a parent, the child's
+		// branch MUST be created off the parent's branch HEAD so siblings
+		// spawned later see prior siblings' commits. The pool pre-builds off
+		// master/primary, so we skip the pool entirely for children — a
+		// claim from the pool would yield a worktree without the parent's
+		// commits. See SUBGOALS-SPEC §3.2 + the user-reversed §3.4 (sandbox
+		// MUST work). The same baseBranch flows into both the host
+		// `createWorktree` path AND any future ProjectSandbox.createWorktree
+		// path; sandbox createWorktree already accepts a `baseBranch` arg.
+		const childBaseBranch = this._resolveChildBaseBranch(goal);
+
 		// Pool-first (Phase 3): claim a pre-built worktree if one is available.
 		// On success this is observably as fast as session start (~tens of ms).
 		// On failure or empty pool we fall through to the legacy createWorktree path.
-		const pool = this.poolResolver?.();
+		// SKIPPED for child goals — see comment above.
+		const pool = childBaseBranch ? null : this.poolResolver?.();
 		if (pool) {
 			try {
 				const claim = await pool.claim(goal.branch!);
@@ -342,7 +391,7 @@ export class GoalManager {
 				const worktreeRootOverride = goal.projectId && this.worktreeRootResolver
 					? this.worktreeRootResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
-					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride });
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, childBaseBranch, { worktreeRoot: worktreeRootOverride });
 					// Per-component setup commands run after the worktree set lands.
 					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
 					try {
@@ -377,7 +426,7 @@ export class GoalManager {
 					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
 					return;
 				}
-				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride });
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, startPoint: childBaseBranch });
 				// Per-component setup — non-fatal on failure. Mirrors the multi-repo
 				// branch above so component.relativePath is honored.
 				if (components && components.length > 0) {
@@ -452,6 +501,144 @@ export class GoalManager {
 			setupError: undefined,
 		});
 		return true;
+	}
+
+	/**
+	 * Locally merge a child goal's branch into its parent's branch and
+	 * (best-effort) push the parent branch to origin so siblings spawned
+	 * later see the latest tip and CI picks up the merge.
+	 *
+	 * Phase 2 of nested goals. Wraps `mergeChildBranchLocal` from
+	 * `skills/git.ts`. Caller (Phase 3 `runSubgoalStep`) is responsible for
+	 * archiving + tearing down the child afterwards via
+	 * `archiveGoalAfterMerge`.
+	 *
+	 * Security invariant: `child.parentGoalId === parentGoalId` MUST hold.
+	 * Mismatch throws — prevents cross-tree merges (e.g. spec drift, cycle
+	 * leakage, or a UI bug pointing at the wrong child).
+	 *
+	 * Push failure is non-fatal: the parent branch tip is still updated
+	 * locally so the next agent that fetches will pick it up. We surface
+	 * `pushError` so callers can log it.
+	 */
+	async mergeChild(parentGoalId: string, childGoalId: string): Promise<MergeChildOutcome> {
+		const parent = this.store.get(parentGoalId);
+		const child = this.store.get(childGoalId);
+		if (!parent) {
+			throw new Error(`mergeChild: parent goal not found: ${parentGoalId}`);
+		}
+		if (!child) {
+			throw new Error(`mergeChild: child goal not found: ${childGoalId}`);
+		}
+		if (child.parentGoalId !== parentGoalId) {
+			// Structured error so REST handlers can return 400 instead of 500.
+			const err = new Error(
+				`mergeChild: child ${childGoalId} has parentGoalId="${child.parentGoalId}", expected "${parentGoalId}"`,
+			);
+			(err as any).code = "PARENT_MISMATCH";
+			throw err;
+		}
+		if (!parent.branch || !child.branch) {
+			throw new Error(
+				`mergeChild: missing branch — parent="${parent.branch}", child="${child.branch}"`,
+			);
+		}
+
+		// Resolve parentCwd: prefer the primary repo's worktree path. In
+		// multi-repo mode, repoWorktrees["."] is the canonical "primary"
+		// repo path; in single-repo mode worktreePath is authoritative.
+		const parentCwd = parent.repoWorktrees?.["."] ?? parent.worktreePath;
+		if (!parentCwd) {
+			throw new Error(`mergeChild: parent ${parentGoalId} has no worktreePath`);
+		}
+
+		const result = await mergeChildBranchLocal(parent.branch, child.branch, parentCwd);
+
+		const outcome: MergeChildOutcome = { ...result, pushed: false };
+
+		// Push parent branch to origin so siblings spawned later see the
+		// merge tip. Push is best-effort and gated by shouldSkipRemotePush
+		// (BOBBIT_TEST_NO_PUSH=1 in test mode). Skip on conflict — there's
+		// nothing new to push and we want the worktree to stay diagnostic.
+		if (!result.conflict && (result.merged || result.alreadyMerged) && !shouldSkipRemotePush()) {
+			try {
+				await pExecFile("git", ["push", "origin", parent.branch], { cwd: parentCwd, timeout: 30_000 });
+				outcome.pushed = true;
+			} catch (err) {
+				outcome.pushError = err instanceof Error ? err.message : String(err);
+				console.warn(`[goal-manager] mergeChild: push of "${parent.branch}" failed (non-fatal):`, outcome.pushError);
+			}
+		}
+
+		return outcome;
+	}
+
+	/**
+	 * Archive a child goal after its branch has been merged into its parent.
+	 *
+	 * Order is load-bearing (Lesson 4.2 rescue path):
+	 *   1. Stamp `state: "complete"` on the live record FIRST so the
+	 *      archived snapshot has state=complete on disk. The harness
+	 *      short-circuits on `archived && state === "complete"` and
+	 *      returns success terminal — without this stamp the rescue path
+	 *      reads `state="in-progress"` on a stale record and re-spawns.
+	 *   2. Archive (soft-delete) — sets archived=true / archivedAt.
+	 *   3. (Caller may invoke teamManager.teardownTeam afterwards; this
+	 *      method is a pure data-layer operation.)
+	 *
+	 * Idempotent: safe to call twice — a second invocation finds the row
+	 * already complete + archived and silently returns.
+	 */
+	async archiveGoalAfterMerge(childId: string): Promise<void> {
+		const goal = this.store.get(childId);
+		if (!goal) {
+			console.warn(`[goal-manager] archiveGoalAfterMerge: child ${childId} not found`);
+			return;
+		}
+		// Idempotent — already complete and archived.
+		if (goal.archived && goal.state === "complete") {
+			return;
+		}
+
+		// 1. State first.
+		if (goal.state !== "complete") {
+			this.store.update(childId, { state: "complete" });
+		}
+		// 2. Archive.
+		if (!goal.archived) {
+			await this.archiveGoal(childId);
+		}
+		console.log(`[goal-manager] archiveGoalAfterMerge: child ${childId} complete + archived`);
+	}
+
+	/**
+	 * Boot-time migration: backfill `state: "complete"` on archived goals
+	 * whose `ready-to-merge` gate is in the `passed` state. Closes the
+	 * Lesson 4.2 gap on records produced by code paths that pre-date
+	 * `archiveGoalAfterMerge`.
+	 *
+	 * Idempotent — only writes when the record is missing the stamp.
+	 * Wrapped in per-goal try/catch so one corrupt record cannot crash
+	 * boot (Lesson 4.11 — "endless restart" guard).
+	 */
+	backfillCompleteState(gateStore: GateStore): { backfilled: number; skipped: number } {
+		let backfilled = 0;
+		let skipped = 0;
+		for (const goal of this.store.getAll()) {
+			try {
+				if (goal.archived !== true) { skipped++; continue; }
+				if (goal.state === "complete") { skipped++; continue; }
+				const rtm = gateStore.getGate(goal.id, "ready-to-merge");
+				if (!rtm || rtm.status !== "passed") { skipped++; continue; }
+				this.store.update(goal.id, { state: "complete" });
+				backfilled++;
+				console.log(`[goal-manager] Backfilled state=complete for legacy archived goal ${goal.id}`);
+			} catch (err) {
+				console.warn(`[goal-manager] backfillCompleteState: skipped goal ${goal.id} due to error:`, err);
+				skipped++;
+			}
+		}
+		return { backfilled, skipped };
 	}
 
 	async archiveGoal(id: string): Promise<boolean> {
