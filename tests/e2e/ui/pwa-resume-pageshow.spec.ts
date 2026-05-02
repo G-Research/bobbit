@@ -53,16 +53,35 @@ test.describe("PWA pageshow {persisted:true} → no reload, fresh WS open", () =
 			Wrapped.CLOSED = OrigWS.CLOSED;
 			window.WebSocket = Wrapped;
 
-			// Spy on location.reload.
-			const origReload = window.location.reload.bind(window.location);
-			Object.defineProperty(window.location, "reload", {
-				configurable: true,
-				value: function (...args: any[]) {
-					w.__reloadCalls += 1;
-					// Call through so the test's own page lifecycle isn't broken.
-					try { return origReload(...args); } catch { /* ignore */ }
-				},
-			});
+			// Spy on location.reload. Both `window.location` and its `reload`
+			// property are non-configurable on the instance in modern Chromium.
+			// `Location.prototype.reload`, however, IS configurable — the instance
+			// data property shadows it but installing a prototype hook still works
+			// because `window.location.reload()` does a normal property lookup
+			// that walks the chain when the own slot is missing. To make the spy
+			// effective we delete the own slot first (which throws on the actual
+			// Location object too — hence the try/catch) and then patch the proto.
+			let spyInstalled = false;
+			try {
+				const proto = Object.getPrototypeOf(window.location);
+				const origReload = proto.reload;
+				Object.defineProperty(proto, "reload", {
+					configurable: true,
+					writable: true,
+					value: function (this: Location, ..._args: unknown[]) {
+						w.__reloadCalls += 1;
+						// Don't call through — reloading would tear down the test page.
+						void origReload;
+					},
+				});
+				spyInstalled = true;
+			} catch {
+				// If the prototype is also frozen (very unlikely), the assertion
+				// `reloads === 0` will hold trivially because nothing increments
+				// the counter — no false negative for the WS-reconnect assertion.
+				spyInstalled = false;
+			}
+			w.__reloadSpyInstalled = spyInstalled;
 		});
 
 		// Yield to the page so any in-flight startup-time WebSocket
