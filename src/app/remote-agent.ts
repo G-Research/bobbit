@@ -543,12 +543,14 @@ export class RemoteAgent {
 		}
 		// Stream D §3(b): also bind pageshow (bfcache restore on iOS) and the
 		// best-effort Page Lifecycle freeze/resume events.
-		if (!this._heartbeatBound) {
-			window.addEventListener("pageshow", this._onPageShow);
-			document.addEventListener("freeze", this._onFreeze);
-			document.addEventListener("resume", this._onResume);
-			this._heartbeatBound = true;
-		}
+		// `addEventListener` dedupes on (event, handler) identity so calling this
+		// every connect is idempotent — belt-and-suspenders against the case
+		// where `_heartbeatBound` got out of sync with the actual binding (e.g.
+		// listener removed externally, or session re-connect without disconnect).
+		window.addEventListener("pageshow", this._onPageShow);
+		document.addEventListener("freeze", this._onFreeze);
+		document.addEventListener("resume", this._onResume);
+		this._heartbeatBound = true;
 		// Stream D §6.4: start the soft heartbeat. Writes Date.now() to
 		// sessionStorage every 10s while the document is visible. The gap
 		// between writes is what _onVisibilityChange / _onPageShow consult
