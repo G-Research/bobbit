@@ -99,19 +99,24 @@ test.describe("PWA cold-load + offline → cached view <100ms", () => {
 		// the navigation commit.
 		const SAMPLE_DEADLINE_MS = 250;
 		let firstNonEmptyAt: number | null = null;
-		while (Date.now() - navStart < SAMPLE_DEADLINE_MS) {
-			const info = await page.evaluate(() => {
-				const app = document.getElementById("app");
-				const appHtml = (app?.innerHTML ?? "").trim();
-				const bodyText = (document.body?.textContent ?? "").trim();
-				const hasSkeleton = !!document.querySelector("[data-bobbit-skeleton], .bobbit-skeleton, [data-skeleton]");
-				return { appHtmlLen: appHtml.length, bodyTextLen: bodyText.length, hasSkeleton };
-			});
-			if (info.appHtmlLen > 0 || info.hasSkeleton) {
-				firstNonEmptyAt = Date.now() - navStart;
-				break;
-			}
-			await new Promise((r) => setTimeout(r, 10));
+		try {
+			// Event-driven: poll inside the page (rAF-paced) until #app has
+			// content or an inline skeleton element is present, with a hard
+			// deadline. waitForFunction itself uses rAF/MutationObserver — no
+			// setTimeout sleep in test code.
+			await page.waitForFunction(
+				() => {
+					const app = document.getElementById("app");
+					const appHtmlLen = (app?.innerHTML ?? "").trim().length;
+					const hasSkeleton = !!document.querySelector("[data-bobbit-skeleton], .bobbit-skeleton, [data-skeleton]");
+					return appHtmlLen > 0 || hasSkeleton;
+				},
+				null,
+				{ timeout: SAMPLE_DEADLINE_MS, polling: "raf" },
+			);
+			firstNonEmptyAt = Date.now() - navStart;
+		} catch {
+			firstNonEmptyAt = null;
 		}
 
 		// Today both branches fail: no snapshot hydrate AND no inline skeleton.
