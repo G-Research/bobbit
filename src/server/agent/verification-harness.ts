@@ -135,6 +135,40 @@ export const VERIFICATION_RESULT_REMINDER =
 	"This is REQUIRED — the verification system only receives results through this tool.";
 
 /**
+ * Build a context-rich reminder by re-sending the full kickoff prompt with
+ * a strong directive at the top. Used when the agent went idle without
+ * calling `verification_result` — the original kickoff context is still in
+ * the agent's transcript but evidently wasn't enough to drive a tool call,
+ * so we restate everything plus an explicit "this is non-negotiable".
+ *
+ * Live test (PR #409 0e4fc54c plan-approval UX, repeated occurrences):
+ * Eve's and Gizmo's reviewers consistently emitted their review as chat-
+ * text and ended turn. The terse generic reminder didn't elicit a tool
+ * call. Embedding the full kickoff with a stronger preamble forces the
+ * reviewer to acknowledge the requirement and produce the call.
+ */
+export function buildContextRichReminder(originalKickoff: string): string {
+	return [
+		"## STOP — verification_result not called",
+		"",
+		"You went idle without calling the `verification_result` tool. The",
+		"verification system has NO RECORD of any review you may have done. Any",
+		"chat-text verdict you produced is invisible to the gate — the gate is",
+		"now waiting on a tool call from you.",
+		"",
+		"You MUST call `verification_result` with two args (`verdict`, `summary`).",
+		"Do this NOW. If you've already formed an opinion, call the tool with",
+		"that opinion. Do NOT re-investigate. Do NOT do more analysis.",
+		"",
+		"---",
+		"",
+		"Original kickoff (still in effect):",
+		"",
+		originalKickoff,
+	].join("\n");
+}
+
+/**
  * The `verification_result` tool is now a standard goal tool registered in
  * `.bobbit/config/tools/tasks/extension.ts` — no generated extension needed.
  * It calls POST /api/internal/verification-result using the same api() helper
@@ -3093,10 +3127,27 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the generic reminder.
+			// fall back to a context-rich reminder.
+			//
+			// Live test (PR #409 0e4fc54c plan-approval UX, repeated):
+			// Eve's reviewers and Gizmo's reviewers BOTH kept failing with
+			// "Agent did not call verification_result after reminder". The
+			// generic VERIFICATION_RESULT_REMINDER is two sentences with
+			// zero task context — the reviewer agent often emits its
+			// review as a chat-text response then ends turn. The reminder
+			// then arrives and Opus has no clear handle to act on.
+			//
+			// Fix: when sending the generic reminder, RE-SEND THE FULL
+			// KICKOFF context with an explicit "call the tool" preamble.
+			// The reviewer now has the verdict + summary already in its
+			// context (from the prior turn's chat-text response) plus a
+			// fresh, full statement of what to do, and just needs to call
+			// the tool with that material.
 			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder`);
+			const reminderPrompt = jsonErr
+				? buildJsonRetryPrompt(jsonErr)
+				: buildContextRichReminder(kickoff);
+			console.log(`[verification] No verification_result from ${sessionId}, sending ${jsonErr ? "JSON-retry" : "context-rich"} reminder`);
 			await session.rpcClient.prompt(reminderPrompt);
 			// Wait for the agent to actually pick up the reminder before racing
 			// against waitForIdle — see _tryResumeFromSession for rationale. The
@@ -3386,8 +3437,10 @@ export class VerificationHarness {
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
 			// fall back to the generic reminder.
 			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
-			const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : VERIFICATION_RESULT_REMINDER;
-			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "generic"} reminder`);
+			const qaReminderPrompt = qaJsonErr
+				? buildJsonRetryPrompt(qaJsonErr)
+				: buildContextRichReminder(kickoff);
+			console.log(`[verification] No verification_result from QA agent ${qaSessionId}, sending ${qaJsonErr ? "JSON-retry" : "context-rich"} reminder`);
 			await session.rpcClient.prompt(qaReminderPrompt);
 			// Wait for the agent to actually pick up the reminder before racing
 			// against waitForIdle — see _tryResumeFromSession for rationale.
