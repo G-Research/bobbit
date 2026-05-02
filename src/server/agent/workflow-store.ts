@@ -17,9 +17,31 @@ import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineV
 
 // ── Public types (kept compatible with the old WorkflowStore shape) ──
 
+/**
+ * Subgoal verify-step descriptor (only meaningful when `VerifyStep.type === "subgoal"`).
+ *
+ * Phase 3 of nested goals — see docs/_phase-3-notes.md and SUBGOALS-SPEC §2.
+ *
+ * The verification harness's `runSubgoalStep` handler reads these fields to
+ * spawn / resolve a child goal and waits for the child's `ready-to-merge`
+ * gate before merging the child branch into the parent.
+ */
+export interface VerifyStepSubgoal {
+	/** Stable id for this plan node — used as the spawnedFromPlanId on the child goal (Lesson 4.1). */
+	planId: string;
+	/** Title of the subgoal — becomes the child goal's title. */
+	title: string;
+	/** Markdown spec for the subgoal — becomes the child goal's spec. */
+	spec: string;
+	/** Workflow id for the child (defaults to "feature" when omitted). */
+	workflowId?: string;
+	/** Suggested team-lead role for the child. */
+	suggestedRole?: string;
+}
+
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
@@ -33,6 +55,8 @@ export interface VerifyStep {
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */
 	command?: string;
+	/** Subgoal step descriptor (only when type === "subgoal"). */
+	subgoal?: VerifyStepSubgoal;
 }
 
 export interface WorkflowGate {
@@ -62,9 +86,14 @@ export interface Workflow {
 
 function normalizeStep(raw: unknown): VerifyStep {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+	const rawType = r.type;
+	const type: VerifyStep["type"] =
+		rawType === "llm-review" || rawType === "agent-qa" || rawType === "subgoal"
+			? rawType
+			: "command";
 	const step: VerifyStep = {
 		name: typeof r.name === "string" ? r.name : "",
-		type: (r.type === "llm-review" || r.type === "agent-qa") ? r.type : "command",
+		type,
 	};
 	if (typeof r.run === "string") step.run = r.run;
 	if (typeof r.prompt === "string") step.prompt = r.prompt;
@@ -77,6 +106,23 @@ function normalizeStep(raw: unknown): VerifyStep {
 	if (typeof r.description === "string") step.description = r.description;
 	if (typeof r.component === "string") step.component = r.component;
 	if (typeof r.command === "string") step.command = r.command;
+	// Subgoal payload — only round-tripped when the field is a structured
+	// object. Older stored data without the `subgoal` field is silently
+	// tolerated; non-subgoal step types may legitimately leave this unset.
+	if (r.subgoal && typeof r.subgoal === "object" && !Array.isArray(r.subgoal)) {
+		const sg = r.subgoal as Record<string, unknown>;
+		const planId = typeof sg.planId === "string" ? sg.planId : (typeof sg.plan_id === "string" ? sg.plan_id : "");
+		const title = typeof sg.title === "string" ? sg.title : "";
+		const spec = typeof sg.spec === "string" ? sg.spec : "";
+		const workflowId = typeof sg.workflowId === "string" ? sg.workflowId
+			: typeof sg.workflow_id === "string" ? sg.workflow_id : undefined;
+		const suggestedRole = typeof sg.suggestedRole === "string" ? sg.suggestedRole
+			: typeof sg.suggested_role === "string" ? sg.suggested_role : undefined;
+		const subgoal: VerifyStepSubgoal = { planId, title, spec };
+		if (workflowId !== undefined) subgoal.workflowId = workflowId;
+		if (suggestedRole !== undefined) subgoal.suggestedRole = suggestedRole;
+		step.subgoal = subgoal;
+	}
 	return step;
 }
 
@@ -133,6 +179,16 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.label !== undefined) out.label = s.label;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
+	if (s.subgoal) {
+		const sg: Record<string, unknown> = {
+			planId: s.subgoal.planId,
+			title: s.subgoal.title,
+			spec: s.subgoal.spec,
+		};
+		if (s.subgoal.workflowId !== undefined) sg.workflowId = s.subgoal.workflowId;
+		if (s.subgoal.suggestedRole !== undefined) sg.suggestedRole = s.subgoal.suggestedRole;
+		out.subgoal = sg;
+	}
 	return out;
 }
 

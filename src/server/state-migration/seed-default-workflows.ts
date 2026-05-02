@@ -16,7 +16,7 @@
 
 export interface SeededVerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal";
 	component?: string;
 	command?: string;
 	run?: string;
@@ -28,6 +28,13 @@ export interface SeededVerifyStep {
 	optional?: boolean;
 	label?: string;
 	description?: string;
+	subgoal?: {
+		planId: string;
+		title: string;
+		spec: string;
+		workflowId?: string;
+		suggestedRole?: string;
+	};
 	[key: string]: unknown;
 }
 
@@ -38,6 +45,7 @@ export interface SeededGate {
 	depends_on?: string[];
 	content?: boolean;
 	inject_downstream?: boolean;
+	manual?: boolean;
 	metadata?: Record<string, string>;
 	verify?: SeededVerifyStep[];
 }
@@ -142,6 +150,126 @@ Check:
 3. Data validation — are inputs validated and sanitized?
 4. Secrets handling — no hardcoded secrets, tokens, or credentials
 5. Dependency risks — any new dependencies with known vulnerabilities?`;
+
+// ── Phase 3 nested goals — `parent` meta-workflow prompts ──────────────
+//
+// The team-lead system prompt does the heavy lifting; these gate-level
+// reviews are intentionally concise (3-6 sentences each).
+
+/** Charter LLM-review prompt — does the goal have a clear, well-bounded charter? */
+export const CHARTER_REVIEW_PROMPT = `Review the goal charter for clarity and scope.
+
+Verify:
+1. The problem statement is concrete (not "improve X" — what specifically must change?).
+2. Acceptance criteria are listed (a "## Acceptance criteria" section is the convention) and each criterion is independently testable.
+3. The scope boundary is explicit — what is in vs out of this goal.
+
+Pass if the charter is good enough to plan against. Fail with concrete missing pieces if not.`;
+
+/** Plan structural sanity prompt — does the proposed plan make architectural sense? */
+export const PLAN_STRUCTURAL_PROMPT = `Review the structural sanity of the proposed plan.
+
+Verify:
+1. Subgoals decompose the parent into independently mergeable units (each merges into the parent's branch on its own).
+2. Phase ordering / dependencies are sensible — work that depends on other work is in a later phase.
+3. No subgoal duplicates another's scope or contradicts the parent charter.
+4. Each subgoal has a clear title, spec, and (if relevant) suggested role.
+
+Pass if the plan is coherent. Fail with concrete restructuring suggestions if not.`;
+
+/** Acceptance-criteria coverage prompt — does the plan cover every criterion? */
+export const CRITERIA_COVERAGE_PROMPT = `Verify the proposed plan covers every acceptance criterion in the parent goal's spec.
+
+The criteria-coverage check is a whitespace-normalised, case-insensitive substring match against the union of {parent spec, subgoal step specs}. Hashes do not work — they fail when wording paraphrases. Subgoal specs MUST quote the criteria they cover verbatim (a "## Covers" heading is the convention).
+
+Verify:
+1. Every "## Acceptance criteria" bullet from the parent spec appears verbatim somewhere in the plan (parent or any subgoal spec).
+2. Each subgoal that targets a criterion makes that link explicit.
+
+Pass if every criterion is verbatim-covered. Fail with the list of uncovered criteria if not.`;
+
+/** Integration LLM-review prompt — once children have merged, does the integrated whole make sense? */
+export const INTEGRATION_PROMPT = `Review the cross-component integration after all subgoals have merged.
+
+Run \`git diff origin/{{master}}...HEAD\` to see the cumulative result on the parent branch.
+
+Verify:
+1. Subgoal merges play together — no accidental regressions where one subgoal silently broke another.
+2. End-to-end functionality reflects what the parent charter promised (each acceptance criterion now demonstrable on the merged tree).
+3. No leftover scaffolding, duplicate definitions, or contradictory configs from the merges.
+
+Pass if the integrated tree is coherent. Fail with concrete issues if not.`;
+
+/**
+ * Build the `parent` meta-workflow.
+ *
+ * Phase 3 of nested goals — see SUBGOALS-SPEC §2 / §5 and
+ * docs/_phase-3-notes.md. The execution gate's verify[] starts EMPTY; the
+ * team-lead populates it via `propose_*` and the goal-plan signal freezes
+ * the array (mutation classifier kicks in for further changes).
+ *
+ * Gate sequence: charter → plan-review → goal-plan → execution → integration → ready-to-merge.
+ *
+ * Reuses `readyToMergeGate()` so behaviour matches every other workflow.
+ */
+export function buildParentWorkflow(): SeededWorkflow {
+	return {
+		id: "parent",
+		name: "Parent",
+		description: "A meta-workflow whose execution gate spawns and merges child goals (subgoals).",
+		gates: [
+			{
+				id: "charter",
+				name: "Charter",
+				content: true,
+				inject_downstream: true,
+				verify: [
+					{ name: "Charter review", type: "llm-review", role: "architect", prompt: CHARTER_REVIEW_PROMPT },
+				],
+			},
+			{
+				id: "plan-review",
+				name: "Plan Review",
+				depends_on: ["charter"],
+				content: true,
+				inject_downstream: true,
+				verify: [
+					{ name: "Plan structural sanity", type: "llm-review", role: "architect", prompt: PLAN_STRUCTURAL_PROMPT },
+					{ name: "Acceptance criteria coverage", type: "llm-review", role: "spec-auditor", prompt: CRITERIA_COVERAGE_PROMPT },
+				],
+			},
+			{
+				id: "goal-plan",
+				name: "Goal Plan",
+				depends_on: ["plan-review"],
+				// Manual gate — signaled by the team-lead to FREEZE execution.verify[].
+				// content:false because the plan lives on execution.verify[], not as
+				// gate content.
+				manual: true,
+				content: false,
+			},
+			{
+				id: "execution",
+				name: "Execution",
+				depends_on: ["goal-plan"],
+				description: RALPH_LOOP_DESCRIPTION,
+				// Populated by the team-lead via propose-and-edit on the parent goal's
+				// workflow snapshot. Each step has type: "subgoal" and runs through
+				// `runSubgoalStep` in the verification harness.
+				verify: [],
+			},
+			{
+				id: "integration",
+				name: "Integration",
+				depends_on: ["execution"],
+				verify: [
+					{ name: "Cross-component integration", type: "llm-review", role: "architect", prompt: INTEGRATION_PROMPT },
+				],
+			},
+			{ ...readyToMergeGate(), depends_on: ["integration"] },
+		],
+	};
+}
 
 /** Build the four canonical workflows targeting `componentName` (typically the project name). */
 export function buildDefaultWorkflows(componentName: string): Record<string, SeededWorkflow> {
@@ -332,5 +460,6 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 		feature,
 		"bug-fix": bugFix,
 		"quick-fix": quickFix,
+		parent: buildParentWorkflow(),
 	};
 }
