@@ -2431,6 +2431,16 @@ export class VerificationHarness {
 					enabledOptionalSteps: sg.enabledOptionalSteps,
 				});
 				childGoalId = child.id;
+				// CRITICAL: stamp spawnedFromPlanId on the child IMMEDIATELY
+				// after createGoal. Without this, the harness's own runSubgoalStep
+				// path leaves children orphaned (no planId linkage), which causes
+				// duplicate spawns on subsequent execution-gate signals (issue 11
+				// in PR #409 v0.2-embeddings live test). The cef6257f fix only
+				// covered the goal_spawn_child REST path, NOT this harness-internal
+				// spawn path. updateGoal is synchronous + persisted, so even a
+				// gateway crash IMMEDIATELY after createGoal but before this line
+				// is the worst case (covered by tier-4 title fallback at 5d77ca5e).
+				goalManager.updateGoal(child.id, { spawnedFromPlanId: sg.planId });
 				if (parentGoal.projectId) {
 					goalManager.updateGoal(child.id, { projectId: parentGoal.projectId, autoStartTeam: true });
 				}
