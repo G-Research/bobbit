@@ -51,6 +51,31 @@ export interface PersistedGoal {
 	enabledOptionalSteps?: string[];
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
+
+	// ── Nested goals & DAG subgoals (Phase 1 data model) ─────────────────
+	// All fields below are optional and lazy-migrated. Top-level (non-nested)
+	// goals leave them undefined; the data layer never backfills defaults —
+	// callers compute defaults at use sites. See docs/goals-workflows-tasks.md
+	// "Nested goals (Phase 1 data model)".
+
+	/** Parent goal ID (undefined for root goals). */
+	parentGoalId?: string;
+	/** Root of this goal's tree (== id for root, == parent's rootGoalId for children). */
+	rootGoalId?: string;
+	/** Where this goal's branch merges: "master" for root, "parent" for children. Auto-derived at createGoal. */
+	mergeTarget?: "master" | "parent";
+	/** Mutation policy for post-freeze plan changes. Default "balanced". Only meaningful on root. */
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	/** Max parallel children across the tree. Only meaningful on root. Default 3, hard max 8. */
+	maxConcurrentChildren?: number;
+	/** Acceptance criteria parsed from spec, used by criteria-coverage check. */
+	acceptanceCriteria?: string[];
+	/** Subgoal idempotency key — set immediately after createGoal in runSubgoalStep (Lesson 4.1). */
+	spawnedFromPlanId?: string;
+	/** Paused flag — user can pause a goal mid-flight (children may inherit via cascade). */
+	paused?: boolean;
+	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
+	replanCount?: number;
 }
 
 /**
