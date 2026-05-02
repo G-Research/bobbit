@@ -153,6 +153,15 @@ export class GoalManager {
 			sandboxed,
 		};
 
+		// Persist the project association on the goal record. Previously this
+		// was stamped post-hoc by `POST /api/goals`, which left subgoals
+		// (created via `goal_spawn_child`) without a projectId on disk and
+		// forced the sidebar to walk the parentGoalId chain to bucket them.
+		// Stamping it here closes that gap server-side.
+		if (projectId) {
+			goal.projectId = projectId;
+		}
+
 		if (enabledOptionalSteps?.length) {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
 		}
