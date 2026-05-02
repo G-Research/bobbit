@@ -1,11 +1,11 @@
-import { html, nothing, type TemplateResult } from "lit";
+import { html, nothing, svg, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "../ui/components/VerificationOutputModal.js";
 import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
@@ -13,6 +13,10 @@ import { createAndConnectSession, connectToSession, startReattempt, terminateSes
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
+import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-visibility.js";
+import { buildPlanSteps, type PlanStep, type SynthesisGoal, type FormalPlanStep } from "./plan-synthesis.js";
+import { resolvePlanNodeChild, type PlanNodeChild, type PlanNodeState } from "./plan-node-state.js";
+import { computeEdgePaths, type PlanEdgeNode, type PlanEdge } from "./plan-edge-paths.js";
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)
@@ -150,7 +154,74 @@ let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let dashboardWsIntentionalClose = false;
 
 /** Current dashboard tab */
-let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
+let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children" = "gates";
+
+/** Tree-cost rollup (Lesson 4.21). Fetched lazily when the per-goal cost row is rendered. */
+interface TreeCostBreakdown {
+	goalId: string;
+	depth: number;
+	title: string;
+	costUsd: number;
+	tokensIn: number;
+	tokensOut: number;
+}
+interface TreeCost {
+	rootGoalId: string;
+	totalCostUsd: number;
+	totalTokensIn: number;
+	totalTokensOut: number;
+	breakdown: TreeCostBreakdown[];
+}
+let treeCost: TreeCost | null = null;
+let treeCostExpanded = false;
+let treeCostInFlight = false;
+let treeCostLastFetchAt = 0;
+
+/** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned (Lesson 4.22). */
+let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
+const PLAN_RERENDER_THROTTLE_MS = 250;
+
+/** Bridge for state.goals → dashboard re-render coalescing. */
+function schedulePlanRerender(): void {
+	if (_planRerenderTimer != null) return;
+	_planRerenderTimer = setTimeout(() => {
+		_planRerenderTimer = null;
+		renderApp();
+	}, PLAN_RERENDER_THROTTLE_MS);
+}
+
+/** Public: external code (remote-agent) can poke the dashboard on goal events. */
+export function notifyGoalEventForDashboard(): void {
+	if (currentGoalId) {
+		schedulePlanRerender();
+		// Re-fetch tree cost in the background — capped at 5s minimum interval
+		// so a burst of events doesn't hammer the endpoint.
+		const now = Date.now();
+		if (currentGoalId && !treeCostInFlight && now - treeCostLastFetchAt > 5_000) {
+			void fetchTreeCost(currentGoalId);
+		}
+	}
+}
+
+async function fetchTreeCost(goalId: string): Promise<void> {
+	if (treeCostInFlight) return;
+	treeCostInFlight = true;
+	treeCostLastFetchAt = Date.now();
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/tree-cost`);
+		if (!res.ok) return;
+		const data = await res.json() as TreeCost;
+		// Only stomp the existing value if we're still on the same goal.
+		if (currentGoalId === goalId) {
+			treeCost = data;
+			renderApp();
+		}
+	} catch {
+		// best-effort
+	} finally {
+		treeCostInFlight = false;
+	}
+}
 
 /** Role picker dropdown state */
 let roleDropdownOpen = false;
@@ -316,6 +387,10 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		startCostPolling(goalId);
 		startGitStatusPolling(goalId);
 
+		// Fetch tree-cost rollup (Lesson 4.21). Best-effort; the panel
+		// short-circuits when the response hasn't landed yet.
+		void fetchTreeCost(goalId);
+
 		// Start setup status polling if worktree is still being prepared
 		if (currentGoal && currentGoal.setupStatus === "preparing") {
 			startSetupStatusPoll(goalId);
@@ -406,6 +481,11 @@ export function clearDashboardState(): void {
 	error = "";
 	dashboardTab = "gates";
 	roleDropdownOpen = false;
+	treeCost = null;
+	treeCostExpanded = false;
+	treeCostInFlight = false;
+	treeCostLastFetchAt = 0;
+	if (_planRerenderTimer != null) { clearTimeout(_planRerenderTimer); _planRerenderTimer = null; }
 	gitStatus = null;
 	gitRepoKnown = 'unknown';
 	if (gitStatusAbort) { gitStatusAbort.abort(); gitStatusAbort = null; }
@@ -1095,6 +1175,8 @@ const svgClock = html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none
 const svgPhaseArrow = html`<svg viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M0 6h16M13 2l4 4-4 4"/></svg>`;
 const svgArchive = html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>`;
 const svgDoc = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>`;
+const svgPlan = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>`;
+const svgChildren = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v6a3 3 0 0 0 3 3h12"/><path d="m15 9 3 3-3 3"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="20" r="2"/></svg>`;
 
 // ============================================================================
 // RENDER: NAV BAR
@@ -1136,6 +1218,29 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 	return nothing as any;
 }
 
+function renderParentBreadcrumb(goal: Goal): TemplateResult | typeof nothing {
+	if (!goal.parentGoalId) return nothing;
+	const parent = state.goals.find(g => g.id === goal.parentGoalId);
+	const root = goal.rootGoalId ? state.goals.find(g => g.id === goal.rootGoalId) : undefined;
+	if (!parent && !root) return nothing;
+	// "← root.title / parent.title" — root and parent may be the same when a
+	// direct child of the root, in which case we emit just one segment.
+	const parts: TemplateResult[] = [];
+	if (root && root.id !== parent?.id) {
+		parts.push(html`<a class="breadcrumb-link" data-testid="breadcrumb-root" style="color:var(--primary);text-decoration:none;cursor:pointer;" title="Open ${root.title}" @click=${() => setHashRoute("goal-dashboard", root.id)}>${root.title}</a>`);
+	}
+	if (parent) {
+		if (parts.length > 0) parts.push(html`<span style="color:var(--muted-foreground);"> / </span>`);
+		parts.push(html`<a class="breadcrumb-link" data-testid="breadcrumb-parent" style="color:var(--primary);text-decoration:none;cursor:pointer;" title="Open ${parent.title}" @click=${() => setHashRoute("goal-dashboard", parent.id)}>${parent.title}</a>`);
+	}
+	return html`
+		<div class="parent-breadcrumb" data-testid="parent-breadcrumb"
+			style="display:flex;align-items:center;gap:6px;padding:4px 16px;font-size:11px;color:var(--muted-foreground);background:var(--muted);border-bottom:1px solid var(--border);">
+			<span>←</span>${parts}
+		</div>
+	`;
+}
+
 function renderNavBar(goal: Goal): TemplateResult {
 	const isTeamGoal = !!goal.team;
 
@@ -1155,6 +1260,9 @@ function renderNavBar(goal: Goal): TemplateResult {
 			<div class="nav-right">
 				${goal.archived ? nothing : html`
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
+					${goal.paused
+						? html`<button class="btn-icon" data-testid="goal-resume-btn" @click=${() => resumeGoalWithDialog(goal.id)} title="Resume goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Resume</span></button>`
+						: html`<button class="btn-icon" data-testid="goal-pause-btn" @click=${() => pauseGoalWithDialog(goal.id)} title="Pause goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>Pause</span></button>`}
 					${prStatus?.state === "MERGED" && !teamActive
 						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
 						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>`}
@@ -1283,12 +1391,62 @@ function formatTokens(n: number): string {
 	return String(n);
 }
 
+function renderTreeCostRow(): TemplateResult | typeof nothing {
+	// Show tree cost row when this goal has a real rollup (i.e. children OR
+	// it's a child whose root has children) — single-goal trees are noisy.
+	if (!currentGoal) return nothing;
+	const hasChildren = state.goals.some(g => g.parentGoalId === currentGoal!.id);
+	const isChild = !!currentGoal.parentGoalId;
+	if (!hasChildren && !isChild) return nothing;
+	if (!treeCost) return nothing;
+	const total = treeCost.totalCostUsd ?? 0;
+	if (total <= 0 && treeCost.breakdown.length <= 1) return nothing;
+	return html`
+		<div class="meta-row" data-testid="tree-cost-row" style="flex-direction:column;align-items:flex-start;">
+			<div class="meta-item" style="cursor:pointer;"
+				data-testid="tree-cost-toggle"
+				title="Click for per-child breakdown"
+				@click=${(e: Event) => { e.stopPropagation(); treeCostExpanded = !treeCostExpanded; renderApp(); }}>
+				<span style="font-size:11px;color:var(--muted-foreground);">${treeCostExpanded ? "▾" : "▸"}</span>
+				<span class="meta-label" style="margin-left:4px;">Tree cost:</span>
+				<span class="meta-tag cost-tag" data-testid="tree-cost-total">$${total.toFixed(2)}</span>
+				<span class="meta-label">${formatTokens(treeCost.totalTokensIn + treeCost.totalTokensOut)} tokens</span>
+			</div>
+			${treeCostExpanded ? html`
+				<table data-testid="tree-cost-breakdown" style="width:100%;margin-top:6px;border-collapse:collapse;font-size:11px;">
+					<thead>
+						<tr style="border-bottom:1px solid var(--border);color:var(--muted-foreground);">
+							<th style="text-align:left;padding:4px 8px;font-weight:500;">Goal</th>
+							<th style="text-align:right;padding:4px 8px;font-weight:500;">Cost</th>
+							<th style="text-align:right;padding:4px 8px;font-weight:500;">Tokens</th>
+						</tr>
+					</thead>
+					<tbody>
+						${treeCost.breakdown.map(b => html`
+							<tr data-testid="tree-cost-row-${b.goalId}" style="border-bottom:1px dashed var(--border);">
+								<td style="padding:3px 8px;">
+									<span style="color:var(--muted-foreground);">${"  ".repeat(b.depth)}</span>
+									<a style="color:var(--primary);cursor:pointer;text-decoration:none;"
+										@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>
+								</td>
+								<td style="text-align:right;padding:3px 8px;">$${b.costUsd.toFixed(4)}</td>
+								<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
+							</tr>
+						`)}
+					</tbody>
+				</table>
+			` : nothing}
+		</div>
+	`;
+}
+
 function renderMetaRows(goal: Goal): TemplateResult {
 	const branch = goal.branch || "";
 	const gs = gitStatus;
 
 	return html`
 		<div class="meta-rows">
+			${renderTreeCostRow()}
 			${goalCost && goalCost.totalCost > 0 ? html`
 			<div class="meta-row">
 				<div class="meta-item" style="position:relative;cursor:pointer;" @click=${(e: Event) => {
@@ -1464,10 +1622,36 @@ function renderTabBar(): TemplateResult {
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
+	// Phase 5b: Plan and Children tabs (visibility from Phase 5a predicates).
+	if (currentGoal) {
+		const allLiveGoals = state.goals.filter(g => !g.archived);
+		const childGoals = allLiveGoals.filter(g => g.parentGoalId === currentGoal!.id);
+		const childCount = state.goals.filter(g => g.parentGoalId === currentGoal!.id).length;
+		const archivedChildCount = state.goals.filter(g => g.parentGoalId === currentGoal!.id && g.archived).length;
+		const liveChildCount = childCount - archivedChildCount;
+		// Plan-tab predicate uses the live goals list so the living-plan branch fires when needed.
+		if (shouldShowPlanTab(currentGoal as any, allLiveGoals as any)) {
+			tabs.push({
+				id: "plan",
+				label: "Plan",
+				icon: svgPlan,
+				countStr: String(childGoals.length),
+			});
+		}
+		if (shouldShowChildrenTab(currentGoal as any, liveChildCount > 0 || archivedChildCount > 0)) {
+			tabs.push({
+				id: "children",
+				label: "Children",
+				icon: svgChildren,
+				countStr: String(childCount),
+			});
+		}
+	}
+
 	return html`
 		<div class="tab-bar">
 			${tabs.map(t => html`
-				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)} title="${t.label}">
+				<div data-testid="tab-${t.id}" class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)} title="${t.label}">
 					${t.icon}
 					<span class="tab-label">${t.label}</span>
 					${t.countStr ? html`<span class="tab-count">${t.countStr}</span>` : nothing}
@@ -1697,6 +1881,304 @@ function renderSpecTab(): TemplateResult {
 			<div class="spec-content">
 				<markdown-block .content=${spec}></markdown-block>
 			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
+// RENDER: CHILDREN TAB (Phase 5b)
+// ============================================================================
+
+interface ChildCardSummary {
+	goal: Goal;
+	gatesPassed: number;
+	gatesTotal: number;
+	cost: number;
+}
+
+function buildChildSummaries(parentGoalId: string, includeArchived: boolean): ChildCardSummary[] {
+	const out: ChildCardSummary[] = [];
+	for (const g of state.goals) {
+		if (g.parentGoalId !== parentGoalId) continue;
+		if (g.archived && !includeArchived) continue;
+		if (!g.archived && includeArchived) continue;
+		const gatesTotal = g.workflow?.gates.length ?? 0;
+		// Tree-cost breakdown is the source for per-child cost when present;
+		// otherwise we leave 0 (the user already sees a "Tree cost" rollup).
+		const breakdown = treeCost?.breakdown.find(b => b.goalId === g.id);
+		const cost = breakdown ? breakdown.costUsd : 0;
+		// gatesPassed: best-effort — full gate list not fetched per child here;
+		// the child's own dashboard shows the precise count. We approximate
+		// from the workflow snapshot's `metadata.passed === "true"` pattern
+		// when the Phase 6 server stamps it. For now, report 0 unless the
+		// goal is archived+complete (success terminal → all gates passed).
+		const gatesPassed = g.archived && g.state === "complete" ? gatesTotal : 0;
+		out.push({ goal: g, gatesPassed, gatesTotal, cost });
+	}
+	out.sort((a, b) => a.goal.createdAt - b.goal.createdAt);
+	return out;
+}
+
+function renderChildCard(s: ChildCardSummary): TemplateResult {
+	const g = s.goal;
+	const stateClass = g.archived && g.state === "complete"
+		? "complete"
+		: g.paused
+			? "paused"
+			: g.state === "shelved"
+				? "failed"
+				: g.state;
+	const costStr = s.cost > 0 ? `$${s.cost.toFixed(2)}` : "—";
+	const progressStr = s.gatesTotal > 0 ? `${s.gatesPassed}/${s.gatesTotal}` : "—";
+	return html`
+		<div class="child-card" data-testid="child-card-${g.id}"
+			style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;background:var(--card);min-width:0;"
+			@click=${() => setHashRoute("goal-dashboard", g.id)}>
+			<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+				<span class="status-chip ${statusChipClass(stateClass === "complete" ? "complete" : (stateClass === "in-progress" ? "in-progress" : (stateClass === "failed" ? "skipped" : "todo")))}" data-testid="child-card-state">
+					<span class="dot"></span>${stateClass === "in-progress" ? "Running" : stateClass === "complete" ? "Done" : stateClass === "failed" ? "Failed" : stateClass === "paused" ? "Paused" : "Todo"}
+				</span>
+				${g.paused ? html`<span class="meta-tag" data-testid="child-card-paused" style="background:var(--secondary);color:var(--muted-foreground);font-size:10px;padding:1px 6px;border-radius:6px;">paused</span>` : nothing}
+			</div>
+			<div style="font-weight:600;font-size:13px;line-height:1.3;margin-bottom:6px;color:var(--foreground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${g.title}">${g.title}</div>
+			<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted-foreground);">
+				<span title="Gates passed / total">${progressStr}</span>
+				<span title="Cost (USD)">${costStr}</span>
+			</div>
+		</div>
+	`;
+}
+
+function renderChildrenTab(): TemplateResult {
+	if (!currentGoal) return html``;
+	const live = buildChildSummaries(currentGoal.id, false);
+	const archived = buildChildSummaries(currentGoal.id, true);
+	if (live.length === 0 && archived.length === 0) {
+		return html`<div class="tab-empty">${svgChildren}<span>No child goals yet</span></div>`;
+	}
+	return html`
+		<div class="tab-panel-inner" data-testid="children-tab">
+			<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;">
+				${live.map(s => renderChildCard(s))}
+			</div>
+			${archived.length > 0 ? html`
+				<details style="margin-top:14px;">
+					<summary style="cursor:pointer;font-size:12px;color:var(--muted-foreground);" data-testid="children-archived-disclosure">Archived (${archived.length})</summary>
+					<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-top:10px;opacity:0.7;">
+						${archived.map(s => renderChildCard(s))}
+					</div>
+				</details>
+			` : nothing}
+		</div>
+	`;
+}
+
+// ============================================================================
+// RENDER: PLAN TAB (Phase 5b — DAG SVG, Lessons 4.20 / 4.22)
+// ============================================================================
+
+/** Plan-tab nested expansion state keyed by `goalId`. */
+const _planExpandedGoals: Set<string> = new Set();
+
+function _togglePlanExpanded(goalId: string): void {
+	if (_planExpandedGoals.has(goalId)) _planExpandedGoals.delete(goalId);
+	else _planExpandedGoals.add(goalId);
+	renderApp();
+}
+
+interface PlanLayoutNode extends PlanEdgeNode {
+	step: PlanStep;
+	state: PlanNodeState;
+	childGoal?: Goal;
+}
+
+const PLAN_NODE_W = 200;
+const PLAN_NODE_H = 64;
+const PLAN_PHASE_GAP = 56; // horizontal gap between phases
+const PLAN_NODE_GAP_Y = 16; // vertical gap within phase
+const PLAN_PADDING = 16;
+const PLAN_RENDER_DEPTH_CAP = 3;
+
+/** Compute the node + edge layout for a single plan (one goal's plan). */
+function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number): {
+	nodes: PlanLayoutNode[];
+	edges: PlanEdge[];
+	width: number;
+	height: number;
+} {
+	if (steps.length === 0) return { nodes: [], edges: [], width: 0, height: 0 };
+	const phaseMap = new Map<number, PlanStep[]>();
+	for (const s of steps) {
+		const list = phaseMap.get(s.phase);
+		if (list) list.push(s); else phaseMap.set(s.phase, [s]);
+	}
+	const phases = Array.from(phaseMap.keys()).sort((a, b) => a - b);
+	const candidates: PlanNodeChild[] = allGoals.map(g => ({
+		id: g.id,
+		parentGoalId: g.parentGoalId,
+		spawnedFromPlanId: g.spawnedFromPlanId,
+		state: g.state as any,
+		archived: !!g.archived,
+		paused: !!g.paused,
+		createdAt: g.createdAt,
+	}));
+	const nodes: PlanLayoutNode[] = [];
+	const colNodesByPhase = new Map<number, PlanLayoutNode[]>();
+	let maxColH = 0;
+	for (let pi = 0; pi < phases.length; pi++) {
+		const phase = phases[pi];
+		const x = PLAN_PADDING + pi * (PLAN_NODE_W + PLAN_PHASE_GAP);
+		const stepsInPhase = phaseMap.get(phase)!;
+		const colNodes: PlanLayoutNode[] = [];
+		stepsInPhase.forEach((s, i) => {
+			const y = yOffset + PLAN_PADDING + i * (PLAN_NODE_H + PLAN_NODE_GAP_Y);
+			const resolution = resolvePlanNodeChild(s.planId, candidates);
+			const childGoal = resolution.child ? allGoals.find(g => g.id === resolution.child!.id) : undefined;
+			const node: PlanLayoutNode = {
+				id: `${s.planId}::${pi}::${i}`,
+				step: s,
+				state: resolution.state,
+				childGoal,
+				x,
+				y,
+				width: PLAN_NODE_W,
+				height: PLAN_NODE_H,
+			};
+			nodes.push(node);
+			colNodes.push(node);
+		});
+		colNodesByPhase.set(phase, colNodes);
+		const colH = stepsInPhase.length * (PLAN_NODE_H + PLAN_NODE_GAP_Y);
+		if (colH > maxColH) maxColH = colH;
+	}
+	// Edges: bipartite phase N → phase N+1 fully connected.
+	const edges: PlanEdge[] = [];
+	for (let pi = 0; pi < phases.length - 1; pi++) {
+		const fromCol = colNodesByPhase.get(phases[pi]) ?? [];
+		const toCol = colNodesByPhase.get(phases[pi + 1]) ?? [];
+		for (const f of fromCol) {
+			for (const t of toCol) {
+				edges.push({ fromNodeId: f.id, toNodeId: t.id });
+			}
+		}
+	}
+	const width = phases.length * PLAN_NODE_W + (phases.length - 1) * PLAN_PHASE_GAP + 2 * PLAN_PADDING;
+	const height = yOffset + maxColH + 2 * PLAN_PADDING;
+	return { nodes, edges, width, height };
+}
+
+function planNodeFillColor(s: PlanNodeState): string {
+	switch (s) {
+		case "complete": return "rgba(34, 197, 94, 0.10)";
+		case "in-progress": return "rgba(59, 130, 246, 0.12)";
+		case "failed": return "rgba(239, 68, 68, 0.12)";
+		case "paused": return "rgba(234, 179, 8, 0.14)";
+		default: return "rgba(120, 120, 120, 0.06)";
+	}
+}
+
+function planNodeBorderColor(s: PlanNodeState): string {
+	switch (s) {
+		case "complete": return "#22c55e";
+		case "in-progress": return "#3b82f6";
+		case "failed": return "#ef4444";
+		case "paused": return "#eab308";
+		default: return "var(--border)";
+	}
+}
+
+function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): TemplateResult | typeof nothing {
+	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
+	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0);
+	const paths = computeEdgePaths(nodes, edges, { midLineY: (a, b) => (a + b) / 2 });
+	return html`
+		<div class="plan-level" data-testid="plan-level-${depth}" data-plan-depth="${depth}" style="position:relative;margin-bottom:18px;">
+			<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;max-width:100%;">
+				${paths.map(p => svg`<path data-testid="plan-edge" d=${p.d} fill="none" stroke="var(--muted-foreground)" stroke-opacity="0.4" stroke-width="1.5"></path>`)}
+				${nodes.map(n => svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}">
+					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
+						fill=${planNodeFillColor(n.state)}
+						stroke=${planNodeBorderColor(n.state)}
+						stroke-width="1.5"></rect>
+					<foreignObject x=${n.x + 6} y=${n.y + 4} width=${n.width - 12} height=${n.height - 8}>
+						<div xmlns="http://www.w3.org/1999/xhtml" style="font-family:inherit;font-size:11px;color:var(--foreground);overflow:hidden;height:100%;display:flex;flex-direction:column;justify-content:space-between;">
+							<div style="display:flex;align-items:center;gap:4px;">
+								${n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
+									style="cursor:pointer;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:transparent;"
+									@click=${(e: Event) => { e.stopPropagation(); _togglePlanExpanded(n.childGoal!.id); }}
+									title="${_planExpandedGoals.has(n.childGoal.id) ? "Collapse" : "Expand"} sub-plan">
+									${_planExpandedGoals.has(n.childGoal.id) ? "▾" : "▸"}
+								</span>` : nothing}
+								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
+							</div>
+							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
+								<span>${n.state}</span>
+								${n.childGoal ? html`<a class="plan-node-link"
+									style="color:var(--primary);text-decoration:none;cursor:pointer;"
+									@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", n.childGoal!.id); }}
+									title="Open ${n.childGoal.title}">open →</a>` : nothing}
+							</div>
+						</div>
+					</foreignObject>
+				</g>`)}
+			</svg>
+			${nodes.filter(n => n.childGoal && _planExpandedGoals.has(n.childGoal.id)).map(n => {
+				const child = n.childGoal!;
+				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals);
+				if (childPlanSteps.length === 0) {
+					return html`<div data-testid="plan-subtree-empty" style="margin-left:24px;font-size:11px;color:var(--muted-foreground);padding:6px 0;">No sub-plan for "${child.title}".</div>`;
+				}
+				if (depth + 1 > PLAN_RENDER_DEPTH_CAP) {
+					const direct = state.goals.filter(g => g.parentGoalId === child.id && !g.archived).length;
+					return html`<div data-testid="plan-subtree-truncated" style="margin-left:24px;font-size:11px;color:var(--muted-foreground);padding:6px 0;">Show ${direct} more nested step${direct === 1 ? "" : "s"}…</div>`;
+				}
+				return html`
+					<div data-testid="plan-subtree" data-parent-goal-id="${child.id}"
+						style="margin-left:24px;border-left:2px solid var(--border);padding-left:8px;">
+						${renderPlanLevel(childPlanSteps, allGoals, depth + 1)}
+					</div>
+				`;
+			})}
+		</div>
+	`;
+}
+
+/** Compute plan steps for an arbitrary goal (top-level or nested). */
+function computePlanStepsForGoal(goal: Goal, allGoals: Goal[]): PlanStep[] {
+	const formalGate = goal.workflow?.gates.find(g => g.id === "execution");
+	const formalSteps: FormalPlanStep[] | undefined = (formalGate as any)?.verify
+		?.filter((v: any) => v.type === "subgoal" && v.subgoal)
+		.map((v: any, idx: number) => ({
+			planId: v.subgoal.planId,
+			title: v.subgoal.title,
+			spec: v.subgoal.spec,
+			phase: typeof v.phase === "number" ? v.phase : idx,
+		}));
+	const childSynthesis: SynthesisGoal[] = allGoals
+		.filter(g => g.parentGoalId === goal.id)
+		.map(g => ({
+			id: g.id,
+			parentGoalId: g.parentGoalId,
+			spawnedFromPlanId: g.spawnedFromPlanId,
+			createdAt: g.createdAt,
+			state: g.state as any,
+			archived: !!g.archived,
+			title: g.title,
+			workflowId: g.workflowId,
+		}));
+	return buildPlanSteps({ formalSteps, childGoals: childSynthesis });
+}
+
+function renderPlanTab(): TemplateResult {
+	if (!currentGoal) return html``;
+	const allGoals = state.goals;
+	const steps = computePlanStepsForGoal(currentGoal, allGoals);
+	if (steps.length === 0) {
+		return html`<div class="tab-empty">${svgPlan}<span>No plan yet — propose subgoal steps or spawn a child.</span></div>`;
+	}
+	return html`
+		<div class="tab-panel-inner" data-testid="plan-tab" style="overflow-x:auto;">
+			${renderPlanLevel(steps, allGoals as any, 0)}
 		</div>
 	`;
 }
@@ -2153,6 +2635,7 @@ export function renderGoalDashboard(): TemplateResult {
 	return html`
 		<div class="dashboard-container">
 			${renderNavBar(currentGoal)}
+			${renderParentBreadcrumb(currentGoal)}
 			${isArchived ? html`
 				<div style="margin:0 16px 8px;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--muted);color:var(--muted-foreground);font-size:13px;">
 					This goal was archived on ${new Date(currentGoal.archivedAt!).toLocaleDateString()}. Dashboard is read-only.
@@ -2168,6 +2651,8 @@ export function renderGoalDashboard(): TemplateResult {
 				<div class="tab-panel ${activeTab === "tasks" ? "active" : ""}">${activeTab === "tasks" ? renderTasksTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "agents" ? "active" : ""}">${activeTab === "agents" ? renderAgentsTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "commits" ? "active" : ""}">${activeTab === "commits" ? renderCommitsTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "plan" ? "active" : ""}">${activeTab === "plan" ? renderPlanTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "children" ? "active" : ""}">${activeTab === "children" ? renderChildrenTab() : nothing}</div>
 			</div>
 		</div>
 		${dashboardModalStep ? html`
