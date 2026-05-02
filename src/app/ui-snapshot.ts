@@ -145,6 +145,13 @@ export const writeSnapshot = serialize;
 /**
  * Hydrate a state-shaped object from storage. Returns null on miss, version
  * mismatch, or any parse/IO error.
+ *
+ * Supports two payload shapes (returns the raw parsed object either way; the
+ * `activeSession` accessor below normalises both):
+ *   1. Canonical (written by `buildPayload()` here):
+ *        { activeSession: { id, messages, ... } }
+ *   2. Legacy / E2E test-fixture:
+ *        { sessions: { [id]: { messages, ... } }, selectedSessionId }
  */
 export function hydrate(opts: IoOpts): Record<string, any> | null {
 	if (!opts || !opts.storage) return null;
@@ -162,6 +169,23 @@ export function hydrate(opts: IoOpts): Record<string, any> | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Resolve the active-session record from a hydrated snapshot, accepting both
+ * payload shapes (canonical `activeSession` field, or legacy `sessions[id]`
+ * map keyed by `selectedSessionId`). Returns null when neither is present.
+ */
+export function getActiveSessionFromSnapshot(snap: Record<string, any> | null | undefined): Record<string, any> | null {
+	if (!snap || typeof snap !== "object") return null;
+	if (snap.activeSession && typeof snap.activeSession === "object") {
+		return snap.activeSession as Record<string, any>;
+	}
+	if (snap.sessions && typeof snap.sessions === "object" && typeof snap.selectedSessionId === "string") {
+		const sess = (snap.sessions as Record<string, any>)[snap.selectedSessionId];
+		if (sess && typeof sess === "object") return sess;
+	}
+	return null;
 }
 
 export const readSnapshot = hydrate;
