@@ -1186,6 +1186,22 @@ export function createGateway(config: GatewayConfig) {
 				});
 			}
 
+			// Phase 3 nested goals — boot-time backfill of state=complete on
+			// archived goals whose ready-to-merge gate already passed. Closes
+			// the Lesson 4.2 gap on records produced by code paths predating
+			// archiveGoalAfterMerge. Wrapped in try/catch — backfill failure
+			// must not block boot (Lesson 4.11 — endless-restart guard).
+			for (const ctx of projectContextManager.all()) {
+				try {
+					const result = ctx.goalManager.backfillCompleteState(ctx.gateStore);
+					if (result.backfilled > 0) {
+						console.log(`[goal-manager] backfillCompleteState project=${ctx.project.id} backfilled=${result.backfilled} skipped=${result.skipped}`);
+					}
+				} catch (err) {
+					console.warn(`[goal-manager] backfillCompleteState failed for project ${ctx.project.id} (non-fatal):`, err);
+				}
+			}
+
 			// Now that sessions are live, re-subscribe to team events
 			// (must happen after restoreSessions so session objects exist)
 			teamManager.resubscribeTeamEvents();
@@ -4639,6 +4655,27 @@ async function handleApiRoute(
 		}
 		if (body?.metadata) {
 			gateStore.updateGateMetadata(goalId, gateId, body.metadata);
+		}
+
+		// Phase 3 nested goals — freeze the parent workflow's execution.verify[]
+		// when the team-lead signals the goal-plan gate. After this point any
+		// changes to execution.verify[] route through the mutation classifier
+		// (Phase 4). See SUBGOALS-SPEC §3.6 / docs/_phase-3-notes.md.
+		if (gateId === "goal-plan" && goal.workflowId === "parent" && goal.workflow) {
+			const executionGate = goal.workflow.gates.find(g => g.id === "execution");
+			if (executionGate) {
+				const updatedGate = {
+					...executionGate,
+					metadata: { ...(executionGate.metadata ?? {}), frozen: "true" },
+				};
+				const updatedWorkflow = {
+					...goal.workflow,
+					gates: goal.workflow.gates.map(g => g.id === "execution" ? updatedGate : g),
+					updatedAt: Date.now(),
+				};
+				gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: updatedWorkflow });
+				console.log(`[gate-signal] Plan frozen for goal ${goalId} (execution.verify[] now immutable except via mutation classifier)`);
+			}
 		}
 
 		// Broadcast signal received

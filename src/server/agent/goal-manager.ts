@@ -686,7 +686,44 @@ export class GoalManager {
 		return this.store.getAll();
 	}
 
-	async updateGoal(id: string, updates: { title?: string; cwd?: string; state?: GoalState; spec?: string; team?: boolean; repoPath?: string; branch?: string; prUrl?: string; reattemptOf?: string; projectId?: string; autoStartTeam?: boolean }): Promise<boolean> {
+	/**
+	 * Resolve the per-tree concurrency cap consulted by `runSubgoalStep` when
+	 * acquiring a semaphore slot before spawning a child. Reads
+	 * `maxConcurrentChildren` off the root goal record.
+	 *
+	 * Defaults: unset / unknown root → 3. Hard max: 8 (defensive cap on user
+	 * input). Floor: 1 (never zero — would deadlock the harness).
+	 *
+	 * See SUBGOALS-SPEC §3.5.
+	 */
+	resolveRootMaxConcurrentChildren(rootGoalId: string): number {
+		const root = this.store.get(rootGoalId);
+		if (!root) return 3;
+		const raw = root.maxConcurrentChildren ?? 3;
+		return Math.max(1, Math.min(8, raw));
+	}
+
+	async updateGoal(id: string, updates: {
+		title?: string;
+		cwd?: string;
+		state?: GoalState;
+		spec?: string;
+		team?: boolean;
+		repoPath?: string;
+		branch?: string;
+		prUrl?: string;
+		reattemptOf?: string;
+		projectId?: string;
+		autoStartTeam?: boolean;
+		// Phase 3 nested-goals fields (Lesson 4.1 — must be settable
+		// immediately after createGoal in runSubgoalStep).
+		spawnedFromPlanId?: string;
+		paused?: boolean;
+		replanCount?: number;
+		divergencePolicy?: "strict" | "balanced" | "autonomous";
+		maxConcurrentChildren?: number;
+		acceptanceCriteria?: string[];
+	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
 
