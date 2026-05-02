@@ -3330,7 +3330,21 @@ async function handleApiRoute(
 		}
 
 		try {
-			const child = await goalManager.createGoal(title, parent.cwd, {
+			// Children inherit the ROOT REPO path, not the parent's cwd
+			// (which is the parent's worktree). Otherwise getRepoRoot resolves
+			// to the parent's worktree and child worktrees get nested under
+			// `<parent-worktree>-wt/`, which collapses Phase 2's branch
+			// topology and stalls setup. Preserve any monorepo subdir offset.
+			let childCwd = parent.cwd;
+			if (parent.repoPath) {
+				const offset = parent.worktreePath
+					? path.relative(parent.worktreePath, parent.cwd)
+					: "";
+				childCwd = (offset && offset !== "." && !offset.startsWith(".."))
+					? path.join(parent.repoPath, offset)
+					: parent.repoPath;
+			}
+			const child = await goalManager.createGoal(title, childCwd, {
 				spec,
 				workflowId,
 				projectId: parent.projectId,
@@ -3342,6 +3356,28 @@ async function handleApiRoute(
 			void suggestedRole; // Reserved for future per-child role hint persistence.
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
 			json({ id: child.id }, 201);
+
+			// Trigger worktree setup + team start exactly like POST /api/goals does.
+			// Without this the child sits in setupStatus="preparing" forever — the
+			// store has the goal but nothing actually creates its worktree or
+			// spawns its team-lead. Mirrors the autoStartTeam branch from the
+			// main goal-creation handler (server.ts ~3094).
+			if (child.setupStatus === "preparing") {
+				goalManager.setupWorktreeAndStartTeam(child.id, () => teamManager.startTeam(child.id))
+					.then(() => {
+						broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
+					})
+					.catch((err) => {
+						const g = goalManager.getGoal(child.id);
+						if (g?.setupStatus === "ready") {
+							broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
+							console.error(`[spawn-child] Auto-start team failed for ${child.id} (worktree ready):`, err);
+						} else {
+							console.error(`[spawn-child] Setup failed for ${child.id}:`, err);
+							broadcastToAll({ type: "goal_setup_error", goalId: child.id, error: String(err) });
+						}
+					});
+			}
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			// createGoal throws on cycle violations and missing parent.
@@ -3357,8 +3393,18 @@ async function handleApiRoute(
 		const id = planPatchMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		if (goal.workflowId !== "parent") {
-			json({ error: "PATCH /plan only valid on parent-workflow goals", code: "NOT_PARENT_WORKFLOW" }, 400);
+		// Plan-propose requires a workflow that can hold subgoal-typed verify
+		// steps. Canonically that's the `parent` workflow (charter → plan-review
+		// → goal-plan freeze → execution), but any workflow whose snapshot
+		// contains an `execution` gate works equally well. Reject with an
+		// actionable error otherwise so the team-lead can either switch to the
+		// parent workflow or fall back to `goal_spawn_child` for each step.
+		const hasExecutionGate = !!goal.workflow?.gates.some(g => g.id === "execution");
+		if (!hasExecutionGate) {
+			json({
+				error: `Goal's workflow (${goal.workflowId ?? "unknown"}) has no 'execution' gate to hold a subgoal plan. Either re-create the goal with the 'parent' workflow, or call goal_spawn_child directly for each step.`,
+				code: "NO_EXECUTION_GATE",
+			}, 400);
 			return;
 		}
 		const body = await readBody(req).catch(() => null);
