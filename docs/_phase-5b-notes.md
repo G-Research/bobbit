@@ -4,7 +4,31 @@ This file is the working scratchpad for Phase 5b: surfacing pure helpers from
 Phase 5a, REST endpoints from Phase 4, and system-prompt stanzas from Phase 6
 to the user.
 
-## Status: in progress
+## Status: complete
+
+- 1826 Node unit tests pass (was 1798 + 28 new)
+- 1008 Playwright unit tests pass (was 1008)
+- 14 new browser E2E tests under `tests/e2e/ui/` (sidebar nesting, plan
+  tab, cascade dialogs, breadcrumb, tree cost) — all green
+- `npm run check` clean
+
+## Key implementation choices
+
+- **Sidebar projectId fallback** — child goals spawned via the Phase 4
+  `goal_spawn_child` REST endpoint do not carry a `projectId` of their own
+  (the server-side `goalManager.createGoal` accepts the option but the
+  goal record never persists it; only the POST `/api/goals` handler stamps
+  `projectId` post hoc). Rather than touch server code (out of scope for
+  Phase 5b), the sidebar bucket loop now walks the `parentGoalId` chain to
+  inherit projectId. Phase 8 should consider plumbing this through
+  `createGoal` proper.
+- **Cascade UX** — three new dialogs (`showArchiveGoalDialog`,
+  `showPauseGoalDialog`, `showResumeGoalDialog`) in `dialogs.ts`. UI is
+  the policy authority: server returns 422 if cascade param missing.
+- **Mutation-approval card** — new reducer actions
+  (`mutation-pending`, `mutation-update`) keep mutation cards atomic with
+  the rest of the transcript. Dedupe by `requestId`. Card flips to a
+  decided-disabled state on `mutation_decided`.
 
 ## What's wired
 
