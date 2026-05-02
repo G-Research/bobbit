@@ -35,6 +35,15 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	// Tool-call schema validation failure from the provider SDK — distinct
 	// from the raw JSON parse errors, which live in TRANSIENT_ERROR_REGEXES.
 	"Validation failed for tool",
+	// Resumed-from-restart reviewer that lost its kickoff context. Live
+	// test (PR #409 0e4fc54c plan-approval UX): seven occurrences in a
+	// row of "Gap analysis" / "Code quality review" / "Security review"
+	// failing with this exact output. The reminder fires but the
+	// resumed agent process is fresh — it has no memory of what to
+	// review. Marking transient triggers `_rerunLlmReviewStep` which
+	// re-builds the kickoff prompt from the workflow definition and
+	// drives a fresh review session with full context.
+	"Agent did not call verification_result after server restart",
 ];
 
 /**

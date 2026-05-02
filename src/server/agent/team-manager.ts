@@ -331,6 +331,50 @@ export class TeamManager {
 	 * because it needs live session objects to attach event listeners.
 	 */
 	resubscribeTeamEvents(): void {
+		// Boot-time sweep: clean up zombie reviewer registrations from
+		// crashed verifications. A reviewer is registered to a goal's team
+		// at the start of an llm-review/QA step. The corresponding
+		// `unregisterReviewerSession` runs in a `finally` block at the
+		// end of the step, but if the harness process crashed mid-review
+		// (or the gateway hard-restarted), that cleanup never happens.
+		// The reviewer's session record gets terminated by
+		// `terminateSession` before crash, but the team-store entry stays
+		// behind — producing the "phantom agents" pattern that has dogged
+		// PR #409 (live test: Eve's goal showed 4 zombie reviewers from
+		// 17h-ago verifications, all with role=null/kind=null because they
+		// were registered before the `kind` migration).
+		//
+		// Heuristic: a registered agent is a zombie reviewer if
+		//   (kind === "reviewer" || role === "reviewer" ||
+		//    task starts with "Verification review:")
+		// AND its session is no longer findable (or is `terminated`).
+		// We unregister those entries, not the underlying sessions, on
+		// the conservative assumption that anything else with a live
+		// session is a real worker.
+		let zombieCount = 0;
+		for (const [goalId, entry] of this.teams) {
+			const toUnregister: string[] = [];
+			for (const agent of entry.agents) {
+				const looksLikeReviewer =
+					agent.kind === "reviewer" ||
+					agent.role === "reviewer" ||
+					(typeof agent.task === "string" && agent.task.startsWith("Verification review:")) ||
+					(typeof agent.sessionId === "string" && agent.sessionId.startsWith("llm-review-"));
+				if (!looksLikeReviewer) continue;
+				const session = this.sessionManager.getSession(agent.sessionId);
+				if (!session || session.status === "terminated") {
+					toUnregister.push(agent.sessionId);
+				}
+			}
+			for (const sid of toUnregister) {
+				this.unregisterReviewerSession(goalId, sid);
+				zombieCount++;
+			}
+		}
+		if (zombieCount > 0) {
+			console.log(`[team-manager] Cleaned ${zombieCount} zombie reviewer registration(s) on boot.`);
+		}
+
 		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed
 			if (entry.teamLeadSessionId) {

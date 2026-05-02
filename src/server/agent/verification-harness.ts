@@ -603,6 +603,64 @@ export class VerificationHarness {
 	 * from the restored reviewer session. Fire-and-forget from the caller.
 	 */
 	async resumeInterruptedVerifications(): Promise<void> {
+		// Phase 1: walk all per-project gate-stores for orphan running
+		// signals — gate-store records that say `verification.status:
+		// "running"` but have no in-memory active verification AND no
+		// persisted active-verifications.json entry.
+		//
+		// Live test (PR #409 v0.2-embeddings, signal 7644f188): Meg's
+		// execution gate had a signal with verification.status=running
+		// from before a restart, but agent-memory's
+		// active-verifications.json file didn't exist, so Phase 2
+		// (the file-loading path below) never saw the signal. The gate
+		// stayed `failed` (last completed status) but the latest signal
+		// reported status=running indefinitely. cancel-verification API
+		// returned "No running verification" because the harness had no
+		// in-memory state. Result: the gate was unrecoverable through
+		// any normal path.
+		//
+		// Sweep all known goals; for each gate; for each signal whose
+		// verification.status === "running", mark it as failed with a
+		// clear restart-orphan message. The standard restart-interrupt
+		// suppression at line ~830 then converts this into a benign
+		// "please re-signal" notification when the team-lead is up.
+		if (this.projectContextManager) {
+			try {
+				const allGoals = (this.projectContextManager as any).getAllGoals?.() ?? [];
+				let orphanCount = 0;
+				for (const goal of allGoals) {
+					if (goal.archived) continue;
+					const ctx = this.projectContextManager.getContextForGoal(goal.id);
+					if (!ctx) continue;
+					const gateStore = ctx.gateStore;
+					const gates = (gateStore as any).getGatesForGoal?.(goal.id) ?? [];
+					for (const gate of gates) {
+						for (const sig of (gate.signals ?? [])) {
+							if (sig.verification?.status === "running" && !this.activeVerifications.has(sig.id)) {
+									console.log(`[verification] Sweeping orphan running signal ${sig.id} for ${goal.id}/${gate.gateId} — not in active map, marking failed.`);
+									gateStore.updateSignalVerification(sig.id, {
+										status: "failed",
+										steps: [{
+											name: "Resume Error",
+											type: "command",
+											passed: false,
+											output: "Step was running but had no session ID — cannot resume after restart.",
+											duration_ms: 0,
+										}],
+									});
+									orphanCount++;
+								}
+							}
+						}
+					}
+				if (orphanCount > 0) {
+					console.log(`[verification] Marked ${orphanCount} orphan running signal(s) as failed (restart-orphan recovery).`);
+				}
+			} catch (err) {
+				console.warn("[verification] Orphan-signal sweep failed (best-effort):", err);
+			}
+		}
+
 		const persisted = this._loadActive();
 		if (persisted.length === 0) return;
 
@@ -847,6 +905,17 @@ export class VerificationHarness {
 			"Session lost during server restart",
 			"Agent process exited unexpectedly",
 			"Reviewer agent process died",
+			// The resumed-from-restart path in `_resumeOneVerification`
+			// emits this when the reviewer agent didn't pick up the
+			// reminder — typically because the original kickoff context
+			// was lost when the server restarted mid-turn. Live test (PR
+			// #409 0e4fc54c plan-approval UX, 7th occurrence): three
+			// reviewer steps (Gap analysis / Code quality review /
+			// Security review) all came back with this exact output
+			// after every gateway restart. The reminder fires but the
+			// resumed agent has lost the original kickoff context, so
+			// it can't recover what to verify.
+			"Agent did not call verification_result after server restart",
 		];
 		const isRestartInterrupt = (r: { type: string; output: string }): boolean => {
 			if (RESTART_INTERRUPT_MARKERS.some(m => r.output.includes(m))) return true;
