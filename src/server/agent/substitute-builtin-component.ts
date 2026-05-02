@@ -64,13 +64,25 @@ export interface PrimaryComponent {
 }
 
 /** Resolve the input form (string for back-compat with PR-aa913742-era
- *  tests, or a full PrimaryComponent for prune support). */
+ *  tests, or a full PrimaryComponent for prune support).
+ *
+ *  Production callers (project-context-manager / boot-migration) pass
+ *  the object form. Object form with `commands: undefined` is treated
+ *  as `commands: {}` — the project explicitly declared no commands, so
+ *  every named command targeting this component must be pruned.
+ *
+ *  String form preserves the back-compat skip-prune behaviour (the
+ *  PR-aa913742-era unit tests rely on this).
+ */
 function resolvePrimary(
 	primary: PrimaryComponent | string | undefined,
 ): PrimaryComponent | undefined {
 	if (!primary) return undefined;
 	if (typeof primary === "string") return { name: primary };
 	if (!primary.name) return undefined;
+	// Object form: normalise commands to {} so the prune predicate fires
+	// even when the project's component declares no commands at all.
+	if (!primary.commands) return { name: primary.name, commands: {} };
 	return primary;
 }
 

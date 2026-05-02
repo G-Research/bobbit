@@ -343,6 +343,59 @@ describe("substituteBuiltinComponent — prune undeclared commands (issue 9)", (
 	});
 });
 
+describe("substituteBuiltinComponent — object form with undefined commands prunes", () => {
+	// Live test (PR #409): the bobbit-suubro project's project.yaml had
+	// `components: [{name: bobbit, repo: .}]` with NO commands map.
+	const wfWithMixed = (): Workflow => ({
+		id: "feature",
+		name: "Feature",
+		description: "",
+		createdAt: 0,
+		updatedAt: 0,
+		gates: [{
+			id: "implementation",
+			name: "Impl",
+			dependsOn: [],
+			verify: [
+				{ name: "Build", type: "command", component: "app", command: "build" },
+				{ name: "Type check", type: "command", component: "app", command: "check" },
+				{ name: "Unit tests", type: "command", component: "app", command: "unit" },
+				{ name: "E2E tests", type: "command", component: "app", command: "e2e" },
+				{ name: "Code review", type: "llm-review" },
+			] as never,
+		} as never],
+	});
+
+	it("object form with commands undefined prunes ALL named-command steps (THE bug)", () => {
+		// Bobbit-suubro project case: project.yaml has component without
+		// any commands map. Until this fix, the prune was skipped and the
+		// goal's implementation gate failed with `component "bobbit" has
+		// no command "build"`. Now `commands: undefined` is treated same
+		// as `commands: {}` — every named-command step is dropped.
+		const wf = wfWithMixed();
+		const result = substituteBuiltinComponent(wf, { name: "bobbit" }); // commands undefined
+		const names = (result.gates[0].verify as Array<{ name: string }>).map(s => s.name);
+		assert.deepEqual(names, ["Code review"], "all 4 command steps pruned; LLM review survives");
+	});
+
+	it("string form preserves back-compat skip-prune (PR-aa913742-era tests)", () => {
+		// String form is used by older callers that just want substitution
+		// (component-name rewrite) without prune. Don't break them.
+		const wf = wfWithMixed();
+		const result = substituteBuiltinComponent(wf, "bobbit");
+		const names = (result.gates[0].verify as Array<{ name: string }>).map(s => s.name);
+		assert.deepEqual(names, ["Build", "Type check", "Unit tests", "E2E tests", "Code review"], "string form: all kept, only substitution applied");
+	});
+
+	it("object form with commands={} also prunes all (consistency check)", () => {
+		// Both `undefined` and `{}` should produce identical behaviour.
+		const wf = wfWithMixed();
+		const result = substituteBuiltinComponent(wf, { name: "bobbit", commands: {} });
+		const names = (result.gates[0].verify as Array<{ name: string }>).map(s => s.name);
+		assert.deepEqual(names, ["Code review"]);
+	});
+});
+
 describe("substituteBuiltinComponents — array helper", () => {
 	it("applies substitution across multiple workflows", () => {
 		const wfs = [wfWithPlaceholder(), wfWithPlaceholder()];
