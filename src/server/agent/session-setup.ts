@@ -723,6 +723,36 @@ export async function executeWorktreeAsync(
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	if (plan.preExistingAgentSessionFile) {
+		// The continue handler pre-computes the cloned-.jsonl path against the
+		// project-root cwd. For worktree-backed sessions, the agent CLI boots
+		// with cwd=offsetCwd (the worktree path), and `formatAgentSessionFilePath`
+		// embeds a slug derived from cwd in the path. So the clone is currently
+		// stranded under the project-root slug-dir. Rebase it onto the agent's
+		// actual cwd-slug before issuing switch_session.
+		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
+		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
+		if (correctPath !== plan.preExistingAgentSessionFile) {
+			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
+			const fsCtx = { sandboxed: !!plan.sandboxed, projectId: plan.projectId };
+			if (plan.sandboxed) {
+				// Container-side: copy via docker exec then delete the old file.
+				await sessionFileCopy(fsCtx, plan.preExistingAgentSessionFile, fsCtx, correctPath, ctx.sandboxManager);
+				await sessionFileDelete(fsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+			} else {
+				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
+				const fsp = await import("node:fs/promises");
+				await fsp.mkdir(path.dirname(correctPath), { recursive: true });
+				try {
+					await fsp.rename(plan.preExistingAgentSessionFile, correctPath);
+				} catch (err) {
+					await fsp.copyFile(plan.preExistingAgentSessionFile, correctPath);
+					await fsp.unlink(plan.preExistingAgentSessionFile).catch(() => {});
+				}
+			}
+			plan.preExistingAgentSessionFile = correctPath;
+			ctx.store.update(session.id, { agentSessionFile: correctPath });
+		}
+
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },

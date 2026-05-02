@@ -545,8 +545,10 @@ function renderGoalForm(config: GoalFormConfig) {
 		reconcileFollowTail(goalSpecTextareaRef.value);
 	});
 
+	const goalRev = state.activeProposals.goal?.rev ?? 0;
 	return html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
+			${goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
 			<div class="flex flex-col md:flex-row gap-2.5 md:items-center">
 				<div class="flex items-center gap-2 flex-1 min-w-0">
 					<label class="${lblCls} w-20 md:w-16">Title</label>
@@ -1731,6 +1733,7 @@ function projectProposalPanel() {
 		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode}>
 			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
 				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
+				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}
 				<div class="text-[11px] text-muted-foreground font-mono truncate min-w-0" title=${fields.root_path || ""}>${fields.root_path || ""}</div>
 			</div>
 			${projectViewTabs(activeView, onView, {

@@ -142,6 +142,13 @@ export class RemoteAgent {
 	/** Throttle visibility-driven resyncs: Android can fire visibilitychange
 	 *  several times during screen unlock; we only want one resync per wake. */
 	private _lastVisibilityResync = 0;
+	/** True if the WS has dropped since the last successful snapshot apply.
+	 *  Visibility-driven resyncs are skipped while this is false and we already
+	 *  have messages in state — the cached state is correct, and a redundant
+	 *  `requestMessages()` on every tab-focus tick is what triggers the
+	 *  new-tab duplicate-messages bug. Set true on WS close, cleared after
+	 *  any successful snapshot apply. */
+	_hadDisconnectSinceLastSnapshot = true;
 	private _onVisibilityChange = (): void => {
 		if (document.visibilityState !== "visible") return;
 		if (this._intentionalDisconnect) return;
@@ -178,7 +185,16 @@ export class RemoteAgent {
 			// with live message_end deltas. Reconnects after real disconnects
 			// still resync (that path doesn't go through here).
 			if (this._state.isStreaming) return;
-			this.requestMessages();
+			// Skip the message resync when the WS has stayed connected since
+			// the last snapshot AND we already have messages: the cached state
+			// is correct and re-snapshotting on every visibilitychange tick is
+			// what causes the new-tab duplicate-messages bug (each tick re-runs
+			// the snapshot survivor merge against the current `state.messages`,
+			// and any id-less live rows accumulate duplicates). `get_state`
+			// still fires — only the message refetch is skipped.
+			const needsResync =
+				this._hadDisconnectSinceLastSnapshot || this._state.messages.length === 0;
+			if (needsResync) this.requestMessages();
 			this.send({ type: "get_state" });
 			// Nudge subscribers — after a tab wake, Lit property bindings
 			// driven by this agent may not have been reactive while suspended.
@@ -229,6 +245,7 @@ export class RemoteAgent {
 		type: ProposalType,
 		fields: Record<string, unknown> | null,
 		streaming: boolean,
+		rev?: number,
 	) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
@@ -472,6 +489,10 @@ export class RemoteAgent {
 			};
 
 			this.ws.onclose = () => {
+				// Mark that the WS dropped — the next visibility-driven resync
+				// must run a fresh `requestMessages()` to pick up anything we
+				// missed while disconnected.
+				this._hadDisconnectSinceLastSnapshot = true;
 				if (!settled) {
 					settled = true;
 					if (initial) {
@@ -895,6 +916,10 @@ export class RemoteAgent {
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					// Successful snapshot apply — cached state is now in sync with
+					// the server, so future visibility ticks can short-circuit
+					// `requestMessages()` until the WS drops again.
+					this._hadDisconnectSinceLastSnapshot = false;
 					// Streaming preview: if the snapshot contains the streaming
 					// message id, it's no longer in-flight on this client.
 					this.streamingMessageId = undefined;
@@ -1131,12 +1156,13 @@ export class RemoteAgent {
 
 			case "proposal_update": {
 				// Slice D: server-pushed proposal projection (post-edit / post-seed /
-				// rehydrate-on-attach). Always non-streaming — streaming partials
+				// rehydrate-on-attach / restore). Always non-streaming — streaming partials
 				// flow through the inline tool_use scan in `_checkToolProposals`.
 				const pType = (msg as any).proposalType;
 				const fields = (msg as any).fields;
+				const rev = typeof (msg as any).rev === "number" ? (msg as any).rev as number : undefined;
 				if (this.onProposal && isProposalType(pType) && fields && typeof fields === "object") {
-					this.onProposal(pType, fields as Record<string, unknown>, false);
+					this.onProposal(pType, fields as Record<string, unknown>, false, rev);
 				}
 				break;
 			}

@@ -52,7 +52,23 @@ export interface EditSuccess {
 	ok: true;
 	newContent: string;
 	parsed: TypedProposal;
+	/** Rev of the snapshot written for this edit (0 if snapshot write failed). */
+	rev: number;
 }
+
+export interface RestoreSuccess {
+	ok: true;
+	newRev: number;
+	fields: Record<string, unknown>;
+}
+
+export interface SnapshotNotFoundError {
+	ok: false;
+	code: "SNAPSHOT_NOT_FOUND";
+	message: string;
+}
+
+export type RestoreResult = RestoreSuccess | SnapshotNotFoundError | ParseError;
 
 export type EditResult = EditSuccess | ParseError | EditError;
 
@@ -94,6 +110,129 @@ export function proposalFilePath(stateDir: string, sessionId: string, type: Prop
 	return path.join(stateDir, "proposal-drafts", sessionId, plugin.filename);
 }
 
+// ── Per-rev snapshot history ───────────────────────────────────────────
+// Layout: <stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>
+// docs/design/proposal-revision-snapshots.md
+
+function extFor(type: ProposalType): string {
+	return type === "goal" ? "md" : "yaml";
+}
+
+function historyDir(stateDir: string, sessionId: string, type: ProposalType): string {
+	assertSafeSessionId(sessionId);
+	assertSafeType(type);
+	return path.join(stateDir, "proposal-drafts", sessionId, `${type}.history`);
+}
+
+function snapshotPath(stateDir: string, sessionId: string, type: ProposalType, rev: number): string {
+	return path.join(historyDir(stateDir, sessionId, type), `${rev}.${extFor(type)}`);
+}
+
+const SNAPSHOT_FILE_RE = /^(\d+)\.(md|yaml)$/;
+
+/** Scan history dir; return the highest integer rev, or 0 if empty/missing. */
+export async function latestRev(
+	stateDir: string,
+	sessionId: string,
+	type: ProposalType,
+): Promise<number> {
+	const dir = historyDir(stateDir, sessionId, type);
+	let entries: string[];
+	try {
+		entries = await fsp.readdir(dir);
+	} catch (err: any) {
+		if (err && err.code === "ENOENT") return 0;
+		throw err;
+	}
+	let max = 0;
+	for (const e of entries) {
+		const m = SNAPSHOT_FILE_RE.exec(e);
+		if (!m) continue;
+		const n = Number.parseInt(m[1], 10);
+		if (Number.isFinite(n) && n > max) max = n;
+	}
+	return max;
+}
+
+/** Write `<rev>.<ext>` atomically. */
+export async function writeSnapshot(
+	stateDir: string,
+	sessionId: string,
+	type: ProposalType,
+	rev: number,
+	content: string,
+): Promise<void> {
+	if (!Number.isFinite(rev) || rev < 1 || !Number.isInteger(rev)) {
+		throw new Error(`writeSnapshot: invalid rev ${rev}`);
+	}
+	const dir = historyDir(stateDir, sessionId, type);
+	await fsp.mkdir(dir, { recursive: true });
+	const filePath = snapshotPath(stateDir, sessionId, type, rev);
+	const tmpPath = filePath + ".tmp";
+	await fsp.writeFile(tmpPath, content, "utf8");
+	await fsp.rename(tmpPath, filePath);
+}
+
+/** Read snapshot content, or undefined if missing. */
+export async function readSnapshot(
+	stateDir: string,
+	sessionId: string,
+	type: ProposalType,
+	rev: number,
+): Promise<string | undefined> {
+	if (!Number.isFinite(rev) || rev < 1) return undefined;
+	try {
+		return await fsp.readFile(snapshotPath(stateDir, sessionId, type, rev), "utf8");
+	} catch (err: any) {
+		if (err && err.code === "ENOENT") return undefined;
+		throw err;
+	}
+}
+
+/**
+ * Copy snapshot N back to the live draft AND write a new snapshot at
+ * currentRev+1 whose contents equal snapshot N. Atomic via tmp+rename.
+ */
+export async function restoreSnapshot(
+	stateDir: string,
+	sessionId: string,
+	type: ProposalType,
+	rev: number,
+): Promise<RestoreResult> {
+	assertSafeSessionId(sessionId);
+	assertSafeType(type);
+	const plugin = getProposalTypePlugin(type);
+	const content = await readSnapshot(stateDir, sessionId, type, rev);
+	if (content === undefined) {
+		return {
+			ok: false,
+			code: "SNAPSHOT_NOT_FOUND",
+			message: `No snapshot rev ${rev} for ${type} proposal`,
+		};
+	}
+	const parsed = plugin.parse(content);
+	if (!parsed.ok) return parsed;
+
+	// Write to live draft atomically.
+	const dir = dirFor(stateDir, sessionId);
+	await fsp.mkdir(dir, { recursive: true });
+	const livePath = path.join(dir, plugin.filename);
+	const tmpPath = livePath + ".tmp";
+	await fsp.writeFile(tmpPath, content, "utf8");
+	await fsp.rename(tmpPath, livePath);
+
+	// New snapshot at currentRev+1.
+	const newRev = (await latestRev(stateDir, sessionId, type)) + 1;
+	try {
+		await writeSnapshot(stateDir, sessionId, type, newRev, content);
+	} catch (err) {
+		console.error(`[proposal-files] writeSnapshot failed during restore:`, err);
+		// Live draft is already updated; return rev 0 to signal degraded mode.
+		return { ok: true, newRev: 0, fields: parsed.value.fields };
+	}
+	return { ok: true, newRev, fields: parsed.value.fields };
+}
+
 /**
  * Serialize and write a proposal file. Atomic via write-tmp + rename.
  * Always parses+validates the serialized form before rename — if validation
@@ -104,7 +243,7 @@ export async function writeProposalFile(
 	sessionId: string,
 	type: ProposalType,
 	fields: Record<string, unknown>,
-): Promise<void> {
+): Promise<{ rev: number }> {
 	assertSafeSessionId(sessionId);
 	assertSafeType(type);
 	const plugin = getProposalTypePlugin(type);
@@ -122,6 +261,16 @@ export async function writeProposalFile(
 		throw new Error(`writeProposalFile validation failed [${e.code}]: ${e.message}`);
 	}
 	await fsp.rename(tmpPath, filePath);
+	// Snapshot — non-fatal on failure.
+	let rev = 0;
+	try {
+		rev = (await latestRev(stateDir, sessionId, type)) + 1;
+		await writeSnapshot(stateDir, sessionId, type, rev, content);
+	} catch (err) {
+		console.error(`[proposal-files] writeSnapshot failed for ${type}:`, err);
+		rev = 0;
+	}
+	return { rev };
 }
 
 /** Read raw file contents, or `undefined` if missing. */
@@ -197,7 +346,16 @@ export async function editProposalFile(
 		return parsed;
 	}
 	await fsp.rename(tmpPath, filePath);
-	return { ok: true, newContent: next, parsed: parsed.value };
+	// Snapshot the new content — non-fatal on failure.
+	let rev = 0;
+	try {
+		rev = (await latestRev(stateDir, sessionId, type)) + 1;
+		await writeSnapshot(stateDir, sessionId, type, rev, next);
+	} catch (err) {
+		console.error(`[proposal-files] writeSnapshot failed for edit ${type}:`, err);
+		rev = 0;
+	}
+	return { ok: true, newContent: next, parsed: parsed.value, rev };
 }
 
 /** Read + parse the proposal file via the per-type plugin. */

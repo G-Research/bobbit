@@ -29,6 +29,7 @@ import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
 import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
+import { EditProposalRenderer } from "./renderers/EditProposalRenderer.js";
 import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
 import { ActivateSkillRenderer } from "./renderers/ActivateSkillRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
@@ -82,6 +83,7 @@ const PROPOSAL_TOOL_NAMES = [
 for (const name of PROPOSAL_TOOL_NAMES) {
 	registerToolRenderer(name, new ProposalRenderer(name));
 }
+registerToolRenderer("edit_proposal", new EditProposalRenderer());
 
 const defaultRenderer = new DefaultRenderer();
 

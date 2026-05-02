@@ -15,11 +15,15 @@ import path from "node:path";
 import {
 	deleteProposalFile,
 	editProposalFile,
+	latestRev,
 	listProposalFiles,
 	parseProposalFile,
 	proposalFilePath,
 	readProposalFile,
+	readSnapshot,
+	restoreSnapshot,
 	writeProposalFile,
+	writeSnapshot,
 	type ProposalType,
 } from "../src/server/proposals/proposal-files.ts";
 
@@ -184,6 +188,100 @@ describe("editProposalFile semantics", () => {
 			assert.equal((r as any).code, "MISSING_REQUIRED_FIELD");
 		}
 		assert.equal(sha(fp), before);
+	});
+});
+
+describe("snapshot history", () => {
+	const sidS = "sess-snap-1";
+
+	it("latestRev returns 0 on empty/missing dir", async () => {
+		assert.equal(await latestRev(stateDir, "no-such", "goal"), 0);
+	});
+
+	it("writeProposalFile bumps rev monotonically", async () => {
+		const r1 = await writeProposalFile(stateDir, sidS, "project", { name: "A", root_path: "/tmp/a" });
+		assert.equal(r1.rev, 1);
+		const r2 = await writeProposalFile(stateDir, sidS, "project", { name: "B", root_path: "/tmp/a" });
+		assert.equal(r2.rev, 2);
+		const r3 = await writeProposalFile(stateDir, sidS, "project", { name: "C", root_path: "/tmp/a" });
+		assert.equal(r3.rev, 3);
+		assert.equal(await latestRev(stateDir, sidS, "project"), 3);
+	});
+
+	it("readSnapshot returns content; undefined for missing rev", async () => {
+		const c1 = await readSnapshot(stateDir, sidS, "project", 1);
+		assert.ok(c1 && c1.includes("name: A"));
+		const c99 = await readSnapshot(stateDir, sidS, "project", 99);
+		assert.equal(c99, undefined);
+	});
+
+	it("editProposalFile bumps rev on success", async () => {
+		const r = await editProposalFile(stateDir, sidS, "project", "name: C", "name: D");
+		assert.equal(r.ok, true);
+		if (r.ok) assert.equal(r.rev, 4);
+		assert.equal(await latestRev(stateDir, sidS, "project"), 4);
+	});
+
+	it("failed editProposalFile does not bump rev", async () => {
+		const before = await latestRev(stateDir, sidS, "project");
+		const r = await editProposalFile(stateDir, sidS, "project", "DOES_NOT_EXIST", "x");
+		assert.equal(r.ok, false);
+		assert.equal(await latestRev(stateDir, sidS, "project"), before);
+	});
+
+	it("latestRev ignores garbage filenames", async () => {
+		const sidG = "sess-garbage";
+		await writeProposalFile(stateDir, sidG, "project", { name: "X", root_path: "/tmp/x" });
+		const hist = path.join(stateDir, "proposal-drafts", sidG, "project.history");
+		fs.writeFileSync(path.join(hist, "foo.txt"), "junk");
+		fs.writeFileSync(path.join(hist, "abc.yaml"), "junk");
+		assert.equal(await latestRev(stateDir, sidG, "project"), 1);
+	});
+
+	it("writeSnapshot rejects bad rev", async () => {
+		await assert.rejects(() => writeSnapshot(stateDir, sidS, "project", 0, "x"));
+		await assert.rejects(() => writeSnapshot(stateDir, sidS, "project", -1, "x"));
+		await assert.rejects(() => writeSnapshot(stateDir, sidS, "project", 1.5, "x"));
+	});
+
+	it("restoreSnapshot round-trip: rev1 fields A, rev2 fields B, restore rev1 -> rev3 with fields A", async () => {
+		const sidR = "sess-restore-1";
+		await writeProposalFile(stateDir, sidR, "project", { name: "A", root_path: "/tmp/a" });
+		await writeProposalFile(stateDir, sidR, "project", { name: "B", root_path: "/tmp/a" });
+		assert.equal(await latestRev(stateDir, sidR, "project"), 2);
+		const restored = await restoreSnapshot(stateDir, sidR, "project", 1);
+		assert.equal(restored.ok, true);
+		if (restored.ok) {
+			assert.equal(restored.newRev, 3);
+			assert.equal(restored.fields.name, "A");
+		}
+		// Live draft contents == rev 1 contents.
+		const live = await readProposalFile(stateDir, sidR, "project");
+		const rev1 = await readSnapshot(stateDir, sidR, "project", 1);
+		const rev3 = await readSnapshot(stateDir, sidR, "project", 3);
+		assert.equal(live, rev1);
+		assert.equal(rev3, rev1);
+		const parsed = await parseProposalFile(stateDir, sidR, "project");
+		assert.equal(parsed.ok, true);
+		if (parsed.ok) assert.equal(parsed.value.fields.name, "A");
+	});
+
+	it("restoreSnapshot returns SNAPSHOT_NOT_FOUND for missing rev", async () => {
+		const r = await restoreSnapshot(stateDir, "sess-no-restore", "project", 5);
+		assert.equal(r.ok, false);
+		if (!r.ok) assert.equal((r as any).code, "SNAPSHOT_NOT_FOUND");
+	});
+
+	it("rmdir cleanup wipes both live and history", async () => {
+		const sidC = "sess-cleanup";
+		await writeProposalFile(stateDir, sidC, "project", { name: "X", root_path: "/tmp/x" });
+		await writeProposalFile(stateDir, sidC, "project", { name: "Y", root_path: "/tmp/x" });
+		const dir = path.join(stateDir, "proposal-drafts", sidC);
+		assert.equal(fs.existsSync(path.join(dir, "project.yaml")), true);
+		assert.equal(fs.existsSync(path.join(dir, "project.history", "1.yaml")), true);
+		assert.equal(fs.existsSync(path.join(dir, "project.history", "2.yaml")), true);
+		fs.rmSync(dir, { recursive: true, force: true });
+		assert.equal(fs.existsSync(dir), false);
 	});
 });
 
