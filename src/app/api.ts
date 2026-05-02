@@ -848,8 +848,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -858,6 +858,7 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (projectId) body.projectId = projectId;
 		if (enabledOptionalSteps?.length) body.enabledOptionalSteps = enabledOptionalSteps;
 		if (autoStartTeam !== undefined) body.autoStartTeam = autoStartTeam;
+		if (workflow !== undefined) body.workflow = workflow;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
