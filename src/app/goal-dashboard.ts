@@ -1637,18 +1637,26 @@ function renderTabBar(): TemplateResult {
 
 	// Phase 5b: Plan and Children tabs (visibility from Phase 5a predicates).
 	if (currentGoal) {
-		const allLiveGoals = state.goals.filter(g => !g.archived);
-		const childGoals = allLiveGoals.filter(g => g.parentGoalId === currentGoal!.id);
 		const childCount = state.goals.filter(g => g.parentGoalId === currentGoal!.id).length;
 		const archivedChildCount = state.goals.filter(g => g.parentGoalId === currentGoal!.id && g.archived).length;
 		const liveChildCount = childCount - archivedChildCount;
-		// Plan-tab predicate uses the live goals list so the living-plan branch fires when needed.
-		if (shouldShowPlanTab(currentGoal as any, allLiveGoals as any)) {
+		// Plan tab visibility: present whenever the goal's workflow has a
+		// goal-plan gate (formal plan) OR there's at least one direct child
+		// (synthesised living-plan). Use ALL goals — archived parent goals
+		// must still surface their plan tree, otherwise the dashboard becomes
+		// blank-staring at a fully-archived tree.
+		if (shouldShowPlanTab(currentGoal as any, state.goals as any)) {
+			// Badge counts the actual nodes the plan view will render (formal
+			// plan steps + ad-hoc children, dedup'd by planId). Falling back to
+			// `childGoals.length` was incorrect for archived parents (filter
+			// excluded archived → badge said 0 while the tab still rendered
+			// formal-plan nodes).
+			const planSteps = computePlanStepsForGoal(currentGoal, state.goals as any);
 			tabs.push({
 				id: "plan",
 				label: "Plan",
 				icon: svgPlan,
-				countStr: String(childGoals.length),
+				countStr: String(planSteps.length),
 			});
 		}
 		if (shouldShowChildrenTab(currentGoal as any, liveChildCount > 0 || archivedChildCount > 0)) {
@@ -2142,7 +2150,16 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 		<div class="plan-level" data-testid="plan-level-${depth}" data-plan-depth="${depth}" style="position:relative;margin-bottom:18px;">
 			<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;max-width:100%;">
 				${paths.map(p => svg`<path data-testid="plan-edge" d=${p.d} fill="none" stroke="var(--muted-foreground)" stroke-opacity="0.4" stroke-width="1.5"></path>`)}
-				${nodes.map(n => svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}">
+				${nodes.map(n => {
+					// A plan node has a "sub-plan" (and thus a chevron worth showing)
+					// only if its resolved child has its own formal plan or own
+					// ad-hoc children. Computing per-render is cheap (the
+					// recursive computePlanStepsForGoal already runs once per
+					// expanded child below); doing it here gates the chevron.
+					const childHasSubPlan = n.childGoal
+						? computePlanStepsForGoal(n.childGoal as any, allGoals).length > 0
+						: false;
+					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}">
 					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
 						fill=${planNodeFillColor(n.state)}
 						stroke=${planNodeBorderColor(n.state)}
@@ -2150,7 +2167,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 					<foreignObject x=${n.x + 6} y=${n.y + 4} width=${n.width - 12} height=${n.height - 8}>
 						<div xmlns="http://www.w3.org/1999/xhtml" style="font-family:inherit;font-size:11px;color:var(--foreground);overflow:hidden;height:100%;display:flex;flex-direction:column;justify-content:space-between;">
 							<div style="display:flex;align-items:center;gap:4px;">
-								${n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
+								${childHasSubPlan && n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
 									style="cursor:pointer;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:transparent;"
 									@click=${(e: Event) => { e.stopPropagation(); _togglePlanExpanded(n.childGoal!.id); }}
 									title="${_isPlanExpanded(n.childGoal.id) ? "Collapse" : "Expand"} sub-plan">
@@ -2167,16 +2184,20 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 							</div>
 						</div>
 					</foreignObject>
-				</g>`)}
+				</g>`;
+				})}
 			</svg>
 			${nodes.filter(n => n.childGoal && _isPlanExpanded(n.childGoal.id)).map(n => {
 				const child = n.childGoal!;
 				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals);
-				if (childPlanSteps.length === 0) {
-					return html`<div data-testid="plan-subtree-empty" style="margin-left:24px;font-size:11px;color:var(--muted-foreground);padding:6px 0;">No sub-plan for "${child.title}".</div>`;
-				}
+				// Leaf children (no formal sub-plan, no own ad-hoc children)
+				// render NOTHING — the parent node already names them, the
+				// "No sub-plan for X" line was just noise. Chevron is also
+				// suppressed for leaves in the SVG render so users don't try
+				// to expand a leaf and get an empty hint.
+				if (childPlanSteps.length === 0) return nothing;
 				if (depth + 1 > PLAN_RENDER_DEPTH_CAP) {
-					const direct = state.goals.filter(g => g.parentGoalId === child.id && !g.archived).length;
+					const direct = state.goals.filter(g => g.parentGoalId === child.id).length;
 					return html`<div data-testid="plan-subtree-truncated" style="margin-left:24px;font-size:11px;color:var(--muted-foreground);padding:6px 0;">Show ${direct} more nested step${direct === 1 ? "" : "s"}…</div>`;
 				}
 				return html`
