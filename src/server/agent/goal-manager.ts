@@ -18,6 +18,52 @@ function toBranchName(title: string): string {
 		.slice(0, 10) || "goal";
 }
 
+/** Defensive cap on parent-chain walks. See deriveNestingFields(). */
+export const NESTING_WALK_DEPTH_CAP = 64;
+
+/**
+ * Pure helper for the nested-goals lineage derivation. Given a new goal's id
+ * and its (optional) parentGoalId, walk the parent chain via the lookup
+ * function and:
+ *   - throw if the new id appears in the chain (cycle)
+ *   - cap the walk at NESTING_WALK_DEPTH_CAP to prevent infinite loops on
+ *     pathological / corrupted store state
+ *   - derive rootGoalId (== id for root, == parent.rootGoalId ?? parent.id
+ *     otherwise) and mergeTarget ("master" for root, "parent" for child)
+ *
+ * Exported for unit-testing the cycle-prevention branch deterministically.
+ */
+export function deriveNestingFields(
+	newId: string,
+	parentGoalId: string | undefined | null,
+	lookup: (id: string) => PersistedGoal | undefined,
+): { parentGoalId?: string; rootGoalId: string; mergeTarget: "master" | "parent" } {
+	if (parentGoalId === undefined || parentGoalId === null) {
+		return { rootGoalId: newId, mergeTarget: "master" };
+	}
+	const parent = lookup(parentGoalId);
+	if (!parent) {
+		throw new Error(`GoalManager.createGoal: parentGoalId="${parentGoalId}" not found`);
+	}
+	let cursor: PersistedGoal | undefined = parent;
+	let depth = 0;
+	while (cursor && depth < NESTING_WALK_DEPTH_CAP) {
+		if (cursor.id === newId) {
+			throw new Error(
+				`Cycle detected: parent ${parentGoalId} already has ${newId} in its ancestor chain`,
+			);
+		}
+		if (!cursor.parentGoalId) break;
+		cursor = lookup(cursor.parentGoalId);
+		depth++;
+	}
+	return {
+		parentGoalId,
+		rootGoalId: parent.rootGoalId ?? parent.id,
+		mergeTarget: "parent",
+	};
+}
+
 
 export class GoalManager {
 	private store: GoalStore;
@@ -101,12 +147,20 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
 		const id = randomUUID();
+
+		// ── Nested-goal derivation (Phase 1) ─────────────────────────────
+		// Auto-derive rootGoalId, mergeTarget, and prevent cycles by walking
+		// the parent chain. divergencePolicy / maxConcurrentChildren are NOT
+		// inherited — they are root-only semantics; the harness consults the
+		// root's value at runtime. Sub-goals can store their own value but it
+		// is inert (forward-compat).
+		const nesting = deriveNestingFields(id, parentGoalId, (gid) => this.store.get(gid));
 
 		let worktreePath: string | undefined;
 		let branch: string | undefined;
@@ -156,6 +210,16 @@ export class GoalManager {
 		if (enabledOptionalSteps?.length) {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
 		}
+
+		// Stamp nested-goal lineage. Always set on every newly created goal
+		// (root or child) — root goals get rootGoalId === id, mergeTarget
+		// === "master"; children get parent's rootGoalId chain and
+		// mergeTarget === "parent".
+		if (nesting.parentGoalId !== undefined) {
+			goal.parentGoalId = nesting.parentGoalId;
+		}
+		goal.rootGoalId = nesting.rootGoalId;
+		goal.mergeTarget = nesting.mergeTarget;
 
 		// Snapshot workflow onto goal. Resolution order:
 		//   1. Caller passed `resolvedWorkflow` (from config cascade) — use it.
