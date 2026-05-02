@@ -285,8 +285,27 @@ export class TeamManager {
 		let persisted: PersistedTeamEntry[];
 		if (this.config.projectContextManager) {
 			persisted = [];
+			let orphans = 0;
 			for (const ctx of this.config.projectContextManager.all()) {
-				persisted.push(...ctx.teamStore.getAll());
+				for (const entry of ctx.teamStore.getAll()) {
+					// Drop team-store entries whose goal no longer exists in the
+					// owning project's goal store. These orphans crash boot when
+					// the zombie-reviewer sweep in resubscribeTeamEvents() calls
+					// persistEntry → resolveTeamStore (which scans goalStores and
+					// throws when none has the goal).
+					if (!ctx.goalStore.get(entry.goalId)) {
+						ctx.teamStore.remove(entry.goalId);
+						orphans++;
+						console.warn(
+							`[team-manager] Dropped orphan team entry for goal ${entry.goalId} (project ${ctx.project.id}) — goal no longer in goal store.`,
+						);
+						continue;
+					}
+					persisted.push(entry);
+				}
+			}
+			if (orphans > 0) {
+				console.log(`[team-manager] Cleaned ${orphans} orphan team entr${orphans === 1 ? "y" : "ies"} on boot.`);
 			}
 		} else {
 			persisted = this.localStore!.getAll();
@@ -367,8 +386,15 @@ export class TeamManager {
 				}
 			}
 			for (const sid of toUnregister) {
-				this.unregisterReviewerSession(goalId, sid);
-				zombieCount++;
+				try {
+					this.unregisterReviewerSession(goalId, sid);
+					zombieCount++;
+				} catch (err) {
+					console.error(
+						`[team-manager] Failed to unregister zombie reviewer ${sid} for goal ${goalId}:`,
+						err,
+					);
+				}
 			}
 		}
 		if (zombieCount > 0) {
@@ -407,6 +433,40 @@ export class TeamManager {
 			}
 		}
 		console.log(`[team-manager] Re-subscribed to events for ${this.teams.size} team(s)`);
+
+		// Boot-time recovery: respawn team-leads for in-progress non-archived
+		// goals whose team-lead sessions died across restart and weren't
+		// successfully restored. Live test (PR #409 v0.2-embeddings, Issue
+		// 12 from team-lead-4285af30): three Phase-2 leaves (cfe8cbe2,
+		// 5c8a6c7a, e270b449) all sat in state=in-progress, setupStatus=ready,
+		// archived=null with ZERO team agents and ZERO team-lead session.
+		// The harness's BUG-16 recovery in `_resumeOneVerification` only
+		// fires when there's an active verification with the child's
+		// recorded planId — but if the parent's verification record was
+		// itself lost in the restart (active-verifications.json gone), the
+		// children stay sessionless until manually rescued.
+		//
+		// Fix: walk all non-archived goals; for any with state=in-progress,
+		// setupStatus=ready, no team-lead session, AND no team-lead
+		// registration in this.teams — fire setupWorktreeAndStartTeam.
+		if (this.config.projectContextManager) {
+			let respawned = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const goal of ctx.goalStore.getAll()) {
+					if (goal.archived) continue;
+					if (goal.state !== "in-progress") continue;
+					if (goal.setupStatus !== "ready") continue;
+					if (this.teams.has(goal.id)) continue; // Already has a team entry
+					respawned++;
+					console.log(`[team-manager] Boot recovery: respawning team-lead for sessionless in-progress goal "${goal.title}" (${goal.id.slice(0, 8)})`);
+					ctx.goalManager.setupWorktreeAndStartTeam(goal.id, () => this.startTeam(goal.id))
+						.catch(err => console.warn(`[team-manager] Boot recovery: failed to respawn team-lead for ${goal.id}:`, err));
+				}
+			}
+			if (respawned > 0) {
+				console.log(`[team-manager] Boot recovery: respawned ${respawned} team-lead(s) for sessionless goal(s)`);
+			}
+		}
 	}
 
 	/**

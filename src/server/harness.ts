@@ -78,8 +78,18 @@ const BUILD_TIMEOUT_MS = 30_000;
 let child: ChildProcess | null = null;
 let restarting = false;
 
+// Crash-loop guard: if the child exits unexpectedly N times within a short
+// window without ever staying alive long enough to be considered "healthy",
+// stop auto-restarting. Without this, a server that fails during startup
+// (e.g. fatal exception in initialisation) burns CPU forever.
+const HEALTHY_UPTIME_MS = 10_000;
+const CRASH_LOOP_THRESHOLD = 5;
+let consecutiveQuickCrashes = 0;
+let lastLaunchAt = 0;
+
 function launchServer(): void {
 	console.log(`\n[harness] Launching server (port ${PORT})...`);
+	lastLaunchAt = Date.now();
 	// Use process.execPath (absolute path to the same node running this
 	// process) rather than bare "node" — prevents `spawn node ENOENT`
 	// when PATH is sanitised by an outer launcher.
@@ -91,12 +101,26 @@ function launchServer(): void {
 
 	child.on("exit", (code, signal) => {
 		const reason = signal ? `signal ${signal}` : `code ${code}`;
-		console.log(`[harness] Server exited (${reason})`);
+		const uptime = Date.now() - lastLaunchAt;
+		console.log(`[harness] Server exited (${reason}) after ${uptime}ms`);
 		child = null;
 
 		// If we didn't initiate this exit, restart automatically
 		if (!restarting) {
-			console.log("[harness] Unexpected exit — restarting in 1s...");
+			if (uptime < HEALTHY_UPTIME_MS) {
+				consecutiveQuickCrashes++;
+			} else {
+				consecutiveQuickCrashes = 0;
+			}
+			if (consecutiveQuickCrashes >= CRASH_LOOP_THRESHOLD) {
+				console.error(
+					`[harness] Server crashed ${consecutiveQuickCrashes} times in a row without staying up for ${HEALTHY_UPTIME_MS}ms. ` +
+					`Stopping auto-restart. Fix the underlying error and re-run \`npm run dev:harness\`, ` +
+					`or trigger a restart with \`npm run restart-server\`.`,
+				);
+				return;
+			}
+			console.log(`[harness] Unexpected exit — restarting in 1s (crash ${consecutiveQuickCrashes}/${CRASH_LOOP_THRESHOLD})...`);
 			setTimeout(() => launchServer(), 1000);
 		}
 	});
@@ -188,6 +212,9 @@ async function restart(): Promise<void> {
 
 	try {
 		console.log("\n[harness] ======== RESTART TRIGGERED ========");
+		// Manual restart is an explicit user action — clear any crash-loop
+		// state so a previously wedged server gets fresh attempts.
+		consecutiveQuickCrashes = 0;
 
 		// 1. Kill running server
 		await killServer();
