@@ -844,11 +844,27 @@ export class VerificationHarness {
 		const RESTART_INTERRUPT_MARKERS = [
 			"Step was running but had no session ID",
 			"Step was interrupted by server restart",
+			"Session lost during server restart",
+			"Agent process exited unexpectedly",
+			"Reviewer agent process died",
 		];
+		const isRestartInterrupt = (r: { type: string; output: string }): boolean => {
+			if (RESTART_INTERRUPT_MARKERS.some(m => r.output.includes(m))) return true;
+			// Empty-output llm-review / agent-qa failures: the reviewer
+			// session was SIGTERM'd by the gateway shutdown before it could
+			// emit a verification_result OR write any text to the .jsonl.
+			// Live test (PR #409 0e4fc54c): "Gap analysis", "Code quality
+			// review", "Security review" all came back with output: "" after
+			// every gateway restart. Without this clause, the suppression
+			// predicate misclassified them as real failures and marked the
+			// gate failed.
+			if (r.output.trim() === "" && (r.type === "llm-review" || r.type === "agent-qa")) return true;
+			return false;
+		};
 		const failedSteps = resolvedSteps.filter(r => !r.passed);
 		const allFailuresAreRestartInterrupts =
 			failedSteps.length > 0 &&
-			failedSteps.every(r => RESTART_INTERRUPT_MARKERS.some(m => r.output.includes(m)));
+			failedSteps.every(r => isRestartInterrupt(r));
 
 		if (!allPassed && allFailuresAreRestartInterrupts) {
 			console.log(`[verification] Resumed verification ${v.signalId}: ALL ${failedSteps.length} failed step(s) are restart-interrupts — suppressing gate failure, leaving signal as 'running' for team-lead to re-signal.`);

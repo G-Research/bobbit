@@ -41,13 +41,25 @@ interface ResolvedStep {
 const RESTART_INTERRUPT_MARKERS = [
 	"Step was running but had no session ID",
 	"Step was interrupted by server restart",
+	"Session lost during server restart",
+	"Agent process exited unexpectedly",
+	"Reviewer agent process died",
 ];
+
+function isRestartInterrupt(r: { type: string; output: string }): boolean {
+	if (RESTART_INTERRUPT_MARKERS.some(m => r.output.includes(m))) return true;
+	// Empty-output llm-review / agent-qa failures: the reviewer
+	// session was SIGTERM'd before emitting verification_result OR
+	// writing any text. Treat as interrupt.
+	if (r.output.trim() === "" && (r.type === "llm-review" || r.type === "agent-qa")) return true;
+	return false;
+}
 
 /** Replicates the suppression decision predicate. */
 function shouldSuppressAsRestartInterrupt(steps: ResolvedStep[]): boolean {
 	const failed = steps.filter(s => !s.passed);
 	if (failed.length === 0) return false;
-	return failed.every(r => RESTART_INTERRUPT_MARKERS.some(m => r.output.includes(m)));
+	return failed.every(r => isRestartInterrupt(r));
 }
 
 describe("restart-interrupt suppression predicate", () => {
@@ -105,5 +117,65 @@ describe("restart-interrupt suppression predicate", () => {
 			{ name: "Unit", type: "command", passed: false, output: "Some prelude...\nStep was running but had no session ID — cannot resume after restart.", duration_ms: 0 },
 		];
 		assert.equal(shouldSuppressAsRestartInterrupt(steps), true);
+	});
+
+	it("THE 2nd bug: empty-output llm-review failure is treated as restart-interrupt", () => {
+		// Live test (PR #409 0e4fc54c): "Gap analysis" / "Code quality
+		// review" / "Security review" all came back with output: ""
+		// after every gateway restart — the reviewer session was
+		// SIGTERM'd before emitting verification_result OR any text.
+		// The original predicate ran .includes() on "" which returned
+		// false; the gate was marked failed when it should have been
+		// pending.
+		const steps: ResolvedStep[] = [
+			{ name: "Build", type: "command", passed: true, output: "OK", duration_ms: 1000 },
+			{ name: "E2E tests", type: "command", passed: false, output: "Step was running but had no session ID — cannot resume after restart. Re-signal the gate to retry.", duration_ms: 0 },
+			{ name: "Gap analysis", type: "llm-review", passed: false, output: "", duration_ms: 30000 },
+			{ name: "Code quality review", type: "llm-review", passed: false, output: "", duration_ms: 30000 },
+			{ name: "Security review", type: "llm-review", passed: false, output: "", duration_ms: 30000 },
+		];
+		assert.equal(shouldSuppressAsRestartInterrupt(steps), true,
+			"empty llm-review outputs after restart should be treated as interrupts");
+	});
+
+	it("empty-output COMMAND failure is NOT auto-treated as interrupt (must have explicit marker)", () => {
+		// A command step with empty output is unusual but might mean
+		// a true silent failure (e.g. exit code 0 from a misconfigured
+		// test runner that produces no output). Don't auto-suppress;
+		// only suppress command failures that have the explicit
+		// "Step was running" marker.
+		const steps: ResolvedStep[] = [
+			{ name: "Build", type: "command", passed: false, output: "", duration_ms: 0 },
+		];
+		assert.equal(shouldSuppressAsRestartInterrupt(steps), false);
+	});
+
+	it("empty-output llm-review with whitespace only is treated as interrupt", () => {
+		const steps: ResolvedStep[] = [
+			{ name: "Gap analysis", type: "llm-review", passed: false, output: "   \n  \n", duration_ms: 0 },
+		];
+		assert.equal(shouldSuppressAsRestartInterrupt(steps), true);
+	});
+
+	it("explicit Session lost marker (added in this fix)", () => {
+		const steps: ResolvedStep[] = [
+			{ name: "Gap analysis", type: "llm-review", passed: false, output: "Session lost during server restart.", duration_ms: 100 },
+		];
+		assert.equal(shouldSuppressAsRestartInterrupt(steps), true);
+	});
+
+	it("explicit Reviewer agent process died marker (added in this fix)", () => {
+		const steps: ResolvedStep[] = [
+			{ name: "Gap analysis", type: "llm-review", passed: false, output: "Reviewer agent process died during \"Gap analysis\" (session llm-review-...): Agent process exited unexpectedly (code 143)", duration_ms: 0 },
+		];
+		assert.equal(shouldSuppressAsRestartInterrupt(steps), true);
+	});
+
+	it("REAL llm-review failure with substantive output is NOT suppressed", () => {
+		// Verdict from the reviewer with real text — don't paper over.
+		const steps: ResolvedStep[] = [
+			{ name: "Code quality review", type: "llm-review", passed: false, output: "FAIL: Section 3 of the design doc is not addressed by the implementation.", duration_ms: 90000 },
+		];
+		assert.equal(shouldSuppressAsRestartInterrupt(steps), false);
 	});
 });
