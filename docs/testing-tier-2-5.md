@@ -28,7 +28,8 @@ When `RECORDSCREEN=1`:
 
 - A red cursor dot is injected so clicks are visible in screenshots.
 - Each `rec.capture(label)` writes one PNG (~50ms) and appends an entry to an in-memory list.
-- At end of run, the `tier-2-5-reporter` walks every `beats.jsonl`, runs ffmpeg-static to encode a WebM (each beat held for 1500ms) plus a thumbnail strip, and writes `tests/results/tier-2-5/report.html`. The report path is printed to stdout.
+- At end of run, the `tier-2-5-reporter` walks every `beats.jsonl`, runs ffmpeg to encode a WebM (each beat held for 1500ms) plus a thumbnail strip, and writes `tests/results/tier-2-5/report.html`. The report path is printed to stdout.
+- If ffmpeg is not installed, the reporter logs a warning and still writes `report.html` (with a banner; videos and thumbnails are absent). See **ffmpeg resolution** below.
 
 When `RECORDSCREEN` is unset:
 
@@ -156,8 +157,26 @@ The fixture's plumbing is a few small files that nest cleanly into the existing 
 - **`tests/e2e/ui/cursor-overlay.ts`** — `CURSOR_OVERLAY_SCRIPT` string, fed to Playwright's `addInitScript`. Self-contained IIFE, idempotent (`window.__protoCursorInstalled` guard). Red dot tracks pointer events, flashes yellow on mousedown.
 - **`tests/e2e/ui/beat-recorder.ts`** — `class BeatRecorder { capture(label); flush() }`. Each `capture()` writes one viewport PNG to `<testInfo.outputDir>/beats/<idx-padded-4>.png` and appends a record. `flush()` writes JSONL to `<testInfo.outputDir>/beats.jsonl`. Off-switch: every method early-returns when `RECORDSCREEN !== "1"`.
 - **`tests/e2e/ui/fixtures.ts`** — extends `baseTest` from `../gateway-harness.js` with a `rec: BeatRecorder` fixture. Conditionally injects the cursor overlay, auto-flushes after `use(rec)`. Re-exports `expect` from Playwright.
-- **`tests/e2e/report/tier-2-5-reporter.ts`** — Playwright `Reporter`. On `onEnd`, walks the test-results tree for `beats.jsonl`, encodes each test's `beats/*.png` into a 1500ms-per-beat WebM via ffmpeg-static, generates 240px thumbnails, and emits `tests/results/tier-2-5/report.html`. All references in the HTML are relative paths — **no base64 inlining**.
+- **`tests/e2e/report/tier-2-5-reporter.ts`** — Playwright `Reporter`. On `onEnd`, walks the test-results tree for `beats.jsonl`, encodes each test's `beats/*.png` into a 1500ms-per-beat WebM via ffmpeg, generates 240px thumbnails, and emits `tests/results/tier-2-5/report.html`. All references in the HTML are relative paths — **no base64 inlining**.
 - **`playwright-e2e.config.ts`** — gated reporter registration: when `RECORDSCREEN=1`, the reporter is appended to the `reporter` array; otherwise the file is never loaded.
+
+## ffmpeg resolution
+
+The reporter resolves the ffmpeg binary at runtime (no `ffmpeg-static` install-time dependency — dropped to keep `npm install` working in offline environments). Resolution order:
+
+1. **`process.env.FFMPEG_PATH`** — if set & non-empty AND the binary accepts `-version` within 5s, use it.
+2. **System `ffmpeg` on `PATH`** — if `ffmpeg -version` succeeds within 5s, use the bare command.
+3. **Skip with warning** — the reporter logs `[tier-2-5] ffmpeg not found; videos and thumbnails skipped. Install ffmpeg (apt/brew/choco) or set FFMPEG_PATH=/abs/path/to/ffmpeg.` and still emits `report.html` with a top-level warning banner. Per-test sections show "video missing" and thumbnail `<img>` tags 404 in the browser — acceptable for a debug artifact.
+
+Install ffmpeg with one of:
+
+```bash
+apt install ffmpeg     # Debian/Ubuntu
+brew install ffmpeg    # macOS
+choco install ffmpeg   # Windows
+```
+
+Most CI images already include it.
 
 ## Output layout
 
