@@ -30,6 +30,41 @@ import {
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import { scheduleSave as scheduleSnapshotSave } from "./ui-snapshot.js";
+
+// ============================================================================
+// UI SNAPSHOT WRITE HOOK
+// ============================================================================
+//
+// Stream A wires snapshot persistence into the canonical state-mutation
+// points listed in the issue analysis §4. The reducer itself is owned by
+// remote-agent.ts (which is off-limits to this stream). When messages
+// mutate the snapshot is written from elsewhere; until that hook lands the
+// active-session messages are persisted opportunistically every time a
+// nearby state mutation triggers `persistSnapshot()`. Debounce in
+// `ui-snapshot.ts` collapses bursts.
+//
+// TODO(stream-D): add a single `scheduleSave(state)` call after
+// `RemoteAgent.apply()` in src/app/remote-agent.ts so the messages array
+// is captured the moment the reducer mutates, instead of relying on the
+// next nearby mutation. The hook lives here as `persistSnapshot()` so the
+// stream-D coder only has to import from this module.
+export function persistSnapshot(): void {
+	try { scheduleSnapshotSave(state); } catch { /* non-fatal */ }
+}
+
+/** Reflect the live WS connection status onto the #app element so the
+ *  inline boot skeleton in index.html can fade itself out the moment the
+ *  real UI is ready. Watchdog cleanup observer keys off this attribute. */
+function reflectConnectedFlag(connected: boolean): void {
+	try {
+		const app = typeof document !== "undefined" ? document.getElementById("app") : null;
+		if (!app) return;
+		if (connected) app.setAttribute("data-connected", "true");
+		else app.removeAttribute("data-connected");
+	} catch { /* non-fatal */ }
+}
+export { reflectConnectedFlag };
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -90,6 +125,7 @@ export function applyProjectPalette(projectId?: string): void {
 	const project = (state.projects || []).find((p: any) => p.id === projectId);
 	if (projectId && project) {
 		state.activeProjectId = projectId;
+		persistSnapshot();
 	}
 	const palette = project?.palette;
 	if (palette) {
@@ -656,6 +692,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	}
 
 	state.selectedSessionId = sessionId;
+	persistSnapshot();
 
 	// Project proposal is scoped to the session that emitted it. Clear it the
 	// moment the user navigates away so it never bleeds into other sessions.
@@ -720,6 +757,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.remoteAgent = cached.remoteAgent;
 		state.connectionStatus = "connected";
 		state.connectingSessionId = null;
+		persistSnapshot();
+		reflectConnectedFlag(true);
 
 		// Fade in the restored panel
 		state.chatPanel.classList.remove("session-fade-out");
@@ -937,6 +976,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Only update global connection status if this is the active session
 			if (isActive) {
 				state.connectionStatus = status;
+				persistSnapshot();
+				reflectConnectedFlag(status === "connected");
 			}
 			// Re-fetch git status and bg processes after reconnect (e.g. server
 			// restart). Skip for cached/background agents — they’ll be refreshed
@@ -983,6 +1024,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onSessionRemoved = (removedId: string, _reason: string) => {
 			const beforeLen = state.gatewaySessions.length;
 			state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== removedId);
+			persistSnapshot();
 			const changed = state.gatewaySessions.length !== beforeLen;
 			if (activeSessionId() === removedId) {
 				setHashRoute("landing");
@@ -1297,6 +1339,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.connectionStatus = "connected";
 		state.remoteAgent = remote;
 		state.appView = "authenticated";
+		persistSnapshot();
+		reflectConnectedFlag(true);
 		markSessionVisited(sessionId);
 
 		// Detect assistant type from cached session data (no network needed).

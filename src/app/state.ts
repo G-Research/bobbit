@@ -317,6 +317,10 @@ export const state = {
 	/** Docker sandbox status (fetched on demand) */
 	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
 
+	/** Debug-only: epoch ms of last UI snapshot write. Informational; not
+	 *  consumed by render or persisted server-side. */
+	lastUiSnapshotAt: 0 as number,
+
 	/** Per-proposal-tag streaming flag. True between the first message_update
 	 *  delta carrying a propose_<tag> block and the matching block-finish event.
 	 *  Keyed by the `tag` from PROPOSAL_PARSERS — i.e. "goal_proposal",
