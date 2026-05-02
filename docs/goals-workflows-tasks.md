@@ -63,7 +63,7 @@ Goals without workflows still work fine — workflows are optional.
 ```typescript
 interface VerifyStep {
   name: string;
-  type: "command" | "llm-review" | "agent-qa";
+  type: "command" | "llm-review" | "agent-qa" | "subgoal";
   // For type: "command" — three exclusive shapes:
   component?: string; // Component name to resolve against components[]
   command?: string;   // Named command on that component (component.commands[command])
@@ -77,6 +77,8 @@ interface VerifyStep {
   optional?: boolean; // If true, step runs only when enabled per-goal. See "Optional verify steps".
   label?: string;     // Human-readable label for the toggle in goal creation UI.
   description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
+  // For type: "subgoal":
+  subgoal?: { planId: string; title: string; spec: string; workflowId?: string; suggestedRole?: string };
 }
 
 interface WorkflowGate {
@@ -327,6 +329,43 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 **Resume support:** If the server restarts during an `agent-qa` step, the harness re-executes the step from scratch on the next verification cycle.
 
 The `agent-qa` step typically runs at phase 2 in the `feature` and `bug-fix` workflows — after command checks (phase 0) and LLM reviews (phase 1) have passed. See [QA Testing](qa-testing.md) for project configuration and the `/qa-test` skill protocol.
+
+#### `subgoal` step type
+
+The `subgoal` verification step type spawns or resolves a child goal and waits for that child's `ready-to-merge` gate to pass before merging the child's branch into the parent locally. **The subgoal step IS the scheduler** — there is no background poll loop; the harness's existing phase-parallel run loop, plus a per-`rootGoalId` semaphore, is the entire orchestration mechanism. Full reference: [Nested Goals & DAG Subgoals](nested-goals.md).
+
+**Descriptor shape:**
+
+```yaml
+verify:
+  - name: "Implement v0.1"
+    type: subgoal
+    subgoal:
+      planId: "v0.1"               # Stable idempotency key (string, unique within the gate)
+      title: "v0.1 — basic CLI"    # Becomes the child goal's title
+      spec: |                      # Becomes the child goal's spec markdown
+        ## Overview
+        ...
+        ## Covers
+        - "Basic CLI works end-to-end"   # Quote root acceptance criteria verbatim here
+      workflowId: "feature"        # Optional — child's workflow id (defaults to parent's workflow if omitted)
+      suggestedRole: "team-lead"   # Optional — hint for the child's lead role
+```
+
+**What it does** (in `runSubgoalStep`, `src/server/agent/verification-harness.ts`):
+
+1. Resolve descriptor and look up an existing child by `(parentGoalId, planId)` using a tier-based preference: live in-progress > archived complete > live other > archived non-complete (Lesson 4.19). A cached `active.steps[i].subgoal.childGoalId` pointer is sanity-checked and wiped if it points at an archived non-complete row.
+2. If no live child resolves, spawn one via `goalManager.createGoal({ parentGoalId, ... })` and **immediately** stamp `spawnedFromPlanId = planId` on the new record (Lesson 4.1 — no awaits between createGoal and the stamp).
+3. Acquire a permit on the per-`rootGoalId` semaphore (default 3, hard max 8); release in `finally`.
+4. Wait for the child's `ready-to-merge` gate to pass, or for the child to be externally archived, or for the step to be cancelled.
+5. On success: `goalManager.mergeChild(parent, child)` (local `git merge --no-ff` into the parent's branch, gated push to origin), then `teamManager.teardownTeam(child.id)` and `goalManager.archiveGoalAfterMerge(child.id)` — the latter stamps `state: "complete"` BEFORE flipping `archived: true` so a crash mid-archive can't strand the harness in the rescue path.
+6. On merge conflict: `passed: false` with a manual-recovery directive in the output. The child is **NOT auto-archived** — its work is preserved for retry.
+
+**Mid-flight progress is reflected in the parent's gate UI** via the resolved child's gates. The Plan tab DAG SVG renders nested sub-trees inline with chevron disclosure (depth cap 3) — clicking expands the child's plan inline; deeper levels surface via "Show N more…". Server-side `resolvePlanStepChild` and client-side `resolvePlanNodeChild` (`src/app/plan-node-state.ts`) implement the same tier preference and MUST agree on displayed state.
+
+**Idempotency:** `planId` is the stable key. A re-entry of the same step (after restart, after a re-signal of the gate, after a parent re-render) finds the existing child via tiers 1/1.5/2 and reuses it; only an absent or invalidated child triggers a fresh spawn. The `spawnedFromPlanId` field is the persistence backbone — every spawn site (the harness, the `goal_spawn_child` REST endpoint, any future spawner) MUST stamp it synchronously immediately after `createGoal`.
+
+**`goal-plan` gate freeze:** when the parent goal's `goal-plan` gate is signalled, the per-goal workflow snapshot's `executionGate.metadata.frozen = "true"`. Subsequent mutations to `execution.verify[]` route through the mutation classifier (`src/server/agent/plan-mutation.ts`); see [nested-goals.md — Mutation classifier](nested-goals.md#mutation-classifier).
 
 ### Gate Re-Signal Cancellation
 
