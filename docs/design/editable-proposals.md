@@ -793,6 +793,23 @@ A (Part 0)   B (server files+REST+WS)   F (parity tests, dev-only)
                           F integrated into CI here
 ```
 
+## 11.5 Revision snapshots (follow-up)
+
+After this design shipped, a follow-up extended the on-disk model with
+immutable per-rev snapshots so the chat transcript becomes a navigable
+timeline of proposal revisions. Each successful `seed` and `edit` write
+also writes `<type>.history/<rev>.<ext>`; the server stamps a monotonic
+`rev` on every `proposal_update` WS event, and a new
+`POST /api/sessions/:id/proposal/:type/restore` endpoint lets the chat
+card "Open proposal" buttons roll the live draft back to a specific
+snapshot (writing a new snapshot at `currentRev + 1` so the rollback is
+itself a revision — no silent data loss). A new `EditProposalRenderer`
+gives `edit_proposal` calls a proper card with a compact diff and an
+"Open proposal" button. Tool-result text carries a
+`__proposal_rev_v1__:<n>` marker the renderers parse to wire the button.
+
+Full design: [docs/design/proposal-revision-snapshots.md](./proposal-revision-snapshots.md).
+
 ## 12. Out of scope
 
 - Diff/undo history of edits.
