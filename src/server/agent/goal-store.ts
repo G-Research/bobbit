@@ -72,7 +72,11 @@ export interface PersistedGoal {
 	acceptanceCriteria?: string[];
 	/** Subgoal idempotency key — set immediately after createGoal in runSubgoalStep (Lesson 4.1). */
 	spawnedFromPlanId?: string;
-	/** Paused flag — user can pause a goal mid-flight (children may inherit via cascade). */
+	/**
+	 * Whether this goal is paused. Paused children do NOT count as in-flight
+	 * for `anyInFlightChild`/parent nudge suppression — the parent (or user)
+	 * must act before the child can resume. (Lesson 4.13)
+	 */
 	paused?: boolean;
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
 	replanCount?: number;

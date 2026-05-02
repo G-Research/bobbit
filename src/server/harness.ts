@@ -71,6 +71,25 @@ const PORT_WAIT_TIMEOUT_MS = 10_000;
 const PORT_POLL_INTERVAL_MS = 250;
 const BUILD_TIMEOUT_MS = 30_000;
 
+/**
+ * Lesson 4.11A — Crash-loop guard.
+ *
+ * If the gateway child crashes within HEALTHY_UPTIME_MS of launch, count it
+ * as a "quick" crash. After CRASH_LOOP_THRESHOLD consecutive quick crashes,
+ * stop auto-restarting and log a clear directive — without this, the
+ * harness would relaunch the gateway every 1s forever, masking whatever
+ * boot-time error is making the gateway crash and burning CPU.
+ *
+ * The counter resets to 0 in two cases:
+ *   1. The child stays alive at least HEALTHY_UPTIME_MS after launch
+ *      (`child.on("exit")` checks elapsed since `lastLaunchAt`).
+ *   2. The user touches the restart sentinel (`npm run restart-server`),
+ *      which is the explicit "I've fixed the underlying problem, please
+ *      try again" signal.
+ */
+const HEALTHY_UPTIME_MS = 10_000;
+const CRASH_LOOP_THRESHOLD = 5;
+
 // ---------------------------------------------------------------------------
 // Child process management
 // ---------------------------------------------------------------------------
@@ -78,8 +97,18 @@ const BUILD_TIMEOUT_MS = 30_000;
 let child: ChildProcess | null = null;
 let restarting = false;
 
+let consecutiveQuickCrashes = 0;
+let lastLaunchAt = 0;
+let crashLoopHalted = false;
+
 function launchServer(): void {
+	if (crashLoopHalted) {
+		// Belt-and-braces — should never reach here while the flag is set.
+		console.log("[harness] Auto-restart suppressed (crash loop). Run `npm run restart-server` to resume.");
+		return;
+	}
 	console.log(`\n[harness] Launching server (port ${PORT})...`);
+	lastLaunchAt = Date.now();
 	child = spawn("node", [CLI_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
@@ -88,11 +117,30 @@ function launchServer(): void {
 
 	child.on("exit", (code, signal) => {
 		const reason = signal ? `signal ${signal}` : `code ${code}`;
-		console.log(`[harness] Server exited (${reason})`);
+		const uptimeMs = Date.now() - lastLaunchAt;
+		console.log(`[harness] Server exited (${reason}, uptime ${uptimeMs}ms)`);
 		child = null;
 
-		// If we didn't initiate this exit, restart automatically
+		// If we didn't initiate this exit, restart automatically — but bound
+		// the blast radius via the crash-loop guard. A child that lives
+		// HEALTHY_UPTIME_MS or longer counts as healthy; anything shorter is
+		// a "quick crash" and pushes us closer to the auto-restart cap.
 		if (!restarting) {
+			if (uptimeMs < HEALTHY_UPTIME_MS) {
+				consecutiveQuickCrashes++;
+			} else {
+				consecutiveQuickCrashes = 0;
+			}
+
+			if (consecutiveQuickCrashes >= CRASH_LOOP_THRESHOLD) {
+				crashLoopHalted = true;
+				console.error(
+					`[harness] Crash loop detected (${consecutiveQuickCrashes} quick crashes). ` +
+					`Stopping auto-restart. Run \`npm run restart-server\` to resume after fixing the root cause.`,
+				);
+				return;
+			}
+
 			console.log("[harness] Unexpected exit — restarting in 1s...");
 			setTimeout(() => launchServer(), 1000);
 		}
@@ -182,6 +230,17 @@ async function restart(): Promise<void> {
 		return;
 	}
 	restarting = true;
+
+	// Lesson 4.11A — Manual restart via the sentinel file is the explicit
+	// "I have fixed the underlying problem, please try again" signal. Reset
+	// the crash-loop counter and clear the halt flag so launchServer() runs.
+	if (consecutiveQuickCrashes > 0 || crashLoopHalted) {
+		console.log(
+			`[harness] Manual restart trigger — clearing crash-loop counter (was ${consecutiveQuickCrashes}, halted=${crashLoopHalted}).`,
+		);
+	}
+	consecutiveQuickCrashes = 0;
+	crashLoopHalted = false;
 
 	try {
 		console.log("\n[harness] ======== RESTART TRIGGERED ========");

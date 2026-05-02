@@ -272,6 +272,48 @@ export class TeamManager {
 	 * Event subscriptions are deferred to resubscribeTeamEvents().
 	 */
 	private restoreTeams(): void {
+		// Lesson 4.11B — Boot-time orphan cleanup. Walk every persisted team
+		// entry FIRST and drop entries whose `goalId` is not present in the
+		// owning project's goal store. This prevents the zombie-reviewer sweep
+		// in `resubscribeTeamEvents` from blowing up later (it ultimately calls
+		// `unregisterReviewerSession` → `persistEntry` → `resolveTeamStore`,
+		// which would throw because the goal is unknown).
+		//
+		// Symptom this fixes: server crashes on boot, harness restarts in 1s,
+		// server crashes on boot again — endless loop the user has to
+		// manually intervene to break.
+		//
+		// We only drop entries when we have a project-context manager wired
+		// in (the production path). In the local/test path, `resolveTeamStore`
+		// always returns `this.localStore` so no resolution-time throw can
+		// happen and the cleanup is a no-op.
+		let droppedOrphans = 0;
+		if (this.config.projectContextManager) {
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const entry of ctx.teamStore.getAll()) {
+					const goal = ctx.goalStore.get(entry.goalId);
+					if (!goal) {
+						try {
+							ctx.teamStore.remove(entry.goalId);
+							droppedOrphans++;
+							console.warn(
+								`[team-manager] Boot cleanup: dropped orphan team entry for unknown goal "${entry.goalId}" ` +
+								`(team lead session ${entry.teamLeadSessionId ?? "<none>"}).`,
+							);
+						} catch (err) {
+							console.error(
+								`[team-manager] Failed to drop orphan team entry for goalId=${entry.goalId}:`,
+								err,
+							);
+						}
+					}
+				}
+			}
+			if (droppedOrphans > 0) {
+				console.log(`[team-manager] Cleaned ${droppedOrphans} orphan team entries on boot.`);
+			}
+		}
+
 		let persisted: PersistedTeamEntry[];
 		if (this.config.projectContextManager) {
 			persisted = [];
@@ -321,6 +363,42 @@ export class TeamManager {
 	 * because it needs live session objects to attach event listeners.
 	 */
 	resubscribeTeamEvents(): void {
+		// Lesson 4.11C — Zombie-reviewer sweep. After a server restart, reviewer
+		// sessions belonging to a verification that was running mid-flight are
+		// torn down by the harness's resume logic. The persisted `team-state.json`
+		// can still carry a stale agent entry pointing at the dead session; if
+		// nothing reaps it, every subsequent team_list / dashboard render
+		// surfaces it as a phantom reviewer. This defensive sweep removes
+		// reviewer agents whose underlying session no longer exists in the
+		// session manager.
+		//
+		// `unregisterReviewerSession` is wrapped in try/catch so one bad reviewer
+		// entry can't take down the whole boot path — the symptom would be
+		// indistinguishable from Lesson 4.11B (endless restart loop) but
+		// triggered later in the boot sequence.
+		for (const [goalId, entry] of this.teams) {
+			const reviewers = entry.agents.filter((a) => a.kind === "reviewer" || a.role === "reviewer");
+			for (const reviewer of reviewers) {
+				const session = this.sessionManager.getSession(reviewer.sessionId);
+				if (!session || session.status === "terminated") {
+					try {
+						this.unregisterReviewerSession(goalId, reviewer.sessionId);
+						console.log(
+							`[team-manager] Zombie-reviewer sweep: unregistered terminated reviewer session ` +
+							`${reviewer.sessionId} from goal ${goalId}.`,
+						);
+					} catch (err) {
+						console.error(
+							`[team-manager] Zombie-reviewer sweep failed for goal=${goalId} session=${reviewer.sessionId}:`,
+							err,
+						);
+						// Continue processing other reviewers / goals — one bad
+						// entry must not block boot.
+					}
+				}
+			}
+		}
+
 		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed
 			if (entry.teamLeadSessionId) {
@@ -352,7 +430,58 @@ export class TeamManager {
 				agent.unsubscribeEvent = unsubscribe;
 			}
 		}
+		// Lesson 4.12 — Boot-respawn for sessionless in-progress goals.
+		this._bootRespawnSessionlessGoals();
+
 		console.log(`[team-manager] Re-subscribed to events for ${this.teams.size} team(s)`);
+	}
+
+	/**
+	 * Lesson 4.12 — Walk every non-archived goal that is in-progress, has
+	 * setupStatus=ready, and is a team goal but has no live team entry. Spin
+	 * up a fresh team-lead for each so the goal is not stranded.
+	 *
+	 * Symptom on PR #409: after several gateway restarts, three Phase-2 leaves
+	 * all sat in `state: in-progress, setupStatus: ready, archived: null`
+	 * with ZERO team agents and ZERO team-lead session. The harness's
+	 * existing recovery only fired when there was an active verification with
+	 * the child's planId — but the parent's verification record was itself
+	 * lost in the restart, so nothing rescued the orphan.
+	 *
+	 * Wraps each respawn in try/catch — one bad goal must not block the rest.
+	 */
+	private _bootRespawnSessionlessGoals(): void {
+		if (!this.config.projectContextManager) return;
+
+		for (const ctx of this.config.projectContextManager.all()) {
+			for (const goal of ctx.goalStore.getAll()) {
+				if (goal.archived) continue;
+				if (goal.state !== "in-progress") continue;
+				if (goal.setupStatus !== "ready") continue;
+				if (!goal.team) continue;
+				if (this.teams.has(goal.id)) continue;
+
+				try {
+					console.log(
+						`[team-manager] Boot recovery: respawning team-lead for sessionless in-progress goal "${goal.title}" (id=${goal.id})`,
+					);
+					// Fire and forget — startTeam returns a promise but boot can't
+					// block on it. Errors are logged inside the catch so they
+					// don't propagate as unhandled rejections.
+					this.startTeam(goal.id).catch((err) => {
+						console.error(
+							`[team-manager] Boot recovery startTeam failed for goal=${goal.id} ("${goal.title}"):`,
+							err,
+						);
+					});
+				} catch (err) {
+					console.error(
+						`[team-manager] Boot recovery failed synchronously for goal=${goal.id} ("${goal.title}"):`,
+						err,
+					);
+				}
+			}
+		}
 	}
 
 	/**
