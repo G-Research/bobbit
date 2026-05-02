@@ -51,6 +51,16 @@ export interface PersistedGoal {
 	enabledOptionalSteps?: string[];
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
+	/**
+	 * Whether this goal is paused. Paused children do NOT count as in-flight for
+	 * `anyInFlightChild`/parent nudge suppression — the parent (or user) must
+	 * act before the child can resume. (Lesson 4.13)
+	 *
+	 * Phase 1 of the nested-goals feature owns the wiring through createGoal.
+	 * The field is declared here so Phase 7's restart-resilience changes
+	 * (`anyInFlightChild` paused exclusion) can read it safely on master.
+	 */
+	paused?: boolean;
 }
 
 /**
