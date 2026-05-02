@@ -1977,12 +1977,25 @@ function renderChildrenTab(): TemplateResult {
 // RENDER: PLAN TAB (Phase 5b — DAG SVG, Lessons 4.20 / 4.22)
 // ============================================================================
 
-/** Plan-tab nested expansion state keyed by `goalId`. */
-const _planExpandedGoals: Set<string> = new Set();
+/**
+ * Plan-tab nested expansion state keyed by `goalId`.
+ *
+ * Default policy is **expanded** so the user sees the full sub-plan tree of
+ * a parent-workflow goal at a glance — matches the user's expectation that
+ * "the dashboard plan view dynamically expands all sub-plans depending on
+ * what grandchildren have". The set tracks goals the user explicitly
+ * COLLAPSED (inverse-state), so default rendering is recursive without
+ * extra clicks.
+ */
+const _planCollapsedGoals: Set<string> = new Set();
+
+function _isPlanExpanded(goalId: string): boolean {
+	return !_planCollapsedGoals.has(goalId);
+}
 
 function _togglePlanExpanded(goalId: string): void {
-	if (_planExpandedGoals.has(goalId)) _planExpandedGoals.delete(goalId);
-	else _planExpandedGoals.add(goalId);
+	if (_planCollapsedGoals.has(goalId)) _planCollapsedGoals.delete(goalId);
+	else _planCollapsedGoals.add(goalId);
 	renderApp();
 }
 
@@ -2106,8 +2119,8 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 								${n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
 									style="cursor:pointer;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:transparent;"
 									@click=${(e: Event) => { e.stopPropagation(); _togglePlanExpanded(n.childGoal!.id); }}
-									title="${_planExpandedGoals.has(n.childGoal.id) ? "Collapse" : "Expand"} sub-plan">
-									${_planExpandedGoals.has(n.childGoal.id) ? "▾" : "▸"}
+									title="${_isPlanExpanded(n.childGoal.id) ? "Collapse" : "Expand"} sub-plan">
+									${_isPlanExpanded(n.childGoal.id) ? "▾" : "▸"}
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
 							</div>
@@ -2122,7 +2135,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 					</foreignObject>
 				</g>`)}
 			</svg>
-			${nodes.filter(n => n.childGoal && _planExpandedGoals.has(n.childGoal.id)).map(n => {
+			${nodes.filter(n => n.childGoal && _isPlanExpanded(n.childGoal.id)).map(n => {
 				const child = n.childGoal!;
 				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals);
 				if (childPlanSteps.length === 0) {
