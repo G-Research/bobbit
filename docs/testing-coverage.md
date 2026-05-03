@@ -1,6 +1,6 @@
 # Testing Coverage
 
-Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md).
+Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md). For opt-in video capture on top of browser E2E, see [testing-tier-2-5.md](testing-tier-2-5.md).
 
 ## Prompt interactions
 
@@ -10,6 +10,7 @@ User stories PI-01 through PI-25 (+ sub-stories) are defined in `userstories/pro
 - **Browser E2E** — multi-component flows needing a real server: model persistence, context stats. Pattern reference: `tests/e2e/ui/prompt-stats-e2e.spec.ts`.
 - **Spec-framework stories**:
   - `tests/e2e/ui/stories-streaming.spec.ts` — contracts CT-01 (streaming lifecycle) and CT-06 (focus follows intent), including ST-DEDUP-01 (reconnect-mid-stream dedup).
+  - `tests/e2e/ui/transcript-fidelity.spec.ts` — generic invariant test asserting live DOM equals post-refresh DOM after a `STREAM_BURST:3` mock burst (counts, ordering, uniqueness). Catches the bug class PRs #436 and #437 fixed (in-flight `message_end` without a string id duplicating into MessageList + StreamingMessageContainer; un-id'd toolResult rows surviving snapshot reconciliation). See [testing-tier-2-5.md — Transcript-fidelity invariant](testing-tier-2-5.md#transcript-fidelity-invariant).
   - `tests/e2e/ui/stories-drafts.spec.ts` — contract CT-02 (draft preservation), 7 stories spanning all 8 contract variations, plus spec graph analysis tests.
 - Story definitions registered in `tests/e2e/ui/story-registry.ts` for `tools/spec-check.ts` coverage reporting.
 

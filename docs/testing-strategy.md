@@ -412,7 +412,11 @@ Reusable helpers in `tests/e2e/ui/ui-helpers.ts`. Import from `./ui-helpers.js`:
 
 ### Mock agent keywords
 
-The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `propose_goal` tool call response (with `options: "QA testing"`) — used to test the goal assistant flow without a real LLM.
+The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `propose_goal` tool call response (with `options: "QA testing"`) — used to test the goal assistant flow without a real LLM. The full trigger contract (busy/wait, bursts, real fs/shell tools, proposals, UI primitives, steer round-trip) is documented in the header comment of `tests/e2e/mock-agent-core.mjs` — single source of truth.
+
+### Tier 2.5 — opt-in video capture
+
+A layer **on top of** Tier 2 browser E2E. Tests opt in by importing `tests/e2e/ui/fixtures.ts` (instead of `../gateway-harness.js`) and sprinkling `await rec.capture(label)` at user-visible moments; running with `RECORDSCREEN=1` produces a self-contained scrubbable HTML report at `tests/results/tier-2-5/report.html` (per-test WebM + thumbnail strip). Default off; zero overhead when `RECORDSCREEN` is unset. See [docs/testing-tier-2-5.md](testing-tier-2-5.md).
 
 ## Manual Integration Tests
 

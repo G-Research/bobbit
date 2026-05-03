@@ -12,13 +12,14 @@
  *    to read-only when the first tab submits (via the envelope user message
  *    arriving through the normal message_end stream).
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 test.describe("ask_user_choices widget (full-stack UI)", () => {
-	test("happy path — pick answers, submit, widget flips to read-only", async ({ page }) => {
+	test("happy path — pick answers, submit, widget flips to read-only", async ({ page, rec }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
+		await rec.capture("Empty session ready");
 
 		// Trigger the mock agent's ask_user_choices branch.
 		await sendMessage(page, "please use ask_user_choices");
@@ -26,6 +27,7 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		// Widget appears.
 		const widget = page.locator("ask-user-choices-widget").first();
 		await expect(widget).toBeVisible({ timeout: 20_000 });
+		await rec.capture("Widget rendered");
 
 		// Two tabs.
 		const tabs = widget.locator('[role="tab"]');
@@ -39,6 +41,7 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await widget.locator('label:has(input[value="blue"])').click();
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+		await rec.capture("Q1 answered — auto-advanced to Q2");
 
 		// "Other" is rendered for the active panel; the free-text input is always
 		// visible — even before Other is checked. (Only the active panel is in DOM.)
@@ -54,10 +57,12 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 
 		await widget.locator(".ask-other-input").fill("tiny");
 		await expect(submit).toBeEnabled({ timeout: 5_000 });
+		await rec.capture("Other text typed — Submit enabled");
 
 		// Click Submit — widget should go read-only (no Submit button).
 		await submit.click();
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await rec.capture("Submitted — widget read-only");
 
 		// Radio inputs are disabled in read-only mode.
 		await expect(widget.locator('input[type="radio"]').first()).toBeDisabled();
@@ -65,6 +70,7 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		// Switch back to Q1 tab, confirm "blue" is shown as the final answer.
 		await widget.locator('[role="tab"][data-tab-index="0"]').click();
 		await expect(widget.locator('input[type="radio"][value="blue"]')).toBeChecked();
+		await rec.capture("Q1 tab — blue retained");
 	});
 
 	test("persistence across reload — Other still rendered with always-visible input", async ({ page }) => {
@@ -154,13 +160,14 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(restored.locator(".ask-submit")).toHaveCount(0);
 	});
 
-	test("cross-client finalization — second tab flips to read-only", async ({ page, context }) => {
+	test("cross-client finalization — second tab flips to read-only", async ({ page, context, rec }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "please use ask_user_choices");
 
 		const widget = page.locator("ask-user-choices-widget").first();
 		await expect(widget).toBeVisible({ timeout: 20_000 });
+		await rec.capture("Tab 1 — widget rendered");
 		const pendingUrl = page.url();
 
 		// Open a second tab pointed at the same session.
@@ -170,6 +177,7 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget2).toBeVisible({ timeout: 20_000 });
 		// Second tab still has the Submit button (not yet answered).
 		await expect(widget2.locator(".ask-submit")).toBeVisible();
+		await rec.capture("Tab 2 — widget mirrors pending state");
 
 		// Submit from the first tab.
 		await widget.locator('label:has(input[value="blue"])').click();
@@ -178,12 +186,14 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await widget.locator('label:has(input[value="large"])').click();
 		await widget.locator(".ask-submit").click();
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await rec.capture("Tab 1 submitted — read-only");
 
 		// Second tab should also flip to read-only — the envelope user message
 		// appended by /submit is broadcast via the normal message_end stream,
 		// and the tool_use card's renderer scans the transcript for it.
 		await expect(widget2.locator(".ask-submit")).toHaveCount(0, { timeout: 15_000 });
 		await expect(widget2.locator('input[type="radio"]').first()).toBeDisabled();
+		await rec.capture("Tab 2 also flipped read-only");
 
 		await page2.close();
 	});

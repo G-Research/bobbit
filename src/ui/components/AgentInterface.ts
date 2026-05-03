@@ -19,7 +19,6 @@ import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./ContinueSessionChooser.js";
-import { estimateTranscriptBytes } from "./ContinueSessionChooser.js";
 import { state as appState } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -129,7 +128,6 @@ export class AgentInterface extends LitElement {
 		const chooser = document.createElement("continue-session-chooser") as any;
 		chooser.sessionId = this.session?.sessionId ?? "";
 		chooser.messageCount = this.session?.state?.messages?.length ?? 0;
-		chooser.transcriptBytes = estimateTranscriptBytes(this.session?.state);
 		document.body.appendChild(chooser);
 
 		const cleanup = () => {
@@ -137,8 +135,7 @@ export class AgentInterface extends LitElement {
 		};
 
 		chooser.addEventListener("cancel", () => cleanup());
-		chooser.addEventListener("continue", async (e: Event) => {
-			const { mode } = (e as CustomEvent).detail || {};
+		chooser.addEventListener("continue", async () => {
 			cleanup();
 			const archivedId = this.session?.sessionId;
 			if (!archivedId) return;
@@ -146,7 +143,7 @@ export class AgentInterface extends LitElement {
 				const resp = await gatewayFetch(`/api/sessions/${archivedId}/continue`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ mode }),
+					body: JSON.stringify({}),
 				});
 				if (!resp.ok) {
 					const text = await resp.text().catch(() => "");
@@ -914,10 +911,16 @@ export class AgentInterface extends LitElement {
 		// streaming-container. The reducer publishes this id via RemoteAgent's
 		// `_streamingMessageId` private field; we read it defensively.
 		const streamingMessageId: string | undefined = (this.session as any)?.streamingMessageId;
-		const visibleMessages = (this.session.state.messages || []).filter(
-			(m: any) => !isAskResponseEnvelope(m) &&
-				(!streamingMessageId || m.id !== streamingMessageId),
-		);
+		const streamingMessage: any = this.session?.state.streamingMessage;
+		const visibleMessages = (this.session.state.messages || []).filter((m: any) => {
+			if (isAskResponseEnvelope(m)) return false;
+			// Belt-and-braces: hide a row that IS the same object reference as
+			// the in-flight streaming message, even if streamingMessageId is
+			// undefined (legacy fallback path). The id-equality check below is
+			// the primary guard.
+			if (streamingMessage && m === streamingMessage) return false;
+			return !streamingMessageId || m.id !== streamingMessageId;
+		});
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
@@ -1109,7 +1112,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-0 sm:ml-0.5">${state.model.id}</span>
+					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id">${state.model.id}</span>
 				`,
 				// Mobile: tighten gap (4px) and horizontal padding so the sparkles
 				// icon sits closer to the model name. ! beats Button's defaults.

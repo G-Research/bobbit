@@ -12,6 +12,13 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 
+// Prevent seedProposal() from issuing real fetch() calls to a Bobbit gateway
+// when this test is run from inside a live Bobbit session (env-inherited).
+// In-flight fetches at --test-force-exit time trigger a Windows libuv
+// assertion (UV_HANDLE_CLOSING) that fails the file even though all
+// sub-tests pass. Must be set BEFORE the extension module is imported.
+delete process.env.BOBBIT_SESSION_ID;
+
 import extensionFactory from "../defaults/tools/proposals/extension.ts";
 
 type ToolReg = {

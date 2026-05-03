@@ -12,6 +12,7 @@ Thumbs.db
 *.log
 bobbit2/
 test-results/
+tests/results/tier-2-5/
 bobbit-screenshot.png
 tests/fullstack/screenshots/
 tests/e2e/screenshots/
@@ -19,10 +20,11 @@ tests/e2e/screenshots/
 *-report.html
 nul
 .pi/
-# .bobbit/config/ is runtime state (per-project overrides), not tracked in git
-.bobbit/config/
+# .bobbit/config/ holds team-shared overrides (roles, tools, workflows) and SHOULD be committed.
+# Per-machine runtime state lives in .bobbit/state/ and .bobbit/tmp/, both excluded below
+# (state/ also via .bobbit/.gitignore for redundancy).
+.bobbit/state/
 .bobbit/tmp/
-# .bobbit/state/ is excluded by .bobbit/.gitignore
 .e2e-pi*
 .e2e-bobbit*
 .e2e-fullstack*
@@ -60,3 +62,5 @@ tests/fixtures/verification-dedup-bundle.js
 tests/fixtures/verification-dedup-bundle.css
 tests/fixtures/follow-tail-bundle.js
 tests/fixtures/follow-tail-bundle.css
+tests/fixtures/streaming-message-container-bundle.js
+tests/fixtures/streaming-message-container-bundle.css

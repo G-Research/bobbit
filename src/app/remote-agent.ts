@@ -1,5 +1,6 @@
 import { getModel } from "@mariozechner/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
+import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { refreshGateStatusForGoal } from "./api.js";
@@ -8,15 +9,55 @@ import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
+import { computeStreamingMessageId } from "./streaming-message-id.js";
 
-/** Maps propose_* tool suffix → callback name on RemoteAgent */
+// Stream A hook: persist UI state on every reducer dispatch so a hard reload
+// (or iOS PWA snapshot restore) can repaint the last-rendered view from
+// localStorage before the WS reconnects. `ui-snapshot.ts` is now part of the
+// app bundle, so we import it statically; in production it lands in the same
+// chunk as remote-agent.ts and Vite resolves it at build time. Wrapped in
+// try/catch at every call site so a save error never blocks a dispatch.
+import { scheduleSave as _scheduleSaveFn } from "./ui-snapshot.js";
+const _scheduleSave: ((s: any) => void) | null = _scheduleSaveFn;
+
+/** sessionStorage key used by the soft heartbeat (Stream D §6.4). */
+const HEARTBEAT_KEY = "bobbit:heartbeat";
+/** Heartbeat write cadence while the document is visible. */
+const HEARTBEAT_INTERVAL_MS = 10_000;
+/** Gap above which a streaming flag is considered stale (server turn long since over). */
+const STALE_STREAMING_GAP_MS = 60_000;
+/** Gap above which we force a one-shot resync regardless of streaming state. */
+const LONG_RESUME_GAP_MS = 5 * 60_000;
+
+/** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
+ *  Slice E will replace this lookup with a flat ProposalType allow-list and
+ *  a single `this.onProposal?.(type, input, streaming)` dispatch. Until then,
+ *  both the legacy per-type callbacks AND the new unified `onProposal`
+ *  callback are fired so Slice E can migrate consumers atomically. */
 const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	goal: "onGoalProposal",
 	role: "onRoleProposal",
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
-	setup: "onSetupProposal",
-	workflow: "onWorkflowProposal",
+	project: "onProjectProposal",
+};
+
+/** Maps legacy XML proposal tag → ProposalType (replaces the per-parser
+ *  `callbackName` field which was dropped in Slice D). */
+const PROPOSAL_TAG_TO_TYPE: Record<string, ProposalType> = {
+	goal_proposal: "goal",
+	role_proposal: "role",
+	tool_proposal: "tool",
+	staff_proposal: "staff",
+	project_proposal: "project",
+};
+
+/** Maps ProposalType → legacy per-type callback name on RemoteAgent. */
+const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
+	goal: "onGoalProposal",
+	role: "onRoleProposal",
+	tool: "onToolProposal",
+	staff: "onStaffProposal",
 	project: "onProjectProposal",
 };
 
@@ -119,6 +160,13 @@ export class RemoteAgent {
 	/** Throttle visibility-driven resyncs: Android can fire visibilitychange
 	 *  several times during screen unlock; we only want one resync per wake. */
 	private _lastVisibilityResync = 0;
+	/** True if the WS has dropped since the last successful snapshot apply.
+	 *  Visibility-driven resyncs are skipped while this is false and we already
+	 *  have messages in state — the cached state is correct, and a redundant
+	 *  `requestMessages()` on every tab-focus tick is what triggers the
+	 *  new-tab duplicate-messages bug. Set true on WS close, cleared after
+	 *  any successful snapshot apply. */
+	_hadDisconnectSinceLastSnapshot = true;
 	private _onVisibilityChange = (): void => {
 		if (document.visibilityState !== "visible") return;
 		if (this._intentionalDisconnect) return;
@@ -129,6 +177,11 @@ export class RemoteAgent {
 		// can return tens of KB of history. That’s a major source of mobile
 		// sluggishness after returning from background.
 		if (state.selectedSessionId !== this._sessionId) return;
+
+		const heartbeatGap = this._readHeartbeatGap();
+		const isStaleStreaming = heartbeatGap > STALE_STREAMING_GAP_MS;
+		const longResume = heartbeatGap > LONG_RESUME_GAP_MS;
+
 		if (this.ws?.readyState !== WebSocket.OPEN) {
 			// Socket isn't OPEN — kick an immediate reconnect instead of
 			// waiting for the (possibly long) backoff timer that may have been
@@ -152,10 +205,29 @@ export class RemoteAgent {
 			this._lastVisibilityResync = now;
 			// Skip resync while a turn is streaming — the server is actively
 			// pushing events and a wholesale message replacement can interleave
-			// with live message_end deltas. Reconnects after real disconnects
-			// still resync (that path doesn't go through here).
-			if (this._state.isStreaming) return;
-			this.requestMessages();
+			// with live message_end deltas. EXCEPT when the heartbeat gap shows
+			// the streaming flag is stale (>60s without a heartbeat write means
+			// the tab was frozen — the server-side turn is long since over and
+			// the local flag was never cleared). In that case force a resync.
+			if (this._state.isStreaming && !isStaleStreaming) return;
+			// Skip the message resync when the WS has stayed connected since
+			// the last snapshot AND we already have messages: the cached state
+			// is correct and re-snapshotting on every visibilitychange tick is
+			// what causes the new-tab duplicate-messages bug (each tick re-runs
+			// the snapshot survivor merge against the current `state.messages`,
+			// and any id-less live rows accumulate duplicates). `get_state`
+			// still fires — only the message refetch is skipped.
+			//
+			// One-shot exception (Stream D §6.4): a long-resume gap (>5min)
+			// means the tab was deeply frozen — force a fresh snapshot regardless
+			// of `_hadDisconnectSinceLastSnapshot`, because the WS may report
+			// OPEN against a half-dead socket the OS never closed.
+			const needsResync =
+				this._hadDisconnectSinceLastSnapshot ||
+				this._state.messages.length === 0 ||
+				longResume ||
+				isStaleStreaming;
+			if (needsResync) this.requestMessages();
 			this.send({ type: "get_state" });
 			// Nudge subscribers — after a tab wake, Lit property bindings
 			// driven by this agent may not have been reactive while suspended.
@@ -166,6 +238,131 @@ export class RemoteAgent {
 			this.emit({ type: "state_update", data: { woke: true } });
 		}
 	};
+
+	/**
+	 * iOS bfcache restore fires `pageshow` (with `event.persisted === true`)
+	 * but does NOT fire `visibilitychange`. Without this listener the WS is
+	 * never poked on bfcache restore and in-memory state stays stale.
+	 * See Stream D §3(b)/(c) and the `pwa-resume-pageshow` reproducing test.
+	 */
+	private _onPageShow = (event: PageTransitionEvent | Event): void => {
+		// Safely no-op if there's no active session yet (boot sequence: pageshow
+		// can fire before WS is even connected).
+		if (!this._sessionId) return;
+		if (this._intentionalDisconnect) return;
+		// NOTE: deliberately do NOT gate on `state.selectedSessionId !== this._sessionId`
+		// here — the bfcache-restore path must always trigger a fresh WS open for
+		// the active agent, and the spec test asserts a new `new WebSocket(...)`
+		// call within 1500ms of dispatching `pageshow{persisted:true}`. The
+		// active-session check in _onVisibilityChange is for cached background
+		// agents; pageshow is fired once on the window so only the active
+		// agent's listener should react anyway, but we keep the bar low.
+
+		// Read `persisted` defensively — PageTransitionEvent has it natively;
+		// the test's polyfill defines it via `Object.defineProperty`. Either way
+		// `(event as any).persisted === true` works.
+		const persisted = (event as any).persisted === true;
+		if (!persisted) {
+			// Normal-load `pageshow` fires on every navigation; the bootstrap's
+			// initial `connect()` already handles it.
+			return;
+		}
+
+		// bfcache restore — kick an immediate reconnect with backoff reset,
+		// matching the visibility-change socket-not-OPEN path. Always force a
+		// resync (bypassing the dedup short-circuit) — bfcache means the JS
+		// state is hours stale by definition.
+		if (this._reconnectTimer) {
+			clearTimeout(this._reconnectTimer);
+			this._reconnectTimer = null;
+		}
+		this._reconnectAttempt = 0;
+		this._setConnectionStatus("reconnecting");
+		// Force-clear the dedup guard so the requestMessages() that follows
+		// auth_ok actually runs (resume_gap path) — bfcache state is stale
+		// regardless of whether _hadDisconnectSinceLastSnapshot was set.
+		this._hadDisconnectSinceLastSnapshot = true;
+		// Force-close any existing socket BEFORE reconnecting so `_connectWs`
+		// unconditionally constructs a fresh `new WebSocket(...)` — the spec
+		// test's WebSocket-constructor spy must observe the new open within
+		// 1500ms. We swap the reference to a closing one and immediately call
+		// _connectWs(false) which assigns a brand-new socket to `this.ws`.
+		try {
+			const prev = this.ws;
+			if (prev) {
+				// Detach handlers so the close doesn't trigger an unintended
+				// onclose-driven _scheduleReconnect race against our explicit
+				// _connectWs call below.
+				prev.onopen = null;
+				prev.onmessage = null;
+				prev.onerror = null;
+				prev.onclose = null;
+				try { prev.close(); } catch { /* ignore */ }
+			}
+		} catch { /* ignore */ }
+		this.ws = null;
+		// Synchronous `new WebSocket(...)` happens inside `_connectWs` — so the
+		// constructor invocation is observed before this microtask returns,
+		// well within the test's 1500ms window.
+		this._connectWs(false).catch(() => { /* onclose will schedule retry */ });
+	};
+
+	/** Page Lifecycle API — best-effort; iOS Safari doesn't support these reliably. */
+	private _onFreeze = (): void => {
+		// Stop heartbeat writes — they'd be wasted CPU on a frozen tab anyway.
+		this._stopHeartbeat();
+	};
+	private _onResume = (): void => {
+		// Mirror pageshow.persisted handling — Chrome/Edge fire this under
+		// memory-pressure freeze/resume cycles.
+		if (!this._sessionId) return;
+		if (this._intentionalDisconnect) return;
+		if (state.selectedSessionId !== this._sessionId) return;
+		this._startHeartbeat();
+		if (this._reconnectTimer) {
+			clearTimeout(this._reconnectTimer);
+			this._reconnectTimer = null;
+		}
+		this._reconnectAttempt = 0;
+		this._setConnectionStatus("reconnecting");
+		this._hadDisconnectSinceLastSnapshot = true;
+		this._connectWs(false).catch(() => {});
+	};
+
+	// ── Soft heartbeat (Stream D §6.4) ────────────────────────────────
+	private _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+	private _heartbeatBound = false;
+
+	private _writeHeartbeat(): void {
+		if (typeof document !== "undefined" && document.hidden) return;
+		try { sessionStorage.setItem(HEARTBEAT_KEY, String(Date.now())); } catch { /* quota */ }
+	}
+
+	private _startHeartbeat(): void {
+		if (this._heartbeatTimer) return;
+		// Write once immediately so a freshly-connected agent has a baseline.
+		this._writeHeartbeat();
+		this._heartbeatTimer = setInterval(() => this._writeHeartbeat(), HEARTBEAT_INTERVAL_MS);
+	}
+
+	private _stopHeartbeat(): void {
+		if (this._heartbeatTimer) {
+			clearInterval(this._heartbeatTimer);
+			this._heartbeatTimer = null;
+		}
+	}
+
+	private _readHeartbeatGap(): number {
+		try {
+			const raw = sessionStorage.getItem(HEARTBEAT_KEY);
+			if (!raw) return Number.MAX_SAFE_INTEGER;
+			const t = parseInt(raw, 10);
+			if (!Number.isFinite(t) || t <= 0) return Number.MAX_SAFE_INTEGER;
+			return Date.now() - t;
+		} catch {
+			return Number.MAX_SAFE_INTEGER;
+		}
+	}
 	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
 	private _lastTruncatedStreamUpdate = 0;
 	private static readonly MAX_RECONNECT_DELAY = 30_000;
@@ -191,12 +388,23 @@ export class RemoteAgent {
 	onToolProposal?: (proposal: { tool: string; action: string; content: string }, streaming: boolean) => void;
 	/** Callback fired when a staff proposal is detected in an assistant message. */
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
-	/** Callback fired when a setup proposal is detected in an assistant message. */
-	onSetupProposal?: (proposal: Record<string, string> & { action: string }, streaming: boolean) => void;
-	/** Callback fired when a workflow proposal is detected in an assistant message. */
-	onWorkflowProposal?: (proposal: { id: string; name: string; description: string; gates: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
 	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
+	/**
+	 * Slice D: unified proposal callback. Slice E will collapse all six
+	 * `onXProposal` callbacks above into this one. For now both fire — see
+	 * `_checkToolProposals` and the `proposal_update` / `proposal_cleared`
+	 * WS handlers below.
+	 *
+	 * `fields === null` signals a `proposal_cleared` event from the server
+	 * (e.g. after accept/dismiss/file-delete).
+	 */
+	onProposal?: (
+		type: ProposalType,
+		fields: Record<string, unknown> | null,
+		streaming: boolean,
+		rev?: number,
+	) => void;
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
@@ -274,6 +482,11 @@ export class RemoteAgent {
 
 	/** Play a short two-tone beep using the Web Audio API (no file needed). */
 	static playNotificationBeep(): void {
+		// Gated by user preference (Settings → General). Default ON; only "false" silences.
+		if (typeof document !== "undefined"
+			&& document.documentElement.dataset.playAgentFinishSound === "false") {
+			return;
+		}
 		try {
 			const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
 			const now = ctx.currentTime;
@@ -300,7 +513,11 @@ export class RemoteAgent {
 
 	// ── Connection ────────────────────────────────────────────────────
 
-	private static readonly CONNECT_TIMEOUT_MS = 15_000;
+	// Stream D §3(a): reduced from 15s → 8s. The 15s wait was what users
+	// perceived as “white screen for 15s” on iOS resume. We allow exactly
+	// one fast retry below before falling through to the existing
+	// reconnect-with-backoff path.
+	private static readonly CONNECT_TIMEOUT_MS = 8_000;
 
 	async connect(gatewayUrl: string, token: string, sessionId: string): Promise<void> {
 		this._gatewayUrl = gatewayUrl;
@@ -318,6 +535,21 @@ export class RemoteAgent {
 			document.addEventListener("visibilitychange", this._onVisibilityChange);
 			this._visibilityHandlerBound = true;
 		}
+		// Stream D §3(b): also bind pageshow (bfcache restore on iOS) and the
+		// best-effort Page Lifecycle freeze/resume events.
+		// `addEventListener` dedupes on (event, handler) identity so calling this
+		// every connect is idempotent — belt-and-suspenders against the case
+		// where `_heartbeatBound` got out of sync with the actual binding (e.g.
+		// listener removed externally, or session re-connect without disconnect).
+		window.addEventListener("pageshow", this._onPageShow);
+		document.addEventListener("freeze", this._onFreeze);
+		document.addEventListener("resume", this._onResume);
+		this._heartbeatBound = true;
+		// Stream D §6.4: start the soft heartbeat. Writes Date.now() to
+		// sessionStorage every 10s while the document is visible. The gap
+		// between writes is what _onVisibilityChange / _onPageShow consult
+		// to detect deeply-frozen tabs.
+		this._startHeartbeat();
 
 		// Restore processed proposal IDs from sessionStorage
 		try {
@@ -328,19 +560,40 @@ export class RemoteAgent {
 		} catch { /* ignore */ }
 
 		// Race the WebSocket connect against a timeout so we don't hang
-		// forever on degraded mobile networks.
-		const timeout = new Promise<never>((_, reject) => {
+		// forever on degraded mobile networks. On the first timeout we attempt
+		// exactly ONE fast retry (no backoff) before propagating — falls
+		// through to the existing reconnect-with-backoff path on second fail.
+		const makeTimeout = () => new Promise<never>((_, reject) => {
 			setTimeout(() => reject(new Error("Connection timed out")), RemoteAgent.CONNECT_TIMEOUT_MS);
 		});
 
-		try {
-			await Promise.race([this._connectWs(true), timeout]);
-		} catch (err) {
-			// If timed out, clean up the pending WebSocket
-			this._intentionalDisconnect = true;
-			this.ws?.close();
+		const isTimeout = (e: unknown): boolean =>
+			e instanceof Error && /timed out/i.test(e.message);
+
+		const closeAndNull = () => {
+			const sock = this.ws as WebSocket | null;
+			try { sock?.close(); } catch { /* ignore */ }
 			this.ws = null;
-			throw err;
+		};
+
+		try {
+			await Promise.race([this._connectWs(true), makeTimeout()]);
+		} catch (err) {
+			if (isTimeout(err)) {
+				// Clean up the previous half-open socket before retrying.
+				closeAndNull();
+				try {
+					await Promise.race([this._connectWs(true), makeTimeout()]);
+				} catch (err2) {
+					this._intentionalDisconnect = true;
+					closeAndNull();
+					throw err2;
+				}
+			} else {
+				this._intentionalDisconnect = true;
+				closeAndNull();
+				throw err;
+			}
 		}
 	}
 
@@ -434,6 +687,10 @@ export class RemoteAgent {
 			};
 
 			this.ws.onclose = () => {
+				// Mark that the WS dropped — the next visibility-driven resync
+				// must run a fresh `requestMessages()` to pick up anything we
+				// missed while disconnected.
+				this._hadDisconnectSinceLastSnapshot = true;
 				if (!settled) {
 					settled = true;
 					if (initial) {
@@ -492,6 +749,13 @@ export class RemoteAgent {
 			document.removeEventListener("visibilitychange", this._onVisibilityChange);
 			this._visibilityHandlerBound = false;
 		}
+		if (this._heartbeatBound) {
+			window.removeEventListener("pageshow", this._onPageShow);
+			document.removeEventListener("freeze", this._onFreeze);
+			document.removeEventListener("resume", this._onResume);
+			this._heartbeatBound = false;
+		}
+		this._stopHeartbeat();
 		this.ws?.close();
 		this.ws = null;
 		this._setConnectionStatus("disconnected");
@@ -517,6 +781,10 @@ export class RemoteAgent {
 	private apply(action: Action): void {
 		this.reducerState = reduce(this.reducerState, action);
 		this._state.messages = this.reducerState.messages;
+		// Stream A hook: persist a snapshot of UI state so the next bootstrap
+		// can paint the last-known view in the first frame. Wrapped — a save
+		// error must never block a reducer dispatch.
+		try { _scheduleSave?.(this._state); } catch { /* ignore */ }
 	}
 
 	// ── Agent commands (proxied to gateway) ──────────────────────────
@@ -857,6 +1125,10 @@ export class RemoteAgent {
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					// Successful snapshot apply — cached state is now in sync with
+					// the server, so future visibility ticks can short-circuit
+					// `requestMessages()` until the WS drops again.
+					this._hadDisconnectSinceLastSnapshot = false;
 					// Streaming preview: if the snapshot contains the streaming
 					// message id, it's no longer in-flight on this client.
 					this.streamingMessageId = undefined;
@@ -1091,6 +1363,27 @@ export class RemoteAgent {
 				this.onPreviewChanged?.(msg.sessionId, msg.preview);
 				break;
 
+			case "proposal_update": {
+				// Slice D: server-pushed proposal projection (post-edit / post-seed /
+				// rehydrate-on-attach / restore). Always non-streaming — streaming partials
+				// flow through the inline tool_use scan in `_checkToolProposals`.
+				const pType = (msg as any).proposalType;
+				const fields = (msg as any).fields;
+				const rev = typeof (msg as any).rev === "number" ? (msg as any).rev as number : undefined;
+				if (this.onProposal && isProposalType(pType) && fields && typeof fields === "object") {
+					this.onProposal(pType, fields as Record<string, unknown>, false, rev);
+				}
+				break;
+			}
+
+			case "proposal_cleared": {
+				const pType = (msg as any).proposalType;
+				if (this.onProposal && isProposalType(pType)) {
+					this.onProposal(pType, null, false);
+				}
+				break;
+			}
+
 			case "bg_process_created":
 			case "bg_process_output":
 			case "bg_process_exited":
@@ -1193,7 +1486,9 @@ export class RemoteAgent {
 			const callbackName = PROPOSAL_TOOL_MAP[proposalType];
 			if (!callbackName) continue;
 			const callback = (this as any)[callbackName];
-			if (!callback) continue;
+			// Slice D: dispatch to unified onProposal alongside legacy callback.
+			// Either may be unset — we keep going as long as one is wired.
+			if (!callback && !this.onProposal) continue;
 
 			// Deduplicate — skip blocks already processed (survives re-scan on reconnect/refresh).
 			// During streaming we still check this so we don't re-fire after message_end marks it.
@@ -1217,7 +1512,16 @@ export class RemoteAgent {
 			if (streaming) {
 				state.proposalStreamingByTag[tagKey] = true;
 			}
-			callback(input, streaming);
+			// Slice E gap-closure: run the unified onProposal BEFORE the legacy
+			// per-type callback so plugin.mergeFields sees the un-mutated prev
+			// slot. Several legacy callbacks (goal/role/staff) overwrite
+			// state.activeProposals[type].fields with the incoming partial verbatim,
+			// which would leave nothing for mergeFields to preserve if onProposal
+			// ran second.
+			if (this.onProposal && isProposalType(proposalType)) {
+				this.onProposal(proposalType, input, streaming);
+			}
+			if (callback) callback(input, streaming);
 
 			// Only mark as processed on non-streaming calls (message_end, full re-scan).
 			// During streaming we fire the callback repeatedly for live preview sync
@@ -1256,10 +1560,12 @@ export class RemoteAgent {
 		if (!text) return;
 
 		for (const parser of PROPOSAL_PARSERS) {
-			const callback = (this as any)[parser.callbackName];
-			if (!callback) continue;
+			const proposalType = PROPOSAL_TAG_TO_TYPE[parser.tag];
+			const callbackName = proposalType ? TYPE_TO_LEGACY_CALLBACK[proposalType] : undefined;
+			const callback = callbackName ? (this as any)[callbackName] : undefined;
+			if (!callback && !this.onProposal) continue;
 
-			// Match all occurrences (e.g. setup_proposal may appear multiple times)
+			// Match all occurrences (a proposal block may appear multiple times)
 			const regex = new RegExp(`<${parser.tag}>([\\s\\S]*?)<\\/${parser.tag}>`, "g");
 			let match: RegExpExecArray | null;
 			while ((match = regex.exec(text)) !== null) {
@@ -1299,7 +1605,10 @@ export class RemoteAgent {
 				if (missing) continue;
 
 				console.warn(`[proposal] Detected legacy XML <${parser.tag}> block — this format is deprecated, use propose_* tools instead`);
-				callback(normalized);
+				if (this.onProposal && proposalType) {
+					this.onProposal(proposalType, normalized, false);
+				}
+				if (callback) callback(normalized);
 			}
 		}
 	}
@@ -1402,6 +1711,12 @@ export class RemoteAgent {
 			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
 		}
 
+		// Apply playAgentFinishSound — default ON when unset.
+		if ("playAgentFinishSound" in prefs) {
+			document.documentElement.dataset.playAgentFinishSound =
+				prefs.playAgentFinishSound === false ? "false" : "true";
+		}
+
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {
 			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());
@@ -1501,7 +1816,16 @@ export class RemoteAgent {
 						// container still owns it. When there are no tool calls the
 						// streaming container will be cleared by AgentInterface.
 						if (hasToolCalls) {
-							this.streamingMessageId = typeof msg.id === "string" ? msg.id : undefined;
+							const sid = computeStreamingMessageId(msg);
+							this.streamingMessageId = sid;
+							// Stamp the synthetic id onto the reducer entry too, so the
+							// visible-messages filter's id-equality check can hide the
+							// in-flight row even when the upstream `msg.id` is missing
+							// (undefined / null / numeric). Single source of truth via
+							// `computeStreamingMessageId` so the two cannot diverge.
+							if (sid && (typeof msg.id !== "string" || msg.id.length === 0)) {
+								msg = { ...msg, id: sid };
+							}
 						} else {
 							this._state.streamingMessage = null;
 							this.streamingMessageId = undefined;

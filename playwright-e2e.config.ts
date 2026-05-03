@@ -11,6 +11,12 @@
  */
 import { defineConfig } from "@playwright/test";
 
+// Tier 2.5 video reporter — opt-in via RECORDSCREEN=1. When unset, the
+// reporter file is never loaded → zero overhead. See docs/testing-tier-2-5.md.
+const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
+	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
+	: [];
+
 // Retries policy: 3 everywhere for now. Real bugs fail all 4 attempts;
 // flakes (Windows-FS races, goal-assistant cold-start timeouts) absorb
 // the retry. Will tighten back to 0 once the flake floor is fully fixed.
@@ -28,6 +34,10 @@ export default defineConfig({
 	// providing a meaningful wall-clock win once browser project is capped
 	// at 3 anyway.
 	workers: 4,
+	reporter: [
+		["list"],
+		...recordScreenReporters,
+	],
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
 	globalTeardown: "./tests/e2e/e2e-teardown.ts",
 	// Default artifact / launch settings. Chromium's GPU process, prerenderer,

@@ -29,6 +29,7 @@ import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
 import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
 import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
+import { EditProposalRenderer } from "./renderers/EditProposalRenderer.js";
 import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
 import { ActivateSkillRenderer } from "./renderers/ActivateSkillRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
@@ -77,11 +78,12 @@ registerToolRenderer("activate_skill", new ActivateSkillRenderer());
 // Proposal tools — one renderer per proposal type
 const PROPOSAL_TOOL_NAMES = [
 	"propose_goal", "propose_role", "propose_tool",
-	"propose_staff", "propose_setup", "propose_workflow", "propose_project",
+	"propose_staff", "propose_project",
 ] as const;
 for (const name of PROPOSAL_TOOL_NAMES) {
 	registerToolRenderer(name, new ProposalRenderer(name));
 }
+registerToolRenderer("edit_proposal", new EditProposalRenderer());
 
 const defaultRenderer = new DefaultRenderer();
 

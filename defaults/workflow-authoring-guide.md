@@ -1,6 +1,6 @@
 # Workflow Authoring Guide
 
-> **Audience:** the project assistant, workflow assistant, and goal assistant when generating or editing the inline `workflows:` block of a project's `project.yaml`.
+> **Audience:** the project assistant and goal assistant when generating or editing the inline `workflows:` block of a project's `project.yaml`.
 >
 > This guide is **not read at runtime**. It is included as context for assistant prompts so that hand-generated workflows are consistent and runnable. The runtime contract lives in `src/server/agent/workflow-validator.ts` and the gate runner; this document mirrors it.
 
@@ -166,6 +166,12 @@ workflows:
 | `metadata` | map? | declared metadata schema for signals; values resolved via `{{agent.X}}`/`{{<gate>.meta.X}}` |
 | `verify` | VerifyStep[] | verification steps (see §4) |
 
+### Producers vs verifiers
+
+Roles listed under a gate's `verify:` block (e.g. `role: architect`, `role: code-reviewer`, `role: spec-auditor`, `role: security-reviewer`, `role: reviewer`) are **verifiers** — the gate runner spawns them automatically after the gate is signaled, and they critique the signaled content. They are **not producers** of the gate's content.
+
+The team lead is the producer for content gates: it either drafts the markdown directly and signals, or delegates artifact-writing to a `coder` / `docs-writer`, merges the resulting branch, and signals from the merged content. Every contributor role carries `gate_signal: never` in its tool-policy; only the `team-lead` role's policy permits the call. Workflow authors should therefore not staff content-producing tasks with reviewer roles, and should expect the team lead — never the reviewer named under `verify:` — to be the one calling `gate_signal`.
+
 ### 3.1 The implementation gate is a Ralph loop
 
 The `implementation` gate's `verify` list is the agent's loop body. When verification
@@ -186,6 +192,10 @@ Practical implications when authoring workflows:
   (except quick-fix). Design-time gap analysis catches missing requirements before
   the agent burns iterations; post-impl gap analysis catches drift between design
   and code. The `general`, `feature`, and per-component templates in this guide include both — use them as starting points when they fit the project.
+  **Post-impl gap analysis must explicitly tell the reviewer to ignore documentation
+  gaps** — it runs in the `implementation` gate, before the dedicated `documentation`
+  gate, so flagging missing/stale docs there causes redundant Ralph-loop iterations.
+  Focus the prompt on code/behavior gaps relative to the spec and design.
 - **The `description` field on the gate** surfaces in the project-proposal panel
   and the goal dashboard. Use it to remind reviewers that this gate is a loop, not
   a checkpoint.

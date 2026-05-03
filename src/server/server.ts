@@ -8,6 +8,8 @@ import path from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { isSetupComplete } from "./setup-status.js";
+export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
@@ -79,6 +81,16 @@ import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade } from "./agent/config-cascade.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
+import {
+	deleteProposalFile,
+	editProposalFile,
+	isProposalType,
+	parseProposalFile,
+	readProposalFile,
+	restoreSnapshot,
+	writeProposalFile,
+	type ProposalType,
+} from "./proposals/proposal-files.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -1245,30 +1257,7 @@ export function createGateway(config: GatewayConfig) {
 	};
 }
 
-/** Check if project setup has been completed (sentinel exists or system-prompt.md has been customized). */
-function isSetupComplete(): boolean {
-	// Check sentinel file
-	const sentinelPath = path.join(bobbitStateDir(), "setup-complete");
-	if (fs.existsSync(sentinelPath)) return true;
-
-	// Check if system-prompt.md has been customized beyond the default template
-	const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
-	if (!fs.existsSync(systemPromptPath)) return false;
-
-	// Compare with default template — if the file differs, setup is considered done
-	const defaultTemplatePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "system-prompt.md");
-	if (!fs.existsSync(defaultTemplatePath)) {
-		// Can't find default template; if the file exists at all, assume customized
-		return true;
-	}
-	try {
-		const current = fs.readFileSync(systemPromptPath, "utf-8");
-		const defaultContent = fs.readFileSync(defaultTemplatePath, "utf-8");
-		return current.trim() !== defaultContent.trim();
-	} catch {
-		return false;
-	}
-}
+// isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
 
 /** Redact token values in sandbox config for API responses. Never send real secrets to the browser.
  *  `sandbox_tokens` is a structured array (post-native-YAML); other fields stay flat strings. */
@@ -1587,6 +1576,35 @@ async function handleApiRoute(
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 500);
+		}
+		return;
+	}
+
+	// POST /api/system-prompt/customise — copy shipped default to .bobbit/config/system-prompt.md
+	//   so the user can edit it. If the file already exists it is left unchanged.
+	//   Returns { path, created, content }.
+	if (url.pathname === "/api/system-prompt/customise" && req.method === "POST") {
+		const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
+		const defaultPath = path.join(
+			path.dirname(fileURLToPath(import.meta.url)),
+			"defaults",
+			"system-prompt.md",
+		);
+		let created = false;
+		try {
+			if (!fs.existsSync(userPath)) {
+				if (!fs.existsSync(defaultPath)) {
+					json({ error: "Default system-prompt.md not found in install" }, 500);
+					return;
+				}
+				fs.mkdirSync(path.dirname(userPath), { recursive: true });
+				fs.copyFileSync(defaultPath, userPath);
+				created = true;
+			}
+			const content = fs.readFileSync(userPath, "utf-8");
+			json({ path: userPath, created, content });
+		} catch (err: any) {
+			json({ error: String(err?.message ?? err) }, 500);
 		}
 		return;
 	}
@@ -5420,18 +5438,19 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:archivedId/continue — Continue-Archived
-	// Creates a new session cloned from an archived one's settings, with the
-	// archived transcript seeded into the new session's system prompt.
+	// POST /api/sessions/:archivedId/continue — Continue-Archived (lossless)
+	//
+	// Clones the archived session's `.jsonl` into a fresh slot, registers it
+	// as the new session's `agentSessionFile`, and lets the agent CLI rehydrate
+	// from it via `switch_session` — same mechanism the restart-resume path
+	// uses for live sessions. No transcript stringification, no system-prompt
+	// seeding, no byte budget.
 	const continueMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/continue$/);
 	if (continueMatch && req.method === "POST") {
 		const archivedId = continueMatch[1];
-		const body = await readBody(req);
-		const mode = body?.mode;
-		if (mode !== "summary" && mode !== "full") {
-			json({ error: "mode must be 'summary' or 'full'" }, 400);
-			return;
-		}
+		// Body is read for parity but no fields are required — the legacy `mode`
+		// parameter is ignored.
+		await readBody(req).catch(() => ({}));
 
 		// Resolve the archived session across all project contexts.
 		const ps = sessionManager.getPersistedSession(archivedId);
@@ -5446,20 +5465,38 @@ async function handleApiRoute(
 			return;
 		}
 
-		const messages = await sessionManager.getArchivedMessages(archivedId);
-		if (!messages || messages.length === 0) {
+		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
+		// sessions whose persisted `agentSessionFile` was never populated.
+		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { copyToolContentDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		const nodeFs = await import("node:fs");
+		const { randomUUID } = await import("node:crypto");
+
+		let sourceJsonl = ps.agentSessionFile;
+		if (!sourceJsonl) {
+			const recovered = sessionManager.recoverSessionFile(ps);
+			if (recovered) sourceJsonl = recovered;
+		}
+		if (!sourceJsonl) {
 			json({ error: "archived transcript missing or empty" }, 404);
 			return;
 		}
 
-		let seedContext: string;
-		try {
-			const { buildSeedContext } = await import("./agent/continue-archived.js");
-			const namingOpts = sessionManager.getNamingModelOptions();
-			seedContext = await buildSeedContext(messages, mode, ps, namingOpts);
-		} catch (err) {
-			json({ error: `failed to build seed context: ${String(err)}` }, 500);
-			return;
+		// Verify the source file actually exists and is non-empty. For non-sandboxed
+		// sessions a quick host-side stat suffices; sandboxed sessions defer to the
+		// copy step (which surfaces the failure as a 500). Empty / missing → 404.
+		if (!ps.sandboxed) {
+			try {
+				const st = nodeFs.statSync(sourceJsonl);
+				if (!st.isFile() || st.size === 0) {
+					json({ error: "archived transcript missing or empty" }, 404);
+					return;
+				}
+			} catch {
+				json({ error: "archived transcript missing or empty" }, 404);
+				return;
+			}
 		}
 
 		const proj = projectRegistry.get(ps.projectId)!;
@@ -5474,16 +5511,50 @@ async function handleApiRoute(
 			} catch { /* ignore — no worktree */ }
 		}
 
+		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
+		// for worktree-backed sessions the agent CLI will rotate to a new file
+		// once the worktree cwd is final, but the cloned file we hand it via
+		// `switch_session` is what gets adopted.
+		const newSessionId = randomUUID();
+		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
+
+		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
+		const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+		try {
+			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+		} catch (err) {
+			if (err instanceof CrossRealmCopyError) {
+				json({ error: "cross-realm continue not supported" }, 422);
+				return;
+			}
+			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			json({ error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` }, 500);
+			return;
+		}
+
+		// Defensive forward-compat: copy the lazy tool-content cache if present.
+		try {
+			copyToolContentDirIfPresent(archivedId, newSessionId, bobbitStateDir());
+		} catch (err) {
+			console.warn(`[continue-archived] tool-content copy failed (non-fatal): ${err}`);
+		}
+
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
 		const createOpts: any = {
+			sessionId: newSessionId,
 			projectId: ps.projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
-			seedContext,
-			seedContextSourceId: archivedId,
+			preExistingAgentSessionFile: destJsonl,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
+		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
+		// redundant initial `model_change` event with its hardcoded default.
+		if (ps.modelProvider && ps.modelId) {
+			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
 			createOpts.roleName = role.name;
@@ -5497,7 +5568,8 @@ async function handleApiRoute(
 				projCwd, undefined, undefined, undefined, createOpts,
 			);
 		} catch (err) {
-			json({ error: `failed to create session: ${String(err)}` }, 500);
+			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			json({ error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` }, 500);
 			return;
 		}
 
@@ -5508,24 +5580,10 @@ async function handleApiRoute(
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
 		if (ps.modelProvider && ps.modelId) {
-			// Fire-and-forget: set the model and persist. For worktree sessions the
-			// agent isn't ready yet, so setModel can fail — persist regardless so
-			// later restore picks it up.
-			const provider = ps.modelProvider;
-			const modelId = ps.modelId;
-			(async () => {
-				try {
-					// Wait briefly for the session to become idle if it's still preparing
-					for (let i = 0; i < 40; i++) {
-						const s = sessionManager.getSession(newSession.id);
-						if (s && (s.status === "idle" || s.status === "streaming")) break;
-						await new Promise(r => setTimeout(r, 50));
-					}
-					const s = sessionManager.getSession(newSession.id);
-					if (s) await s.rpcClient.setModel(provider, modelId).catch(() => {});
-				} catch { /* best-effort */ }
-				sessionManager.persistSessionModel(newSession.id, provider, modelId);
-			})().catch(() => {});
+			// Model is pinned at spawn via createOpts.initialModel above; just
+			// persist the choice so a later restore picks it up. No redundant
+			// post-spawn setModel — that's the whole point of spawn-time pinning.
+			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
 		}
 
 		json({
@@ -5679,6 +5737,171 @@ async function handleApiRoute(
 		const ok = sessionManager.markSessionRead(id);
 		if (!ok) { json({ error: "session not found" }, 404); return; }
 		json({ ok: true });
+		return;
+	}
+
+	// ── Editable proposals (file-on-disk source of truth) ──────────────
+	// docs/design/editable-proposals.md §6.4
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore)?$/);
+	if (proposalRouteMatch) {
+		const sessionId = proposalRouteMatch[1];
+		const typeStr = proposalRouteMatch[2];
+		const suffix = proposalRouteMatch[3] || "";
+		if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (!isProposalType(typeStr)) {
+			json({ error: `Unknown proposal type: ${typeStr}` }, 400);
+			return;
+		}
+		const proposalType = typeStr as ProposalType;
+		const proposalStateDir = bobbitStateDir();
+
+		// GET /api/sessions/:id/proposal/:type — read raw file
+		if (suffix === "" && req.method === "GET") {
+			try {
+				const content = await readProposalFile(proposalStateDir, sessionId, proposalType);
+				if (content === undefined) {
+					json({ ok: false, code: "FILE_NOT_FOUND", message: `No ${proposalType} proposal draft. Call propose_${proposalType} first.` }, 404);
+					return;
+				}
+				const contentType = proposalType === "goal" ? "text/markdown; charset=utf-8" : "application/yaml; charset=utf-8";
+				res.writeHead(200, { "Content-Type": contentType });
+				res.end(content);
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// DELETE /api/sessions/:id/proposal/:type
+		if (suffix === "" && req.method === "DELETE") {
+			try {
+				await deleteProposalFile(proposalStateDir, sessionId, proposalType);
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, { type: "proposal_cleared", sessionId, proposalType });
+				}
+				res.writeHead(204);
+				res.end();
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/:type/edit — surgical edit
+		if (suffix === "/edit" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") {
+				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
+				return;
+			}
+			const { old_text, new_text } = body as { old_text?: unknown; new_text?: unknown };
+			if (typeof old_text !== "string" || typeof new_text !== "string") {
+				json({ ok: false, code: "INVALID_BODY", message: "old_text and new_text must be strings" }, 400);
+				return;
+			}
+			try {
+				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
+				if (!result.ok) {
+					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
+					json(result, status);
+					return;
+				}
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: result.parsed.fields,
+						rev: result.rev,
+						streaming: false,
+						source: "edit",
+					});
+				}
+				json({ ok: true, newContent: result.newContent, rev: result.rev });
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/:type/seed — called from propose_* execute()
+		if (suffix === "/seed" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") {
+				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
+				return;
+			}
+			const args = (body as { args?: unknown }).args;
+			if (!args || typeof args !== "object" || Array.isArray(args)) {
+				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
+				return;
+			}
+			try {
+				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
+				if (!parsed.ok) {
+					json(parsed, 400);
+					return;
+				}
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: parsed.value.fields,
+						rev: writeRes.rev,
+						streaming: false,
+						source: "seed",
+					});
+				}
+				json({ ok: true, rev: writeRes.rev });
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/:type/restore — restore a snapshot
+		if (suffix === "/restore" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object") {
+				json({ ok: false, code: "INVALID_BODY", message: "body must be JSON object" }, 400);
+				return;
+			}
+			const rev = (body as { rev?: unknown }).rev;
+			if (typeof rev !== "number" || !Number.isInteger(rev) || rev < 1) {
+				json({ ok: false, code: "INVALID_BODY", message: "rev must be a positive integer" }, 400);
+				return;
+			}
+			try {
+				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				if (!result.ok) {
+					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
+					json(result, status);
+					return;
+				}
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: result.fields,
+						rev: result.newRev,
+						streaming: false,
+						source: "restore",
+					});
+				}
+				json({ ok: true, newRev: result.newRev, fields: result.fields });
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		json({ error: "Method not allowed" }, 405);
 		return;
 	}
 

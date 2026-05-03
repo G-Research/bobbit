@@ -1,6 +1,6 @@
 {
   "name": "bobbit",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "type": "module",
   "bin": {
     "bobbit": "dist/server/cli.js"
@@ -36,12 +36,12 @@
   },
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
-    "@sinclair/typebox": "^0.34.41",
     "@mariozechner/mini-lit": "^0.2.0",
     "@mariozechner/pi-agent-core": "^0.67.5",
     "@mariozechner/pi-ai": "^0.67.5",
     "@mariozechner/pi-coding-agent": "^0.67.5",
     "@recogito/text-annotator": "^3.4.9",
+    "@sinclair/typebox": "^0.34.41",
     "acme-client": "^5.4.0",
     "docx-preview": "^0.3.7",
     "flexsearch": "0.8.158",

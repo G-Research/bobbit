@@ -14,6 +14,7 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
+import { loadSnapshot, scheduleSave } from "./ui-snapshot.js";
 import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 
@@ -22,6 +23,10 @@ import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-
 // ============================================================================
 
 setRenderApp(doRenderApp);
+
+// Expose state on window for E2E tests (harmless in production — the state
+// object is already mutable from devtools and contains no secrets).
+(window as any).__bobbitState = state;
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
@@ -311,6 +316,46 @@ async function initApp() {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
+	// ------------------------------------------------------------------
+	// SYNCHRONOUS SNAPSHOT HYDRATE — first paint must happen before any
+	// `await`. We project the persisted snapshot onto `state` so the very
+	// first renderApp() call below paints the last-known view, even if
+	// the gateway is unreachable / iOS just restored a process snapshot.
+	// Reconciliation with fresh server data flows through the existing
+	// reducer survivor filter (see remote-agent.ts → `"snapshot"` action).
+	// ------------------------------------------------------------------
+	try {
+		const snap = loadSnapshot();
+		if (snap) {
+			if (Array.isArray(snap.projects)) state.projects = snap.projects;
+			if (typeof snap.activeProjectId === "string" || snap.activeProjectId === null) {
+				state.activeProjectId = snap.activeProjectId;
+			}
+			if (Array.isArray(snap.goals)) state.goals = snap.goals;
+			if (Array.isArray(snap.archivedSessions)) state.archivedSessions = snap.archivedSessions;
+			if (typeof snap.selectedSessionId === "string") {
+				state.selectedSessionId = snap.selectedSessionId;
+			}
+			// Connection status from snapshot is informational — actual WS
+			// state is recomputed once the network call lands. Showing the
+			// last-known status ("connected") avoids a brief disconnected flash.
+			if (typeof snap.activeSession?.connectionStatus === "string") {
+				state.connectionStatus = snap.activeSession.connectionStatus;
+			}
+			// Any saved creds → assume we'll be authenticated; non-authed paint
+			// is reserved for the genuinely-no-creds case below.
+			const preUrl = localStorage.getItem(GW_URL_KEY);
+			const preToken = localStorage.getItem(GW_TOKEN_KEY);
+			if (preUrl && preToken) state.appView = "authenticated";
+		}
+	} catch { /* snapshot hydrate must never crash bootstrap */ }
+
+	// Trigger the inline-skeleton prepaint defined in index.html so the
+	// last-rendered transcript text shows up even when the prior snapshot
+	// was written by THIS bootstrap (i.e. same-URL navigations where the
+	// inline script's first invocation ran with empty localStorage).
+	try { (window as any).__bobbitPrepaint?.(); } catch { /* non-fatal */ }
+
 	// Palette is loaded from server preferences after gateway auth (see below)
 
 	state.chatPanel = new ChatPanel();
@@ -348,11 +393,44 @@ async function initApp() {
 	}
 
 	// If we have credentials, show "starting" immediately instead of
-	// "disconnected" — the gateway may just be booting up.
-	if (savedUrl && savedToken) {
+	// "disconnected" — the gateway may just be booting up. With a hydrated
+	// snapshot we go directly to "authenticated" view (the cached UI is
+	// already rendered); only fall back to "gateway-starting" when there's
+	// no snapshot to paint.
+	if (savedUrl && savedToken && state.appView !== "authenticated") {
 		state.appView = "gateway-starting";
 	}
 	renderApp();
+	// Mark the app container as having been rendered by Lit — the inline
+	// watchdog in index.html cancels its 3 s / 10 s escalation when this
+	// attribute appears.
+	try {
+		const appEl = document.getElementById("app");
+		if (appEl) appEl.setAttribute("data-rendered", "true");
+	} catch { /* non-fatal */ }
+
+	// Tear down any leftover boot-skeleton DOM and disarm the inline
+	// prepaint function. Normally the inline MutationObserver in index.html
+	// hides the skeleton when `data-rendered` flips, but a tab loaded with
+	// a stale (pre-fix) cached `index.html` runs the older prepaint script
+	// that re-appends a `Reconnecting…` pill on every `localStorage.setItem`
+	// via a monkey-patched `Storage.prototype.setItem`. The patch itself is
+	// baked into the cached document and we can't remove it from here — but
+	// we CAN replace `window.__bobbitPrepaint` (which the patch calls) with
+	// a no-op, so the patch becomes harmless until the user reloads onto
+	// the fixed shell. On the fixed shell this whole block is a benign
+	// no-op (skeleton is already `.--hide`, no pills exist, and the
+	// fresh `__bobbitPrepaint` itself early-returns on data-rendered).
+	try {
+		(window as any).__bobbitPrepaint = () => {};
+		document.querySelectorAll("[data-bobbit-pill]").forEach((el) => el.remove());
+		const sk = document.querySelector("[data-bobbit-skeleton]") as HTMLElement | null;
+		if (sk) sk.classList.add("--hide");
+	} catch { /* non-fatal */ }
+
+	// Persist the initial state immediately so a hard reload before any
+	// further mutation still has a snapshot to hydrate from.
+	try { scheduleSave(state); } catch { /* non-fatal */ }
 
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
@@ -377,6 +455,9 @@ async function initApp() {
 					if (prefs.showTimestamps) {
 						document.documentElement.dataset.showTimestamps = "true";
 					}
+					// Apply playAgentFinishSound — default ON when unset.
+					document.documentElement.dataset.playAgentFinishSound =
+						prefs.playAgentFinishSound === false ? "false" : "true";
 				}
 			} catch {}
 
@@ -554,7 +635,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeGoalProposal != null || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen);
 			if (hasPanel) {
 				// If fullscreen, exit fullscreen and collapse in one step
 				if (state.previewPanelFullscreen) {
@@ -659,6 +740,9 @@ async function initApp() {
 			}
 			// Apply showTimestamps
 			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			// Apply playAgentFinishSound — default ON when unset.
+			document.documentElement.dataset.playAgentFinishSound =
+				prefs.playAgentFinishSound === false ? "false" : "true";
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();

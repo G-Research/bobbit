@@ -1,17 +1,14 @@
 /**
  * Browser E2E tests for "Continue in New Session" on archived sessions.
  *
- * Story CA-01 (contracts CT-05, CT-16).
- *
- * Covers design §9.2:
+ * Lossless flow:
  *  - Archive a non-goal non-delegate session, open it, click Continue →
- *    mode chooser appears → pick Summary → land in a new session with a
- *    "Continued:" title and a fresh cwd.
- *  - Same flow with "Full transcript".
+ *    confirm-only chooser appears → click Continue → land in a new session
+ *    with a "Continued:" title and a fresh cwd.
  *  - Button is hidden for goal-linked and delegate archived sessions.
  *
- * The server endpoint is `POST /api/sessions/:archivedId/continue` with
- * `{ mode: "summary" | "full" }` → `{ id, cwd, status, title }`.
+ * The server endpoint is `POST /api/sessions/:archivedId/continue` (empty
+ * body) → `{ id, cwd, status, title }`.
  */
 import { test, expect } from "../gateway-harness.js";
 import {
@@ -57,7 +54,7 @@ async function fetchSession(id: string): Promise<any | null> {
 }
 
 test.describe("Continue archived in new session", () => {
-	test("Summary mode: archive → Continue → land in new session with seeded context", async ({ page }) => {
+	test("happy path: archive → Continue → land in new session", async ({ page }) => {
 		// 1. Create a non-goal, non-delegate source session and drive it to idle.
 		const sourceId = await createSession();
 		await waitForSessionStatus(sourceId, "idle");
@@ -92,14 +89,15 @@ test.describe("Continue archived in new session", () => {
 		const continueBtn = continueFooter.locator("[data-action='continue-archived']");
 		await expect(continueBtn).toBeVisible();
 
-		// 5. Click → mode chooser appears.
+		// 5. Click → confirm-only chooser appears.
 		await continueBtn.click();
 		const chooser = page.locator("continue-session-chooser");
 		await expect(chooser).toBeVisible();
 		await expect(chooser.locator("[role='dialog']")).toBeVisible();
 
-		// 6. Summary is the default. Click Continue.
-		await expect(chooser.locator("[data-mode='summary'][aria-checked='true']")).toBeVisible();
+		// No mode radio in lossless flow — just Cancel + Continue.
+		await expect(chooser.locator("[data-mode]")).toHaveCount(0);
+		await expect(chooser.locator("[data-large-transcript-warning]")).toHaveCount(0);
 		await chooser.locator("[data-action='continue']").click();
 
 		// 7. URL should change to a new session hash, different from source.
@@ -141,58 +139,6 @@ test.describe("Continue archived in new session", () => {
 		await deleteSession(newId);
 	});
 
-	test("Full mode: chooser warns on large transcripts, creates new session", async ({ page }) => {
-		const sourceId = await createSession();
-		await waitForSessionStatus(sourceId, "idle");
-
-		await openApp(page);
-		await navigateToHash(page, `#/session/${sourceId}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
-
-		await sendMessage(page, "hello");
-		await waitForAgentResponse(page);
-		await waitForSessionStatus(sourceId, "idle");
-
-		await terminateSession(sourceId);
-		await navigateToHash(page, "#/");
-		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 10_000 });
-		await navigateToHash(page, `#/session/${sourceId}`);
-
-		await expect(page.locator("[data-continue-archived-footer]")).toBeVisible({ timeout: 10_000 });
-		await page.locator("[data-action='continue-archived']").click();
-
-		const chooser = page.locator("continue-session-chooser");
-		await expect(chooser).toBeVisible();
-
-		// Switch to Full mode.
-		await chooser.locator("[data-mode='full']").click();
-		await expect(chooser.locator("[data-mode='full'][aria-checked='true']")).toBeVisible();
-
-		// Warning is conditional on transcript size — just assert it doesn't
-		// crash and the selection sticks.
-		await chooser.locator("[data-action='continue']").click();
-
-		await page.waitForFunction(
-			(oldId) => {
-				const h = window.location.hash || "";
-				const m = h.match(/^#\/session\/([^/?]+)/);
-				return !!m && m[1] !== oldId;
-			},
-			sourceId,
-			{ timeout: 20_000 },
-		);
-
-		const newHash = await page.evaluate(() => window.location.hash);
-		const newId = newHash.match(/^#\/session\/([^/?]+)/)![1];
-		expect(newId).not.toBe(sourceId);
-		await waitForSessionStatus(newId, "idle");
-		const created = await fetchSession(newId);
-		expect(created?.title || "").toMatch(/^Continued:/);
-
-		await deleteSession(newId);
-	});
 
 	test("Cancel closes the chooser without creating a session", async ({ page }) => {
 		const sourceId = await createSession();
