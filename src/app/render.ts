@@ -1221,12 +1221,17 @@ function rolePreviewPanel() {
 		const trimmedLabel = state.rolePreviewLabel.trim();
 		if (!trimmedName || !trimmedLabel) return;
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
+		// Mid-session acceptance (agent proposed a role from a regular session)
+		// must NOT tear down the session. Only the role-assistant context owns
+		// the disconnect-and-navigate flow. Distinguished by `state.assistantType`.
+		const isAssistantContext = state.assistantType === "role";
+
+		if (isAssistantContext && state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
 			state.connectionStatus = "disconnected";
 		}
-		state.assistantType = null;
+		if (isAssistantContext) state.assistantType = null;
 		if (sessionId) clearProposalAnnotations(sessionId, "role");
 		resetProposalAnnCount("role");
 		delete state.activeProposals.role;
@@ -1234,7 +1239,9 @@ function rolePreviewPanel() {
 		if (sessionId) {
 			deleteRoleDraft(sessionId);
 		}
-		localStorage.removeItem("gateway.sessionId");
+		if (isAssistantContext) {
+			localStorage.removeItem("gateway.sessionId");
+		}
 
 		// Parse tools: comma-separated string -> array
 		const toolsList = state.rolePreviewTools
@@ -1257,15 +1264,17 @@ function rolePreviewPanel() {
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "role");
 
-		if (sessionId) {
+		if (isAssistantContext && sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
 
-		// Navigate to the roles page
-		const { loadRolePageData } = await import("./role-manager-page.js");
-		await loadRolePageData();
-		setHashRoute("roles");
+		if (isAssistantContext) {
+			// Assistant flow ends by navigating to the roles page.
+			const { loadRolePageData } = await import("./role-manager-page.js");
+			await loadRolePageData();
+			setHashRoute("roles");
+		}
 		renderApp();
 	};
 
@@ -1761,18 +1770,24 @@ function staffPreviewPanel() {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
+		// Mid-session acceptance must NOT tear down the active session — only
+		// the staff-assistant context owns the disconnect-and-navigate flow.
+		const isAssistantContext = state.assistantType === "staff";
+
+		if (isAssistantContext && state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
 			state.connectionStatus = "disconnected";
 		}
-		state.assistantType = null;
+		if (isAssistantContext) state.assistantType = null;
 		if (sessionId) clearProposalAnnotations(sessionId, "staff");
 		resetProposalAnnCount("staff");
 		delete state.activeProposals.staff;
-		localStorage.removeItem("gateway.sessionId");
-		setHashRoute("landing");
-		state.appView = "authenticated";
+		if (isAssistantContext) {
+			localStorage.removeItem("gateway.sessionId");
+			setHashRoute("landing");
+			state.appView = "authenticated";
+		}
 
 		let triggers: any[] = [];
 		try {
@@ -1792,13 +1807,13 @@ function staffPreviewPanel() {
 		});
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "staff");
-		if (sessionId) {
+		if (isAssistantContext && sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
 		reloadStaffList();
 		await refreshSessions();
-		if (result?.currentSessionId) {
+		if (isAssistantContext && result?.currentSessionId) {
 			const { connectToSession } = await import("./session-manager.js");
 			await connectToSession(result.currentSessionId, false);
 		}
@@ -2437,17 +2452,25 @@ function hasUnifiedPanel(): boolean {
 		state.isPreviewSession ||
 		state.activeProposals.goal != null ||
 		state.activeProposals.project != null ||
+		state.activeProposals.role != null ||
+		state.activeProposals.tool != null ||
+		state.activeProposals.staff != null ||
 		state.reviewPanelOpen
 	);
 }
 
+type UnifiedPanelTab = "chat" | "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff";
+
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project"> {
-	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
+function unifiedPanelTabs(): UnifiedPanelTab[] {
+	const tabs: UnifiedPanelTab[] = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
 	if (state.activeProposals.goal != null) tabs.push("goal");
 	if (state.activeProposals.project != null) tabs.push("project");
+	if (state.activeProposals.role != null) tabs.push("role");
+	if (state.activeProposals.tool != null) tabs.push("tool");
+	if (state.activeProposals.staff != null) tabs.push("staff");
 	return tabs;
 }
 
@@ -2886,6 +2909,27 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "project"; renderApp(); }}
 					>Project <span class="goal-tab-dot"></span></button>
 				` : ""}
+				${state.activeProposals.role != null ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "role" ? "goal-tab-pill--active" : ""}"
+						title="Role"
+						@click=${() => { state.previewPanelTab = "role"; renderApp(); }}
+					>Role <span class="goal-tab-dot"></span></button>
+				` : ""}
+				${state.activeProposals.tool != null ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "tool" ? "goal-tab-pill--active" : ""}"
+						title="Tool"
+						@click=${() => { state.previewPanelTab = "tool"; renderApp(); }}
+					>Tool <span class="goal-tab-dot"></span></button>
+				` : ""}
+				${state.activeProposals.staff != null ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "staff" ? "goal-tab-pill--active" : ""}"
+						title="Staff"
+						@click=${() => { state.previewPanelTab = "staff"; renderApp(); }}
+					>Staff <span class="goal-tab-dot"></span></button>
+				` : ""}
 			</div>
 		`;
 	};
@@ -2997,23 +3041,38 @@ export function doRenderApp(): void {
 	};
 
 	const unifiedPreviewPanel = () => {
-		// Auto-correct tab if the active tab's content is no longer available
-		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : "preview"));
-		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeProposals.goal != null) {
-			state.previewPanelActiveTab = "goal";
-		} else if (state.previewPanelActiveTab === "goal" && state.activeProposals.goal == null && state.isPreviewSession) {
-			state.previewPanelActiveTab = "preview";
-		} else if (state.previewPanelActiveTab === "project" && state.activeProposals.project == null) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
-				: (state.activeProposals.goal != null ? "goal"
-				: (state.reviewPanelOpen ? "review" : "preview"));
+		// Auto-correct tab if the active tab's content is no longer available.
+		// Pick the highest-priority surviving tab as the fallback.
+		const pickFallback = (): "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" => {
+			if (state.activeProposals.goal != null) return "goal";
+			if (state.activeProposals.project != null) return "project";
+			if (state.activeProposals.role != null) return "role";
+			if (state.activeProposals.tool != null) return "tool";
+			if (state.activeProposals.staff != null) return "staff";
+			if (state.reviewPanelOpen) return "review";
+			return "preview";
+		};
+		const tabAvailable = (t: typeof state.previewPanelActiveTab): boolean => {
+			if (t === "preview") return state.isPreviewSession;
+			if (t === "review") return state.reviewPanelOpen;
+			if (t === "goal") return state.activeProposals.goal != null;
+			if (t === "project") return state.activeProposals.project != null;
+			if (t === "role") return state.activeProposals.role != null;
+			if (t === "tool") return state.activeProposals.tool != null;
+			if (t === "staff") return state.activeProposals.staff != null;
+			return false;
+		};
+		if (!tabAvailable(state.previewPanelActiveTab)) {
+			state.previewPanelActiveTab = pickFallback();
 		}
 
 		const showPreviewTab = state.isPreviewSession;
 		const showGoalTab = state.activeProposals.goal != null;
 		const showReviewTab = state.reviewPanelOpen;
 		const showProjectTab = state.activeProposals.project != null;
+		const showRoleTab = state.activeProposals.role != null;
+		const showToolTab = state.activeProposals.tool != null;
+		const showStaffTab = state.activeProposals.staff != null;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -3048,6 +3107,27 @@ export function doRenderApp(): void {
 								@click=${() => { state.previewPanelActiveTab = "project"; renderApp(); }}
 							>Project <span class="goal-tab-dot"></span></button>
 						` : ""}
+						${showRoleTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "role" ? "goal-tab-pill--active" : ""}"
+								title="Role"
+								@click=${() => { state.previewPanelActiveTab = "role"; renderApp(); }}
+							>Role <span class="goal-tab-dot"></span></button>
+						` : ""}
+						${showToolTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "tool" ? "goal-tab-pill--active" : ""}"
+								title="Tool"
+								@click=${() => { state.previewPanelActiveTab = "tool"; renderApp(); }}
+							>Tool <span class="goal-tab-dot"></span></button>
+						` : ""}
+						${showStaffTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "staff" ? "goal-tab-pill--active" : ""}"
+								title="Staff"
+								@click=${() => { state.previewPanelActiveTab = "staff"; renderApp(); }}
+							>Staff <span class="goal-tab-dot"></span></button>
+						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
@@ -3069,7 +3149,13 @@ export function doRenderApp(): void {
 							? goalProposalPanel()
 							: state.previewPanelActiveTab === "project" && showProjectTab
 								? projectProposalPanel()
-								: ""}
+								: state.previewPanelActiveTab === "role" && showRoleTab
+									? rolePreviewPanel()
+									: state.previewPanelActiveTab === "tool" && showToolTab
+										? toolPreviewPanel()
+										: state.previewPanelActiveTab === "staff" && showStaffTab
+											? staffPreviewPanel()
+											: ""}
 			</div>
 		`;
 	};
@@ -3080,7 +3166,7 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review" | "project") => {
+	const mobilePaneContent = (tab: UnifiedPanelTab) => {
 		if (tab === "chat") return state.chatPanel;
 		if (tab === "preview" && state.isPreviewSession) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
@@ -3093,6 +3179,15 @@ export function doRenderApp(): void {
 		}
 		if (tab === "project" && state.activeProposals.project != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
+		}
+		if (tab === "role" && state.activeProposals.role != null) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${rolePreviewPanel()}</div>`;
+		}
+		if (tab === "tool" && state.activeProposals.tool != null) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${toolPreviewPanel()}</div>`;
+		}
+		if (tab === "staff" && state.activeProposals.staff != null) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${staffPreviewPanel()}</div>`;
 		}
 		return html``;
 	};

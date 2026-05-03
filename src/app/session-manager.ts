@@ -1402,6 +1402,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
+			// Explicit user intent — focus the matching tab in the unified
+			// preview panel so the proposal is immediately visible. Without
+			// this, the click landed on a tab that didn't exist (role/tool/
+			// staff) and the panel rendered nothing.
+			state.previewPanelTab = type as typeof state.previewPanelTab;
+			state.previewPanelActiveTab = type as typeof state.previewPanelActiveTab;
 
 			// Snapshot-restore branch — server is authoritative; the broadcast
 			// rebuilds the slot via remote.onProposal. We also fan out to the
