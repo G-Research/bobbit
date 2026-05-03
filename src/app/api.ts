@@ -1154,7 +1154,19 @@ export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
 			const body = await probe.json().catch(() => null) as { code?: string; count?: number; descendants?: Array<{ id: string; title: string }> } | null;
 			if (body?.code === "HAS_DESCENDANT_TEAMS") {
 				const dialogModule = await import("./dialogs.js");
-				const goal = (window as any).__goalCache?.get?.(goalId) ?? { id: goalId, title: goalId.slice(0, 8) };
+				// Resolve the goal title from live client state (the source of
+				// truth populated by refreshSessions / WS goal_state_changed
+				// events). The historical `__goalCache` was unset in this
+				// build, so the fallback `goalId.slice(0, 8)` produced an
+				// unreadable truncated UUID in the dialog ("4005ee07" has 3
+				// descendant goals…). The state-side lookup gives the actual
+				// title; if the goal somehow isn't in state yet we fall back
+				// to the full id rather than the slice.
+				const stateModule = await import("./state.js");
+				const liveGoal = stateModule.state.goals.find(g => g.id === goalId);
+				const goal = liveGoal
+					? { id: liveGoal.id, title: liveGoal.title }
+					: ((window as any).__goalCache?.get?.(goalId) ?? { id: goalId, title: goalId });
 				const decision = await dialogModule.showStopTeamDialog(goal, body.count ?? 0, body.descendants ?? []);
 				if (decision === "cancel") return false;
 				if (decision === "cascade") {

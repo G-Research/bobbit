@@ -3539,14 +3539,25 @@ async function handleApiRoute(
 					: parent.repoPath;
 			}
 
-			// Inline workflow (Phase 5b parity) — caller may supply the full
-			// workflow definition for this child instead of a workflowId. Snapshot
-			// onto the child via createGoal's resolvedWorkflow path. When both
-			// fields are present, the inline body wins.
+			// Inline workflow resolution for the child. Precedence:
+			//   1. body.workflow — explicit override from the spawn-child caller
+			//   2. parent.workflow — inherited from the parent's snapshotted
+			//      workflow when the body doesn't override. Mirrors the
+			//      inlineRoles inheritance below: a parent that defined an
+			//      inline workflow propagates it to children unless the agent
+			//      explicitly chooses a different one. Without this, children
+			//      defaulted to the project's "feature" workflow lookup, which
+			//      either fails on bare projects (no stored "feature") or
+			//      produces a child whose gates don't match the parent's plan.
 			const inlineWorkflowBody = (body as { workflow?: unknown }).workflow;
 			let resolvedWorkflowForChild: import("./agent/workflow-store.js").Workflow | undefined;
 			if (inlineWorkflowBody && typeof inlineWorkflowBody === "object") {
 				resolvedWorkflowForChild = inlineWorkflowBody as import("./agent/workflow-store.js").Workflow;
+			} else if (parent.workflow) {
+				// Deep-clone so the child's snapshot is independent — same
+				// freeze-at-creation pattern as goal-manager's existing
+				// snapshot logic.
+				resolvedWorkflowForChild = JSON.parse(JSON.stringify(parent.workflow)) as import("./agent/workflow-store.js").Workflow;
 			}
 
 			// Inline roles — merge parent's snapshot with the body's. Child
@@ -3584,6 +3595,16 @@ async function handleApiRoute(
 				...(suggestedRole ? { suggestedRole } : {}),
 				...(spawnedBySessionId ? { spawnedBySessionId } : {}),
 			});
+			// Initialize gate states for the child's workflow gates. Mirrors the
+			// initGatesForGoal() call in POST /api/goals (~L3148). Without this,
+			// gateStore.getGatesForGoal(child.id) returns [] and the child's
+			// agents see "no gates" from gate_list / gate_status / etc., even
+			// though goal.workflow.gates is populated. Critical: the
+			// verification harness also relies on these entries to cache
+			// signal results and dependency state per gate.
+			if (child.workflow) {
+				ctx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
+			}
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
 			json({ id: child.id, suggestedRole, spawnedBySessionId }, 201);
 
