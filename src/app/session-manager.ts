@@ -1574,10 +1574,30 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// in parallel. Draft restores must complete before we unlock proposal
 		// checking, but they don't depend on refreshSessions.
 		const draftRestorePromise = (async () => {
-			// Clear stale proposals for non-matching assistant types or sessions
-			if (state.assistantType !== "goal") delete state.activeProposals.goal;
-			if (state.assistantType !== "role") delete state.activeProposals.role;
-			if (state.assistantType !== "staff") delete state.activeProposals.staff;
+			// Clear stale proposals for non-matching assistant types or sessions.
+			// IMPORTANT: only clear when the slot does NOT belong to the current
+			// session. The unified `onProposal` handler buffers `proposal_update`
+			// events received between WS-connect and callback-wiring (see
+			// remote-agent.ts), so by the time this draft-restore runs, the
+			// rehydrate-on-attach broadcast for the CURRENT session may have
+			// already populated the slot. Blindly deleting it here drops the
+			// rehydrated state for non-assistant sessions — the exact regression
+			// covered by the proposal-types parity restart-survival E2E tests.
+			// Mirror the project-slot pattern below: keep the slot when it's
+			// scoped to this session, drop it only when it's left over from a
+			// different session.
+			if (state.assistantType !== "goal") {
+				const slot = state.activeProposals.goal;
+				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.goal;
+			}
+			if (state.assistantType !== "role") {
+				const slot = state.activeProposals.role;
+				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.role;
+			}
+			if (state.assistantType !== "staff") {
+				const slot = state.activeProposals.staff;
+				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.staff;
+			}
 			// Project proposal is scoped to the originating session and transient
 			// for non-assistant sessions — mirrors the goal-proposal model. The
 			// project-assistant branch below handles persistence for that session
