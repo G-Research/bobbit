@@ -513,10 +513,14 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 ### Preview
 
+The preview side-panel iframe is fed by these endpoints. Two modes are supported: **inline** (agent supplies raw HTML) and **file** (agent supplies a path to an HTML file on disk; sibling assets are served over HTTP without the agent ever reading their bytes). Full reference: [docs/preview-file-mode.md](preview-file-mode.md).
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/preview` | Get preview HTML for a session (`?sessionId=`) |
-| `POST` | `/api/preview` | Set preview HTML for a session (`?sessionId=`, `{ html }`) |
+| `GET` | `/api/preview` | Get preview HTML + mode for a session (`?sessionId=`). Response: `{ html, mtime, kind: "inline" \| "file", entry? }`. |
+| `POST` | `/api/preview` | Set preview for a session (`?sessionId=`). Body is either `{ html }` (inline mode; deletes any existing meta sidecar) or `{ kind: "file", path: "/abs/path/report.html" }` (file mode). On success returns `{ ok: true, kind, entry?, mtime }`. `400 baseDir not host-visible` if the gateway can't read `path` (sandbox translation failed) — the `preview_open` extension catches this specific 400 and retries with inline. |
+| `GET` | `/api/preview/render` | Render preview HTML for the iframe (`?sessionId=`). Server injects `<base href="/api/preview/asset?sessionId=…&path=">` into `<head>` plus the shared theme-bridge/swipe scripts before `</body>`. `200 text/html; charset=utf-8`; `400` invalid sessionId; `404` no preview state. |
+| `GET` | `/api/preview/asset` | Serve a sibling asset relative to the session's `baseDir` (`?sessionId=`, `?path=<rel>`). File mode only. Path-traversal-guarded (rejects `../`, encoded variants, backslashes, absolute paths, and symlink escapes via `realpathSync`). 25 MiB cap per asset. `200` asset bytes; `400` invalid sessionId / missing path / traversal rejected; `404` no preview state, inline-mode session, or file not found; `413` over the size cap. `Cache-Control: no-store`. |
 
 ### Search
 

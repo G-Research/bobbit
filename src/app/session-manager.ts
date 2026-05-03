@@ -853,6 +853,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewCwdEdited = false;
 		state.isPreviewSession = sessionData?.preview || false;
 		state.previewPanelHtml = "";
+		state.previewPanelMode = "inline";
+		state.previewPanelMtime = 0;
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -1429,6 +1431,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.assistantHasProposal = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelHtml = ""; // Clear stale preview from previous session
+		state.previewPanelMode = "inline";
+		state.previewPanelMtime = 0;
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;

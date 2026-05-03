@@ -4,8 +4,9 @@ import { PanelRight } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderContext, ToolRenderer, ToolRenderResult } from "../types.js";
 
-/** Must match `defaults/tools/html/snapshot.ts` PREVIEW_SNAPSHOT_MARKER. */
-const PREVIEW_SNAPSHOT_MARKER = "__preview_snapshot_v1__\n";
+/** Must match `defaults/tools/html/snapshot.ts`. */
+const PREVIEW_SNAPSHOT_MARKER_V1 = "__preview_snapshot_v1__\n";
+const PREVIEW_SNAPSHOT_MARKER_V2 = "__preview_snapshot_v2__\n";
 
 interface PreviewOpenParams {
 	html?: string;
@@ -20,6 +21,29 @@ interface SnapshotBlock {
 	preview?: string;
 }
 
+type ParsedSnapshot =
+	| { kind: "inline"; html: string }
+	| { kind: "file"; path: string };
+
+function parseSnapshotText(text: string): ParsedSnapshot | null {
+	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V1)) {
+		return { kind: "inline", html: text.slice(PREVIEW_SNAPSHOT_MARKER_V1.length) };
+	}
+	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2)) {
+		const body = text.slice(PREVIEW_SNAPSHOT_MARKER_V2.length).trim();
+		try {
+			const parsed = JSON.parse(body);
+			if (parsed && parsed.kind === "file" && typeof parsed.path === "string" && parsed.path) {
+				return { kind: "file", path: parsed.path };
+			}
+		} catch {
+			/* fall through */
+		}
+		return null;
+	}
+	return null;
+}
+
 /** Find a snapshot text block in a tool_result's content array, returning block + index. */
 function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block: SnapshotBlock; index: number } | null {
 	const content = result?.content;
@@ -28,7 +52,7 @@ function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block:
 		const b = content[i] as any;
 		if (!b || b.type !== "text") continue;
 		if (typeof b.text !== "string") continue;
-		if (b.text.startsWith(PREVIEW_SNAPSHOT_MARKER)) {
+		if (b.text.startsWith(PREVIEW_SNAPSHOT_MARKER_V1) || b.text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2)) {
 			return { block: b as SnapshotBlock, index: i };
 		}
 	}
@@ -116,10 +140,9 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					snapshotText = await fetchToolContent(sessionId, located.messageIndex, located.blockIndex);
 				}
 
-				// 2. Strip marker to get raw HTML
-				const htmlPayload = snapshotText.startsWith(PREVIEW_SNAPSHOT_MARKER)
-					? snapshotText.slice(PREVIEW_SNAPSHOT_MARKER.length)
-					: snapshotText;
+				// 2. Parse snapshot — either inline (v1) or file (v2).
+				const parsed = parseSnapshotText(snapshotText);
+				if (!parsed) throw new Error("Snapshot block could not be parsed");
 
 				// 3. Enable preview mode (idempotent)
 				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
@@ -128,12 +151,22 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				});
 				if (!patchResp.ok) throw new Error(`PATCH failed: ${patchResp.status}`);
 
-				// 4. Push HTML to the preview panel
+				// 4. Push HTML or file path to the preview endpoint.
+				const postBody = parsed.kind === "file"
+					? { kind: "file", path: parsed.path }
+					: { html: parsed.html };
 				const postResp = await gatewayFetch(`/api/preview?sessionId=${encodeURIComponent(sessionId)}`, {
 					method: "POST",
-					body: JSON.stringify({ html: htmlPayload }),
+					body: JSON.stringify(postBody),
 				});
-				if (!postResp.ok) throw new Error(`POST failed: ${postResp.status}`);
+				if (!postResp.ok) {
+					if (parsed.kind === "file" && (postResp.status === 400 || postResp.status === 404)) {
+						btn.textContent = "File no longer available";
+						btn.disabled = true;
+						return;
+					}
+					throw new Error(`POST failed: ${postResp.status}`);
+				}
 
 				btn.textContent = "Opened ✓";
 				setTimeout(() => {
