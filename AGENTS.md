@@ -163,6 +163,18 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 
 Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
+### Line endings
+
+All text files in this repo are stored and checked out with **LF** line endings, pinned via `.gitattributes` (`* text=auto eol=lf`). Windows-native script files (`*.cmd`, `*.bat`, `*.ps1`) are the only exception and are checked out with CRLF.
+
+**Windows contributors:** the Git for Windows installer defaults to `core.autocrlf=true`, which can override `.gitattributes` and cause phantom "modified" entries in `git status` plus "LF will be replaced by CRLF" warnings. Disable it once globally:
+
+```bash
+git config --global core.autocrlf false
+```
+
+If you've already accumulated CRLF in your working tree, run `git checkout -- .` (or re-clone) to restore LF after changing the setting.
+
 ### Committing with a dirty working copy
 
 When asked to commit, other unstaged/staged changes may exist from another agent or the user. **Never discard, stash, or reset those changes.** Stage only the files you modified (`git add <your-files>`) and commit. If your changes overlap and can't be cleanly separated, ask the user.
