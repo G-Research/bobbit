@@ -384,12 +384,29 @@ export function bucketArchivedByProject(
  * row, chevron, descendant badge, and team rendering match the rest of the
  * sidebar. Indent is one INDENT step relative to the parent's
  * tlExpanded container.
+ *
+ * `renderedAncestors` is the set of goal ids that have already rendered as
+ * an ancestor of this row. If `child.id` is already in the set we render a
+ * compact "(loop)" placeholder instead of recursing — defensive guard
+ * against any data anomaly that could let a descendant point back at an
+ * ancestor (createGoal rejects true id-cycles, but the render path
+ * shouldn't trust the data layer to be perfect).
  */
-function renderSpawnedChildGoalRow(child: Goal): TemplateResult {
+function renderSpawnedChildGoalRow(child: Goal, renderedAncestors?: Set<string>): TemplateResult {
+	if (renderedAncestors?.has(child.id)) {
+		return html`
+			<div class="text-[10px] text-muted-foreground/70 italic px-1 py-0.5"
+				data-testid="sidebar-spawned-child-row-loop"
+				data-goal-id="${child.id}"
+				title="${child.title} appears earlier in this tree — loop detected.">
+				↺ ${child.title} (already shown above)
+			</div>
+		`;
+	}
 	const descendantCount = state.goals.filter(g => !g.archived && g.parentGoalId === child.id).length;
 	return html`
 		<div data-testid="sidebar-spawned-child-row" data-goal-id="${child.id}" data-spawned-by="${child.spawnedBySessionId ?? ""}">
-			${renderGoalGroup(child, { descendantCount })}
+			${renderGoalGroup(child, { descendantCount, renderedAncestors })}
 		</div>
 	`;
 }
@@ -729,7 +746,7 @@ function renderGoalBadge(goalId: string) {
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
  * Mobile:  dashboard button always visible. No double-click (no hover hint).
  */
-export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number }) {
+export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string> }) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
 	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
@@ -840,11 +857,39 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 		// the team-lead row counts agents+archived but NOT spawned sub-goals
 		// (sub-goals already advertise themselves via the parent goal's
 		// descendant-count badge).
-		const spawnedChildren = state.goals.filter(g =>
-			g.parentGoalId === goal.id
-			&& g.spawnedBySessionId === teamLead.id
-			&& (state.showArchived || !g.archived)
-		);
+		//
+		// Defensive shaping:
+		//  - Dedupe by id. state.goals shouldn't have duplicate ids, but if a
+		//    reducer race leaves an old + new copy of the same goal, render
+		//    only one.
+		//  - Sort by createdAt asc, ties broken by id, so the visible order is
+		//    deterministic across re-renders. Without this, two goals with
+		//    identical titles but distinct ids would shuffle on every render.
+		const seenIds = new Set<string>();
+		const spawnedChildren = state.goals
+			.filter(g =>
+				g.parentGoalId === goal.id
+				&& g.spawnedBySessionId === teamLead.id
+				&& (state.showArchived || !g.archived))
+			.filter(g => {
+				if (seenIds.has(g.id)) return false;
+				seenIds.add(g.id);
+				return true;
+			})
+			.sort((a, b) => {
+				const at = a.createdAt ?? 0;
+				const bt = b.createdAt ?? 0;
+				if (at !== bt) return at - bt;
+				return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+			});
+
+		// Cycle guard: build the visited-ancestors set we'll thread through
+		// each child's renderGoalGroup call. Includes this goal's id so any
+		// descendant that — via a data anomaly — points back at this goal as
+		// a child won't recurse infinitely.
+		const ancestors = new Set(opts?.renderedAncestors ?? []);
+		ancestors.add(goal.id);
+
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
 			${tlExpanded ? html`
@@ -854,7 +899,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}
 					`)}
-					${spawnedChildren.map(child => renderSpawnedChildGoalRow(child))}
+					${spawnedChildren.map(child => renderSpawnedChildGoalRow(child, ancestors))}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}
@@ -911,9 +956,24 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 						// inside the archived lead's expanded block. The chevron
 						// only renders when there's something to expand, so we
 						// roll spawned sub-goals into the hasChildren signal.
-						const spawnedSubGoalsOf = (leadId: string) => state.goals.filter(g =>
-							g.parentGoalId === goal.id && g.spawnedBySessionId === leadId
-						);
+						// Apply the same defensive shaping as live spawnedChildren
+						// (dedupe by id, deterministic sort by createdAt then id).
+						const spawnedSubGoalsOf = (leadId: string) => {
+							const seen = new Set<string>();
+							return state.goals
+								.filter(g => g.parentGoalId === goal.id && g.spawnedBySessionId === leadId)
+								.filter(g => { if (seen.has(g.id)) return false; seen.add(g.id); return true; })
+								.sort((a, b) => {
+									const at = a.createdAt ?? 0;
+									const bt = b.createdAt ?? 0;
+									if (at !== bt) return at - bt;
+									return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+								});
+						};
+						// Cycle guard for the archived-lead branch — same shape as
+						// the live branch above.
+						const archivedAncestors = new Set(opts?.renderedAncestors ?? []);
+						archivedAncestors.add(goal.id);
 
 						// Render archived leads, each with their own members + spawned sub-goals
 						const renderLeadWithMembers = (lead: GatewaySession, isLast: boolean) => {
@@ -930,7 +990,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 											${renderArchivedSessionRow(m)}
 											${renderArchivedDelegates(m.id)}
 										`)}
-										${mySubGoals.map(child => renderSpawnedChildGoalRow(child))}
+										${mySubGoals.map(child => renderSpawnedChildGoalRow(child, archivedAncestors))}
 									</div>
 								` : ""}
 							`;
