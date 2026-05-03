@@ -755,6 +755,30 @@ function renderGoalForm(config: GoalFormConfig) {
 }
 
 function goalPreviewPanel() {
+	// Populate previewProjectId for re-attempt / assistant sessions where it
+	// wasn't seeded by the +New Goal picker. Resolution order:
+	// 1. Active session's projectId (server inherits this for re-attempts).
+	// 2. Original goal's projectId via reattemptGoalId.
+	// 3. Match proposal cwd against a registered project's rootPath.
+	if (!state.previewProjectId) {
+		const sid = activeSessionId();
+		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
+		let candidate = sess?.projectId;
+		if (!candidate && sess?.reattemptGoalId) {
+			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
+		}
+		if (!candidate) {
+			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
+			if (cwd) {
+				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+				const target = norm(cwd);
+				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
+			}
+		}
+		if (candidate && state.projects.some(p => p.id === candidate)) {
+			state.previewProjectId = candidate;
+		}
+	}
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
@@ -1877,6 +1901,30 @@ function syncProposalFormState(): void {
 }
 
 function goalProposalPanel() {
+	// Populate previewProjectId for re-attempt / assistant sessions where it
+	// wasn't seeded by the +New Goal picker. Resolution order:
+	// 1. Active session's projectId (server inherits this for re-attempts).
+	// 2. Original goal's projectId via reattemptGoalId.
+	// 3. Match proposal cwd against a registered project's rootPath.
+	if (!state.previewProjectId) {
+		const sid = activeSessionId();
+		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
+		let candidate = sess?.projectId;
+		if (!candidate && sess?.reattemptGoalId) {
+			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
+		}
+		if (!candidate) {
+			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
+			if (cwd) {
+				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+				const target = norm(cwd);
+				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
+			}
+		}
+		if (candidate && state.projects.some(p => p.id === candidate)) {
+			state.previewProjectId = candidate;
+		}
+	}
 	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
