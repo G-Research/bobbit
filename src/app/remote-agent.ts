@@ -10,6 +10,7 @@ import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSu
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
+import { mark } from "./perf.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -438,10 +439,12 @@ export class RemoteAgent {
 		const wsUrl = this._gatewayUrl.replace(/^http/, "ws");
 
 		return new Promise<void>((resolve, reject) => {
+			mark(initial ? "ws:construct" : "ws:reconnect-construct");
 			this.ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
 			let settled = false;
 
 			this.ws.onopen = () => {
+				mark(initial ? "ws:open" : "ws:reconnect-open");
 				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken }));
 			};
 
@@ -455,6 +458,7 @@ export class RemoteAgent {
 
 				if (!settled) {
 					if (msg.type === "auth_ok") {
+						mark(initial ? "ws:auth-ok" : "ws:reconnect-auth-ok");
 						settled = true;
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");

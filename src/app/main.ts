@@ -1,5 +1,7 @@
 import "./app.css";
 import "./storage.js"; // must initialize before anything else
+import { mark, markPaint, installResumeHooks } from "./perf.js";
+mark("main:module"); // earliest reachable mark — module evaluation start
 import { ChatPanel } from "../ui/index.js";
 import {
 	state,
@@ -323,6 +325,8 @@ async function handleHashChange(): Promise<void> {
 // ============================================================================
 
 async function initApp() {
+	mark("init:start");
+	installResumeHooks();
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
@@ -367,7 +371,9 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		state.appView = "gateway-starting";
 	}
+	mark("init:first-render");
 	renderApp();
+	markPaint("init:first-paint");
 
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
@@ -375,7 +381,9 @@ async function initApp() {
 
 	if (savedUrl && savedToken) {
 		try {
+			mark("init:gateway-wait-start");
 			await waitForGateway(savedUrl, savedToken);
+			mark("init:gateway-wait-end");
 
 			// Load saved preferences (palette, timestamps, AI gateway)
 			try {
@@ -397,6 +405,8 @@ async function initApp() {
 						prefs.playAgentFinishSound === false ? "false" : "true";
 				}
 			} catch {}
+
+			mark("init:prefs-loaded");
 
 			// Fire-and-forget one-shot migration of legacy localStorage read state
 			// to the server. Idempotent — guarded by the localStorage key.
