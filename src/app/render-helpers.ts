@@ -907,19 +907,30 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 						const mappedIds = new Set(archivedMembers.filter(m => m.teamLeadSessionId && allLeads.includes(m.teamLeadSessionId)).map(m => m.id));
 						const unmapped = archivedMembers.filter(m => !mappedIds.has(m.id));
 
-						// Render archived leads, each with their own members
+						// Sub-goals spawned by an archived team-lead — surfaced
+						// inside the archived lead's expanded block. The chevron
+						// only renders when there's something to expand, so we
+						// roll spawned sub-goals into the hasChildren signal.
+						const spawnedSubGoalsOf = (leadId: string) => state.goals.filter(g =>
+							g.parentGoalId === goal.id && g.spawnedBySessionId === leadId
+						);
+
+						// Render archived leads, each with their own members + spawned sub-goals
 						const renderLeadWithMembers = (lead: GatewaySession, isLast: boolean) => {
 							const myMembers = [...membersOf(lead.id), ...(isLast ? unmapped : [])];
+							const mySubGoals = spawnedSubGoalsOf(lead.id);
+							const hasContent = myMembers.length > 0 || mySubGoals.length > 0;
 							const expanded = isArchivedParentExpanded(lead.id);
 							return html`
-								${renderArchivedSessionRow(lead, myMembers.length > 0)}
+								${renderArchivedSessionRow(lead, hasContent)}
 								${renderArchivedDelegates(lead.id)}
-								${expanded && myMembers.length > 0 ? html`
+								${expanded && hasContent ? html`
 									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 										${myMembers.map(m => html`
 											${renderArchivedSessionRow(m)}
 											${renderArchivedDelegates(m.id)}
 										`)}
+										${mySubGoals.map(child => renderSpawnedChildGoalRow(child))}
 									</div>
 								` : ""}
 							`;
