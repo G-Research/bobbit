@@ -1,265 +1,433 @@
-# Design Doc — Ask widget keyboard navigation + label polish
+# Reduce UI bundle size — design doc
 
-Translates the goal spec into a concrete implementation plan. No code here — just
-shapes, formats, and test surface.
+Status: design  •  Goal branch: `goal-goal-reduce-ui--0ce41cc6`  •  Author: architect-0938851a
 
-## 1. Files to modify
+## Problem
 
-### Tool schema
-- `defaults/tools/ask/ask_user_choices.yaml` — update `description`, `promptSnippet`,
-  `docs`, and `detail_docs` so the agent is told to supply `tab_label` on every
-  question when `questions.length > 1`. Add a short "Tab labels" section + an
-  example with `tab_label` populated.
-- `defaults/tools/ask/extension.ts` — extend the TypeBox `Type.Object({...})` for
-  each question with `tab_label: Type.Optional(Type.String({ minLength: 1, maxLength: 24 }))`.
-  It stays optional at the JSON-schema layer (single-question asks don't need it);
-  server-side validation enforces "required when questions.length > 1".
+`npm run build:ui` emits a 3.6 MB / 999 kB-gzipped main chunk. The chunk dominates cold-launch parse-and-execute time and PWA snapshot resume. The goal spec mandates main chunk ≤ 600 kB gzipped (≥40% reduction) without architectural rewrites or new deps.
 
-### Server validation
-- `src/server/agent/ask-user-choices-validation.ts`
-  - Extend `UserQuestion` interface with `tab_label?: string`.
-  - In `validateQuestions()`: if `questions.length > 1`, require every `q.tab_label`
-    to be a non-empty string ≤ 24 chars; reject with a clear error string
-    (`questions[i].tab_label is required for multi-question asks (got <value>)`).
-    Also validate that when present (even in single-question asks) it is a
-    string ≤ 24 chars — so bad input is always rejected.
-  - `crossValidate()` does not need changes (answers don't carry `tab_label`).
-- `src/server/server.ts` (~ line 6276) — no behavioural change needed here;
-  `validateQuestions` is already invoked upstream of the tool_use broadcast via
-  the normal tool parameter pipeline. Confirm during implementation whether
-  `validateQuestions` is called on the tool_use input before broadcasting the
-  widget — if not, add a call at the point that builds `matchedQuestions` so
-  malformed asks surface an error to the agent instead of rendering a broken
-  widget. (See Open Questions #1.)
+## Baseline (this worktree, Vite 7.3.2)
 
-### Widget
-- `src/ui/components/AskUserChoicesWidget.ts`
-  - Extend `AskQuestion` interface with `tab_label?: string`.
-  - Tab rendering: replace `${idx + 1}. ${q.question.slice(0,40)}` with
-    `${letter(idx)}. ${q.tab_label}` (letter = `String.fromCharCode(65 + idx)`).
-    Only shown when `questions.length > 1` (tabs already hidden otherwise).
-  - Option rendering: prefix every option card's visible text with a numbered
-    badge (`1.`, `2.`, …) via a dedicated `<span class="ask-option-index">`
-    before `.ask-option-text`. "Other" uses `options.length + 1`.
-  - Primary button: compute `isLast = this._activeTab === this.questions.length - 1`
-    in `render()`.
-    - Multi-question + not last → render **Next** button in place of Submit.
-      Disabled until the active question's draft entry is valid (re-use the
-      per-question validity predicate extracted from `_canSubmit()`).
-    - Multi-question + last → render **Submit** (existing behaviour), disabled
-      until all questions valid.
-    - Single-question → unchanged (`_shouldHideSubmit()` already handles this).
-  - Add a keydown listener on the `.ask-widget` root (`@keydown=${this._onKey}`).
-  - New state: `@state() private _focusedOption = 0` — index of focused option
-    card within the active question (0 = first real option, `q.options.length`
-    = the always-rendered "Other" row). Reset to 0 on tab change. Applied as a
-    roving `tabindex="0"` on the focused card, `-1` on others.
-  - Tabs get roving tabindex too: the active tab button has `tabindex="0"`,
-    others `tabindex="-1"`. ArrowLeft/ArrowRight on a focused tab button moves
-    tab focus and activates the new tab (ARIA tablist with automatic activation).
+Captured via `npm run build:ui` after `npm ci`. Top emitted chunks:
 
-### Fixture (plain-JS mirror)
-- `tests/ask-user-choices-widget.html` — mirror all rendering changes (numbered
-  tabs, numbered options, Next vs. Submit, roving tabindex, keydown handler,
-  Escape/number/letter shortcuts). Every multi-question fixture call must pass
-  `tab_label` so it matches the real widget's expected input.
+```
+dist/ui/assets/pdf.worker.min-Cpi8b8z3.mjs  1,050.96 kB                       (worker, lazy)
+dist/ui/assets/index-Bz4tEU50.css             344.17 kB │ gzip:  50.28 kB
+dist/ui/assets/anthropic-E_eUeXte.js           94.52 kB │ gzip:  24.30 kB
+dist/ui/assets/client-Sq9UPDIz.js             104.33 kB │ gzip:  28.11 kB
+dist/ui/assets/google-shared-Ceinhjbm.js      269.60 kB │ gzip:  54.86 kB
+dist/ui/assets/mistral-xH6e0y0y.js            836.22 kB │ gzip: 113.52 kB     (!)
+dist/ui/assets/index-DB1RfC0H.js            3,586.09 kB │ gzip: 999.48 kB     (!)
++ small per-provider chunks (google, openai-*, github-copilot-headers, …)
++ KaTeX font assets (~50 woff/woff2/ttf, ~750 kB lazy)
+(!) Some chunks are larger than 500 kB after minification.
+```
 
-### Unit tests
-- `tests/ask-user-choices-widget.spec.ts` — update existing multi-question
-  fixtures to include `tab_label`; add new tests (see Test plan §6).
+Key finding: only `index-*.js` and `mistral-*.js` exceed 500 kB. The pi-ai providers are already lazy-loaded chunks via dynamic `import()` inside `node_modules/@mariozechner/pi-ai/dist/providers/register-builtins.js`. They are split correctly; they are **not** pulled into `index-*.js`. The big win is `index-*.js` itself.
 
-### Browser E2E
-- `tests/e2e/ui/ask-user-choices-ui.spec.ts` — add one keyboard-only
-  multi-question flow; update any existing multi-question scenarios to include
-  `tab_label`.
+Confirmed: **no static UI imports of `pi-ai/dist/providers/*`** exist in `src/`. Mistral/google-shared are emitted because pi-ai's lazy `import("./mistral.js")` is reachable, not because UI code statically imports them. `mistral.js` is only needed when the user picks a Mistral model — see "Provider tree-shaking audit" below.
 
-### Mock agent
-- `tests/e2e/mock-agent-core.mjs` — all multi-question mock ask emissions now
-  include `tab_label` on each question.
+The current main-chunk bloat comes from three sources, in order:
 
-## 2. Data model
+1. **Route modules eagerly imported in `render.ts`** — settings-page (3,545 LOC), goal-dashboard (2,195), workflow-page (1,159), tool-manager-page (872), search-page (726), role-manager-page (766), staff-page (681), skills-page (333). Total ~10,277 LOC of TypeScript that must run to render any route.
+2. **MarkdownBlock + KaTeX** statically pulled at top of `render.ts:2`. Once `MarkdownBlock.js` is in the graph, KaTeX, marked, highlight.js parsers etc. ride along and are forced into the main chunk.
+3. **Tool renderer registry** — `src/ui/tools/index.ts` synchronously imports 30+ renderers and wires them at module load. Several pull in heavy artifacts (`pdfjs-dist`, `docx-preview`, `MarkdownBlock`, `Diff`, `CodeBlock`).
+
+---
+
+## Scope item 1 — Route-level code splitting
+
+### Plan
+
+Edit `src/app/render.ts` to remove eager imports for route page modules and replace the `mainArea()` switch (lines 2624-2654) with a lazy-loader pattern that dynamic-imports the page module on first navigation, caches the imported render function in module scope, and re-renders once loaded.
+
+**Static imports to convert** (in `src/app/render.ts`):
+
+| Line | Current import | Becomes |
+|---|---|---|
+| 59 | `import { renderGoalDashboard } from "./goal-dashboard.js";` | dynamic on `route.view === "goal-dashboard"` |
+| 60 | `import "./goal-dashboard.css";` | move into `goal-dashboard.ts` itself (CSS travels with chunk) |
+| 62 | `import { renderRoleManagerPage } from "./role-manager-page.js";` | dynamic on `roles` / `role-edit` |
+| 63 | `import "./role-manager.css";` | move into module |
+| 64 | `import { renderToolManagerPage } from "./tool-manager-page.js";` | dynamic on `tools` / `tool-edit` |
+| 65 | `import "./tool-manager.css";` | move into module |
+| 66 | `import { renderWorkflowPage } from "./workflow-page.js";` | dynamic on `workflows` / `workflow-edit` |
+| 67 | `import "./workflow-page.css";` | move into module |
+| 68 | `import "./config-scope.css";` | keep eager (shared) |
+| 69 | `import { renderStaffPage } from "./staff-page.js";` | dynamic on `staff` / `staff-edit` |
+| 70 | `import { renderSkillsPage } from "./skills-page.js";` | dynamic on `skills` |
+| 71 | `import { renderSettingsPage } from "./settings-page.js";` | dynamic on `settings` |
+| 72 | `import { renderSearchPage, initSearchPage, resetSearchPage } from "./search-page.js";` | dynamic on `search`; `resetSearchPage` becomes a no-op when module not yet loaded |
+
+`SystemPromptDialog` at `render.ts:2258` is **already** dynamic — leave as is.
+
+`components-editor.ts` is only imported from `settings-page.ts:33` so it falls out of the main chunk automatically when settings is split.
+
+**Loader helper** — add to `src/app/render.ts`:
 
 ```ts
-// src/ui/components/AskUserChoicesWidget.ts
-export interface AskQuestion {
-  question: string;
-  options: string[];
-  tab_label?: string;       // NEW — required when questions.length > 1
-  // allow_other removed — "Other" is always rendered.
-  multi?: boolean;
-  min?: number;
-  max?: number;
-}
-
-// src/server/agent/ask-user-choices-validation.ts
-export interface UserQuestion {
-  question: string;
-  options: string[];
-  tab_label?: string;       // NEW — same semantics
-  // allow_other removed — "Other" is always rendered.
-  multi?: boolean;
-  min?: number;
-  max?: number;
+// Cache imported page-render functions; re-render once a chunk lands.
+const _pageCache: Record<string, any> = {};
+function lazyPage(key: string, importer: () => Promise<any>, exportName: string) {
+  if (_pageCache[key]) return _pageCache[key]();
+  importer().then((m) => { _pageCache[key] = m[exportName]; renderApp(); });
+  return loadingPlaceholder();
 }
 ```
 
-Validation rule (server):
-- `typeof tab_label === "string"` when present.
-- `tab_label.trim().length >= 1` and `tab_label.length <= 24` when present.
-- If `questions.length > 1`, every question MUST have `tab_label` — reject
-  otherwise. No fallback.
-- Single-question asks: `tab_label` is ignored (not rendered) but still
-  type-checked when present.
+`loadingPlaceholder()` reuses `bobbitLoadingAnimation` (already imported, no new dep) inside a centred wrapper matching existing route padding.
 
-## 3. Rendering spec
+**Eager-import call sites already using dynamic `import()`** in `render.ts` (lines 124, 129, 134, 144, 313, 908, 1073, 2352) and `main.ts` (lines 158, 172, 188, 202, 222, 235, 250, 263, 519, 638) for `loadXxxPageData()` calls already work — they will resolve from the same chunk Vite emits for the page module, so no duplication.
 
-- **Tab label**: `A. ${q.tab_label}` (letter via `String.fromCharCode(65 + idx)`).
-  Rendered as two spans: `<span class="ask-tab-letter">A.</span>
-  <span class="ask-tab-label">User behaviour</span>`. The `✓` marker logic is
-  unchanged.
-- **Option label**: option card adds a leading
-  `<span class="ask-option-index font-mono">${n}.</span>` before the existing
-  `<span class="ask-option-text">`, where `n = optIdx + 1`. The "Other" row uses
-  `n = q.options.length + 1`. The numbered prefix is styled as a monospace badge
-  so the shortcut (`1`, `2`, …) is obvious.
-- **Primary button**:
-  - Label: `Next` when multi-question and not last; `Submit` when last (or
-    single-question and Submit is shown by existing rules); `Submitting…` while
-    in-flight (unchanged).
-  - `disabled` predicate:
-    - Next: `!_isQuestionValid(this._activeTab)`.
-    - Submit: `!_canSubmit() || _submitting` (unchanged).
-  - Click handler:
-    - Next → `this._activeTab = this._activeTab + 1` and reset `_focusedOption = 0`.
-    - Submit → `_submit()` (unchanged).
-- Mouse/touch flows untouched apart from label strings. Single-select
-  auto-submit (single-question) and auto-advance (multi-question) behaviour
-  preserved.
+### Expected impact
 
-## 4. Keyboard handling
+Removing 10,277 LOC × ~300 bytes/LOC of bundled JS from the main chunk → ~3 MB raw / ~700 kB gzipped → ~300 kB gzipped in main. Each page chunk lands as a separate file in `dist/ui/assets/`. **Estimated -300–500 kB gzipped.** Settings alone (3,545 LOC, ~600 kB raw) likely accounts for 100+ kB gzipped.
 
-One keydown listener on `.ask-widget` root. Early-out guard: if
-`document.activeElement` is the `.ask-other-input` text input, only intercept
-**Enter** (submit/next) and **Escape** (clear); never intercept digits or
-letters. All other keys fall through to the text input.
+### Validation
 
-Key map (handler runs only when focus is inside the widget):
+`npm run build:ui` must emit one chunk per page module (e.g. `settings-page-*.js`, `goal-dashboard-*.js`). Manual: navigate to each route, check Network panel shows the new chunk fetched, page renders with placeholder briefly then real content.
 
-| Key | Behaviour |
-|-----|-----------|
-| `ArrowDown` | `_focusedOption = (_focusedOption + 1) % optionCount`; `preventDefault`. Also physically focus the card (for screen-reader parity). |
-| `ArrowUp` | `_focusedOption = (_focusedOption - 1 + optionCount) % optionCount`; `preventDefault`. |
-| `ArrowLeft` / `ArrowRight` | Only when focus is on a tab button: move tab focus + activate new tab (ARIA tablist auto-activation). `preventDefault`. |
-| `Enter` | If the focused element is the primary button, click it. Else if single-question + single-select + a focused option exists → select it (auto-submits via existing path). Else if primary button is enabled → click it (Next or Submit). `preventDefault`. |
-| `Tab` / `Shift+Tab` | Browser default — DOM order is: tablist (one roving stop) → options radiogroup (one roving stop) → Other text input (when present) → primary button. |
-| `Escape` | Clear active question: set `_draft[_activeTab].selected = q.multi ? [] : null` and `_draft[_activeTab].other_text = ""`. `preventDefault`. Do not submit or close. |
-| `1`–`9` | `pickByIndex(n - 1)` on the active question: |
-| | – out-of-range (>= optionCount): ignore. |
-| | – single-select: select the option. Single-question → auto-submits (existing path). Multi-question + not last → auto-advances (existing path). Last question → stay put (user must press Enter to Submit). |
-| | – multi-select: toggle the option (no auto-advance). |
-| | `preventDefault` on accept. Skipped when text input has focus. |
-| `A`–`Z` (case-insensitive) | `jumpToTab(code - 65)` in multi-question asks. Out-of-range ignored. Updates `_activeTab` and resets `_focusedOption = 0`. Single-question asks: ignored. Skipped when text input has focus. |
+---
 
-Helper predicates:
-- `optionCount(qIdx) = q.options.length + 1` (the +1 is the always-rendered "Other" row).
-- `isTextInputFocused()` = `document.activeElement instanceof HTMLInputElement
-  && activeElement.type === "text"`.
+## Scope item 2 — Lazy-load heavy renderers / dialogs
 
-## 5. ARIA
+### Plan
 
-- Tab bar: `role="tablist"` (already present); each tab button keeps
-  `role="tab"`, `aria-selected`, plus new `tabindex` (0 for active, -1 for
-  others), and new `aria-controls="ask-panel-${idx}"`.
-- Panel: `role="tabpanel"` gets `id="ask-panel-${idx}"` and
-  `aria-labelledby="ask-tab-${idx}"`.
-- Options container: swap the implicit grouping for
-  `role="radiogroup"` (single-select) or `role="group"` (multi-select) with
-  `aria-label=${q.question}`. Each option `<label>` gets `role="radio"` /
-  `role="checkbox"` and `aria-checked` reflecting state; roving `tabindex`
-  (0 on `_focusedOption`, -1 otherwise).
-- The visually-hidden native `<input>` stays for form semantics and for the
-  fixture tests that already query by `input[type=radio]`.
+#### 2a. MarkdownBlock + KaTeX
 
-## 6. Test plan
+Eight static imports today (grep `MarkdownBlock`):
 
-### Unit (`tests/ask-user-choices-widget.spec.ts`)
-Update first: every existing multi-question fixture gets `tab_label` on each
-question, and label assertions are updated to the new format.
+```
+src/app/render.ts:2
+src/ui/tools/artifacts/artifacts.ts:2
+src/ui/tools/renderers/GateInspectRenderer.ts:10
+src/ui/tools/artifacts/MarkdownArtifact.ts:6
+src/ui/tools/renderers/GateVerificationLive.ts:11
+src/ui/tools/renderers/VerificationResultRenderer.ts:5
+src/ui/components/VerificationOutputModal.ts:9
+```
 
-Add:
-1. **Tab label format** — multi-question ask renders `A. <tab_label>` on tab 0,
-   `B. <tab_label>` on tab 1, etc. Letter and label are in separate spans.
-2. **Option label format** — options render `1.`, `2.`, … prefixes; "Other" is
-   `${options.length + 1}.`.
-3. **Next vs. Submit button swap** — in a 2-question ask, question 0 shows Next
-   (disabled with no selection, enabled after selecting), question 1 shows
-   Submit. Clicking Next on q0 advances to q1; Submit on q1 submits.
-4. **ArrowDown / ArrowUp** — move `_focusedOption` with wrap-around; radio
-   `tabindex` follows.
-5. **ArrowLeft / ArrowRight** on tab button — move tab focus and activate new
-   tab.
-6. **Enter on primary button** — clicks Next or Submit depending on active tab.
-7. **Enter on focused option (single-question, single-select)** — selects and
-   auto-submits.
-8. **Escape clears** — single-select clears to `null`; multi-select clears to
-   `[]`; `other_text` reset to `""`. Does not submit or advance tab.
-9. **Number key 1–9 pick** —
-   - single-select + multi-question + non-last: auto-advances to next tab.
-   - single-select + multi-question + last: selects, no advance.
-   - single-select + single-question: auto-submits.
-   - multi-select: toggles the option.
-   - out-of-range (e.g. `7` with 3 options): no-op.
-10. **Letter key A–Z jump** — A focuses tab 0, B focuses tab 1, etc. Out-of-range
-    is a no-op. Single-question ask ignores letter keys.
-11. **No hijack while typing in Other** — focus the `.ask-other-input`, press
-    `3`, `b`: text field receives the characters, widget does not intercept.
-    Only Enter (submit) and Escape (clear) still intercept from inside the
-    Other input.
-12. **"Other" numbering** — every option list renders the Other row with
-    `${options.length + 1}.` (it is always present); pressing that number key
-    selects Other (single-select — focuses the always-visible text input;
-    multi-select — toggles).
+`<markdown-block>` is a custom element registered as a side effect of importing the file. The element is `<markdown-block>` (used inside lit templates). Because it's registered globally once, **a single eager import anywhere in the graph forces the entire KaTeX/marked/highlight.js graph into the main chunk**.
 
-### Server validation (`tests/ask-user-choices-validation.spec.ts` if present, else a new one)
-13. `validateQuestions` rejects a 2-question ask where `tab_label` is missing on
-    any question; error message mentions `tab_label` and the question index.
-14. `validateQuestions` rejects `tab_label` longer than 24 chars.
-15. `validateQuestions` accepts a single-question ask without `tab_label`.
-16. `validateQuestions` accepts a multi-question ask where every question has a
-    valid `tab_label`.
+Strategy: introduce one helper `src/ui/lazy/markdown-block.ts`:
 
-### Browser E2E (`tests/e2e/ui/ask-user-choices-ui.spec.ts`)
-17. **Keyboard-only multi-question submission** — mock agent emits a
-    2-question ask (both with `tab_label`); test focuses the widget, presses
-    `1` (picks option 1, auto-advances to q2), presses `2` (picks option 2, no
-    advance — last question), presses `Enter` (Submit). Assert the submitted
-    envelope matches and the widget is read-only.
+```ts
+let loaded = false;
+export function ensureMarkdownBlock(): void {
+  if (loaded) return;
+  loaded = true;
+  import("@mariozechner/mini-lit/dist/MarkdownBlock.js");
+}
+```
 
-## 7. Out of scope
+Replace every static `import "@mariozechner/mini-lit/dist/MarkdownBlock.js";` with a call to `ensureMarkdownBlock()` inside the renderer/component's `render()` (or constructor for components). The custom-element upgrade is asynchronous-tolerant: lit re-renders the host on connection, and unknown-element nodes upgrade in place when the definition lands. Worst-case visual: a single ~50 ms flash of unstyled markdown text on first encounter — acceptable.
 
-- No changes to mouse/touch flows other than label strings (numbered tabs/options,
-  Next vs. Submit).
-- **No fallback** for missing `tab_label` — server rejects multi-question asks
-  without it. No auto-generation from `question` text.
-- No changes to the `ask_user_choices_response` envelope format. Answers
-  continue to carry `{ question, selected, other_text }` only.
-- No new CSS theme tokens — reuse existing `border-border`, `bg-card`, etc.
-- No changes to `min`/`max` semantics.
+KaTeX comes in transitively via MarkdownBlock; deferring MarkdownBlock defers KaTeX automatically. KaTeX font woff/woff2/ttf assets are emitted as separate URLs already and will be lazy-fetched on first math render.
 
-## 8. Open questions
+#### 2b. pdfjs-dist / docx-preview
 
-1. **Where does `validateQuestions` run on inbound tool_use?** The current
-   codebase calls it in the `/api/internal/user-question/submit` path (against
-   the transcript-captured input). We should confirm whether the tool_use is
-   validated when first broadcast to the UI — if not, an invalid multi-question
-   ask would render a broken tab bar before the submit path catches it. If the
-   validator isn't wired there yet, the implementer should add a call either in
-   the tool extension's `execute` (return an error content instead of the stub)
-   or in the WS broadcast pipeline so the agent gets immediate feedback. Either
-   path is acceptable — flag for the coder.
-2. **Case of letter shortcut**: spec says A–Z; should we also accept
-   lowercase `a`–`z`? Recommendation: yes (compare `event.key.toUpperCase()`);
-   cheap and user-friendly. Flagged in case the reviewer prefers strict.
-3. **Enter inside the Other text input**: currently submit when valid — confirm
-   this is still desired (design assumes yes; matches existing behaviour
-   preserved by not intercepting anything else from the text input).
+Already dynamic in some sites but **statically imported** at:
+
+- `src/ui/utils/attachment-utils.ts:1,3,4` — `import { parseAsync } from "docx-preview"; import * as pdfjsLib from "pdfjs-dist"`. Pulled by `extract-document.ts:8` (`loadAttachment`), which is registered eagerly in `src/ui/tools/index.ts:3`.
+- `src/ui/dialogs/AttachmentOverlay.ts:4,8`
+- `src/ui/tools/artifacts/PdfArtifact.ts:4`
+- `src/ui/tools/artifacts/DocxArtifact.ts:2`
+
+Pdfjs.worker is already lazy-emitted (see baseline `pdf.worker.min-*.mjs`). The 100+ kB pdfjs main library however currently lands in `index-*.js` because `attachment-utils.ts` is reachable from the eager renderer registry (via `extract-document.ts`).
+
+Strategy: change `attachment-utils.ts` to use dynamic `await import()` inside `loadAttachment()` for both `pdfjs-dist` and `docx-preview`. Same for `AttachmentOverlay.ts` (lazy-init when overlay opens). `PdfArtifact.ts` and `DocxArtifact.ts` are already only loaded when their artifact type is encountered (via lazy-renderer plan 2c) — but the static `import * as pdfjsLib` should still become dynamic so the artifact module itself stays small.
+
+#### 2c. Tool renderer lazy registration
+
+`src/ui/tools/index.ts` registers 30+ renderers eagerly at module load. Several have heavy graph dependencies:
+
+- `GateInspectRenderer` → MarkdownBlock + KaTeX
+- `GateVerificationLive` → MarkdownBlock
+- `VerificationResultRenderer` → MarkdownBlock
+- `ProposalRenderer` → ExpandableSection (small, ok)
+- `extract-document` → attachment-utils → pdfjs + docx-preview
+- `artifacts-tool-renderer` → CodeBlock + Diff (mini-lit) + ConsoleBlock
+
+Strategy: convert `renderer-registry.ts` to support a **lazy registration record**:
+
+```ts
+type LazyEntry = { kind: "lazy"; load: () => Promise<ToolRenderer<any, any>>; placeholder: ToolRenderer<any, any> };
+```
+
+`getToolRenderer(name)` returns the lazy entry's placeholder (a tiny no-op renderer that shows the tool name + spinner) and kicks off `load()` if not started. When the promise resolves, cache the real renderer and trigger `renderApp()` so the tool block re-renders with the full UI.
+
+Convert `src/ui/tools/index.ts` to register heavy ones lazily (only the ~6 above), keep light ones (Bash, Read, Write, Edit, Ls, Find, Grep, browser_*, web_*, team_*, task_*, gate_list, gate_signal, gate_status, ask_user_choices, activate_skill) eager — they're tiny (one `lit` html template plus one or two lucide icons each) and are exercised constantly, so paying the round-trip per tool would feel laggy.
+
+Lazy candidates (estimated savings):
+
+| Renderer | Heavy dep |
+|---|---|
+| `GateInspectRenderer`, `GateVerificationLive`, `VerificationResultRenderer` | MarkdownBlock + KaTeX |
+| `extract_document` | pdfjs + docx-preview |
+| `artifacts-tool-renderer` (and `MarkdownArtifact`, `PdfArtifact`, `DocxArtifact`, `HtmlArtifact`, `SvgArtifact`) | CodeBlock, Diff, highlight.js |
+| `PreviewOpenRenderer` | uses HtmlArtifact transitively |
+| `ScreenshotRenderer` | image-utils only — light, keep eager |
+| `EditProposalRenderer`, `ProposalRenderer` | light — keep eager (they render in proposal panel, hot path) |
+
+`extract-document.ts` and `javascript-repl.ts` self-register via top-level `registerToolRenderer()` calls at module load. To make them truly lazy, drop the side-effect imports at `src/ui/tools/index.ts:2-3` and instead register a **lazy entry** that imports the file when the tool is first encountered.
+
+### Expected impact
+
+- MarkdownBlock + KaTeX deferral: -150–250 kB gzipped from main (KaTeX parser alone is ~80 kB gzipped; marked + highlight.js add another ~70 kB).
+- pdfjs-dist deferral: -100–150 kB raw / ~40 kB gzipped from main.
+- Lazy renderers: small per-renderer gain, mainly enables 2a/2b above to actually take effect (without 2c, the eager registry pulls them right back in).
+
+---
+
+## Scope item 3 — Provider tree-shaking audit
+
+### Plan
+
+The 836 kB mistral chunk and 270 kB google-shared chunk are emitted as their own chunks because pi-ai's `register-builtins.js` uses dynamic `import("./mistral.js")` and `import("./google.js")` (verified). They are **already** off the main bundle. We don't pay their cost on first load.
+
+Confirmed grep — only static UI imports of `@mariozechner/pi-ai` are types and a few small functions:
+
+```
+streamSimple             → ui/utils/proxy-utils.ts, ui/components/AgentInterface.ts
+getProviders             → ui/dialogs/SettingsDialog.ts, ui/dialogs/ProvidersModelsTab.ts
+getModel, modelsAreEqual → ui/dialogs/ModelSelector.ts, ui/components/ProviderKeyInput.ts
+getModel                 → app/remote-agent.ts
+type Model               → ui/index.ts, ui/storage/types.ts, ui/components/MessageEditor.ts, …
+type ToolResultMessage   → many renderers
+```
+
+None of these reach `providers/mistral.js` or `providers/google.js` synchronously. They're pulled only via the lazy `register-builtins.js` path when a Mistral / Google model is actually selected.
+
+**Action**: no code change required — just add a build assertion that confirms `mistral-*.js` and `google-shared-*.js` are emitted as **separate** chunks (not merged into main). If a future refactor accidentally hoists a static provider import, the assertion fails fast.
+
+The `mistral` chunk is large (836 kB) because pi-ai bundles a Mistral-specific codepath; reducing it is upstream work in `@mariozechner/pi-ai` and **out of scope**. Settings dialog could lazy-load model lists, but it's behind a settings click which is already lazy under item 1.
+
+### Expected impact
+
+0 kB main-chunk reduction (already lazy). This step is a guard, not a saving.
+
+---
+
+## Scope item 4 — Vite build flags
+
+### Plan
+
+Edit `vite.config.ts` (last section of `defineConfig`, line ~280):
+
+```ts
+build: {
+  outDir: "dist/ui",
+  target: "esnext",                     // emit modern JS, smaller transpilation
+  modulePreload: { polyfill: false },   // ~2 kB; polyfill unused in evergreen browsers
+  // cssCodeSplit defaults to true — confirmed (no override in current config)
+  chunkSizeWarningLimit: 600,           // tighten so bundle regressions are flagged
+},
+```
+
+`build.cssCodeSplit` is on by default — Vite emits per-chunk CSS automatically. Confirmed by absence of override in current `vite.config.ts`.
+
+`target: "esnext"` is safe: the app already uses top-level await, optional-chaining, nullish-coalescing, and ES2022 class features. The PWA support matrix (iOS 17+, modern Chrome/Edge/Firefox) handles esnext output.
+
+### Expected impact
+
+- `target: esnext`: -1–3% main chunk size (skipped helpers, native syntax instead of polyfill helpers). ~10–30 kB gzipped.
+- `modulePreload.polyfill: false`: -2 kB.
+
+---
+
+## Scope item 5 — Dead-code sweep
+
+### Plan
+
+`npx knip` output (this worktree, full):
+
+- **1 unused dependency**: `acme-client` in `package.json:45`. Server-only candidate; verify before removing. Out of UI bundle scope; keep for separate cleanup.
+- **8 unlisted dependencies**: `playwright`, `esbuild`, `marked`, `highlight.js` (×4). All transitive — used via `@mariozechner/mini-lit`. No action: adding them to `dependencies` would make builds reproducible but doesn't change bundle size.
+- **81 unused exports** (top items, all sourced from `npx knip`):
+  - `src/app/state.ts`: `renderAppSync`, `addPendingProject`, `removePendingProject`, `GOAL_STATE_COLORS` — confirm and delete.
+  - `src/app/render-helpers.ts`: `escapeHtml`, `renderProjectBadge`, `shortenPath`, `stopTimeRefresh`, `renderSidebarSession`, `goalStateIcon`.
+  - `src/app/ui-snapshot.ts`: `writeSnapshot`, `getActiveSessionFromSnapshot`, `readSnapshot`, `default`, `clearSnapshot`, `flushPendingSnapshot` — six exports, ~80% of the file's surface area unused. Delete or convert to private.
+  - `src/app/goal-dashboard.ts:2193`: `renderAgentPanel`.
+  - `src/app/favicon-badge.ts:109`: `hideFaviconBadge`.
+  - `src/app/dialogs.ts:1208`: `showAssignRoleDialog`.
+  - `src/app/follow-tail.ts:153`: `resetFollowTail`.
+  - `src/ui/components/CostPopover.ts:28`: `CostPopover` (entire class).
+  - `src/ui/bobbit-render.ts`: `drawShadowPixels`, `renderBodyToDataURL`, `renderAccessoryToDataURL`, `renderChatBlobCanvas`.
+  - `src/ui/components/ToolPermissionCard.ts:12`: `ToolPermissionCard` class.
+  - `src/ui/bobbit-sprite-data.ts`: `SHADOW_REST`, `SHADOW_BUSY_FRAMES`, `SHADOW_COMPACT_FRAMES`.
+
+**Server-side exports** (unused) are not in the UI bundle but still worth a separate cleanup pass — out of scope for this goal.
+
+Strategy: in this goal, delete the **UI-side** unused exports above (≈30 entries). For each, confirm with a `Grep` that no dynamic-string reference exists, then drop. Leave server exports alone.
+
+### Expected impact
+
+5–15% of touched files, but most are tiny utilities. Realistic main-chunk impact: **-10–30 kB gzipped**. The bigger value is cleaner code surface.
+
+---
+
+## Scope item 6 — SW route-chunk warming
+
+### Plan
+
+Once route splitting (item 1) lands, edit `public/sw.js`:
+
+1. **Build-time chunk discovery**: extend the `bobbit-sw-version` Vite plugin in `vite.config.ts` to read the manifest from `dist/ui/.vite/manifest.json` (Vite generates this when `build.manifest: true`) inside the existing `closeBundle` hook. Resolve the chunk paths for the most-likely-next-routes (`session`, `goal-dashboard`, `chat-panel`) and inject them into `sw.js` via a second placeholder `__BOBBIT_PRECACHE_CHUNKS__` next to the existing `__BOBBIT_BUILD_ID__`.
+2. **SW change** (`public/sw.js:29`): replace the hard-coded `PRECACHE_URLS = ["/", "/index.html", "/manifest.json"]` with the injected list:
+   ```js
+   const PRECACHE_URLS = ["/", "/index.html", "/manifest.json", ...JSON.parse("__BOBBIT_PRECACHE_CHUNKS__")];
+   ```
+3. **Add `build.manifest: true`** to `vite.config.ts` build section so the manifest is generated.
+
+Critical: `/assets/*` is currently bypassed by `sw.js` (`if (url.pathname.startsWith("/assets/")) return;` at line 102) — that bypass must remain, but the **install-time** `cache.addAll(PRECACHE_URLS)` writes to the cache once; subsequent fetches still bypass the SW (browser HTTP cache handles them via ETag), which is fine. Pre-caching is beneficial for **offline cold starts**, where the browser cache may be cold but the SW cache survives.
+
+### Expected impact
+
+No bundle-size change. Faster cold starts on flaky networks. Per spec, this is the smallest of the six items.
+
+---
+
+## Proposed task partition
+
+Six independently-shippable, non-overlapping tasks. Tasks 1, 2a, 4, 5 can run fully in parallel on day one. Tasks 2b/2c depend on the lazy-renderer registry helper landed in task 2a's first commit.
+
+### Task A — Route-level code splitting (item 1)
+- **Files**: `src/app/render.ts` (lines 59-72, 2624-2654, plus loader helper). Move CSS imports into the page modules they belong to: `src/app/goal-dashboard.ts`, `src/app/role-manager-page.ts`, `src/app/tool-manager-page.ts`, `src/app/workflow-page.ts`.
+- **Scope**: extract `lazyPage()` + `loadingPlaceholder()`, replace eager imports with dynamic loaders, move per-page CSS into the page modules. No changes to page module internals.
+- **Depends on**: none.
+- **Estimated savings**: -300–500 kB gzipped.
+
+### Task B — MarkdownBlock + KaTeX deferral (item 2a)
+- **Files**: new `src/ui/lazy/markdown-block.ts`. Edit `src/app/render.ts:2`, `src/ui/tools/artifacts/artifacts.ts:2`, `src/ui/tools/renderers/GateInspectRenderer.ts:10`, `src/ui/tools/artifacts/MarkdownArtifact.ts:6`, `src/ui/tools/renderers/GateVerificationLive.ts:11`, `src/ui/tools/renderers/VerificationResultRenderer.ts:5`, `src/ui/components/VerificationOutputModal.ts:9`.
+- **Scope**: replace static `import "MarkdownBlock.js"` with `ensureMarkdownBlock()` calls at component construction or first `render()`.
+- **Depends on**: none.
+- **Estimated savings**: -150–250 kB gzipped.
+
+### Task C — Lazy tool-renderer registry (item 2c)
+- **Files**: `src/ui/tools/renderer-registry.ts` (add `LazyEntry` support), `src/ui/tools/index.ts` (convert heavy renderers to lazy: `GateInspectRenderer`, `GateVerificationLive`, `VerificationResultRenderer`, `extract_document`, `artifacts-tool-renderer`, `PreviewOpenRenderer`).
+- **Scope**: introduce lazy-registration mechanism, convert ~6 heavy renderers, ensure re-render on chunk arrival.
+- **Depends on**: Task B (so MarkdownBlock-using renderers actually drop from main once their carrier modules are split out).
+- **Estimated savings**: enables full effect of Task B; -50–80 kB gzipped on top.
+
+### Task D — pdfjs / docx-preview deferral (item 2b)
+- **Files**: `src/ui/utils/attachment-utils.ts:1-8`, `src/ui/dialogs/AttachmentOverlay.ts:4,8`, `src/ui/tools/artifacts/PdfArtifact.ts:4,9`, `src/ui/tools/artifacts/DocxArtifact.ts:2`.
+- **Scope**: convert top-level static imports to dynamic `await import()` inside the function that needs them. `pdfjsLib.GlobalWorkerOptions.workerSrc` set inside the dynamic init function.
+- **Depends on**: none (works without Task C; Task C amplifies the effect by also keeping the artifact renderers themselves out of main).
+- **Estimated savings**: -100–150 kB raw / ~40 kB gzipped.
+
+### Task E — Vite build flags + dead-code sweep (items 4 + 5)
+- **Files**: `vite.config.ts` (build section), plus deletions across `src/app/state.ts`, `src/app/render-helpers.ts`, `src/app/ui-snapshot.ts`, `src/app/dialogs.ts`, `src/app/follow-tail.ts`, `src/app/favicon-badge.ts`, `src/ui/components/CostPopover.ts`, `src/ui/components/ToolPermissionCard.ts`, `src/ui/bobbit-render.ts`, `src/ui/bobbit-sprite-data.ts`, `src/app/goal-dashboard.ts:2193`.
+- **Scope**: add `target: "esnext"`, `modulePreload.polyfill: false`, `chunkSizeWarningLimit: 600`. Delete UI-side unused exports listed in scope item 5.
+- **Depends on**: none.
+- **Estimated savings**: -10–35 kB gzipped combined.
+
+### Task F — SW route-chunk warming + bundle-size assertion test (item 6 + validation)
+- **Files**: `vite.config.ts` (extend `bobbitSwVersion()` plugin, set `build.manifest: true`), `public/sw.js` (line 29), new `tests/bundle-size.spec.ts`.
+- **Scope**: inject precache chunk list into SW at build time; add a Node-test that runs `npm run build:ui` (or reads `dist/ui` after a previous build) and asserts `index-*.js` gzipped size ≤ 600 kB and that no non-worker chunk exceeds 500 kB except the known PDF worker.
+- **Depends on**: Task A (route chunks must exist before SW can pre-cache them).
+
+---
+
+## Validation plan
+
+For every PR in the chain:
+
+```bash
+npm run check                                                          # must pass
+npm run test:unit 2>&1 | tail -5                                       # all green
+npm run test:e2e 2>&1 | tail -5                                        # all green, especially:
+#   tests/e2e/ui/pwa-resume-cold-offline.spec.ts
+#   tests/e2e/ui/pwa-resume-pageshow.spec.ts
+#   tests/e2e/ui/pwa-prepaint-post-render.spec.ts
+npm run build:ui 2>&1 | tail -40                                       # capture chunk sizes
+npx vite-bundle-visualizer 2>&1 | tail -20                             # treemap; attach to PR
+```
+
+### Bundle-size assertion (Task F)
+
+`tests/bundle-size.spec.ts`:
+
+```ts
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
+test("main UI chunk fits under gzip budget", () => {
+  const assets = join("dist", "ui", "assets");
+  const files = readdirSync(assets);
+  const main = files.find((f) => /^index-.*\.js$/.test(f));
+  assert.ok(main, "no index-*.js emitted — did you run `npm run build:ui`?");
+  const gzipped = gzipSync(readFileSync(join(assets, main))).byteLength;
+  assert.ok(gzipped <= 600 * 1024, `main chunk ${(gzipped / 1024).toFixed(1)} kB > 600 kB budget`);
+
+  const oversized = files.filter((f) => {
+    if (!f.endsWith(".js") && !f.endsWith(".mjs")) return false;
+    if (/pdf\.worker/.test(f)) return false;          // worker is unavoidable
+    const sz = gzipSync(readFileSync(join(assets, f))).byteLength;
+    return sz > 500 * 1024;
+  });
+  assert.deepEqual(oversized, [], `chunks above 500 kB gzipped: ${oversized.join(", ")}`);
+});
+```
+
+The test reads `dist/ui` produced by a prior `npm run build:ui`. Add a script `npm run test:bundle` that runs the build then this test — wire into CI.
+
+### Route-placeholder E2E test (Task A)
+
+`tests/e2e/ui/route-code-split.spec.ts` (sketch):
+
+```ts
+import { test, expect } from "@playwright/test";
+import { launchGateway } from "../gateway-harness.js";
+
+test.describe("route code splitting", () => {
+  test("settings page mounts within 5 s on first navigation", async ({ page }) => {
+    const { url } = await launchGateway();
+    await page.goto(url);
+    await page.waitForSelector("[data-rendered]");
+    // First click — chunk has not been fetched yet.
+    const navStart = Date.now();
+    await page.locator("[title='Settings']").first().click();
+    await page.waitForSelector("[data-testid='settings-page']", { timeout: 5_000 });
+    expect(Date.now() - navStart).toBeLessThan(5_000);
+  });
+
+  test("goal-dashboard, roles, tools, workflows, skills all mount", async ({ page }) => {
+    // ... navigate to each via hash, assert page-specific marker appears
+  });
+});
+```
+
+Each route-split target should expose a stable `data-testid` (most already do via the existing `data-rendered` watchdog hook).
+
+---
+
+## Success metrics
+
+Verbatim from goal spec:
+
+- Main `index-*.js` ≤ **600 kB gzipped** (≥40% reduction from baseline 999.48 kB).
+- No chunk > 500 kB warning **except**:
+  - `pdf.worker.min-*.mjs` (1,050.96 kB) — pdfjs worker, unavoidable.
+- All existing tests pass; no new flakes.
+- No visible regression in route navigation latency on a fast connection.
+
+### Expected post-implementation bundle (estimate)
+
+| Chunk | Before | After (target) |
+|---|---|---|
+| `index-*.js` | 3,586 kB / 999 kB gz | ~1,800 kB / **~520 kB gz** |
+| `settings-page-*.js` | (in main) | ~600 kB / ~110 kB gz |
+| `goal-dashboard-*.js` | (in main) | ~400 kB / ~75 kB gz |
+| `workflow-page-*.js` | (in main) | ~250 kB / ~50 kB gz |
+| `tool-manager-page-*.js` | (in main) | ~180 kB / ~40 kB gz |
+| `role-manager-page-*.js` | (in main) | ~160 kB / ~35 kB gz |
+| `staff-page-*.js`, `skills-page-*.js`, `search-page-*.js` | (in main) | ~80 kB each |
+| `markdown-block-*.js` (KaTeX + marked) | (in main) | ~600 kB / ~180 kB gz (lazy) |
+| `pdfjs-*.js` | (in main) | ~300 kB / ~110 kB gz (lazy) |
+| `mistral-*.js`, `google-shared-*.js`, `client-*.js`, etc. | unchanged (already lazy) | unchanged |
+| `pdf.worker.min-*.mjs` | 1,051 kB (lazy) | unchanged |
+
+Net main-chunk reduction: **~480 kB gzipped (48%)** — comfortably under the 600 kB budget.
