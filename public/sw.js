@@ -97,9 +97,35 @@ self.addEventListener("fetch", (event) => {
 	// Never touch API or WebSocket traffic — must always hit the gateway.
 	if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws")) return;
 
-	// Bypass the SW entirely for hashed `/assets/*` URLs (see
-	// `isShellPath` for rationale).
-	if (url.pathname.startsWith("/assets/")) return;
+	// Cache-first for hashed `/assets/*` URLs. They're content-addressed
+	// (Vite hash in the filename) so a cache hit is always correct: a
+	// rebuild changes the hash, which changes the URL, which is a cache
+	// miss by definition. Cache-first is what makes iOS PWA resume actually
+	// seamless — the bundle (~1 MB gzip) loads from cache without ever
+	// touching the network, so a half-dead socket after wake-from-sleep
+	// can't hang the launch.
+	if (url.pathname.startsWith("/assets/")) {
+		event.respondWith((async () => {
+			const cached = await caches.match(req);
+			if (cached) {
+				// Refresh in the background so a forced asset replacement
+				// (rare, but possible if a deploy republishes the same hash)
+				// updates the cache without blocking this request.
+				try {
+					event.waitUntil(fetch(req).then((r) => cacheIfOk(req, r)).catch(() => null));
+				} catch {}
+				return cached;
+			}
+			// No cache hit — fetch and cache. If the network returns a
+			// non-JS response (e.g. SPA fallback HTML for an asset URL that no
+			// longer exists because the user is on a stale index.html), DON'T
+			// cache it and let the browser's MIME enforcement reject it so the
+			// page reloads onto a fresh shell.
+			const response = await fetch(req);
+			return cacheIfOk(req, response);
+		})());
+		return;
+	}
 
 	const isNavigate = req.mode === "navigate";
 	const isShell = isNavigate || isShellPath(url.pathname);
