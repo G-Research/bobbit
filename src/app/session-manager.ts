@@ -11,6 +11,8 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
+	markSessionsHydrated,
+	awaitSessionsHydrated,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
@@ -454,16 +456,33 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		setHashRoute("landing");
 	}
 	renderApp();
-	await refreshSessions();
-	try {
-		const cwdRes = await gatewayFetch("/api/config/cwd");
+	startSessionPolling();
+	startTimeRefresh();
+}
+
+/** Module-level flag so startPostAuthBackgroundFetches is idempotent. The
+ *  promise itself is owned by state.ts (awaitSessionsHydrated). */
+let _didInitialSessionsRefresh = false;
+
+/**
+ * Fire the post-auth REST fetches as side-effects so route dispatch can run
+ * in parallel with them (A1). Idempotent. Resolves the `sessionsHydrated`
+ * latch in state.ts on first refreshSessions() success so consumers that
+ * need state.gatewaySessions / state.projects populated can `await` it
+ * instead of relying on bootstrap-step ordering.
+ */
+export function startPostAuthBackgroundFetches(): void {
+	if (_didInitialSessionsRefresh) return;
+	_didInitialSessionsRefresh = true;
+	refreshSessions()
+		.catch(() => { /* polling tick will retry */ })
+		.finally(() => { markSessionsHydrated(); });
+	gatewayFetch("/api/config/cwd").then(async (cwdRes) => {
 		if (cwdRes.ok) {
 			const cwdData = await cwdRes.json();
 			state.defaultCwd = cwdData.cwd || "";
 		}
-	} catch {}
-	startSessionPolling();
-	startTimeRefresh();
+	}).catch(() => { /* non-fatal */ });
 }
 
 // ============================================================================
@@ -1727,8 +1746,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		})();
 
+		// F3: gate on the hydration latch instead of always firing a fresh
+		// refreshSessions(). If startPostAuthBackgroundFetches has already
+		// resolved the latch, this is a no-op tick — we use the data already
+		// in state.gatewaySessions. If it hasn't (rare race), we wait for it.
+		const sessionsRefreshPromise = awaitSessionsHydrated();
 		const backgroundWork = Promise.all([
-			refreshSessions().then(() => {
+			sessionsRefreshPromise.then(() => {
 				if (isStale()) return;
 				// Re-apply accessory class after refreshSessions (may have new data)
 				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId)
@@ -1791,6 +1815,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				window.dispatchEvent(new CustomEvent("search-result-stale", {
 					detail: { kind: "session", id: sessionId },
 				}));
+			} else if (missing) {
+				// F2: dedicated session-not-found view replaces the previous
+				// /api/sessions/:id existence probe. Renders a clear "Session
+				// not found" page with a back-to-landing button instead of
+				// surfacing a generic disconnected modal.
+				state.appView = "session-not-found";
+				renderApp();
 			} else {
 				showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
 			}

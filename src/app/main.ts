@@ -10,10 +10,11 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	activeSessionId,
+	resetSessionsHydration,
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
-import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
+import { getRouteFromHash } from "./routing.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, startPostAuthBackgroundFetches } from "./session-manager.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
@@ -135,15 +136,10 @@ async function handleHashChange(): Promise<void> {
 				state.connectionStatus = "disconnected";
 			}
 			state.goalDashboardId = null;
-			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
-			if (checkRes.ok) {
-				await connectToSession(route.sessionId, true);
-			} else {
-				setHashRoute("landing");
-				state.appView = "authenticated";
-				renderApp();
-				await refreshSessions();
-			}
+			// A3: skip /api/sessions/:id existence probe — connectToSession
+			// surfaces SESSION_NOT_FOUND via the WS auth path; the catch block
+			// below routes that to the dedicated session-not-found view.
+			await connectToSession(route.sessionId, true);
 		} else if (route.view === "goal-dashboard" && route.goalId) {
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
@@ -328,6 +324,10 @@ async function handleHashChange(): Promise<void> {
 async function initApp() {
 	mark("init:start");
 	installResumeHooks();
+	// F1: arm the sessions-hydration latch so consumers calling
+	// awaitSessionsHydrated() during boot block until the first post-auth
+	// refreshSessions() lands.
+	resetSessionsHydration();
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
@@ -410,6 +410,13 @@ async function initApp() {
 			await waitForGateway(savedUrl, savedToken);
 			mark("init:gateway-wait-end");
 
+			// A1: fire post-auth REST fetches as side-effects so route
+			// dispatch can run in parallel. Resolves the sessionsHydrated
+			// latch on completion; consumers that need state.gatewaySessions
+			// populated `await awaitSessionsHydrated()` instead of relying on
+			// bootstrap-step ordering.
+			startPostAuthBackgroundFetches();
+
 			// A2: load saved preferences fire-and-forget. The palette is
 			// already applied inline (`index.html`); showTimestamps and
 			// playAgentFinishSound are not visible on first paint.
@@ -440,10 +447,10 @@ async function initApp() {
 			if (route.view === "goal" && route.goalId) {
 				await loadDashboardData(route.goalId);
 			} else if (route.view === "session" && route.sessionId) {
-				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
-				if (checkRes.ok) {
-					await connectToSession(route.sessionId, true);
-				}
+				// A3: skip existence probe — connectToSession surfaces
+				// SESSION_NOT_FOUND via the WS auth path; the dedicated
+				// `session-not-found` view is rendered from there.
+				await connectToSession(route.sessionId, true);
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;
 				loadDashboardData(route.goalId);
