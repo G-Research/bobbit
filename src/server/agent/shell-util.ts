@@ -115,6 +115,9 @@ export function getVerificationShell(_command: string): ShellConfig {
  * installed). On Linux/macOS returns "sh".
  *
  * Use this instead of hardcoded "sh" for `execFile("sh", ["-c", cmd])` calls.
+ *
+ * Prefer `execShellCommand()` for new code — it handles cmd.exe's `/d /s /c`
+ * arg form when neither Git Bash nor `sh` is on PATH.
  */
 export function resolveShell(): string {
 	if (process.platform === "win32") {
@@ -129,4 +132,28 @@ export function resolveShell(): string {
 		}
 	}
 	return "sh";
+}
+
+/**
+ * Run a shell command via `execFile`, picking the right shell binary + args
+ * for the current platform via `getShellConfig()`. Use this in place of
+ * hardcoded `execFile("sh", ["-c", cmd], …)` calls — on Windows machines
+ * without Git Bash on PATH the literal "sh" binary doesn't exist and spawn
+ * fails with ENOENT (errno -4058), silently breaking pool / goal / staff /
+ * session worktree setup.
+ */
+export async function execShellCommand(
+	command: string,
+	opts: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number },
+): Promise<{ stdout: string; stderr: string }> {
+	const { execFile } = await import("node:child_process");
+	const { promisify } = await import("node:util");
+	const pExecFile = promisify(execFile);
+	const { shell, args } = getShellConfig();
+	return pExecFile(shell, [...args, command], {
+		cwd: opts.cwd,
+		env: opts.env,
+		timeout: opts.timeout,
+		windowsHide: true,
+	}) as Promise<{ stdout: string; stderr: string }>;
 }

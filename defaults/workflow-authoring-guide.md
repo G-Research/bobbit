@@ -186,6 +186,10 @@ Practical implications when authoring workflows:
   (except quick-fix). Design-time gap analysis catches missing requirements before
   the agent burns iterations; post-impl gap analysis catches drift between design
   and code. The `general`, `feature`, and per-component templates in this guide include both — use them as starting points when they fit the project.
+  **Post-impl gap analysis must explicitly tell the reviewer to ignore documentation
+  gaps** — it runs in the `implementation` gate, before the dedicated `documentation`
+  gate, so flagging missing/stale docs there causes redundant Ralph-loop iterations.
+  Focus the prompt on code/behavior gaps relative to the spec and design.
 - **The `description` field on the gate** surfaces in the project-proposal panel
   and the goal dashboard. Use it to remind reviewers that this gate is a loop, not
   a checkpoint.
