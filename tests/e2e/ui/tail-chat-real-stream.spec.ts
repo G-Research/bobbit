@@ -14,9 +14,10 @@
  * (Verified empirically: confirmed that disabling all three production
  * pin paths still passes the test if scroll-anchoring is left enabled.)
  *
- * Assertions:
- *   - End-of-stream: `_stickToBottom === true` and viewport within TAIL_PX.
- *   - Sample-checks every ~250 ms so a *transient* unstick is caught even
+ * Assertions (all derived from `getBoundingClientRect()` / public scroll
+ * metrics — NEVER private fields):
+ *   - End-of-stream: viewport pinned within TAIL_PX of the bottom.
+ *   - Sample-checks every ~250 ms so a *transient* drift is caught even
  *     when the final tick re-pins.
  *   - Burst meaningfully grows scrollHeight (catches a vacuous layout).
  *
@@ -117,14 +118,12 @@ test.describe("tail-chat: real streaming path keeps viewport pinned", () => {
 		).toBeLessThanOrEqual(TAIL_PX);
 		await rec.capture(`Pre-stream: 5000px spacer, at bottom (overflow=${pre.overflow})`);
 
-		// Sampler: while the stream is running, periodically read
-		// `_stickToBottom` and the scroll-distance from the bottom. Any
-		// sample where stick=false OR distance > clientHeight*0.25 is a
-		// transient unstick — the final-tick re-pin masks the bug, so we
-		// must catch the moment of drift.
+		// Sampler: while the stream is running, periodically read public
+		// scroll metrics. Any sample where distance > clientHeight*0.25 is
+		// a transient drift — the final-tick re-pin masks the bug, so we
+		// must catch the moment of drift. NO private fields.
 		const samples: Array<{
 			t: number;
-			stick: boolean;
 			distance: number;
 			clientHeight: number;
 			scrollHeight: number;
@@ -137,12 +136,10 @@ test.describe("tail-chat: real streaming path keeps viewport pinned", () => {
 			w.__tailChatSamples = [];
 			const start = performance.now();
 			w.__tailChatSamplerId = setInterval(() => {
-				const ai = document.querySelector("agent-interface") as any;
 				const el = document.querySelector(sel) as HTMLElement | null;
-				if (!ai || !el) return;
+				if (!el) return;
 				w.__tailChatSamples.push({
 					t: Math.round(performance.now() - start),
-					stick: !!ai._stickToBottom,
 					scrollTop: el.scrollTop,
 					scrollHeight: el.scrollHeight,
 					clientHeight: el.clientHeight,
@@ -178,7 +175,6 @@ test.describe("tail-chat: real streaming path keeps viewport pinned", () => {
 			w.__tailChatSamplerId = null;
 			return (w.__tailChatSamples || []) as Array<{
 				t: number;
-				stick: boolean;
 				scrollTop: number;
 				scrollHeight: number;
 				clientHeight: number;
@@ -187,7 +183,6 @@ test.describe("tail-chat: real streaming path keeps viewport pinned", () => {
 		for (const s of rawSamples) {
 			samples.push({
 				t: s.t,
-				stick: s.stick,
 				distance: s.scrollHeight - s.scrollTop - s.clientHeight,
 				clientHeight: s.clientHeight,
 				scrollHeight: s.scrollHeight,
@@ -198,47 +193,38 @@ test.describe("tail-chat: real streaming path keeps viewport pinned", () => {
 		}));
 
 		const final = await page.evaluate((sel) => {
-			const ai = document.querySelector("agent-interface") as any;
 			const el = document.querySelector(sel) as HTMLElement;
 			return {
-				stick: !!ai._stickToBottom,
 				scrollTop: el.scrollTop,
 				scrollHeight: el.scrollHeight,
 				clientHeight: el.clientHeight,
 			};
 		}, SCROLL_SEL);
 		const finalDist = final.scrollHeight - final.scrollTop - final.clientHeight;
-		await rec.capture(`Final: stick=${final.stick} dist=${finalDist} samples=${samples.length}`);
+		await rec.capture(`Final: dist=${finalDist} samples=${samples.length}`);
 
 		// --- Outcome assertions ---
 
-		// 1. End-of-stream pin.
-		expect(
-			final.stick,
-			`tail-chat-real-stream: _stickToBottom flipped false during real burst`,
-		).toBe(true);
+		// 1. End-of-stream pin (public scroll metrics only).
 		expect(
 			finalDist,
 			`tail-chat-real-stream: end-of-stream viewport drift; dist=${finalDist} (>${TAIL_PX}). ` +
 			`scrollTop=${final.scrollTop} scrollHeight=${final.scrollHeight} clientHeight=${final.clientHeight}`,
 		).toBeLessThanOrEqual(TAIL_PX);
 
-		// 2. No transient unstick. Allow drift up to clientHeight*0.25 mid-
-		// stream (a single growth that lands between RO tick + re-pin can
-		// transiently show ~card-height of drift before the next rAF re-
-		// pins). Anything beyond that, OR a stick=false sample, is a bug.
-		const badSamples = samples.filter(
-			(s) => !s.stick || s.distance > s.clientHeight * 0.25,
-		);
-		// Pretty-print the worst few for the failure message.
+		// 2. No transient drift. Allow up to clientHeight*0.25 mid-stream
+		// (a single growth that lands between RO tick + re-pin can
+		// transiently show ~card-height of drift before the next rAF
+		// re-pins). Anything beyond that is a bug.
+		const badSamples = samples.filter((s) => s.distance > s.clientHeight * 0.25);
 		const summary = badSamples
 			.slice(0, 8)
-			.map((s) => `t=${s.t}ms stick=${s.stick} dist=${s.distance}/${s.clientHeight}`)
+			.map((s) => `t=${s.t}ms dist=${s.distance}/${s.clientHeight}`)
 			.join("\n  ");
 		expect(
 			badSamples.length,
 			`tail-chat-real-stream: ${badSamples.length} of ${samples.length} samples ` +
-			`showed transient unstick or significant drift during real burst:\n  ${summary}`,
+			`showed transient drift during real burst:\n  ${summary}`,
 		).toBe(0);
 
 		// 3. The mock emitted at least 3 BG_WAIT cycles → sample count must

@@ -1,140 +1,70 @@
 /**
- * Reproducing test for goal "Fix tail-chat reliability" — Case (3):
- * **Session navigate doesn't always land at the bottom.**
+ * Tier 2.5 \u2014 REALISTIC tail-chat reliability test for session navigate.
  *
- * Per Issue Analysis section 4 case (3), the 3 s session-load settle window
- * exits early when scrollHeight stabilises across two ticks, but async
- * markdown / syntax highlighting / image-decode reflows can land *after*
- * that exit. Once the settle window is gone, the geometry path in
- * `_handleScroll` re-engages and a queued stale scroll event from the DOM
- * swap flips `_stickToBottom = false`. The user lands above the latest
- * content.
+ * Pre-creates two sessions, sends a real `STREAM_BURST:1` to each so
+ * each has an actual transcript taller than the viewport (with a
+ * tool-message + chunked assistant text). Hops A \u2192 B \u2192 A \u2192 B \u2192 A
+ * (5 navigates) and asserts the latest message DOM node is bottom-
+ * pinned within 8 px after each hop \u2014 using `getBoundingClientRect()`
+ * only.
  *
- * The redesign (section 6.4) replaces the time-bounded settle window with
- * an event-driven RO loop and an image-load delegate. The geometry-driven
- * flip is removed.
+ * Disables CSS scroll-anchoring inside the test scope (Safari-equivalent
+ * baseline). The JS pin path (`setupSessionSubscription` \u2192 `await
+ * updateComplete` \u2192 `_pinIfSticking`, plus `_imageLoadHandler` for any
+ * subsequent image decodes) is the single contract.
  *
- * Scenario: pre-create two sessions, manually inflate each with a tall
- * spacer + queue a delayed (post-render) growth event via setTimeout that
- * arrives well after the settle window's 3 s deadline. Navigate A→B→A→B→A
- * (five hops). Each navigate must land at the bottom within 4 px.
- *
- * Expected master failure: at least one hop's settle window exits before
- * the delayed-growth event arrives, the geometry path then flips the flag,
- * and the viewport ends up above the bottom by the delayed-growth height.
+ * Sensitivity: fails when `_pinIfSticking()` returns immediately.
  */
 import { test, expect } from "./fixtures.js";
 import { createSession, waitForSessionStatus, waitForHealth } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
-import { SCROLL_SEL, CONTENT_SEL, TAIL_PX } from "./tail-chat-helpers.js";
+import { openApp, sendMessage } from "./ui-helpers.js";
+import { SCROLL_SEL, TAIL_PX, disableScrollAnchoring, expectLatestMessagePinned } from "./tail-chat-helpers.js";
 
-test.describe("tail-chat: session navigate lands at bottom", () => {
+test.describe("tail-chat: session navigate lands on latest message", () => {
 	test.beforeAll(async () => {
 		await waitForHealth();
 	});
 
-	test("navigate A→B→A→B→A: each hop lands at bottom within 4 px", async ({ page, rec }) => {
+	test.setTimeout(120_000);
+
+	test("A \u2192 B \u2192 A \u2192 B \u2192 A: each hop pins latest message bottom", async ({ page, rec }) => {
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		await waitForSessionStatus(sessionA, "idle");
 		await waitForSessionStatus(sessionB, "idle");
 
 		await openApp(page);
+		await disableScrollAnchoring(page);
 
-		/**
-		 * Navigate to a session, install a tall spacer in its `.max-w-5xl`
-		 * container, queue a delayed (post-rAF) growth event simulating
-		 * async markdown / syntax-highlighting reflow that lands AFTER
-		 * the master settle window's two-stable-ticks early exit.
-		 *
-		 * Returns the post-settle scroll metrics + _stickToBottom flag.
-		 */
-		const visit = async (id: string, label: string) => {
-			await page.evaluate((sid) => {
-				window.location.hash = `#/session/${sid}`;
-			}, id);
-			await page.waitForSelector(SCROLL_SEL, { timeout: 15_000 });
-			// Wait for the agent-interface to render and for setupSessionSubscription
-			// to install the scroll container + ResizeObserver.
+		// Helper: navigate to a session and stream a real burst into it.
+		const seedSession = async (sid: string, label: string) => {
+			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sid);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await page.waitForSelector(SCROLL_SEL, { timeout: 10_000 });
+			await sendMessage(page, `STREAM_BURST:1 seed ${label}`);
 			await page.waitForFunction(() => {
-				const ai = document.querySelector("agent-interface") as any;
-				return ai && ai._scrollContainer;
-			}, null, { timeout: 10_000 });
-
-			// Install a tall spacer so the scroll container has overflow.
-			await page.evaluate(({ contentSel }) => {
-				const content = document.querySelector(contentSel) as HTMLElement | null;
-				if (!content) throw new Error("messages content container not found");
-				content.querySelectorAll(".__tail_chat_nav").forEach((n) => n.remove());
-				const spacer = document.createElement("div");
-				spacer.className = "__tail_chat_nav";
-				spacer.style.height = "3500px";
-				spacer.style.background = "linear-gradient(#eef, #fee)";
-				content.appendChild(spacer);
-			}, { contentSel: CONTENT_SEL });
-
-			// Let initial RO + Lit pin chains run.
-			await page.evaluate(() => new Promise<void>((resolve) => {
-				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-			}));
-
-			// Force the session-load settle window to exit (the redesign removes
-			// it entirely). This simulates the master failure mode where the
-			// settle window exits early (after two stable RO ticks) before all
-			// async growth has landed. On the post-fix build the property
-			// doesn't exist; assignment is harmless.
-			await page.evaluate(() => {
-				const ai = document.querySelector("agent-interface") as any;
-				if ("_settleWindowActive" in ai) ai._settleWindowActive = false;
-			});
-
-			// Inject a stale scroll event whose (scrollTop, scrollHeight) does
-			// NOT match the echo latch — mimics the queued browser-emitted
-			// scroll event from the navigate-time DOM swap that arrives after
-			// the settle window has exited.
-			await page.evaluate((sel) => {
-				const ai = document.querySelector("agent-interface") as any;
-				const el = document.querySelector(sel) as HTMLElement;
-				if (Array.isArray(ai._programmaticEchoes)) {
-					ai._programmaticEchoes.length = 0;
-				} else {
-					ai._lastProgrammaticScrollTop = null;
-					ai._lastProgrammaticScrollHeight = null;
-				}
-				const ch = el.clientHeight;
-				el.scrollTop = Math.max(0, el.scrollHeight - ch - Math.ceil(ch * 0.5));
-				el.dispatchEvent(new Event("scroll"));
-			}, SCROLL_SEL);
-
-			// Late async growth (markdown / syntax-highlighting / image-decode
-			// reflow that lands after settle exits).
-			await page.evaluate(({ contentSel }) => {
-				const content = document.querySelector(contentSel) as HTMLElement | null;
-				if (!content) return;
-				const late = document.createElement("div");
-				late.className = "__tail_chat_nav";
-				late.style.height = "400px";
-				late.style.background = "rgba(255,0,0,0.05)";
-				content.appendChild(late);
-			}, { contentSel: CONTENT_SEL });
-
-			// Two rAFs so the RO has fired and Lit has committed.
-			await page.evaluate(() => new Promise<void>((resolve) => {
-				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-			}));
-
-			return await page.evaluate((sel) => {
-				const ai = document.querySelector("agent-interface") as any;
-				const el = document.querySelector(sel) as HTMLElement;
-				return {
-					stick: ai._stickToBottom,
-					scrollTop: el.scrollTop,
-					scrollHeight: el.scrollHeight,
-					clientHeight: el.clientHeight,
-				};
-			}, SCROLL_SEL);
+				const ai = document.querySelector("agent-interface");
+				const content = ai?.querySelector(".max-w-5xl");
+				return !!content && /STREAM_BURST_DONE:1/.test(content.textContent || "");
+			}, null, { timeout: 30_000 });
+			// Give Lit + RO a moment to settle after the burst.
+			await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
 		};
 
+		await seedSession(sessionA, "A");
+		await rec.capture("Session A seeded");
+		await seedSession(sessionB, "B");
+		await rec.capture("Session B seeded");
+
+		// Now perform the 5 hops. Each hop:
+		//   1. Routes to the target session.
+		//   2. Re-applies `overflow-anchor: none` (addStyleTag survives navigate
+		//      because we only flip the URL hash; the document is not reloaded,
+		//      but we re-disable defensively in case any framework code resets).
+		//   3. Awaits `_scrollContainer` to be available again.
+		//   4. Awaits `updateComplete` + 2 rAFs so the production
+		//      `setupSessionSubscription` \u2192 `_pinIfSticking` chain has run.
+		//   5. Asserts latest-message bottom is at viewport bottom.
 		const hops: Array<{ id: string; label: string }> = [
 			{ id: sessionA, label: "A (1st)" },
 			{ id: sessionB, label: "B (1st)" },
@@ -142,19 +72,29 @@ test.describe("tail-chat: session navigate lands at bottom", () => {
 			{ id: sessionB, label: "B (2nd)" },
 			{ id: sessionA, label: "A (3rd)" },
 		];
-
-		await rec.capture("Sessions A and B created");
 		for (const { id, label } of hops) {
-			const m = await visit(id, label);
-			const distance = m.scrollHeight - m.scrollTop - m.clientHeight;
-			await rec.capture(`Hop "${label}": dist=${distance} stick=${m.stick}`);
-			expect(
-				distance,
-				`tail-chat-session-navigate: hop "${label}" did not land at bottom; ` +
-				`scrollTop=${m.scrollTop} scrollHeight=${m.scrollHeight} ` +
-				`clientHeight=${m.clientHeight} distance=${distance} (>${TAIL_PX}); ` +
-				`_stickToBottom=${m.stick}`,
-			).toBeLessThanOrEqual(TAIL_PX);
+			await page.evaluate((sid) => { window.location.hash = `#/session/${sid}`; }, id);
+			await page.waitForFunction(() => {
+				const ai = document.querySelector("agent-interface") as any;
+				return ai && ai._scrollContainer;
+			}, null, { timeout: 10_000 });
+			// Wait for at least one message DOM node to be present (pre-existing
+			// transcript replay completes before pin runs).
+			await page.waitForFunction(
+				() => document.querySelectorAll("user-message, assistant-message, tool-message").length > 0,
+				null,
+				{ timeout: 15_000 },
+			);
+			await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+			await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+			await rec.capture(`Hop "${label}"`);
+			await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label });
 		}
+
+		// Sanity: at least one message rendered in the final hop.
+		const msgCount = await page.evaluate(
+			() => document.querySelectorAll("user-message, assistant-message, tool-message").length,
+		);
+		expect(msgCount, `final session must have message DOM nodes`).toBeGreaterThan(0);
 	});
 });

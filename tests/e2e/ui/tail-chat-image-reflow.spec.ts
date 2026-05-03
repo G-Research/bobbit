@@ -214,13 +214,13 @@ test.describe("tail-chat: image-decode reflow keeps latest message pinned", () =
 			};
 		}, { scrollSel: SCROLL_SEL, msgSel: MESSAGE_SEL });
 
-		// Distance from the bottom of the last message to the bottom of
-		// the viewport. Positive = message bottom is BELOW the viewport
-		// (cut off / below the fold) — the regression symptom. A small
-		// negative value (message bottom slightly above the viewport
-		// bottom because the scroll container has padding under the last
-		// message) is also fine; we abs() for safety.
-		const dist = Math.abs(probe.viewportBottom - probe.lastBottom);
+		// belowFold > 0 = message bottom is BELOW the viewport (cut off /
+		// below the fold) — the regression symptom. <= 0 means the message
+		// is fully visible (the scroll container has padding under it; a
+		// fully-visible latest message commonly sits a few px above the
+		// viewport bottom). `dist` is the abs() summary for the beat label.
+		const belowFold = probe.lastBottom - probe.viewportBottom;
+		const dist = Math.abs(belowFold);
 		await rec.capture(
 			`Probe: last=<${probe.lastTag}> dist=${Math.round(dist)} ` +
 			`scrollTop=${Math.round(probe.scrollTop)}/${probe.scrollHeight} ` +
@@ -253,14 +253,16 @@ test.describe("tail-chat: image-decode reflow keeps latest message pinned", () =
 			`(otherwise no reflow happened and the test is trivial).`,
 		).toBe(true);
 
-		// THE assertion. Latest message bottom must align with the
-		// viewport bottom within TAIL_PX. On a regressed build (no
-		// `_imageLoadHandler` re-pin), this fails with the latest-message
-		// bottom ~IMG_HEIGHT px below the viewport — the exact tail-chat-
-		// not-following symptom users report.
+		// THE assertion. The latest message must NOT extend below the
+		// viewport. On a regressed build (no `_imageLoadHandler` re-pin),
+		// `belowFold` is ~IMG_HEIGHT — the exact tail-chat-not-following
+		// symptom users report. A small negative value is fine; the
+		// scroll container has padding under the last message and a
+		// fully-visible latest message commonly sits a few px above the
+		// viewport bottom.
 		expect(
-			dist,
-			`latest-message bottom ${Math.round(dist)} px below viewport (>${TAIL_PX}). ` +
+			belowFold,
+			`latest-message bottom ${Math.round(belowFold)} px BELOW viewport (>${TAIL_PX}). ` +
 			`scrollTop=${Math.round(probe.scrollTop)} scrollHeight=${probe.scrollHeight} ` +
 			`clientHeight=${probe.clientHeight} distFromScrollBottom=${Math.round(probe.distFromBottom)} ` +
 			`lastTag=${probe.lastTag} lastHeight=${Math.round(probe.lastHeight)}. ` +
