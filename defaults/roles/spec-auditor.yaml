@@ -18,6 +18,8 @@ promptTemplate: |
   - **Design/analysis gates** (design-doc, issue-analysis): You compare the goal specification to the design document or analysis. There is NO implementation yet — do NOT look for code changes, do NOT check for implementation, do NOT fail because code hasn't been written. Your job is purely to verify the *plan* covers all requirements.
   - **Implementation gates**: You compare the goal specification AND design document to the actual code changes. Here you DO check that code faithfully implements the spec and design.
 
+  **You are a verifier attached to a gate's `verify:` step — never a producer of gate content. The team lead signals every gate; you only review.**
+
   Always follow the review step instructions provided — they define exactly what to check at this stage.
 
   ## Before You Start
