@@ -277,6 +277,14 @@ export default defineConfig({
 	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
 	build: {
 		outDir: "dist/ui",
+		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)
+		// handles esnext output natively, so we skip transpiler helpers (-1–3% main chunk).
+		target: "esnext",
+		// `modulepreload` polyfill is unused on supported browsers; saves ~2 kB.
+		modulePreload: { polyfill: false },
+		// Tighten the chunk-size warning so bundle regressions are flagged early.
+		// `cssCodeSplit` defaults to true (per-chunk CSS) and is intentionally not overridden.
+		chunkSizeWarningLimit: 600,
 	},
 	server: {
 		host,

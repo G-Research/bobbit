@@ -486,26 +486,9 @@ export function renderApp(): void {
 	});
 }
 
-/** Synchronous render — bypasses rAF debounce for cases needing immediate DOM update before layout measurement. */
-export function renderAppSync(): void {
-	_renderScheduled = false;
-	_renderApp();
-}
-
 // ============================================================================
 // PROJECT HELPERS
 // ============================================================================
-
-/** @deprecated No-op — provisional projects replace pending project placeholders. */
-export function addPendingProject(_entry: { sessionId: string; dirPath: string; name: string }): void {
-	// No-op: provisional projects are now real projects with a `provisional` flag.
-	// Kept as export for backward compat with callers that haven't been updated yet.
-}
-
-/** @deprecated No-op — provisional projects are cleaned up via DELETE /api/projects/:id. */
-export function removePendingProject(_sessionId: string): void {
-	// No-op: see addPendingProject.
-}
 
 /** Update the project list and ensure activeProjectId stays in sync.
  *  Defaults to the first project when no explicit selection exists. */
@@ -576,13 +559,6 @@ export const GOAL_STATE_LABELS: Record<GoalState, string> = {
 	"in-progress": "In Progress",
 	"complete": "Complete",
 	"shelved": "Shelved",
-};
-
-export const GOAL_STATE_COLORS: Record<GoalState, string> = {
-	"todo": "text-muted-foreground",
-	"in-progress": "text-yellow-600 dark:text-yellow-400",
-	"complete": "text-green-600 dark:text-green-400",
-	"shelved": "text-muted-foreground opacity-60",
 };
 
 // ============================================================================

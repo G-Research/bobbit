@@ -24,7 +24,6 @@
  *                           mismatch, or any error.
  *     - `scheduleSave()`  — debounced (~500 ms, idle-callback if available)
  *                           wrapper around `saveSnapshot`.
- *     - `clearSnapshot()` — wipe (used on logout).
  *
  * Constraints honoured:
  *   • `BOBBIT_E2E=1` → high-level writers (`saveSnapshot`, `scheduleSave`)
@@ -139,9 +138,6 @@ export function serialize(state: Record<string, any>, opts: IoOpts): boolean {
 	}
 }
 
-/** Alias preserved for clarity at the high-level call site. */
-export const writeSnapshot = serialize;
-
 /**
  * Hydrate a state-shaped object from storage. Returns null on miss, version
  * mismatch, or any parse/IO error.
@@ -170,27 +166,6 @@ export function hydrate(opts: IoOpts): Record<string, any> | null {
 		return null;
 	}
 }
-
-/**
- * Resolve the active-session record from a hydrated snapshot, accepting both
- * payload shapes (canonical `activeSession` field, or legacy `sessions[id]`
- * map keyed by `selectedSessionId`). Returns null when neither is present.
- */
-export function getActiveSessionFromSnapshot(snap: Record<string, any> | null | undefined): Record<string, any> | null {
-	if (!snap || typeof snap !== "object") return null;
-	if (snap.activeSession && typeof snap.activeSession === "object") {
-		return snap.activeSession as Record<string, any>;
-	}
-	if (snap.sessions && typeof snap.sessions === "object" && typeof snap.selectedSessionId === "string") {
-		const sess = (snap.sessions as Record<string, any>)[snap.selectedSessionId];
-		if (sess && typeof sess === "object") return sess;
-	}
-	return null;
-}
-
-export const readSnapshot = hydrate;
-
-export default serialize;
 
 // ---------------------------------------------------------------------------
 // High-level: project from app `state` → localStorage with debounce
@@ -286,11 +261,6 @@ export function loadSnapshot(): Record<string, any> | null {
 	}
 }
 
-/** Wipe the snapshot (logout / explicit reset). */
-export function clearSnapshot(): void {
-	try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
-}
-
 // ---------------------------------------------------------------------------
 // Debounced scheduler
 // ---------------------------------------------------------------------------
@@ -331,9 +301,3 @@ export function scheduleSave(state: any): void {
 	}, DEBOUNCE_MS);
 }
 
-/** Flush any pending debounced save synchronously (e.g. before unload). */
-export function flushPendingSnapshot(state: any): void {
-	if (_saveTimer == null && _idleHandle == null) return;
-	cancelPendingSave();
-	saveSnapshot(state);
-}
