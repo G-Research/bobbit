@@ -3202,19 +3202,27 @@ async function handleApiRoute(
 	 * responsible for deciding archive order (deepest-first via `.reverse()`
 	 * is convenient for cascade-archive).
 	 */
-	function listDescendants(goalId: string): PersistedGoal[] {
+	function listDescendants(goalId: string, opts?: { includeArchived?: boolean }): PersistedGoal[] {
 		const ctx = projectContextManager.getContextForGoal(goalId);
 		if (!ctx) return [];
 		const all = ctx.goalStore.getAll();
+		const includeArchived = opts?.includeArchived ?? false;
 		const out: PersistedGoal[] = [];
 		const seen = new Set<string>([goalId]);
 		const queue: string[] = [goalId];
 		while (queue.length > 0) {
 			const cur = queue.shift()!;
 			for (const g of all) {
+				// Walk THROUGH archived descendants when looking for live ones
+				// further down the tree (a live grandchild whose parent is
+				// archived must still block the cascade=false path) — but
+				// only INCLUDE the archived goal in `out` when the caller
+				// asked for it (the cascade=true path needs the full set).
 				if (g.parentGoalId === cur && !seen.has(g.id)) {
 					seen.add(g.id);
-					out.push(g);
+					if (includeArchived || !g.archived) {
+						out.push(g);
+					}
 					queue.push(g.id);
 				}
 			}
@@ -3784,11 +3792,22 @@ async function handleApiRoute(
 			const cascade = cascadeParam === "true";
 			const targetGoal = getGoalAcrossProjects(id);
 			if (!targetGoal) { json({ error: "Goal not found" }, 404); return; }
-			const descendants = listDescendants(id);
-			if (!cascade && descendants.length > 0) {
-				json({ code: "HAS_DESCENDANTS", count: descendants.length, error: `${descendants.length} descendant(s) — pass cascade=true to archive recursively` }, 409);
+			// Live descendants (archived ones don't block cascade=false — they're
+			// already archived, no work to do for them). Mirrors the client's
+			// countDescendants which only counts non-archived. If client and
+			// server disagree on archived-status (rare race), the user gets a
+			// 409 they can't satisfy by re-confirming the dialog — that was the
+			// bug behind the user's "Failed to archive goal: HTTP 409" toast.
+			const liveDescendants = listDescendants(id);
+			if (!cascade && liveDescendants.length > 0) {
+				json({ code: "HAS_DESCENDANTS", count: liveDescendants.length, error: `${liveDescendants.length} descendant(s) — pass cascade=true to archive recursively` }, 409);
 				return;
 			}
+
+			// For the actual archive walk (when cascade=true), include archived
+			// descendants too — they may need branch cleanup or post-archive
+			// state propagation, and walking through them is cheap.
+			const descendants = cascade ? listDescendants(id, { includeArchived: true }) : liveDescendants;
 
 			// Archive deepest-first: descendants in BFS order; reverse for
 			// deepest-first traversal. The parent itself is archived last.
@@ -3825,16 +3844,18 @@ async function handleApiRoute(
 					catch (err) { console.error(`[api] Error tearing down team for goal ${gid}:`, err); }
 				}
 				const deleteGoalMgr = getGoalManagerForGoal(gid);
-				await deleteGoalMgr.archiveGoal(gid);
+				const wasArchived = await deleteGoalMgr.archiveGoal(gid);
 				const archivedGoal = deleteGoalMgr.getGoal(gid);
-				if (archivedGoal?.repoPath) {
+				if (wasArchived && archivedGoal?.repoPath) {
 					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
 						console.warn(`[api] Remote branch cleanup failed for goal ${gid}:`, err);
 					});
 				}
-				prStatusStore.remove(gid);
-				broadcastToAll({ type: "goal_state_changed", goalId: gid });
-				archivedCount++;
+				if (wasArchived) {
+					prStatusStore.remove(gid);
+					broadcastToAll({ type: "goal_state_changed", goalId: gid });
+					archivedCount++;
+				}
 			}
 			json({ ok: true, archived: archivedCount });
 			return;
