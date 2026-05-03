@@ -101,8 +101,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_plan_propose",
 		label: "Propose Goal Plan",
-		description: "Propose (or re-propose) the current parent goal's plan — array of subgoal-typed steps. The classifier compares against the frozen baseline and returns one of noop / fix-up / expansion / restructure / criteria-drop. Decision matrix in SUBGOALS-SPEC §3.6 then maps the kind + divergence policy to allow / require-approval / 409.",
-		promptSnippet: "Propose a (re-)plan for the parent goal. Returns the classifier verdict.",
+		description: "Submit (or re-submit) a plan of subgoal-typed steps for this goal. " +
+			"On a `parent`-workflow goal: the classifier compares against the frozen baseline " +
+			"(noop / fix-up / expansion / restructure / criteria-drop), and the divergence-" +
+			"policy decision matrix (SUBGOALS-SPEC §3.6) maps the kind to allow / require-" +
+			"approval / 409. " +
+			"On any other workflow (no `execution` gate to hold a frozen plan): the steps " +
+			"are spawned directly as child goals via goal_spawn_child — same effect for the " +
+			"user, just without the freeze/replan classifier. Idempotent on planId in both " +
+			"paths. Returns either a classifier verdict or a `{ fallback: \"spawn-children-direct\", spawned: [...] }` block.",
+		promptSnippet: "Propose a (re-)plan for the goal. Auto-falls-back to direct child spawn when the workflow has no execution gate.",
 		parameters: Type.Object({
 			steps: Type.Array(Type.Object({
 				planId: Type.String(),
@@ -116,7 +124,47 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params) {
 			try {
 				return ok(await api("PATCH", `/api/goals/${goalId}/plan`, { proposedSteps: params.steps }));
-			} catch (e: any) { return err(e.message); }
+			} catch (e: any) {
+				// Auto-fallback: when the goal's workflow has no execution gate
+				// the classifier/freeze flow doesn't apply — but the user's
+				// intent is plain (a list of subgoals to spawn). Loop
+				// goal_spawn_child for each step, idempotent on planId.
+				// Returning a shaped result instead of an error keeps the agent
+				// flow uninterrupted: the team-lead sees `fallback: "spawn-
+				// children-direct"` and knows the children were spawned but
+				// the freeze/replan classifier is unavailable on this workflow.
+				if (typeof e?.message === "string" && /NO_EXECUTION_GATE|no 'execution' gate/i.test(e.message)) {
+					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; error?: string }> = [];
+					for (const step of params.steps) {
+						try {
+							const result = await api("POST", `/api/goals/${goalId}/spawn-child`, {
+								planId: step.planId,
+								title: step.title,
+								spec: step.spec,
+								workflowId: step.workflowId,
+								suggestedRole: step.suggestedRole,
+							}) as { id?: string; alreadyExists?: boolean; suggestedRole?: string };
+							spawned.push({
+								planId: step.planId,
+								childGoalId: result.id,
+								alreadyExists: result.alreadyExists,
+								suggestedRole: result.suggestedRole,
+							});
+						} catch (spawnErr: any) {
+							spawned.push({ planId: step.planId, error: spawnErr?.message ?? String(spawnErr) });
+						}
+					}
+					const failed = spawned.filter(s => s.error).length;
+					return ok({
+						fallback: "spawn-children-direct",
+						note: "Goal's workflow has no execution gate, so the classifier/freeze flow was skipped. Each step was spawned via goal_spawn_child instead (idempotent on planId). To use the full plan/freeze/replan flow, recreate the goal with the 'parent' workflow.",
+						spawned,
+						spawnedCount: spawned.length - failed,
+						failedCount: failed,
+					});
+				}
+				return err(e.message);
+			}
 		},
 	});
 
