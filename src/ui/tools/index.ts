@@ -1,7 +1,5 @@
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
-import "./javascript-repl.js"; // Auto-registers the renderer
-import "./extract-document.js"; // Auto-registers the renderer
-import { getToolRenderer, registerToolRenderer } from "./renderer-registry.js";
+import { getToolRenderer, registerToolRenderer, registerLazyToolRenderer } from "./renderer-registry.js";
 import { BashRenderer } from "./renderers/BashRenderer.js";
 import { BrowserClickRenderer } from "./renderers/BrowserClickRenderer.js";
 import { BrowserEvalRenderer } from "./renderers/BrowserEvalRenderer.js";
@@ -22,12 +20,8 @@ import { WriteRenderer } from "./renderers/WriteRenderer.js";
 import { TeamSpawnRenderer, TeamListRenderer, TeamDismissRenderer, TeamCompleteRenderer, TeamSteerRenderer, TeamPromptRenderer, TeamAbortRenderer } from "./renderers/TeamToolRenderers.js";
 import { TaskListRenderer, TaskCreateRenderer, TaskUpdateRenderer } from "./renderers/TaskToolRenderers.js";
 import { GateListRenderer, GateSignalRenderer, GateStatusRenderer } from "./renderers/GateToolRenderers.js";
-import { GateInspectRenderer } from "./renderers/GateInspectRenderer.js";
-import "./renderers/GateVerificationLive.js"; // registers <gate-verification-live> custom element
 import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
-import { PreviewOpenRenderer } from "./renderers/PreviewRenderer.js";
 import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
-import { VerificationResultRenderer } from "./renderers/VerificationResultRenderer.js";
 import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
 import { EditProposalRenderer } from "./renderers/EditProposalRenderer.js";
 import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
@@ -67,13 +61,36 @@ registerToolRenderer("bash_bg", new BgProcessRenderer());
 registerToolRenderer("gate_list", new GateListRenderer());
 registerToolRenderer("gate_signal", new GateSignalRenderer());
 registerToolRenderer("gate_status", new GateStatusRenderer());
-registerToolRenderer("gate_inspect", new GateInspectRenderer());
-registerToolRenderer("preview_open", new PreviewOpenRenderer());
 registerToolRenderer("review_open", new ReviewOpenRenderer());
 registerToolRenderer("review_close", new ReviewCloseRenderer());
-registerToolRenderer("verification_result", new VerificationResultRenderer());
 registerToolRenderer("ask_user_choices", new AskUserChoicesRenderer());
 registerToolRenderer("activate_skill", new ActivateSkillRenderer());
+
+// ── Heavy renderers — lazy-loaded on first encounter of each tool. ──
+// These pull MarkdownBlock/KaTeX/pdfjs/docx-preview transitively, so keeping
+// them out of the main chunk is the whole point.
+registerLazyToolRenderer("gate_inspect", async () => {
+	const { GateInspectRenderer } = await import("./renderers/GateInspectRenderer.js");
+	return new GateInspectRenderer();
+});
+registerLazyToolRenderer("verification_result", async () => {
+	const { VerificationResultRenderer } = await import("./renderers/VerificationResultRenderer.js");
+	return new VerificationResultRenderer();
+});
+registerLazyToolRenderer("preview_open", async () => {
+	const { PreviewOpenRenderer } = await import("./renderers/PreviewRenderer.js");
+	return new PreviewOpenRenderer();
+});
+registerLazyToolRenderer("extract_document", async () => {
+	const { extractDocumentRenderer } = await import("./extract-document.js");
+	return extractDocumentRenderer;
+});
+registerLazyToolRenderer("javascript_repl", async () => {
+	const { javascriptReplRenderer } = await import("./javascript-repl.js");
+	return javascriptReplRenderer;
+});
+// gate_verification_live custom element is loaded lazily via
+// `src/ui/lazy/gate-verification-live.ts` from GateToolRenderers.
 
 // Proposal tools — one renderer per proposal type
 const PROPOSAL_TOOL_NAMES = [
