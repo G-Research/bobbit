@@ -2,6 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
+import { selectSpawnedChildren, isAncestorCycle, extendAncestors } from "./sidebar-spawned-children.js";
 import {
 	state,
 	renderApp,
@@ -368,7 +369,7 @@ export function bucketArchivedByProject(
  * shouldn't trust the data layer to be perfect).
  */
 function renderSpawnedChildGoalRow(child: Goal, renderedAncestors?: Set<string>): TemplateResult {
-	if (renderedAncestors?.has(child.id)) {
+	if (isAncestorCycle(child.id, renderedAncestors)) {
 		return html`
 			<div class="text-[10px] text-muted-foreground/70 italic px-1 py-0.5"
 				data-testid="sidebar-spawned-child-row-loop"
@@ -832,37 +833,19 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		// (sub-goals already advertise themselves via the parent goal's
 		// descendant-count badge).
 		//
-		// Defensive shaping:
-		//  - Dedupe by id. state.goals shouldn't have duplicate ids, but if a
-		//    reducer race leaves an old + new copy of the same goal, render
-		//    only one.
-		//  - Sort by createdAt asc, ties broken by id, so the visible order is
-		//    deterministic across re-renders. Without this, two goals with
-		//    identical titles but distinct ids would shuffle on every render.
-		const seenIds = new Set<string>();
-		const spawnedChildren = state.goals
-			.filter(g =>
-				g.parentGoalId === goal.id
-				&& g.spawnedBySessionId === teamLead.id
-				&& (state.showArchived || !g.archived))
-			.filter(g => {
-				if (seenIds.has(g.id)) return false;
-				seenIds.add(g.id);
-				return true;
-			})
-			.sort((a, b) => {
-				const at = a.createdAt ?? 0;
-				const bt = b.createdAt ?? 0;
-				if (at !== bt) return at - bt;
-				return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-			});
-
+		// Defensive shaping (filter, dedupe by id, deterministic sort) lives
+		// in the pure helper so it's unit-testable. See sidebar-spawned-children.ts.
+		const spawnedChildren = selectSpawnedChildren(
+			state.goals,
+			goal.id,
+			teamLead.id,
+			state.showArchived,
+		);
 		// Cycle guard: build the visited-ancestors set we'll thread through
 		// each child's renderGoalGroup call. Includes this goal's id so any
 		// descendant that — via a data anomaly — points back at this goal as
 		// a child won't recurse infinitely.
-		const ancestors = new Set(opts?.renderedAncestors ?? []);
-		ancestors.add(goal.id);
+		const ancestors = extendAncestors(opts?.renderedAncestors, goal.id);
 
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
@@ -930,24 +913,16 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 						// inside the archived lead's expanded block. The chevron
 						// only renders when there's something to expand, so we
 						// roll spawned sub-goals into the hasChildren signal.
-						// Apply the same defensive shaping as live spawnedChildren
-						// (dedupe by id, deterministic sort by createdAt then id).
-						const spawnedSubGoalsOf = (leadId: string) => {
-							const seen = new Set<string>();
-							return state.goals
-								.filter(g => g.parentGoalId === goal.id && g.spawnedBySessionId === leadId)
-								.filter(g => { if (seen.has(g.id)) return false; seen.add(g.id); return true; })
-								.sort((a, b) => {
-									const at = a.createdAt ?? 0;
-									const bt = b.createdAt ?? 0;
-									if (at !== bt) return at - bt;
-									return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-								});
-						};
+						// Same defensive shaping as live spawnedChildren via the
+						// shared pure helper. Note we pass `true` for showArchived
+						// here since the archived-leads branch is itself gated on
+						// `state.showArchived` upstream — we want to include
+						// archived sub-goals when this branch runs.
+						const spawnedSubGoalsOf = (leadId: string) =>
+							selectSpawnedChildren(state.goals, goal.id, leadId, true);
 						// Cycle guard for the archived-lead branch — same shape as
 						// the live branch above.
-						const archivedAncestors = new Set(opts?.renderedAncestors ?? []);
-						archivedAncestors.add(goal.id);
+						const archivedAncestors = extendAncestors(opts?.renderedAncestors, goal.id);
 
 						// Render archived leads, each with their own members + spawned sub-goals
 						const renderLeadWithMembers = (lead: GatewaySession, isLast: boolean) => {
