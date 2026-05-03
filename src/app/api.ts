@@ -907,7 +907,12 @@ export async function deleteGoal(id: string): Promise<void> {
 		const confirmed = await confirmAction("Archive Goal", `Archive "${goalTitle}"? It will move to the archived section.`, "Archive", false);
 		if (!confirmed) return;
 		try {
-			await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
+			const res = await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
+			if (!res.ok) {
+				showConnectionError("Failed to archive goal", `HTTP ${res.status}`);
+				return;
+			}
+			eagerMarkArchived([id]);  // eager UI update — refresh races otherwise
 			setHashRoute("landing");
 			await refreshSessions();
 		} catch (err) {
@@ -919,8 +924,50 @@ export async function deleteGoal(id: string): Promise<void> {
 	// Cascade flow — pre-flight + dialog. The dialog handles all REST calls.
 	const result = await showArchiveGoalDialog(goal);
 	if (result.archived > 0) {
+		// Eagerly mark every archived goal in client state so the sidebar
+		// updates immediately. Without this, there's a window between the
+		// dialog's resolve and refreshSessions completing where the UI
+		// still shows the (now-server-archived) goals as live — exactly
+		// the symptom the user reported when they expected the goal gone
+		// and saw it still in the menu.
+		const allIds = collectGoalIdsFor(id);
+		eagerMarkArchived(allIds);
 		setHashRoute("landing");
 		await refreshSessions();
+	}
+}
+
+/** Collect a goal + all its non-archived descendants from client state. */
+function collectGoalIdsFor(rootId: string): string[] {
+	const out = [rootId];
+	const queue = [rootId];
+	const seen = new Set<string>([rootId]);
+	while (queue.length > 0) {
+		const cur = queue.shift()!;
+		for (const g of state.goals) {
+			if (g.parentGoalId !== cur || g.archived || seen.has(g.id)) continue;
+			seen.add(g.id);
+			out.push(g.id);
+			queue.push(g.id);
+		}
+	}
+	return out;
+}
+
+/**
+ * Mutate `state.goals` to flip `archived: true` (and stamp `archivedAt`) for
+ * the given ids. Safe to call before `refreshSessions()` returns — the next
+ * fetch will replace the goal list anyway, but this gives the sidebar an
+ * instant visual update instead of waiting for the network round-trip.
+ */
+function eagerMarkArchived(ids: string[]): void {
+	const idSet = new Set(ids);
+	const now = Date.now();
+	for (const g of state.goals) {
+		if (idSet.has(g.id) && !g.archived) {
+			g.archived = true;
+			(g as Goal).archivedAt = now;
+		}
 	}
 }
 
