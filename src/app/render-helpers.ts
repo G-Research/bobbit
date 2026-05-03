@@ -719,7 +719,8 @@ export function renderGoalGroup(goal: Goal) {
 
 	const pr = state.prStatusCache.get(goal.id);
 	const canArchive = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
-	const reattemptBtn = (goal.archived || canArchive) ? html`
+	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
+	const reattemptBtn = !hasActiveSession ? html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}
 			title="Re-attempt goal">${icon(RotateCcw, "xs")}</button>

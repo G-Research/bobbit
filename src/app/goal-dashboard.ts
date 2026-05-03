@@ -1139,6 +1139,12 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 
 function renderNavBar(goal: Goal): TemplateResult {
 	const isTeamGoal = !!goal.team;
+	const hasLiveNonTeamSession = !goal.team && state.gatewaySessions.some(
+		(s) => (s.goalId === goal.id || s.teamGoalId === goal.id)
+			&& !s.delegateOf
+			&& s.status !== "terminated",
+	);
+	const showReattempt = !teamActive && !hasLiveNonTeamSession;
 
 	return html`
 		<div class="nav">
@@ -1160,7 +1166,7 @@ function renderNavBar(goal: Goal): TemplateResult {
 						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
 						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>`}
 				`}
-				${(prStatus?.state === "MERGED" || goal.archived) && !teamActive ? html`
+				${showReattempt ? html`
 					<button class="btn-icon" @click=${() => startReattempt(goal.id)} title="Re-attempt this goal">
 						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 							<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
