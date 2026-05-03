@@ -555,3 +555,117 @@ gate diagnostic console output behind
 to leave the gate in (small cost, free debugging for next regression)
 or strip it (cleaner). My recommendation: leave it. The debugging
 chapter in AGENTS.md should mention it.
+
+---
+
+## Outcome of the redesign
+
+The plan above shipped in two passes. This section captures the
+final state — what landed, what changed during implementation, and
+what subsequent regression hunts taught us. Treat the rest of this
+document as historical analysis; trust this section for current
+behaviour.
+
+### Production: one contract on both engines
+
+`agent-interface .overflow-y-auto` carries inline
+`overflow-anchor: none`. CSS scroll-anchoring is Chromium-only —
+Safari (desktop and iOS PWA) has no implementation
+([MDN: limited availability](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/overflow-anchor)).
+Leaving it on meant Chromium silently masked broken JS pin behaviour
+while Safari users experienced every regression unfiltered. With
+anchoring forced off everywhere, the four-rule JS model in
+`AgentInterface` is the single contract on both engines; any future
+regression must surface on Chromium too, where CI runs.
+
+### `_imageLoadHandler` is gone
+
+The capture-phase `load` listener on the scroll container — added
+during the original redesign to catch lazy `<img>` / `<iframe>`
+decode reflows on session-navigate — turned out to be a redundant
+second write. The ResizeObserver attached to the content container
+fires the same frame as the decode reflow, and its `delta > 0` branch
+already routes through `_pinIfSticking()`. Two writes for the same
+reflow produced an extra echo to absorb and a parallel failure mode
+if either path drifted out of sync. Removing the load handler
+collapses the contract back to "one re-pin path, fed by RO and the
+session-event funnel". Image / iframe / Mermaid / KaTeX reflows are
+now tested explicitly by `tests/e2e/ui/tail-chat-image-reflow.spec.ts`
+— if RO ever stops covering the decode path, that test breaks first.
+
+### Tests assert outcomes, not internals
+
+Empirically demonstrated during the redesign: tests that asserted on
+`_stickToBottom`, `_settleWindowActive`, or echo-buffer counts kept
+passing after production paths were neutered to no-ops. Chromium's
+default `overflow-anchor: auto` was hiding the bugs. The rewritten
+suite asserts only what the user actually sees:
+
+- **`expectLatestMessagePinned`** (`tests/e2e/ui/tail-chat-helpers.ts`)
+  reads `getBoundingClientRect()` of the last rendered message and
+  compares it to the scroll container's viewport. Two checks: the
+  scroll container is within `tailPx` of the bottom, and the latest
+  message's bottom is not below the viewport bottom (the canonical
+  "tail-chat lost" symptom users report).
+- **`disableScrollAnchoring`** cascades `overflow-anchor: none` to
+  every descendant inside the test scope so Chromium-under-test
+  matches Safari, forcing the JS pin path to be the only thing
+  keeping the latest message visible. Production already sets
+  `overflow-anchor: none` on the container; the helper is belt-and-
+  braces against any nested `overflow-anchor: auto` reset.
+- **Real preconditions only.** Tests drive `STREAM_BURST:N`,
+  `STAY_BUSY:Nms`, real tool-result rendering, and *trusted*
+  `page.mouse.wheel` events — never `dispatchEvent(new WheelEvent)`,
+  never poking `_stickToBottom = true`, never seeding the echo
+  buffer.
+- **No private-field assertions.** If a test needs a new fact, the
+  fact gets a named outcome helper alongside `expectLatestMessagePinned`.
+
+### Sensitivity matrix (held at merge)
+
+Each rewritten test was confirmed to fail when its corresponding
+production path was deliberately neutered:
+
+| Path neutered                                     | Tests that fail                             |
+|---------------------------------------------------|---------------------------------------------|
+| `_pinIfSticking()` made a no-op                   | `tail-chat-real-stream`, ≥2 rewritten specs |
+| ResizeObserver `delta > 0` branch removed         | ≥2 rewritten specs                          |
+| `overflow-anchor: none` reverted (Chromium auto)  | (silently passes — exposed by Safari only)  |
+| Image-reflow path broken inside RO                | `tail-chat-image-reflow`                    |
+
+The third row is why `disableScrollAnchoring` exists in the helper
+file: with Chromium's default `auto`, even a fully-broken JS path can
+still pin via CSS. Forcing `none` inside the test makes the JS
+contract the only mechanism under test, which is what we ship to
+Safari users anyway.
+
+### Manual Safari / iOS PWA verification
+
+The rewritten suite is CI-green on Chromium. iOS PWA verification
+runs against the same code via `Add to Home Screen` and exercises
+the JS pin path natively (no scroll-anchoring fallback). Any future
+regression here should reproduce in CI too thanks to
+`disableScrollAnchoring`; if it doesn't, the helper grew a hole and
+needs widening before the underlying bug is fixed.
+
+### Pointers for future debugging
+
+- **Symptom: latest message slips below the fold during streaming.**
+  Start at the RO `delta > 0` branch in `AgentInterface` and
+  `_pinIfSticking()`. Run `tail-chat-real-stream.spec.ts` with
+  `RECORDSCREEN=1` for a Tier 2.5 video; the failure point is
+  usually obvious within 30 s of scrubbing.
+- **Symptom: scroll snaps back while the user is mid-read.** Look at
+  `_handleScroll` and the echo-ring consumption logic. The
+  geometry-based intent flip is gone — if it has crept back in, kill
+  it; if not, the echo ring is leaking a programmatic write.
+- **Symptom: tail-chat works on Chromium, breaks on Safari.** That
+  is exactly the failure mode `overflow-anchor: none` exists to
+  prevent. Confirm the inline style is still on the scroll container
+  in production CSS, and that no test removed it accidentally.
+- **Resist re-adding any of the deleted defenses** listed in
+  `AGENTS.md` and `docs/internals.md` — settle window, carry-over
+  flag, suppress-jump timer, triple-rAF chain, geometry intent flip,
+  10 % stick-grace band, inner rAF re-assert in `_scrollToBottom`,
+  and `_imageLoadHandler`. Every one of them was eventually shown
+  to be masking a bug elsewhere.
