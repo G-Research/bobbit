@@ -124,8 +124,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_complete",
 		label: "Complete Team",
-		description: "Dismiss all role agents and mark the goal complete; team lead stays active.",
-		promptSnippet: "Complete the team: dismiss all agents, keep team lead active.",
+		description: "Dismiss all role agents and mark the goal complete; team lead stays active. All spawned subgoals must first be resolved via goal_merge_child or goal_archive_child (else 409 HAS_LIVE_CHILDREN).",
+		promptSnippet: "Complete the team: dismiss agents, keep team lead. Requires all subgoals merged/archived first.",
 		parameters: Type.Object({}),
 		async execute() {
 			try {
