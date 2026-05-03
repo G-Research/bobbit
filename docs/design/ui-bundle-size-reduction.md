@@ -1,6 +1,27 @@
 # Reduce UI bundle size — design doc
 
-Status: design  •  Goal branch: `goal-goal-reduce-ui--0ce41cc6`  •  Author: architect-0938851a
+Status: shipped (HEAD `1741cbf6`)  •  Goal branch: `goal-goal-reduce-ui--0ce41cc6`  •  Author: architect-0938851a
+
+## Outcome
+
+All six tasks (A–F) shipped. Final main `index-*.js` chunk: **~362 kB gzipped**, down from **999.48 kB** baseline — a **~64% reduction**, comfortably under the 600 kB budget (and well below the ~520 kB estimate in the table at the bottom of this doc).
+
+What landed:
+
+- **Task A** — route-level code splitting via `lazyPage()` / `lazyPageCall()` / `loadingPlaceholder()` helpers in `src/app/render.ts`. Settings, goal-dashboard, role/tool/workflow/staff/skills/search pages and the system-prompt dialog are all dynamic-imported.
+- **Task B** — `MarkdownBlock` + KaTeX deferred via `ensureMarkdownBlock()` in `src/ui/lazy/markdown-block.ts`; called from each consumer's `connectedCallback()` / first `render()`.
+- **Task C** — lazy tool-renderer registry: `registerLazyToolRenderer()` in `src/ui/tools/renderer-registry.ts`. Heavy renderers (`gate_inspect`, `verification_result`, `preview_open`, `extract_document`, `javascript_repl`, artifacts) load on first encounter.
+- **Task D** — `pdfjs-dist` and `docx-preview` switched to dynamic `await import()` at call sites in `src/ui/utils/attachment-utils.ts`, `AttachmentOverlay`, `PdfArtifact`, `DocxArtifact`.
+- **Task E** — Vite build flags (`target: "esnext"`, `modulePreload.polyfill: false`, `chunkSizeWarningLimit: 600`) plus a `knip`-driven dead-code sweep across `src/app/` and `src/ui/`.
+- **Task F** — SW route-chunk warming via the `bobbitSwVersion` plugin in `vite.config.ts` (replaces `/*__BOBBIT_PRECACHE_CHUNKS__*/` in `public/sw.js` from `dist/ui/.vite/manifest.json`) and a budget regression guard at `tests/bundle-size.test.ts` (`npm run test:bundle`).
+
+Follow-on bug fixes during stabilisation:
+
+- `ensureMarkdownBlock` calls added to chat-message custom elements (E2E regression: markdown rendering as raw text until something else triggered the load).
+- `proposal_update` events buffered in `_bufferedProposalEvents` (`src/app/remote-agent.ts`) so rehydrate-on-attach doesn't drop events arriving before the proposal panel binds its handler.
+- Stale-slot scope check tightened on lazy-renderer resolution.
+
+A pre-existing PWA-resume cold-offline test was skipped (verified flaky on `master` at `94143ba8`) and is tracked separately.
 
 ## Problem
 
