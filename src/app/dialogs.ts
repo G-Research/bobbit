@@ -1787,32 +1787,29 @@ export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveR
 				Dialog({
 					isOpen: true,
 					onClose: () => cleanup({ archived: 0 }),
-					width: "min(460px, 92vw)",
+					width: "min(480px, 92vw)",
 					height: "auto",
 					backdropClassName: "bg-black/50 backdrop-blur-sm",
 					children: html`
 						${DialogContent({
 							children: html`
 								${DialogHeader({ title: "Archive goal & descendants" })}
-								<p class="text-sm text-muted-foreground mt-2" data-testid="cascade-archive-summary">
-									"${goal.title}" has ${descendantCount} descendant goal${descendantCount === 1 ? "" : "s"}.
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-archive-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantCount}</span>
+									descendant goal${descendantCount === 1 ? "" : "s"}.
 								</p>
-								<div class="mt-3 flex flex-col gap-2 text-sm">
-									<label class="flex items-start gap-2 cursor-not-allowed" title="Cannot orphan child goals — must cascade or cancel.">
-										<input type="checkbox" checked disabled data-testid="cascade-archive-checkbox-cascade" />
-										<span>
-											Archive descendants too (${descendantCount} child goal${descendantCount === 1 ? "" : "s"})
-											<span class="block text-[10px] text-muted-foreground">Required: cannot orphan child goals.</span>
-										</span>
-									</label>
-									<label class="flex items-start gap-2 cursor-not-allowed" title="Sessions are torn down automatically by archive.">
-										<input type="checkbox" checked disabled data-testid="cascade-archive-checkbox-teardown" />
-										<span>
-											Tear down running team sessions
-											<span class="block text-[10px] text-muted-foreground">Required: archive intrinsically tears down sessions.</span>
-										</span>
-									</label>
-								</div>
+								<p class="text-sm text-muted-foreground mt-2">
+									Confirming will:
+								</p>
+								<ul class="text-sm text-foreground mt-1 ml-4 list-disc space-y-1" data-testid="cascade-archive-effects">
+									<li>Archive the parent goal.</li>
+									<li>Archive all <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"} (children of children too).</li>
+									<li>Tear down every running team session under this tree.</li>
+								</ul>
+								<p class="text-xs text-muted-foreground/80 mt-3 italic">
+									Cascade is required — child goals can't be orphaned. Cancel if you'd like to back out.
+								</p>
 							`,
 						})}
 						${DialogFooter({
@@ -1895,13 +1892,15 @@ export async function showStopTeamDialog(
 						${DialogContent({
 							children: html`
 								${DialogHeader({ title: "Stop team" })}
-								<p class="text-sm mt-2" data-testid="cascade-stop-summary">
-									"${goal.title}" has <strong>${descendantTeamCount}</strong> descendant goal${descendantTeamCount === 1 ? "" : "s"} with running team${descendantTeamCount === 1 ? "" : "s"}.
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-stop-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantTeamCount}</span>
+									descendant goal${descendantTeamCount === 1 ? "" : "s"} with running team${descendantTeamCount === 1 ? "" : "s"}.
 								</p>
-								<p class="text-sm text-muted-foreground mt-1">
+								<p class="text-sm text-muted-foreground mt-2">
 									Stopping just this goal's team would leave the descendant teams running and burning tokens. Cascade-stop tears down all of them.
 								</p>
-								<ul class="text-xs text-muted-foreground mt-2 ml-4 list-disc space-y-0.5" data-testid="cascade-stop-descendants">
+								<ul class="text-sm text-foreground mt-2 ml-4 list-disc space-y-0.5" data-testid="cascade-stop-descendants">
 									${previewLines}${overflow}
 								</ul>
 							`,
@@ -1994,15 +1993,21 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 						${DialogContent({
 							children: html`
 								${DialogHeader({ title: "Pause goal" })}
-								<p class="text-sm text-muted-foreground mt-2" data-testid="cascade-pause-summary">
-									"${goal.title}" has ${descendantCount} descendant goal${descendantCount === 1 ? "" : "s"}.
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-pause-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantCount}</span>
+									descendant goal${descendantCount === 1 ? "" : "s"}.
 								</p>
-								<label class="flex items-start gap-2 mt-3 text-sm cursor-pointer">
+								<p class="text-sm text-muted-foreground mt-2">
+									Pausing a goal stops its team-lead from receiving new prompts. By default we cascade so descendants pause too — uncheck if you want to pause only this goal.
+								</p>
+								<label class="flex items-start gap-2 mt-3 text-sm text-foreground cursor-pointer">
 									<input type="checkbox"
 										?checked=${cascade}
+										class="mt-0.5"
 										data-testid="cascade-pause-checkbox"
 										@change=${(e: Event) => { cascade = (e.target as HTMLInputElement).checked; renderDialog(); }} />
-									<span>Also pause ${descendantCount} descendant goal${descendantCount === 1 ? "" : "s"}</span>
+									<span>Also pause <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"}</span>
 								</label>
 							`,
 						})}
@@ -2101,15 +2106,21 @@ export async function showResumeGoalDialog(goal: Goal, descendantCount: number):
 						${DialogContent({
 							children: html`
 								${DialogHeader({ title: "Resume goal" })}
-								<p class="text-sm text-muted-foreground mt-2" data-testid="cascade-resume-summary">
-									"${goal.title}" has ${descendantCount} descendant goal${descendantCount === 1 ? "" : "s"} that may also be paused.
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-resume-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantCount}</span>
+									descendant goal${descendantCount === 1 ? "" : "s"} that may also be paused.
 								</p>
-								<label class="flex items-start gap-2 mt-3 text-sm cursor-pointer">
+								<p class="text-sm text-muted-foreground mt-2">
+									By default we resume only this goal. Check the box to also resume the descendants.
+								</p>
+								<label class="flex items-start gap-2 mt-3 text-sm text-foreground cursor-pointer">
 									<input type="checkbox"
 										?checked=${cascade}
+										class="mt-0.5"
 										data-testid="cascade-resume-checkbox"
 										@change=${(e: Event) => { cascade = (e.target as HTMLInputElement).checked; renderDialog(); }} />
-									<span>Also resume ${descendantCount} descendant goal${descendantCount === 1 ? "" : "s"}</span>
+									<span>Also resume <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"}</span>
 								</label>
 							`,
 						})}
