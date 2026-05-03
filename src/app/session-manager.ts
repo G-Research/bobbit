@@ -23,7 +23,12 @@ import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { setSelectedWorkflowId } from "./render.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
-import { invalidateProjectScopeConfig } from "./settings-page.js";
+// settings-page is dynamic-imported lazily below to keep it out of the main chunk.
+// See docs/design/ui-bundle-size-reduction.md (Task A).
+async function invalidateProjectScopeConfig(projectId: string): Promise<void> {
+	const m = await import("./settings-page.js");
+	m.invalidateProjectScopeConfig(projectId);
+}
 import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
