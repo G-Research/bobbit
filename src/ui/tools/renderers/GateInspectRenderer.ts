@@ -7,7 +7,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { ShieldCheck } from "lucide";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { getResult, gateBadge } from "./GateToolRenderers.js";
@@ -38,6 +38,7 @@ function deriveStepStatus(step: any): string {
 
 export class GateInspectRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+		ensureMarkdownBlock();
 		const state = getToolState(result, isStreaming);
 		const gateId = params?.gate_id || "gate";
 

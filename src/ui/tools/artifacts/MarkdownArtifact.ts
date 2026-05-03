@@ -3,7 +3,7 @@ import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { i18n } from "../../utils/i18n.js";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import { CopyButton } from "@mariozechner/mini-lit/dist/CopyButton.js";
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { PreviewCodeToggle } from "@mariozechner/mini-lit/dist/PreviewCodeToggle.js";
@@ -59,6 +59,7 @@ export class MarkdownArtifact extends ArtifactElement {
 	}
 
 	override render() {
+		ensureMarkdownBlock();
 		return html`
 			<div class="h-full flex flex-col">
 				<div class="flex-1 overflow-auto">

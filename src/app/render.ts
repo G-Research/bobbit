@@ -1,5 +1,5 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
@@ -516,6 +516,7 @@ interface GoalFormConfig {
 }
 
 function renderGoalForm(config: GoalFormConfig) {
+	ensureMarkdownBlock();
 	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
 	const worktreePath = linkedProject
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
@@ -853,6 +854,7 @@ function ensureToolsLoaded(): void {
 }
 
 function rolePreviewPanel() {
+	ensureMarkdownBlock();
 	ensureToolsLoaded();
 	const streaming = isProposalStreaming("role_proposal");
 	queueMicrotask(() => {
@@ -1057,6 +1059,7 @@ function rolePreviewPanel() {
 // ============================================================================
 
 function toolPreviewPanel() {
+	ensureMarkdownBlock();
 	const streaming = isProposalStreaming("tool_proposal");
 	queueMicrotask(() => {
 		reconcileFollowTail(toolDocsPreviewRef.value);
@@ -1362,6 +1365,7 @@ function describeCron(cron: string): string {
 }
 
 function staffPreviewPanel() {
+	ensureMarkdownBlock();
 	ensureSandboxStatusLoaded();
 	const streaming = isProposalStreaming("staff_proposal");
 	queueMicrotask(() => {
