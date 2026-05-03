@@ -93,6 +93,34 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		}
 	});
 
+	test("SB-22b: Re-attempt button visible on a fresh goal with no sessions", async ({ page }) => {
+		const goal = await createGoal({ title: "SB22b Fresh Reattempt", cwd: nonGitCwd() });
+		goalIds.push(goal.id);
+
+		await openApp(page);
+
+		const goalTitle = page.getByText("SB22b Fresh Reattempt", { exact: false }).first();
+		await expect(goalTitle).toBeVisible({ timeout: 15_000 });
+
+		const goalRow = goalTitle.locator("xpath=ancestor::div[contains(@class,'group')]").first();
+		await goalRow.hover();
+
+		const reattemptBtn = goalRow.locator("button[title='Re-attempt goal']");
+		await expect(reattemptBtn).toBeVisible({ timeout: 5_000 });
+		await reattemptBtn.click();
+
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+
+		await expect(async () => {
+			const hash = await page.evaluate(() => window.location.hash);
+			expect(hash).toMatch(/#\/session\/[a-f0-9-]+/i);
+		}).toPass({ timeout: 10_000 });
+
+		const hash = await page.evaluate(() => window.location.hash);
+		const m = hash.match(/#\/session\/([a-f0-9-]+)/i);
+		if (m) await apiFetch(`/api/sessions/${m[1]}`, { method: "DELETE" }).catch(() => {});
+	});
+
 	test("SB-23: Archive goal — disappears from live, appears in archived", async ({ page }) => {
 		// Create a live goal
 		const goal = await createGoal({ title: "SB23 Archive Test", cwd: nonGitCwd() });
