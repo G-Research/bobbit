@@ -376,6 +376,18 @@ async function initApp() {
 	renderApp();
 	markPaint("init:first-paint");
 
+	// §E PWA-resume skeleton — hide on first paint of the real app. Single
+	// removal point; no re-show path. The skeleton is a sibling of #app and
+	// outside Lit's render target, so this is safe for Lit.
+	try {
+		const sk = document.getElementById("bobbit-skeleton");
+		if (sk) {
+			sk.setAttribute("hidden", "");
+			sk.style.setProperty("display", "none", "important");
+			sk.style.setProperty("pointer-events", "none", "important");
+		}
+	} catch { /* never block bootstrap */ }
+
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
 	window.addEventListener("hashchange", handleHashChange);
