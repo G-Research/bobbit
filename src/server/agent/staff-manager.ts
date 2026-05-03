@@ -6,6 +6,7 @@ import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
+import { execShellCommand } from "./shell-util.js";
 
 const execFile = promisify(execFileCb);
 
@@ -273,7 +274,7 @@ export class StaffManager {
 					branchContainer: wt,
 					primaryWorktreeRoot: staff.cwd,
 					exec: async (cmd, cwd, env) => {
-						await execFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 					},
 				});
 			} catch (err) {

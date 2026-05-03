@@ -574,15 +574,13 @@ export async function executeWorktreeAsync(
 		if (components.length > 0) {
 			try {
 				const { runComponentSetups } = await import("../skills/worktree-setup.js");
-				const { execFile } = await import("node:child_process");
-				const { promisify } = await import("node:util");
-				const pExecFile = promisify(execFile);
+				const { execShellCommand } = await import("./shell-util.js");
 				await runComponentSetups({
 					components,
 					branchContainer: worktreeCwd,
 					primaryWorktreeRoot: plan.repoPath!,
 					exec: async (cmd, cwd, env) => {
-						await pExecFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 					},
 				});
 			} catch (err) {

@@ -31,6 +31,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createWorktree, cleanupWorktree, shouldSkipRemotePush, createWorktreeSet, type WorktreeResult } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
+import { execShellCommand } from "./shell-util.js";
 import type { Component } from "./project-config-store.js";
 
 const execFile = promisify(execFileCb);
@@ -476,7 +477,7 @@ export class WorktreePool {
 							branchContainer: container,
 							primaryWorktreeRoot: this.repoPath,
 							exec: async (cmd, cwd, env) => {
-								await execFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+								await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 							},
 						});
 					} catch (err) {
