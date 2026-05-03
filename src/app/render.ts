@@ -2234,6 +2234,44 @@ export function doRenderApp(): void {
 		return;
 	}
 
+	// F2: Session-not-found view — surfaces SESSION_NOT_FOUND from the WS
+	// auth path after we removed the /api/sessions/:id existence probe.
+	if (state.appView === "session-not-found") {
+		render(html`
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden" data-testid="session-not-found-view">
+				<div class="flex items-center justify-between border-b border-border shrink-0">
+					<div class="flex items-center gap-2 px-4 py-1">
+						${bobbitIcon}
+						<span class="text-base font-semibold text-foreground">Bobbit</span>
+					</div>
+					<div class="flex items-center gap-1 px-2">
+						<theme-toggle></theme-toggle>
+					</div>
+				</div>
+				<div class="flex-1 flex flex-col items-center justify-center gap-6 p-8">
+					<div class="flex flex-col items-center gap-3 text-center">
+						<div class="text-muted-foreground empty-state-icon">${icon(Unplug, "lg")}</div>
+						<h2 class="text-lg font-medium text-foreground">Session not found</h2>
+						<p class="text-sm text-muted-foreground max-w-sm">
+							This session no longer exists. It may have been terminated or archived.
+						</p>
+					</div>
+					${Button({
+						variant: "default",
+						onClick: () => {
+							state.appView = "authenticated";
+							setHashRoute("landing");
+							renderApp();
+							refreshSessions();
+						},
+						children: html`<span class="inline-flex items-center gap-2">${icon(ArrowLeft, "sm")} Back to sessions</span>`,
+					})}
+				</div>
+			</div>
+		`, app);
+		return;
+	}
+
 	// Gateway starting — server not yet responsive, polling until ready
 	if (state.appView === "gateway-starting") {
 		render(html`
