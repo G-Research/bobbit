@@ -267,7 +267,6 @@ build: {
 - **81 unused exports** (top items, all sourced from `npx knip`):
   - `src/app/state.ts`: `renderAppSync`, `addPendingProject`, `removePendingProject`, `GOAL_STATE_COLORS` — confirm and delete.
   - `src/app/render-helpers.ts`: `escapeHtml`, `renderProjectBadge`, `shortenPath`, `stopTimeRefresh`, `renderSidebarSession`, `goalStateIcon`.
-  - `src/app/ui-snapshot.ts`: `writeSnapshot`, `getActiveSessionFromSnapshot`, `readSnapshot`, `default`, `clearSnapshot`, `flushPendingSnapshot` — six exports, ~80% of the file's surface area unused. Delete or convert to private.
   - `src/app/goal-dashboard.ts:2193`: `renderAgentPanel`.
   - `src/app/favicon-badge.ts:109`: `hideFaviconBadge`.
   - `src/app/dialogs.ts:1208`: `showAssignRoleDialog`.
@@ -337,7 +336,7 @@ Six independently-shippable, non-overlapping tasks. Tasks 1, 2a, 4, 5 can run fu
 - **Estimated savings**: -100–150 kB raw / ~40 kB gzipped.
 
 ### Task E — Vite build flags + dead-code sweep (items 4 + 5)
-- **Files**: `vite.config.ts` (build section), plus deletions across `src/app/state.ts`, `src/app/render-helpers.ts`, `src/app/ui-snapshot.ts`, `src/app/dialogs.ts`, `src/app/follow-tail.ts`, `src/app/favicon-badge.ts`, `src/ui/components/CostPopover.ts`, `src/ui/components/ToolPermissionCard.ts`, `src/ui/bobbit-render.ts`, `src/ui/bobbit-sprite-data.ts`, `src/app/goal-dashboard.ts:2193`.
+- **Files**: `vite.config.ts` (build section), plus deletions across `src/app/state.ts`, `src/app/render-helpers.ts`, `src/app/dialogs.ts`, `src/app/follow-tail.ts`, `src/app/favicon-badge.ts`, `src/ui/components/CostPopover.ts`, `src/ui/components/ToolPermissionCard.ts`, `src/ui/bobbit-render.ts`, `src/ui/bobbit-sprite-data.ts`, `src/app/goal-dashboard.ts:2193`.
 - **Scope**: add `target: "esnext"`, `modulePreload.polyfill: false`, `chunkSizeWarningLimit: 600`. Delete UI-side unused exports listed in scope item 5.
 - **Depends on**: none.
 - **Estimated savings**: -10–35 kB gzipped combined.
@@ -356,10 +355,7 @@ For every PR in the chain:
 ```bash
 npm run check                                                          # must pass
 npm run test:unit 2>&1 | tail -5                                       # all green
-npm run test:e2e 2>&1 | tail -5                                        # all green, especially:
-#   tests/e2e/ui/pwa-resume-cold-offline.spec.ts
-#   tests/e2e/ui/pwa-resume-pageshow.spec.ts
-#   tests/e2e/ui/pwa-prepaint-post-render.spec.ts
+npm run test:e2e 2>&1 | tail -5                                        # all green
 npm run build:ui 2>&1 | tail -40                                       # capture chunk sizes
 npx vite-bundle-visualizer 2>&1 | tail -20                             # treemap; attach to PR
 ```
