@@ -9,6 +9,7 @@ import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { TeamStore } from "./team-store.js";
+import type { SessionStore } from "./session-store.js";
 
 const pExecFile = promisify(execFileCb);
 
@@ -653,23 +654,37 @@ export class GoalManager {
 	 * field (commit 00d6805f). Without this, legacy sub-goals don't nest
 	 * under their spawning team-lead in the sidebar.
 	 *
-	 * For each non-archived goal with a `parentGoalId`, look up the parent's
-	 * team entry and stamp the parent's team-lead session id. Archived
-	 * goals are skipped — their parent's team has long since been torn down.
+	 * Lookup precedence: (1) parent's persisted team entry's
+	 * `teamLeadSessionId` — works for live teams; (2) session store fallback
+	 * — find sessions with `role === "team-lead"` and `teamGoalId` matching
+	 * the parent goal; if exactly one exists (live OR archived), stamp it.
+	 * Multi-team-lead parents stay ambiguous and are skipped — sub-goals
+	 * fall back to the parent-forest level rather than misattribute.
+	 *
+	 * Archived sub-goals are processed too: the visual nesting under an
+	 * archived team-lead in the "Archived" sidebar block depends on this
+	 * field being stamped.
 	 *
 	 * Idempotent — only writes when the field is absent. Per-goal try/catch
 	 * keeps boot resilient (Lesson 4.11 — endless-restart guard).
 	 */
-	backfillSpawnedBySessionId(teamStore: TeamStore): { backfilled: number; skipped: number } {
+	backfillSpawnedBySessionId(teamStore: TeamStore, sessionStore?: SessionStore): { backfilled: number; skipped: number } {
 		let backfilled = 0;
 		let skipped = 0;
 		for (const goal of this.store.getAll()) {
 			try {
-				if (goal.archived) { skipped++; continue; }
 				if (!goal.parentGoalId) { skipped++; continue; }
 				if (goal.spawnedBySessionId) { skipped++; continue; }
-				const parentTeam = teamStore.get(goal.parentGoalId);
-				const tlSession = parentTeam?.teamLeadSessionId;
+				let tlSession: string | undefined = teamStore.get(goal.parentGoalId)?.teamLeadSessionId ?? undefined;
+				if (!tlSession && sessionStore) {
+					const candidates = sessionStore.getAll().filter(s =>
+						s.role === "team-lead"
+						&& (s.teamGoalId === goal.parentGoalId || s.goalId === goal.parentGoalId)
+					);
+					if (candidates.length === 1) {
+						tlSession = candidates[0].id;
+					}
+				}
 				if (!tlSession) { skipped++; continue; }
 				this.store.update(goal.id, { spawnedBySessionId: tlSession });
 				backfilled++;

@@ -1296,7 +1296,7 @@ export function createGateway(config: GatewayConfig) {
 				// (commit 00d6805f). Reads `teamLeadSessionId` from the
 				// parent's persisted team entry. Idempotent.
 				try {
-					const result = ctx.goalManager.backfillSpawnedBySessionId(ctx.teamStore);
+					const result = ctx.goalManager.backfillSpawnedBySessionId(ctx.teamStore, ctx.sessionStore);
 					if (result.backfilled > 0) {
 						console.log(`[goal-manager] backfillSpawnedBySessionId project=${ctx.project.id} backfilled=${result.backfilled} skipped=${result.skipped}`);
 					}
