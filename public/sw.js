@@ -25,7 +25,28 @@ const BUILD_ID = "__BOBBIT_BUILD_ID__";
 const CACHE_NAME = `bobbit-${BUILD_ID}`;
 const NAV_TIMEOUT_MS = 4000;
 const NAV_TIMEOUT = Symbol("nav-timeout");
-const PRECACHE_URLS = ["/", "/index.html", "/manifest.json"];
+// Likely-next route chunks are appended at build time by the
+// `bobbit-sw-version` Vite plugin (see vite.config.ts). The placeholder
+// is replaced with a JSON array of `/assets/...` paths; in dev it
+// becomes `[]`. Pre-warming these chunks during install means the first
+// navigation to e.g. /goal-dashboard hits the cache instead of the
+// network — cold-launch parse cost becomes the only bottleneck.
+// Replaced at build time with a JS array literal of `/assets/...` paths
+// for the most-likely next routes (goal-dashboard, settings-page) by the
+// `bobbit-sw-version` Vite plugin. In dev it's `[]`. Pre-warming these
+// chunks during install means the first navigation hits the cache
+// instead of the network — cold-launch parse cost becomes the only
+// bottleneck after a deploy.
+// The marker `/*__BOBBIT_PRECACHE_CHUNKS__*/` is replaced at build time
+// by the `bobbit-sw-version` Vite plugin with the comma-separated hashed
+// paths of the most-likely next route chunks (goal-dashboard,
+// settings-page) plus their transitive imports/css. Pre-warming these
+// during install means the first navigation hits the cache instead of
+// the network — cold-launch parse cost becomes the only bottleneck
+// after a deploy. In dev / unstamped sources the marker is a no-op
+// comment so the file stays valid JS.
+const PRECACHE_ROUTE_CHUNKS = [/*__BOBBIT_PRECACHE_CHUNKS__*/];
+const PRECACHE_URLS = ["/", "/index.html", "/manifest.json", ...PRECACHE_ROUTE_CHUNKS];
 
 self.addEventListener("install", (event) => {
 	// Activate immediately so a new build replaces the old SW on the next
