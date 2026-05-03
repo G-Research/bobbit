@@ -360,6 +360,18 @@ details.wf-proposal-workflow .wf-proposal-gates {
 		max-width: 50%;
 		overflow: hidden;
 	}
+	/* When a preview panel is nested inside another (the unified preview panel
+	   tab content rendering goalPreviewPanel / rolePreviewPanel /
+	   toolPreviewPanel / staffPreviewPanel), the inner panel must fill its
+	   parent — the outer panel already supplies the 50% width and the left
+	   border. Without this reset, the inner panel keeps its own `flex: 0 0
+	   50%` and `overflow: hidden`, which clips the System Prompt textarea
+	   and other long content. */
+	.goal-preview-panel .goal-preview-panel {
+		flex: 1 1 auto;
+		max-width: 100%;
+		border-left: none;
+	}
 }
 
 /* On mobile, remove the left border when shown as a tab */
