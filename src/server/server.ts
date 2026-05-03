@@ -3504,10 +3504,16 @@ async function handleApiRoute(
 				parentGoalId: parentId,
 			});
 			// Lesson 4.1: stamp spawnedFromPlanId IMMEDIATELY — no awaits between.
-			await goalManager.updateGoal(child.id, { spawnedFromPlanId: planId });
-			void suggestedRole; // Reserved for future per-child role hint persistence.
+			// Also persist suggestedRole when supplied so the child's team-lead
+			// gets a hint about which role to delegate to first (read by the
+			// team-lead system prompt; falls back to default-role selection
+			// when absent). Field is optional on PersistedGoal.
+			await goalManager.updateGoal(child.id, {
+				spawnedFromPlanId: planId,
+				...(suggestedRole ? { suggestedRole } : {}),
+			});
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
-			json({ id: child.id }, 201);
+			json({ id: child.id, suggestedRole }, 201);
 
 			// Trigger worktree setup + team start exactly like POST /api/goals does.
 			// Without this the child sits in setupStatus="preparing" forever — the

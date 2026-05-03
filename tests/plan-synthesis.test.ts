@@ -84,15 +84,20 @@ describe("plan-synthesis — living plan (no formal)", () => {
 		assert.equal(steps[1].planId, "synth:b");
 	});
 
-	it("excludes archived children from living plan", () => {
+	it("INCLUDES archived children in living plan (renderer decides display state)", () => {
+		// Inverted from the prior policy. Plan-tab synthesis is now a faithful
+		// view of "what's been planned/spawned"; the renderer (plan-node-state.ts)
+		// decides per-node display state. Excluding archived blanked-out the
+		// Plan tab whenever a parent's children were archived. Bug surfaced by
+		// user on an archived parent goal whose archived children disappeared.
 		const steps = buildPlanSteps({
 			childGoals: [
 				child({ id: "a", createdAt: 0 }),
 				child({ id: "b", createdAt: 10, archived: true }),
 			],
 		});
-		assert.equal(steps.length, 1);
-		assert.equal(steps[0].childGoalId, "a");
+		assert.equal(steps.length, 2);
+		assert.deepEqual(steps.map(s => s.childGoalId), ["a", "b"]);
 	});
 });
 

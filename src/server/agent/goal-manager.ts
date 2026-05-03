@@ -727,6 +727,7 @@ export class GoalManager {
 		divergencePolicy?: "strict" | "balanced" | "autonomous";
 		maxConcurrentChildren?: number;
 		acceptanceCriteria?: string[];
+		suggestedRole?: string;
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;

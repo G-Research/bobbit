@@ -74,6 +74,13 @@ export interface PersistedGoal {
 	paused?: boolean;
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
 	replanCount?: number;
+	/**
+	 * Optional role hint set by `goal_spawn_child` when the parent specifies
+	 * which role should pick up the child first. Read by the child team-lead's
+	 * system prompt to bias the first delegation; not enforced — the team-lead
+	 * is free to pick a different role if the work demands it.
+	 */
+	suggestedRole?: string;
 }
 
 /**

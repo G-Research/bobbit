@@ -142,6 +142,48 @@ describe("classifyMutation", () => {
 		assert.notEqual(r.kind, "criteria-drop");
 	});
 
+	it("criteria-drop: criterion ONLY carried by a removed step (not in root spec) — flagged", () => {
+		// E2E suite recommendation 3: when a criterion appears only in the
+		// removed step's spec (root spec doesn't carry it), the classifier
+		// must flip restructure → criteria-drop. Ensures coverage union is
+		// computed against the PROPOSED step set, not current.
+		const current = [
+			step("a", { phase: 1, spec: "covers foo" }),
+			step("b", { phase: 1, spec: "covers bar — the only mention" }),
+		];
+		const proposed = [step("a", { phase: 1, spec: "covers foo" })]; // dropped b
+		const r = classifyMutation({
+			current,
+			proposed,
+			rootAcceptanceCriteria: ["foo", "bar"],
+			rootSpec: "", // root spec carries neither criterion
+		});
+		assert.equal(r.kind, "criteria-drop", `expected criteria-drop, got ${r.kind}`);
+		assert.deepEqual(r.uncoveredCriteria, ["bar"]);
+		// Step "b" was removed → diff should report it.
+		assert.deepEqual(r.diff.removed, ["b"]);
+	});
+
+	it("criteria-drop: removing a step whose criterion is ALSO in root spec → restructure (not criteria-drop)", () => {
+		// Mirror of the above: when the criterion is carried verbatim in the
+		// root spec, removing the step that mentions it does NOT drop coverage.
+		// Verifies the union {rootSpec ∪ proposed.specs} is consulted.
+		const current = [
+			step("a", { phase: 1, spec: "covers foo" }),
+			step("b", { phase: 1, spec: "covers bar" }),
+		];
+		const proposed = [step("a", { phase: 1, spec: "covers foo" })]; // dropped b
+		const r = classifyMutation({
+			current,
+			proposed,
+			rootAcceptanceCriteria: ["bar"],
+			rootSpec: "the root explicitly mentions bar",
+		});
+		// Structurally a restructure (step removed without pause).
+		assert.equal(r.kind, "restructure");
+		assert.equal(r.uncoveredCriteria, undefined);
+	});
+
 	it("criteria-drop OVERRIDES expansion: structurally expansion + uncovered criterion → criteria-drop", () => {
 		const current = [step("a", { phase: 1, spec: "" })];
 		const proposed = [step("a", { phase: 1, spec: "" }), step("b", { phase: 2, spec: "unrelated" })];

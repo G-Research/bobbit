@@ -100,8 +100,11 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 		}));
 		const maxFormalPhase = out.reduce((m, s) => Math.max(m, s.phase), 0);
 		// Orphans = ad-hoc children whose spawnedFromPlanId is not in the formal list.
+		// Include archived children too — the renderer (plan-node-state.ts) decides
+		// display state per node, and an archived parent should still surface its
+		// archived children's plan structure so the dashboard isn't blank.
 		const orphans = childGoals
-			.filter(c => !c.archived && (c.spawnedFromPlanId === undefined || !formalPlanIds.has(c.spawnedFromPlanId)))
+			.filter(c => c.spawnedFromPlanId === undefined || !formalPlanIds.has(c.spawnedFromPlanId))
 			.slice()
 			.sort((a, b) => a.createdAt - b.createdAt);
 		const orphanPhases = clusterPhases(orphans, gap, maxFormalPhase + 1);
@@ -118,9 +121,13 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 		return out;
 	}
 
-	// Living plan: synthesise from non-archived children.
+	// Living plan: synthesise from ALL children — archived included.
+	// Plan-tab display state is the renderer's responsibility (plan-node-state.ts
+	// distinguishes complete vs failed vs paused per child); the synthesis layer
+	// is just "what's been planned/spawned". Excluding archived here would
+	// blank-out the Plan tab whenever a parent's children are archived (e.g.
+	// after a cascade-archive sweep).
 	const sorted = childGoals
-		.filter(c => !c.archived)
 		.slice()
 		.sort((a, b) => a.createdAt - b.createdAt);
 	const phases = clusterPhases(sorted, gap, 0);
