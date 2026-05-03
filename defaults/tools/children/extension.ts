@@ -52,7 +52,16 @@ export default function (pi: ExtensionAPI) {
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
 		const resp = await fetch(`${baseUrl}${urlPath}`, {
 			method,
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+				// Identifies the team-lead session that's calling — server
+				// uses this on POST /spawn-child to stamp `spawnedBySessionId`
+				// on the new child so the sidebar can render it nested under
+				// this session (collapse-with-team-lead behaviour). Other
+				// endpoints ignore it.
+				"X-Bobbit-Spawning-Session": sessionId,
+			},
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 		});
 		const text = await resp.text();

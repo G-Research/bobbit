@@ -3475,6 +3475,15 @@ async function handleApiRoute(
 		if (!spec) { json({ error: "spec is required" }, 400); return; }
 		const workflowId = typeof body.workflowId === "string" ? body.workflowId : "feature";
 		const suggestedRole = typeof body.suggestedRole === "string" ? body.suggestedRole : undefined;
+		// Caller (children-tools extension) may identify the spawning team-lead
+		// session so the sidebar can nest the child under it. Header takes
+		// precedence over body so the agent's session id is authoritative
+		// even if a forwarded request rewrites the body.
+		const spawnedBySessionId =
+			(typeof req.headers["x-bobbit-spawning-session"] === "string"
+				? (req.headers["x-bobbit-spawning-session"] as string)
+				: undefined)
+			?? (typeof body.spawnedBySessionId === "string" ? body.spawnedBySessionId : undefined);
 
 		const ctx = projectContextManager.getContextForGoal(parentId);
 		if (!ctx) { json({ error: "Project context not found for parent goal" }, 404); return; }
@@ -3512,16 +3521,16 @@ async function handleApiRoute(
 				parentGoalId: parentId,
 			});
 			// Lesson 4.1: stamp spawnedFromPlanId IMMEDIATELY — no awaits between.
-			// Also persist suggestedRole when supplied so the child's team-lead
-			// gets a hint about which role to delegate to first (read by the
-			// team-lead system prompt; falls back to default-role selection
-			// when absent). Field is optional on PersistedGoal.
+			// Also persist suggestedRole + spawnedBySessionId in the same atomic
+			// updateGoal so the sidebar can nest the child under its spawning
+			// team-lead session (collapse-with-the-team-lead behaviour).
 			await goalManager.updateGoal(child.id, {
 				spawnedFromPlanId: planId,
 				...(suggestedRole ? { suggestedRole } : {}),
+				...(spawnedBySessionId ? { spawnedBySessionId } : {}),
 			});
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
-			json({ id: child.id, suggestedRole }, 201);
+			json({ id: child.id, suggestedRole, spawnedBySessionId }, 201);
 
 			// Trigger worktree setup + team start exactly like POST /api/goals does.
 			// Without this the child sits in setupStatus="preparing" forever — the

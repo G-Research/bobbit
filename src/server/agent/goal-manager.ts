@@ -728,6 +728,7 @@ export class GoalManager {
 		maxConcurrentChildren?: number;
 		acceptanceCriteria?: string[];
 		suggestedRole?: string;
+		spawnedBySessionId?: string;
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;

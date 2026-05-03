@@ -843,7 +843,20 @@ function renderProjectContent(
 			return goals.some(g => g.id === ag.parentGoalId && !g.archived);
 		})]
 		: goals;
-	const forest = buildNestedGoalForest(liveAndArchivedForForest as any, { maxDepth, includeArchived: state.showArchived });
+	// Sub-goals stamped with `spawnedBySessionId` are rendered under their
+	// spawning team-lead session inside renderGoalGroup. Exclude them here
+	// so they only appear in one place. Falls back to parent-level rendering
+	// when the spawning session is gone (terminated and not in state, or
+	// archived) — otherwise the sub-goal would be unreachable.
+	const liveSessionIds = new Set(
+		state.gatewaySessions
+			.filter(s => s.role === "team-lead" && s.status !== "terminated")
+			.map(s => s.id),
+	);
+	const forestInput = liveAndArchivedForForest.filter(g =>
+		!g.spawnedBySessionId || !liveSessionIds.has(g.spawnedBySessionId)
+	);
+	const forest = buildNestedGoalForest(forestInput as any, { maxDepth, includeArchived: state.showArchived });
 	return html`
 		${forest.map((node, i) => html`
 			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}

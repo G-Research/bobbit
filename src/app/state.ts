@@ -99,6 +99,10 @@ export interface Goal {
 	maxConcurrentChildren?: number;
 	acceptanceCriteria?: string[];
 	spawnedFromPlanId?: string;
+	/** Set on goal_spawn_child to the spawning team-lead session id. Used
+	 *  by the sidebar to nest sub-goals under their spawning session so
+	 *  collapsing the team-lead also hides the sub-goals it owns. */
+	spawnedBySessionId?: string;
 	paused?: boolean;
 	replanCount?: number;
 	workflow?: {
