@@ -49,6 +49,13 @@ export interface ApplyReviewModelOptions {
 	maxAttempts?: number;
 	/** Delay between retries in ms. Defaults to 250. */
 	retryDelayMs?: number;
+	/**
+	 * Skip the `setModel` RPC and go straight to read-back verification.
+	 * Use when the agent was spawned with `--model <provider>/<modelId>`
+	 * already — the read-back still hard-fails on mismatch, preserving the
+	 * contract.
+	 */
+	skipSetModel?: boolean;
 }
 
 export interface ApplyModelStringOptions {
@@ -60,6 +67,12 @@ export interface ApplyModelStringOptions {
 	maxAttempts?: number;
 	/** Delay between retries in ms. Defaults to 250. */
 	retryDelayMs?: number;
+	/**
+	 * Skip the `setModel` RPC and go straight to read-back verification.
+	 * Use when the agent was spawned with `--model <provider>/<modelId>`
+	 * already — the read-back still hard-fails on mismatch.
+	 */
+	skipSetModel?: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -93,25 +106,27 @@ export async function applyModelString(
 	const maxAttempts = Math.max(1, opts.maxAttempts ?? 2);
 	const retryDelayMs = Math.max(0, opts.retryDelayMs ?? 250);
 
-	let lastErr: unknown;
-	let succeeded = false;
-	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		try {
-			await rpc.setModel(provider, modelId);
-			succeeded = true;
-			break;
-		} catch (err) {
-			lastErr = err;
-			if (attempt < maxAttempts) {
-				await sleep(retryDelayMs);
+	if (!opts.skipSetModel) {
+		let lastErr: unknown;
+		let succeeded = false;
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				await rpc.setModel(provider, modelId);
+				succeeded = true;
+				break;
+			} catch (err) {
+				lastErr = err;
+				if (attempt < maxAttempts) {
+					await sleep(retryDelayMs);
+				}
 			}
 		}
-	}
-	if (!succeeded) {
-		const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-		throw new Error(
-			`setModel failed for ${label}="${modelString}" after ${maxAttempts} attempt(s): ${msg}`,
-		);
+		if (!succeeded) {
+			const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+			throw new Error(
+				`setModel failed for ${label}="${modelString}" after ${maxAttempts} attempt(s): ${msg}`,
+			);
+		}
 	}
 
 	// Read-back verification
@@ -154,5 +169,6 @@ export async function applyReviewModelOverrides(
 		contextLabel: prefKey,
 		maxAttempts: opts.maxAttempts,
 		retryDelayMs: opts.retryDelayMs,
+		skipSetModel: opts.skipSetModel,
 	});
 }
