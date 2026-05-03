@@ -53,22 +53,27 @@ export async function setupTailChatScene(page: Page): Promise<{ scrollSel: strin
 		requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
 	}));
 
-	// Snap to bottom + cancel the session-load settle window so we exercise
-	// the steady-state geometry path, not the settle-window guard. The settle
-	// window is removed entirely by the redesign — but on master it's the
-	// thing masking the geometry race during the first 3 s after navigate.
+	// Snap to bottom and seed the programmatic-scroll echo latch so the
+	// consequent native scroll event is consumed as an echo and doesn't flip
+	// `_stickToBottom`. On the post-fix build the latch is a ring buffer
+	// (`_programmaticEchoes`); on master it's a single pair of scalars
+	// (`_lastProgrammaticScrollTop`/`Height`). Seed whichever surface exists.
 	await page.evaluate((sel) => {
 		const ai = document.querySelector("agent-interface") as any;
 		const el = document.querySelector(sel) as HTMLElement;
 		el.scrollTop = el.scrollHeight;
-		// Mark recent-programmatic-scroll latch so the consequent native scroll
-		// event is consumed as an echo and doesn't flip _stickToBottom.
-		ai._lastProgrammaticScrollTop = el.scrollHeight - el.clientHeight;
-		ai._lastProgrammaticScrollHeight = el.scrollHeight;
+		const top = el.scrollHeight - el.clientHeight;
+		const height = el.scrollHeight;
+		if (Array.isArray(ai._programmaticEchoes)) {
+			ai._programmaticEchoes.push({ top, height });
+		} else {
+			ai._lastProgrammaticScrollTop = top;
+			ai._lastProgrammaticScrollHeight = height;
+		}
 		ai._stickToBottom = true;
-		// Cancel the settle window so the steady-state geometry path runs.
-		// The redesign removes the settle window outright, so on the post-fix
-		// build this property simply doesn't exist (assignment is harmless).
+		// Cancel the legacy settle window so steady-state behaviour runs. The
+		// redesign removes the settle window entirely; on the post-fix build
+		// this field doesn't exist and the assignment is harmless.
 		if ("_settleWindowActive" in ai) ai._settleWindowActive = false;
 		el.dispatchEvent(new Event("scroll"));
 	}, SCROLL_SEL);
@@ -145,9 +150,13 @@ export async function injectStaleScrollEvent(page: Page): Promise<{
 		// above bottom" (> 10% of clientHeight away from the floor). Clear the
 		// echo-latch so the event isn't filtered as an echo. This mimics a
 		// queued browser scroll event that fires after we've already latched
-		// the *next* programmatic write.
-		ai._lastProgrammaticScrollTop = null;
-		ai._lastProgrammaticScrollHeight = null;
+		// the *next* programmatic write. Clear whichever echo surface exists.
+		if (Array.isArray(ai._programmaticEchoes)) {
+			ai._programmaticEchoes.length = 0;
+		} else {
+			ai._lastProgrammaticScrollTop = null;
+			ai._lastProgrammaticScrollHeight = null;
+		}
 		const ch = el.clientHeight;
 		const targetTop = Math.max(0, el.scrollHeight - ch - Math.ceil(ch * 0.5));
 		el.scrollTop = targetTop;

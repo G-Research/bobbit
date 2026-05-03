@@ -145,7 +145,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Streaming dedup/reorder** — events carry `seq`+`ts`; `{type:"resume", fromSeq}` on reconnect. See [docs/design/streaming-dedup-reorder.md](docs/design/streaming-dedup-reorder.md).
 - **WS overflow guard** — `decideOverflowAction` in `ws-overflow-guard.ts`; transient spike tolerated via deferred re-check.
 - **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`; `seq`-based LRU dedupe.
-- **Scroll snaps back / vibration** — `AgentInterface` ResizeObserver auto-scrolls only on `delta > 0`. See [docs/internals.md — Chat scroll lock invariant](docs/internals.md#chat-scroll-lock-invariant).
+- **Scroll snaps back / vibration / tail-chat lost** — `AgentInterface` uses a single `_stickToBottom` flag (mutated only by user gestures / programmatic restore points), a programmatic-scroll echo ring buffer (`_programmaticEchoes`), and one re-pin path (`_pinIfSticking`). Geometry never mutates the flag. The settle window, `_wasAtBottomAtLastUserScroll` carry-over, jump-button suppression timer, and triple-rAF chain are deleted — do not re-introduce them. See [docs/internals.md — Chat scroll lock invariant](docs/internals.md#chat-scroll-lock-invariant).
 - **Proposal panel button enabled mid-stream** — `state.proposalStreamingByTag[<tag>_proposal]` flag.
 - **"Open proposal" on old card destroys later edits** — check for `__proposal_rev_v1__:<n>` marker; legacy archived sessions intentionally fall back.
 - **Proposal panel doesn't update after `edit_proposal`** — check WS `proposal_update` frame and structured error code.

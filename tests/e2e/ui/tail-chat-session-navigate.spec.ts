@@ -95,8 +95,12 @@ test.describe("tail-chat: session navigate lands at bottom", () => {
 			await page.evaluate((sel) => {
 				const ai = document.querySelector("agent-interface") as any;
 				const el = document.querySelector(sel) as HTMLElement;
-				ai._lastProgrammaticScrollTop = null;
-				ai._lastProgrammaticScrollHeight = null;
+				if (Array.isArray(ai._programmaticEchoes)) {
+					ai._programmaticEchoes.length = 0;
+				} else {
+					ai._lastProgrammaticScrollTop = null;
+					ai._lastProgrammaticScrollHeight = null;
+				}
 				const ch = el.clientHeight;
 				el.scrollTop = Math.max(0, el.scrollHeight - ch - Math.ceil(ch * 0.5));
 				el.dispatchEvent(new Event("scroll"));

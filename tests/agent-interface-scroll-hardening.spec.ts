@@ -1,94 +1,85 @@
 /**
- * Scroll-lock hardening — Changes 1–4 from the design doc.
+ * Scroll-lock hardening — outcome tests for the post-redesign model.
  *
- * Behavioural twin of the post-hardening logic in
- * src/ui/components/AgentInterface.ts. Each test maps directly to one of
- * the five mechanical changes specified in the design doc.
+ * The redesign collapses the previous layered patches (settle window,
+ * `_wasAtBottomAtLastUserScroll` carry-over, geometry-driven intent flip,
+ * jump-button suppression timer) into a single coherent model:
  *
- * (Change 5, the Jump-to-bottom button, is covered by an E2E test:
- * tests/e2e/ui/jump-to-bottom.spec.ts.)
+ *   - `_stickToBottom` flips FALSE only on user gestures.
+ *   - Geometry NEVER mutates the flag.
+ *   - Programmatic-scroll echoes go through a ring buffer (length 4),
+ *     consumed oldest-match first with sub-pixel (< 1 px) tolerance.
+ *   - The ResizeObserver re-pins via `_pinIfSticking()` on `delta > 0`.
+ *
+ * These tests exercise the OUTCOMES that the old patches were trying to
+ * achieve, against the new model. The previous mechanism-detail tests
+ * (settle window re-anchors, carry-over scroll on state_update) are gone
+ * because the mechanisms they asserted are deleted.
+ *
+ * The Jump-to-bottom button click flow is covered by
+ * tests/e2e/ui/jump-to-bottom.spec.ts. The vibration regression
+ * (delta === 0 RO no-op) is covered by tests/agent-interface-scroll.spec.ts.
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
 const TEST_PAGE = `file://${path.resolve("tests/fixtures/agent-interface-scroll-hardening.html")}`;
 
-test.describe("AgentInterface scroll hardening", () => {
+test.describe("AgentInterface scroll hardening (post-redesign)", () => {
 	test.beforeEach(async ({ page }) => {
 		await page.goto(TEST_PAGE);
 	});
 
-	test("Change 1 — sub-pixel echo latch (< 1 px) consumes the echo and does not flip stickToBottom", async ({ page }) => {
+	test("sub-pixel echo is consumed (< 1 px tolerance) and does not flip stickToBottom", async ({ page }) => {
 		await page.evaluate(() => (window as any).__startAtBottom());
 		await page.evaluate(() => (window as any).__primeProgrammaticScroll());
 
 		const before = await page.evaluate(() => (window as any).__getState());
 		expect(before.stickToBottom).toBe(true);
-		expect(before.lastProgrammaticScrollTop).not.toBeNull();
+		expect(before.echoCount).toBeGreaterThanOrEqual(1);
 
-		// Synthesize a scroll event whose reported scrollTop is the latched value + 0.4.
-		// On master (strict equality) this would miss the echo and recompute
-		// _stickToBottom against a false offset. With the < 1 tolerance, the
-		// echo is consumed exactly once and the latch is cleared.
+		// Fractional-offset scroll event simulating HiDPI device-pixel rounding.
 		await page.evaluate(() => (window as any).__simulateFractionalEcho());
 
 		const after = await page.evaluate(() => (window as any).__getState());
-		expect(after.lastProgrammaticScrollTop, "echo latch should be cleared after consumption").toBeNull();
-		expect(after.lastProgrammaticScrollHeight).toBeNull();
-		expect(after.stickToBottom, "stickToBottom must not be flipped by the echoed event").toBe(true);
+		expect(after.echoCount, "echo ring should have one fewer entry after consumption")
+			.toBe(before.echoCount - 1);
+		expect(after.stickToBottom, "stickToBottom must not change for an echo").toBe(true);
 	});
 
-	test("Change 2 — widened tail tolerance (< 10) keeps stickToBottom true at distance 7", async ({ page }) => {
+	test("geometry alone does NOT flip stickToBottom even at distance 30 from bottom", async ({ page }) => {
+		// In the legacy model, a transient sub-pixel scroll-up beyond the 10 px
+		// stick-grace tail flipped _stickToBottom = false via geometry, which then
+		// required a `_wasAtBottomAtLastUserScroll` carry-over to re-anchor on
+		// state_update. The redesign removes geometry-driven flips entirely:
+		// `_stickToBottom` stays true unless the user explicitly scrolls.
 		await page.evaluate(() => (window as any).__startAtBottom());
-		// Position so scrollHeight - scrollTop - clientHeight === 7 px from bottom.
-		await page.evaluate(() => (window as any).__scrollSoDistanceFromBottomIs(7));
+		await page.evaluate(() => (window as any).__scrollSoDistanceFromBottomIs(30));
 
 		const state = await page.evaluate(() => (window as any).__getState());
-		const distance = state.scrollHeight - state.scrollTop - state.clientHeight;
-		expect(distance).toBe(7);
-		expect(state.stickToBottom, "tail tolerance is now < 10, so 7px must still be 'at bottom'").toBe(true);
+		expect(state.stickToBottom, "geometry must not mutate the flag").toBe(true);
+		// Jump-button visibility comes from geometry — at 30 px (< clientHeight*0.5)
+		// the button should remain hidden.
+		expect(state.showJumpToBottom).toBe(false);
 	});
 
-	test("Change 3 — wasAtBottom carry-over scrolls to bottom on state_update after a transient scroll-up", async ({ page }) => {
+	test("explicit user wheel releases stickiness immediately", async ({ page }) => {
 		await page.evaluate(() => (window as any).__startAtBottom());
-		// Transient scroll-up by 30 px (well > 10 to defeat Change 2's tolerance).
-		await page.evaluate(() => (window as any).__simulateTransientScrollUp(30));
-
-		const mid = await page.evaluate(() => (window as any).__getState());
-		expect(mid.stickToBottom, "30px scroll-up must flip stickToBottom false").toBe(false);
-		expect(mid.wasAtBottomAtLastUserScroll, "carry-over must remember we WERE at bottom").toBe(true);
-		expect(mid.scrollToBottomCallCount).toBe(0);
-
-		// Fire state_update — should re-anchor to bottom via the carry-over.
-		await page.evaluate(() => (window as any).__fireStateUpdate());
-		const after = await page.evaluate(() => (window as any).__getState());
-		expect(after.scrollToBottomCallCount, "state_update must re-anchor to bottom via carry-over").toBe(1);
-	});
-
-	test("Change 3 — explicit user intent (wheel) resets the carry-over", async ({ page }) => {
-		await page.evaluate(() => (window as any).__startAtBottom());
-		await page.evaluate(() => (window as any).__simulateTransientScrollUp(30));
-		// Explicit wheel/touchstart-style user intent.
 		await page.evaluate(() => (window as any).__fireUserWheel());
 		const after = await page.evaluate(() => (window as any).__getState());
 		expect(after.stickToBottom).toBe(false);
-		expect(after.wasAtBottomAtLastUserScroll, "user-intent must clear the carry-over").toBe(false);
 	});
 
-	test("Change 3 — keyboard navigation also clears carry-over", async ({ page }) => {
+	test("keyboard nav releases stickiness", async ({ page }) => {
 		await page.evaluate(() => (window as any).__startAtBottom());
-		await page.evaluate(() => (window as any).__simulateTransientScrollUp(30));
 		await page.evaluate(() => (window as any).__fireScrollKey("PageUp"));
 		const after = await page.evaluate(() => (window as any).__getState());
-		expect(after.wasAtBottomAtLastUserScroll).toBe(false);
+		expect(after.stickToBottom).toBe(false);
 	});
 
-	test("Change 4 — settle window re-anchors across staggered RO ticks", async ({ page }) => {
+	test("RO ticks on growth re-pin while sticking; viewport stays within sub-pixel tail", async ({ page }) => {
 		await page.evaluate(() => (window as any).__startAtBottom());
-		await page.evaluate(() => (window as any).__armSettleWindow(2000));
-
-		// Three staggered ticks — each grows scrollHeight, simulating async
-		// markdown/code-block layout settling after session bind.
+		// Three staggered growths — async markdown / code-block layout.
 		for (let i = 0; i < 3; i++) {
 			await page.evaluate(() => {
 				(window as any).__appendMessages(20);
@@ -96,18 +87,15 @@ test.describe("AgentInterface scroll hardening", () => {
 			});
 			await page.waitForTimeout(20);
 		}
-
 		const after = await page.evaluate(() => (window as any).__getState());
 		const tail = after.scrollHeight - after.scrollTop - after.clientHeight;
-		expect(tail, "after settle, must be within 5 px of the bottom").toBeLessThanOrEqual(5);
-		expect(after.scrollToBottomCallCount, "settle window must have re-anchored at least once").toBeGreaterThanOrEqual(1);
+		expect(tail, "after growth, must be within 1 px of the bottom").toBeLessThanOrEqual(1);
+		expect(after.scrollToBottomCallCount, "must have re-pinned at least once").toBeGreaterThanOrEqual(1);
 	});
 
-	test("Change 4 — user wheel during settle cancels the window; later RO ticks do NOT force-scroll", async ({ page }) => {
+	test("user wheel mid-stream stops further re-pins (no hidden settle window)", async ({ page }) => {
 		await page.evaluate(() => (window as any).__startAtBottom());
-		await page.evaluate(() => (window as any).__armSettleWindow(2000));
-
-		// First tick — settle window applies.
+		// First tick re-pins (we're stuck).
 		await page.evaluate(() => {
 			(window as any).__appendMessages(20);
 			(window as any).__fireResizeObserver();
@@ -115,14 +103,12 @@ test.describe("AgentInterface scroll hardening", () => {
 		const afterFirst = await page.evaluate(() => (window as any).__getState());
 		const callsAfterFirst = afterFirst.scrollToBottomCallCount;
 
-		// User scrolls (wheel) → settle window must cancel.
+		// User wheel — stickiness released.
 		await page.evaluate(() => (window as any).__fireUserWheel());
 		const cancelled = await page.evaluate(() => (window as any).__getState());
-		expect(cancelled.settleWindowActive).toBe(false);
 		expect(cancelled.stickToBottom).toBe(false);
 
-		// Subsequent RO ticks must NOT force-scroll — stickToBottom is false
-		// AND settle window is inactive.
+		// Subsequent RO ticks must NOT re-pin.
 		await page.evaluate(() => {
 			(window as any).__appendMessages(20);
 			(window as any).__fireResizeObserver();
@@ -132,6 +118,21 @@ test.describe("AgentInterface scroll hardening", () => {
 			(window as any).__fireResizeObserver();
 		});
 		const final = await page.evaluate(() => (window as any).__getState());
-		expect(final.scrollToBottomCallCount, "no further scroll after user intent cancelled the window").toBe(callsAfterFirst);
+		expect(final.scrollToBottomCallCount, "no further re-pins after user intent")
+			.toBe(callsAfterFirst);
+	});
+
+	test("ring-buffer absorbs multi-write echo race (older echo arriving after newer write)", async ({ page }) => {
+		await page.evaluate(() => (window as any).__startAtBottom());
+		const before = await page.evaluate(() => (window as any).__getState());
+		await page.evaluate(() => (window as any).__simulateMultiWriteRace());
+		const after = await page.evaluate(() => (window as any).__getState());
+		// stickToBottom must stay true: geometry never mutates it, AND the
+		// older echo was consumed instead of falling through to user-intent
+		// territory.
+		expect(after.stickToBottom).toBe(true);
+		// And the ring still holds the newer echo — only the older one was spliced.
+		expect(after.echoCount).toBeGreaterThanOrEqual(1);
+		void before;
 	});
 });
