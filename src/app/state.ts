@@ -155,6 +155,12 @@ applySidebarWidthVar(loadSidebarWidth());
 export const state = {
 	chatPanel: null as ChatPanel | null,
 	remoteAgent: null as RemoteAgent | null,
+	/** Pre-warmed RemoteAgent constructed before route dispatch when the
+	 *  initial route is `/session/:id`. The WS connect runs in parallel with
+	 *  `waitForGateway` so the TCP+TLS+upgrade+auth_ok round-trips overlap.
+	 *  `connectToSession` consumes it if the session id matches; otherwise
+	 *  it is discarded via `agent.disconnect()`. */
+	preWarmedAgent: null as { sessionId: string; agent: RemoteAgent; connectPromise: Promise<void> } | null,
 	connectionStatus: "disconnected" as ConnectionStatus,
 	appView: "disconnected" as AppView,
 

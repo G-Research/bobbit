@@ -12,8 +12,9 @@ import {
 	activeSessionId,
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
-import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
+import { getRouteFromHash } from "./routing.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, startPostAuthBackgroundFetches } from "./session-manager.js";
+import { RemoteAgent } from "./remote-agent.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
@@ -134,15 +135,10 @@ async function handleHashChange(): Promise<void> {
 				state.connectionStatus = "disconnected";
 			}
 			state.goalDashboardId = null;
-			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
-			if (checkRes.ok) {
-				await connectToSession(route.sessionId, true);
-			} else {
-				setHashRoute("landing");
-				state.appView = "authenticated";
-				renderApp();
-				await refreshSessions();
-			}
+			// A3: skip the existence probe — connectToSession surfaces the
+			// SESSION_NOT_FOUND error path (showConnectionError modal) if the
+			// WS handshake rejects.
+			await connectToSession(route.sessionId, true);
 		} else if (route.view === "goal-dashboard" && route.goalId) {
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
@@ -379,16 +375,46 @@ async function initApp() {
 	// during async init (gateway wait, session refresh) are not silently missed.
 	window.addEventListener("hashchange", handleHashChange);
 
+	// B1: when resuming directly into /session/:id, pre-warm the WebSocket in
+	// parallel with `waitForGateway`. The TCP+TLS+upgrade+auth_ok round-trips
+	// overlap with `/api/health`, so by the time `connectToSession` runs the
+	// connect promise is often already settled.
+	if (savedUrl && savedToken) {
+		const initialRoute = getRouteFromHash();
+		if (initialRoute.view === "session" && initialRoute.sessionId) {
+			try {
+				const preAgent = new RemoteAgent();
+				const connectPromise = preAgent.connect(savedUrl, savedToken, initialRoute.sessionId)
+					.catch((err) => {
+						// Swallow — connectToSession will re-throw via the awaited
+						// promise and surface the standard error UI. Without the catch,
+						// an unhandled rejection lands before the consumer attaches.
+						throw err;
+					});
+				// Defuse unhandled-rejection: re-attached when consumed.
+				connectPromise.catch(() => { /* will surface via connectToSession */ });
+				state.preWarmedAgent = { sessionId: initialRoute.sessionId, agent: preAgent, connectPromise };
+				mark("ws:prewarm-start");
+			} catch { /* non-fatal */ }
+		}
+	}
+
 	if (savedUrl && savedToken) {
 		try {
 			mark("init:gateway-wait-start");
 			await waitForGateway(savedUrl, savedToken);
 			mark("init:gateway-wait-end");
 
-			// Load saved preferences (palette, timestamps, AI gateway)
-			try {
-				const prefRes = await gatewayFetch("/api/preferences");
-				if (prefRes.ok) {
+			// A1: fire post-auth REST fetches as side-effects so the route
+			// dispatch can run in parallel.
+			startPostAuthBackgroundFetches();
+
+			// A2: load saved preferences fire-and-forget. The palette is
+			// already applied inline (`index.html`); showTimestamps and
+			// playAgentFinishSound are not visible on first paint.
+			gatewayFetch("/api/preferences").then(async (prefRes) => {
+				if (!prefRes.ok) return;
+				try {
 					const prefs = await prefRes.json();
 					if (prefs.palette && prefs.palette !== "forest") {
 						document.documentElement.dataset.palette = prefs.palette;
@@ -396,17 +422,14 @@ async function initApp() {
 					} else {
 						localStorage.removeItem('palette');
 					}
-					// Apply showTimestamps
 					if (prefs.showTimestamps) {
 						document.documentElement.dataset.showTimestamps = "true";
 					}
-					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
-				}
-			} catch {}
-
-			mark("init:prefs-loaded");
+				} catch { /* non-fatal */ }
+				mark("init:prefs-loaded");
+			}).catch(() => { /* non-fatal */ });
 
 			// Fire-and-forget one-shot migration of legacy localStorage read state
 			// to the server. Idempotent — guarded by the localStorage key.
@@ -416,10 +439,9 @@ async function initApp() {
 			if (route.view === "goal" && route.goalId) {
 				await loadDashboardData(route.goalId);
 			} else if (route.view === "session" && route.sessionId) {
-				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
-				if (checkRes.ok) {
-					await connectToSession(route.sessionId, true);
-				}
+				// A3: skip existence probe — connectToSession surfaces
+				// SESSION_NOT_FOUND via the WS auth path's standard error UI.
+				await connectToSession(route.sessionId, true);
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;
 				loadDashboardData(route.goalId);
