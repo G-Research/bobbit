@@ -88,20 +88,39 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_spawn_child",
 		label: "Spawn Child Goal",
-		description: "Spawn a child goal under the current goal. Idempotent on planId — re-calling with the same planId returns the existing child id rather than creating a duplicate. The child branches off the parent's branch HEAD; on ready-to-merge, the child's branch merges LOCALLY into the parent (no remote PR).",
-		promptSnippet: "Spawn a child goal idempotently (keyed by planId).",
+		description: "Spawn a child goal under the current goal. Idempotent on planId — re-calling with the same planId returns the existing child id rather than creating a duplicate. The child branches off the parent's branch HEAD; on ready-to-merge, the child's branch merges LOCALLY into the parent (no remote PR). The child INHERITS the parent's `inlineRoles` snapshot automatically — to add child-specific ephemeral roles or override a parent's, pass `inlineRoles` here. Same applies to `inlineWorkflow` for one-off workflow definitions.",
+		promptSnippet: "Spawn a child goal idempotently (keyed by planId). Inherits parent's inlineRoles; pass inlineRoles/inlineWorkflow to add child-specific ephemeral definitions.",
 		parameters: Type.Object({
 			planId: Type.String({ description: "Stable id for this plan node — used as spawnedFromPlanId on the child (Lesson 4.1)." }),
 			title: Type.String({ description: "Child goal title — becomes the child's display title and branch slug." }),
 			spec: Type.String({ description: "Markdown spec for the child goal." }),
-			workflowId: Type.Optional(Type.String({ description: "Workflow id for the child (defaults to 'feature' on the server)." })),
+			workflowId: Type.Optional(Type.String({ description: "Workflow id for the child (defaults to 'feature' on the server). Mutually exclusive with inlineWorkflow." })),
 			suggestedRole: Type.Optional(Type.String({ description: "Suggested team-lead role for the child." })),
+			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
+				name: Type.String(),
+				label: Type.String(),
+				promptTemplate: Type.String(),
+				accessory: Type.Optional(Type.String()),
+				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.String())),
+				model: Type.Optional(Type.String()),
+				thinkingLevel: Type.Optional(Type.String()),
+			}), {
+				description: "Per-child ephemeral roles. MERGED on top of the parent's inlineRoles snapshot — child entries with the same name override the parent's. Use this when the subgoal needs a different reviewer/QA role than the parent. Resolved BEFORE the project role cascade. For roles useful across many goals → propose_role (permanent) instead.",
+			})),
+			inlineWorkflow: Type.Optional(Type.Object({
+				id: Type.String(),
+				name: Type.String(),
+				description: Type.Optional(Type.String()),
+				gates: Type.Array(Type.Any()),
+			}, { description: "Optional inline workflow snapshot for the child. When provided, snapshotted onto the child record and the project workflow store is bypassed for this child. Mutually exclusive with workflowId — if both are given, the inline workflow wins." })),
 		}),
 		async execute(_id, params) {
 			try {
 				const body: Record<string, unknown> = { planId: params.planId, title: params.title, spec: params.spec };
 				if (params.workflowId !== undefined) body.workflowId = params.workflowId;
 				if (params.suggestedRole !== undefined) body.suggestedRole = params.suggestedRole;
+				if (params.inlineRoles !== undefined) body.inlineRoles = params.inlineRoles;
+				if (params.inlineWorkflow !== undefined) body.workflow = params.inlineWorkflow;
 				return ok(await api("POST", `/api/goals/${goalId}/spawn-child`, body));
 			} catch (e: any) { return err(e.message); }
 		},

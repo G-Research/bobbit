@@ -57,6 +57,8 @@ parallel throughput, and a single PR for review at the top.
                   │   + spawnedBySessionId?: string    │
                   │   + paused?: boolean               │
                   │   + replanCount?: number           │
+                  │   + inlineRoles?: Record<          │
+                  │       name, Role>  (snapshot)      │
                   └────────────────────────────────────┘
 
                   ┌────────────────────────────────────┐
@@ -363,6 +365,61 @@ endless-restart guard). Wired in `src/server/server.ts` immediately
 after `restoreTeams`, alongside `backfillCompleteState`. Logs
 `[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal
 <gid>` per stamped goal.
+
+## Ephemeral roles & workflows (goal-scoped)
+
+By default, roles and workflows live in the project's permanent library
+and are reusable across goals. For one-off cases — an audit-specific
+synthesis-reviewer that doesn't belong in the project's role manager;
+a bespoke gate sequence for a single bug-fix — both can be **snapshotted
+onto the goal record** and resolved BEFORE the project cascade.
+
+**Inline workflows** (existing, Phase 5b): pass `body.workflow` (a full
+Workflow object) on `POST /api/goals` or `goal_spawn_child`. The server
+deep-clones it to `goal.workflow`. The runtime uses the snapshot, not a
+re-lookup against the workflow store, so subsequent edits to the
+project's stored workflows don't affect this goal.
+
+**Inline roles**: pass `body.inlineRoles: Record<roleName, Role>` on the
+same endpoints. Snapshotted to `goal.inlineRoles`. Resolution happens via
+the pure helper `resolveRole(goal, name, roleStore)` in
+`src/server/agent/resolve-role.ts`:
+
+1. `goal.inlineRoles[name]` — wins if present
+2. `roleStore.get(name)` — project → server → builtin cascade
+
+`listAvailableRoles(goal, roleStore)` unions both sources for fail-loud
+"Role X not found" error messages. Three call sites use this:
+`team-manager.ts::spawnRole` and three sites in
+`verification-harness.ts` (model-resolution for sub-sessions, `llm-review`
+reviewer pickup, `agent-qa` qa-tester pickup). Any new role-lookup site
+MUST go through `resolveRole`.
+
+**Inheritance** — when `goal_spawn_child` spawns a child, the server
+merges `parent.inlineRoles` with `body.inlineRoles` (`{...parent,
+...body}`). Child entries with the same name override the parent's; new
+names extend the set. This lets a parent goal define audit-wide roles
+once (e.g. `synthesis-reviewer`) and have every spawned subgoal inherit
+them automatically.
+
+**When to use what**:
+
+| Need | Tool | Lifetime |
+|---|---|---|
+| Role useful across many goals | `propose_role` | permanent (project library) |
+| Role only useful for ONE goal (and its subgoals) | `inlineRoles` on `propose_goal` / `goal_spawn_child` | snapshotted; lives with the goal |
+| Workflow useful across many goals | `propose_project` with `workflows: { ... }` | permanent (project library) |
+| Workflow only for ONE goal | `inlineWorkflow` on `propose_goal` / `goal_spawn_child` (`body.workflow` on REST) | snapshotted; lives with the goal |
+
+The `propose_role.yaml` and `propose_goal.yaml` tool descriptions surface
+this trade-off so agents pick the right tool. Decision rule: "will any
+goal OTHER than this one need this role/workflow?". If yes → permanent.
+If no → ephemeral. When in doubt, prefer ephemeral — easier to undo.
+
+Tests pinning the contract: `tests/resolve-role.test.ts` (pure helper
+precedence), `tests/goal-manager-inline-roles.test.ts` (snapshot +
+parent-child merge), `tests/e2e/api-goals-spawn-child-route.spec.ts`
+(full HTTP roundtrip including parent-inheritance).
 
 ## Cost rollup
 

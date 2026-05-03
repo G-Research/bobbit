@@ -108,8 +108,36 @@ export default function (pi: ExtensionAPI) {
 			cwd: Type.Optional(Type.String({ description: "Working directory override path" })),
 			workflow: Type.Optional(Type.String({ description: "Workflow ID (e.g. \"general\", \"feature\", \"bug-fix\")" })),
 			options: Type.Optional(Type.String({ description: "Comma-separated step names for optional steps (e.g. \"QA testing\")" })),
+			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
+				name: Type.String({ description: "Role identifier (lowercase, hyphens). Must equal the map key." }),
+				label: Type.String({ description: "Human-readable display name" }),
+				promptTemplate: Type.String({ description: "Markdown system prompt — supports {{AGENT_ID}}, {{GOAL_BRANCH}}" }),
+				accessory: Type.Optional(Type.String()),
+				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.String())),
+				model: Type.Optional(Type.String()),
+				thinkingLevel: Type.Optional(Type.String()),
+			}), {
+				description: "Optional per-goal ephemeral roles. Snapshotted onto the goal at creation time and resolved BEFORE the project/server/builtin role cascade. Use this for one-off reviewers/QA-testers tied to this goal — e.g. an audit-specific synthesis-reviewer that doesn't belong in the project's permanent role library. Persistent reuse → propose_role instead. Inline roles defined here are also visible to the goal's verification gates and to any subgoals spawned from this goal (children inherit and may override them).",
+			})),
+			inlineWorkflow: Type.Optional(Type.Object({
+				id: Type.String(),
+				name: Type.String(),
+				description: Type.Optional(Type.String()),
+				gates: Type.Array(Type.Any()),
+			}, { description: "Optional inline workflow snapshot. When present, this workflow is frozen onto the goal record and the project's workflow store is bypassed for this goal — same pattern as the YAML 'Advanced: paste inline workflow' flow in the New Goal dialog. Use this when an existing project workflow doesn't fit and you don't want to add a permanent one. The workflow's `verify[]` steps may reference roles defined in `inlineRoles` above." })),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("goal", args); return ack(rev); },
+		async execute(_id, args) {
+			// Map `inlineWorkflow` from the schema into `workflow` so the goal-
+			// proposal panel + server's POST /api/goals snapshot path see it
+			// under the legacy field name.
+			const argsAny = args as Record<string, unknown>;
+			if (argsAny.inlineWorkflow && !argsAny.workflow) {
+				argsAny.workflow = argsAny.inlineWorkflow;
+				delete argsAny.inlineWorkflow;
+			}
+			const rev = await seedProposal("goal", argsAny);
+			return ack(rev);
+		},
 	});
 
 	// ── propose_role ──────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 name: propose_role
-description: "Submit a custom agent role for user review. This is THE canonical (and only) tool for creating new roles or updating existing ones — there is no separate create_role or update_role tool. Roles define how an agent behaves: their system prompt, the tools they can use, and the policies that gate sensitive tools (e.g. `gate_signal: never` for non-team-leads). A role you propose here can immediately be referenced by name from any workflow gate's `verify[]` step (e.g. `verify: [{type: llm-review, role: my-custom-reviewer}]`) and from staff/team configurations. Works mid-session against an already-registered project: the user reviews a diff and accepts via PUT /api/roles/:name without ending the session. To tweak the prompt or tool list of an in-flight role draft without re-emitting the whole payload, follow up with edit_proposal(type=\"role\", ...)."
-summary: "Propose or update a custom agent role (system prompt, allowed tools, tool policies, accessory icon). This is the only tool for defining roles; once accepted, the role can be referenced by name from workflow `verify[]` steps and team specs."
+description: "Submit a custom agent role for PERMANENT addition to the project's role library. Use this when the role will be useful across MULTIPLE goals or staff — it lives in the project config and is available everywhere via the role cascade. For a role that only matters to ONE goal (e.g. a one-off `synthesis-reviewer` for an audit), use `inlineRoles` on `propose_goal` (or `inlineRoles` on `goal_spawn_child` for subgoals) instead — those snapshot the role onto the goal record without polluting the permanent library. Roles define agent behaviour: system prompt, allowed tools, and per-tool policies (e.g. `gate_signal: never` for non-team-leads). A permanent role can immediately be referenced by name from any workflow gate's `verify[]` step (e.g. `verify: [{type: llm-review, role: my-custom-reviewer}]`) and from staff/team configurations. Works mid-session against an already-registered project — the user reviews a diff and accepts via PUT /api/roles/:name without ending the session. To tweak the prompt or tool list of an in-flight role draft without re-emitting the whole payload, follow up with edit_proposal(type=\"role\", ...)."
+summary: "Propose or update a PERMANENT custom agent role for the project's role library. For one-off roles bound to a single goal, use propose_goal's `inlineRoles` field instead (ephemeral; auto-cleaned with the goal)."
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -28,6 +28,18 @@ docs: >-
   Cascade: roles are project-scoped by default but cascade builtin → server →
   project. To override a builtin role for one project, propose with the
   builtin's name and the override is applied at the project layer.
+
+  PERMANENT vs EPHEMERAL — when to use what:
+    - propose_role (THIS tool): the role belongs in the project's permanent
+      role library because OTHER goals will also use it. Lives forever until
+      the user explicitly deletes it via the role manager.
+    - inlineRoles on propose_goal / goal_spawn_child: the role only matters
+      for one goal (and its subgoals). Snapshotted onto the goal record at
+      creation time; resolved BEFORE the project role cascade by the
+      verification harness and team-spawn. Doesn't show up in the role
+      manager UI; goes away with the goal.
+  When in doubt, prefer ephemeral (inlineRoles) — the user can always promote
+  it later; it's harder to undo a permanent role that was only ever used once.
 
   Mid-session vs setup: this tool works in either mode. Mid-session, the user
   sees a diff against the current role definition.

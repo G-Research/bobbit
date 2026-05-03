@@ -17,9 +17,28 @@ docs: >-
   nested goals, suggestedRole for hint to the team-lead, maxConcurrentChildren
   for parent goals, divergencePolicy, etc.).
 
-  Custom workflows: this tool only references existing workflows by id. To
-  CREATE or update a workflow before proposing a goal that uses it, use
-  propose_project with the new workflow inside the `workflows:` field.
+  EPHEMERAL ROLES (`inlineRoles`): when an existing role doesn't fit and the
+  custom role would only matter for THIS goal (e.g. a one-off
+  "synthesis-reviewer" for a real-tasks audit), pass a Record<roleName,
+  roleDefinition> here instead of polluting the project's permanent role
+  library via propose_role. The map is snapshotted onto the goal record at
+  creation time and resolved BEFORE the project/server/builtin role cascade.
+  Children spawned from this goal inherit the parent's inline roles (and may
+  override them with their own). For roles that other goals will also need →
+  use propose_role (permanent) instead.
 
-  Custom roles: similarly, to define a role referenced by the chosen workflow's
-  verify[] steps, use propose_role first.
+  EPHEMERAL WORKFLOWS (`inlineWorkflow`): same pattern as inlineRoles but for
+  the workflow itself. When the project's existing workflows don't fit and
+  this goal needs a bespoke gate sequence, pass the full Workflow object
+  here. The workflow is snapshotted onto the goal record (via goal.workflow
+  in goal-store.ts), so subsequent edits to the project's workflow store
+  don't affect this goal. The workflow's verify[] steps may reference roles
+  defined in `inlineRoles`. For workflows that other goals will also need →
+  use propose_project with the new entry under `workflows:` instead.
+
+  DECISION GUIDE for the agent: ask "will any goal OTHER than this one need
+  this role/workflow?". If yes → permanent (propose_role / propose_project).
+  If no → ephemeral (inlineRoles / inlineWorkflow on this goal). When in
+  doubt, prefer ephemeral — the user can always promote it later by editing
+  the project config; it's harder to undo a permanent role that was only
+  ever used once.

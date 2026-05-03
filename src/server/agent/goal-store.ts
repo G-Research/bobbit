@@ -97,6 +97,23 @@ export interface PersistedGoal {
 	 * this undefined and render at the parent-goal level as before.
 	 */
 	spawnedBySessionId?: string;
+	/**
+	 * Ephemeral role definitions snapshotted onto this goal at creation time.
+	 * Resolved BEFORE the project/server/builtin role-store cascade by
+	 * `resolveRole(goal, name, roleStore)` (src/server/agent/resolve-role.ts).
+	 *
+	 * Mirrors the `goal.workflow` snapshot pattern: the live store is bypassed
+	 * for any name present here, so the goal's verification gates and team
+	 * spawns can use one-off roles that don't pollute the project's role
+	 * library. Subsequent edits to the project's role store don't affect
+	 * already-running goals — the snapshot is frozen.
+	 *
+	 * Inheritance: when `goal_spawn_child` spawns a child, the parent's
+	 * `inlineRoles` are merged into the child's (`{...parent, ...body}`),
+	 * with the child's own additions overriding parent definitions of the
+	 * same name. See server.ts spawn-child handler.
+	 */
+	inlineRoles?: Record<string, import("./role-store.js").Role>;
 }
 
 /**

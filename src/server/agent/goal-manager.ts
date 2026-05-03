@@ -166,8 +166,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role> }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -237,6 +237,16 @@ export class GoalManager {
 
 		if (enabledOptionalSteps?.length) {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
+		}
+
+		// Snapshot inline roles onto the goal — same freeze-at-creation pattern
+		// as `goal.workflow`. Subsequent edits to the project's role store
+		// don't affect this goal; verification gates and team-spawns will
+		// resolve role names from this snapshot first via resolveRole().
+		// Deep-clone so a caller mutating the source object can't poison
+		// the goal's frozen copy.
+		if (inlineRoles && Object.keys(inlineRoles).length > 0) {
+			goal.inlineRoles = JSON.parse(JSON.stringify(inlineRoles));
 		}
 
 		// Stamp nested-goal lineage. Always set on every newly created goal

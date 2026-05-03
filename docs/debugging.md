@@ -582,3 +582,24 @@ Diagnose:
 3. Confirm all four reminder sites await it. The regression-guard test (`tests/verification-reminder-race.test.ts`) mocks a session that flips from idle to streaming after 50ms and asserts `_tryResumeFromSession` does not terminate within the first second.
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts` (the four reminder sites). Tests: `tests/verification-reminder-race.test.ts`, API E2E `tests/e2e/gate-verification-resume.spec.ts`. See [docs/internals.md — Reminder race after restart-resume](internals.md#reminder-race-after-restart-resume).
+
+
+## Verification step fails with `Role "X" not found. Available roles: ...`
+
+The verification harness (or `team_spawn`) couldn't resolve a role name to either a goal-scoped inline role or a project/server/builtin store entry. This is a fail-loud error by design — the agent must see what's available so it can pick a valid name or propose a new one.
+
+Resolution order applied by `resolveRole(goal, name, roleStore)` in `src/server/agent/resolve-role.ts`:
+1. `goal.inlineRoles[name]` — ephemeral, snapshotted at goal creation, frozen forever for that goal
+2. `roleStore.get(name)` — project → server → builtin cascade
+
+The error message lists everything `listAvailableRoles(goal, roleStore)` can find, inline first then store, deduped by name.
+
+Diagnose:
+1. **Misspelt name** — check the spelling in the workflow's `verify[]` step or in the `team_spawn(role=...)` argument against the listed names.
+2. **Inline role expected but missing** — read the goal record from `.bobbit/state/goals.json`. If `inlineRoles` is undefined, the `propose_goal` / `goal_spawn_child` call didn't include the role. Re-propose with `inlineRoles: { <name>: { ... } }`.
+3. **Inline role NOT inherited from parent** — `goal_spawn_child` merges `parent.inlineRoles` with `body.inlineRoles`, child wins on collision. If the parent's inline roles aren't on the child, check the spawn-child handler in `src/server/server.ts` (look for the merge `{...parentInlineRoles, ...bodyInlineRoles}`).
+4. **Custom role missing from project library** — if you intended a permanent role, run `propose_role` and accept the proposal. The role then becomes available across all goals via the cascade.
+
+Tests pinning the precedence rule: `tests/resolve-role.test.ts`. Snapshot + child-merge: `tests/goal-manager-inline-roles.test.ts`. Full HTTP roundtrip: `tests/e2e/api-goals-spawn-child-route.spec.ts`.
+
+Key files: `src/server/agent/resolve-role.ts` (pure helper), `src/server/agent/team-manager.ts::spawnRole`, three sites in `src/server/agent/verification-harness.ts` (model-resolution, llm-review, agent-qa).
