@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
 	buildParentReadyNotification,
+	buildParentPausedNotification,
 	type ChildGoalForParentNotify,
 } from "../src/server/agent/notify-team-lead-child-passed.ts";
 
@@ -63,16 +64,39 @@ describe("buildParentReadyNotification — passes", () => {
 	});
 });
 
-describe("buildParentReadyNotification — null cases (no notification)", () => {
-	it("returns null for non-passed status", () => {
-		assert.equal(
-			buildParentReadyNotification(
-				child({ id: "c", title: "x", parentGoalId: "p" }),
-				"ready-to-merge",
-				"failed",
-			),
-			null,
+describe("buildParentReadyNotification — failed cases (also notify)", () => {
+	it("returns a notification when status=failed AND gateId=ready-to-merge AND child has parentGoalId", () => {
+		const out = buildParentReadyNotification(
+			child({ id: "c1", title: "Audit X", parentGoalId: "p1" }),
+			"ready-to-merge",
+			"failed",
 		);
+		assert.ok(out);
+		assert.equal(out!.parentGoalId, "p1");
+		assert.match(out!.message, /Audit X/);
+		assert.match(out!.message, /FAILED at ready-to-merge/);
+		assert.match(out!.message, /goal_archive_child/);
+	});
+
+	it("failed message differs from passed message", () => {
+		const passed = buildParentReadyNotification(
+			child({ id: "c", title: "T", parentGoalId: "p" }),
+			"ready-to-merge",
+			"passed",
+		)!;
+		const failed = buildParentReadyNotification(
+			child({ id: "c", title: "T", parentGoalId: "p" }),
+			"ready-to-merge",
+			"failed",
+		)!;
+		assert.notEqual(passed.message, failed.message);
+		assert.match(passed.message, /goal_merge_child/);
+		assert.doesNotMatch(failed.message, /goal_merge_child/);
+	});
+});
+
+describe("buildParentReadyNotification — null cases (no notification)", () => {
+	it("returns null for status pending / aborted / unknown", () => {
 		assert.equal(
 			buildParentReadyNotification(
 				child({ id: "c", title: "x", parentGoalId: "p" }),
@@ -81,9 +105,19 @@ describe("buildParentReadyNotification — null cases (no notification)", () => 
 			),
 			null,
 		);
+		assert.equal(
+			buildParentReadyNotification(
+				child({ id: "c", title: "x", parentGoalId: "p" }),
+				"ready-to-merge",
+				"aborted",
+			),
+			null,
+		);
 	});
 
-	it("returns null for non-ready-to-merge gates (intra-child gates don't notify)", () => {
+	it("returns null for non-ready-to-merge gates (intra-child gates don't notify, even on failure)", () => {
+		// Intra-child gate passes/fails are noise for the parent — only the
+		// terminal ready-to-merge gate is propagation-worthy.
 		assert.equal(
 			buildParentReadyNotification(
 				child({ id: "c", title: "x", parentGoalId: "p" }),
@@ -96,6 +130,14 @@ describe("buildParentReadyNotification — null cases (no notification)", () => 
 			buildParentReadyNotification(
 				child({ id: "c", title: "x", parentGoalId: "p" }),
 				"implementation",
+				"failed",
+			),
+			null,
+		);
+		assert.equal(
+			buildParentReadyNotification(
+				child({ id: "c", title: "x", parentGoalId: "p" }),
+				"qa",
 				"passed",
 			),
 			null,
@@ -118,5 +160,49 @@ describe("buildParentReadyNotification — null cases (no notification)", () => 
 			buildParentReadyNotification(undefined, "ready-to-merge", "passed"),
 			null,
 		);
+	});
+});
+
+describe("buildParentPausedNotification — auto-pause propagation", () => {
+	it("returns notification with the right parentGoalId and reason text", () => {
+		const out = buildParentPausedNotification(
+			child({ id: "c1", title: "Stuck Subgoal", parentGoalId: "p1" }),
+			"replan-overflow",
+		);
+		assert.ok(out);
+		assert.equal(out!.parentGoalId, "p1");
+		assert.match(out!.message, /Stuck Subgoal/);
+		assert.match(out!.message, /replan count/);
+		assert.match(out!.message, /goal_resume/);
+		assert.match(out!.message, /goal_archive_child/);
+	});
+
+	it("each reason produces a distinct message", () => {
+		const c = child({ id: "c", title: "T", parentGoalId: "p" });
+		const replan = buildParentPausedNotification(c, "replan-overflow")!;
+		const restructure = buildParentPausedNotification(c, "restructure-requires-pause")!;
+		const manual = buildParentPausedNotification(c, "manual")!;
+		const other = buildParentPausedNotification(c, "other")!;
+		const messages = [replan.message, restructure.message, manual.message, other.message];
+		assert.equal(new Set(messages).size, 4, "all four reasons produce distinct messages");
+	});
+
+	it("falls back to id-prefix when title is missing", () => {
+		const out = buildParentPausedNotification(
+			child({ id: "deadbeef-rest", parentGoalId: "p" }),
+			"replan-overflow",
+		);
+		assert.match(out!.message, /"deadbeef"/);
+	});
+
+	it("returns null for root goals (no parentGoalId)", () => {
+		assert.equal(
+			buildParentPausedNotification(child({ id: "root", title: "Root" }), "manual"),
+			null,
+		);
+	});
+
+	it("returns null when child is undefined", () => {
+		assert.equal(buildParentPausedNotification(undefined, "manual"), null);
 	});
 });

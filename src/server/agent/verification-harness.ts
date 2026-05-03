@@ -1170,30 +1170,31 @@ export class VerificationHarness {
 		failureContext?: { steps?: ReadonlyArray<{ name: string; type: string; passed: boolean; output?: string }>; goalBranch?: string },
 	): void {
 		if (!this.notifyTeamLeadFn) return;
+		// Notify the goal's OWN team-lead first (intra-team signal).
 		if (status === "passed") {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
-			// When a CHILD goal's ready-to-merge gate passes, wake up the
-			// PARENT goal's team-lead too. Otherwise the parent sits idle
-			// "awaiting completion notifications" with no signal that work
-			// is ready to merge. The pure helper decides whether to fire
-			// (only for ready-to-merge passes on goals with a parent).
-			try {
-				const ctx = this.projectContextManager?.getContextForGoal(goalId);
-				const child = ctx?.goalStore.get(goalId);
-				const parentNotify = buildParentReadyNotification(child, gateId, status);
-				if (parentNotify) {
-					this.notifyTeamLeadFn(parentNotify.parentGoalId, parentNotify.message);
-				}
-			} catch (err) {
-				console.warn("[verification] Failed to notify parent team-lead on child ready-to-merge:", err);
-			}
-			return;
+		} else {
+			const steps = failureContext?.steps ?? [];
+			const goalBranch = failureContext?.goalBranch;
+			const message = buildVerificationFailureMessage(gateId, steps, goalBranch);
+			this.notifyTeamLeadFn(goalId, message);
 		}
-		// Failure path — use Lesson 4.18 actionable message when step detail is available.
-		const steps = failureContext?.steps ?? [];
-		const goalBranch = failureContext?.goalBranch;
-		const message = buildVerificationFailureMessage(gateId, steps, goalBranch);
-		this.notifyTeamLeadFn(goalId, message);
+		// Cross-team propagation: when a CHILD goal's ready-to-merge gate
+		// resolves (passed OR failed), wake up the PARENT goal's team-lead
+		// too. Otherwise the parent sits idle "awaiting completion
+		// notifications" with no signal that work is done — or stuck. The
+		// pure helper decides whether to fire (only for ready-to-merge,
+		// only when child has a parent, only on passed/failed).
+		try {
+			const ctx = this.projectContextManager?.getContextForGoal(goalId);
+			const child = ctx?.goalStore.get(goalId);
+			const parentNotify = buildParentReadyNotification(child, gateId, status);
+			if (parentNotify) {
+				this.notifyTeamLeadFn(parentNotify.parentGoalId, parentNotify.message);
+			}
+		} catch (err) {
+			console.warn("[verification] Failed to notify parent team-lead on child ready-to-merge:", err);
+		}
 	}
 
 	/**
