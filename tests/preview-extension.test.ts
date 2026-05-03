@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import extensionFactory from "../defaults/tools/html/extension.ts";
-import { PREVIEW_SNAPSHOT_MARKER } from "../defaults/tools/html/snapshot.ts";
+import { PREVIEW_SNAPSHOT_MARKER, PREVIEW_SNAPSHOT_MARKER_V2, parseSnapshot } from "../defaults/tools/html/snapshot.ts";
 
 type ToolReg = {
 	name: string;
@@ -20,6 +20,7 @@ const registered: ToolReg[] = [];
 const pi = { registerTool: (t: ToolReg) => { registered.push(t); } } as any;
 
 let origFetch: typeof fetch;
+let fetchResponder: ((url: string, init: any) => { status: number; body: any }) | null = null;
 const fetchCalls: Array<{ url: string; init: any }> = [];
 
 before(() => {
@@ -30,6 +31,10 @@ before(() => {
 	// Default: every fetch call is a 200 OK
 	globalThis.fetch = (async (url: any, init: any) => {
 		fetchCalls.push({ url: String(url), init });
+		if (fetchResponder) {
+			const r = fetchResponder(String(url), init);
+			return new Response(JSON.stringify(r.body), { status: r.status });
+		}
 		return new Response(JSON.stringify({ ok: true }), { status: 200 });
 	}) as any;
 	extensionFactory(pi);
@@ -42,6 +47,8 @@ after(() => {
 
 beforeEach(() => {
 	fetchCalls.length = 0;
+	fetchResponder = null;
+	delete process.env.BOBBIT_HOST_CWD;
 });
 
 function getTool(): ToolReg {
@@ -62,7 +69,7 @@ describe("preview_open extension", () => {
 		assert.strictEqual(res.content[1].text, PREVIEW_SNAPSHOT_MARKER + rawHtml);
 	});
 
-	it("execute({file}) stores file contents (not the path) in the snapshot", async () => {
+	it("execute({file}) emits v2 marker carrying the path (not file contents) on success", async () => {
 		const tool = getTool();
 		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-"));
 		const filePath = join(dir, "snap.html");
@@ -71,16 +78,24 @@ describe("preview_open extension", () => {
 		try {
 			const res = await tool.execute("call-2", { file: filePath });
 			assert.strictEqual(res.content.length, 2);
-			assert.strictEqual(res.content[1].text, PREVIEW_SNAPSHOT_MARKER + fileContents);
-			// Snapshot must NOT contain the file path literal
-			assert.ok(!res.content[1].text.includes(filePath));
+			assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2));
+			// The snapshot block must NOT carry file contents — only the path.
+			assert.ok(!res.content[1].text.includes("from-disk"));
+			const parsed = parseSnapshot(res.content[1].text);
+			assert.ok(parsed && parsed.kind === "file");
+			if (parsed && parsed.kind === "file") assert.strictEqual(parsed.path, filePath);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("error (bad file path) returns a single status block, no snapshot", async () => {
+	it("error (bad file path, server falls back to inline & read fails) returns a single status block, no snapshot", async () => {
 		const tool = getTool();
+		// Server rejects file mode → extension falls back to inline → fs.readFileSync fails.
+		fetchResponder = (_url, init) => {
+			if (init?.method === "POST") return { status: 400, body: { error: "baseDir not host-visible" } };
+			return { status: 200, body: { ok: true } };
+		};
 		const res = await tool.execute("call-3", { file: "/nonexistent/path/does-not-exist.html" });
 		assert.strictEqual(res.content.length, 1);
 		assert.strictEqual(res.content[0].type, "text");
@@ -116,5 +131,110 @@ describe("preview_open extension", () => {
 		assert.ok(patches.length >= 1, "expected at least one PATCH");
 		assert.ok(posts.length >= 1, "expected at least one POST");
 		assert.ok(posts.some(c => c.url.includes("/api/preview")), "POST should target /api/preview");
+	});
+
+	it("file: mode tries kind:file POST first and emits v2 marker on success", async () => {
+		const tool = getTool();
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-v2-"));
+		const filePath = join(dir, "report.html");
+		writeFileSync(filePath, "<html><body>x</body></html>", "utf-8");
+		try {
+			fetchResponder = (_url, init) => {
+				if (init?.method === "POST") return { status: 200, body: { ok: true, kind: "file" } };
+				return { status: 200, body: { ok: true } };
+			};
+			const res = await tool.execute("call-v2-1", { file: filePath });
+			assert.strictEqual(res.content.length, 2);
+			assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2));
+			// The marker must NOT carry full bytes — only a JSON path payload.
+			assert.ok(!res.content[1].text.includes("<body>x</body>"));
+			const parsed = parseSnapshot(res.content[1].text);
+			assert.ok(parsed && parsed.kind === "file");
+			if (parsed && parsed.kind === "file") assert.strictEqual(parsed.path, filePath);
+			// POST body must be {kind:"file", path:...}
+			const posts = fetchCalls.filter(c => c.init?.method === "POST" && String(c.url).includes("/api/preview"));
+			assert.ok(posts.length >= 1);
+			const body = JSON.parse(posts[0].init.body);
+			assert.strictEqual(body.kind, "file");
+			assert.strictEqual(body.path, filePath);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("v2 marker is < 1 KB regardless of (fake-)file size", async () => {
+		const tool = getTool();
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-size-"));
+		// 256-char filename is plenty long for the path-length invariant test.
+		const longName = "a".repeat(200) + ".html";
+		const filePath = join(dir, longName);
+		writeFileSync(filePath, "<html></html>", "utf-8");
+		try {
+			fetchResponder = (_url, init) => {
+				if (init?.method === "POST") return { status: 200, body: { ok: true, kind: "file" } };
+				return { status: 200, body: { ok: true } };
+			};
+			const res = await tool.execute("call-v2-size", { file: filePath });
+			assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2));
+			assert.ok(
+				res.content[1].text.length < 1024,
+				`v2 marker block must be < 1 KB, got ${res.content[1].text.length}`,
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("file: mode falls back to inline when server returns 400 (baseDir not host-visible)", async () => {
+		const tool = getTool();
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-fb-"));
+		const filePath = join(dir, "report.html");
+		const rawHtml = "<html><body>fallback</body></html>";
+		writeFileSync(filePath, rawHtml, "utf-8");
+		try {
+			let postCount = 0;
+			fetchResponder = (_url, init) => {
+				if (init?.method === "POST") {
+					postCount++;
+					if (postCount === 1) {
+						return { status: 400, body: { error: "baseDir not host-visible" } };
+					}
+					return { status: 200, body: { ok: true } };
+				}
+				return { status: 200, body: { ok: true } };
+			};
+			const res = await tool.execute("call-v2-fb", { file: filePath });
+			assert.strictEqual(res.content.length, 2);
+			// Fallback should produce a v1 marker carrying the bytes.
+			assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER));
+			assert.strictEqual(res.content[1].text, PREVIEW_SNAPSHOT_MARKER + rawHtml);
+			assert.match(res.content[0].text, /falling back to inline/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("file: mode falls back to inline when BOBBIT_HOST_CWD is set but path is outside cwd", async () => {
+		const tool = getTool();
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-outside-"));
+		const filePath = join(dir, "report.html");
+		writeFileSync(filePath, "<html></html>", "utf-8");
+		try {
+			// Force the translation to bail (path is *not* under process.cwd).
+			process.env.BOBBIT_HOST_CWD = "/host/workspace";
+			// process.cwd() is the project root — the tmp dir is somewhere else.
+			const res = await tool.execute("call-v2-outside", { file: filePath });
+			assert.strictEqual(res.content.length, 2);
+			assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER));
+			assert.match(res.content[0].text, /falling back to inline|could not translate/);
+			// No file-mode POST should have been attempted.
+			const posts = fetchCalls.filter(c => c.init?.method === "POST" && String(c.url).includes("/api/preview"));
+			for (const p of posts) {
+				const body = JSON.parse(p.init.body || "{}");
+				assert.notStrictEqual(body.kind, "file", "should not POST kind:file when path is outside cwd");
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
