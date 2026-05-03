@@ -1164,7 +1164,7 @@ function renderNavBar(goal: Goal): TemplateResult {
 					<button class="btn-icon" @click=${() => showGoalDialog(goal)} title="Edit goal">${svgPencil}<span>Edit</span></button>
 					${prStatus?.state === "MERGED" && !teamActive
 						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
-						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="${teamActive ? "Stop the team before archiving" : "Archive goal"}" ?disabled=${teamActive}>${svgTrash}<span>Archive</span></button>`}
+						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>`}
 				`}
 				${showReattempt ? html`
 					<button class="btn-icon" @click=${() => startReattempt(goal.id)} title="Re-attempt this goal">
