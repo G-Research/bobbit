@@ -85,7 +85,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Add/modify session creation** → `session-setup.ts`, wrappers in `session-manager.ts`. See [docs/internals.md — Session worktrees](docs/internals.md#session-worktrees).
 - **Continue an archived session** → footer button → `POST /api/sessions/:archivedId/continue`. Lossless: server clones the source `.jsonl`. See [docs/design/lossless-continue-archived.md](docs/design/lossless-continue-archived.md).
 - **Server-side read/unread state** → `lastReadAt` on `PersistedSession`; `POST /api/sessions/:id/mark-read`. See [docs/internals.md — Read/unread state](docs/internals.md#readunread-state).
-- **Config cascade** → builtin → server → project, for **roles, tools, and tool-group-policies only**. Workflows are project-scoped, not cascaded. See [docs/internals.md — Config cascade](docs/internals.md#config-cascade).
+- **Config cascade** → builtin → server → project, for **roles, tools, tool-group-policies, and `system-prompt.md`**. `system-prompt.md` resolves at runtime via `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` (user override at `.bobbit/config/system-prompt.md` wins, else shipped `defaults/system-prompt.md`); the file is no longer scaffolded on startup — users opt in via Settings → General → "Customise system prompt" (`POST /api/system-prompt/customise`). Workflows are project-scoped, not cascaded. See [docs/internals.md — Config cascade](docs/internals.md#config-cascade).
 - **Change tool access policy** → `defaults/tool-group-policies.yaml` or `.bobbit/config/tool-group-policies.yaml`. Per-role: role YAML `toolPolicies`. Values: `allow`/`ask`/`never`. `gate_signal` is team-lead-only. See [docs/internals.md — Tool access policies](docs/internals.md#tool-access-policies).
 - **Per-role model / thinking-level override** → role YAML `model: "<provider>/<modelId>"` and `thinkingLevel`. Edit via Model tab in role-manager page. See [docs/design/per-role-model-overrides.md](docs/design/per-role-model-overrides.md).
 - **Change message rendering** → `src/ui/components/Messages.ts` (standard), `message-renderer-registry.ts` (custom).
@@ -102,7 +102,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Edit a proposal mid-session** → `view_proposal(type)` / `edit_proposal(type, old_text, new_text)`. Each successful write also writes a per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/`. See [docs/design/editable-proposals.md](docs/design/editable-proposals.md), [docs/design/proposal-revision-snapshots.md](docs/design/proposal-revision-snapshots.md).
 - **Add QA testing** → set `qa_start_command` (and friends) on the relevant component's `config:` map in `project.yaml`. See [docs/qa-testing.md](docs/qa-testing.md).
 - **Add a verification reminder site** → see `src/server/agent/verification-harness.ts`. After dispatching the reminder, await `SessionManager.waitForStreaming(sessionId, 10_000).catch(() => {})` before racing `waitForIdle`.
-- **Create a design mockup** → `/mockup` skill or `.bobbit/config/docs/design-mockups.md`.
+- **Create a design mockup** → `/mockup` skill (canonical body lives at `defaults/docs/design-mockups.md`; resolved by the skill itself).
 - **Generate an image** → `generate_image` tool routes through `POST /api/image-generation/generate`. See [docs/internals.md — Image generation routing](docs/internals.md#image-generation-routing).
 - **Add / debug per-provider OAuth** → `src/server/auth/oauth.ts`; REST endpoints at `/api/oauth/*`. See [docs/rest-api.md — OAuth](docs/rest-api.md#oauth).
 
@@ -111,6 +111,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/debugging.md).
 
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
+- **`system-prompt.md` customisation not taking effect** — resolver `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` only picks up the user override if `<bobbitConfigDir>/system-prompt.md` exists. Click "Customise system prompt" in Settings → General (or `POST /api/system-prompt/customise`) to copy the shipped default into place; restart the server to pick up edits.
 - **`lastActivity` reads as "just now" after restart** — `isUserVisibleActivity` filter in `src/server/agent/session-manager.ts`.
 - **Sandbox status** — `GET /api/sandbox-status`; container label `bobbit-project=<projectId>`.
 - **Stuck gate verification** — `POST /api/goals/:id/gates/:gateId/cancel-verification`.

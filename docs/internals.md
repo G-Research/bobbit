@@ -190,6 +190,8 @@ Two resolution modes:
 
 The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
 
+The global `system-prompt.md` template participates in the same builtin → user-override pattern but via a dedicated path resolver rather than the `ConfigCascade` class. `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` returns `<bobbitConfigDir()>/system-prompt.md` when present and falls back to the shipped `dist/server/defaults/system-prompt.md`. The file is **not** copied to `.bobbit/config/` on startup; users opt into customisation explicitly via the Settings → General → "Customise system prompt" button (which calls `POST /api/system-prompt/customise` to copy the default into place). Existence of `.bobbit/config/system-prompt.md` is itself the customisation signal used by `isSetupComplete()` (in `src/server/setup-status.ts`).
+
 > **Workflows are NOT in the cascade.** Workflows live exclusively inline in each registered project's `project.yaml::workflows` block — there is no system-scope or builtin workflow layer. `ConfigCascade.resolveWorkflows(projectId)` reads only the project layer; without a `projectId` it returns `[]`. See [Workflows are project-scoped only](#workflows-are-project-scoped-only) below for the rationale.
 
 #### Why a cascade?
@@ -260,7 +262,7 @@ On server startup, standalone stores (`roleStore`) are seeded with builtins that
 
 #### Scaffolding
 
-`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is **no longer** copied or scaffolded — it resolves at runtime via `resolveSystemPromptPath()` (see [Config cascade](#config-cascade)) and is created on disk only when the user clicks "Customise system prompt" in Settings (`POST /api/system-prompt/customise`). The shipped `defaults/docs/` tree is similarly never copied or overwritten; consumers (e.g. the `/mockup` skill) read from `defaults/docs/` directly.
 
 #### Session setup integration
 
@@ -2329,7 +2331,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
-| `system-prompt.md` | `cli.ts` | Global system prompt template |
+| `system-prompt.md` | `cli.ts`, `system-prompt.ts::resolveSystemPromptPath` | Global system prompt template (read directly from `defaults/`; only copied to `.bobbit/config/` when the user opts in via `POST /api/system-prompt/customise`) |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
 | `workflows/*.yaml` | (legacy) | Historical default workflow seeds. No longer copied into new projects — the server seeds nothing; the project assistant designs workflows. Not read by `BuiltinConfigProvider` at runtime. See [No default workflow scaffold](#no-default-workflow-scaffold). |

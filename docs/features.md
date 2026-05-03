@@ -102,7 +102,7 @@ Context compaction reduces token usage by summarising the conversation.
 
 Each session's system prompt is assembled from three layers:
 
-1. **Global** — `.bobbit/config/system-prompt.md` from the Bobbit project root
+1. **Global** — `.bobbit/config/system-prompt.md` if the user has opted in via Settings → "Customise system prompt" (`POST /api/system-prompt/customise`); otherwise the shipped `defaults/system-prompt.md`. Resolved at session-prompt assembly time by `resolveSystemPromptPath()` — see [internals.md — Config cascade](internals.md#config-cascade).
 2. **AGENTS.md** — From the session's working directory, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe)
 3. **Goal spec** — If the session belongs to a goal, the goal's spec is appended
 
