@@ -603,3 +603,24 @@ Diagnose:
 Tests pinning the precedence rule: `tests/resolve-role.test.ts`. Snapshot + child-merge: `tests/goal-manager-inline-roles.test.ts`. Full HTTP roundtrip: `tests/e2e/api-goals-spawn-child-route.spec.ts`.
 
 Key files: `src/server/agent/resolve-role.ts` (pure helper), `src/server/agent/team-manager.ts::spawnRole`, three sites in `src/server/agent/verification-harness.ts` (model-resolution, llm-review, agent-qa).
+
+## propose_goal inline fields silently dropped
+
+**Symptom:** an agent calls `propose_goal` with `inlineWorkflow` and/or `inlineRoles` and the tool result returns success (`__proposal_rev_v1__:N`), but the draft on disk at `<stateDir>/proposal-drafts/<sessionId>/goal.md` shows only `title`, `cwd`, `workflow`, `options` in the YAML frontmatter — both inline fields are missing. The proposal panel in the UI consequently renders an empty "Advanced: paste inline workflow YAML" textarea and no inline-roles section.
+
+**Cause:** two compounding bugs.
+
+1. The goal serializer at `src/server/proposals/proposal-types.ts` (the `goalPlugin.serialize` function) used to hardcode the four legacy keys `["title", "cwd", "workflow", "options"]` and silently drop everything else. The fix iterates `GOAL_FRONTMATTER_KEYS` (now includes `inlineWorkflow` and `inlineRoles`) and validates the structure of either field when present via `validateGoalInlineFields`.
+2. `defaults/tools/proposals/extension.ts::propose_goal.execute` had a conditional rename `inlineWorkflow → workflow` when `workflow` was empty, which also corrupted the type contract (`workflow` is a string id, `inlineWorkflow` is a full Workflow object). Removed — the two fields are now passed through untouched.
+
+**Diagnose:**
+
+1. Reproduce by calling `propose_goal` with both fields and immediately `view_proposal type:"goal"`. The returned markdown's frontmatter must contain `inlineWorkflow:` and `inlineRoles:` keys.
+2. If the keys are missing, grep `src/server/proposals/proposal-types.ts:43` for `GOAL_FRONTMATTER_KEYS` — it must include both names. Without them, the fix has been reverted.
+3. If the keys are present in the draft but the goal record on `GET /api/goals/:id` doesn't carry them, check the acceptance path: `src/app/render.ts::handleCreateGoal` reads `state.activeProposals.goal?.fields.inlineWorkflow` and `inlineRoles` BEFORE deleting the slot, then passes them to `createGoal()` in `src/app/api.ts:851`. Both call sites (`goalPreviewPanel`, `goalProposalPanel`) must read from the proposal slot.
+4. For the role-acceptance equivalent: `src/app/render.ts::handleCreateRole` snapshots the proposal slot before delete and forwards `toolPolicies` (preferring the explicit Record over the comma-string reconstruction), `model`, `thinkingLevel`, `description` to `createRole()`. The same silent-drop bug class would affect roles when an agent set those fields via `edit_proposal(type="role", ...)`.
+
+Tests pinning the contract:
+
+- `tests/proposal-types-goal-inline.test.ts` — round-trip + structural validators.
+- `tests/e2e/api-goals-propose-inline.spec.ts` — seed→read draft preserves both keys; POST /api/goals with both fields snapshots them onto the goal record.

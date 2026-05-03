@@ -127,15 +127,17 @@ export default function (pi: ExtensionAPI) {
 			}, { description: "Optional inline workflow snapshot. When present, this workflow is frozen onto the goal record and the project's workflow store is bypassed for this goal — same pattern as the YAML 'Advanced: paste inline workflow' flow in the New Goal dialog. Use this when an existing project workflow doesn't fit and you don't want to add a permanent one. The workflow's `verify[]` steps may reference roles defined in `inlineRoles` above." })),
 		}),
 		async execute(_id, args) {
-			// Map `inlineWorkflow` from the schema into `workflow` so the goal-
-			// proposal panel + server's POST /api/goals snapshot path see it
-			// under the legacy field name.
-			const argsAny = args as Record<string, unknown>;
-			if (argsAny.inlineWorkflow && !argsAny.workflow) {
-				argsAny.workflow = argsAny.inlineWorkflow;
-				delete argsAny.inlineWorkflow;
-			}
-			const rev = await seedProposal("goal", argsAny);
+			// `workflow` (string id) and `inlineWorkflow` (full Workflow object)
+			// are SEPARATE fields with different semantics — workflow is looked
+			// up against the project's workflow store, inlineWorkflow is a
+			// frozen snapshot that bypasses the store. Pass both through
+			// untouched; the proposal serializer (proposal-types.ts goalPlugin)
+			// preserves both YAML keys, and goal-proposal acceptance reads
+			// inlineWorkflow → POST /api/goals body.workflow (the snapshot
+			// path), or workflow → POST /api/goals body.workflowId (the
+			// store-lookup path). Mixing one into the other corrupts the
+			// type contract.
+			const rev = await seedProposal("goal", args as Record<string, unknown>);
 			return ack(rev);
 		},
 	});

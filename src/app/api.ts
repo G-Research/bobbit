@@ -848,8 +848,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown> }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -859,6 +859,9 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (enabledOptionalSteps?.length) body.enabledOptionalSteps = enabledOptionalSteps;
 		if (autoStartTeam !== undefined) body.autoStartTeam = autoStartTeam;
 		if (workflow !== undefined) body.workflow = workflow;
+		if (inlineRoles !== undefined && inlineRoles !== null && Object.keys(inlineRoles).length > 0) {
+			body.inlineRoles = inlineRoles;
+		}
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -1582,11 +1585,27 @@ export async function createRole(role: {
 	promptTemplate: string;
 	toolPolicies?: Record<string, string>;
 	accessory: string;
+	model?: string;
+	thinkingLevel?: string;
+	description?: string;
 }): Promise<RoleData | null> {
 	try {
+		// Strip undefined fields so the wire payload stays minimal and the
+		// server's optional-string validation (model, thinkingLevel) doesn't
+		// see empty strings as "set".
+		const body: Record<string, unknown> = {
+			name: role.name,
+			label: role.label,
+			promptTemplate: role.promptTemplate,
+			accessory: role.accessory,
+		};
+		if (role.toolPolicies !== undefined) body.toolPolicies = role.toolPolicies;
+		if (role.model !== undefined && role.model !== "") body.model = role.model;
+		if (role.thinkingLevel !== undefined && role.thinkingLevel !== "") body.thinkingLevel = role.thinkingLevel;
+		if (role.description !== undefined && role.description !== "") body.description = role.description;
 		const res = await gatewayFetch("/api/roles", {
 			method: "POST",
-			body: JSON.stringify(role),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({}));

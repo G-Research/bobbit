@@ -519,6 +519,11 @@ interface GoalFormConfig {
 	inlineWorkflowYaml?: string;
 	inlineWorkflowYamlError?: string;
 	onInlineWorkflowYamlChange?: (e: Event) => void;
+	// Inline-roles preview (read-only side-table). Populated when the goal
+	// proposal's `inlineRoles` field is non-empty so the user can see the
+	// ephemeral roles before accepting. Editing happens via edit_proposal —
+	// no inline-edit UI here.
+	inlineRolesPreview?: Record<string, { name?: string; label?: string; promptTemplate?: string; accessory?: string }>;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -686,7 +691,7 @@ function renderGoalForm(config: GoalFormConfig) {
 			</div>
 		</div>
 		${config.onInlineWorkflowYamlChange !== undefined ? html`
-			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-workflow-yaml">
+			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-workflow-yaml" ?open=${(config.inlineWorkflowYaml ?? "").trim() !== ""}>
 				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Advanced: paste inline workflow YAML</summary>
 				<div class="mt-2 flex flex-col gap-1">
 					<textarea
@@ -699,6 +704,26 @@ function renderGoalForm(config: GoalFormConfig) {
 					${config.inlineWorkflowYamlError ? html`
 						<div class="text-[11px] text-destructive" data-testid="goal-inline-workflow-yaml-error">${config.inlineWorkflowYamlError}</div>
 					` : ""}
+				</div>
+			</details>
+		` : ""}
+		${config.inlineRolesPreview && Object.keys(config.inlineRolesPreview).length > 0 ? html`
+			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-roles" open>
+				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Inline roles (ephemeral, scoped to this goal)</summary>
+				<div class="mt-2 flex flex-col gap-2">
+					${Object.entries(config.inlineRolesPreview).map(([name, role]) => html`
+						<div class="rounded-md border border-border p-2 flex flex-col gap-1" data-testid="goal-inline-role-row" data-role-name=${name}>
+							<div class="flex items-center gap-2">
+								<span class="text-xs font-mono text-foreground">${name}</span>
+								${role.label ? html`<span class="text-xs text-muted-foreground">— ${role.label}</span>` : ""}
+								${role.accessory && role.accessory !== "none" ? html`<span class="text-[10px] text-muted-foreground/80 ml-auto">${role.accessory}</span>` : ""}
+							</div>
+							${role.promptTemplate ? html`
+								<div class="text-[11px] text-muted-foreground/80 line-clamp-2 font-mono whitespace-pre-wrap" data-testid="goal-inline-role-prompt">${role.promptTemplate.slice(0, 200)}${role.promptTemplate.length > 200 ? "…" : ""}</div>
+							` : ""}
+						</div>
+					`)}
+					<div class="text-[10px] text-muted-foreground/60 italic">Edit via <code class="text-foreground">edit_proposal(type="goal", ...)</code>.</div>
 				</div>
 			</details>
 		` : ""}
@@ -733,6 +758,13 @@ function goalPreviewPanel() {
 		// the goal-assistant context owns the disconnect-and-navigate flow.
 		const isAssistantContext = state.assistantType === "goal";
 
+		// Snapshot the proposal slot's fields BEFORE we delete the slot below —
+		// otherwise inlineWorkflow / inlineRoles would be unrecoverable here.
+		// Closes the silent-drop gap where the agent's payload landed in
+		// state.activeProposals.goal.fields but never reached POST /api/goals
+		// because handleCreateGoal only read the textarea cache.
+		const proposalFields = (state.activeProposals.goal?.fields as Record<string, unknown> | undefined) ?? {};
+
 		if (isAssistantContext && state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
@@ -750,7 +782,15 @@ function goalPreviewPanel() {
 		_goalAutoStartTeam = true;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		_assistantEnabledOptionalSteps = [];
-		const inlineWorkflow = _assistantInlineWorkflowParsed;
+		// Textarea-driven `_assistantInlineWorkflowParsed` cache wins when the
+		// user has edited the panel; otherwise fall back to the snapshotted
+		// proposal slot. Same logic for inlineRoles.
+		const inlineWorkflow = _assistantInlineWorkflowParsed
+			?? (proposalFields.inlineWorkflow as unknown);
+		const inlineRolesFromProposal = proposalFields.inlineRoles;
+		const inlineRoles = (inlineRolesFromProposal && typeof inlineRolesFromProposal === "object" && !Array.isArray(inlineRolesFromProposal))
+			? (inlineRolesFromProposal as Record<string, unknown>)
+			: undefined;
 		_assistantInlineWorkflowYaml = "";
 		_assistantInlineWorkflowYamlError = "";
 		_assistantInlineWorkflowParsed = undefined;
@@ -776,6 +816,7 @@ function goalPreviewPanel() {
 			enabledOptionalSteps,
 			autoStartTeam,
 			workflow: inlineWorkflow,
+			inlineRoles,
 		});
 
 		// Slice E: drop the on-disk proposal file once accepted.
@@ -882,6 +923,7 @@ function goalPreviewPanel() {
 					_assistantInlineWorkflowParsed = v.parsed;
 					renderApp();
 				},
+				inlineRolesPreview: ((state.activeProposals.goal?.fields as any)?.inlineRoles) as Record<string, any> | undefined,
 			})}
 		</div>
 	`;
@@ -922,6 +964,14 @@ function rolePreviewPanel() {
 		// the disconnect-and-navigate flow. Distinguished by `state.assistantType`.
 		const isAssistantContext = state.assistantType === "role";
 
+		// Snapshot the proposal slot's full field-set BEFORE deleting the
+		// slot. Closes the silent-drop gap parallel to goal proposals: the
+		// rolePreview* state only mirrors name/label/prompt/tools/accessory,
+		// so anything the agent added via edit_proposal (toolPolicies map,
+		// model, thinkingLevel, description) is recoverable only from the
+		// slot.fields snapshot.
+		const proposalFields = (state.activeProposals.role?.fields as Record<string, unknown> | undefined) ?? {};
+
 		if (isAssistantContext && state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
@@ -937,22 +987,43 @@ function rolePreviewPanel() {
 			localStorage.removeItem("gateway.sessionId");
 		}
 
-		// Parse tools: comma-separated string -> array
-		const toolsList = state.rolePreviewTools
-			.split(",")
-			.map((t) => t.trim())
-			.filter(Boolean);
+		// Tool policies precedence:
+		//   1. proposal.toolPolicies — explicit Record<tool, allow|ask|never>
+		//      from the agent's edit_proposal payload. Wins because it can
+		//      express the `never` policy that the comma-string reconstruction
+		//      below cannot.
+		//   2. comma-separated `tools` string → all entries set to "allow"
+		//      (legacy behaviour).
+		const proposalToolPolicies = proposalFields.toolPolicies;
+		let toolPolicies: Record<string, string> | undefined;
+		if (proposalToolPolicies && typeof proposalToolPolicies === "object" && !Array.isArray(proposalToolPolicies) && Object.keys(proposalToolPolicies).length > 0) {
+			toolPolicies = proposalToolPolicies as Record<string, string>;
+		} else {
+			const toolsList = state.rolePreviewTools
+				.split(",")
+				.map((t) => t.trim())
+				.filter(Boolean);
+			if (toolsList.length > 0) {
+				toolPolicies = {};
+				for (const t of toolsList) toolPolicies[t] = "allow";
+			}
+		}
 
-		// Convert tools list to toolPolicies (all explicitly listed tools get "allow")
-		const toolPolicies: Record<string, string> = {};
-		for (const t of toolsList) toolPolicies[t] = "allow";
+		// Optional fields the proposal YAML can carry; pass through to the
+		// server which already accepts them on POST /api/roles.
+		const model = typeof proposalFields.model === "string" ? proposalFields.model : undefined;
+		const thinkingLevel = typeof proposalFields.thinkingLevel === "string" ? proposalFields.thinkingLevel : undefined;
+		const description = typeof proposalFields.description === "string" ? proposalFields.description : undefined;
 
 		await createRole({
 			name: trimmedName,
 			label: trimmedLabel,
 			promptTemplate: state.rolePreviewPrompt,
-			toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
+			toolPolicies,
 			accessory: state.rolePreviewAccessory,
+			model,
+			thinkingLevel,
+			description,
 		});
 
 		// Slice E: drop the on-disk proposal file once accepted.
@@ -1900,10 +1971,23 @@ function _validateInlineWorkflowYaml(yamlText: string): { parsed?: unknown; erro
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+	const proposal = state.activeProposals.goal?.fields as undefined | {
+		title: string;
+		spec: string;
+		cwd?: string;
+		workflow?: string;
+		options?: string;
+		inlineWorkflow?: unknown;
+		inlineRoles?: Record<string, unknown>;
+	};
 	if (!proposal) return;
-	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
+	// Identity check uses a fingerprint that includes inlineWorkflow + inlineRoles
+	// so a re-emitted proposal that adds (or edits) those fields re-seeds the
+	// textarea / role list — without this, an edit_proposal that adds inlineRoles
+	// after the first emit would leave the panel showing the original payload.
+	const inlineWorkflowKey = proposal.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
+	const inlineRolesKey = proposal.inlineRoles ? JSON.stringify(Object.keys(proposal.inlineRoles).sort()) : "";
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${inlineWorkflowKey}|${inlineRolesKey}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -1917,6 +2001,24 @@ function syncProposalFormState(): void {
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
 		: [];
 	_proposalSaving = false;
+	// Seed the "Advanced: paste inline workflow YAML" textarea from the proposal
+	// when the agent provided one. The user can still edit; their edits land in
+	// _proposalInlineWorkflowYaml/_proposalInlineWorkflowParsed via the textarea
+	// onChange. Without this seed the agent's payload was visible in the
+	// proposal slot but invisible to the user — so they couldn't review it.
+	if (proposal.inlineWorkflow !== undefined && proposal.inlineWorkflow !== null) {
+		try {
+			_proposalInlineWorkflowYaml = yaml.stringify(proposal.inlineWorkflow);
+			_proposalInlineWorkflowParsed = proposal.inlineWorkflow;
+			_proposalInlineWorkflowYamlError = "";
+		} catch (err) {
+			_proposalInlineWorkflowYamlError = `Could not stringify inline workflow: ${err instanceof Error ? err.message : String(err)}`;
+		}
+	} else {
+		_proposalInlineWorkflowYaml = "";
+		_proposalInlineWorkflowParsed = undefined;
+		_proposalInlineWorkflowYamlError = "";
+	}
 }
 
 function goalProposalPanel() {
@@ -1939,7 +2041,18 @@ function goalProposalPanel() {
 			_proposalSandboxed = false;
 			const autoStartTeam = _proposalAutoStartTeam;
 			_proposalAutoStartTeam = true;
-			const inlineWorkflow = _proposalInlineWorkflowParsed;
+			// Pull inlineRoles directly from the proposal slot (panel never edits
+			// roles today; if it grows a UI for that, mirror the inlineWorkflow
+			// textarea pattern). inlineWorkflow falls back to the slot when the
+			// textarea cache is empty — covers the agent-only path where the
+			// user accepts without editing the textarea.
+			const proposalFields = (state.activeProposals.goal?.fields as Record<string, unknown> | undefined) ?? {};
+			const inlineWorkflow = _proposalInlineWorkflowParsed
+				?? (proposalFields.inlineWorkflow as unknown);
+			const inlineRolesRaw = proposalFields.inlineRoles;
+			const inlineRoles = (inlineRolesRaw && typeof inlineRolesRaw === "object" && !Array.isArray(inlineRolesRaw))
+				? (inlineRolesRaw as Record<string, unknown>)
+				: undefined;
 			_proposalInlineWorkflowYaml = "";
 			_proposalInlineWorkflowYamlError = "";
 			_proposalInlineWorkflowParsed = undefined;
@@ -1951,6 +2064,7 @@ function goalProposalPanel() {
 				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
 				autoStartTeam,
 				workflow: inlineWorkflow,
+				inlineRoles,
 			});
 			delete state.activeProposals.goal;
 			_proposalEnabledOptionalSteps = [];
@@ -2020,6 +2134,7 @@ function goalProposalPanel() {
 			_proposalInlineWorkflowParsed = v.parsed;
 			renderApp();
 		},
+		inlineRolesPreview: ((state.activeProposals.goal?.fields as any)?.inlineRoles) as Record<string, any> | undefined,
 	});
 }
 
