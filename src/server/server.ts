@@ -3788,6 +3788,31 @@ async function handleApiRoute(
 			await goalManager.updateGoal(goal.id, updates);
 			planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused: !!updates.paused });
+			// Cross-team propagation: when a child goal is auto-paused,
+			// notify the PARENT's team-lead so it knows the child won't
+			// progress on its own. Without this, the parent sits idle
+			// indefinitely after the replan-overflow tripwire fires.
+			if (updates.paused) {
+				try {
+					const { buildParentPausedNotification } = await import("./agent/notify-team-lead-child-passed.js");
+					const parentNotify = buildParentPausedNotification(goal, "replan-overflow");
+					if (parentNotify) {
+						const team = teamManager.getTeamState(parentNotify.parentGoalId);
+						if (team?.teamLeadSessionId) {
+							const tlSess = sessionManager.getSession(team.teamLeadSessionId);
+							if (tlSess && tlSess.status !== "terminated") {
+								if (tlSess.status === "streaming") {
+									sessionManager.deliverLiveSteer(team.teamLeadSessionId, parentNotify.message).catch(() => {});
+								} else {
+									sessionManager.enqueuePrompt(team.teamLeadSessionId, parentNotify.message, { isSteered: true }).catch(() => {});
+								}
+							}
+						}
+					}
+				} catch (err) {
+					console.warn("[plan-mutation] Failed to notify parent of auto-pause:", err);
+				}
+			}
 			json({ applied: true, replanCount: newReplanCount, autoPaused: !!updates.paused });
 		} catch (err) {
 			json({ error: err instanceof Error ? err.message : String(err) }, 500);
