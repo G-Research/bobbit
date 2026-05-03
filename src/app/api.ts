@@ -895,13 +895,30 @@ export async function deleteGoal(id: string): Promise<void> {
 	const goalTitle = goal?.title || "this goal";
 	const sessionsUnderGoal = state.gatewaySessions.filter((s) => s.goalId === id);
 
-	let message = `Are you sure you want to delete "${goalTitle}"?`;
-	if (sessionsUnderGoal.length > 0) {
-		message += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
-	}
+	// Detect active team for this goal (mirror of heuristic in render-helpers.ts).
+	const isTeamGoal = !!(goal as any)?.team;
+	const teamActive = isTeamGoal && state.gatewaySessions.some(
+		(s) => (s.goalId === id || s.teamGoalId === id)
+			&& s.role === "team-lead"
+			&& s.status !== "terminated",
+	);
 
-	const confirmed = await confirmAction("Archive Goal", `Archive "${goalTitle}"? It will move to the archived section.`, "Archive", false);
+	const title = teamActive ? "Stop team and archive goal?" : "Archive Goal";
+	let body = teamActive
+		? `The team will be stopped and "${goalTitle}" will be archived.`
+		: `Archive "${goalTitle}"? It will move to the archived section.`;
+	if (sessionsUnderGoal.length > 0) {
+		body += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
+	}
+	const confirmLabel = teamActive ? "Stop & Archive" : "Archive";
+
+	const confirmed = await confirmAction(title, body, confirmLabel, teamActive);
 	if (!confirmed) return;
+
+	if (teamActive) {
+		const ok = await teardownTeam(id);
+		if (!ok) return; // teardownTeam already surfaced an error toast.
+	}
 
 	try {
 		await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
