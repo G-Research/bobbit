@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 
 import {
 	applyReviewModelOverrides,
+	applyModelString,
 	type ReviewModelRpc,
 	type ReviewModelPrefs,
 } from "../src/server/agent/review-model-override.ts";
@@ -106,5 +107,39 @@ describe("applyReviewModelOverrides — desired contract", () => {
 			"helper must reject malformed prefs rather than silently ignoring",
 		);
 		assert.equal(rpc.setModelCalls.length, 0);
+	});
+});
+
+describe("applyModelString skipSetModel — spawn-pinned read-back", () => {
+	it("skips setModel but still calls getState() and resolves on match", async () => {
+		const rpc = makeRpc({
+			async setModel() { throw new Error("setModel must NOT be called when skipSetModel=true"); },
+			async getState() {
+				return { model: { id: "claude-3-5-sonnet", provider: "anthropic" } };
+			},
+		});
+		let getStateCalls = 0;
+		const origGetState = rpc.getState;
+		rpc.getState = async () => { getStateCalls++; return origGetState.call(rpc); };
+
+		await applyModelString(rpc, "anthropic/claude-3-5-sonnet", { skipSetModel: true });
+		assert.equal(rpc.setModelCalls.length, 0, "setModel must not run when skipSetModel=true");
+		assert.equal(getStateCalls, 1, "getState() read-back must still run when skipSetModel=true");
+	});
+
+	it("throws on read-back mismatch even when skipSetModel=true (hard-fail contract)", async () => {
+		const rpc = makeRpc({
+			async setModel() { throw new Error("setModel must NOT be called"); },
+			async getState() {
+				// Agent is bound to a different model than what was requested at spawn.
+				return { model: { id: "claude-opus-4-7", provider: "anthropic" } };
+			},
+		});
+
+		await assert.rejects(
+			applyModelString(rpc, "anthropic/claude-3-5-sonnet", { skipSetModel: true }),
+			/read-back mismatch|mismatch/i,
+			"hard-fail-on-mismatch contract must hold even when setModel was skipped",
+		);
 	});
 });

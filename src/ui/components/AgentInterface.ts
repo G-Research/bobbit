@@ -1112,7 +1112,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(Sparkles, "sm")}
-					<span class="ml-0 sm:ml-0.5">${state.model.id}</span>
+					<span class="ml-0 sm:ml-0.5" data-testid="footer-model-id">${state.model.id}</span>
 				`,
 				// Mobile: tighten gap (4px) and horizontal padding so the sparkles
 				// icon sits closer to the model name. ! beats Button's defaults.
