@@ -211,7 +211,6 @@ export class AgentInterface extends LitElement {
 	// reflows (which grow `.max-w-5xl` after the initial pin) and re-pins
 	// while `_stickToBottom` is true. Removed on next session navigate /
 	// disconnect.
-	private _imageLoadHandler?: (e: Event) => void;
 
 	// Jump-to-bottom button visibility. Computed purely from geometry in
 	// `_handleScroll`. NEVER mutates `_stickToBottom`.
@@ -398,18 +397,6 @@ export class AgentInterface extends LitElement {
 			this._scrollContainer.addEventListener("touchstart", this._handleUserIntent, { passive: true });
 			this._scrollContainer.addEventListener("keydown", this._handleScrollKeydown);
 
-			// Capture-phase `load` listener: catches `<img>` and `<iframe>`
-			// decode reflows anywhere in the subtree (including markdown
-			// images, lazy-hydrated tool-content, mermaid/katex async
-			// renders) and re-pins via `_pinIfSticking`. Lives on the scroll
-			// container — not the session subscription — so it covers the
-			// full lifetime of the component, including initial render where
-			// no session navigate has occurred yet AND streaming bursts after
-			// the per-session handler is removed.
-			if (!this._imageLoadHandler) {
-				this._imageLoadHandler = () => this._pinIfSticking();
-				this._scrollContainer.addEventListener("load", this._imageLoadHandler, true);
-			}
 		}
 
 		// Subscribe to external session if provided
@@ -437,10 +424,6 @@ export class AgentInterface extends LitElement {
 			this._scrollContainer.removeEventListener("wheel", this._handleUserIntent);
 			this._scrollContainer.removeEventListener("touchstart", this._handleUserIntent);
 			this._scrollContainer.removeEventListener("keydown", this._handleScrollKeydown);
-			if (this._imageLoadHandler) {
-				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, true);
-				this._imageLoadHandler = undefined;
-			}
 		}
 
 		if (this._pillResizeObserver) {
@@ -487,17 +470,12 @@ export class AgentInterface extends LitElement {
 		}
 		// Single re-pin path on session navigate: pin once after Lit's first
 		// commit. Subsequent async growth (markdown, syntax highlighting,
-		// hydrated tool-content) is caught by the ResizeObserver — every
-		// `delta > 0` tick re-pins via `_pinIfSticking()`. Lazy `<img>`/
-		// `<iframe>` decode reflows are caught by the capture-phase `load`
-		// listener installed below.
+		// hydrated tool-content, lazy `<img>`/`<iframe>` decode reflows) is
+		// caught by the ResizeObserver — every `delta > 0` tick re-pins via
+		// `_pinIfSticking()`. The RO observes the inner `.max-w-5xl` content
+		// container, so any height growth from any source (image decode
+		// included) triggers a re-pin without an explicit `load` listener.
 		this.updateComplete.then(() => this._pinIfSticking());
-
-		// `_imageLoadHandler` lives on `_scrollContainer` for the full
-		// component lifetime (registered in `connectedCallback`), so no
-		// per-session re-attach is needed — it covers session navigate,
-		// streaming bursts, lazy markdown image decode, and tool-content
-		// hydration uniformly.
 
 		// Set default streamFn with proxy support if not already set
 		if (this.session.streamFn === streamSimple) {
