@@ -36,6 +36,14 @@ docs: >-
   defined in `inlineRoles`. For workflows that other goals will also need →
   use propose_project with the new entry under `workflows:` instead.
 
+  INHERITANCE TO SUBGOALS: any subgoals spawned from this goal via
+  `goal_spawn_child` automatically inherit BOTH this goal's `inlineRoles`
+  AND its workflow snapshot (whether it came from `inlineWorkflow`,
+  `workflow` id, or auto-seeded defaults). Children may override either
+  on a per-spawn basis by passing their own `inlineRoles` (merged on top —
+  child entries with the same name win) or `inlineWorkflow` / `workflowId`
+  (replaces the inherited workflow entirely for that child).
+
   DECISION GUIDE for the agent: ask "will any goal OTHER than this one need
   this role/workflow?". If yes → permanent (propose_role / propose_project).
   If no → ephemeral (inlineRoles / inlineWorkflow on this goal). When in

@@ -88,13 +88,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_spawn_child",
 		label: "Spawn Child Goal",
-		description: "Spawn a child goal under the current goal. Idempotent on planId — re-calling with the same planId returns the existing child id rather than creating a duplicate. The child branches off the parent's branch HEAD; on ready-to-merge, the child's branch merges LOCALLY into the parent (no remote PR). The child INHERITS the parent's `inlineRoles` snapshot automatically — to add child-specific ephemeral roles or override a parent's, pass `inlineRoles` here. Same applies to `inlineWorkflow` for one-off workflow definitions.",
-		promptSnippet: "Spawn a child goal idempotently (keyed by planId). Inherits parent's inlineRoles; pass inlineRoles/inlineWorkflow to add child-specific ephemeral definitions.",
+		description: "Spawn a child goal under the current goal. Idempotent on planId — re-calling with the same planId returns the existing child id rather than creating a duplicate. The child branches off the parent's branch HEAD; on ready-to-merge, the child's branch merges LOCALLY into the parent (no remote PR). INHERITANCE: the child automatically inherits BOTH the parent's `inlineRoles` snapshot AND the parent's workflow snapshot (whether the parent's workflow came from `inlineWorkflow`, a stored workflow id, or auto-seeded defaults). To override either, pass `inlineRoles` (merged on top of parent's; child entries with the same name win) or `inlineWorkflow` / `workflowId` (replaces the parent's workflow entirely for this child). To use a different stored workflow than the parent, pass `workflowId`.",
+		promptSnippet: "Spawn a child goal idempotently (keyed by planId). Inherits parent's inlineRoles AND workflow; pass inlineRoles/inlineWorkflow/workflowId to override.",
 		parameters: Type.Object({
 			planId: Type.String({ description: "Stable id for this plan node — used as spawnedFromPlanId on the child (Lesson 4.1)." }),
 			title: Type.String({ description: "Child goal title — becomes the child's display title and branch slug." }),
 			spec: Type.String({ description: "Markdown spec for the child goal." }),
-			workflowId: Type.Optional(Type.String({ description: "Workflow id for the child (defaults to 'feature' on the server). Mutually exclusive with inlineWorkflow." })),
+			workflowId: Type.Optional(Type.String({ description: "Workflow id to look up in the project's workflow store. When omitted, the child INHERITS the parent's snapshotted workflow — pass this only when you want a different stored workflow than the parent. Mutually exclusive with inlineWorkflow (inlineWorkflow wins if both supplied)." })),
 			suggestedRole: Type.Optional(Type.String({ description: "Suggested team-lead role for the child." })),
 			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
 				name: Type.String(),
@@ -112,7 +112,7 @@ export default function (pi: ExtensionAPI) {
 				name: Type.String(),
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
-			}, { description: "Optional inline workflow snapshot for the child. When provided, snapshotted onto the child record and the project workflow store is bypassed for this child. Mutually exclusive with workflowId — if both are given, the inline workflow wins." })),
+			}, { description: "Optional inline workflow snapshot for the child. REPLACES the inherited parent workflow entirely — pass this only when the child needs a fundamentally different gate sequence (and only for THIS child). For workflows useful across many goals → propose_project with the workflow inside `workflows:` (permanent). Mutually exclusive with workflowId — if both are given, the inline workflow wins. The inline workflow's `verify[]` steps may reference roles defined in `inlineRoles` above." })),
 		}),
 		async execute(_id, params) {
 			try {
