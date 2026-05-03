@@ -46,6 +46,24 @@ window.extendAncestors = function(prev, goalId) {
 	return next;
 };
 
+window.computeTitleSuffixes = function(siblings) {
+	const titleCounts = new Map();
+	for (const s of siblings) {
+		const t = s.title ?? "";
+		titleCounts.set(t, (titleCounts.get(t) ?? 0) + 1);
+	}
+	const out = new Map();
+	for (const s of siblings) {
+		const t = s.title ?? "";
+		if ((titleCounts.get(t) ?? 0) > 1) {
+			out.set(s.id, s.id.slice(0, 6));
+		} else {
+			out.set(s.id, undefined);
+		}
+	}
+	return out;
+};
+
 /**
  * Render-walk simulator — same shape as the real renderGoalGroup →
  * renderSpawnedChildGoalRow chain in src/app/render-helpers.ts. Returns

@@ -86,3 +86,33 @@ export function extendAncestors(
 	next.add(goalId);
 	return next;
 }
+
+/**
+ * Compute per-id title-suffix disambiguators for a sibling set. Returns a
+ * Map keyed by goal id; the value is the short id-suffix (`id.slice(0, 6)`)
+ * for siblings whose `title` collides with at least one other sibling, or
+ * undefined for siblings with unique titles. Mirrors the collision-detection
+ * logic in `buildNestedGoalForest` so the live spawned-children render
+ * path produces the same `(<suffix>)` tag as the archived forest path.
+ *
+ * Pure — call site decides how to apply the suffix to the rendered title.
+ */
+export function computeTitleSuffixes<G extends { id: string; title?: string }>(
+	siblings: readonly G[],
+): Map<string, string | undefined> {
+	const titleCounts = new Map<string, number>();
+	for (const s of siblings) {
+		const t = s.title ?? "";
+		titleCounts.set(t, (titleCounts.get(t) ?? 0) + 1);
+	}
+	const out = new Map<string, string | undefined>();
+	for (const s of siblings) {
+		const t = s.title ?? "";
+		if ((titleCounts.get(t) ?? 0) > 1) {
+			out.set(s.id, s.id.slice(0, 6));
+		} else {
+			out.set(s.id, undefined);
+		}
+	}
+	return out;
+}

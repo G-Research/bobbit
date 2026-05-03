@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
-import { selectSpawnedChildren, isAncestorCycle, extendAncestors } from "./sidebar-spawned-children.js";
+import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import {
 	state,
 	renderApp,
@@ -368,7 +368,11 @@ export function bucketArchivedByProject(
  * ancestor (createGoal rejects true id-cycles, but the render path
  * shouldn't trust the data layer to be perfect).
  */
-function renderSpawnedChildGoalRow(child: Goal, renderedAncestors?: Set<string>): TemplateResult {
+function renderSpawnedChildGoalRow(
+	child: Goal,
+	renderedAncestors?: Set<string>,
+	displayTitleSuffix?: string,
+): TemplateResult {
 	if (isAncestorCycle(child.id, renderedAncestors)) {
 		return html`
 			<div class="text-[10px] text-muted-foreground/70 italic px-1 py-0.5"
@@ -382,7 +386,7 @@ function renderSpawnedChildGoalRow(child: Goal, renderedAncestors?: Set<string>)
 	const descendantCount = state.goals.filter(g => !g.archived && g.parentGoalId === child.id).length;
 	return html`
 		<div data-testid="sidebar-spawned-child-row" data-goal-id="${child.id}" data-spawned-by="${child.spawnedBySessionId ?? ""}">
-			${renderGoalGroup(child, { descendantCount, renderedAncestors })}
+			${renderGoalGroup(child, { descendantCount, renderedAncestors, displayTitleSuffix })}
 		</div>
 	`;
 }
@@ -401,15 +405,15 @@ function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean): Te
 	// archived children when their chevron is collapsed — symmetric with
 	// how live parents hide live children. The user reported sub-goal
 	// rows still showing under a collapsed archived parent.
-	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[] }): TemplateResult => {
+	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[]; displayTitleSuffix?: string }): TemplateResult => {
 		const indentPx = node.depth * 16;
 		const goal = node.goal as Goal;
 		const isExpanded = expandedGoals.has(goal.id);
 		return html`
 			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
 				${isMobile
-					? html`<div class="opacity-60">${renderGoalGroup(goal, { descendantCount: node.descendantCount })}</div>`
-					: renderGoalGroup(goal, { descendantCount: node.descendantCount })}
+					? html`<div class="opacity-60">${renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}</div>`
+					: renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}
 			</div>
 			${isExpanded ? node.children.map((c: any) => renderArcNode(c)) : nothing}
 		`;
@@ -719,7 +723,7 @@ function renderGoalBadge(goalId: string) {
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
  * Mobile:  dashboard button always visible. No double-click (no hover hint).
  */
-export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string> }) {
+export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string }) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
 	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
@@ -846,6 +850,10 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		// descendant that — via a data anomaly — points back at this goal as
 		// a child won't recurse infinitely.
 		const ancestors = extendAncestors(opts?.renderedAncestors, goal.id);
+		// Disambiguator suffixes for same-titled spawned siblings — same
+		// pattern as buildNestedGoalForest's sibling-title pass so the live
+		// and archived paths render identical "(<suffix>)" tags.
+		const liveSuffixes = computeTitleSuffixes(spawnedChildren);
 
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
@@ -856,7 +864,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}
 					`)}
-					${spawnedChildren.map(child => renderSpawnedChildGoalRow(child, ancestors))}
+					${spawnedChildren.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}
@@ -872,7 +880,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
-				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}</span>
+				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${opts?.displayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${opts.displayTitleSuffix})</span>` : ""}</span>
 				${(opts?.descendantCount ?? 0) > 0 ? html`
 					<span
 						class="shrink-0 font-semibold text-muted-foreground"
@@ -930,6 +938,8 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 							const mySubGoals = spawnedSubGoalsOf(lead.id);
 							const hasContent = myMembers.length > 0 || mySubGoals.length > 0;
 							const expanded = isArchivedParentExpanded(lead.id);
+							// Same disambiguator pass as the live branch.
+							const archivedSuffixes = computeTitleSuffixes(mySubGoals);
 							return html`
 								${renderArchivedSessionRow(lead, hasContent)}
 								${renderArchivedDelegates(lead.id)}
@@ -939,7 +949,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 											${renderArchivedSessionRow(m)}
 											${renderArchivedDelegates(m.id)}
 										`)}
-										${mySubGoals.map(child => renderSpawnedChildGoalRow(child, archivedAncestors))}
+										${mySubGoals.map(child => renderSpawnedChildGoalRow(child, archivedAncestors, archivedSuffixes.get(child.id)))}
 									</div>
 								` : ""}
 							`;

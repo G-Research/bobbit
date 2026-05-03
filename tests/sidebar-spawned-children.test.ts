@@ -22,6 +22,7 @@ import {
 	selectSpawnedChildren,
 	isAncestorCycle,
 	extendAncestors,
+	computeTitleSuffixes,
 	type SpawnedChildLike,
 } from "../src/app/sidebar-spawned-children.ts";
 
@@ -148,6 +149,35 @@ describe("extendAncestors — pure, never mutates input", () => {
 	it("returns a single-element set when prev is undefined", () => {
 		const next = extendAncestors(undefined, "lonely");
 		assert.deepEqual([...next], ["lonely"]);
+	});
+});
+
+describe("computeTitleSuffixes — sibling disambiguator", () => {
+	it("siblings with same title get a 6-char suffix; unique titles get undefined", () => {
+		const siblings = [
+			{ id: "abc123def", title: "AUDIT: CLAUDE CODE" },
+			{ id: "fed987cba", title: "AUDIT: CLAUDE CODE" },
+			{ id: "unique-1", title: "AUDIT: BOBBIT HARNESS" },
+		];
+		const result = computeTitleSuffixes(siblings);
+		assert.equal(result.get("abc123def"), "abc123");
+		assert.equal(result.get("fed987cba"), "fed987");
+		assert.equal(result.get("unique-1"), undefined);
+	});
+
+	it("returns empty map for empty siblings", () => {
+		assert.equal(computeTitleSuffixes([]).size, 0);
+	});
+
+	it("undefined title behaves as empty string for collision detection", () => {
+		const siblings = [
+			{ id: "111111aaa", title: undefined },
+			{ id: "222222bbb", title: undefined },
+		];
+		const result = computeTitleSuffixes(siblings);
+		// Both have empty title — collision triggers, both get suffixes.
+		assert.equal(result.get("111111aaa"), "111111");
+		assert.equal(result.get("222222bbb"), "222222");
 	});
 });
 

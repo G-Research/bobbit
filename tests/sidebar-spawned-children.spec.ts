@@ -17,6 +17,7 @@ declare global {
 		selectSpawnedChildren: (goals: any[], parentId: string, leadId: string, showArchived: boolean) => any[];
 		isAncestorCycle: (childId: string, renderedAncestors: Set<string> | undefined) => boolean;
 		extendAncestors: (prev: Set<string> | undefined, goalId: string) => Set<string>;
+		computeTitleSuffixes: (siblings: any[]) => Map<string, string | undefined>;
 		simulateRender: (goals: any[], rootGoalId: string, leadId: string, opts?: { cap?: number; showArchived?: boolean }) => Array<{ kind: string; id: string; depth: number; title?: string }>;
 	}
 }
@@ -88,6 +89,24 @@ test.describe("selectSpawnedChildren — filter, dedupe, stable sort", () => {
 			return window.selectSpawnedChildren(goals, "P", "L", true).map(g => g.id);
 		});
 		expect(all).toEqual(["a", "b"]);
+	});
+});
+
+test.describe("computeTitleSuffixes — sibling disambiguator in browser", () => {
+	test("user image #42 reproduction: two AUDIT: CLAUDE CODE siblings get distinguishing suffixes", async ({ page }) => {
+		await page.goto(FIXTURE);
+		const result = await page.evaluate(() => {
+			const siblings = [
+				{ id: "abc123def", title: "AUDIT: CLAUDE CODE" },
+				{ id: "fed987cba", title: "AUDIT: CLAUDE CODE" },
+				{ id: "xxx-bobbit", title: "AUDIT: BOBBIT HARNESS" },
+			];
+			const m = window.computeTitleSuffixes(siblings);
+			return Object.fromEntries(m);
+		});
+		expect(result["abc123def"]).toBe("abc123");
+		expect(result["fed987cba"]).toBe("fed987");
+		expect(result["xxx-bobbit"]).toBeUndefined();
 	});
 });
 

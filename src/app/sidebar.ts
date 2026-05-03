@@ -806,7 +806,7 @@ function renderNestedNode(
 	return html`
 		<div data-testid="sidebar-nested-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
 			<div data-testid="sidebar-goal-row">
-				${renderGoalGroup(goal, { descendantCount: node.descendantCount })}
+				${renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}
 			</div>
 		</div>
 		${isExpanded ? html`
