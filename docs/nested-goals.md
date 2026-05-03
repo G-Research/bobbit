@@ -395,12 +395,28 @@ the pure helper `resolveRole(goal, name, roleStore)` in
 reviewer pickup, `agent-qa` qa-tester pickup). Any new role-lookup site
 MUST go through `resolveRole`.
 
-**Inheritance** — when `goal_spawn_child` spawns a child, the server
-merges `parent.inlineRoles` with `body.inlineRoles` (`{...parent,
-...body}`). Child entries with the same name override the parent's; new
-names extend the set. This lets a parent goal define audit-wide roles
-once (e.g. `synthesis-reviewer`) and have every spawned subgoal inherit
-them automatically.
+**Inheritance** — when `goal_spawn_child` spawns a child, both the
+roles AND the workflow are inherited from the parent:
+
+- `inlineRoles`: server merges `parent.inlineRoles` with
+  `body.inlineRoles` (`{...parent, ...body}`). Child entries with the
+  same name override the parent's; new names extend the set. A parent
+  goal can define audit-wide roles once (e.g. `synthesis-reviewer`) and
+  every spawned subgoal inherits them automatically.
+- `goal.workflow`: precedence is `body.workflow` (inline override) →
+  `parent.workflow` (deep-cloned snapshot — same freeze-at-creation
+  pattern) → `body.workflowId` lookup against the project workflow
+  store. So a parent that proposed an `inlineWorkflow` propagates it
+  to every child unless the agent explicitly overrides. To use a
+  different STORED workflow on the child, pass `workflowId`; to use a
+  different one-off workflow, pass `inlineWorkflow`.
+
+**Critical companion** for the inheritance to actually work: spawn-child
+calls `gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g
+=> g.id))` after `createGoal`. Without this, the child has
+`goal.workflow` populated but the gate store has no entries, so
+`gate_list` / `gate_signal` / `gate_status` / `gate_inspect` and the
+verification harness all see `[]` despite a populated workflow.
 
 **When to use what**:
 
