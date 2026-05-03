@@ -519,10 +519,15 @@ interface GoalFormConfig {
 	inlineWorkflowYaml?: string;
 	inlineWorkflowYamlError?: string;
 	onInlineWorkflowYamlChange?: (e: Event) => void;
-	// Inline-roles preview (read-only side-table). Populated when the goal
-	// proposal's `inlineRoles` field is non-empty so the user can see the
-	// ephemeral roles before accepting. Editing happens via edit_proposal —
-	// no inline-edit UI here.
+	// Inline-roles editor — mirrors the inline-workflow textarea pattern.
+	// Always rendered when `onInlineRolesYamlChange` is provided so users
+	// can ADD ephemeral roles even when the agent didn't seed any. The
+	// `inlineRolesPreview` parsed view shows above the textarea (scrollable;
+	// max-height capped) so reviewers can scan a long list without
+	// expanding the YAML.
+	inlineRolesYaml?: string;
+	inlineRolesYamlError?: string;
+	onInlineRolesYamlChange?: (e: Event) => void;
 	inlineRolesPreview?: Record<string, { name?: string; label?: string; promptTemplate?: string; accessory?: string }>;
 }
 
@@ -572,20 +577,43 @@ function renderGoalForm(config: GoalFormConfig) {
 						})}
 					</div>
 				</div>
-				${_cachedWorkflows.length > 0 ? html`
-					<div class="flex items-center gap-2 md:shrink-0">
-						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
-						<select
-							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
-							.value=${config.workflowId}
-							@change=${config.onWorkflowChange}
-						>
-							${_cachedWorkflows.map((w) => html`
-								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
-							`)}
-						</select>
-					</div>
-				` : ""}
+				${_cachedWorkflows.length > 0 ? (() => {
+					// When an inline workflow is parsed and active, the dropdown
+					// choice is overridden — the goal record snapshots
+					// inlineWorkflow directly via POST /api/goals body.workflow.
+					// Surface that to the user with a synthetic "Inline (N gates)"
+					// option pinned at the top, selected and disabled. Clearing
+					// the inline YAML textarea re-enables the dropdown.
+					const inlineYaml = (config.inlineWorkflowYaml ?? "").trim();
+					const inlineActive = inlineYaml.length > 0 && !config.inlineWorkflowYamlError;
+					let inlineGateCount: number | undefined;
+					if (inlineActive) {
+						try {
+							const parsed = yaml.parse(inlineYaml) as { gates?: unknown[] } | null;
+							if (parsed && Array.isArray(parsed.gates)) inlineGateCount = parsed.gates.length;
+						} catch { /* validator already showed the error */ }
+					}
+					return html`
+						<div class="flex items-center gap-2 md:shrink-0" data-testid="goal-workflow-select-wrap">
+							<label class="${lblCls} w-20 md:w-auto">Workflow</label>
+							<select
+								class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9 ${inlineActive ? "opacity-60" : ""}"
+								.value=${inlineActive ? "__inline__" : config.workflowId}
+								@change=${config.onWorkflowChange}
+								?disabled=${inlineActive}
+								title=${inlineActive ? "Inline workflow YAML is active — clear it below to choose a stored workflow" : ""}
+								data-testid="goal-workflow-select"
+							>
+								${inlineActive ? html`
+									<option value="__inline__" selected>Inline${inlineGateCount !== undefined ? ` (${inlineGateCount} gate${inlineGateCount === 1 ? "" : "s"})` : ""}</option>
+								` : ""}
+								${_cachedWorkflows.map((w) => html`
+									<option value=${w.id} ?selected=${!inlineActive && config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
+								`)}
+							</select>
+						</div>
+					`;
+				})() : ""}
 			</div>
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
@@ -707,26 +735,47 @@ function renderGoalForm(config: GoalFormConfig) {
 				</div>
 			</details>
 		` : ""}
-		${config.inlineRolesPreview && Object.keys(config.inlineRolesPreview).length > 0 ? html`
-			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-roles" open>
-				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Inline roles (ephemeral, scoped to this goal)</summary>
-				<div class="mt-2 flex flex-col gap-2">
-					${Object.entries(config.inlineRolesPreview).map(([name, role]) => html`
-						<div class="rounded-md border border-border p-2 flex flex-col gap-1" data-testid="goal-inline-role-row" data-role-name=${name}>
-							<div class="flex items-center gap-2">
-								<span class="text-xs font-mono text-foreground">${name}</span>
-								${role.label ? html`<span class="text-xs text-muted-foreground">— ${role.label}</span>` : ""}
-								${role.accessory && role.accessory !== "none" ? html`<span class="text-[10px] text-muted-foreground/80 ml-auto">${role.accessory}</span>` : ""}
+		${config.onInlineRolesYamlChange !== undefined ? (() => {
+			const previewEntries = config.inlineRolesPreview ? Object.entries(config.inlineRolesPreview) : [];
+			const hasYaml = (config.inlineRolesYaml ?? "").trim() !== "";
+			const hasContent = previewEntries.length > 0 || hasYaml;
+			return html`
+				<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-roles" ?open=${hasContent}>
+					<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Inline roles (ephemeral, scoped to this goal)</summary>
+					<div class="mt-2 flex flex-col gap-2">
+						${previewEntries.length > 0 ? html`
+							<div class="flex flex-col gap-2 max-h-[260px] overflow-y-auto pr-1" data-testid="goal-inline-roles-preview-scroll">
+								${previewEntries.map(([name, role]) => html`
+									<div class="rounded-md border border-border p-2 flex flex-col gap-1" data-testid="goal-inline-role-row" data-role-name=${name}>
+										<div class="flex items-center gap-2">
+											<span class="text-xs font-mono text-foreground">${name}</span>
+											${role.label ? html`<span class="text-xs text-muted-foreground">— ${role.label}</span>` : ""}
+											${role.accessory && role.accessory !== "none" ? html`<span class="text-[10px] text-muted-foreground/80 ml-auto">${role.accessory}</span>` : ""}
+										</div>
+										${role.promptTemplate ? html`
+											<div class="text-[11px] text-muted-foreground/80 line-clamp-2 font-mono whitespace-pre-wrap" data-testid="goal-inline-role-prompt">${role.promptTemplate.slice(0, 200)}${role.promptTemplate.length > 200 ? "…" : ""}</div>
+										` : ""}
+									</div>
+								`)}
 							</div>
-							${role.promptTemplate ? html`
-								<div class="text-[11px] text-muted-foreground/80 line-clamp-2 font-mono whitespace-pre-wrap" data-testid="goal-inline-role-prompt">${role.promptTemplate.slice(0, 200)}${role.promptTemplate.length > 200 ? "…" : ""}</div>
-							` : ""}
-						</div>
-					`)}
-					<div class="text-[10px] text-muted-foreground/60 italic">Edit via <code class="text-foreground">edit_proposal(type="goal", ...)</code>.</div>
-				</div>
-			</details>
-		` : ""}
+						` : html`
+							<div class="text-[11px] text-muted-foreground/70 italic" data-testid="goal-inline-roles-empty">No inline roles yet — add a YAML mapping below to create one for this goal only.</div>
+						`}
+						<textarea
+							class="w-full min-h-[120px] max-h-[300px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+							placeholder="# Optional: add ephemeral role(s) for this goal&#10;# Format: roleName: { name, label, promptTemplate, ... }&#10;synthesis-reviewer:&#10;  name: synthesis-reviewer&#10;  label: Synthesis Reviewer&#10;  promptTemplate: |&#10;    You are a synthesis reviewer for this audit.&#10;  accessory: magnifying-glass"
+							.value=${config.inlineRolesYaml ?? ""}
+							data-testid="goal-inline-roles-yaml-textarea"
+							@input=${config.onInlineRolesYamlChange}
+						></textarea>
+						${config.inlineRolesYamlError ? html`
+							<div class="text-[11px] text-destructive" data-testid="goal-inline-roles-yaml-error">${config.inlineRolesYamlError}</div>
+						` : ""}
+						<div class="text-[10px] text-muted-foreground/60 italic">Tip: an agent can also propose roles via <code class="text-foreground">propose_goal(inlineRoles: …)</code> or <code class="text-foreground">edit_proposal(type="goal", ...)</code>.</div>
+					</div>
+				</details>
+			`;
+		})() : ""}
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
@@ -734,7 +783,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || !!config.inlineWorkflowYamlError,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || !!config.inlineWorkflowYamlError || !!config.inlineRolesYamlError,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
 			</div>
@@ -787,13 +836,17 @@ function goalPreviewPanel() {
 		// proposal slot. Same logic for inlineRoles.
 		const inlineWorkflow = _assistantInlineWorkflowParsed
 			?? (proposalFields.inlineWorkflow as unknown);
-		const inlineRolesFromProposal = proposalFields.inlineRoles;
-		const inlineRoles = (inlineRolesFromProposal && typeof inlineRolesFromProposal === "object" && !Array.isArray(inlineRolesFromProposal))
-			? (inlineRolesFromProposal as Record<string, unknown>)
+		const inlineRolesCandidate: unknown = _assistantInlineRolesParsed
+			?? proposalFields.inlineRoles;
+		const inlineRoles = (inlineRolesCandidate && typeof inlineRolesCandidate === "object" && !Array.isArray(inlineRolesCandidate))
+			? (inlineRolesCandidate as Record<string, unknown>)
 			: undefined;
 		_assistantInlineWorkflowYaml = "";
 		_assistantInlineWorkflowYamlError = "";
 		_assistantInlineWorkflowParsed = undefined;
+		_assistantInlineRolesYaml = "";
+		_assistantInlineRolesYamlError = "";
+		_assistantInlineRolesParsed = undefined;
 		// Clean up persisted draft
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
@@ -923,7 +976,19 @@ function goalPreviewPanel() {
 					_assistantInlineWorkflowParsed = v.parsed;
 					renderApp();
 				},
-				inlineRolesPreview: ((state.activeProposals.goal?.fields as any)?.inlineRoles) as Record<string, any> | undefined,
+				inlineRolesYaml: _assistantInlineRolesYaml,
+				inlineRolesYamlError: _assistantInlineRolesYamlError,
+				onInlineRolesYamlChange: (e: Event) => {
+					_assistantInlineRolesYaml = (e.target as HTMLTextAreaElement).value;
+					const v = _validateInlineRolesYaml(_assistantInlineRolesYaml);
+					_assistantInlineRolesYamlError = v.error ?? "";
+					_assistantInlineRolesParsed = v.parsed;
+					renderApp();
+				},
+				// Preview reflects the textarea cache when populated (so user
+				// edits show up in the row preview immediately), otherwise the
+				// proposal slot's snapshot from the agent.
+				inlineRolesPreview: (_assistantInlineRolesParsed ?? ((state.activeProposals.goal?.fields as any)?.inlineRoles)) as Record<string, any> | undefined,
 			})}
 		</div>
 	`;
@@ -1969,6 +2034,50 @@ function _validateInlineWorkflowYaml(yamlText: string): { parsed?: unknown; erro
 	}
 }
 
+// Module-level caches for the inline-roles textarea — mirror the inline-workflow
+// pattern. The textarea-driven cache wins at accept time; otherwise
+// handleCreateGoal falls back to state.activeProposals.goal.fields.inlineRoles.
+let _proposalInlineRolesYaml = "";
+let _proposalInlineRolesYamlError = "";
+let _proposalInlineRolesParsed: Record<string, unknown> | undefined;
+let _assistantInlineRolesYaml = "";
+let _assistantInlineRolesYamlError = "";
+let _assistantInlineRolesParsed: Record<string, unknown> | undefined;
+
+/**
+ * Validate inline-roles YAML. Must parse to a `Record<roleName, Role>` —
+ * each entry needs `name`, `label`, `promptTemplate`. Mirrors the structural
+ * checks in src/server/proposals/proposal-types.ts::validateGoalInlineFields
+ * so the user catches the same errors locally before the server rejects.
+ */
+function _validateInlineRolesYaml(yamlText: string): { parsed?: Record<string, unknown>; error?: string } {
+	const trimmed = yamlText.trim();
+	if (!trimmed) return { parsed: undefined };
+	let parsed: unknown;
+	try {
+		parsed = yaml.parse(trimmed);
+	} catch (err) {
+		return { error: err instanceof Error ? err.message : String(err) };
+	}
+	if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { error: "Inline roles must be a YAML mapping of roleName → Role definition." };
+	}
+	const map = parsed as Record<string, unknown>;
+	for (const [name, role] of Object.entries(map)) {
+		if (role == null || typeof role !== "object" || Array.isArray(role)) {
+			return { error: `Role "${name}" must be a YAML mapping.` };
+		}
+		const r = role as Record<string, unknown>;
+		for (const required of ["name", "label", "promptTemplate"] as const) {
+			const v = r[required];
+			if (typeof v !== "string" || v.trim() === "") {
+				return { error: `Role "${name}" is missing required field \`${required}\` (must be a non-empty string).` };
+			}
+		}
+	}
+	return { parsed: map };
+}
+
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
 	const proposal = state.activeProposals.goal?.fields as undefined | {
@@ -1986,7 +2095,10 @@ function syncProposalFormState(): void {
 	// textarea / role list — without this, an edit_proposal that adds inlineRoles
 	// after the first emit would leave the panel showing the original payload.
 	const inlineWorkflowKey = proposal.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
-	const inlineRolesKey = proposal.inlineRoles ? JSON.stringify(Object.keys(proposal.inlineRoles).sort()) : "";
+	// Deeper-than-just-keys hash so that a re-emitted proposal that edits a
+	// role's prompt (without changing the role list) still re-seeds the
+	// textarea with the new content.
+	const inlineRolesKey = proposal.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
 	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${inlineWorkflowKey}|${inlineRolesKey}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
@@ -2019,6 +2131,21 @@ function syncProposalFormState(): void {
 		_proposalInlineWorkflowParsed = undefined;
 		_proposalInlineWorkflowYamlError = "";
 	}
+	// Same seed pattern for inline roles: present in the proposal? stringify
+	// to YAML and pre-populate the textarea so users can review & edit.
+	if (proposal.inlineRoles && typeof proposal.inlineRoles === "object" && Object.keys(proposal.inlineRoles).length > 0) {
+		try {
+			_proposalInlineRolesYaml = yaml.stringify(proposal.inlineRoles);
+			_proposalInlineRolesParsed = proposal.inlineRoles as Record<string, unknown>;
+			_proposalInlineRolesYamlError = "";
+		} catch (err) {
+			_proposalInlineRolesYamlError = `Could not stringify inline roles: ${err instanceof Error ? err.message : String(err)}`;
+		}
+	} else {
+		_proposalInlineRolesYaml = "";
+		_proposalInlineRolesParsed = undefined;
+		_proposalInlineRolesYamlError = "";
+	}
 }
 
 function goalProposalPanel() {
@@ -2041,21 +2168,24 @@ function goalProposalPanel() {
 			_proposalSandboxed = false;
 			const autoStartTeam = _proposalAutoStartTeam;
 			_proposalAutoStartTeam = true;
-			// Pull inlineRoles directly from the proposal slot (panel never edits
-			// roles today; if it grows a UI for that, mirror the inlineWorkflow
-			// textarea pattern). inlineWorkflow falls back to the slot when the
-			// textarea cache is empty — covers the agent-only path where the
-			// user accepts without editing the textarea.
+			// Textarea-driven caches win when the user edited the panel; both
+			// inline-workflow and inline-roles fall back to the snapshotted
+			// proposal slot otherwise (covers the agent-only path where the
+			// user accepts without editing).
 			const proposalFields = (state.activeProposals.goal?.fields as Record<string, unknown> | undefined) ?? {};
 			const inlineWorkflow = _proposalInlineWorkflowParsed
 				?? (proposalFields.inlineWorkflow as unknown);
-			const inlineRolesRaw = proposalFields.inlineRoles;
-			const inlineRoles = (inlineRolesRaw && typeof inlineRolesRaw === "object" && !Array.isArray(inlineRolesRaw))
-				? (inlineRolesRaw as Record<string, unknown>)
+			const inlineRolesCandidate: unknown = _proposalInlineRolesParsed
+				?? proposalFields.inlineRoles;
+			const inlineRoles = (inlineRolesCandidate && typeof inlineRolesCandidate === "object" && !Array.isArray(inlineRolesCandidate))
+				? (inlineRolesCandidate as Record<string, unknown>)
 				: undefined;
 			_proposalInlineWorkflowYaml = "";
 			_proposalInlineWorkflowYamlError = "";
 			_proposalInlineWorkflowParsed = undefined;
+			_proposalInlineRolesYaml = "";
+			_proposalInlineRolesYamlError = "";
+			_proposalInlineRolesParsed = undefined;
 			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 				spec: _proposalSpec,
 				workflowId: _proposalWorkflowId || undefined,
@@ -2134,7 +2264,16 @@ function goalProposalPanel() {
 			_proposalInlineWorkflowParsed = v.parsed;
 			renderApp();
 		},
-		inlineRolesPreview: ((state.activeProposals.goal?.fields as any)?.inlineRoles) as Record<string, any> | undefined,
+		inlineRolesYaml: _proposalInlineRolesYaml,
+		inlineRolesYamlError: _proposalInlineRolesYamlError,
+		onInlineRolesYamlChange: (e: Event) => {
+			_proposalInlineRolesYaml = (e.target as HTMLTextAreaElement).value;
+			const v = _validateInlineRolesYaml(_proposalInlineRolesYaml);
+			_proposalInlineRolesYamlError = v.error ?? "";
+			_proposalInlineRolesParsed = v.parsed;
+			renderApp();
+		},
+		inlineRolesPreview: (_proposalInlineRolesParsed ?? ((state.activeProposals.goal?.fields as any)?.inlineRoles)) as Record<string, any> | undefined,
 	});
 }
 
