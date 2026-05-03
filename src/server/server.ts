@@ -5957,13 +5957,95 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead)
+	// POST /api/goals/:id/team/teardown — fully tear down a team
+	// (dismiss agents + terminate team lead). Cascade contract mirrors
+	// pause/archive: explicit cascade required when descendants exist.
+	//
+	// Without `?cascade=true`: tears down only THIS goal's team. If the
+	// goal has any non-archived descendants with live teams, returns
+	// 409 HAS_DESCENDANT_TEAMS so the UI can prompt the user.
+	// With `?cascade=true`: walks descendants (depth-first), tears down
+	// each team, then tears down the parent. Idempotent: missing teams
+	// are silently skipped.
 	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
 	if (teamTeardownMatch && req.method === "POST") {
 		const goalId = teamTeardownMatch[1];
+		const cascade = url.searchParams.get("cascade") === "true";
+		const ctx = projectContextManager.getContextForGoal(goalId);
 		try {
-			await teamManager.teardownTeam(goalId);
-			json({ ok: true });
+			if (!cascade) {
+				// Discovery: any descendant goal with a live team?
+				const descendantsWithTeams: Array<{ id: string; title: string }> = [];
+				if (ctx) {
+					const all = ctx.goalStore.getAll();
+					const byParent = new Map<string, typeof all[number][]>();
+					for (const g of all) {
+						if (!g.parentGoalId) continue;
+						const arr = byParent.get(g.parentGoalId) ?? [];
+						arr.push(g);
+						byParent.set(g.parentGoalId, arr);
+					}
+					const queue: string[] = [goalId];
+					const visited = new Set<string>([goalId]);
+					while (queue.length) {
+						const cur = queue.shift()!;
+						for (const child of byParent.get(cur) ?? []) {
+							if (visited.has(child.id) || child.archived) continue;
+							visited.add(child.id);
+							if (teamManager.getTeamState(child.id)) {
+								descendantsWithTeams.push({ id: child.id, title: child.title });
+							}
+							queue.push(child.id);
+						}
+					}
+				}
+				if (descendantsWithTeams.length > 0) {
+					json({
+						code: "HAS_DESCENDANT_TEAMS",
+						count: descendantsWithTeams.length,
+						descendants: descendantsWithTeams,
+						message: `Goal has ${descendantsWithTeams.length} descendant team(s) still running. Re-call with ?cascade=true to stop them all.`,
+					}, 409);
+					return;
+				}
+			}
+
+			// Cascade tear-down: walk descendants depth-first, then this goal.
+			// Each teardown is best-effort — one failure must not stop the rest.
+			const teardownOrder: string[] = [];
+			if (ctx) {
+				const all = ctx.goalStore.getAll();
+				const byParent = new Map<string, typeof all[number][]>();
+				for (const g of all) {
+					if (!g.parentGoalId) continue;
+					const arr = byParent.get(g.parentGoalId) ?? [];
+					arr.push(g);
+					byParent.set(g.parentGoalId, arr);
+				}
+				const visit = (id: string) => {
+					for (const child of byParent.get(id) ?? []) {
+						if (child.archived) continue;
+						visit(child.id);
+						teardownOrder.push(child.id);
+					}
+				};
+				if (cascade) visit(goalId);
+			}
+			teardownOrder.push(goalId);
+
+			let toreDown = 0;
+			const errors: Array<{ goalId: string; error: string }> = [];
+			for (const id of teardownOrder) {
+				try {
+					if (teamManager.getTeamState(id)) {
+						await teamManager.teardownTeam(id);
+						toreDown += 1;
+					}
+				} catch (err) {
+					errors.push({ goalId: id, error: err instanceof Error ? err.message : String(err) });
+				}
+			}
+			json({ ok: true, toreDown, errors });
 		} catch (err) {
 			json({ error: String(err) }, 400);
 		}

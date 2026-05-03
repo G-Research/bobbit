@@ -1003,14 +1003,59 @@ export async function completeTeam(goalId: string): Promise<boolean> {
 	}
 }
 
-export async function teardownTeam(goalId: string): Promise<boolean> {
+/**
+ * Tear down a goal's team. When the goal has live descendant teams, the
+ * server returns 409 HAS_DESCENDANT_TEAMS — the dialog wrapper below
+ * (`teardownTeamWithDialog`) handles that case by prompting the user to
+ * cascade. Direct callers that already know there are no descendants (or
+ * accept the failure mode) can use this raw helper.
+ */
+export async function teardownTeam(goalId: string, cascade = false): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/teardown`, {
-			method: "POST",
-		});
+		const url = `/api/goals/${goalId}/team/teardown${cascade ? "?cascade=true" : ""}`;
+		const res = await gatewayFetch(url, { method: "POST" });
 		if (!res.ok) throw new Error(`Failed: ${res.status}`);
 		await refreshSessions();
 		return true;
+	} catch (err) {
+		showConnectionError("Failed to tear down team", err instanceof Error ? err.message : String(err));
+		return false;
+	}
+}
+
+/**
+ * Tear down with cascade-confirmation dialog when descendants are present.
+ * Pre-flight: try cascade=false. On 409 HAS_DESCENDANT_TEAMS, show the
+ * confirmation dialog with the descendant list + count and let the user
+ * choose. On any other status the no-cascade path completes immediately.
+ *
+ * Returns true if the teardown completed (with or without cascade), false
+ * on cancel or network error.
+ */
+export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
+	try {
+		const probe = await gatewayFetch(`/api/goals/${goalId}/team/teardown`, { method: "POST" });
+		if (probe.ok) {
+			await refreshSessions();
+			return true;
+		}
+		if (probe.status === 409) {
+			const body = await probe.json().catch(() => null) as { code?: string; count?: number; descendants?: Array<{ id: string; title: string }> } | null;
+			if (body?.code === "HAS_DESCENDANT_TEAMS") {
+				const dialogModule = await import("./dialogs.js");
+				const goal = (window as any).__goalCache?.get?.(goalId) ?? { id: goalId, title: goalId.slice(0, 8) };
+				const decision = await dialogModule.showStopTeamDialog(goal, body.count ?? 0, body.descendants ?? []);
+				if (decision === "cancel") return false;
+				if (decision === "cascade") {
+					const r = await gatewayFetch(`/api/goals/${goalId}/team/teardown?cascade=true`, { method: "POST" });
+					if (!r.ok) throw new Error(`Failed: ${r.status}`);
+					await refreshSessions();
+					return true;
+				}
+				return false;
+			}
+		}
+		throw new Error(`Failed: ${probe.status}`);
 	} catch (err) {
 		showConnectionError("Failed to tear down team", err instanceof Error ? err.message : String(err));
 		return false;

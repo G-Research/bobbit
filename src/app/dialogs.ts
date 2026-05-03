@@ -1826,6 +1826,84 @@ interface CascadePauseResult { paused: number }
  * If the goal has zero descendants, sends `cascade: false` directly without
  * showing a dialog.
  */
+/**
+ * Cascade-stop confirmation. Returns:
+ *  - "this-only" — server already accepted the no-cascade teardown
+ *  - "cascade"   — user picked "Stop all teams"
+ *  - "cancel"    — user dismissed
+ */
+export async function showStopTeamDialog(
+	goal: { id: string; title: string },
+	descendantTeamCount: number,
+	descendants: Array<{ id: string; title: string }>,
+): Promise<"this-only" | "cascade" | "cancel"> {
+	if (descendantTeamCount === 0) return "this-only";
+	return new Promise<"this-only" | "cascade" | "cancel">((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		let working = false;
+
+		const cleanup = (result: "this-only" | "cascade" | "cancel") => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const doCascade = async () => {
+			if (working) return;
+			working = true;
+			renderDialog();
+			cleanup("cascade");
+		};
+
+		const renderDialog = () => {
+			const previewLines = descendants.slice(0, 5).map(d => html`<li class="truncate">${d.title}</li>`);
+			const overflow = descendants.length > 5 ? html`<li class="text-muted-foreground italic">…and ${descendants.length - 5} more</li>` : "";
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => cleanup("cancel"),
+					width: "min(480px, 92vw)",
+					height: "auto",
+					backdropClassName: "bg-black/50 backdrop-blur-sm",
+					children: html`
+						${DialogContent({
+							children: html`
+								${DialogHeader({ title: "Stop team" })}
+								<p class="text-sm mt-2" data-testid="cascade-stop-summary">
+									"${goal.title}" has <strong>${descendantTeamCount}</strong> descendant goal${descendantTeamCount === 1 ? "" : "s"} with running team${descendantTeamCount === 1 ? "" : "s"}.
+								</p>
+								<p class="text-sm text-muted-foreground mt-1">
+									Stopping just this goal's team would leave the descendant teams running and burning tokens. Cascade-stop tears down all of them.
+								</p>
+								<ul class="text-xs text-muted-foreground mt-2 ml-4 list-disc space-y-0.5" data-testid="cascade-stop-descendants">
+									${previewLines}${overflow}
+								</ul>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup("cancel"), children: "Cancel", disabled: working })}
+									<span data-testid="cascade-stop-confirm">${Button({
+										variant: "default",
+										disabled: working,
+										onClick: () => doCascade(),
+										children: working ? "Stopping…" : `Stop all ${descendantTeamCount + 1} teams`,
+									})}</span>
+								</div>
+							`,
+						})}
+					`,
+				}),
+				container,
+			);
+		};
+		renderDialog();
+	});
+}
+
 export async function showPauseGoalDialog(goal: Goal, descendantCount: number): Promise<CascadePauseResult> {
 	if (descendantCount === 0) {
 		const res = await gatewayFetch(`/api/goals/${goal.id}/pause`, {
