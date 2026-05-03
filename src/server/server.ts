@@ -5555,6 +5555,34 @@ async function handleApiRoute(
 		}
 	}
 
+	// POST /api/sessions/:id/notify — enqueue a synthetic user-style message
+	// to a session. Used by the proposal accept-flow to wake the proposing
+	// agent ("[user accepted your role proposal …]") so the team-lead can
+	// continue its task without polling. Live and idle sessions both supported
+	// via enqueuePrompt; archived sessions reject (404 from getSession).
+	const notifyMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/notify$/);
+	if (notifyMatch && req.method === "POST") {
+		const id = notifyMatch[1];
+		const body = await readBody(req);
+		if (!body?.message || typeof body.message !== "string") {
+			json({ error: "Missing or invalid message" }, 400);
+			return;
+		}
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		if (session.nonInteractive) {
+			json({ error: "Cannot notify a non-interactive session" }, 400);
+			return;
+		}
+		try {
+			await sessionManager.enqueuePrompt(id, body.message);
+			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
+		} catch (err: any) {
+			json({ error: `Failed to enqueue notification: ${err?.message || String(err)}` }, 500);
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/wait — block until session becomes idle
 	// Uses chunked transfer with periodic heartbeat newlines to prevent
 	// HTTP client body-timeout (undici defaults to 300s between chunks).
