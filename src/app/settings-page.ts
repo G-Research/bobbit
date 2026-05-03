@@ -93,6 +93,7 @@ let _listening = false;
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
+let customisePromptStatus = "";
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -1843,6 +1844,25 @@ async function toggleShowTimestamps(): Promise<void> {
 	} catch {}
 }
 
+async function customiseSystemPrompt(): Promise<void> {
+	customisePromptStatus = "Working…";
+	renderApp();
+	try {
+		const resp = await gatewayFetch("/api/system-prompt/customise", { method: "POST" });
+		if (!resp.ok) {
+			customisePromptStatus = `Failed (${resp.status})`;
+		} else {
+			const data = await resp.json();
+			customisePromptStatus = data.created
+				? `Created ${data.path}`
+				: `Already exists at ${data.path}`;
+		}
+	} catch (err) {
+		customisePromptStatus = `Error: ${(err as Error).message}`;
+	}
+	renderApp();
+}
+
 async function togglePlayFinishSound(): Promise<void> {
 	settingsPlayFinishSound = !settingsPlayFinishSound;
 	// Apply synchronously to the dataset so the gate flips without waiting on
@@ -1890,6 +1910,21 @@ function renderGeneralTab() {
 				<p class="text-xs text-muted-foreground ml-6">
 					Play a short notification beep when an agent finishes its turn.
 				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-sm font-medium text-foreground">System prompt</span>
+				<p class="text-xs text-muted-foreground">
+					Copy the shipped default to <code>.bobbit/config/system-prompt.md</code> so you can edit it.
+					If the file already exists it is left unchanged.
+				</p>
+				<div class="flex items-center gap-3">
+					<button
+						class="px-3 py-1.5 rounded border border-input text-sm hover:bg-secondary"
+						data-testid="general-customise-system-prompt"
+						@click=${customiseSystemPrompt}
+					>Customise system prompt</button>
+					${customisePromptStatus ? html`<span class="text-xs text-muted-foreground">${customisePromptStatus}</span>` : ""}
+				</div>
 			</div>
 		</div>
 	`;

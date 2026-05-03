@@ -1,9 +1,28 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { bobbitConfigDir } from "../bobbit-dir.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Resolve the active system-prompt.md path.
+ * Prefers the user override at `<bobbitConfigDir()>/system-prompt.md`;
+ * falls back to the shipped `<defaultsDir>/system-prompt.md`.
+ * Returns `undefined` only when neither file exists.
+ */
+export function resolveSystemPromptPath(): string | undefined {
+	const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
+	if (fs.existsSync(userPath)) return userPath;
+	// __dirname here is dist/server/agent/, so defaults live at dist/server/defaults/.
+	const defaultPath = path.join(__dirname, "..", "defaults", "system-prompt.md");
+	if (fs.existsSync(defaultPath)) return defaultPath;
+	return undefined;
+}
 
 /** Module-level cache of the prompts directory. Set once by ensurePromptsDir(). */
 let _promptsDir: string | undefined;
@@ -163,7 +182,8 @@ export function readAllAgentFiles(cwd: string, projectConfigStore?: ProjectConfi
 }
 
 export interface PromptParts {
-	/** Path to the global system prompt file (config/system-prompt.md) */
+	/** Path to the global system prompt file. Resolved via resolveSystemPromptPath():
+	 *  prefers `<bobbitConfigDir()>/system-prompt.md`, falls back to the shipped default. */
 	baseSystemPromptPath?: string;
 	/** Working directory shown to the agent (may be container-internal for sandbox). */
 	cwd: string;

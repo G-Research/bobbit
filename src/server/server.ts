@@ -8,6 +8,8 @@ import path from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { isSetupComplete } from "./setup-status.js";
+export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
@@ -1255,30 +1257,7 @@ export function createGateway(config: GatewayConfig) {
 	};
 }
 
-/** Check if project setup has been completed (sentinel exists or system-prompt.md has been customized). */
-function isSetupComplete(): boolean {
-	// Check sentinel file
-	const sentinelPath = path.join(bobbitStateDir(), "setup-complete");
-	if (fs.existsSync(sentinelPath)) return true;
-
-	// Check if system-prompt.md has been customized beyond the default template
-	const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
-	if (!fs.existsSync(systemPromptPath)) return false;
-
-	// Compare with default template — if the file differs, setup is considered done
-	const defaultTemplatePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "system-prompt.md");
-	if (!fs.existsSync(defaultTemplatePath)) {
-		// Can't find default template; if the file exists at all, assume customized
-		return true;
-	}
-	try {
-		const current = fs.readFileSync(systemPromptPath, "utf-8");
-		const defaultContent = fs.readFileSync(defaultTemplatePath, "utf-8");
-		return current.trim() !== defaultContent.trim();
-	} catch {
-		return false;
-	}
-}
+// isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
 
 /** Redact token values in sandbox config for API responses. Never send real secrets to the browser.
  *  `sandbox_tokens` is a structured array (post-native-YAML); other fields stay flat strings. */
@@ -1597,6 +1576,35 @@ async function handleApiRoute(
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 500);
+		}
+		return;
+	}
+
+	// POST /api/system-prompt/customise — copy shipped default to .bobbit/config/system-prompt.md
+	//   so the user can edit it. If the file already exists it is left unchanged.
+	//   Returns { path, created, content }.
+	if (url.pathname === "/api/system-prompt/customise" && req.method === "POST") {
+		const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
+		const defaultPath = path.join(
+			path.dirname(fileURLToPath(import.meta.url)),
+			"defaults",
+			"system-prompt.md",
+		);
+		let created = false;
+		try {
+			if (!fs.existsSync(userPath)) {
+				if (!fs.existsSync(defaultPath)) {
+					json({ error: "Default system-prompt.md not found in install" }, 500);
+					return;
+				}
+				fs.mkdirSync(path.dirname(userPath), { recursive: true });
+				fs.copyFileSync(defaultPath, userPath);
+				created = true;
+			}
+			const content = fs.readFileSync(userPath, "utf-8");
+			json({ path: userPath, created, content });
+		} catch (err: any) {
+			json({ error: String(err?.message ?? err) }, 500);
 		}
 		return;
 	}
@@ -5542,6 +5550,11 @@ async function handleApiRoute(
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
+		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
+		// redundant initial `model_change` event with its hardcoded default.
+		if (ps.modelProvider && ps.modelId) {
+			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
 			createOpts.roleName = role.name;
@@ -5567,24 +5580,10 @@ async function handleApiRoute(
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
 		if (ps.modelProvider && ps.modelId) {
-			// Fire-and-forget: set the model and persist. For worktree sessions the
-			// agent isn't ready yet, so setModel can fail — persist regardless so
-			// later restore picks it up.
-			const provider = ps.modelProvider;
-			const modelId = ps.modelId;
-			(async () => {
-				try {
-					// Wait briefly for the session to become idle if it's still preparing
-					for (let i = 0; i < 40; i++) {
-						const s = sessionManager.getSession(newSession.id);
-						if (s && (s.status === "idle" || s.status === "streaming")) break;
-						await new Promise(r => setTimeout(r, 50));
-					}
-					const s = sessionManager.getSession(newSession.id);
-					if (s) await s.rpcClient.setModel(provider, modelId).catch(() => {});
-				} catch { /* best-effort */ }
-				sessionManager.persistSessionModel(newSession.id, provider, modelId);
-			})().catch(() => {});
+			// Model is pinned at spawn via createOpts.initialModel above; just
+			// persist the choice so a later restore picks it up. No redundant
+			// post-spawn setModel — that's the whole point of spawn-time pinning.
+			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
 		}
 
 		json({

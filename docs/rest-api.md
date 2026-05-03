@@ -281,6 +281,16 @@ Server-level fallback (applied when no project override is set):
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/shutdown` | Graceful server shutdown (used by coverage teardown) |
+| `POST` | `/api/system-prompt/customise` | Copy shipped `defaults/system-prompt.md` to `<bobbitConfigDir>/system-prompt.md` so the user can edit it |
+
+**`POST /api/system-prompt/customise`** — no request body. Behaviour:
+
+- If `<bobbitConfigDir>/system-prompt.md` does not exist, copies `defaults/system-prompt.md` to that path.
+- If the user file already exists, it is left unchanged (no-op overwrite — user edits are never clobbered).
+- Returns `{ path, created, content }` where `path` is the absolute user-override path, `created` is `true` only when the file was just copied this call, and `content` is the current file contents (newly copied default or pre-existing user version).
+- Errors: `500 { error }` if the shipped default is missing from the install or the copy/read fails.
+
+This is the explicit opt-in path for customising the global system prompt. The startup pipeline no longer scaffolds the file — see [internals.md — Config cascade](internals.md#config-cascade) for the runtime resolution rules.
 
 ### Workflows
 

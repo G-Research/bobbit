@@ -48,6 +48,18 @@ export interface RpcBridgeOptions {
 	containerId?: string;
 	/** Tool manager for resolving extension paths (optional — falls back to TOOLS_DIR). */
 	toolManager?: ToolManager;
+	/**
+	 * Pin the agent's model at spawn time via `--model <provider>/<modelId>`.
+	 * Avoids the redundant initial `model_change` event that pi-coding-agent
+	 * emits when booting with its hardcoded default before Bobbit calls
+	 * `setModel`. Silently ignored if malformed.
+	 */
+	initialModel?: string;
+	/**
+	 * Pin the agent's thinking level at spawn time via `--thinking <level>`.
+	 * Valid: off|minimal|low|medium|high. Silently ignored otherwise.
+	 */
+	initialThinkingLevel?: string;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -92,6 +104,33 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
 	_factory = factory;
 }
 
+/**
+ * Build the pi-coding-agent CLI arg list from RpcBridgeOptions.
+ *
+ * Exported for unit testing (mocking child_process.spawn is brittle).
+ * Order matters: --model and --thinking are inserted BEFORE caller-supplied
+ * `options.args` so any explicit override in `args` (e.g. `--model x` from
+ * a custom flow) wins over the spawn-time pin.
+ */
+export function buildAgentArgs(options: RpcBridgeOptions): string[] {
+	const args = ["--mode", "rpc"];
+	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
+	if (options.initialModel) {
+		const slash = options.initialModel.indexOf("/");
+		if (slash > 0 && slash < options.initialModel.length - 1) {
+			args.push("--model", options.initialModel);
+		}
+	}
+	if (options.initialThinkingLevel) {
+		const valid = ["off", "minimal", "low", "medium", "high"];
+		if (valid.includes(options.initialThinkingLevel)) {
+			args.push("--thinking", options.initialThinkingLevel);
+		}
+	}
+	if (options.args) args.push(...options.args);
+	return args;
+}
+
 export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
@@ -119,9 +158,7 @@ export class RpcBridge {
 
 	async start(): Promise<void> {
 		const cliPath = this.options.cliPath || findAgentCli();
-		const args = ["--mode", "rpc"];
-		if (this.options.systemPromptPath) args.push("--system-prompt", this.options.systemPromptPath);
-		if (this.options.args) args.push(...this.options.args);
+		const args = buildAgentArgs(this.options);
 
 		// Enable all built-in tools EXCEPT bash (which is provided by our custom extension)
 		// unless --tools was explicitly passed (e.g. by role-based tool activation).

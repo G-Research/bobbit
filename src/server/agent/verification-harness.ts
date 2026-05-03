@@ -1724,6 +1724,22 @@ export class VerificationHarness {
 			const isSandboxed = (goalId
 				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
+
+			// Resolve the model and thinking level up-front so we can pin them at
+			// spawn time (avoids a redundant initial `model_change` event).
+			const _preRoleOverrides = this.resolveRoleForGoal(roleName, goalId);
+			const _preRoleModel = _preRoleOverrides?.model;
+			const _preReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
+			const _preInitialModel = (_preRoleModel && /^[^/]+\/.+$/.test(_preRoleModel))
+				? _preRoleModel
+				: ((_preReviewPref && /^[^/]+\/.+$/.test(_preReviewPref)) ? _preReviewPref : undefined);
+			const _preRoleThinking = _preRoleOverrides?.thinkingLevel;
+			const _preReviewThinkingPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+			const _validLevels = ["off", "minimal", "low", "medium", "high"];
+			const _preInitialThinking = (_preRoleThinking && _validLevels.includes(_preRoleThinking))
+				? _preRoleThinking
+				: ((_preReviewThinkingPref && _validLevels.includes(_preReviewThinkingPref)) ? _preReviewThinkingPref : "off");
+
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName,
@@ -1731,6 +1747,8 @@ export class VerificationHarness {
 				sessionId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
+				initialModel: _preInitialModel,
+				initialThinkingLevel: _preInitialThinking,
 			});
 
 			// Set title and metadata
@@ -1760,12 +1778,15 @@ export class VerificationHarness {
 
 			// Override model: role wins, else default.reviewModel preference.
 			// Throws on failure/mismatch — outer catch converts to a failed gate result.
+			// `skipSetModel` is true when the spawn already pinned the same model;
+			// the read-back verification still runs and still hard-fails on mismatch.
 			if (roleModel_r) {
 				try {
 					await applyModelString(session.rpcClient, roleModel_r, {
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						contextLabel: `role.${roleName}.model`,
+						skipSetModel: _preInitialModel === roleModel_r,
 					});
 					console.log(`[verification] Set role-override model "${roleModel_r}" for reviewer ${sessionId} (role=${roleName})`);
 				} catch (err) {
@@ -1780,6 +1801,7 @@ export class VerificationHarness {
 						sessionManager: this.sessionManager ?? null,
 						sessionId,
 						role: "reviewer",
+						skipSetModel: !!reviewModelPref && _preInitialModel === reviewModelPref,
 					});
 					if (reviewModelPref) {
 						console.log(`[verification] Set review model "${reviewModelPref}" for ${sessionId}`);
@@ -1792,6 +1814,7 @@ export class VerificationHarness {
 
 			// Apply thinking level: role wins; else default.reviewThinkingLevel pref;
 			// else "off" (matches Settings page default for review agents).
+			// Skip the RPC if spawn already pinned the same level.
 			{
 				let level: string;
 				if (roleThinking_r) {
@@ -1801,11 +1824,15 @@ export class VerificationHarness {
 					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				try {
-					await session.rpcClient.setThinkingLevel(level);
-					console.log(`[verification] Set review thinking level "${level}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
-				} catch (err) {
-					console.error(`[verification] Failed to set review thinking level:`, err);
+				if (_preInitialThinking === level) {
+					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${sessionId}`);
+				} else {
+					try {
+						await session.rpcClient.setThinkingLevel(level);
+						console.log(`[verification] Set review thinking level "${level}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
+					} catch (err) {
+						console.error(`[verification] Failed to set review thinking level:`, err);
+					}
 				}
 			}
 
@@ -2003,6 +2030,21 @@ export class VerificationHarness {
 			const qaIsSandboxed = (goalId
 				? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.sandboxed
 				: undefined) ?? this.sessionManager!.isSandboxEnabled;
+
+			// Resolve QA model + thinking level for spawn-time pin.
+			const _preQaRoleOverrides = this.resolveRoleForGoal(qaRoleName, goalId);
+			const _preQaRoleModel = _preQaRoleOverrides?.model;
+			const _preQaReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
+			const _preQaInitialModel = (_preQaRoleModel && /^[^/]+\/.+$/.test(_preQaRoleModel))
+				? _preQaRoleModel
+				: ((_preQaReviewPref && /^[^/]+\/.+$/.test(_preQaReviewPref)) ? _preQaReviewPref : undefined);
+			const _preQaRoleThinking = _preQaRoleOverrides?.thinkingLevel;
+			const _preQaReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+			const _qaValidLevels = ["off", "minimal", "low", "medium", "high"];
+			const _preQaInitialThinking = (_preQaRoleThinking && _qaValidLevels.includes(_preQaRoleThinking))
+				? _preQaRoleThinking
+				: ((_preQaReviewThinkPref && _qaValidLevels.includes(_preQaReviewThinkPref)) ? _preQaReviewThinkPref : "off");
+
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
 				roleName: qaRoleName,
@@ -2010,6 +2052,8 @@ export class VerificationHarness {
 				sessionId: qaSessionId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
+				initialModel: _preQaInitialModel,
+				initialThinkingLevel: _preQaInitialThinking,
 			});
 			qaSessionId = session.id;
 
@@ -2045,6 +2089,7 @@ export class VerificationHarness {
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						contextLabel: `role.${qaRoleName}.model`,
+						skipSetModel: _preQaInitialModel === roleModel_q,
 					});
 					console.log(`[verification] Set role-override model "${roleModel_q}" for QA ${qaSessionId} (role=${qaRoleName})`);
 				} catch (err) {
@@ -2059,6 +2104,7 @@ export class VerificationHarness {
 						sessionManager: this.sessionManager ?? null,
 						sessionId: qaSessionId,
 						role: "qa",
+						skipSetModel: !!reviewModelPref && _preQaInitialModel === reviewModelPref,
 					});
 					if (reviewModelPref) {
 						console.log(`[verification] Set QA model "${reviewModelPref}" for ${qaSessionId}`);
@@ -2079,10 +2125,14 @@ export class VerificationHarness {
 					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				try {
-					await session.rpcClient.setThinkingLevel(level);
-				} catch (err) {
-					console.error(`[verification] Failed to set QA thinking level:`, err);
+				if (_preQaInitialThinking === level) {
+					console.log(`[verification] QA thinking level "${level}" already pinned at spawn for ${qaSessionId}`);
+				} else {
+					try {
+						await session.rpcClient.setThinkingLevel(level);
+					} catch (err) {
+						console.error(`[verification] Failed to set QA thinking level:`, err);
+					}
 				}
 			}
 
@@ -2197,6 +2247,22 @@ export class VerificationHarness {
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 
+		// Resolve and pin model + thinking level at spawn time (legacy direct path).
+		const _preLegacyRoleOverrides = roleName ? this.resolveRoleForGoal(roleName) : undefined;
+		const _preLegacyRoleModel = _preLegacyRoleOverrides?.model;
+		const _preLegacyReviewPref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
+		const _preLegacyInitialModel = (_preLegacyRoleModel && /^[^/]+\/.+$/.test(_preLegacyRoleModel))
+			? _preLegacyRoleModel
+			: ((_preLegacyReviewPref && /^[^/]+\/.+$/.test(_preLegacyReviewPref)) ? _preLegacyReviewPref : undefined);
+		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
+		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
+		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
+		const _legacyValidLevels = ["off", "minimal", "low", "medium", "high"];
+		const _preLegacyInitialThinking = (_preLegacyRoleThinking && _legacyValidLevels.includes(_preLegacyRoleThinking))
+			? _preLegacyRoleThinking
+			: ((_preLegacyReviewThinkPref && _legacyValidLevels.includes(_preLegacyReviewThinkPref)) ? _preLegacyReviewThinkPref : "off");
+		bridgeOptions.initialThinkingLevel = _preLegacyInitialThinking;
+
 		const rpc = new RpcBridge(bridgeOptions);
 		let unregisterSession: (() => void) | undefined;
 		let legacyLastErroredToolOutput: string | null = null;
@@ -2241,6 +2307,7 @@ export class VerificationHarness {
 						sessionManager: null,
 						sessionId: null,
 						contextLabel: `role.${roleName}.model`,
+						skipSetModel: _preLegacyInitialModel === roleModel_s,
 					});
 					console.log(`[verification] Set role-override model "${roleModel_s}" for sub-session ${subSessionId} (role=${roleName})`);
 				} catch (err) {
@@ -2255,6 +2322,7 @@ export class VerificationHarness {
 						sessionManager: null,
 						sessionId: null,
 						role: "subsession",
+						skipSetModel: !!reviewModelPref && _preLegacyInitialModel === reviewModelPref,
 					});
 					if (reviewModelPref) {
 						console.log(`[verification] Set review model "${reviewModelPref}" for ${subSessionId}`);
@@ -2275,11 +2343,15 @@ export class VerificationHarness {
 					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				try {
-					await rpc.setThinkingLevel(level);
-					console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}"${roleThinking_s ? " (role override)" : ""}`);
-				} catch (err) {
-					console.error(`[verification] Failed to set review thinking level:`, err);
+				if (_preLegacyInitialThinking === level) {
+					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${subSessionId}`);
+				} else {
+					try {
+						await rpc.setThinkingLevel(level);
+						console.log(`[verification] Set review thinking level "${level}" for ${subSessionId}"${roleThinking_s ? " (role override)" : ""}`);
+					} catch (err) {
+						console.error(`[verification] Failed to set review thinking level:`, err);
+					}
 				}
 			}
 
