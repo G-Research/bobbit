@@ -214,6 +214,15 @@
 			 */
 			function __bobbitPrepaint() {
 				try {
+					// Once Lit has rendered, the skeleton + pill must stay hidden.
+					// scheduleSave() writes bobbit.ui-snapshot.v1 on every state
+					// mutation, and the patched Storage.prototype.setItem below
+					// re-runs us on each write. Without this guard we would
+					// un-hide the skeleton (revealing its background behind the
+					// real UI) and append a new "Reconnecting…" pill on every
+					// state change after boot.
+					var appEl = document.getElementById("app");
+					if (appEl && appEl.getAttribute("data-rendered") === "true") return;
 					var raw = localStorage.getItem("bobbit.ui-snapshot.v1");
 					if (!raw) return;
 					var snap = JSON.parse(raw);
