@@ -56,20 +56,78 @@ import { cwdCombobox } from "./cwd-combobox.js";
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
-import { renderGoalDashboard } from "./goal-dashboard.js";
-import "./goal-dashboard.css";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
-import { renderRoleManagerPage } from "./role-manager-page.js";
-import "./role-manager.css";
-import { renderToolManagerPage } from "./tool-manager-page.js";
-import "./tool-manager.css";
-import { renderWorkflowPage } from "./workflow-page.js";
-import "./workflow-page.css";
 import "./config-scope.css";
-import { renderStaffPage } from "./staff-page.js";
-import { renderSkillsPage } from "./skills-page.js";
-import { renderSettingsPage } from "./settings-page.js";
-import { renderSearchPage, initSearchPage, resetSearchPage } from "./search-page.js";
+
+// ---------------------------------------------------------------------------
+// Lazy route page loader — see docs/design/ui-bundle-size-reduction.md (Task A)
+// ---------------------------------------------------------------------------
+const _pageCache: Record<string, ((...args: unknown[]) => unknown)> = {};
+const _pageLoading: Record<string, boolean> = {};
+
+/** Centred placeholder while a route chunk is in-flight. */
+function loadingPlaceholder() {
+	return html`<div class="flex-1 min-h-0 flex items-center justify-center">${bobbitLoadingAnimation()}</div>`;
+}
+
+/**
+ * Dynamic-import a route page module on first access. Caches the named export
+ * in module scope and triggers `renderApp()` once the chunk lands so the
+ * placeholder is replaced with the real page on the next paint.
+ */
+function lazyPage(
+	key: string,
+	importer: () => Promise<Record<string, unknown>>,
+	exportName: string,
+) {
+	const fn = _pageCache[key];
+	if (fn) return fn();
+	if (!_pageLoading[key]) {
+		_pageLoading[key] = true;
+		importer().then((m) => {
+			const exp = m[exportName];
+			if (typeof exp === "function") {
+				_pageCache[key] = exp as (...args: unknown[]) => unknown;
+			}
+			renderApp();
+		}).catch((err) => {
+			_pageLoading[key] = false;
+			console.error(`Failed to load page chunk "${key}":`, err);
+		});
+	}
+	return loadingPlaceholder();
+}
+
+/**
+ * Call a named export on a lazy-loaded page module. If `loadIfMissing` is
+ * true (default), the chunk is fetched and the export is invoked on arrival.
+ * If false, this is a no-op when the chunk hasn't been loaded yet — used for
+ * "cleanup on leave" hooks like `resetSearchPage` where there's nothing to
+ * clean up if the page was never visited.
+ */
+function lazyPageCall(
+	key: string,
+	importer: () => Promise<Record<string, unknown>>,
+	exportName: string,
+	loadIfMissing = true,
+): void {
+	const cacheKey = `${key}:${exportName}`;
+	const fn = _pageCache[cacheKey];
+	if (fn) {
+		fn();
+		return;
+	}
+	if (!loadIfMissing) return;
+	if (_pageLoading[cacheKey]) return;
+	_pageLoading[cacheKey] = true;
+	importer().then((m) => {
+		const exp = m[exportName];
+		if (typeof exp === "function") {
+			_pageCache[cacheKey] = exp as (...args: unknown[]) => unknown;
+			(exp as () => void)();
+		}
+	}).catch(() => { _pageLoading[cacheKey] = false; });
+}
 
 // ============================================================================
 // MOBILE LANDING PAGE
@@ -2625,31 +2683,32 @@ export function doRenderApp(): void {
 		// Goal dashboard route
 		const route = getRouteFromHash();
 		if (route.view === "goal-dashboard" && route.goalId) {
-			return renderGoalDashboard();
+			return lazyPage("goal-dashboard", () => import("./goal-dashboard.js"), "renderGoalDashboard");
 		}
 		if (route.view === "roles" || route.view === "role-edit") {
-			return renderRoleManagerPage();
+			return lazyPage("role-manager", () => import("./role-manager-page.js"), "renderRoleManagerPage");
 		}
 		if (route.view === "tools" || route.view === "tool-edit") {
-			return renderToolManagerPage();
+			return lazyPage("tool-manager", () => import("./tool-manager-page.js"), "renderToolManagerPage");
 		}
 		if (route.view === "workflows" || route.view === "workflow-edit") {
-			return renderWorkflowPage();
+			return lazyPage("workflow", () => import("./workflow-page.js"), "renderWorkflowPage");
 		}
 		if (route.view === "staff" || route.view === "staff-edit") {
-			return renderStaffPage();
+			return lazyPage("staff", () => import("./staff-page.js"), "renderStaffPage");
 		}
 		if (route.view === "skills") {
-			return renderSkillsPage();
+			return lazyPage("skills", () => import("./skills-page.js"), "renderSkillsPage");
 		}
 		if (route.view === "settings") {
-			return renderSettingsPage();
+			return lazyPage("settings", () => import("./settings-page.js"), "renderSettingsPage");
 		}
 		if (route.view === "search") {
-			initSearchPage();
-			return renderSearchPage();
+			lazyPageCall("search", () => import("./search-page.js"), "initSearchPage");
+			return lazyPage("search", () => import("./search-page.js"), "renderSearchPage");
 		} else {
-			resetSearchPage();
+			// resetSearchPage is a no-op when the chunk hasn't loaded yet.
+			lazyPageCall("search", () => import("./search-page.js"), "resetSearchPage", false);
 		}
 
 		if (connected && state.assistantType) {

@@ -15,7 +15,18 @@ import { authenticateGateway, connectToSession, createAndConnectSession, termina
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
 import { loadSnapshot, scheduleSave } from "./ui-snapshot.js";
-import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
+// goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
+// See docs/design/ui-bundle-size-reduction.md (Task A).
+let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
+async function loadDashboardData(goalId: string): Promise<void> {
+	if (!_goalDashboardModule) _goalDashboardModule = await import("./goal-dashboard.js");
+	return _goalDashboardModule.loadDashboardData(goalId);
+}
+function clearDashboardState(): void {
+	// No-op when the dashboard chunk hasn't been loaded yet — nothing to clear,
+	// and importing it here would defeat the route-level code-split.
+	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
+}
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 
 // ============================================================================
