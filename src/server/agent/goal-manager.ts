@@ -8,6 +8,7 @@ import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
+import type { TeamStore } from "./team-store.js";
 
 const pExecFile = promisify(execFileCb);
 
@@ -640,6 +641,41 @@ export class GoalManager {
 				console.log(`[goal-manager] Backfilled state=complete for legacy archived goal ${goal.id}`);
 			} catch (err) {
 				console.warn(`[goal-manager] backfillCompleteState: skipped goal ${goal.id} due to error:`, err);
+				skipped++;
+			}
+		}
+		return { backfilled, skipped };
+	}
+
+	/**
+	 * Boot-time migration: backfill `spawnedBySessionId` on sub-goals that
+	 * were created before the spawn-child handler started stamping the
+	 * field (commit 00d6805f). Without this, legacy sub-goals don't nest
+	 * under their spawning team-lead in the sidebar.
+	 *
+	 * For each non-archived goal with a `parentGoalId`, look up the parent's
+	 * team entry and stamp the parent's team-lead session id. Archived
+	 * goals are skipped — their parent's team has long since been torn down.
+	 *
+	 * Idempotent — only writes when the field is absent. Per-goal try/catch
+	 * keeps boot resilient (Lesson 4.11 — endless-restart guard).
+	 */
+	backfillSpawnedBySessionId(teamStore: TeamStore): { backfilled: number; skipped: number } {
+		let backfilled = 0;
+		let skipped = 0;
+		for (const goal of this.store.getAll()) {
+			try {
+				if (goal.archived) { skipped++; continue; }
+				if (!goal.parentGoalId) { skipped++; continue; }
+				if (goal.spawnedBySessionId) { skipped++; continue; }
+				const parentTeam = teamStore.get(goal.parentGoalId);
+				const tlSession = parentTeam?.teamLeadSessionId;
+				if (!tlSession) { skipped++; continue; }
+				this.store.update(goal.id, { spawnedBySessionId: tlSession });
+				backfilled++;
+				console.log(`[goal-manager] Backfilled spawnedBySessionId=${tlSession} for legacy sub-goal ${goal.id}`);
+			} catch (err) {
+				console.warn(`[goal-manager] backfillSpawnedBySessionId: skipped goal ${goal.id} due to error:`, err);
 				skipped++;
 			}
 		}

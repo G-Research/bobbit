@@ -1290,6 +1290,19 @@ export function createGateway(config: GatewayConfig) {
 				} catch (err) {
 					console.warn(`[goal-manager] backfillCompleteState failed for project ${ctx.project.id} (non-fatal):`, err);
 				}
+
+				// Backfill `spawnedBySessionId` on legacy sub-goals created
+				// before the spawn-child handler started stamping the field
+				// (commit 00d6805f). Reads `teamLeadSessionId` from the
+				// parent's persisted team entry. Idempotent.
+				try {
+					const result = ctx.goalManager.backfillSpawnedBySessionId(ctx.teamStore);
+					if (result.backfilled > 0) {
+						console.log(`[goal-manager] backfillSpawnedBySessionId project=${ctx.project.id} backfilled=${result.backfilled} skipped=${result.skipped}`);
+					}
+				} catch (err) {
+					console.warn(`[goal-manager] backfillSpawnedBySessionId failed for project ${ctx.project.id} (non-fatal):`, err);
+				}
 			}
 
 			// Now that sessions are live, re-subscribe to team events
