@@ -1,9 +1,27 @@
 name: propose_staff
-description: "Submit a staff member proposal for user review"
-summary: "Propose a staff member with name, prompt, and optional fields."
+description: "Submit a staff member proposal for user review. Staff are persistent agents with their own worktree that wake up periodically (or on triggers) to do recurring work — e.g. a docs-keeper that runs nightly to update docs, or a security-watcher triggered on PR creation. This is THE canonical (and only) tool for creating or updating staff. To tweak a draft, follow up with edit_proposal(type=\"staff\", ...)."
+summary: "Propose or update a staff member (persistent recurring agent with name, prompt, optional triggers and schedule)."
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: name (required), prompt (required), description, triggers, cwd.
+  Required parameters: name (kebab-case identifier — used in worktree path
+  staff-<name>-<id>), prompt (the staff agent's system prompt — runs each wake
+  cycle).
+
+  Optional parameters: description (free-form summary for the user), triggers
+  (string describing trigger conditions — wakes the staff agent on the named
+  events; see StaffTrigger in src/server/agent/staff-store.ts for the full
+  shape), cwd (project path the staff runs against — defaults to the
+  registered project).
+
+  Roles for staff: a staff agent uses a role's prompt + tool policies via the
+  `roleId` field. Define a custom role first via propose_role if you need
+  bespoke behaviour, then reference it from the staff proposal.
+
+  Cascade: staff are project-scoped only — there is no builtin/server layer.
+
+  Worktree refresh: staff worktrees are auto-rebased onto primary on each
+  wake, and per-component setup commands re-run. See AGENTS.md for the full
+  contract.
