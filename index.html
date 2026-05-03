@@ -372,15 +372,21 @@
 					document.body.appendChild(wrap);
 				};
 				// Soft 3s nudge: "Reconnecting…" + reload button.
+				// Soft 8s nudge. The bundle is ~1 MB gzipped and on slower devices
+				// (older iPhones resuming from a process snapshot, low-end Android)
+				// parse + execute can take 3-6 s before main.ts sets data-rendered.
+				// A 3 s threshold fired prematurely on every iOS PWA resume and
+				// trained users to tap Reload. 8 s catches genuinely-stuck loads
+				// (fetch hung, JS error before render) without false positives.
 				setTimeout(function() {
 					if (rendered()) return;
-					showBanner("Reconnecting…", true);
-				}, 3000);
-				// Hard 10s escalation: "Something went wrong".
+					showBanner("Loading…", true);
+				}, 8000);
+				// Hard 20s escalation: "Something went wrong".
 				setTimeout(function() {
 					if (rendered()) return;
 					showBanner("Something went wrong", true);
-				}, 10000);
+				}, 20000);
 				// Cleanup hook — once Lit has rendered (#app gets
 				// data-rendered="true" from main.ts after the first renderApp())
 				// hide the skeleton. The skeleton uses `position: fixed; inset: 0`
