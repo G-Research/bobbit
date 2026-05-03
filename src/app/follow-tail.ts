@@ -149,7 +149,3 @@ export function reconcileFollowTail(el: HTMLElement | null | undefined): void {
 	}
 }
 
-/** Optional explicit cleanup. WeakMap GC handles the common case. */
-export function resetFollowTail(el: HTMLElement): void {
-	locks.delete(el);
-}

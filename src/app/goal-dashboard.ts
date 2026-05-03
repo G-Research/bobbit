@@ -1,3 +1,4 @@
+import "./goal-dashboard.css";
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import "../ui/components/VerificationOutputModal.js";
@@ -2186,10 +2187,3 @@ export function renderGoalDashboard(): TemplateResult {
 	`;
 }
 
-// ============================================================================
-// BACKWARD COMPAT: renderAgentPanel (exported but only used internally before)
-// ============================================================================
-
-export function renderAgentPanel(_agentList: TeamAgent[]): TemplateResult {
-	return renderAgentsTab();
-}

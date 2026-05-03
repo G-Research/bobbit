@@ -100,20 +100,14 @@ export type {
 	StorageTransaction,
 	StoreConfig,
 } from "./storage/types.js";
-// Artifacts
-export { ArtifactElement } from "./tools/artifacts/ArtifactElement.js";
-export { ArtifactPill } from "./tools/artifacts/ArtifactPill.js";
-export { type Artifact, ArtifactsPanel, type ArtifactsParams } from "./tools/artifacts/artifacts.js";
-export { ArtifactsToolRenderer } from "./tools/artifacts/artifacts-tool-renderer.js";
-export { HtmlArtifact } from "./tools/artifacts/HtmlArtifact.js";
-export { ImageArtifact } from "./tools/artifacts/ImageArtifact.js";
-export { MarkdownArtifact } from "./tools/artifacts/MarkdownArtifact.js";
-export { SvgArtifact } from "./tools/artifacts/SvgArtifact.js";
-export { TextArtifact } from "./tools/artifacts/TextArtifact.js";
-export { createExtractDocumentTool, extractDocumentTool } from "./tools/extract-document.js";
+// Artifacts — type-only re-exports keep the heavy class graph (highlight.js,
+// pdfjs, docx-preview chains) out of the main chunk. Value imports happen
+// inside ChatPanel via a dynamic `import("./tools/artifacts/index.js")`.
+export type { Artifact, ArtifactsParams } from "./tools/artifacts/artifacts.js";
+export type { ArtifactsPanel } from "./tools/artifacts/artifacts.js";
+export type { ArtifactsToolRenderer } from "./tools/artifacts/artifacts-tool-renderer.js";
 // Tools
 export { getToolRenderer, registerToolRenderer, renderTool, setShowJsonMode } from "./tools/index.js";
-export { createJavaScriptReplTool, javascriptReplTool } from "./tools/javascript-repl.js";
 export { renderCollapsibleHeader, renderHeader } from "./tools/renderer-registry.js";
 export { BashRenderer } from "./tools/renderers/BashRenderer.js";
 export { CalculateRenderer } from "./tools/renderers/CalculateRenderer.js";

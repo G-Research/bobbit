@@ -28,10 +28,20 @@ async function getDefaultProjectId(): Promise<string> {
 }
 
 async function activeSessionId(page: import("@playwright/test").Page): Promise<string> {
-	const sid = await page.evaluate(() => {
-		const s = (window as any).bobbitState;
-		return s?.activeSessionId ?? s?.gatewaySessions?.[0]?.id ?? null;
-	});
+	// Wait for the selected session id to land in state. This used to read
+	// `bobbitState.activeSessionId` (which never existed — it's a function,
+	// not a property) and fell back to `gatewaySessions[0]?.id`. After Task A
+	// (route-level code splitting) the initial sessions list fetch races with
+	// createSessionViaUI()'s textarea-visible signal, so gatewaySessions is
+	// briefly empty even though the hash route already points at the new
+	// session. selectedSessionId is set synchronously by the route handler
+	// and is the source of truth used by every other parity spec. See
+	// proposal-types-uX-parity.spec.ts:135 for the canonical pattern.
+	const sid = await page.waitForFunction(
+		() => (window as any).bobbitState?.selectedSessionId ?? null,
+		null,
+		{ timeout: 10_000 },
+	).then((handle) => handle.jsonValue() as Promise<string | null>);
 	expect(sid).toBeTruthy();
 	return sid as string;
 }

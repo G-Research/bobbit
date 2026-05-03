@@ -398,13 +398,42 @@ export class RemoteAgent {
 	 *
 	 * `fields === null` signals a `proposal_cleared` event from the server
 	 * (e.g. after accept/dismiss/file-delete).
+	 *
+	 * Buffered: events received before the consumer assigns `onProposal`
+	 * (e.g. server-pushed `proposal_update` from rehydrate-on-attach arriving
+	 * during the post-connect await chain in session-manager.ts) are queued
+	 * and replayed synchronously on first assignment. Without this buffer
+	 * the WS message dispatch races the consumer's callback wiring and
+	 * proposals can be silently dropped — which is the exact regression that
+	 * Task C's lazy artifact loading exposed in the parity-restart-survival
+	 * E2E tests.
 	 */
-	onProposal?: (
+	private _onProposal?: (
 		type: ProposalType,
 		fields: Record<string, unknown> | null,
 		streaming: boolean,
 		rev?: number,
 	) => void;
+	private _bufferedProposalEvents: Array<{
+		type: ProposalType;
+		fields: Record<string, unknown> | null;
+		streaming: boolean;
+		rev?: number;
+	}> = [];
+	get onProposal(): typeof this._onProposal {
+		return this._onProposal;
+	}
+	set onProposal(fn: typeof this._onProposal) {
+		this._onProposal = fn;
+		if (fn && this._bufferedProposalEvents.length > 0) {
+			const pending = this._bufferedProposalEvents;
+			this._bufferedProposalEvents = [];
+			for (const ev of pending) {
+				try { fn(ev.type, ev.fields, ev.streaming, ev.rev); }
+				catch (err) { console.warn("[remote-agent] buffered onProposal replay threw:", err); }
+			}
+		}
+	}
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
@@ -1370,16 +1399,24 @@ export class RemoteAgent {
 				const pType = (msg as any).proposalType;
 				const fields = (msg as any).fields;
 				const rev = typeof (msg as any).rev === "number" ? (msg as any).rev as number : undefined;
-				if (this.onProposal && isProposalType(pType) && fields && typeof fields === "object") {
-					this.onProposal(pType, fields as Record<string, unknown>, false, rev);
+				if (isProposalType(pType) && fields && typeof fields === "object") {
+					if (this._onProposal) {
+						this._onProposal(pType, fields as Record<string, unknown>, false, rev);
+					} else {
+						this._bufferedProposalEvents.push({ type: pType, fields: fields as Record<string, unknown>, streaming: false, rev });
+					}
 				}
 				break;
 			}
 
 			case "proposal_cleared": {
 				const pType = (msg as any).proposalType;
-				if (this.onProposal && isProposalType(pType)) {
-					this.onProposal(pType, null, false);
+				if (isProposalType(pType)) {
+					if (this._onProposal) {
+						this._onProposal(pType, null, false);
+					} else {
+						this._bufferedProposalEvents.push({ type: pType, fields: null, streaming: false });
+					}
 				}
 				break;
 			}

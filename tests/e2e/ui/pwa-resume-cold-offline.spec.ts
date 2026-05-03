@@ -36,7 +36,7 @@ test.describe("PWA cold-load + offline → cached view <100ms", () => {
 	// TODO(pwa-resume-flake): pre-existing failure on master HEAD — the snapshot
 	// hydrate path doesn't render the seeded transcript reliably under offline
 	// cold-load in CI. Tracked separately; skipping here to unblock unrelated
-	// prompt-text changes. Re-enable once the snapshot-hydrate race is fixed.
+	// changes. Re-enable once the snapshot-hydrate race is fixed.
 	test.skip("snapshot-hydrated render lands within 100ms even with network offline", async ({ page, context }) => {
 		// First, open the app once normally so the gateway URL + token are
 		// stored in localStorage. We don't need the gateway after this.

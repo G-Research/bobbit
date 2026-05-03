@@ -10,6 +10,7 @@ import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { marked } from "marked";
+import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderTool } from "../tools/index.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
@@ -154,6 +155,7 @@ export class UserMessage extends LitElement {
 	}
 
 	override connectedCallback(): void {
+		ensureMarkdownBlock();
 		super.connectedCallback();
 		this.style.display = "block";
 	}
@@ -238,6 +240,7 @@ export class AssistantMessage extends LitElement {
 	}
 
 	override connectedCallback(): void {
+		ensureMarkdownBlock();
 		super.connectedCallback();
 		this.style.display = "block";
 	}

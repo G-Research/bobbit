@@ -105,11 +105,6 @@ export function showFaviconBadge(): void {
 	applyBadge();
 }
 
-/** Remove the notification dot from the favicon. */
-export function hideFaviconBadge(): void {
-	clearBadge();
-}
-
 // Auto-clear when the tab regains focus
 document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") {

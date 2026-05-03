@@ -7,6 +7,7 @@ import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { ShieldCheck } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
+import { ensureGateVerificationLive } from "../../lazy/gate-verification-live.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -86,6 +87,7 @@ export class GateListRenderer implements ToolRenderer {
 
 export class GateSignalRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+		ensureGateVerificationLive();
 		const state = getToolState(result, isStreaming);
 		const gateId = params?.gate_id || "gate";
 
@@ -156,6 +158,7 @@ export class GateSignalRenderer implements ToolRenderer {
 
 export class GateStatusRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+		ensureGateVerificationLive();
 		const state = getToolState(result, isStreaming);
 		const gateId = params?.gate_id || "gate";
 
