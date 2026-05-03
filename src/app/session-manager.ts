@@ -1978,6 +1978,12 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	// Slice E: drop the on-disk proposal file once accepted.
 	const { deleteProposalFile } = await import("./proposal-helpers.js");
 	void deleteProposalFile(propSessionId, "project");
+	// Notify the proposing agent that the change is now live so it can
+	// continue its task without polling. Mid-session only — provisional
+	// (project-assistant) flow terminates the session, so notifying there
+	// is a no-op.
+	const { notifyProposalDecision } = await import("./api.js");
+	void notifyProposalDecision(propSessionId, "project", "accepted", fieldNameStr || "(unnamed)");
 	renderApp();
 }
 
