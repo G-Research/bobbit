@@ -11,24 +11,6 @@
 		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 		<link rel="apple-touch-icon" href="/icons/icon-192.png" />
 		<title>Bobbit</title>
-		<script>
-			/*
-			 * Inline theme + palette bootstrap. Must run BEFORE the skeleton or
-			 * any styles paint, otherwise we get a flash of the wrong theme on
-			 * cold launch / iOS PWA snapshot restore. mini-lit's ThemeToggle
-			 * module also calls this on import, but that only happens after the
-			 * /assets/* JS bundle loads — way too late for first paint.
-			 */
-			(function() {
-				try {
-					var theme = localStorage.getItem('theme') || 'system';
-					var isDark = theme === 'dark' || (theme === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-					if (isDark) document.documentElement.classList.add('dark');
-					var p = localStorage.getItem('palette');
-					if (p && p !== 'forest') document.documentElement.dataset.palette = p;
-				} catch (e) { /* ignore */ }
-			})();
-		</script>
 		<style>
 			/* ─────────────────────────────────────────────────────────────────
 			 * INLINE BOOT SKELETON
@@ -65,8 +47,6 @@
 			@media (prefers-color-scheme: dark) {
 				.bobbit-skeleton { background: #1a1c1a; color: #d4d4d2; }
 			}
-			html.dark .bobbit-skeleton { background: #1a1c1a; color: #d4d4d2; }
-			html:not(.dark) .bobbit-skeleton { background: #f7f7f6; color: #2b2d2b; }
 			.bobbit-skeleton__sidebar {
 				width: 240px;
 				background: rgba(0,0,0,0.04);
@@ -79,8 +59,6 @@
 			@media (prefers-color-scheme: dark) {
 				.bobbit-skeleton__sidebar { background: rgba(255,255,255,0.04); border-right-color: rgba(255,255,255,0.08); }
 			}
-			html.dark .bobbit-skeleton__sidebar { background: rgba(255,255,255,0.04); border-right-color: rgba(255,255,255,0.08); }
-			html:not(.dark) .bobbit-skeleton__sidebar { background: rgba(0,0,0,0.04); border-right-color: rgba(0,0,0,0.08); }
 			@media (max-width: 767px) { .bobbit-skeleton__sidebar { display: none; } }
 			.bobbit-skeleton__row {
 				height: 14px;
@@ -90,8 +68,6 @@
 			@media (prefers-color-scheme: dark) {
 				.bobbit-skeleton__row { background: rgba(255,255,255,0.07); }
 			}
-			html.dark .bobbit-skeleton__row { background: rgba(255,255,255,0.07); }
-			html:not(.dark) .bobbit-skeleton__row { background: rgba(0,0,0,0.07); }
 			.bobbit-skeleton__row.--w70 { width: 70%; }
 			.bobbit-skeleton__row.--w50 { width: 50%; }
 			.bobbit-skeleton__row.--w90 { width: 90%; }
@@ -124,8 +100,6 @@
 			@media (prefers-color-scheme: dark) {
 				.bobbit-skeleton__msg { background: rgba(255,255,255,0.04); }
 			}
-			html.dark .bobbit-skeleton__msg { background: rgba(255,255,255,0.04); }
-			html:not(.dark) .bobbit-skeleton__msg { background: rgba(0,0,0,0.03); }
 			.bobbit-skeleton__msg.--user { background: rgba(64,128,200,0.12); align-self: flex-end; }
 			.bobbit-skeleton__pill {
 				position: fixed;
@@ -155,8 +129,6 @@
 			@media (prefers-color-scheme: dark) {
 				.bobbit-watchdog { background: #1a1c1a; color: #d4d4d2; }
 			}
-			html.dark .bobbit-watchdog { background: #1a1c1a; color: #d4d4d2; }
-			html:not(.dark) .bobbit-watchdog { background: #f7f7f6; color: #2b2d2b; }
 			.bobbit-watchdog button {
 				padding: 8px 16px;
 				border-radius: 6px;
@@ -196,6 +168,8 @@
 		</noscript>
 		<script>
 			(function() {
+				var p = localStorage.getItem('palette');
+				if (p && p !== 'forest') document.documentElement.dataset.palette = p;
 				// Inject the PWA manifest link with the auth token baked in so iOS
 				// installs a tokenized start_url. Done via JS (rather than a static
 				// <link> tag) to guarantee the href includes the token BEFORE Safari
