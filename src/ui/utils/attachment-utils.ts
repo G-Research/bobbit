@@ -1,11 +1,31 @@
-import { parseAsync } from "docx-preview";
 import JSZip from "jszip";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import * as pdfjsLib from "pdfjs-dist";
 import { i18n } from "./i18n.js";
 
-// Configure PDF.js worker - we'll need to bundle this
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+// Lazy-loaded heavy deps. Keep these out of the main bundle by deferring to first use.
+type PdfjsModule = typeof import("pdfjs-dist");
+let _pdfjsPromise: Promise<PdfjsModule> | null = null;
+async function loadPdfjs(): Promise<PdfjsModule> {
+	if (!_pdfjsPromise) {
+		_pdfjsPromise = import("pdfjs-dist").then((mod) => {
+			// Configure worker right after the dynamic import resolves.
+			mod.GlobalWorkerOptions.workerSrc = new URL(
+				"pdfjs-dist/build/pdf.worker.min.mjs",
+				import.meta.url,
+			).toString();
+			return mod;
+		});
+	}
+	return _pdfjsPromise;
+}
+
+let _docxPreviewPromise: Promise<typeof import("docx-preview")> | null = null;
+async function loadDocxPreview(): Promise<typeof import("docx-preview")> {
+	if (!_docxPreviewPromise) {
+		_docxPreviewPromise = import("docx-preview");
+	}
+	return _docxPreviewPromise;
+}
 
 export interface Attachment {
 	id: string;
@@ -181,6 +201,7 @@ async function processPdf(
 ): Promise<{ extractedText: string; preview?: string }> {
 	let pdf: PDFDocumentProxy | null = null;
 	try {
+		const pdfjsLib = await loadPdfjs();
 		pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
 		// Extract text with page structure
@@ -246,6 +267,7 @@ async function generatePdfPreview(pdf: PDFDocumentProxy): Promise<string | undef
 
 async function processDocx(arrayBuffer: ArrayBuffer, fileName: string): Promise<{ extractedText: string }> {
 	try {
+		const { parseAsync } = await loadDocxPreview();
 		// Parse document structure
 		const wordDoc = await parseAsync(arrayBuffer);
 

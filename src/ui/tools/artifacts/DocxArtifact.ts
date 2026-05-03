@@ -1,9 +1,17 @@
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
-import { renderAsync } from "docx-preview";
 import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { i18n } from "../../utils/i18n.js";
 import { ArtifactElement } from "./ArtifactElement.js";
+
+// Lazy-loaded docx-preview — keeps it out of the main bundle.
+let _docxPreviewPromise: Promise<typeof import("docx-preview")> | null = null;
+async function loadDocxPreview(): Promise<typeof import("docx-preview")> {
+	if (!_docxPreviewPromise) {
+		_docxPreviewPromise = import("docx-preview");
+	}
+	return _docxPreviewPromise;
+}
 
 @customElement("docx-artifact")
 export class DocxArtifact extends ArtifactElement {
@@ -91,6 +99,7 @@ export class DocxArtifact extends ArtifactElement {
 		if (!container || !this._content) return;
 
 		try {
+			const { renderAsync } = await loadDocxPreview();
 			const arrayBuffer = this.base64ToArrayBuffer(this._content);
 
 			// Clear container first
