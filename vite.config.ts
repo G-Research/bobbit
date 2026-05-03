@@ -172,6 +172,13 @@ function bobbitSwVersion(): Plugin {
 	// should be precached.  Keep this list short — extra precache costs
 	// cold-install bandwidth on every deploy.
 	const PRECACHE_SOURCES = [
+		// Resume-route critical chunk: the main entry is what every PWA
+		// cold launch and `/session/:id` resume needs first. Pre-caching
+		// at SW install means the first navigation after install hits
+		// the cache instead of the network. Combined with the cache-first
+		// rule for `/assets/*` in `public/sw.js`, this makes warm resume
+		// independent of network latency.
+		"src/app/main.ts",
 		"src/app/goal-dashboard.ts",
 		"src/app/settings-page.ts",
 	];
