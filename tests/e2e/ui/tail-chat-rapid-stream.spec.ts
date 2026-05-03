@@ -1,84 +1,138 @@
 /**
- * Reproducing test for goal "Fix tail-chat reliability" — Rapid stream:
- * **10+ message_update events back-to-back; bottom must stay pinned
- * throughout, asserted at the midpoint AND end.**
+ * Tier 2.5 \u2014 REALISTIC tail-chat reliability test for rapid streaming.
  *
- * Per Issue Analysis section 7.1 row 3. Rapid streaming is the canonical
- * stressor for the multi-write echo-latch race: the single-pair latch only
- * holds the most recent (scrollTop, scrollHeight) pair, so under fast bursts
- * many echoes fall through to the geometry path and at least one transient
- * `scrollTop` reading is far enough from the bottom to flip
- * `_stickToBottom = false` on master.
+ * Drives the real streaming path with `STREAM_BURST:6` (6 cycles of
+ * propose_goal + chunked-text + bash_bg.wait + chunked-text). This is
+ * the canonical stressor for the multi-write echo-latch race \u2014 many
+ * `message_update` events land back-to-back across cycles, and async
+ * syntax highlighting / hydrated tool-content reflows the layout
+ * mid-stream.
  *
- * The redesign replaces the single-pair latch with a ring buffer AND removes
- * the geometry-driven flip altogether — so geometry never matters and rapid
- * streams stay pinned.
+ * Disables CSS scroll-anchoring inside the test scope so the JS pin
+ * path (`_pinIfSticking` + RO `delta>0` + `_imageLoadHandler`) is the
+ * single contract \u2014 mirroring Safari, where `overflow-anchor` has
+ * limited availability.
  *
- * Expected master failure: after some growth tick mid-stream, `_stickToBottom`
- * is false. Subsequent growth ticks no longer re-pin → viewport drifts away
- * from the bottom by the cumulative height of remaining ticks.
+ * Asserts only on `getBoundingClientRect()`-derived facts \u2014 never
+ * private fields. Sample-checks every ~250 ms so a *transient* drift is
+ * caught even when the final tick happens to re-pin.
+ *
+ * Sensitivity: fails when `_pinIfSticking()` returns immediately or the
+ * RO `delta > 0` branch is removed.
  */
-import { test, expect } from "../gateway-harness.js";
-import { setupTailChatScene, growContent, injectStaleScrollEvent, TAIL_PX, SCROLL_SEL } from "./tail-chat-helpers.js";
+import { test, expect } from "./fixtures.js";
+import { waitForHealth, waitForSessionStatus, createSession } from "../e2e-setup.js";
+import { openApp, sendMessage } from "./ui-helpers.js";
+import { SCROLL_SEL, TAIL_PX, disableScrollAnchoring, expectLatestMessagePinned } from "./tail-chat-helpers.js";
 
-test.describe("tail-chat: rapid stream of message_update events", () => {
-	test("12 back-to-back growth events keep viewport pinned at midpoint and end", async ({ page }) => {
-		await setupTailChatScene(page);
+test.describe("tail-chat: rapid streaming keeps latest message pinned", () => {
+	test.beforeAll(async () => {
+		await waitForHealth();
+	});
 
-		const TOTAL = 12;
-		const MID = 6;
-		// Mix of small token-sized growths and a couple of larger result-sized
-		// growths, with stale scroll events sprinkled in to simulate the echo
-		// race that real browsers exhibit under fast streaming.
-		const sequence = [40, 80, 60, 120, 90, 150, 200, 70, 110, 80, 60, 90];
+	test.setTimeout(90_000);
 
-		for (let i = 0; i < TOTAL; i++) {
-			const m = await growContent(page, sequence[i]);
-			// Inject a stale scroll event roughly every other tick — this is
-			// the multi-write race: a browser echo lands after the next
-			// programmatic write has already overwritten the single-pair latch.
-			if (i % 2 === 1) {
-				await injectStaleScrollEvent(page);
-			}
+	test("STREAM_BURST:6 \u2014 viewport tracks latest message bottom across all cycles", async ({ page, rec }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
 
-			if (i === MID) {
-				const distMid = m.scrollHeight - m.scrollTop - m.clientHeight;
-				const stickMid = m.stick;
-				expect(
-					stickMid,
-					`tail-chat-rapid-stream: _stickToBottom=${stickMid} at midpoint (i=${MID})`,
-				).toBe(true);
-				expect(
-					distMid,
-					`tail-chat-rapid-stream: midpoint viewport drift; ` +
-					`distance=${distMid} (>${TAIL_PX})`,
-				).toBeLessThanOrEqual(TAIL_PX);
-			}
-		}
+		await openApp(page);
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await page.waitForSelector(SCROLL_SEL, { timeout: 10_000 });
 
-		// Final assertion — yield two rAFs to let any trailing RO ticks settle.
-		await page.evaluate(() => new Promise<void>((resolve) => {
-			requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-		}));
-		const final = await page.evaluate((sel) => {
+		await disableScrollAnchoring(page);
+
+		// Pre-stream spacer so the scroll container has overflow before
+		// any message lands. Prepended above all message content so "at
+		// bottom" means "showing the latest message".
+		await page.evaluate((sel) => {
 			const ai = document.querySelector("agent-interface") as any;
+			const content = ai?.querySelector(".max-w-5xl") as HTMLElement | null;
+			if (!content) throw new Error("messages content container not found");
+			const spacer = document.createElement("div");
+			spacer.id = "__tail_chat_pre_spacer";
+			spacer.style.height = "5000px";
+			spacer.style.background = "linear-gradient(#eef, #fee)";
+			content.insertBefore(spacer, content.firstChild);
+			const el = document.querySelector(sel) as HTMLElement;
+			el.scrollTop = el.scrollHeight;
+		}, SCROLL_SEL);
+		await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+
+		const pre = await page.evaluate((sel) => {
 			const el = document.querySelector(sel) as HTMLElement;
 			return {
-				stick: ai._stickToBottom,
-				scrollTop: el.scrollTop,
-				scrollHeight: el.scrollHeight,
-				clientHeight: el.clientHeight,
+				overflow: el.scrollHeight - el.clientHeight,
+				distance: el.scrollHeight - el.scrollTop - el.clientHeight,
 			};
 		}, SCROLL_SEL);
-		const distFinal = final.scrollHeight - final.scrollTop - final.clientHeight;
+		expect(pre.overflow, `pre: scroll container must have overflow`).toBeGreaterThan(2000);
+		expect(pre.distance, `pre: must start at bottom`).toBeLessThanOrEqual(TAIL_PX);
+		await rec.capture(`Pre-stream: spacer installed (overflow=${pre.overflow})`);
+
+		// Sampler: probe `getBoundingClientRect()` every ~250 ms so we
+		// catch transient drift even if the final tick re-pins.
+		await page.evaluate((selectors) => {
+			const w = window as any;
+			w.__tailRapidSamples = [];
+			const start = performance.now();
+			w.__tailRapidSamplerId = setInterval(() => {
+				const el = document.querySelector(selectors.scroll) as HTMLElement | null;
+				if (!el) return;
+				const msgs = Array.from(document.querySelectorAll(selectors.msg)) as HTMLElement[];
+				if (msgs.length === 0) return;
+				const last = msgs[msgs.length - 1];
+				const er = el.getBoundingClientRect();
+				const lr = last.getBoundingClientRect();
+				w.__tailRapidSamples.push({
+					t: Math.round(performance.now() - start),
+					dist: Math.abs(er.bottom - lr.bottom),
+					scrollHeight: el.scrollHeight,
+					clientHeight: el.clientHeight,
+					scrollTop: el.scrollTop,
+				});
+			}, 250);
+		}, { scroll: SCROLL_SEL, msg: "user-message, assistant-message, tool-message" });
+
+		await sendMessage(page, "STREAM_BURST:6 please tail this chat");
+		await rec.capture("Sent STREAM_BURST:6");
+
+		await page.waitForFunction(() => {
+			const ai = document.querySelector("agent-interface");
+			const content = ai?.querySelector(".max-w-5xl");
+			return !!content && /STREAM_BURST_DONE:6/.test(content.textContent || "");
+		}, null, { timeout: 80_000 });
+		await rec.capture("STREAM_BURST_DONE:6 detected");
+
+		const samples = await page.evaluate(() => {
+			const w = window as any;
+			if (w.__tailRapidSamplerId) clearInterval(w.__tailRapidSamplerId);
+			return (w.__tailRapidSamples || []) as Array<{
+				t: number; dist: number; scrollHeight: number; clientHeight: number; scrollTop: number;
+			}>;
+		});
+		await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+
+		// Outcome: end-of-stream latest-message bottom is at viewport bottom.
+		await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label: "end-of-stream" });
+		await rec.capture(`End-of-stream pinned (${samples.length} samples)`);
+
+		// Outcome: no transient drift > clientHeight*0.25.
+		const bad = samples.filter((s) => s.dist > s.clientHeight * 0.25);
+		const summary = bad.slice(0, 8).map((s) => `t=${s.t}ms dist=${Math.round(s.dist)}/${s.clientHeight}`).join("\n  ");
 		expect(
-			final.stick,
-			`tail-chat-rapid-stream: _stickToBottom=${final.stick} after ${TOTAL} events`,
-		).toBe(true);
+			bad.length,
+			`tail-chat-rapid-stream: ${bad.length}/${samples.length} samples drifted > clientHeight*0.25:\n  ${summary}`,
+		).toBe(0);
+
+		expect(samples.length, `sampler must run across the whole burst`).toBeGreaterThan(10);
+
+		// Sanity: streaming meaningfully grew the scroll container.
+		const finalSh = samples.length > 0 ? samples[samples.length - 1].scrollHeight : 0;
 		expect(
-			distFinal,
-			`tail-chat-rapid-stream: end-of-stream viewport drift; ` +
-			`distance=${distFinal} (>${TAIL_PX})`,
-		).toBeLessThanOrEqual(TAIL_PX);
+			finalSh,
+			`scrollHeight (${finalSh}) didn't grow beyond pre-stream baseline (${pre.overflow + (samples[0]?.clientHeight ?? 0)})`,
+		).toBeGreaterThan(pre.overflow + 200);
 	});
 });

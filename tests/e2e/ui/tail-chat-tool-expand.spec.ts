@@ -1,59 +1,102 @@
 /**
- * Reproducing test for goal "Fix tail-chat reliability" — Case (2):
- * **A tool result returns and the existing tool-use card expands; the
- * viewport stays frozen.**
+ * Tier 2.5 \u2014 REALISTIC tail-chat reliability test for tool_result
+ * expansion + async syntax-highlighting reflow.
  *
- * Per Issue Analysis section 4 case (2), this is the same multi-write
- * echo-latch race as case (1), aggravated by async syntax highlighting that
- * mutates the DOM after the initial result render. Master's geometry-flip
- * in `_handleScroll` (line 729) is the central source of fragility.
+ * `STREAM_BURST:2` emits two real cycles, each consisting of:
+ *   - a `propose_goal` tool_use that streams in (renders a tool card),
+ *   - a chunked assistant-text stream,
+ *   - a real `bash_bg.wait` (1.5 s tool_use + tool_result expansion),
+ *   - more chunked assistant-text.
  *
- * Scenario: a tool_use card is inserted (initial render), then a tool_result
- * arrives and grows the existing card by a much larger amount (the result
- * body). A stale scroll event in between simulates the browser-emitted echo
- * race that escapes the single-pair latch.
+ * The bash_bg.wait tool_result expands the existing tool card by the
+ * full output body \u2014 the canonical "tool result returns and the card
+ * expands" path. Async markdown rendering / syntax highlighting then
+ * grows the layout a second time after initial commit. This is the
+ * exact stress pattern Section 4 case (2) of the design doc names.
  *
- * Expected master failure: after the stale-echo race, `_stickToBottom` is
- * false, so the result-expansion growth doesn't re-pin and the result
- * extends below the fold.
+ * Disables CSS scroll-anchoring inside the test scope so the JS pin
+ * path is the single contract (Safari-equivalent baseline).
+ *
+ * Asserts only on `getBoundingClientRect()`-derived facts.
+ *
+ * Sensitivity: fails when `_pinIfSticking()` returns immediately or the
+ * RO `delta > 0` branch is removed.
  */
-import { test, expect } from "../gateway-harness.js";
-import { setupTailChatScene, growContent, injectStaleScrollEvent, TAIL_PX } from "./tail-chat-helpers.js";
+import { test, expect } from "./fixtures.js";
+import { waitForHealth, waitForSessionStatus, createSession } from "../e2e-setup.js";
+import { openApp, sendMessage } from "./ui-helpers.js";
+import { SCROLL_SEL, TAIL_PX, disableScrollAnchoring, expectLatestMessagePinned } from "./tail-chat-helpers.js";
 
-test.describe("tail-chat: tool_result expansion keeps viewport pinned", () => {
-	test("expanding a tool card with result content still pins to bottom", async ({ page }) => {
-		await setupTailChatScene(page);
+test.describe("tail-chat: tool_result expansion keeps latest message pinned", () => {
+	test.beforeAll(async () => {
+		await waitForHealth();
+	});
 
-		// Insert the initial tool_use card.
-		const after1 = await growContent(page, 120);
-		expect(after1.stick).toBe(true);
-		expect(after1.scrollHeight - after1.scrollTop - after1.clientHeight)
-			.toBeLessThanOrEqual(TAIL_PX);
+	test.setTimeout(60_000);
 
-		// Race: stale scroll event from a queued browser scroll arrives after
-		// the latch was already overwritten by the next pin write.
-		const afterStale = await injectStaleScrollEvent(page);
+	test("STREAM_BURST:2 \u2014 tool_use \u2192 tool_result expansion stays pinned", async ({ page, rec }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
 
-		// Tool_result lands — the existing tool-card grows by the full result
-		// body height.
-		const afterResult = await growContent(page, 800);
+		await openApp(page);
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await page.waitForSelector(SCROLL_SEL, { timeout: 10_000 });
 
-		// Async syntax-highlighting / markdown post-processing mutates the
-		// DOM again, growing height a second time. On master this often
-		// arrives after the settle window has exited.
-		const afterHighlight = await growContent(page, 60);
+		await disableScrollAnchoring(page);
 
-		const distance = afterHighlight.scrollHeight - afterHighlight.scrollTop - afterHighlight.clientHeight;
-		expect(
-			afterHighlight.stick,
-			`tail-chat-tool-expand: _stickToBottom flipped during expand. ` +
-			`stale=${JSON.stringify(afterStale)} afterResult.stick=${afterResult.stick}`,
-		).toBe(true);
-		expect(
-			distance,
-			`tail-chat-tool-expand: viewport not pinned after tool_result expand+highlight; ` +
-			`scrollTop+clientHeight=${afterHighlight.scrollTop + afterHighlight.clientHeight} ` +
-			`scrollHeight=${afterHighlight.scrollHeight} distance=${distance} (>${TAIL_PX})`,
-		).toBeLessThanOrEqual(TAIL_PX);
+		await page.evaluate((sel) => {
+			const ai = document.querySelector("agent-interface") as any;
+			const content = ai?.querySelector(".max-w-5xl") as HTMLElement | null;
+			if (!content) throw new Error("messages content container not found");
+			const spacer = document.createElement("div");
+			spacer.id = "__tail_chat_pre_spacer";
+			spacer.style.height = "5000px";
+			spacer.style.background = "linear-gradient(#eef, #fee)";
+			content.insertBefore(spacer, content.firstChild);
+			const el = document.querySelector(sel) as HTMLElement;
+			el.scrollTop = el.scrollHeight;
+		}, SCROLL_SEL);
+		await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+
+		const pre = await page.evaluate((sel) => {
+			const el = document.querySelector(sel) as HTMLElement;
+			return {
+				overflow: el.scrollHeight - el.clientHeight,
+				distance: el.scrollHeight - el.scrollTop - el.clientHeight,
+			};
+		}, SCROLL_SEL);
+		expect(pre.overflow, `pre: scroll container must have overflow`).toBeGreaterThan(2000);
+		expect(pre.distance, `pre: must start at bottom`).toBeLessThanOrEqual(TAIL_PX);
+		await rec.capture(`Pre-stream: spacer (overflow=${pre.overflow})`);
+
+		await sendMessage(page, "STREAM_BURST:2 expand a tool card mid-stream");
+		await rec.capture("Sent STREAM_BURST:2");
+
+		// Wait until the FIRST tool_result lands (proves expansion fired).
+		await page.waitForSelector("tool-message", { timeout: 30_000 });
+		await rec.capture("First tool-message rendered");
+
+		// Mid-stream pin check: latest message tracked while bursting.
+		// Allow a single retry rAF cycle so any in-flight `_pinIfSticking`
+		// can settle. The assertion still fails if drift persists.
+		await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+		await expectLatestMessagePinned(page, { tailPx: 32, label: "mid-burst" });
+		await rec.capture("Mid-burst: latest message pinned");
+
+		await page.waitForFunction(() => {
+			const ai = document.querySelector("agent-interface");
+			const content = ai?.querySelector(".max-w-5xl");
+			return !!content && /STREAM_BURST_DONE:2/.test(content.textContent || "");
+		}, null, { timeout: 30_000 });
+		await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+		await rec.capture("STREAM_BURST_DONE:2 detected");
+
+		// Outcome assertion: end-of-stream latest-message bottom at viewport bottom.
+		await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label: "end-of-stream" });
+
+		// Sanity: a tool-message DOM node exists (otherwise the expansion path didn't run).
+		const toolCount = await page.evaluate(() => document.querySelectorAll("tool-message").length);
+		expect(toolCount, `expected at least one tool-message rendered`).toBeGreaterThan(0);
 	});
 });
