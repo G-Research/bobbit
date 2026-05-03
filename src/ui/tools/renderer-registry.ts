@@ -4,7 +4,7 @@ import { html, type TemplateResult } from "lit";
 import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";
 import { ChevronsUpDown, ChevronUp, Loader } from "lucide";
-import type { ToolRenderer } from "./types.js";
+import type { ToolRenderer, ToolRenderResult } from "./types.js";
 
 /** Possible states for a tool call header icon/styling. */
 export type ToolHeaderState = "inprogress" | "complete" | "error" | "warning";
@@ -32,18 +32,84 @@ export function getToolState(result: ToolResultMessage | undefined, isStreaming?
 // Registry of tool renderers
 export const toolRenderers = new Map<string, ToolRenderer>();
 
+/** Loader returns either the renderer instance or a module whose `default` is the renderer. */
+export type LazyRendererLoader = () => Promise<ToolRenderer | { default: ToolRenderer }>;
+
+// Pending lazy registrations: name → loader (consumed on first getToolRenderer call)
+const pendingLazy = new Map<string, LazyRendererLoader>();
+// In-flight loads: name → promise (so concurrent renders share one fetch)
+const inFlight = new Map<string, Promise<ToolRenderer>>();
+
 /**
  * Register a custom tool renderer
  */
 export function registerToolRenderer(toolName: string, renderer: ToolRenderer): void {
 	toolRenderers.set(toolName, renderer);
+	pendingLazy.delete(toolName);
 }
 
 /**
- * Get a tool renderer by name
+ * Register a tool renderer that is loaded on first use. The first call to
+ * `getToolRenderer(name)` returns a tiny placeholder renderer (spinner +
+ * tool name) and kicks off `loader()`. When the real renderer resolves it
+ * replaces the registration and `renderApp()` is called to re-render.
+ */
+export function registerLazyToolRenderer(toolName: string, loader: LazyRendererLoader): void {
+	pendingLazy.set(toolName, loader);
+}
+
+function startLoad(toolName: string, loader: LazyRendererLoader): void {
+	if (inFlight.has(toolName)) return;
+	const p = loader()
+		.then(mod => {
+			const renderer = (mod as any)?.default ?? mod;
+			toolRenderers.set(toolName, renderer as ToolRenderer);
+			pendingLazy.delete(toolName);
+			inFlight.delete(toolName);
+			// Trigger a re-render so transcript picks up the resolved renderer.
+			import("../../app/state.js")
+				.then(({ renderApp }) => renderApp())
+				.catch(() => { /* state module may not exist in unit-test fixtures */ });
+			return renderer as ToolRenderer;
+		})
+		.catch((err) => {
+			inFlight.delete(toolName);
+			// eslint-disable-next-line no-console
+			console.error(`[tool-registry] failed to lazy-load renderer for "${toolName}":`, err);
+			throw err;
+		});
+	inFlight.set(toolName, p);
+}
+
+function makePlaceholderRenderer(toolName: string): ToolRenderer {
+	return {
+		render(_params, _result, _isStreaming): ToolRenderResult {
+			return {
+				content: html`
+					<div class="flex items-center gap-2 text-sm text-muted-foreground">
+						<span class="inline-block text-foreground">${icon(Loader, "sm")}</span>
+						<span class="font-mono">${toolName}</span>
+					</div>
+				`,
+				isCustom: false,
+			};
+		},
+	};
+}
+
+/**
+ * Get a tool renderer by name. If the renderer is registered lazily and
+ * hasn't loaded yet, kicks off the loader and returns a placeholder.
  */
 export function getToolRenderer(toolName: string): ToolRenderer | undefined {
-	return toolRenderers.get(toolName);
+	const eager = toolRenderers.get(toolName);
+	if (eager) return eager;
+	const loader = pendingLazy.get(toolName);
+	if (loader) {
+		startLoad(toolName, loader);
+		return makePlaceholderRenderer(toolName);
+	}
+	return undefined;
 }
 
 /**

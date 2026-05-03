@@ -4,10 +4,8 @@ import { customElement, state } from "lit/decorators.js";
 import "./components/AgentInterface.js";
 import type { Agent, AgentTool } from "@mariozechner/pi-agent-core";
 import type { AgentInterface } from "./components/AgentInterface.js";
-import { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider.js";
-import { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider.js";
 import type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider.js";
-import { ArtifactsPanel, ArtifactsToolRenderer } from "./tools/artifacts/index.js";
+import type { ArtifactsPanel } from "./tools/artifacts/index.js";
 import { registerToolRenderer } from "./tools/renderer-registry.js";
 import type { Attachment } from "./utils/attachment-utils.js";
 import { i18n } from "./utils/i18n.js";
@@ -80,6 +78,22 @@ export class ChatPanel extends LitElement {
 		this.agentInterface.onApiKeyRequired = config?.onApiKeyRequired;
 		this.agentInterface.onBeforeSend = config?.onBeforeSend;
 		this.agentInterface.onCostClick = config?.onCostClick;
+
+		// Lazy-load the artifacts module — it pulls highlight.js + heavy artifact
+		// element classes (Html/Markdown/Pdf/Docx/Svg) we don't want in the main
+		// chunk. We await before continuing so the rest of setAgent (tools wiring,
+		// reconstruct, requestUpdate) can use the resolved classes; agent and
+		// agentInterface are already assigned above so render() will produce the
+		// chat shell as soon as Lit's next microtask flushes.
+		const [
+			{ ArtifactsPanel, ArtifactsToolRenderer },
+			{ ArtifactsRuntimeProvider },
+			{ AttachmentsRuntimeProvider },
+		] = await Promise.all([
+			import("./tools/artifacts/index.js"),
+			import("./components/sandbox/ArtifactsRuntimeProvider.js"),
+			import("./components/sandbox/AttachmentsRuntimeProvider.js"),
+		]);
 
 		// Set up artifacts panel
 		this.artifactsPanel = new ArtifactsPanel();
