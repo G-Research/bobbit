@@ -18,12 +18,13 @@
  * is false. Subsequent growth ticks no longer re-pin → viewport drifts away
  * from the bottom by the cumulative height of remaining ticks.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { setupTailChatScene, growContent, injectStaleScrollEvent, TAIL_PX, SCROLL_SEL } from "./tail-chat-helpers.js";
 
 test.describe("tail-chat: rapid stream of message_update events", () => {
-	test("12 back-to-back growth events keep viewport pinned at midpoint and end", async ({ page }) => {
+	test("12 back-to-back growth events keep viewport pinned at midpoint and end", async ({ page, rec }) => {
 		await setupTailChatScene(page);
+		await rec.capture("Scene ready: spacer installed, pinned at bottom");
 
 		const TOTAL = 12;
 		const MID = 6;
@@ -44,6 +45,7 @@ test.describe("tail-chat: rapid stream of message_update events", () => {
 			if (i === MID) {
 				const distMid = m.scrollHeight - m.scrollTop - m.clientHeight;
 				const stickMid = m.stick;
+				await rec.capture(`Midpoint i=${MID}: stick=${stickMid} dist=${distMid}`);
 				expect(
 					stickMid,
 					`tail-chat-rapid-stream: _stickToBottom=${stickMid} at midpoint (i=${MID})`,
@@ -55,6 +57,7 @@ test.describe("tail-chat: rapid stream of message_update events", () => {
 				).toBeLessThanOrEqual(TAIL_PX);
 			}
 		}
+		await rec.capture(`After ${TOTAL} growth events`);
 
 		// Final assertion — yield two rAFs to let any trailing RO ticks settle.
 		await page.evaluate(() => new Promise<void>((resolve) => {
@@ -71,6 +74,7 @@ test.describe("tail-chat: rapid stream of message_update events", () => {
 			};
 		}, SCROLL_SEL);
 		const distFinal = final.scrollHeight - final.scrollTop - final.clientHeight;
+		await rec.capture(`End-of-stream: stick=${final.stick} dist=${distFinal}`);
 		expect(
 			final.stick,
 			`tail-chat-rapid-stream: _stickToBottom=${final.stick} after ${TOTAL} events`,

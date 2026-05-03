@@ -23,7 +23,7 @@
  * the delayed-growth event arrives, the geometry path then flips the flag,
  * and the viewport ends up above the bottom by the delayed-growth height.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { createSession, waitForSessionStatus, waitForHealth } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { SCROLL_SEL, CONTENT_SEL, TAIL_PX } from "./tail-chat-helpers.js";
@@ -33,7 +33,7 @@ test.describe("tail-chat: session navigate lands at bottom", () => {
 		await waitForHealth();
 	});
 
-	test("navigate A→B→A→B→A: each hop lands at bottom within 4 px", async ({ page }) => {
+	test("navigate A→B→A→B→A: each hop lands at bottom within 4 px", async ({ page, rec }) => {
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		await waitForSessionStatus(sessionA, "idle");
@@ -143,9 +143,11 @@ test.describe("tail-chat: session navigate lands at bottom", () => {
 			{ id: sessionA, label: "A (3rd)" },
 		];
 
+		await rec.capture("Sessions A and B created");
 		for (const { id, label } of hops) {
 			const m = await visit(id, label);
 			const distance = m.scrollHeight - m.scrollTop - m.clientHeight;
+			await rec.capture(`Hop "${label}": dist=${distance} stick=${m.stick}`);
 			expect(
 				distance,
 				`tail-chat-session-navigate: hop "${label}" did not land at bottom; ` +

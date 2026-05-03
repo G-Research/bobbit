@@ -17,15 +17,17 @@
  * false, so the result-expansion growth doesn't re-pin and the result
  * extends below the fold.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { setupTailChatScene, growContent, injectStaleScrollEvent, TAIL_PX } from "./tail-chat-helpers.js";
 
 test.describe("tail-chat: tool_result expansion keeps viewport pinned", () => {
-	test("expanding a tool card with result content still pins to bottom", async ({ page }) => {
+	test("expanding a tool card with result content still pins to bottom", async ({ page, rec }) => {
 		await setupTailChatScene(page);
+		await rec.capture("Scene ready — pinned at bottom");
 
 		// Insert the initial tool_use card.
 		const after1 = await growContent(page, 120);
+		await rec.capture(`Initial tool_use card (120px): stick=${after1.stick}`);
 		expect(after1.stick).toBe(true);
 		expect(after1.scrollHeight - after1.scrollTop - after1.clientHeight)
 			.toBeLessThanOrEqual(TAIL_PX);
@@ -33,15 +35,18 @@ test.describe("tail-chat: tool_result expansion keeps viewport pinned", () => {
 		// Race: stale scroll event from a queued browser scroll arrives after
 		// the latch was already overwritten by the next pin write.
 		const afterStale = await injectStaleScrollEvent(page);
+		await rec.capture(`Stale scroll injected: stick=${afterStale.stick}`);
 
 		// Tool_result lands — the existing tool-card grows by the full result
 		// body height.
 		const afterResult = await growContent(page, 800);
+		await rec.capture(`After 800px tool_result body: stick=${afterResult.stick}`);
 
 		// Async syntax-highlighting / markdown post-processing mutates the
 		// DOM again, growing height a second time. On master this often
 		// arrives after the settle window has exited.
 		const afterHighlight = await growContent(page, 60);
+		await rec.capture(`After 60px syntax-highlight: stick=${afterHighlight.stick} dist=${afterHighlight.scrollHeight - afterHighlight.scrollTop - afterHighlight.clientHeight}`);
 
 		const distance = afterHighlight.scrollHeight - afterHighlight.scrollTop - afterHighlight.clientHeight;
 		expect(

@@ -15,16 +15,18 @@
  * "tracking new content" check fails. The redesign closes that recovery
  * race.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "./fixtures.js";
 import { setupTailChatScene, growContent, injectStaleScrollEvent, TAIL_PX, SCROLL_SEL } from "./tail-chat-helpers.js";
 
 test.describe("tail-chat: user scroll-up release + recovery", () => {
-	test("wheel-up unsticks; updates do NOT re-pin; jump-button click recovers + tracks", async ({ page }) => {
+	test("wheel-up unsticks; updates do NOT re-pin; jump-button click recovers + tracks", async ({ page, rec }) => {
 		await setupTailChatScene(page);
+		await rec.capture("Scene ready — pinned at bottom");
 
 		// Bring the layout into a known state: one growth tick to establish
 		// streaming, viewport at bottom.
 		const after1 = await growContent(page, 200);
+		await rec.capture(`After 200px streaming growth: stick=${after1.stick}`);
 		expect(after1.stick).toBe(true);
 
 		// User scroll-up via a synthetic `wheel` event (the wheel listener is
@@ -55,6 +57,7 @@ test.describe("tail-chat: user scroll-up release + recovery", () => {
 				scrollHeight: el.scrollHeight,
 			};
 		}, SCROLL_SEL);
+		await rec.capture(`After wheel-up: stick=${afterWheel.stick} show=${afterWheel.show}`);
 		expect(afterWheel.stick, "wheel-up must release _stickToBottom").toBe(false);
 
 		// 2. Subsequent growth events must NOT re-pin the viewport (we're
@@ -81,6 +84,7 @@ test.describe("tail-chat: user scroll-up release + recovery", () => {
 		// slightly across runs (browser sub-pixel rounding); just assert that
 		// the viewport remains substantially above the bottom.
 		const distFromBottom = afterUpdates.scrollHeight - afterUpdates.scrollTop - afterUpdates.clientHeight;
+		await rec.capture(`After 2× growth post-wheel: stick=${afterUpdates.stick} dist=${distFromBottom}`);
 		expect(
 			distFromBottom,
 			`tail-chat-user-scroll-up: stream after wheel-up pulled viewport toward bottom; ` +
@@ -94,6 +98,7 @@ test.describe("tail-chat: user scroll-up release + recovery", () => {
 			if (!b) return false;
 			return b.style.opacity === "1" && b.style.pointerEvents === "auto";
 		}, null, { timeout: 5_000 });
+		await rec.capture("Jump-to-bottom button visible");
 
 		// 4. Click the button → stickiness restored, viewport at bottom.
 		await page.evaluate(() => {
@@ -104,12 +109,14 @@ test.describe("tail-chat: user scroll-up release + recovery", () => {
 			const el = document.querySelector(sel) as HTMLElement;
 			return el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
 		}, SCROLL_SEL, { timeout: 5_000 });
+		await rec.capture("Clicked jump button — back at bottom");
 
 		// 5. Tracking — a stale-echo race after click must NOT unstick us, AND
 		// new content growth must keep the viewport pinned.
 		await injectStaleScrollEvent(page);
 		const afterTrack = await growContent(page, 300);
 		const distance = afterTrack.scrollHeight - afterTrack.scrollTop - afterTrack.clientHeight;
+		await rec.capture(`Tracking after click+stale+growth: stick=${afterTrack.stick} dist=${distance}`);
 		expect(
 			afterTrack.stick,
 			`tail-chat-user-scroll-up: post-click _stickToBottom flipped during tracking ` +
