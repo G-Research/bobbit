@@ -6,11 +6,11 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
-import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
+import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
@@ -1079,38 +1079,44 @@ async function handleStartTeam(goalId: string): Promise<void> {
 }
 
 async function handleEndTeam(goalId: string): Promise<void> {
-	// Find the team lead session so we can route through terminateSession(),
-	// which handles confirmation, active-session disconnect, and local cleanup.
-	const teamLeadSession = state.gatewaySessions.find(
-		(s) => (s.goalId === goalId || s.teamGoalId === goalId) && s.role === "team-lead",
+	// Pre-flight: when the goal has live descendant teams, the user MUST be
+	// asked whether to cascade. Stopping just the parent team while leaving
+	// children's teams running is the bug the user reported — it's both
+	// confusing UX and wasteful (descendant team-leads keep burning tokens).
+	const hasLiveDescendantTeams = state.goals.some(g =>
+		!g.archived
+		&& g.id !== goalId
+		&& isDescendantOf(g, goalId, state.goals as any)
+		&& state.gatewaySessions.some(s =>
+			(s.goalId === g.id || s.teamGoalId === g.id)
+			&& s.role === "team-lead"
+			&& s.status !== "terminated"
+		)
 	);
-	if (teamLeadSession) {
-		teamStopping = true;
-		renderApp();
-		await terminateSession(teamLeadSession.id, { goalId, isTeamLead: true });
-		teamStopping = false;
-		// Re-check: if the team lead session is gone, the teardown succeeded.
-		// If the user cancelled the confirmation, the session still exists.
-		const stillExists = state.gatewaySessions.some(
-			(s) => s.id === teamLeadSession.id,
-		);
-		if (!stillExists) {
-			teamActive = false;
-			agents = [];
-		}
-		renderApp();
-	} else {
-		// Fallback: no team lead session found, tear down directly
-		teamStopping = true;
-		renderApp();
-		const ok = await teardownTeam(goalId);
-		teamStopping = false;
-		if (ok) {
-			teamActive = false;
-			agents = [];
-		}
-		renderApp();
+
+	teamStopping = true;
+	renderApp();
+	const ok = await teardownTeamWithDialog(goalId);
+	teamStopping = false;
+	if (ok) {
+		teamActive = false;
+		agents = [];
 	}
+	renderApp();
+	void hasLiveDescendantTeams; // pre-flight informational; the dialog inside teardownTeamWithDialog also detects via 409
+}
+
+/** Walk parentGoalId chain to determine if `goal` descends from `ancestorId`. */
+function isDescendantOf(goal: { parentGoalId?: string }, ancestorId: string, allGoals: Array<{ id: string; parentGoalId?: string }>): boolean {
+	let cursor = goal.parentGoalId;
+	const seen = new Set<string>();
+	while (cursor && !seen.has(cursor)) {
+		if (cursor === ancestorId) return true;
+		seen.add(cursor);
+		const next = allGoals.find(g => g.id === cursor)?.parentGoalId;
+		cursor = next;
+	}
+	return false;
 }
 
 // ============================================================================
