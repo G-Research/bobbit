@@ -165,15 +165,24 @@ Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
 ### Line endings
 
-All text files in this repo are stored and checked out with **LF** line endings, pinned via `.gitattributes` (`* text=auto eol=lf`). Windows-native script files (`*.cmd`, `*.bat`, `*.ps1`) are the only exception and are checked out with CRLF.
+All text files in this repo are stored and checked out with **LF** line endings, pinned via `.gitattributes` (`* text=auto eol=lf`). Windows-native script files (`*.cmd`, `*.bat`, `*.ps1`) are the only exception and are checked out with CRLF. LF everywhere else keeps diffs, hashes, and tooling output identical across Linux, macOS, Windows, and Docker — and avoids spurious "modified" churn when the same file is touched from different platforms.
 
-**Windows contributors:** the Git for Windows installer defaults to `core.autocrlf=true`, which can override `.gitattributes` and cause phantom "modified" entries in `git status` plus "LF will be replaced by CRLF" warnings. Disable it once globally:
+**Windows contributors:** the Git for Windows installer defaults to `core.autocrlf=true`, which rewrites LF→CRLF on checkout and overrides `.gitattributes`. Symptoms: phantom "modified" entries in `git status` even on a fresh checkout, and "LF will be replaced by CRLF" warnings on `git add`. Disable it once globally:
 
 ```bash
 git config --global core.autocrlf false
+# verify — should print `false` (or nothing)
+git config --get core.autocrlf
 ```
 
-If you've already accumulated CRLF in your working tree, run `git checkout -- .` (or re-clone) to restore LF after changing the setting.
+If you already have CRLF in your working tree from a previous checkout, renormalize after fixing the setting:
+
+```bash
+git rm --cached -r .
+git reset --hard
+```
+
+(or simply re-clone). A plain `git checkout -- .` is usually enough if `git status` is clean.
 
 ### Committing with a dirty working copy
 
