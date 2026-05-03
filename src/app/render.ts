@@ -1043,12 +1043,16 @@ function goalPreviewPanel() {
 			return;
 		}
 		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
+		// Mid-session acceptance must NOT tear down the active session — only
+		// the goal-assistant context owns the disconnect-and-navigate flow.
+		const isAssistantContext = state.assistantType === "goal";
+
+		if (isAssistantContext && state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
 			state.connectionStatus = "disconnected";
 		}
-		state.assistantType = null;
+		if (isAssistantContext) state.assistantType = null;
 		if (sessionId) clearProposalAnnotations(sessionId, "goal");
 		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
@@ -1070,8 +1074,10 @@ function goalPreviewPanel() {
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
-		localStorage.removeItem("gateway.sessionId");
-		state.appView = "authenticated";
+		if (isAssistantContext) {
+			localStorage.removeItem("gateway.sessionId");
+			state.appView = "authenticated";
+		}
 
 		// Detect re-attempt context from the current session
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
@@ -1100,15 +1106,24 @@ function goalPreviewPanel() {
 			});
 		}
 
-		if (sessionId) {
+		// Notify the proposing agent (mid-session only — assistant context
+		// tears down the session below, so notifying there would be moot).
+		if (!isAssistantContext && sessionId && goal) {
+			const { notifyProposalDecision } = await import("./api.js");
+			void notifyProposalDecision(sessionId, "goal", "accepted", trimmedTitle);
+		}
+
+		if (isAssistantContext && sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
 		await refreshSessions();
-		if (goal) {
-			setHashRoute("goal-dashboard", goal.id, true);
-		} else {
-			setHashRoute("landing");
+		if (isAssistantContext) {
+			if (goal) {
+				setHashRoute("goal-dashboard", goal.id, true);
+			} else {
+				setHashRoute("landing");
+			}
 		}
 		renderApp();
 	};
@@ -1263,6 +1278,14 @@ function rolePreviewPanel() {
 
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "role");
+
+		// Notify the proposing agent (fire-and-forget). In assistant context
+		// the session will be terminated immediately below — skip the notify
+		// since there's no agent to receive it.
+		if (!isAssistantContext && sessionId) {
+			const { notifyProposalDecision } = await import("./api.js");
+			void notifyProposalDecision(sessionId, "role", "accepted", trimmedName);
+		}
 
 		if (isAssistantContext && sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
@@ -1807,6 +1830,14 @@ function staffPreviewPanel() {
 		});
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "staff");
+
+		// Notify the proposing agent (fire-and-forget) — only when mid-session,
+		// since the assistant-context flow ends the session right here.
+		if (!isAssistantContext && sessionId) {
+			const { notifyProposalDecision } = await import("./api.js");
+			void notifyProposalDecision(sessionId, "staff", "accepted", trimmedName);
+		}
+
 		if (isAssistantContext && sessionId) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);

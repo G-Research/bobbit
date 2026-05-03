@@ -1825,3 +1825,35 @@ export async function deleteDraftFromServer(sessionId: string, type: string): Pr
 		console.error("[draft-api] Failed to delete draft:", err);
 	}
 }
+
+/**
+ * Tell the proposing agent that the user just accepted (or rejected) its
+ * proposal. Enqueues a synthetic user-style message to the session via
+ * POST /api/sessions/:id/notify. Fire-and-forget — never throws, never
+ * blocks the accept flow on the network call.
+ *
+ * `summary` should be a one-line human-readable identifier of what was
+ * accepted (e.g. role name, project name, goal title) so the agent can
+ * mention it back specifically. The message wording is normalised here
+ * so all five accept paths produce identical UX.
+ */
+export async function notifyProposalDecision(
+	sessionId: string,
+	type: "goal" | "project" | "role" | "tool" | "staff",
+	decision: "accepted" | "rejected",
+	summary: string,
+): Promise<void> {
+	const verb = decision === "accepted" ? "accepted" : "rejected";
+	const message = `[SYSTEM: The user ${verb} your ${type} proposal${summary ? ` "${summary}"` : ""}. ${decision === "accepted" ? "The change is now live in the project — continue with your task." : "Adjust your approach and propose again, or pick a different path."}]`;
+	try {
+		await gatewayFetch(`/api/sessions/${sessionId}/notify`, {
+			method: "POST",
+			body: JSON.stringify({ message }),
+		});
+	} catch (err) {
+		// Never let a notification failure block the accept flow — the user
+		// has already taken the action successfully and the network failure
+		// is a separate concern.
+		console.warn("[proposal-notify] Failed to notify proposing session:", err);
+	}
+}
