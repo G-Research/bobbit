@@ -1,9 +1,33 @@
 name: propose_role
-description: "Submit a role proposal for user review"
-summary: "Propose a custom agent role with name, label, prompt, and optional fields."
+description: "Submit a custom agent role for user review. This is THE canonical (and only) tool for creating new roles or updating existing ones — there is no separate create_role or update_role tool. Roles define how an agent behaves: their system prompt, the tools they can use, and the policies that gate sensitive tools (e.g. `gate_signal: never` for non-team-leads). A role you propose here can immediately be referenced by name from any workflow gate's `verify[]` step (e.g. `verify: [{type: llm-review, role: my-custom-reviewer}]`) and from staff/team configurations. Works mid-session against an already-registered project: the user reviews a diff and accepts via PUT /api/roles/:name without ending the session. To tweak the prompt or tool list of an in-flight role draft without re-emitting the whole payload, follow up with edit_proposal(type=\"role\", ...)."
+summary: "Propose or update a custom agent role (system prompt, allowed tools, tool policies, accessory icon). This is the only tool for defining roles; once accepted, the role can be referenced by name from workflow `verify[]` steps and team specs."
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: name (required), label (required), prompt (required), tools, accessory.
+  Required parameters: name (kebab-case identifier — used by workflows and the
+  team-spawn API; must be unique), label (human-readable display name), prompt
+  (the role's system prompt — supports {{AGENT_ID}}, {{GOAL_BRANCH}}, and other
+  template variables; see defaults/roles/*.yaml for examples).
+
+  Optional parameters on the initial call: tools (comma-separated list of
+  allowed tool names), accessory (cosmetic icon).
+
+  ADDING ADVANCED FIELDS: the role YAML draft on disk supports the full role
+  schema (see defaults/roles/coder.yaml as a reference) — including
+  `toolPolicies` (Record<toolName, "allow" | "ask" | "never"> — overrides the
+  project tool-group policy per-role; canonical example: every contributor
+  declares `gate_signal: never` and `goal_spawn_child: never` so only team-
+  leads can signal gates / spawn sub-goals), `model` (string
+  "<provider>/<modelId>" — overrides the system default for sessions running
+  this role), `thinkingLevel`, and `description`. After the initial
+  propose_role call seeds the draft, use edit_proposal(type="role",
+  old_text=..., new_text=...) to add these fields surgically.
+
+  Cascade: roles are project-scoped by default but cascade builtin → server →
+  project. To override a builtin role for one project, propose with the
+  builtin's name and the override is applied at the project layer.
+
+  Mid-session vs setup: this tool works in either mode. Mid-session, the user
+  sees a diff against the current role definition.

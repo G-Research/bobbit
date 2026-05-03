@@ -6,4 +6,7 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: type (required) — one of goal, project, workflow, role, tool, staff.
+  Parameters: type (required) — one of goal, project, role, tool, staff.
+  Note: there is NO "workflow" proposal type — workflows live inside a
+  `project` proposal under the `workflows:` field. To view or edit
+  workflows mid-session, use type="project".
