@@ -397,6 +397,19 @@ export class AgentInterface extends LitElement {
 			this._scrollContainer.addEventListener("wheel", this._handleUserIntent, { passive: true });
 			this._scrollContainer.addEventListener("touchstart", this._handleUserIntent, { passive: true });
 			this._scrollContainer.addEventListener("keydown", this._handleScrollKeydown);
+
+			// Capture-phase `load` listener: catches `<img>` and `<iframe>`
+			// decode reflows anywhere in the subtree (including markdown
+			// images, lazy-hydrated tool-content, mermaid/katex async
+			// renders) and re-pins via `_pinIfSticking`. Lives on the scroll
+			// container — not the session subscription — so it covers the
+			// full lifetime of the component, including initial render where
+			// no session navigate has occurred yet AND streaming bursts after
+			// the per-session handler is removed.
+			if (!this._imageLoadHandler) {
+				this._imageLoadHandler = () => this._pinIfSticking();
+				this._scrollContainer.addEventListener("load", this._imageLoadHandler, true);
+			}
 		}
 
 		// Subscribe to external session if provided
@@ -480,17 +493,11 @@ export class AgentInterface extends LitElement {
 		// listener installed below.
 		this.updateComplete.then(() => this._pinIfSticking());
 
-		// Install a one-shot capture-phase `load` listener on the scroll
-		// container. Catches `<img>` and `<iframe>` load events anywhere in
-		// the subtree (capture phase fires for non-bubbling events too) and
-		// re-pins. Replaces the previous time-bounded settle window.
-		if (this._scrollContainer) {
-			if (this._imageLoadHandler) {
-				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, true);
-			}
-			this._imageLoadHandler = () => this._pinIfSticking();
-			this._scrollContainer.addEventListener("load", this._imageLoadHandler, true);
-		}
+		// `_imageLoadHandler` lives on `_scrollContainer` for the full
+		// component lifetime (registered in `connectedCallback`), so no
+		// per-session re-attach is needed — it covers session navigate,
+		// streaming bursts, lazy markdown image decode, and tool-content
+		// hydration uniformly.
 
 		// Set default streamFn with proxy support if not already set
 		if (this.session.streamFn === streamSimple) {
@@ -1233,7 +1240,7 @@ export class AgentInterface extends LitElement {
 			<div class="flex flex-col h-full bg-background text-foreground min-w-0">
 				<!-- Messages Area -->
 				<div class="flex-1 min-h-0 relative">
-					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden">
+					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
 					</div>
 					${this._renderJumpToBottom()}
