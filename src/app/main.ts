@@ -405,6 +405,25 @@ async function initApp() {
 		if (appEl) appEl.setAttribute("data-rendered", "true");
 	} catch { /* non-fatal */ }
 
+	// Tear down any leftover boot-skeleton DOM and disarm the inline
+	// prepaint function. Normally the inline MutationObserver in index.html
+	// hides the skeleton when `data-rendered` flips, but a tab loaded with
+	// a stale (pre-fix) cached `index.html` runs the older prepaint script
+	// that re-appends a `Reconnecting…` pill on every `localStorage.setItem`
+	// via a monkey-patched `Storage.prototype.setItem`. The patch itself is
+	// baked into the cached document and we can't remove it from here — but
+	// we CAN replace `window.__bobbitPrepaint` (which the patch calls) with
+	// a no-op, so the patch becomes harmless until the user reloads onto
+	// the fixed shell. On the fixed shell this whole block is a benign
+	// no-op (skeleton is already `.--hide`, no pills exist, and the
+	// fresh `__bobbitPrepaint` itself early-returns on data-rendered).
+	try {
+		(window as any).__bobbitPrepaint = () => {};
+		document.querySelectorAll("[data-bobbit-pill]").forEach((el) => el.remove());
+		const sk = document.querySelector("[data-bobbit-skeleton]") as HTMLElement | null;
+		if (sk) sk.classList.add("--hide");
+	} catch { /* non-fatal */ }
+
 	// Persist the initial state immediately so a hard reload before any
 	// further mutation still has a snapshot to hydrate from.
 	try { scheduleSave(state); } catch { /* non-fatal */ }
