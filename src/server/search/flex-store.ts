@@ -557,21 +557,49 @@ export class FlexSearchStore {
 		// rebuild, and with a ~100MB map.json file it stalls the event
 		// loop for multiple seconds. Yielding lets REST/WS requests slip
 		// through during startup.
+		// FlexSearch's tag import depends on the registry/document being
+		// loaded first — sort `.reg` / `.doc` before `.tag` / `.map`
+		// regardless of `readdir` order. Otherwise a corrupt-tag-on-load
+		// warning fires on every boot for indexes whose FS-iteration order
+		// happens to put `.tag` first. Pure-string sort with a small
+		// extension-priority key.
+		const importPriority = (f: string): number => {
+			if (f.endsWith(".reg.json")) return 0;
+			if (f.endsWith(".doc.json")) return 1;
+			if (f.endsWith(".cfg.json")) return 2;
+			if (f.endsWith(".map.json")) return 3;
+			if (f.endsWith(".tag.json")) return 4; // tag last — depends on reg/doc
+			return 5;
+		};
+		const ordered = [...entries]
+			.filter(f => f.endsWith(".json") && !f.endsWith(".tmp") && f !== "__docs__.json")
+			.sort((a, b) => importPriority(a) - importPriority(b) || a.localeCompare(b));
+
 		let importFailures = 0;
 		let importSuccesses = 0;
-		for (const file of entries) {
-			if (!file.endsWith(".json")) continue;
-			if (file.endsWith(".tmp")) continue;
-			if (file === "__docs__.json") continue;
+		for (const file of ordered) {
 			const key = unsanitiseKey(file.slice(0, -".json".length));
 			try {
 				const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
 				const data = safeParse(raw);
+				if (data === null || data === undefined) {
+					// Empty or null payload would deref-null inside FlexSearch's
+					// import. Skip + delete so the next boot is silent.
+					await fs.promises.rm(path.join(dir, file), { force: true });
+					continue;
+				}
 				this._idx.import(key, data as never);
 				importSuccesses++;
 			} catch (err) {
 				importFailures++;
+				const filePath = path.join(dir, file);
 				console.warn(`[search] Skipping corrupt index file ${file}:`, err);
+				// Self-heal: delete the corrupt file so the warning doesn't
+				// repeat on every restart. The mirror docs map (`__docs__.json`)
+				// is the source of truth — the deleted index will be rebuilt
+				// from it on the next add, or via the re-add fallback below.
+				try { await fs.promises.rm(filePath, { force: true }); }
+				catch { /* best-effort */ }
 			}
 			await yieldToLoop();
 		}

@@ -796,16 +796,25 @@ function renderNestedNode(
 ): TemplateResult | typeof nothing {
 	const indentPx = node.depth * 16;
 	const goal = node.goal as unknown as Goal;
+	// Child rows + truncation row are hidden when the parent's expansion
+	// chevron is collapsed — matches how team-leads collapse their workers
+	// in the same sidebar. Without this gate, a collapsed parent goal's
+	// chevron showed `▶` while its sub-goal rows remained visible below,
+	// which the user reported as confusing (sub-goals stayed even when the
+	// parent was collapsed).
+	const isExpanded = expandedGoals.has(goal.id);
 	return html`
 		<div data-testid="sidebar-nested-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
 			<div data-testid="sidebar-goal-row">
 				${renderGoalGroup(goal, { descendantCount: node.descendantCount })}
 			</div>
 		</div>
-		${node.children.map(c => renderNestedNode(projectId, c))}
-		${node.truncatedChildrenCount && node.truncatedChildrenCount > 0
-			? renderTruncationRow(projectId, node.truncatedChildrenCount, node.depth + 1)
-			: nothing}
+		${isExpanded ? html`
+			${node.children.map(c => renderNestedNode(projectId, c))}
+			${node.truncatedChildrenCount && node.truncatedChildrenCount > 0
+				? renderTruncationRow(projectId, node.truncatedChildrenCount, node.depth + 1)
+				: nothing}
+		` : nothing}
 	`;
 }
 
