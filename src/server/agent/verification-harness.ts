@@ -35,6 +35,7 @@ import {
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
+import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -1171,6 +1172,21 @@ export class VerificationHarness {
 		if (!this.notifyTeamLeadFn) return;
 		if (status === "passed") {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
+			// When a CHILD goal's ready-to-merge gate passes, wake up the
+			// PARENT goal's team-lead too. Otherwise the parent sits idle
+			// "awaiting completion notifications" with no signal that work
+			// is ready to merge. The pure helper decides whether to fire
+			// (only for ready-to-merge passes on goals with a parent).
+			try {
+				const ctx = this.projectContextManager?.getContextForGoal(goalId);
+				const child = ctx?.goalStore.get(goalId);
+				const parentNotify = buildParentReadyNotification(child, gateId, status);
+				if (parentNotify) {
+					this.notifyTeamLeadFn(parentNotify.parentGoalId, parentNotify.message);
+				}
+			} catch (err) {
+				console.warn("[verification] Failed to notify parent team-lead on child ready-to-merge:", err);
+			}
 			return;
 		}
 		// Failure path — use Lesson 4.18 actionable message when step detail is available.
