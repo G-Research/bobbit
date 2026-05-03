@@ -1873,9 +1873,13 @@ export class VerificationHarness {
 				skipAutoThinking: true,
 			});
 
-			// Set title and metadata
+			// Set title and metadata. `step.name` is optional — many inline
+			// workflows skip it. Fall back to step.role / "Review" so the
+			// sidebar never shows "undefined: <name>" as the title prefix.
 			const funName = await generateTeamName("verification");
-			this.sessionManager!.setTitle(sessionId, `${step.name}: ${funName}`);
+			const titlePrefix = step.name?.trim()
+				|| (step.role ? `Review (${step.role})` : "Review");
+			this.sessionManager!.setTitle(sessionId, `${titlePrefix}: ${funName}`);
 			this.sessionManager!.updateSessionMeta(sessionId, {
 				role: roleName,
 				teamGoalId: goalId,
@@ -2166,9 +2170,11 @@ export class VerificationHarness {
 			});
 			qaSessionId = session.id;
 
-			// Set title and metadata
+			// Set title and metadata — same fallback as llm-review above.
 			const qaFunName = await generateTeamName("verification");
-			this.sessionManager!.setTitle(qaSessionId, `${step.name}: ${qaFunName}`);
+			const qaTitlePrefix = step.name?.trim()
+				|| (step.role ? `QA (${step.role})` : "QA");
+			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
 			this.sessionManager!.updateSessionMeta(qaSessionId, {
 				role: qaRoleName,
 				teamGoalId: goalId,
