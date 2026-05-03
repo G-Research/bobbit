@@ -386,16 +386,22 @@ export function bucketArchivedByProject(
  */
 function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean): TemplateResult {
 	const forest = buildNestedGoalForest(archivedGoals as any, { maxDepth: 5, includeArchived: true });
+	// Same collapse-hides-children behaviour as the live forest in
+	// sidebar.ts::renderNestedNode. Archived parents must hide their
+	// archived children when their chevron is collapsed — symmetric with
+	// how live parents hide live children. The user reported sub-goal
+	// rows still showing under a collapsed archived parent.
 	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[] }): TemplateResult => {
 		const indentPx = node.depth * 16;
 		const goal = node.goal as Goal;
+		const isExpanded = expandedGoals.has(goal.id);
 		return html`
 			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
 				${isMobile
 					? html`<div class="opacity-60">${renderGoalGroup(goal, { descendantCount: node.descendantCount })}</div>`
 					: renderGoalGroup(goal, { descendantCount: node.descendantCount })}
 			</div>
-			${node.children.map((c: any) => renderArcNode(c))}
+			${isExpanded ? node.children.map((c: any) => renderArcNode(c)) : nothing}
 		`;
 	};
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
