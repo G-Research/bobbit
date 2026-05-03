@@ -772,9 +772,20 @@ function goalPreviewPanel() {
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
 		if (!trimmedTitle) return;
+		// Fall back to the active session's projectId when previewProjectId
+		// is empty — same defensive fix as goalProposalPanel below. Mid-
+		// session goal creation in a regular project session shouldn't fail
+		// if the proposal slot survived a refresh / draft-restore that
+		// happens to skip the projectId-set step.
 		if (!state.previewProjectId) {
-			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
-			return;
+			const activeSid = activeSessionId();
+			const liveSess = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
+			if (liveSess?.projectId) {
+				state.previewProjectId = liveSess.projectId;
+			} else {
+				showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
+				return;
+			}
 		}
 		const sessionId = activeSessionId();
 		// Mid-session acceptance must NOT tear down the active session — only
@@ -2126,9 +2137,23 @@ function goalProposalPanel() {
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
 		if (!trimmedTitle || _proposalSaving) return;
+		// Fall back to the current session's projectId when previewProjectId
+		// is empty — covers the race where (a) onGoalProposal's projectId-set
+		// path didn't fire (e.g. proposal arrived via WS resume rather than a
+		// fresh emit), or (b) a previous goal-creation cleared previewProjectId
+		// and we're now accepting a second proposal in the same session
+		// without re-arrival. Without this, mid-session goal creation in a
+		// regular project session erroneously rejects with "No project
+		// selected".
 		if (!state.previewProjectId) {
-			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
-			return;
+			const activeSid = activeSessionId();
+			const liveSess = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
+			if (liveSess?.projectId) {
+				state.previewProjectId = liveSess.projectId;
+			} else {
+				showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
+				return;
+			}
 		}
 		_proposalSaving = true;
 		renderApp();
