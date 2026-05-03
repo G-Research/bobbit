@@ -25,6 +25,8 @@ nul
 # (state/ also via .bobbit/.gitignore for redundancy).
 .bobbit/state/
 .bobbit/tmp/
+# Scaffolded per-machine on server start from defaults/system-prompt.md
+.bobbit/config/system-prompt.md
 .e2e-pi*
 .e2e-bobbit*
 .e2e-fullstack*
