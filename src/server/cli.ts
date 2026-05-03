@@ -4,8 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setProjectRoot, bobbitConfigDir, bobbitStateDir, migrateFromLegacyPiDir } from "./bobbit-dir.js";
+import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir } from "./bobbit-dir.js";
 import { scaffoldBobbitDir } from "./scaffold.js";
+import { resolveSystemPromptPath } from "./agent/system-prompt.js";
 import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
@@ -150,9 +151,8 @@ async function main() {
 
 	const authToken = loadOrCreateToken(args.newToken);
 
-	// Resolve custom system prompt from .bobbit/config/
-	const systemPromptFile = path.join(bobbitConfigDir(), "system-prompt.md");
-	const systemPromptPath = fs.existsSync(systemPromptFile) ? systemPromptFile : undefined;
+	// Resolve active system prompt: user override under .bobbit/config/ or shipped default.
+	const systemPromptPath = resolveSystemPromptPath();
 	if (systemPromptPath) {
 		console.log(`  System prompt: ${systemPromptPath}`);
 	}
