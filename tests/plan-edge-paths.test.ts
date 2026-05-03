@@ -117,4 +117,41 @@ describe("plan-edge-paths — computeEdgePaths", () => {
 		assert.equal(paths[0].fromNodeId, "a");
 		assert.equal(paths[0].toNodeId, "b");
 	});
+
+	it("default (no opts) routes right→left through the inter-phase gap (no node crossings)", () => {
+		// Source below destination in adjacent phases — the case that
+		// produced visible node-crossings on the user's screenshot. New
+		// default routing keeps the vertical segment in the empty band
+		// between phases regardless of source/dest row offsets.
+		const lower: PlanEdgeNode = { id: "lower", x: 0, y: 200, width: 100, height: 60 };
+		const upper: PlanEdgeNode = { id: "upper", x: 200, y: 0, width: 100, height: 60 };
+		const paths = computeEdgePaths([lower, upper], [{ fromNodeId: "lower", toNodeId: "upper" }], {});
+		assert.equal(paths.length, 1);
+		// Right (x=100, y=230) → midX=150 → (midX, y=30) → left (x=200, y=30)
+		assert.equal(paths[0].d, "M 100 230 L 150 230 L 150 30 L 200 30");
+	});
+
+	it("default routing: vertical segment never overlaps source-phase nodes", () => {
+		// 3 sources stacked + 1 destination — assert every edge's midX
+		// sits in the empty inter-phase band (source.right < midX < dest.left).
+		const sources = [
+			{ id: "s0", x: 0, y: 0,   width: 200, height: 60 },
+			{ id: "s1", x: 0, y: 80,  width: 200, height: 60 },
+			{ id: "s2", x: 0, y: 160, width: 200, height: 60 },
+		];
+		const dest = { id: "d0", x: 280, y: 0, width: 200, height: 60 };
+		const paths = computeEdgePaths(
+			[...sources, dest],
+			sources.map(s => ({ fromNodeId: s.id, toNodeId: "d0" })),
+			{},
+		);
+		for (const p of paths) {
+			const m = p.d.match(/^M ([\d.]+) ([\d.]+) L ([\d.]+)/);
+			assert.ok(m, `path d should match right/left routing shape: ${p.d}`);
+			const exitX = Number(m![1]);
+			const midX = Number(m![3]);
+			assert.equal(exitX, 200, "edge should exit source's right edge");
+			assert.ok(midX > 200 && midX < 280, `midX (${midX}) must lie strictly inside the inter-phase gap (200..280)`);
+		}
+	});
 });

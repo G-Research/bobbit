@@ -2138,7 +2138,11 @@ function planNodeBorderColor(s: PlanNodeState): string {
 function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): TemplateResult | typeof nothing {
 	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
 	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0);
-	const paths = computeEdgePaths(nodes, edges, { midLineY: (a, b) => (a + b) / 2 });
+	// Right-edge → left-edge routing avoids the bug where a source node
+	// stacked below its destination in the same phase column produced an
+	// upward vertical segment that crossed sibling nodes. The default
+	// midLineX (halfway between phases) keeps the inter-phase band tidy.
+	const paths = computeEdgePaths(nodes, edges, {});
 	return html`
 		<div class="plan-level" data-testid="plan-level-${depth}" data-plan-depth="${depth}" style="position:relative;margin-bottom:18px;">
 			<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;max-width:100%;">
