@@ -159,7 +159,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead) |
-| `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
+| `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead). Cascade mirrors pause/archive: without `?cascade=true`, returns 409 `{code:"HAS_DESCENDANT_TEAMS", count, descendants:[{id,title}]}` if any non-archived descendant has a live team; with `?cascade=true`, walks descendants depth-first and tears down each team (best-effort per-goal), returning `{ok, toreDown, errors[]}`. |
 
 ### Tasks
 
