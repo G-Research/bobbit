@@ -2418,6 +2418,8 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 **Data:** `PersistedGoal.reattemptOf`, `PersistedSession.reattemptGoalId`. API: `POST /api/sessions` accepts `reattemptGoalId`; goals accept `reattemptOf`.
 
+**Visibility:** the "Re-attempt" button is shown whenever the goal has no active team and no live (non-terminated) session — covering fresh, shelved, stopped-team, archived, and merged goals. It is hidden only while a team-lead session or any other live session is running for the goal. Sidebar predicate lives in `src/app/render-helpers.ts`; dashboard nav predicate lives in `src/app/goal-dashboard.ts::renderNavBar`.
+
 ---
 
 ## Disk state
