@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import { html, nothing, svg, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
@@ -16,7 +16,6 @@ import {
 	setArchivedSectionExpanded,
 	type GatewaySession,
 	type Goal,
-	type GoalState,
 	type Project,
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
@@ -35,10 +34,6 @@ const _goalChildrenFetched = new Set<string>();
 /** Clear the on-demand child fetch guard (called when archived state is reset). */
 export function clearGoalChildrenFetchedCache(): void {
 	_goalChildrenFetched.clear();
-}
-
-export function escapeHtml(s: string): string {
-	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 // ============================================================================
@@ -129,22 +124,6 @@ export function getProjectAccentColor(project: Project): string {
 	return isDark
 		? (project.colorDark || project.color || "var(--muted-foreground)")
 		: (project.colorLight || project.color || "var(--muted-foreground)");
-}
-
-/** Render a small colored chip showing a project name. Used in search results. */
-export function renderProjectBadge(project: Project) {
-	const bg = getProjectAccentColor(project);
-	return html`<span
-		class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium leading-none"
-		style="background: ${bg}20; color: ${bg}; border: 1px solid ${bg}30;"
-		title="Project: ${project.name}"
-	>${project.name}</span>`;
-}
-
-export function shortenPath(fullPath: string): string {
-	const parts = fullPath.split(/[/\\]/).filter(Boolean);
-	if (parts.length <= 3) return parts.join("/");
-	return "…/" + parts.slice(-3).join("/");
 }
 
 export function formatSessionAge(timestamp: number): string {
@@ -250,10 +229,6 @@ let _timeRefreshTimer: ReturnType<typeof setInterval> | null = null;
 export function startTimeRefresh(): void {
 	if (_timeRefreshTimer) return;
 	_timeRefreshTimer = setInterval(() => renderApp(), 60_000);
-}
-
-export function stopTimeRefresh(): void {
-	if (_timeRefreshTimer) { clearInterval(_timeRefreshTimer); _timeRefreshTimer = null; }
 }
 
 // ============================================================================
@@ -493,9 +468,6 @@ function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 			: renderSessionRow(s))}
 	</div>`;
 }
-
-// Back-compat alias used by sidebar.ts
-export { renderSessionRow as renderSidebarSession };
 
 // ============================================================================
 // ARCHIVED SESSION ROW
@@ -865,43 +837,3 @@ export function renderGoalGroup(goal: Goal) {
 	`;
 }
 
-// ============================================================================
-// GOAL STATE ICON
-// ============================================================================
-
-export function goalStateIcon(goalState: GoalState, size = 14) {
-	const C = 2 * Math.PI * 10;
-	const blue = "#3b82f6";
-	const green = "#22c55e";
-	const grey = "#6b7280";
-
-	let circleContent: ReturnType<typeof svg>;
-	if (goalState === "complete") {
-		circleContent = svg`<circle cx="12" cy="12" r="10" fill="none" stroke="${green}" stroke-width="2"/>`;
-	} else if (goalState === "in-progress") {
-		const progress = (240 / 360) * C;
-		circleContent = svg`
-			<circle cx="12" cy="12" r="10" fill="none" stroke="${grey}" stroke-width="2" opacity="0.4"/>
-			<circle cx="12" cy="12" r="10" fill="none" stroke="${blue}" stroke-width="2"
-				stroke-dasharray="${progress} ${C}"
-				stroke-dashoffset="0"
-				transform="rotate(-90 12 12)"/>
-		`;
-	} else {
-		const opacity = goalState === "shelved" ? "0.3" : "0.5";
-		circleContent = svg`<circle cx="12" cy="12" r="10" fill="none" stroke="${grey}" stroke-width="2" opacity="${opacity}"/>`;
-	}
-
-	const lineColor = goalState === "complete" ? green : goalState === "in-progress" ? blue : grey;
-	const lineOpacity = goalState === "shelved" ? "0.3" : goalState === "todo" ? "0.5" : "1";
-
-	return html`
-		<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" style="display:block;flex-shrink:0;">
-			${circleContent}
-			${svg`<line x1="22" x2="18" y1="12" y2="12" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-			${svg`<line x1="6" x2="2" y1="12" y2="12" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-			${svg`<line x1="12" x2="12" y1="6" y2="2" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-			${svg`<line x1="12" x2="12" y1="22" y2="18" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-		</svg>
-	`;
-}

@@ -2186,10 +2186,3 @@ export function renderGoalDashboard(): TemplateResult {
 	`;
 }
 
-// ============================================================================
-// BACKWARD COMPAT: renderAgentPanel (exported but only used internally before)
-// ============================================================================
-
-export function renderAgentPanel(_agentList: TeamAgent[]): TemplateResult {
-	return renderAgentsTab();
-}
