@@ -288,12 +288,12 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff",
 	previewPanelHtml: "" as string,
 	previewPanelFullscreen: false,
 
-	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
-	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project",
+	// Unified preview panel tab (for non-assistant sessions with preview or proposal of any type)
+	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff",
 
 	// Review pane state (agent-initiated markdown review documents)
 	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
