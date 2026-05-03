@@ -184,49 +184,38 @@ export class AgentInterface extends LitElement {
 
 	private _contextPopoverOpen = false;
 	private _costPopoverOpen = false;
+
+	// --- Scroll-lock state (single source of truth) ---
+	//
+	// Invariant: `_stickToBottom` is mutated FALSE only by user-gesture
+	// listeners (`wheel` / `touchstart` / `keydown` of nav keys), and TRUE
+	// only by programmatic restore points (`_pinIfSticking`,
+	// `_handleJumpToBottomClick`, `setupSessionSubscription`, `sendMessage`).
+	// Geometry (`_handleScroll`) NEVER mutates the flag — it only updates
+	// jump-button visibility.
 	private _stickToBottom = true;
-	// Deterministic programmatic-scroll detection: when we set scrollTop
-	// programmatically, capture the resulting (scrollTop, scrollHeight) pair.
-	// The next scroll event matching exactly that pair is the browser-emitted
-	// echo of our own assignment and is ignored. Cleared on first match so a
-	// later coincidental match still counts as a real user scroll. No timers.
-	private _lastProgrammaticScrollTop: number | null = null;
-	private _lastProgrammaticScrollHeight: number | null = null;
+	// Ring buffer of recent programmatic-scroll writes. Each entry is the
+	// `(scrollTop, scrollHeight)` pair we wrote. The matching browser-emitted
+	// scroll event is consumed exactly once (oldest match first) and removed.
+	// A small ring (length 4) absorbs multi-write bursts where several
+	// programmatic writes land before any echo scroll event fires — the
+	// previous single-pair latch dropped older echoes on the second write,
+	// causing them to fall through and (on master) flip `_stickToBottom`
+	// false via the now-deleted geometry path.
+	private _programmaticEchoes: Array<{ top: number; height: number }> = [];
 	private _scrollContainer?: HTMLElement;
 	private _resizeObserver?: ResizeObserver;
 	private _lastScrollHeight = 0;
+	// One-shot capture-phase `load` listener registered on the scroll
+	// container per session navigate. Catches `<img>`/`<iframe>` decode
+	// reflows (which grow `.max-w-5xl` after the initial pin) and re-pins
+	// while `_stickToBottom` is true. Removed on next session navigate /
+	// disconnect.
+	private _imageLoadHandler?: (e: Event) => void;
 
-	// Change 3 — `wasAtBottom` carry-over for `state_update`.
-	// Captures the pre-recompute value of `_stickToBottom` at every non-echo
-	// scroll event. Consulted by the `state_update` branch so a transient
-	// scroll-up that flips `_stickToBottom` false right before a server-driven
-	// state refresh still re-anchors to the bottom. Reset on explicit user
-	// intent (`_handleUserIntent`/`_handleScrollKeydown`).
-	private _wasAtBottomAtLastUserScroll = true;
-
-	// Change 4 — session-load settle window. While active, the ResizeObserver
-	// re-asserts `_scrollToBottom()` on every tick (capped at 2 s, exits early
-	// on stable scrollHeight or user-intent). Re-armed on every
-	// `setupSessionSubscription` call.
-	private _settleWindowActive = false;
-	private _settleWindowDeadline = 0;
-	private _lastSettleScrollHeight = -1;
-	// Counts consecutive ResizeObserver ticks where scrollHeight has been
-	// stable AND we re-pinned successfully. The window exits early once we
-	// hit two such ticks, but width-only reflows / no-op ticks no longer
-	// short-circuit it (the previous logic exited as soon as two ticks
-	// reported the same height, which fired before any real growth).
-	private _settleQuietTickCount = 0;
-
-	// Change 5 — Jump-to-bottom button visibility. True when the viewport is
-	// more than half a screen from the bottom. Recomputed in `_handleScroll`.
+	// Jump-to-bottom button visibility. Computed purely from geometry in
+	// `_handleScroll`. NEVER mutates `_stickToBottom`.
 	private _showJumpToBottom = false;
-	// Timestamp (performance.now ms) until which `_handleScroll` must NOT
-	// re-show the jump button. Set when the user clicks the button so the
-	// echo of the programmatic scroll — plus any content-growth race during
-	// the subsequent re-render — can't briefly flip _showJumpToBottom back
-	// to true before _scrollToBottom's rAF re-pins the bottom.
-	private _suppressJumpUntilTs = 0;
 
 	// Measured height (px) of the pill strip floating above the composer. The
 	// jump-to-bottom button uses this to position itself just above the strip
@@ -280,6 +269,50 @@ export class AgentInterface extends LitElement {
 
 	public setAutoScroll(enabled: boolean) {
 		this._stickToBottom = enabled;
+		if (enabled) this._pinIfSticking();
+	}
+
+	/**
+	 * Push a programmatic-scroll echo into the ring buffer (capacity 4).
+	 * Drops the oldest entry on overflow.
+	 */
+	private _pushEcho(top: number, height: number) {
+		const MAX = 4;
+		if (this._programmaticEchoes.length >= MAX) {
+			this._programmaticEchoes.shift();
+		}
+		this._programmaticEchoes.push({ top, height });
+	}
+
+	/**
+	 * The single re-pin path. No-op when `_stickToBottom` is false or no
+	 * scroll container exists. Latches the post-write `(scrollTop,
+	 * scrollHeight)` pair before the assignment so the resulting browser
+	 * `scroll` event is consumed as an echo by `_handleScroll`.
+	 */
+	private _pinIfSticking() {
+		if (!this._stickToBottom || !this._scrollContainer) return;
+		const el = this._scrollContainer;
+		const sh = el.scrollHeight;
+		const target = sh - el.clientHeight;
+		// Already at bottom — skip the assignment so we don't enqueue a no-op
+		// echo (and so subsequent rapid pins don't blow the ring buffer with
+		// duplicate entries).
+		if (Math.abs(el.scrollTop - target) < 1) return;
+		this._pushEcho(target, sh);
+		el.scrollTop = sh; // overshoot; browser clamps to `target`
+	}
+
+	/**
+	 * Request a Lit update and re-pin once layout has committed. Used by
+	 * transcript-mutating session events (message_update, tool_execution_update,
+	 * state_update, turn/agent/compaction events) so growth from the resulting
+	 * re-render is followed to the bottom even when the change happens outside
+	 * an observed RO target subtree.
+	 */
+	private _updateAndPin() {
+		this.requestUpdate();
+		this.updateComplete.then(() => this._pinIfSticking());
 	}
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -311,60 +344,28 @@ export class AgentInterface extends LitElement {
 			this._lastScrollHeight = this._scrollContainer.scrollHeight;
 
 			// When content changes size, scroll to bottom if we're already there.
-			// Uses _stickToBottom flag — no keyboard/focus/viewport tracking needed.
+			// Uses _stickToBottom flag (single source of truth, mutated only by
+			// observed user gestures and programmatic restore points).
 			// Programmatic-scroll echoes are filtered deterministically in
-			// _handleScroll via the (_lastProgrammaticScrollTop, _lastProgrammaticScrollHeight)
-			// latch — no timers.
+			// _handleScroll via the `_programmaticEchoes` ring buffer — no timers.
 			this._resizeObserver = new ResizeObserver(() => {
 				if (!this._scrollContainer) return;
 				const newScrollHeight = this._scrollContainer.scrollHeight;
 				const delta = newScrollHeight - this._lastScrollHeight;
 
-				// Change 4 — session-load settle window. Re-assert bottom on every
-				// tick while active. Exit on deadline, stable height across two
-				// consecutive ticks, or user intent (handled elsewhere).
-				if (this._settleWindowActive) {
-					if (performance.now() > this._settleWindowDeadline) {
-						this._settleWindowActive = false;
-						this._settleQuietTickCount = 0;
-					} else if (this._lastSettleScrollHeight === newScrollHeight) {
-						// Same height as last tick — stable. Re-pin (defensively) and
-						// require two consecutive stable ticks before exiting so a
-						// width-only reflow followed by real growth doesn't fool us.
-						if (this._stickToBottom) {
-							this._scrollToBottom();
-							this._lastScrollHeight = newScrollHeight;
-						}
-						this._settleQuietTickCount++;
-						if (this._settleQuietTickCount >= 2) {
-							this._settleWindowActive = false;
-							this._settleQuietTickCount = 0;
-						}
-						return;
-					} else {
-						// Height changed — reset quiet-tick counter and re-pin.
-						this._lastSettleScrollHeight = newScrollHeight;
-						this._settleQuietTickCount = 0;
-						if (this._stickToBottom) {
-							this._scrollToBottom();
-							this._lastScrollHeight = newScrollHeight;
-							return;
-						}
-					}
-				}
-
 				if (delta < 0) {
 					// Content shrunk (collapse) — apply post-collapse clamp.
 					// Let the browser naturally adjust scrollTop, then check:
 					// if bottom of content is above the viewport midpoint, scroll
-					// so latest message is at the bottom of the viewport.
+					// so latest message is at the bottom of the viewport. This
+					// branch serves tests/collapse-scroll-bugs.spec.ts and is
+					// independent of the stick-to-bottom path.
 					this._lastScrollHeight = newScrollHeight;
 					const { scrollTop, clientHeight } = this._scrollContainer;
 					const contentBottom = newScrollHeight - scrollTop;
 					if (contentBottom < clientHeight / 2) {
 						const target = newScrollHeight - clientHeight;
-						this._lastProgrammaticScrollTop = target;
-						this._lastProgrammaticScrollHeight = newScrollHeight;
+						this._pushEcho(target, newScrollHeight);
 						this._scrollContainer.scrollTop = target;
 					}
 					return;
@@ -373,21 +374,14 @@ export class AgentInterface extends LitElement {
 				if (delta === 0) {
 					// No actual height change — width/border-box reflow only.
 					// Do nothing. Don't touch scrollTop, don't update
-					// _lastScrollHeight (it's already accurate), don't flip
-					// _stickToBottom. This is the fix for the vibration loop.
+					// _lastScrollHeight (it's already accurate). This is the fix
+					// for the vibration loop (tests/agent-interface-scroll.spec.ts).
 					return;
 				}
 
-				// delta > 0: real growth.
-				if (this._stickToBottom) {
-					this._lastScrollHeight = newScrollHeight;
-					const target = newScrollHeight - this._scrollContainer.clientHeight;
-					this._lastProgrammaticScrollTop = target;
-					this._lastProgrammaticScrollHeight = newScrollHeight;
-					this._scrollContainer.scrollTop = newScrollHeight;
-				} else {
-					this._lastScrollHeight = newScrollHeight;
-				}
+				// delta > 0: real growth. Single re-pin path.
+				this._lastScrollHeight = newScrollHeight;
+				this._pinIfSticking();
 			});
 
 			const contentContainer = this._scrollContainer.querySelector(".max-w-5xl");
@@ -419,11 +413,6 @@ export class AgentInterface extends LitElement {
 	override disconnectedCallback() {
 		super.disconnectedCallback();
 
-		// Change 4 — tear down settle window state alongside other observers.
-		this._settleWindowActive = false;
-		this._settleWindowDeadline = 0;
-		this._lastSettleScrollHeight = -1;
-
 		// Clean up observers and listeners
 		if (this._resizeObserver) {
 			this._resizeObserver.disconnect();
@@ -435,6 +424,10 @@ export class AgentInterface extends LitElement {
 			this._scrollContainer.removeEventListener("wheel", this._handleUserIntent);
 			this._scrollContainer.removeEventListener("touchstart", this._handleUserIntent);
 			this._scrollContainer.removeEventListener("keydown", this._handleScrollKeydown);
+			if (this._imageLoadHandler) {
+				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, true);
+				this._imageLoadHandler = undefined;
+			}
 		}
 
 		if (this._pillResizeObserver) {
@@ -469,7 +462,7 @@ export class AgentInterface extends LitElement {
 		// but if the session is already short enough that no scroll fires,
 		// the stale state lingers).
 		this._stickToBottom = true;
-		this._wasAtBottomAtLastUserScroll = true;
+		this._programmaticEchoes = [];
 		if (this._showJumpToBottom) {
 			this._showJumpToBottom = false;
 			// _showJumpToBottom isn't @state(), so mutating it doesn't trigger a
@@ -479,30 +472,25 @@ export class AgentInterface extends LitElement {
 			// so the stale `true` from the previous session would linger.
 			this.requestUpdate();
 		}
-		// Re-pin to the bottom across multiple frames. updateComplete only
-		// awaits Lit's first render — async content (lazy markdown, syntax
-		// highlighting, image dimensions, hydrated tool-content blocks) lands
-		// over subsequent frames, growing scrollHeight after our initial pin.
-		// Three rAF passes catch the common cases without the cost of a long
-		// timer; the ResizeObserver settle window below is the safety net for
-		// later growth.
-		this.updateComplete.then(() => {
-			this._scrollToBottom();
-			requestAnimationFrame(() => {
-				this._scrollToBottom();
-				requestAnimationFrame(() => this._scrollToBottom());
-			});
-		});
+		// Single re-pin path on session navigate: pin once after Lit's first
+		// commit. Subsequent async growth (markdown, syntax highlighting,
+		// hydrated tool-content) is caught by the ResizeObserver — every
+		// `delta > 0` tick re-pins via `_pinIfSticking()`. Lazy `<img>`/
+		// `<iframe>` decode reflows are caught by the capture-phase `load`
+		// listener installed below.
+		this.updateComplete.then(() => this._pinIfSticking());
 
-		// Change 4 — arm the settle window for this session load. Bumped to
-		// 3 s (was 2 s) and the early-exit condition tightened in the observer
-		// to require two consecutive *quiet* ticks rather than two same-height
-		// ticks (a width-only reflow + a growth tick used to close the window
-		// prematurely on session navigate).
-		this._settleWindowActive = true;
-		this._settleWindowDeadline = performance.now() + 3000;
-		this._lastSettleScrollHeight = -1;
-		this._settleQuietTickCount = 0;
+		// Install a one-shot capture-phase `load` listener on the scroll
+		// container. Catches `<img>` and `<iframe>` load events anywhere in
+		// the subtree (capture phase fires for non-bubbling events too) and
+		// re-pins. Replaces the previous time-bounded settle window.
+		if (this._scrollContainer) {
+			if (this._imageLoadHandler) {
+				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, true);
+			}
+			this._imageLoadHandler = () => this._pinIfSticking();
+			this._scrollContainer.addEventListener("load", this._imageLoadHandler, true);
+		}
 
 		// Set default streamFn with proxy support if not already set
 		if (this.session.streamFn === streamSimple) {
@@ -553,30 +541,28 @@ export class AgentInterface extends LitElement {
 			// Handle custom events not in AgentEvent union
 			if ((ev as any).type === "compaction_start") {
 				if (this._streamingContainer) this._streamingContainer.startCompacting();
-				this.requestUpdate();
+				this._updateAndPin();
 				return;
 			}
 			if ((ev as any).type === "compaction_end") {
 				if (this._streamingContainer) this._streamingContainer.endCompacting();
-				this.requestUpdate();
+				this._updateAndPin();
 				return;
 			}
 			if ((ev as any).type === "state_update") {
-				// Server state refresh (e.g. after compaction or reconnect) — re-render stats
-				// and scroll to bottom if we were tracking bottom (content may have been
-				// bulk-replaced without triggering a ResizeObserver change).
-				// Change 3 — also honour `_wasAtBottomAtLastUserScroll` so a transient
-				// scroll-up that just flipped `_stickToBottom` false doesn't lose the bottom.
-				this.requestUpdate();
-				if (this._stickToBottom || this._wasAtBottomAtLastUserScroll) {
-					this.updateComplete.then(() => this._scrollToBottom());
-				}
+				// Server state refresh (e.g. after compaction or reconnect) —
+				// re-render stats and re-pin once layout commits. Content may
+				// have been bulk-replaced without triggering a ResizeObserver
+				// height change. The carry-over flag is gone: pinning is now a
+				// pure function of `_stickToBottom`, which is mutated only by
+				// observed user gestures.
+				this._updateAndPin();
 				return;
 			}
 			if ((ev as any).type === "tool_execution_update") {
 				// Partial results from long-running tools (delegate, skill invocations)
 				// Force streaming container to re-render with updated delegate cards
-				this.requestUpdate();
+				this._updateAndPin();
 				if (this._streamingContainer) {
 					this._streamingContainer.toolPartialResults = (this.session?.state as any)?.toolPartialResults;
 					this._streamingContainer.requestUpdate();
@@ -590,17 +576,17 @@ export class AgentInterface extends LitElement {
 			}
 			if ((ev as any).type === "render") {
 				// Generic re-render request (e.g. tool permission card added)
-				this.requestUpdate();
+				this._updateAndPin();
 				return;
 			}
 			switch (ev.type) {
 				case "turn_end":
 				case "agent_start":
-					this.requestUpdate();
+					this._updateAndPin();
 					break;
 				case "turn_start":
 				case "message_start":
-					this.requestUpdate();
+					this._updateAndPin();
 					break;
 				case "message_end":
 					// When a message finishes, sync the streaming container
@@ -615,7 +601,7 @@ export class AgentInterface extends LitElement {
 							this._streamingContainer.setMessage(null, true);
 						}
 					}
-					this.requestUpdate();
+					this._updateAndPin();
 					break;
 				case "agent_end":
 					// Clear streaming container when agent finishes
@@ -625,7 +611,7 @@ export class AgentInterface extends LitElement {
 						this._streamingContainer.setMessage(null, true);
 					}
 					// Queue draining is handled server-side now
-					this.requestUpdate();
+					this._updateAndPin();
 					break;
 				case "message_update":
 					if (this._streamingContainer) {
@@ -634,122 +620,86 @@ export class AgentInterface extends LitElement {
 						this._streamingContainer.turnStartTime = (this.session?.state as any).turnStartTime ?? null;
 						this._streamingContainer.setMessage(ev.message, !isStreaming);
 					}
+					// message_update doesn't go through Lit's `requestUpdate` (the
+					// streaming container manages its own DOM), so route through
+					// updateComplete + _pinIfSticking to follow growth.
+					this._updateAndPin();
 					break;
 			}
 		});
 	}
 
+	/**
+	 * Force a re-pin (programmatic restore point). Use this from explicit
+	 * user actions (jump-to-bottom, sendMessage) where the intent is “put me
+	 * at the bottom and keep me there”. Sets `_stickToBottom = true`, hides
+	 * the jump button, and pins via `_pinIfSticking()`.
+	 */
 	private _scrollToBottom() {
 		this._stickToBottom = true;
-		// We're definitionally at the bottom now — hide the jump button.
-		// Necessary because a browser clamp scroll event (e.g. content swap on
-		// session navigate) can flip _showJumpToBottom back to true between
-		// content render and this call. After our programmatic scrollTop write,
-		// the echo latch consumes the next scroll event so _handleScroll won't
-		// re-evaluate — leaving a stale `true` that keeps the button visible.
 		if (this._showJumpToBottom) {
 			this._showJumpToBottom = false;
 			this.requestUpdate();
 		}
-		if (this._scrollContainer) {
-			const sh = this._scrollContainer.scrollHeight;
-			const target = sh - this._scrollContainer.clientHeight;
-			this._lastProgrammaticScrollTop = target;
-			this._lastProgrammaticScrollHeight = sh;
-			this._scrollContainer.scrollTop = sh;
-		}
-		// Re-assert after next frame (layout may not have settled yet)
-		requestAnimationFrame(() => {
-			if (this._scrollContainer) {
-				const sh = this._scrollContainer.scrollHeight;
-				const target = sh - this._scrollContainer.clientHeight;
-				this._lastProgrammaticScrollTop = target;
-				this._lastProgrammaticScrollHeight = sh;
-				this._scrollContainer.scrollTop = sh;
-			}
-			if (this._showJumpToBottom) {
-				this._showJumpToBottom = false;
-				this.requestUpdate();
-			}
-		});
+		this._pinIfSticking();
 	}
 
 	/**
-	 * Stick-to-bottom: deterministic programmatic-scroll filter, no timers.
+	 * Scroll handler. SOLE responsibilities:
+	 *   1. Consume programmatic-scroll echoes (oldest matching entry in the
+	 *      ring buffer, < 1 px tolerance for HiDPI rounding).
+	 *   2. Recompute jump-to-bottom button visibility from geometry.
 	 *
-	 * The single scroll event whose (scrollTop, scrollHeight) exactly matches
-	 * the values we just programmatically wrote is the browser-emitted echo
-	 * of our own assignment — ignore it once, then clear the latch so a later
-	 * coincidental match still counts as a real user scroll.
-	 *
-	 * Anything else is user intent. We only re-stick if the user is within
-	 * 5 px of the bottom (the prior 50 px tail enabled the vibration symptom).
+	 * Geometry NEVER mutates `_stickToBottom`. User intent is observed via
+	 * the explicit `wheel`/`touchstart`/`keydown` listeners.
 	 */
 	private _handleScroll = () => {
 		if (!this._scrollContainer) return;
 		const { scrollTop, scrollHeight, clientHeight } = this._scrollContainer;
-		if (
-			this._lastProgrammaticScrollTop !== null &&
-			this._lastProgrammaticScrollHeight !== null &&
-			// Change 1 — sub-pixel echo-latch tolerance. HiDPI / device-pixel
-			// rounding can produce fractional offsets between the scrollTop we
-			// programmatically set and the value the browser reports back; a
-			// strict equality check would miss the echo and treat it as user
-			// intent. < 1 px is well below any meaningful gesture.
-			Math.abs(scrollTop - this._lastProgrammaticScrollTop) < 1 &&
-			Math.abs(scrollHeight - this._lastProgrammaticScrollHeight) < 1
-		) {
-			// Consume the echo exactly once.
-			this._lastProgrammaticScrollTop = null;
-			this._lastProgrammaticScrollHeight = null;
-			return;
+
+		// Echo consumption: scan the ring for any entry within 1 px tolerance
+		// of the observed pair, and splice the OLDEST match. Multiple
+		// programmatic writes can land before any echo fires, so a queue is
+		// required — a single-pair latch dropped older echoes.
+		for (let i = 0; i < this._programmaticEchoes.length; i++) {
+			const entry = this._programmaticEchoes[i];
+			if (
+				Math.abs(scrollTop - entry.top) < 1 &&
+				Math.abs(scrollHeight - entry.height) < 1
+			) {
+				this._programmaticEchoes.splice(i, 1);
+				return;
+			}
 		}
-		// Change 3 — capture pre-recompute value so a transient scroll-up that
-		// flips `_stickToBottom` false in the next line still gets honoured by
-		// the `state_update` branch.
-		this._wasAtBottomAtLastUserScroll = this._stickToBottom;
-		// Stick-to-bottom grace: 10% of viewport height (min 10 px). If the
-		// user is within that band of the bottom, treat new content as
-		// continued tailing rather than "they've scrolled up". The 10 px floor
-		// preserves the original HiDPI-jitter tolerance for very short viewports.
-		const stickGracePx = Math.max(10, clientHeight * 0.1);
-		const geometricallyAtBottom = scrollHeight - scrollTop - clientHeight < stickGracePx;
-		// During the session-load settle window, browser-emitted scroll events
-		// from the DOM swap (old session content unmounted, new session content
-		// rendering with async markdown / syntax highlighting growth) can
-		// transiently report `scrollTop` lagging behind a freshly-grown
-		// `scrollHeight`. Geometry alone would flip `_stickToBottom` to false,
-		// breaking the subsequent ResizeObserver re-pin and leaving the user
-		// stranded mid-scroll. Only allow geometry-driven false during the
-		// settle window — explicit user intent (wheel/touchstart/keydown)
-		// continues to release stickiness via _handleUserIntent.
-		if (this._settleWindowActive && !geometricallyAtBottom) {
-			// Don't change _stickToBottom — keep it true so the observer re-pins.
-		} else {
-			this._stickToBottom = geometricallyAtBottom;
-		}
-		// Change 5 — Jump-to-bottom visibility (more than half a screen from bottom).
-		let nextShow = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
-		// Honour the post-click suppression window: the user just asked us to
-		// jump, so we don't want a transient height-growth race to re-show the
-		// button before the rAF/ResizeObserver re-pins to the bottom.
-		if (nextShow && performance.now() < this._suppressJumpUntilTs) {
-			nextShow = false;
-		}
+
+		// Not an echo. Recompute jump-button visibility from geometry. Geometry
+		// must NOT mutate `_stickToBottom`; that flag is owned exclusively by
+		// the user-gesture listeners and programmatic restore points.
+		const nextShow = scrollHeight - scrollTop - clientHeight > clientHeight * 0.5;
 		if (nextShow !== this._showJumpToBottom) {
 			this._showJumpToBottom = nextShow;
 			this.requestUpdate();
 		}
+		// While sticking, a non-echo scroll event means the browser moved us
+		// somewhere we don't want to be — typically a stale scroll event
+		// queued from a programmatic write whose echo was overwritten by a
+		// later write, or a layout-induced clamp from elsewhere on the page.
+		// Re-pin asynchronously (next rAF) so the synchronous scroll handler
+		// returns first; the resulting write goes through `_pinIfSticking()`
+		// which pushes a fresh echo into the ring. User-gesture listeners
+		// (`wheel`/`touchstart`/`keydown`) flip `_stickToBottom = false` BEFORE
+		// the scroll event fires (Chromium dispatches gesture events before
+		// the resulting scroll), so this branch never runs for real user
+		// scroll-ups.
+		if (this._stickToBottom && nextShow) {
+			requestAnimationFrame(() => this._pinIfSticking());
+		}
 	};
 
 	/** Any direct user-input gesture on the scroll container immediately
-	 *  releases the stickiness. We don't second-guess the user via geometry. */
+	 *  releases the stickiness. Geometry alone never flips the flag. */
 	private _handleUserIntent = () => {
 		this._stickToBottom = false;
-		// Change 3 — explicit user intent clears the carry-over.
-		this._wasAtBottomAtLastUserScroll = false;
-		// Change 4 — explicit user intent cancels the settle window immediately.
-		this._settleWindowActive = false;
 	};
 
 	private _handleScrollKeydown = (e: KeyboardEvent) => {
@@ -761,28 +711,19 @@ export class AgentInterface extends LitElement {
 			case "ArrowDown":
 			case "End":
 				this._stickToBottom = false;
-				// Change 3 — explicit user intent clears the carry-over.
-				this._wasAtBottomAtLastUserScroll = false;
-				// Change 4 — explicit user intent cancels the settle window immediately.
-				this._settleWindowActive = false;
 				break;
 		}
 	};
 
-	// Change 5 — Jump-to-bottom click handler.
+	/** Jump-to-bottom click handler. Programmatic restore point: forces
+	 *  `_stickToBottom = true` and pins immediately. */
 	private _handleJumpToBottomClick = () => {
-		// Open a 600 ms suppression window during which _handleScroll cannot
-		// re-show the button. _scrollToBottom + the size-observer's stick-to-
-		// bottom re-pin both run within that window, so by the time it expires
-		// the geometry is genuinely at the bottom and `nextShow` evaluates false.
-		this._suppressJumpUntilTs = performance.now() + 600;
-		this._scrollToBottom();
 		this._stickToBottom = true;
-		this._wasAtBottomAtLastUserScroll = true;
 		if (this._showJumpToBottom) {
 			this._showJumpToBottom = false;
 			this.requestUpdate();
 		}
+		this._pinIfSticking();
 	};
 
 	public async sendMessage(input: string, attachments?: Attachment[]) {
