@@ -773,6 +773,20 @@ The per-project "+ goal" button on each project row bypasses the popover — the
 - **Search**: The `_archivedBySearch` / `_ensureArchivedForSearch` auto-open behaviour is unchanged — a search match inside any archived item still forces `state.showArchived` on globally. When a search query is active, each project's subsection only renders matching items; projects with no matches render no Archived subsection at all.
 - **Collapsed sidebar**: `renderCollapsedSidebar` is unchanged — archived goals continue to render inline with live goals in the icon-only rail.
 
+#### Sub-goal sidebar placement
+
+Sub-goals stamped with `spawnedBySessionId` (a `PersistedGoal` field — see [docs/goals-workflows-tasks.md — Nested goals](goals-workflows-tasks.md#nested-goals-phase-1-data-model)) render INSIDE the spawning team-lead's expanded block in the sidebar, not at the parent-goal forest level. Collapsing the team-lead chevron hides workers AND spawned sub-goals as one unit — matches the "this team-lead OWNS this work" mental model.
+
+Render invariants live in `src/app/render-helpers.ts` and `src/app/sidebar.ts`:
+
+- **Live team-leads** — `renderTeamGroup` (`src/app/render-helpers.ts`) renders any goal where `parentGoalId === goal.id && spawnedBySessionId === teamLead.id` inside the team-lead's `tlExpanded` block, recursively via `renderGoalGroup` so the sub-goal keeps its own chevron, descendant-count badge, and team rendering. Each row carries `data-testid="sidebar-spawned-child-row"` and a `data-spawned-by` attribute for E2E tests.
+- **Archived team-leads of a still-live parent** — `renderLeadWithMembers` (same file, in the archived-leads block) renders an archived lead's stamped archived sub-goals via `renderSpawnedChildGoalRow`. The chevron shows when there's any content (members OR sub-goals); the `hasContent` signal rolls both axes together.
+- **Forest exclusion** — `forestInput` in `src/app/sidebar.ts` excludes goals whose `spawnedBySessionId` is in the `teamLeadIdsAttributable` set. That set covers BOTH live team-leads (`role === "team-lead" && status !== "terminated"` from `state.gatewaySessions`) AND archived team-leads when `state.showArchived` is on (`state.archivedSessions`). A sub-goal falls back to the parent-forest level only when the spawning session is fully gone — never unreachable.
+
+**Boot-time backfill for legacy records.** `GoalManager.backfillSpawnedBySessionId(teamStore, sessionStore?)` (in `src/server/agent/goal-manager.ts`) walks every sub-goal (live or archived) missing the field and stamps it. Lookup precedence: (1) `teamStore.get(parentGoalId)?.teamLeadSessionId`; (2) `SessionStore` fallback — sessions with `role === "team-lead" && (teamGoalId === parentGoalId || goalId === parentGoalId)`; if exactly one such session exists (live OR archived), stamp it. Multi-team-lead parents stay ambiguous and are skipped. Idempotent — only writes when the field is absent. Per-goal try/catch keeps boot resilient (Lesson 4.11 endless-restart guard). Wired in `src/server/server.ts` immediately after `restoreTeams`, alongside `backfillCompleteState`. Each stamp logs `[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal <gid>`.
+
+**Header source for new spawns.** `defaults/tools/children/extension.ts` sets `X-Bobbit-Spawning-Session: <sessionId>` on every children-tools API call. `POST /api/goals/:id/spawn-child` reads the header (falls back to `body.spawnedBySessionId`) — header wins so a forwarded request can't lie about the spawning agent — and stamps it in the same atomic `updateGoal` that already stamps `spawnedFromPlanId` immediately after `createGoal` (Lesson 4.1 preserved — no extra await between createGoal and the stamp).
+
 ### REST API
 
 | Method | Path | Description |

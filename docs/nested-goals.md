@@ -53,6 +53,8 @@ parallel throughput, and a single PR for review at the top.
                   │   + maxConcurrentChildren?: number │
                   │   + acceptanceCriteria?: string[]  │
                   │   + spawnedFromPlanId?: string     │
+                  │   + suggestedRole?: string         │
+                  │   + spawnedBySessionId?: string    │
                   │   + paused?: boolean               │
                   │   + replanCount?: number           │
                   └────────────────────────────────────┘
@@ -307,6 +309,61 @@ cascade-policy authority:
 **409 `{code: "HAS_DESCENDANTS", count}`** when `cascade=false` and
 descendants exist, so the UI can prompt for confirmation.
 
+`POST /api/goals/:id/team/teardown?cascade=true|false` mirrors the same
+contract for stopping a parent's team. With `cascade=false` (the
+default), the server pre-flights the descendant tree (BFS via
+`parentGoalId`, skips archived) and returns
+**409 `{code: "HAS_DESCENDANT_TEAMS", count, descendants:[{id,title}]}`**
+if any descendant goal still has a live team. With `cascade=true`, walks
+descendants depth-first, tears down each team, then the parent;
+returns `{ok: true, toreDown: N, errors: []}`. Each teardown is
+best-effort (`getTeamState` guard + try/catch) so one missing/error team
+doesn't stop the rest. The client wrapper `teardownTeamWithDialog(goalId)`
+in `src/app/api.ts` pre-flights `cascade=false` and on 409 opens
+`showStopTeamDialog` (the same pattern as showArchive/Pause/Resume) for
+explicit confirmation. Wired into the dashboard's `handleEndTeam`.
+
+## Sub-goal sidebar placement
+
+Sub-goals stamped with `spawnedBySessionId` render INSIDE the spawning
+team-lead's expanded block in the sidebar — collapsing that team-lead
+hides both its workers AND the sub-goals it spawned, as one unit. The
+test-id is `sidebar-spawned-child-row` and each row carries a
+`data-spawned-by` attribute pointing back at the spawning session.
+
+Render sites (in `src/app/render-helpers.ts`):
+
+- `renderTeamGroup` — for **live** team-leads: any goal where
+  `parentGoalId === goal.id && spawnedBySessionId === teamLead.id` is
+  rendered inside the `tlExpanded` block alongside delegate workers and
+  archived members. Reuses `renderGoalGroup` recursively so the sub-goal
+  has its own chevron, descendant-count badge, and team rendering.
+- `renderLeadWithMembers` — for **archived** team-leads of a still-live
+  parent goal: the archived lead's expanded block renders its stamped
+  archived sub-goals via `renderSpawnedChildGoalRow`. The chevron shows
+  whenever there's any content (members OR sub-goals).
+
+The parent-level forest in `src/app/sidebar.ts` excludes goals that are
+already being rendered under an attributable team-lead session — its
+`teamLeadIdsAttributable` set covers BOTH live team-leads and archived
+team-leads (the latter only when `state.showArchived` is on). Sub-goals
+fall back to parent-forest level only when the spawning session is fully
+gone (terminated AND not in archived view) — never unreachable.
+
+**Boot-time backfill** for legacy records:
+`GoalManager.backfillSpawnedBySessionId(teamStore, sessionStore?)` walks
+every sub-goal (live or archived) missing the field and stamps it from
+the parent's persisted team-lead session id. Lookup precedence: (1) the
+parent's `TeamStore` entry's `teamLeadSessionId`; (2) `SessionStore`
+fallback — sessions with `role === "team-lead"` and
+`teamGoalId === parentGoalId` (or `goalId === parentGoalId`); a single
+match wins, multiple matches are ambiguous and skipped. Idempotent
+(only writes when the field is absent), per-goal try/catch (Lesson 4.11
+endless-restart guard). Wired in `src/server/server.ts` immediately
+after `restoreTeams`, alongside `backfillCompleteState`. Logs
+`[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal
+<gid>` per stamped goal.
+
 ## Cost rollup
 
 Parent-goal dashboards walk the descendant tree (via the `rootGoalId`
@@ -399,6 +456,7 @@ each event with a 250ms trailing-edge throttle to avoid layout thrash.
 | POST | `/api/goals/:id/mutation/:requestId/decision` | `{ decision: "approve" \| "reject" }` | 404 `REQUEST_NOT_FOUND`. Bumps `replanCount`; auto-pauses past 5. |
 | PATCH | `/api/goals/:id/policy` | `{ divergencePolicy?, maxConcurrentChildren? }` | Root-only fields. |
 | DELETE | `/api/goals/:id?cascade=true\|false` | (query) | 422 `CASCADE_REQUIRED`, 409 `HAS_DESCENDANTS` when `cascade=false`. |
+| POST | `/api/goals/:id/team/teardown?cascade=true\|false` | (query) | 409 `HAS_DESCENDANT_TEAMS` when `cascade=false` and descendants have live teams; `cascade=true` walks descendants depth-first and tears down each team. Best-effort per-goal: returns `{ok, toreDown, errors[]}`. |
 | GET | `/api/goals/:id/tree-cost` | — | BFS rollup; cache keyed by `(rootGoalId, costGeneration)`. |
 
 WS broadcasts: `goal_created` (carries `parentGoalId`), `goal_state_changed`,

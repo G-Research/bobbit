@@ -291,6 +291,19 @@ Debugging checklist:
 - Children appear briefly then vanish? The client must merge (not replace) archived sessions — check `fetchArchivedSessionsPaginated()` uses additive merge on first page, not `state.archivedSessions = []`
 - Edge case: goal loaded via "Load more goals" has no children? The on-demand fallback in `renderGoalGroup` should fire a one-shot fetch to `GET /api/goals/:id/team/agents?include=archived`. Check the `_goalChildrenFetched` guard Set isn't stale — it's cleared by `clearGoalChildrenFetchedCache()` when toggling archived off
 
+## Sub-goal renders at parent-forest level instead of nested under its team-lead
+
+Symptom: a sub-goal that was spawned by a team-lead session shows up at the top-level goal forest in the sidebar instead of inside the spawning team-lead's expanded block. Collapsing the team-lead doesn't hide it.
+
+Diagnostic chain:
+
+1. **Check the persisted field on disk.** Inspect the goal's record in `.bobbit/state/<projectId>/goals.json` (or the per-project equivalent). If `spawnedBySessionId` is `undefined`, the boot-time backfill couldn't find a unique team-lead candidate — either the parent has multiple team-lead sessions (ambiguous, intentionally skipped to avoid misattribution), or no team-lead session at all. Multi-team-lead parents render their sub-goals at parent-forest level by design.
+2. **Confirm the boot backfill ran.** `[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal <gid>` should appear in the gateway boot logs once per stamped sub-goal. If you see `[goal-manager] backfillSpawnedBySessionId failed for project <id>` or no log line at all for a goal you expected to be stamped, the backfill is wired in `src/server/server.ts` after `restoreTeams` — verify both `teamStore` and `sessionStore` are passed (`backfillSpawnedBySessionId(teamStore, sessionStore)`); without the second arg, archived team-leads of an archived parent are unreachable.
+3. **For new spawns, confirm the header is being sent.** `defaults/tools/children/extension.ts` must include `"X-Bobbit-Spawning-Session": sessionId` in the `api()` helper's headers. Server reads the header in `POST /api/goals/:id/spawn-child` and falls back to `body.spawnedBySessionId`; header wins. If the field is `undefined` on a freshly-spawned child, either the extension regressed or the call went through a path other than the children-tools extension (e.g. a manual `curl` without the header).
+4. **Render-side**: confirm the rendered row has `data-testid="sidebar-spawned-child-row"` with a `data-spawned-by` attribute matching the team-lead session id. Live team-leads route through `renderTeamGroup`; archived team-leads of a live parent route through `renderLeadWithMembers` (`src/app/render-helpers.ts`). The forest-exclusion set in `src/app/sidebar.ts::forestInput` MUST include the team-lead's session id — the set covers live team-leads and (when `state.showArchived` is on) archived team-leads. If `showArchived` is off and the spawning lead is archived, the sub-goal correctly falls back to parent-forest level — that's the "spawning session is fully gone" branch, not a bug.
+
+See [docs/internals.md — Sub-goal sidebar placement](internals.md#sub-goal-sidebar-placement) and [docs/nested-goals.md — Sub-goal sidebar placement](nested-goals.md#sub-goal-sidebar-placement).
+
 ## Paginated archives
 
 - Cursor based on `archivedAt` timestamp
