@@ -97,7 +97,6 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Archived session footer model** → `buildArchivedStateData()` in `src/server/ws/handler.ts` sent on archived `auth_ok` (and reused by `get_state`). Includes model + `imageGenerationModel` so the footer shows the real model on first connect. UI hook: `data-testid="footer-model-id"`. See [docs/internals.md — Archived-session state push on auth](docs/internals.md#archived-session-state-push-on-auth).
 - **Change message rendering** → `src/ui/components/Messages.ts` (standard), `message-renderer-registry.ts` (custom).
 - **Modify message transcript ordering** → all transcript mutations route through `reduce(state, action)` in `src/app/message-reducer.ts`. Never push directly into `state.messages`. See [docs/design/unified-message-ordering-reducer.md](docs/design/unified-message-ordering-reducer.md).
-- **Modify the PWA resume bootstrap / persisted UI snapshot** → `src/app/ui-snapshot.ts`, `src/app/main.ts` (`initApp` synchronous hydrate + `data-rendered` attr), `index.html` (inline skeleton + `__bobbitPrepaint` + watchdog), `public/sw.js` (shell SWR + 4 s nav timeout), `src/app/remote-agent.ts` (pageshow/freeze/resume + heartbeat). See [docs/design/pwa-resume.md](docs/design/pwa-resume.md).
 - **Modify proposal panel streaming UX** → flag in `state.proposalStreamingByTag`; scroll preserved via `reconcileFollowTail` in `src/app/follow-tail.ts`.
 - **Git-status widget** → `src/ui/components/GitStatusWidget.ts`, `src/server/skills/git-status-native.ts`. See [docs/design/git-status-widget-reliability.md](docs/design/git-status-widget-reliability.md).
 - **Large content truncation** → `truncate-large-content.ts` (>32KB). Lazy-load via `GET /api/sessions/:id/tool-content/:mi/:bi`.
@@ -157,10 +156,6 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **"Open proposal" on old card destroys later edits** — check for `__proposal_rev_v1__:<n>` marker; legacy archived sessions intentionally fall back.
 - **Proposal panel doesn't update after `edit_proposal`** — check WS `proposal_update` frame and structured error code.
 - **Stale messages on session navigate / dup messages / out-of-order widgets** — handled by reducer in `src/app/message-reducer.ts`.
-- **Blank/white screen on iOS PWA resume** — bootstrap blocked on `waitForGateway` + WS connect; resolved by snapshot hydrate + Page Lifecycle hooks. See [docs/design/pwa-resume.md](docs/design/pwa-resume.md).
-- **`Failed to load module script` / `MIME type of text/html`** — SW intercepting `/assets/*` (must be bypassed) or SPA fallback returning `index.html` for an asset URL. See [docs/design/pwa-resume.md](docs/design/pwa-resume.md).
-- **Skeleton overlay intercepts clicks on settings / non-session pages** — hide-trigger must be `data-rendered` (every Lit page), not `data-connected` (session pages only); `pointer-events: none` is the safety net. See [docs/design/pwa-resume.md](docs/design/pwa-resume.md).
-- **`pageshow` handler / heartbeat-gap stale-streaming bypass** — `_onPageShow` force-closes WS + reconnects on iOS bfcache restore; >5 min heartbeat gap bypasses `_hadDisconnectSinceLastSnapshot` for one resync. See [docs/design/pwa-resume.md](docs/design/pwa-resume.md).
 - **Continue-Archived button missing** — only renders when archived AND no `goalId` AND no `delegateOf` AND project still registered.
 - **Continued session missing earlier transcript** — confirm cloned `.jsonl` at `agentSessionFile` path; worktree-backed sources are rebased onto worktree-cwd slug-dir in `executeWorktreeAsync`.
 - **Archived session footer shows wrong model** — archived `auth_ok` branch must push `state` frame via `buildArchivedStateData()`.

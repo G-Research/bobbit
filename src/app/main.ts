@@ -14,7 +14,6 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
-import { loadSnapshot, scheduleSave } from "./ui-snapshot.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
 let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
@@ -327,46 +326,6 @@ async function initApp() {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
-	// ------------------------------------------------------------------
-	// SYNCHRONOUS SNAPSHOT HYDRATE — first paint must happen before any
-	// `await`. We project the persisted snapshot onto `state` so the very
-	// first renderApp() call below paints the last-known view, even if
-	// the gateway is unreachable / iOS just restored a process snapshot.
-	// Reconciliation with fresh server data flows through the existing
-	// reducer survivor filter (see remote-agent.ts → `"snapshot"` action).
-	// ------------------------------------------------------------------
-	try {
-		const snap = loadSnapshot();
-		if (snap) {
-			if (Array.isArray(snap.projects)) state.projects = snap.projects;
-			if (typeof snap.activeProjectId === "string" || snap.activeProjectId === null) {
-				state.activeProjectId = snap.activeProjectId;
-			}
-			if (Array.isArray(snap.goals)) state.goals = snap.goals;
-			if (Array.isArray(snap.archivedSessions)) state.archivedSessions = snap.archivedSessions;
-			if (typeof snap.selectedSessionId === "string") {
-				state.selectedSessionId = snap.selectedSessionId;
-			}
-			// Connection status from snapshot is informational — actual WS
-			// state is recomputed once the network call lands. Showing the
-			// last-known status ("connected") avoids a brief disconnected flash.
-			if (typeof snap.activeSession?.connectionStatus === "string") {
-				state.connectionStatus = snap.activeSession.connectionStatus;
-			}
-			// Any saved creds → assume we'll be authenticated; non-authed paint
-			// is reserved for the genuinely-no-creds case below.
-			const preUrl = localStorage.getItem(GW_URL_KEY);
-			const preToken = localStorage.getItem(GW_TOKEN_KEY);
-			if (preUrl && preToken) state.appView = "authenticated";
-		}
-	} catch { /* snapshot hydrate must never crash bootstrap */ }
-
-	// Trigger the inline-skeleton prepaint defined in index.html so the
-	// last-rendered transcript text shows up even when the prior snapshot
-	// was written by THIS bootstrap (i.e. same-URL navigations where the
-	// inline script's first invocation ran with empty localStorage).
-	try { (window as any).__bobbitPrepaint?.(); } catch { /* non-fatal */ }
-
 	// Palette is loaded from server preferences after gateway auth (see below)
 
 	state.chatPanel = new ChatPanel();
@@ -404,25 +363,11 @@ async function initApp() {
 	}
 
 	// If we have credentials, show "starting" immediately instead of
-	// "disconnected" — the gateway may just be booting up. With a hydrated
-	// snapshot we go directly to "authenticated" view (the cached UI is
-	// already rendered); only fall back to "gateway-starting" when there's
-	// no snapshot to paint.
-	if (savedUrl && savedToken && state.appView !== "authenticated") {
+	// "disconnected" — the gateway may just be booting up.
+	if (savedUrl && savedToken) {
 		state.appView = "gateway-starting";
 	}
 	renderApp();
-	// Mark the app container as having been rendered by Lit — the inline
-	// watchdog in index.html cancels its 3 s / 10 s escalation when this
-	// attribute appears.
-	try {
-		const appEl = document.getElementById("app");
-		if (appEl) appEl.setAttribute("data-rendered", "true");
-	} catch { /* non-fatal */ }
-
-	// Persist the initial state immediately so a hard reload before any
-	// further mutation still has a snapshot to hydrate from.
-	try { scheduleSave(state); } catch { /* non-fatal */ }
 
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
