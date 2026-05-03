@@ -246,24 +246,46 @@ const goalDraft = createDraftManager({
 		goalAssistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
+		let dismissed = false;
 		if (draft.activeGoalProposal) {
-			state.activeProposals.goal = {
-				sessionId: _sessionId,
-				fields: draft.activeGoalProposal as Record<string, unknown>,
-				streaming: false,
-				rev: 1,
-			};
+			const fields = draft.activeGoalProposal as Record<string, unknown>;
+			if (isProposalDismissedTyped(_sessionId, "goal", fields)) {
+				// User previously dismissed this proposal — keep the draft on disk
+				// (so future edit_proposal events can rehydrate it) but don't
+				// re-open the panel or re-populate the proposal-mirror preview
+				// fields on reload.
+				delete state.activeProposals.goal;
+				dismissed = true;
+			} else {
+				state.activeProposals.goal = {
+					sessionId: _sessionId,
+					fields,
+					streaming: false,
+					rev: 1,
+				};
+			}
 		} else {
 			delete state.activeProposals.goal;
 		}
-		state.previewTitle = draft.previewTitle ?? "";
-		state.previewSpec = draft.previewSpec ?? "";
-		state.previewCwd = draft.previewCwd ?? "";
-		state.previewProjectId = draft.previewProjectId ?? "";
-		state.previewTitleEdited = draft.previewTitleEdited ?? false;
-		state.previewSpecEdited = draft.previewSpecEdited ?? false;
-		state.previewCwdEdited = draft.previewCwdEdited ?? false;
-		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		if (dismissed) {
+			state.previewTitle = "";
+			state.previewSpec = "";
+			state.previewCwd = draft.previewCwd ?? "";
+			state.previewProjectId = draft.previewProjectId ?? "";
+			state.previewTitleEdited = false;
+			state.previewSpecEdited = false;
+			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.assistantHasProposal = false;
+		} else {
+			state.previewTitle = draft.previewTitle ?? "";
+			state.previewSpec = draft.previewSpec ?? "";
+			state.previewCwd = draft.previewCwd ?? "";
+			state.previewProjectId = draft.previewProjectId ?? "";
+			state.previewTitleEdited = draft.previewTitleEdited ?? false;
+			state.previewSpecEdited = draft.previewSpecEdited ?? false;
+			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		}
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
 	},
 });
@@ -298,27 +320,48 @@ const roleDraft = createDraftManager({
 		roleAssistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
+		let dismissed = false;
 		if (draft.activeRoleProposal) {
-			state.activeProposals.role = {
-				sessionId: _sessionId,
-				fields: draft.activeRoleProposal as Record<string, unknown>,
-				streaming: false,
-				rev: 1,
-			};
+			const fields = draft.activeRoleProposal as Record<string, unknown>;
+			if (isProposalDismissedTyped(_sessionId, "role", fields)) {
+				delete state.activeProposals.role;
+				dismissed = true;
+			} else {
+				state.activeProposals.role = {
+					sessionId: _sessionId,
+					fields,
+					streaming: false,
+					rev: 1,
+				};
+			}
 		} else {
 			delete state.activeProposals.role;
 		}
-		state.rolePreviewName = draft.previewName ?? "";
-		state.rolePreviewLabel = draft.previewLabel ?? "";
-		state.rolePreviewPrompt = draft.previewPrompt ?? "";
-		state.rolePreviewTools = draft.previewTools ?? "";
-		state.rolePreviewAccessory = draft.previewAccessory ?? "none";
-		state.rolePreviewNameEdited = draft.previewNameEdited ?? false;
-		state.rolePreviewLabelEdited = draft.previewLabelEdited ?? false;
-		state.rolePreviewPromptEdited = draft.previewPromptEdited ?? false;
-		state.rolePreviewToolsEdited = draft.previewToolsEdited ?? false;
-		state.rolePreviewAccessoryEdited = draft.previewAccessoryEdited ?? false;
-		state.assistantHasProposal = draft.hasReceivedRoleProposal ?? false;
+		if (dismissed) {
+			state.rolePreviewName = "";
+			state.rolePreviewLabel = "";
+			state.rolePreviewPrompt = "";
+			state.rolePreviewTools = "";
+			state.rolePreviewAccessory = "none";
+			state.rolePreviewNameEdited = false;
+			state.rolePreviewLabelEdited = false;
+			state.rolePreviewPromptEdited = false;
+			state.rolePreviewToolsEdited = false;
+			state.rolePreviewAccessoryEdited = false;
+			state.assistantHasProposal = false;
+		} else {
+			state.rolePreviewName = draft.previewName ?? "";
+			state.rolePreviewLabel = draft.previewLabel ?? "";
+			state.rolePreviewPrompt = draft.previewPrompt ?? "";
+			state.rolePreviewTools = draft.previewTools ?? "";
+			state.rolePreviewAccessory = draft.previewAccessory ?? "none";
+			state.rolePreviewNameEdited = draft.previewNameEdited ?? false;
+			state.rolePreviewLabelEdited = draft.previewLabelEdited ?? false;
+			state.rolePreviewPromptEdited = draft.previewPromptEdited ?? false;
+			state.rolePreviewToolsEdited = draft.previewToolsEdited ?? false;
+			state.rolePreviewAccessoryEdited = draft.previewAccessoryEdited ?? false;
+			state.assistantHasProposal = draft.hasReceivedRoleProposal ?? false;
+		}
 		state.assistantTab = draft.roleAssistantTab ?? "chat";
 	},
 });
@@ -343,19 +386,26 @@ const projectDraft = createDraftManager({
 		assistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
+		let dismissed = false;
 		if (draft.activeProjectProposal) {
 			const p = draft.activeProjectProposal as any;
-			state.activeProposals.project = {
-				sessionId: p.sessionId,
-				fields: p.fields ?? {},
-				mode: p.mode,
-				streaming: typeof p.streaming === "boolean" ? p.streaming : false,
-				rev: typeof p.rev === "number" ? p.rev : 1,
-			};
+			const fields = (p.fields ?? {}) as Record<string, unknown>;
+			if (isProposalDismissedTyped(_sessionId, "project", fields)) {
+				delete state.activeProposals.project;
+				dismissed = true;
+			} else {
+				state.activeProposals.project = {
+					sessionId: p.sessionId,
+					fields,
+					mode: p.mode,
+					streaming: typeof p.streaming === "boolean" ? p.streaming : false,
+					rev: typeof p.rev === "number" ? p.rev : 1,
+				};
+			}
 		} else {
 			delete state.activeProposals.project;
 		}
-		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		state.assistantHasProposal = dismissed ? false : (draft.hasReceivedProposal ?? false);
 		state.assistantTab = draft.assistantTab ?? "chat";
 	},
 });
@@ -1063,6 +1113,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Slice E: state.activeProposals.goal is owned by the unified
 				// onProposal callback (which runs before us with mergeFields).
 				// Legacy callback only handles form-mirror state + summarisation.
+				// First-emit dismissal short-circuit — if the unified callback
+				// just bailed because the user previously dismissed an identical
+				// proposal, don't re-populate the form-mirror preview fields.
+				if (
+					!state.activeProposals.goal &&
+					isProposalDismissedTyped(sessionId, "goal", proposal as unknown as Record<string, unknown>)
+				) {
+					return;
+				}
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
 				if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
@@ -1105,6 +1164,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onRoleProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			// Slice E: state.activeProposals.role owned by unified onProposal.
+			// First-emit dismissal short-circuit — mirror goal handling so a
+			// rehydrate of a dismissed role proposal doesn't repopulate form
+			// fields.
+			if (
+				!state.activeProposals.role &&
+				isProposalDismissedTyped(sessionId, "role", proposal as unknown as Record<string, unknown>)
+			) {
+				return;
+			}
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
 			if (!state.rolePreviewLabelEdited) state.rolePreviewLabel = proposal.label;
 			if (!state.rolePreviewPromptEdited) state.rolePreviewPrompt = proposal.prompt;
