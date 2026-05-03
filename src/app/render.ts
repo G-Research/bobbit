@@ -764,16 +764,13 @@ interface GoalFormConfig {
 	inlineWorkflowYaml?: string;
 	inlineWorkflowYamlError?: string;
 	onInlineWorkflowYamlChange?: (e: Event) => void;
-	// Inline-roles editor — mirrors the inline-workflow textarea pattern.
-	// Always rendered when `onInlineRolesYamlChange` is provided so users
-	// can ADD ephemeral roles even when the agent didn't seed any. The
-	// `inlineRolesPreview` parsed view shows above the textarea (scrollable;
-	// max-height capped) so reviewers can scan a long list without
-	// expanding the YAML.
+	// Inline-roles editor — mirrors the inline-workflow textarea pattern
+	// exactly: a single collapsible "Advanced: paste inline roles YAML"
+	// section with a textarea bound to a module-level cache. No row preview,
+	// for consistency with inline-workflow.
 	inlineRolesYaml?: string;
 	inlineRolesYamlError?: string;
 	onInlineRolesYamlChange?: (e: Event) => void;
-	inlineRolesPreview?: Record<string, { name?: string; label?: string; promptTemplate?: string; accessory?: string }>;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -823,15 +820,16 @@ function renderGoalForm(config: GoalFormConfig) {
 						})}
 					</div>
 				</div>
-				${_cachedWorkflows.length > 0 ? (() => {
-					// When an inline workflow is parsed and active, the dropdown
-					// choice is overridden — the goal record snapshots
-					// inlineWorkflow directly via POST /api/goals body.workflow.
-					// Surface that to the user with a synthetic "Inline (N gates)"
-					// option pinned at the top, selected and disabled. Clearing
-					// the inline YAML textarea re-enables the dropdown.
+				${(() => {
+					// Render the workflow row when EITHER stored workflows are
+					// loaded OR an inline workflow is active. Without this
+					// disjunction the row vanished entirely on projects that
+					// don't have stored workflows yet — even though the agent
+					// had supplied an inline workflow that's the actual source
+					// of truth for this goal.
 					const inlineYaml = (config.inlineWorkflowYaml ?? "").trim();
 					const inlineActive = inlineYaml.length > 0 && !config.inlineWorkflowYamlError;
+					if (_cachedWorkflows.length === 0 && !inlineActive) return "";
 					let inlineGateCount: number | undefined;
 					if (inlineActive) {
 						try {
@@ -859,7 +857,7 @@ function renderGoalForm(config: GoalFormConfig) {
 							</select>
 						</div>
 					`;
-				})() : ""}
+				})()}
 			</div>
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
@@ -1011,47 +1009,23 @@ function renderGoalForm(config: GoalFormConfig) {
 				</div>
 			</details>
 		` : ""}
-		${config.onInlineRolesYamlChange !== undefined ? (() => {
-			const previewEntries = config.inlineRolesPreview ? Object.entries(config.inlineRolesPreview) : [];
-			const hasYaml = (config.inlineRolesYaml ?? "").trim() !== "";
-			const hasContent = previewEntries.length > 0 || hasYaml;
-			return html`
-				<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-roles" ?open=${hasContent}>
-					<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Inline roles (ephemeral, scoped to this goal)</summary>
-					<div class="mt-2 flex flex-col gap-2">
-						${previewEntries.length > 0 ? html`
-							<div class="flex flex-col gap-2 max-h-[260px] overflow-y-auto pr-1" data-testid="goal-inline-roles-preview-scroll">
-								${previewEntries.map(([name, role]) => html`
-									<div class="rounded-md border border-border p-2 flex flex-col gap-1" data-testid="goal-inline-role-row" data-role-name=${name}>
-										<div class="flex items-center gap-2">
-											<span class="text-xs font-mono text-foreground">${name}</span>
-											${role.label ? html`<span class="text-xs text-muted-foreground">— ${role.label}</span>` : ""}
-											${role.accessory && role.accessory !== "none" ? html`<span class="text-[10px] text-muted-foreground/80 ml-auto">${role.accessory}</span>` : ""}
-										</div>
-										${role.promptTemplate ? html`
-											<div class="text-[11px] text-muted-foreground/80 line-clamp-2 font-mono whitespace-pre-wrap" data-testid="goal-inline-role-prompt">${role.promptTemplate.slice(0, 200)}${role.promptTemplate.length > 200 ? "…" : ""}</div>
-										` : ""}
-									</div>
-								`)}
-							</div>
-						` : html`
-							<div class="text-[11px] text-muted-foreground/70 italic" data-testid="goal-inline-roles-empty">No inline roles yet — add a YAML mapping below to create one for this goal only.</div>
-						`}
-						<textarea
-							class="w-full min-h-[120px] max-h-[300px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-							placeholder="# Optional: add ephemeral role(s) for this goal&#10;# Format: roleName: { name, label, promptTemplate, ... }&#10;synthesis-reviewer:&#10;  name: synthesis-reviewer&#10;  label: Synthesis Reviewer&#10;  promptTemplate: |&#10;    You are a synthesis reviewer for this audit.&#10;  accessory: magnifying-glass"
-							.value=${config.inlineRolesYaml ?? ""}
-							data-testid="goal-inline-roles-yaml-textarea"
-							@input=${config.onInlineRolesYamlChange}
-						></textarea>
-						${config.inlineRolesYamlError ? html`
-							<div class="text-[11px] text-destructive" data-testid="goal-inline-roles-yaml-error">${config.inlineRolesYamlError}</div>
-						` : ""}
-						<div class="text-[10px] text-muted-foreground/60 italic">Tip: an agent can also propose roles via <code class="text-foreground">propose_goal(inlineRoles: …)</code> or <code class="text-foreground">edit_proposal(type="goal", ...)</code>.</div>
-					</div>
-				</details>
-			`;
-		})() : ""}
+		${config.onInlineRolesYamlChange !== undefined ? html`
+			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-roles" ?open=${(config.inlineRolesYaml ?? "").trim() !== ""}>
+				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Advanced: paste inline roles YAML</summary>
+				<div class="mt-2 flex flex-col gap-1">
+					<textarea
+						class="w-full min-h-[120px] max-h-[300px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+						placeholder="# Optional: ephemeral role(s) for this goal only&#10;# Format: roleName: { name, label, promptTemplate, accessory, toolPolicies, ... }&#10;synthesis-reviewer:&#10;  name: synthesis-reviewer&#10;  label: Synthesis Reviewer&#10;  promptTemplate: |&#10;    You are a synthesis reviewer for this audit.&#10;  accessory: magnifying-glass"
+						.value=${config.inlineRolesYaml ?? ""}
+						data-testid="goal-inline-roles-yaml-textarea"
+						@input=${config.onInlineRolesYamlChange}
+					></textarea>
+					${config.inlineRolesYamlError ? html`
+						<div class="text-[11px] text-destructive" data-testid="goal-inline-roles-yaml-error">${config.inlineRolesYamlError}</div>
+					` : ""}
+				</div>
+			</details>
+		` : ""}
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
@@ -1303,10 +1277,6 @@ function goalPreviewPanel() {
 					_assistantInlineRolesParsed = v.parsed;
 					renderApp();
 				},
-				// Preview reflects the textarea cache when populated (so user
-				// edits show up in the row preview immediately), otherwise the
-				// proposal slot's snapshot from the agent.
-				inlineRolesPreview: (_assistantInlineRolesParsed ?? ((state.activeProposals.goal?.fields as any)?.inlineRoles)) as Record<string, any> | undefined,
 			})}
 		</div>
 	`;
@@ -2715,7 +2685,6 @@ function goalProposalPanel() {
 			_proposalInlineRolesParsed = v.parsed;
 			renderApp();
 		},
-		inlineRolesPreview: (_proposalInlineRolesParsed ?? ((state.activeProposals.goal?.fields as any)?.inlineRoles)) as Record<string, any> | undefined,
 	});
 }
 
