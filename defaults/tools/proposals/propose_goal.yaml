@@ -7,4 +7,20 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: title (required), spec (required), cwd, workflow, options.
+  Required parameters: title (short human-readable goal name — used in branch
+  names and the sidebar), spec (the full specification including acceptance
+  criteria — agents will use this to drive workflow gates and verification).
+
+  Optional parameters: cwd (project path the goal runs against — defaults to
+  the registered project for this session), workflow (workflow id to use; see
+  GET /api/workflows?projectId=... for available workflows; if omitted, the
+  user picks one in the proposal panel), options (object: parentGoalId for
+  nested goals, suggestedRole for hint to the team-lead, maxConcurrentChildren
+  for parent goals, divergencePolicy, etc.).
+
+  Custom workflows: this tool only references existing workflows by id. To
+  CREATE or update a workflow before proposing a goal that uses it, use
+  propose_project with the new workflow inside the `workflows:` field.
+
+  Custom roles: similarly, to define a role referenced by the chosen workflow's
+  verify[] steps, use propose_role first.

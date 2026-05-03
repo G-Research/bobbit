@@ -7,4 +7,19 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: tool (required), action (required), content (required).
+  Required parameters: tool (the tool's name — kebab-case identifier; used by
+  agents to invoke it and by role tool-allowlists), action (one of "create",
+  "update", "delete"), content (the tool's full YAML definition — same shape
+  as defaults/tools/<group>/*.yaml; ignored when action="delete").
+
+  YAML shape for content: `name`, `description`, `summary`, `group`, `provider`
+  (one of: bobbit-extension with extension.ts, MCP server, shell command, etc.),
+  `docs` (free-form parameter docs surfaced to the agent), and the JSON-schema
+  `parameters` block. See defaults/tools/*/*.yaml for examples — propose_*,
+  bash, gate_signal, etc. all share this shape.
+
+  Cascade: tools are project-scoped by default but cascade builtin → server →
+  project. To override a builtin tool's behaviour for one project, propose with
+  action="update" using the builtin's name.
+
+  Mid-session vs setup: this tool works in either mode.
