@@ -143,6 +143,13 @@ export class RemoteAgent {
 	/** Throttle visibility-driven resyncs: Android can fire visibilitychange
 	 *  several times during screen unlock; we only want one resync per wake. */
 	private _lastVisibilityResync = 0;
+	/** Timestamp (Date.now) of the last inbound WS frame. Used by the
+	 *  OPEN-but-dead detector (C1) to decide whether the post-visibility
+	 *  resync got a response. iOS can freeze a TCP socket without notifying
+	 *  the JS layer; readyState stays OPEN but no frames flow. */
+	private _lastInboundFrameAt = 0;
+	/** Pending OPEN-but-dead detector timer. Cleared on any inbound frame. */
+	private _deadSocketTimer: ReturnType<typeof setTimeout> | null = null;
 	/** True if the WS has dropped since the last successful snapshot apply.
 	 *  Visibility-driven resyncs are skipped while this is false and we already
 	 *  have messages in state — the cached state is correct, and a redundant
@@ -197,6 +204,27 @@ export class RemoteAgent {
 				this._hadDisconnectSinceLastSnapshot || this._state.messages.length === 0;
 			if (needsResync) this.requestMessages();
 			this.send({ type: "get_state" });
+			// C1: schedule a 3s deadline for the post-visible resync. If no
+			// inbound frame arrives within that window, the socket is OPEN-but-
+			// dead (iOS-frozen TCP); force-close and let the reconnect path run.
+			const frameAtSchedule = this._lastInboundFrameAt;
+			if (this._deadSocketTimer) clearTimeout(this._deadSocketTimer);
+			this._deadSocketTimer = setTimeout(() => {
+				this._deadSocketTimer = null;
+				if (this._intentionalDisconnect) return;
+				if (this._lastInboundFrameAt > frameAtSchedule) return;
+				// No inbound frame in the last 3s — treat as dead. Closing the
+				// socket triggers onclose → _scheduleReconnect; we also kick
+				// _connectWs immediately so we don't wait out the backoff.
+				try { this.ws?.close(); } catch { /* ignore */ }
+				if (this._reconnectTimer) {
+					clearTimeout(this._reconnectTimer);
+					this._reconnectTimer = null;
+				}
+				this._reconnectAttempt = 0;
+				this._setConnectionStatus("reconnecting");
+				this._connectWs(false).catch(() => { /* onclose schedules retry */ });
+			}, 3000);
 			// Nudge subscribers — after a tab wake, Lit property bindings
 			// driven by this agent may not have been reactive while suspended.
 			// A synthetic state_update forces AgentInterface to re-read state
@@ -449,6 +477,13 @@ export class RemoteAgent {
 			};
 
 			this.ws.onmessage = (evt) => {
+				// C1: any inbound frame proves the socket is alive. Recorded
+				// before JSON parse so even malformed frames count.
+				this._lastInboundFrameAt = Date.now();
+				if (this._deadSocketTimer) {
+					clearTimeout(this._deadSocketTimer);
+					this._deadSocketTimer = null;
+				}
 				let msg: any;
 				try {
 					msg = JSON.parse(evt.data);
@@ -579,6 +614,10 @@ export class RemoteAgent {
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
+		}
+		if (this._deadSocketTimer) {
+			clearTimeout(this._deadSocketTimer);
+			this._deadSocketTimer = null;
 		}
 		if (this._visibilityHandlerBound) {
 			document.removeEventListener("visibilitychange", this._onVisibilityChange);
@@ -949,6 +988,9 @@ export class RemoteAgent {
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					// D1: stamp once the reducer has accepted the snapshot so the
+					// resume timeline can attribute time spent applying messages.
+					mark("messages:applied");
 					// Successful snapshot apply — cached state is now in sync with
 					// the server, so future visibility ticks can short-circuit
 					// `requestMessages()` until the WS drops again.
