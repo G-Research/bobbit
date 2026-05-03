@@ -378,6 +378,23 @@ export function bucketArchivedByProject(
  * `variant: "mobile"` uses larger touch targets and typography.
  */
 /**
+ * Render a sub-goal under its spawning team-lead session. Recursive — the
+ * sub-goal may itself be a parent of further sub-goals (a team-lead it
+ * spawned could spawn its own sub-goals). Reuses `renderGoalGroup` so the
+ * row, chevron, descendant badge, and team rendering match the rest of the
+ * sidebar. Indent is one INDENT step relative to the parent's
+ * tlExpanded container.
+ */
+function renderSpawnedChildGoalRow(child: Goal): TemplateResult {
+	const descendantCount = state.goals.filter(g => !g.archived && g.parentGoalId === child.id).length;
+	return html`
+		<div data-testid="sidebar-spawned-child-row" data-goal-id="${child.id}" data-spawned-by="${child.spawnedBySessionId ?? ""}">
+			${renderGoalGroup(child, { descendantCount })}
+		</div>
+	`;
+}
+
+/**
  * Render the bottom Archived-section's goal list with hierarchy preserved.
  * Pure intra-archived nesting: goals whose parent is also archived nest
  * under that parent; truly orphaned (parent missing or non-archived) goals
@@ -816,6 +833,18 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 		const archivedForLiveLead = state.showArchived
 			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
 			: [];
+		// Sub-goals this team-lead spawned (via goal_spawn_child).
+		// They render INSIDE this team-lead's expanded block so collapsing
+		// the team-lead also hides them — matches the user's mental model
+		// that the team-lead "owns" the sub-goals it created. The badge on
+		// the team-lead row counts agents+archived but NOT spawned sub-goals
+		// (sub-goals already advertise themselves via the parent goal's
+		// descendant-count badge).
+		const spawnedChildren = state.goals.filter(g =>
+			g.parentGoalId === goal.id
+			&& g.spawnedBySessionId === teamLead.id
+			&& (state.showArchived || !g.archived)
+		);
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
 			${tlExpanded ? html`
@@ -825,6 +854,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number })
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}
 					`)}
+					${spawnedChildren.map(child => renderSpawnedChildGoalRow(child))}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}

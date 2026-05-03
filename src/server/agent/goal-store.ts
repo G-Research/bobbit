@@ -87,6 +87,16 @@ export interface PersistedGoal {
 	 * is free to pick a different role if the work demands it.
 	 */
 	suggestedRole?: string;
+	/**
+	 * The team-lead session id that spawned this child via `goal_spawn_child`
+	 * (or the equivalent fallback path). Lets the sidebar render sub-goals
+	 * visually under their spawning team-lead, so collapsing the team-lead
+	 * also hides the sub-goals it spawned (matches the user's mental model
+	 * — "this team-lead owns this work"). Optional — sub-goals created via
+	 * REST without a session context (E2E tests, manual user clicks) leave
+	 * this undefined and render at the parent-goal level as before.
+	 */
+	spawnedBySessionId?: string;
 }
 
 /**
