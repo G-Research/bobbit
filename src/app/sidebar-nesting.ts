@@ -44,6 +44,14 @@ export interface NestedGoalNode {
 	descendantCount: number;
 	/** True when render-depth cap was hit and N children were elided */
 	truncatedChildrenCount?: number;
+	/**
+	 * Short id suffix to disambiguate this node from a sibling that shares
+	 * the same `goal.title`. Set by `buildNestedGoalForest` only when
+	 * collision is detected; undefined for unique siblings. Renderers
+	 * should append ` (<suffix>)` to the displayed title when this field
+	 * is set so users can tell duplicate-titled goals apart at a glance.
+	 */
+	displayTitleSuffix?: string;
 }
 
 export interface BuildNestedTreeOpts {
@@ -77,7 +85,15 @@ function indexGoals(goals: NestableGoal[], opts: ResolvedOpts): BuildIndex {
 	const byId = new Map<string, NestableGoal>();
 	for (const g of visible) byId.set(g.id, g);
 	const childrenByParent = new Map<string | undefined, NestableGoal[]>();
+	// Track which goal ids we've already enqueued for some parent. Prevents
+	// the same id appearing twice in a parent's children list when the input
+	// `goals` has accidental duplicates from a reducer race (Map.set on byId
+	// dedupes the lookup, but the iteration below can still push the same
+	// goal twice into the children list).
+	const enqueued = new Set<string>();
 	for (const g of visible) {
+		if (enqueued.has(g.id)) continue;
+		enqueued.add(g.id);
 		// Promote orphans (parent not in visible set) to top-level.
 		const effectiveParent = g.parentGoalId !== undefined && byId.has(g.parentGoalId)
 			? g.parentGoalId
@@ -86,9 +102,17 @@ function indexGoals(goals: NestableGoal[], opts: ResolvedOpts): BuildIndex {
 		if (list) list.push(g);
 		else childrenByParent.set(effectiveParent, [g]);
 	}
-	// Sort children by createdAt ASC.
+	// Sort children by createdAt ASC, ties broken by id ASC. The tiebreak is
+	// what makes the order stable across renders when two goals share a
+	// createdAt timestamp (e.g. two same-titled siblings created back-to-back
+	// within the same millisecond, or two distinct goals with intentionally
+	// matching createdAt). Without it the user saw same-titled "duplicate"
+	// audits shuffle order between renders.
 	for (const list of childrenByParent.values()) {
-		list.sort((a, b) => a.createdAt - b.createdAt);
+		list.sort((a, b) => {
+			if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+			return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+		});
 	}
 	return { byId, childrenByParent };
 }
@@ -98,7 +122,14 @@ function buildNode(
 	depth: number,
 	idx: BuildIndex,
 	opts: ResolvedOpts,
+	visited: Set<string>,
 ): NestedGoalNode {
+	// Cycle guard — defensive against any data anomaly that would leave
+	// goal X reachable as its own descendant via the parentGoalId chain.
+	// `createGoal`'s cycle prevention should make this unreachable, but
+	// the tree builder must not loop indefinitely on malformed inputs.
+	visited.add(goal.id);
+
 	const directChildren = idx.childrenByParent.get(goal.id) ?? [];
 	const node: NestedGoalNode = {
 		goal,
@@ -106,18 +137,57 @@ function buildNode(
 		children: [],
 		descendantCount: 0,
 	};
-	if (directChildren.length === 0) return node;
-	if (depth + 1 > opts.maxDepth) {
-		node.truncatedChildrenCount = directChildren.length;
+	if (directChildren.length === 0) {
+		visited.delete(goal.id);
 		return node;
 	}
+	if (depth + 1 > opts.maxDepth) {
+		node.truncatedChildrenCount = directChildren.length;
+		visited.delete(goal.id);
+		return node;
+	}
+
+	// Detect title-collisions among the (about-to-render) sibling set so
+	// we can stamp a short id suffix on each colliding node. Without this
+	// the user sees "AUDIT: CLAUDE CODE" twice with no way to tell them
+	// apart at a glance. The suffix is the first 6 hex chars of the goal id
+	// — short enough to keep the row compact, long enough to be unique in
+	// any realistic sibling set. Same-id duplicates are already deduped at
+	// the index layer, so this only fires for genuine distinct-id sibs.
+	const titleCounts = new Map<string, number>();
+	for (const child of directChildren) {
+		titleCounts.set(child.title, (titleCounts.get(child.title) ?? 0) + 1);
+	}
+
 	let descendants = 0;
 	for (const child of directChildren) {
-		const childNode = buildNode(child, depth + 1, idx, opts);
+		if (visited.has(child.id)) {
+			// Cycle detected — render this child as a stub leaf with no
+			// further recursion. truncatedChildrenCount marks that we
+			// stopped here so the caller can show a placeholder.
+			const stub: NestedGoalNode = {
+				goal: child,
+				depth: depth + 1,
+				children: [],
+				descendantCount: 0,
+				truncatedChildrenCount: 0,
+			};
+			if ((titleCounts.get(child.title) ?? 0) > 1) {
+				stub.displayTitleSuffix = child.id.slice(0, 6);
+			}
+			node.children.push(stub);
+			descendants += 1;
+			continue;
+		}
+		const childNode = buildNode(child, depth + 1, idx, opts, visited);
+		if ((titleCounts.get(child.title) ?? 0) > 1) {
+			childNode.displayTitleSuffix = child.id.slice(0, 6);
+		}
 		node.children.push(childNode);
 		descendants += 1 + childNode.descendantCount;
 	}
 	node.descendantCount = descendants;
+	visited.delete(goal.id);
 	return node;
 }
 
@@ -129,12 +199,28 @@ export function buildNestedGoalForest(
 	const resolved = resolveOpts(opts);
 	const idx = indexGoals(goals, resolved);
 	const visible = resolved.includeArchived ? goals : goals.filter(g => !g.archived);
-	const out: NestedGoalNode[] = [];
+	// Collect top-level roots first so we can stamp title-collision
+	// suffixes on them too (sibling-rule applies at the forest root layer
+	// just as it does inside any node's children).
+	const rootSeen = new Set<string>();
+	const tops: NestableGoal[] = [];
 	for (const g of visible) {
+		if (rootSeen.has(g.id)) continue;
 		const isOrphan = g.parentGoalId !== undefined && !idx.byId.has(g.parentGoalId);
 		const isTopLevel = g.parentGoalId === undefined || isOrphan;
 		if (!isTopLevel) continue;
-		out.push(buildNode(g, 0, idx, resolved));
+		rootSeen.add(g.id);
+		tops.push(g);
+	}
+	const rootTitleCounts = new Map<string, number>();
+	for (const t of tops) rootTitleCounts.set(t.title, (rootTitleCounts.get(t.title) ?? 0) + 1);
+	const out: NestedGoalNode[] = [];
+	for (const g of tops) {
+		const node = buildNode(g, 0, idx, resolved, new Set<string>());
+		if ((rootTitleCounts.get(g.title) ?? 0) > 1) {
+			node.displayTitleSuffix = g.id.slice(0, 6);
+		}
+		out.push(node);
 	}
 	return out;
 }
@@ -149,5 +235,5 @@ export function buildNestedSubtree(
 	const idx = indexGoals(goals, resolved);
 	const root = idx.byId.get(rootId);
 	if (!root) return undefined;
-	return buildNode(root, 0, idx, resolved);
+	return buildNode(root, 0, idx, resolved, new Set<string>());
 }
