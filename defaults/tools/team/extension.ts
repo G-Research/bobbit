@@ -124,8 +124,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_complete",
 		label: "Complete Team",
-		description: "Dismiss all role agents and mark the goal as complete. The team lead stays active to present a report.",
-		promptSnippet: "Complete the team: dismiss all agents, keep team lead active.",
+		description: "Dismiss all role agents and mark the goal as complete. The team lead stays active to present a report. PRECONDITION: every spawned subgoal MUST first be resolved via `goal_merge_child` (clean local merge → auto-archive) OR `goal_archive_child` (give up / read-only deliverables). Calling team_complete with non-archived children returns 409 `HAS_LIVE_CHILDREN` listing the offenders. This is intentional — completing a parent while children are still alive leaves orphan teams burning tokens and leaves the sidebar with un-archived (3/3) goals that look stuck.",
+		promptSnippet: "Complete the team: dismiss agents, keep team lead. Requires all spawned subgoals to be merged or archived first.",
 		parameters: Type.Object({}),
 		async execute() {
 			try {

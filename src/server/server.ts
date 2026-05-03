@@ -6079,6 +6079,34 @@ async function handleApiRoute(
 	const teamCompleteMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/complete$/);
 	if (teamCompleteMatch && req.method === "POST") {
 		const goalId = teamCompleteMatch[1];
+		// Guard: refuse to complete a parent goal while non-archived children
+		// remain. Without this, the parent can mark itself complete and walk
+		// away while its 19 subgoals continue running (or sit idle with all
+		// gates passed but unmerged) — exactly the "Audit X" subgoals at
+		// (3/3) that stayed live in the user's image #49. The fix forces
+		// the agent to explicitly resolve each child via goal_merge_child
+		// (clean integration) or goal_archive_child (give-up / read-only).
+		const goalForCheck = getGoalAcrossProjects(goalId);
+		if (goalForCheck) {
+			const liveChildren = listDescendants(goalId).filter(g => !g.archived);
+			if (liveChildren.length > 0) {
+				const previewItems = liveChildren.slice(0, 5).map(g => ({ id: g.id, title: g.title }));
+				const overflow = liveChildren.length > 5 ? liveChildren.length - 5 : 0;
+				json({
+					code: "HAS_LIVE_CHILDREN",
+					count: liveChildren.length,
+					children: previewItems,
+					overflow,
+					error:
+						`Cannot complete team while ${liveChildren.length} non-archived child goal${liveChildren.length === 1 ? "" : "s"} remain. ` +
+						`For each child either call goal_merge_child (clean local merge → auto-archive) ` +
+						`or goal_archive_child (give up / read-only deliverables). ` +
+						`First few: ${previewItems.map(c => `"${c.title}" (${c.id.slice(0, 8)})`).join(", ")}` +
+						(overflow > 0 ? ` …and ${overflow} more` : "") + ".",
+				}, 409);
+				return;
+			}
+		}
 		try {
 			await teamManager.completeTeam(goalId);
 			json({ ok: true });

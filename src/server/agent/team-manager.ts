@@ -18,6 +18,7 @@ import type { GateStore } from "./gate-store.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
+import { anyInFlightChild } from "./team-manager-helpers.js";
 
 const execFile = promisify(execFileCb);
 
@@ -521,6 +522,21 @@ export class TeamManager {
 		// Don't nudge a team lead whose goal has already finished (complete/shelved/archived).
 		const goal = this.resolveGoal(goalId);
 		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
+		// Don't nudge a parent whose subgoals are still actively making progress
+		// — they'll wake the parent via the parent-notification path when each
+		// subgoal reaches ready-to-merge / fails / pauses. Lesson 4.13's
+		// `anyInFlightChild` excludes paused children (a paused subgoal can't
+		// progress without the parent's intervention, so the nudge is wanted
+		// in that case). Without this, the user reported (image #48) the
+		// parent getting "[AUTO-NUDGE] no active team agents" while 19 of
+		// its subgoals were running in their own workspaces. Defensive
+		// against test mocks lacking listLiveGoals — those paths have no
+		// children anyway so the suppression is a no-op there.
+		try {
+			const gm = this.resolveGoalManager(goalId);
+			const allGoals = typeof gm.listLiveGoals === "function" ? gm.listLiveGoals() : [];
+			if (anyInFlightChild(goalId, allGoals)) return true;
+		} catch { /* mock path or PCM lookup miss — treat as no children */ }
 		return false;
 	}
 

@@ -1897,11 +1897,21 @@ export class VerificationHarness {
 			const titlePrefix = step.name?.trim()
 				|| (step.role ? `Review (${step.role})` : "Review");
 			this.sessionManager!.setTitle(sessionId, `${titlePrefix}: ${funName}`);
+			// Stamp teamLeadSessionId so the sidebar can nest this reviewer
+			// under the team-lead that triggered the verification. Without
+			// this, reviewer sessions persist with teamLeadSessionId=undefined
+			// and the archived render path lumps them under "unmapped" — they
+			// only surface under the LAST archived team-lead. The user's
+			// image #50 was that exact symptom: archived workers existed on
+			// disk but didn't show under the team-leads they actually
+			// belonged to.
+			const reviewerTeamLeadId = this.teamManager?.getTeamState(goalId)?.teamLeadSessionId;
 			this.sessionManager!.updateSessionMeta(sessionId, {
 				role: roleName,
 				teamGoalId: goalId,
 				accessory: role.accessory || "magnifying-glass",
 				nonInteractive: true,
+				...(reviewerTeamLeadId ? { teamLeadSessionId: reviewerTeamLeadId } : {}),
 			});
 
 			// Register in team store (if team manager available)
@@ -2188,15 +2198,21 @@ export class VerificationHarness {
 			qaSessionId = session.id;
 
 			// Set title and metadata — same fallback as llm-review above.
+			// Same teamLeadSessionId stamp so the sidebar can nest this QA
+			// session under its triggering team-lead (see runLlmReviewStep
+			// for the rationale; without this, QA sessions surface as
+			// orphaned "unmapped" members).
 			const qaFunName = await generateTeamName("verification");
 			const qaTitlePrefix = step.name?.trim()
 				|| (step.role ? `QA (${step.role})` : "QA");
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
+			const qaTeamLeadId = this.teamManager?.getTeamState(goalId)?.teamLeadSessionId;
 			this.sessionManager!.updateSessionMeta(qaSessionId, {
 				role: qaRoleName,
 				teamGoalId: goalId,
 				accessory: role.accessory || "stamp",
 				nonInteractive: true,
+				...(qaTeamLeadId ? { teamLeadSessionId: qaTeamLeadId } : {}),
 			});
 
 			// Register in team store
