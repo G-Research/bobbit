@@ -30,5 +30,17 @@ docs: >-
   project. To override a builtin role for one project, propose with the
   builtin's name and the override is applied at the project layer.
 
+  PERMANENT vs EPHEMERAL — when to use what:
+    - propose_role (THIS tool): the role belongs in the project's permanent
+      role library because OTHER goals will also use it. Lives forever until
+      the user explicitly deletes it via the role manager.
+    - inlineRoles on propose_goal / goal_spawn_child: the role only matters
+      for one goal (and its subgoals). Snapshotted onto the goal record at
+      creation time; resolved BEFORE the project role cascade by the
+      verification harness and team-spawn. Doesn't show up in the role
+      manager UI; goes away with the goal.
+  When in doubt, prefer ephemeral (inlineRoles) — the user can always promote
+  it later; it's harder to undo a permanent role that was only ever used once.
+
   Mid-session vs setup: this tool works in either mode. Mid-session, the user
   sees a diff against the current role definition.

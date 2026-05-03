@@ -3261,6 +3261,17 @@ async function handleApiRoute(
 					resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 				}
 			}
+			// Optional inline-roles snapshot (parallel to body.workflow). When
+			// present, these roles are stamped onto the goal record and resolved
+			// FIRST by the verification harness + team-spawn before the project/
+			// server/builtin role-store cascade. See resolveRole() and the
+			// PersistedGoal.inlineRoles field doc for the precedence rule.
+			const inlineRolesBody = (body as { inlineRoles?: unknown }).inlineRoles;
+			let inlineRoles: Record<string, import("./agent/role-store.js").Role> | undefined;
+			if (inlineRolesBody && typeof inlineRolesBody === "object" && !Array.isArray(inlineRolesBody)) {
+				inlineRoles = inlineRolesBody as Record<string, import("./agent/role-store.js").Role>;
+			}
+
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -3269,6 +3280,7 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				inlineRoles,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -3526,12 +3538,42 @@ async function handleApiRoute(
 					? path.join(parent.repoPath, offset)
 					: parent.repoPath;
 			}
+
+			// Inline workflow (Phase 5b parity) — caller may supply the full
+			// workflow definition for this child instead of a workflowId. Snapshot
+			// onto the child via createGoal's resolvedWorkflow path. When both
+			// fields are present, the inline body wins.
+			const inlineWorkflowBody = (body as { workflow?: unknown }).workflow;
+			let resolvedWorkflowForChild: import("./agent/workflow-store.js").Workflow | undefined;
+			if (inlineWorkflowBody && typeof inlineWorkflowBody === "object") {
+				resolvedWorkflowForChild = inlineWorkflowBody as import("./agent/workflow-store.js").Workflow;
+			}
+
+			// Inline roles — merge parent's snapshot with the body's. Child
+			// definitions override parent ones for the same name. Mirrors the
+			// `goal.workflow` snapshot pattern: the resolution chain at run
+			// time is goal.inlineRoles -> roleStore. See resolveRole() for the
+			// precedence rule and PersistedGoal.inlineRoles for the data model.
+			const bodyInlineRoles = (body as { inlineRoles?: unknown }).inlineRoles;
+			let mergedInlineRoles: Record<string, import("./agent/role-store.js").Role> | undefined;
+			const parentInlineRoles = parent.inlineRoles;
+			if (parentInlineRoles || (bodyInlineRoles && typeof bodyInlineRoles === "object" && !Array.isArray(bodyInlineRoles))) {
+				mergedInlineRoles = {
+					...(parentInlineRoles ?? {}),
+					...((bodyInlineRoles && typeof bodyInlineRoles === "object" && !Array.isArray(bodyInlineRoles))
+						? (bodyInlineRoles as Record<string, import("./agent/role-store.js").Role>)
+						: {}),
+				};
+			}
+
 			const child = await goalManager.createGoal(title, childCwd, {
 				spec,
 				workflowId,
+				resolvedWorkflow: resolvedWorkflowForChild,
 				projectId: parent.projectId,
 				sandboxed: parent.sandboxed,
 				parentGoalId: parentId,
+				inlineRoles: mergedInlineRoles,
 			});
 			// Lesson 4.1: stamp spawnedFromPlanId IMMEDIATELY — no awaits between.
 			// Also persist suggestedRole + spawnedBySessionId in the same atomic

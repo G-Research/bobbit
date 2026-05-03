@@ -395,5 +395,148 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			await deleteGoal(parent.id);
 		}
 	});
+
+	test("body.inlineRoles → snapshotted onto child goal record", async () => {
+		const parent = await createParentGoal();
+		try {
+			const inlineRoles = {
+				"synthesis-reviewer": {
+					name: "synthesis-reviewer",
+					label: "Synthesis Reviewer",
+					promptTemplate: "You are a synthesis reviewer for this audit. {{AGENT_ID}}",
+					accessory: "magnifying-glass",
+				},
+			};
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: {
+					planId: "plan-inline-roles-1",
+					title: "Inline-roles child",
+					spec: "child with ephemeral synthesis-reviewer role",
+					inlineRoles,
+				},
+			});
+			expect(status).toBe(201);
+
+			const child = await readGoal(body.id);
+			expect(child.inlineRoles).toBeTruthy();
+			expect(child.inlineRoles["synthesis-reviewer"].label).toBe("Synthesis Reviewer");
+			expect(child.inlineRoles["synthesis-reviewer"].promptTemplate).toContain("synthesis reviewer");
+
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("inlineRoles inheritance: child inherits parent's inline roles, child overrides on collision", async () => {
+		// Parent goal carries an inline 'reviewer' role.
+		const parentInline = {
+			reviewer: {
+				name: "reviewer",
+				label: "Parent's Reviewer",
+				promptTemplate: "PARENT REVIEWER PROMPT",
+				accessory: "none",
+			},
+			"audit-tester": {
+				name: "audit-tester",
+				label: "Parent's Audit Tester",
+				promptTemplate: "PARENT AUDIT TESTER PROMPT",
+				accessory: "none",
+			},
+		};
+		const parentResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: `inherit parent ${Date.now()}`,
+				cwd: gitCwd(),
+				autoStartTeam: false,
+				workflowId: "feature",
+				inlineRoles: parentInline,
+			}),
+		});
+		expect(parentResp.status).toBe(201);
+		const parent = await parentResp.json();
+		// Settle parent so spawn-child reads the inlineRoles back from disk.
+		await pollUntil(
+			async () => {
+				const r = await apiFetch(`/api/goals/${parent.id}`);
+				if (r.status !== 200) return null;
+				const g = await r.json();
+				return g.setupStatus === "ready" && g.repoPath ? g : null;
+			},
+			{ timeoutMs: 30_000, intervalMs: 100, label: `parent ${parent.id} setup ready` },
+		);
+
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: {
+					planId: "plan-inherit-1",
+					title: "Inherit child",
+					spec: "child overrides reviewer; inherits audit-tester",
+					inlineRoles: {
+						reviewer: {
+							name: "reviewer",
+							label: "Child's Reviewer",
+							promptTemplate: "CHILD REVIEWER PROMPT",
+							accessory: "none",
+						},
+					},
+				},
+			});
+			expect(status).toBe(201);
+
+			const child = await readGoal(body.id);
+			expect(child.inlineRoles).toBeTruthy();
+			// reviewer: child wins on collision
+			expect(child.inlineRoles.reviewer.label).toBe("Child's Reviewer");
+			expect(child.inlineRoles.reviewer.promptTemplate).toBe("CHILD REVIEWER PROMPT");
+			// audit-tester: inherited from parent (child didn't redefine)
+			expect(child.inlineRoles["audit-tester"]).toBeTruthy();
+			expect(child.inlineRoles["audit-tester"].label).toBe("Parent's Audit Tester");
+
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("body.workflow inline → child snapshots its own workflow (bypasses store)", async () => {
+		const parent = await createParentGoal();
+		try {
+			const inlineWorkflow = {
+				id: "audit-mini",
+				name: "Audit Mini",
+				description: "ephemeral audit-only workflow",
+				gates: [
+					{ id: "gather", name: "Gather Inputs", dependsOn: [] },
+					{ id: "ready-to-merge", name: "Ready to Merge", dependsOn: ["gather"] },
+				],
+				createdAt: 0,
+				updatedAt: 0,
+			};
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: {
+					planId: "plan-inline-wf-1",
+					title: "Inline-workflow child",
+					spec: "child with ephemeral workflow",
+					workflow: inlineWorkflow,
+				},
+			});
+			expect(status).toBe(201);
+
+			const child = await readGoal(body.id);
+			expect(child.workflow).toBeTruthy();
+			expect(child.workflow.id).toBe("audit-mini");
+			expect(child.workflow.gates.length).toBe(2);
+			expect(child.workflow.gates[0].id).toBe("gather");
+
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
 });
 

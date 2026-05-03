@@ -5,6 +5,8 @@ import path from "node:path";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
+import { resolveRole as resolveRoleFromGoal, listAvailableRoles } from "./resolve-role.js";
+import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
@@ -1010,6 +1012,13 @@ export class VerificationHarness {
 	 * (e.g. unit tests). Returns undefined if the role does not exist.
 	 */
 	private resolveRoleForGoal(roleName: string, goalId?: string): { model?: string; thinkingLevel?: string } | undefined {
+		// Goal-scoped inline roles win over the project/server/builtin cascade.
+		// This lets a goal-bound ephemeral reviewer's `model` / `thinkingLevel`
+		// override the cascade for sessions of that role.
+		const goal = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId) : undefined;
+		const inline = goal?.inlineRoles?.[roleName];
+		if (inline) return { model: inline.model, thinkingLevel: inline.thinkingLevel };
+
 		if (this.configCascade) {
 			const projectId = goalId ? this.projectContextManager?.getContextForGoal(goalId)?.project?.id : undefined;
 			try {
@@ -1775,9 +1784,18 @@ export class VerificationHarness {
 		gate?: WorkflowGate,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
 		const roleName = step.role || "reviewer";
-		const role = this.roleStore.get(roleName) || this.roleStore.get("reviewer");
+		// Goal-scoped inline roles win over the role store. The fallback to
+		// "reviewer" preserves the legacy default — used when an `llm-review`
+		// step omits `role`. Either name may resolve from inlineRoles.
+		const goalForLookup: PersistedGoal | undefined = goalId
+			? this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)
+			: undefined;
+		const role =
+			resolveRoleFromGoal(goalForLookup, roleName, this.roleStore)
+			?? resolveRoleFromGoal(goalForLookup, "reviewer", this.roleStore);
 		if (!role) {
-			return { passed: false, output: `LLM review failed: '${roleName}' role not found in role store.`, sessionId };
+			const available = listAvailableRoles(goalForLookup, this.roleStore).join(", ") || "none";
+			return { passed: false, output: `LLM review failed: '${roleName}' role not found. Available roles (inline + store): ${available}`, sessionId };
 		}
 
 		const timeoutMs = (step.timeout || 600) * 1000;
@@ -2089,9 +2107,18 @@ export class VerificationHarness {
 		sessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string; artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
-		const role = this.roleStore.get(step.role || "qa-tester") || this.roleStore.get("test-engineer") || this.roleStore.get("reviewer");
+		// Inline-roles-aware lookup. Same fallback chain as before: explicit
+		// step.role first, then "qa-tester" / "test-engineer" / "reviewer"
+		// — any of which may resolve from the goal's inline-roles snapshot
+		// before the role-store cascade.
+		const goalForLookup: PersistedGoal | undefined = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+		const role =
+			resolveRoleFromGoal(goalForLookup, step.role || "qa-tester", this.roleStore)
+			?? resolveRoleFromGoal(goalForLookup, "test-engineer", this.roleStore)
+			?? resolveRoleFromGoal(goalForLookup, "reviewer", this.roleStore);
 		if (!role) {
-			return { passed: false, output: "Agent QA failed: no 'qa-tester', 'test-engineer', or 'reviewer' role found in role store.", sessionId };
+			const available = listAvailableRoles(goalForLookup, this.roleStore).join(", ") || "none";
+			return { passed: false, output: `Agent QA failed: no 'qa-tester', 'test-engineer', or 'reviewer' role found. Available roles (inline + store): ${available}`, sessionId };
 		}
 
 		// Build system prompt using the role's prompt template

@@ -108,8 +108,34 @@ export default function (pi: ExtensionAPI) {
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
 			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
+			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
+				name: Type.String({ description: "Role id (kebab-case); must equal the map key." }),
+				label: Type.String({ description: "Display name." }),
+				promptTemplate: Type.String({ description: "System prompt; supports {{AGENT_ID}}, {{GOAL_BRANCH}}." }),
+				accessory: Type.Optional(Type.String()),
+				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.String())),
+				model: Type.Optional(Type.String()),
+				thinkingLevel: Type.Optional(Type.String()),
+			}), { description: "Per-goal ephemeral roles snapshotted onto the goal; resolved before the project/role-store cascade. Use for one-off roles bound to this goal; for permanent roles use propose_role. Inherited by children." })),
+			inlineWorkflow: Type.Optional(Type.Object({
+				id: Type.String(),
+				name: Type.String(),
+				description: Type.Optional(Type.String()),
+				gates: Type.Array(Type.Any()),
+			}, { description: "Inline workflow snapshot frozen onto the goal; bypasses the project workflow store for this goal. May reference roles in inlineRoles." })),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("goal", args); return ack(rev); },
+		async execute(_id, args) {
+			// Map `inlineWorkflow` from the schema into `workflow` so the goal-
+			// proposal panel + server's POST /api/goals snapshot path see it
+			// under the legacy field name.
+			const argsAny = args as Record<string, unknown>;
+			if (argsAny.inlineWorkflow && !argsAny.workflow) {
+				argsAny.workflow = argsAny.inlineWorkflow;
+				delete argsAny.inlineWorkflow;
+			}
+			const rev = await seedProposal("goal", argsAny);
+			return ack(rev);
+		},
 	});
 
 	// ── propose_role ──────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
+import { resolveRole, listAvailableRoles } from "./resolve-role.js";
 import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
@@ -939,9 +940,13 @@ export class TeamManager {
 		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
 		const roleStore = this.config.roleStore;
-		const storedRoleDef = roleStore?.get(role);
+		// Resolve via the goal's inline-roles snapshot first, then the
+		// project/server/builtin role-store cascade. See resolveRole() and the
+		// PersistedGoal.inlineRoles field doc for the precedence rule.
+		const goalForRole = this.resolveGoal(goalId);
+		const storedRoleDef = resolveRole(goalForRole, role, roleStore);
 		if (!storedRoleDef) {
-			const available = roleStore?.getAll().map(r => r.name).join(", ") ?? "none";
+			const available = listAvailableRoles(goalForRole, roleStore).join(", ") || "none";
 			throw new Error(`Role "${role}" not found. Available roles: ${available}`);
 		}
 
