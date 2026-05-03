@@ -12,8 +12,8 @@ import {
 	activeSessionId,
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
-import { getRouteFromHash } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, startPostAuthBackgroundFetches } from "./session-manager.js";
+import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
@@ -135,10 +135,15 @@ async function handleHashChange(): Promise<void> {
 				state.connectionStatus = "disconnected";
 			}
 			state.goalDashboardId = null;
-			// A3: skip the existence probe — connectToSession surfaces the
-			// SESSION_NOT_FOUND error path (showConnectionError modal) if the
-			// WS handshake rejects.
-			await connectToSession(route.sessionId, true);
+			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
+			if (checkRes.ok) {
+				await connectToSession(route.sessionId, true);
+			} else {
+				setHashRoute("landing");
+				state.appView = "authenticated";
+				renderApp();
+				await refreshSessions();
+			}
 		} else if (route.view === "goal-dashboard" && route.goalId) {
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
@@ -405,10 +410,6 @@ async function initApp() {
 			await waitForGateway(savedUrl, savedToken);
 			mark("init:gateway-wait-end");
 
-			// A1: fire post-auth REST fetches as side-effects so the route
-			// dispatch can run in parallel.
-			startPostAuthBackgroundFetches();
-
 			// A2: load saved preferences fire-and-forget. The palette is
 			// already applied inline (`index.html`); showTimestamps and
 			// playAgentFinishSound are not visible on first paint.
@@ -439,9 +440,10 @@ async function initApp() {
 			if (route.view === "goal" && route.goalId) {
 				await loadDashboardData(route.goalId);
 			} else if (route.view === "session" && route.sessionId) {
-				// A3: skip existence probe — connectToSession surfaces
-				// SESSION_NOT_FOUND via the WS auth path's standard error UI.
-				await connectToSession(route.sessionId, true);
+				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
+				if (checkRes.ok) {
+					await connectToSession(route.sessionId, true);
+				}
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;
 				loadDashboardData(route.goalId);

@@ -454,29 +454,16 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		setHashRoute("landing");
 	}
 	renderApp();
-	startSessionPolling();
-	startTimeRefresh();
-}
-
-/** Module-level flag set true after the first post-auth refreshSessions()
- *  resolves. `connectToSession` skips its own duplicate refresh when set;
- *  the 5s session-polling tick covers subsequent updates. */
-let _didInitialSessionsRefresh = false;
-
-/** Fire the post-auth side-effects that used to be awaited inside
- *  `authenticateGateway`. Called as a non-blocking side-effect from
- *  `main.ts` so the route dispatch can proceed without serial REST RTTs.
- *  Idempotent: subsequent invocations no-op once the initial refresh has
- *  resolved. */
-export function startPostAuthBackgroundFetches(): void {
-	if (_didInitialSessionsRefresh) return;
-	refreshSessions().then(() => { _didInitialSessionsRefresh = true; }).catch(() => { /* polling tick will retry */ });
-	gatewayFetch("/api/config/cwd").then(async (cwdRes) => {
+	await refreshSessions();
+	try {
+		const cwdRes = await gatewayFetch("/api/config/cwd");
 		if (cwdRes.ok) {
 			const cwdData = await cwdRes.json();
 			state.defaultCwd = cwdData.cwd || "";
 		}
-	}).catch(() => { /* non-fatal */ });
+	} catch {}
+	startSessionPolling();
+	startTimeRefresh();
 }
 
 // ============================================================================
@@ -1740,14 +1727,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		})();
 
-		// A1/A4: skip the duplicate refreshSessions() if startPostAuthBackgroundFetches
-		// already kicked one off. The accessory/palette/cwd application below still
-		// runs synchronously against whatever session list is currently in state.
-		const sessionsRefreshPromise = _didInitialSessionsRefresh
-			? Promise.resolve()
-			: refreshSessions();
 		const backgroundWork = Promise.all([
-			sessionsRefreshPromise.then(() => {
+			refreshSessions().then(() => {
 				if (isStale()) return;
 				// Re-apply accessory class after refreshSessions (may have new data)
 				const sessionForRole = state.gatewaySessions.find((s) => s.id === sessionId)
