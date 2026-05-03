@@ -424,7 +424,24 @@ function renderSpawnedChildGoalRow(
  * the same 16px-per-level scheme as the live forest.
  */
 function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean): TemplateResult {
-	const forest = buildNestedGoalForest(archivedGoals as any, { maxDepth: 5, includeArchived: true });
+	// Symmetric to the live forest filter in sidebar.ts: exclude archived
+	// goals whose `spawnedBySessionId` points at an archived team-lead
+	// session in this same tree. Without this filter the same goal renders
+	// TWICE — once as a child node in the archived forest, and again under
+	// its team-lead's expanded block via renderLeadWithMembers's
+	// `spawnedSubGoalsOf`. The user's image #43 was that exact symptom: 19
+	// real children of REAL-TASKS appeared once via the forest's nested
+	// rendering AND a second time under Team Lead Al Truist's spawned-
+	// children block, producing visually-identical "duplicates".
+	const archivedTeamLeadIds = new Set(
+		state.archivedSessions
+			.filter(s => s.role === "team-lead")
+			.map(s => s.id),
+	);
+	const filteredArchivedGoals = archivedGoals.filter(g =>
+		!g.spawnedBySessionId || !archivedTeamLeadIds.has(g.spawnedBySessionId),
+	);
+	const forest = buildNestedGoalForest(filteredArchivedGoals as any, { maxDepth: 5, includeArchived: true });
 	// Same collapse-hides-children behaviour as the live forest in
 	// sidebar.ts::renderNestedNode. Archived parents must hide their
 	// archived children when their chevron is collapsed — symmetric with
