@@ -17,7 +17,7 @@ test.describe("Steer multi-tab convergence (AC §4)", () => {
 		try {
 			await A.waitFor((m: any) => m.type === "queue_update");
 			await B.waitFor((m: any) => m.type === "queue_update");
-			A.send({ type: "prompt", text: "STAY_BUSY:5000 task" });
+			A.send({ type: "prompt", text: "STAY_BUSY:3000 task" });
 			await A.waitFor(statusPredicate("streaming"));
 			A.send({ type: "prompt", text: "M1" });
 			await A.waitFor(queueLenPredicate(1));
