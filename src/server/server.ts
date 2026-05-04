@@ -6959,6 +6959,30 @@ async function handleApiRoute(
 				res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
 			} catch { /* socket closed */ }
 		});
+		// Bootstrap: if a mount already exists for this session, emit the
+		// current state synchronously so the just-connected client doesn't
+		// wait for the next agent write. Avoids a race where
+		// broadcastPreviewChanged fires between EventSource open and the
+		// subscription being registered. Payload shape `{entry, mtime, url,
+		// path}` matches broadcastPreviewChanged so the client doesn't need
+		// to distinguish bootstrap from live events.
+		try {
+			const { pickEntry } = await import("./preview/content-route.js");
+			const dir = previewMount.mountDir(sid);
+			if (fs.existsSync(dir)) {
+				const entry = pickEntry(dir);
+				if (entry) {
+					const entryPath = path.join(dir, entry);
+					const stat = fs.statSync(entryPath);
+					res.write(`event: preview-changed\ndata: ${JSON.stringify({
+						entry,
+						mtime: Math.floor(stat.mtimeMs),
+						url: `/preview/${sid}/${entry}`,
+						path: entryPath,
+					})}\n\n`);
+				}
+			}
+		} catch { /* ok — bootstrap is best-effort */ }
 		const keepalive = setInterval(() => {
 			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
 		}, 25_000);
