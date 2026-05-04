@@ -333,6 +333,12 @@ export class ReviewDocument extends LitElement {
       } catch { /* fallback — highlight may not appear */ }
     }
 
+    // Capture the selection rect BEFORE clearing the selection. The popover
+    // singleton requires a non-null reference rect (see _syncPopover); on
+    // mobile bottom-sheet mode the rect itself is unused for positioning,
+    // but it must be set or _syncPopover early-returns and the sheet never
+    // opens. Mirrors the desktop _handleSelection path.
+    this._popoverReferenceRect = range.getBoundingClientRect();
     this._popoverMode = "bottom-sheet";
     this._existingComment = "";
     this._popoverOpen = true;
