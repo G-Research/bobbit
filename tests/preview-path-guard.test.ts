@@ -1,5 +1,5 @@
 /**
- * Unit tests for the path-traversal defence used by `/api/preview/asset`.
+ * Unit tests for the path-traversal defence used by the preview content route.
  * Covers the algorithm spec'd in design doc §3.
  */
 import { describe, it, before, after } from "node:test";

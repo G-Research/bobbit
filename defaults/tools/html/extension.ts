@@ -1,16 +1,17 @@
 /**
- * HTML Preview extension — open and close an HTML preview panel in the Bobbit UI.
+ * HTML Preview extension — open the preview side-panel in the Bobbit UI.
  *
- * Registers the `preview_open` tool that lets agents show
- * live HTML previews alongside the chat.
+ * Both `html=` and `file=` populate a per-session preview mount served at
+ * `/preview/<sid>/`. Sibling assets resolve as relative URLs. The tool
+ * result is a constant ~150-byte v3 snapshot regardless of HTML size.
  *
- * Two modes:
- *   - inline (`html:` parameter): bytes round-trip through the gateway and
- *     the chat transcript via the v1 snapshot marker.
- *   - file   (`file:` parameter): the gateway serves the HTML and sibling
- *     assets over HTTP. Only a tiny v2 marker carrying the file path is
- *     stamped into the tool result. Falls back to inline if the host
- *     gateway can't see the path (e.g. mis-mapped sandbox bind mount).
+ * Flow:
+ *   1. Read sessionId from BOBBIT_SESSION_ID. (No-session fallback writes
+ *      a local file and returns.)
+ *   2. PATCH /api/sessions/:id { preview: true }.
+ *   3. POST /api/preview/mount?sessionId=<sid> with one of {html} or
+ *      {file: absolutePath}. Returns {url, path, entry, mtime}.
+ *   4. Stamp v3 marker into the tool result.
  */
 
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
@@ -18,9 +19,9 @@ import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { PREVIEW_SNAPSHOT_MARKER, buildFileSnapshotBlock } from "./snapshot.js";
+import { buildPreviewSnapshotV3Block } from "./snapshot.js";
 
-// ── Gateway API helpers (copied from agent/extension.ts) ──
+// ── Gateway API helpers ──
 
 function getGatewayUrl(): string {
 	if (process.env.BOBBIT_GATEWAY_URL) return process.env.BOBBIT_GATEWAY_URL.replace(/\/+$/, "");
@@ -61,25 +62,6 @@ async function gatewayFetch(endpoint: string, options: RequestInit = {}): Promis
 	});
 }
 
-/**
- * Translate an in-container file path to its host equivalent when the agent
- * runs inside a sandbox. The gateway sets `BOBBIT_HOST_CWD` on every
- * sandboxed spawn to the host-side path that maps to `process.cwd()`. If
- * the input path falls under `process.cwd()`, we can rewrite it; otherwise
- * we return null and the caller falls back to inline mode.
- */
-function translateToHostPath(filePath: string): string | null {
-	const hostCwd = process.env.BOBBIT_HOST_CWD;
-	if (!hostCwd) return filePath; // not sandboxed → trivially host-visible
-	const cwd = process.cwd();
-	const abs = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
-	const rel = path.relative(cwd, abs);
-	if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
-	// Use POSIX joining for the host path — the host might be Windows but
-	// `BOBBIT_HOST_CWD` is preserved as-is (gateway-author's responsibility).
-	return path.posix.join(hostCwd.replace(/\\/g, "/"), rel.replace(/\\/g, "/"));
-}
-
 // ── Extension registration ──
 
 const extension: ExtensionFactory = (pi) => {
@@ -91,50 +73,33 @@ const extension: ExtensionFactory = (pi) => {
 			"The preview panel appears alongside the chat and auto-updates when you call this tool again.",
 		parameters: Type.Object({
 			html: Type.Optional(Type.String({ description: "Raw HTML content to preview. Takes priority over 'file' if both are provided." })),
-			file: Type.Optional(Type.String({ description: "Path to an HTML file to load and preview." })),
+			file: Type.Optional(Type.String({ description: "Path to an HTML file to load and preview. Sibling files in the same directory are copied alongside it." })),
 		}),
 
 		async execute(_toolCallId, params) {
 			const sessionId = process.env.BOBBIT_SESSION_ID;
 
-			// Resolve mode: html: takes priority over file: when both supplied.
-			const wantsFileMode = !params.html && !!params.file;
-			let inlineContent: string | null = null;
-
-			if (params.html) {
-				inlineContent = params.html;
-			} else if (params.file) {
-				// Will read bytes lazily — only if the file mode falls back to inline.
-				inlineContent = null;
-			} else {
+			if (!params.html && !params.file) {
 				return { content: [{ type: "text", text: "Error: At least one of 'html' or 'file' must be provided." }] };
 			}
-
-			// Helper: read file bytes for inline fallback.
-			const readFileBytes = (filePath: string): { ok: true; bytes: string } | { ok: false; err: string } => {
-				try {
-					return { ok: true, bytes: fs.readFileSync(filePath, "utf-8") };
-				} catch (err: any) {
-					return { ok: false, err: err.message };
-				}
-			};
 
 			// No session ID — fallback: write directly to disk.
 			if (!sessionId) {
 				try {
-					if (inlineContent == null && params.file) {
-						const r = readFileBytes(params.file);
-						if (!r.ok) {
-							return { content: [{ type: "text", text: `Error reading file "${params.file}": ${r.err}` }] };
+					let content = params.html ?? "";
+					if (!params.html && params.file) {
+						try {
+							content = fs.readFileSync(params.file, "utf-8");
+						} catch (err: any) {
+							return { content: [{ type: "text", text: `Error reading file "${params.file}": ${err.message}` }] };
 						}
-						inlineContent = r.bytes;
 					}
 					const stateDir = process.env.BOBBIT_DIR
 						? path.join(process.env.BOBBIT_DIR, "state")
 						: path.join(os.homedir(), ".pi");
 					const fallbackPath = path.join(stateDir, `preview-unknown.html`);
 					fs.mkdirSync(path.dirname(fallbackPath), { recursive: true });
-					fs.writeFileSync(fallbackPath, inlineContent ?? "", "utf-8");
+					fs.writeFileSync(fallbackPath, content, "utf-8");
 					return { content: [{ type: "text", text: `No session ID available. Wrote preview HTML to ${fallbackPath}` }] };
 				} catch (err: any) {
 					return { content: [{ type: "text", text: `Error: No session ID and failed to write fallback file: ${err.message}` }] };
@@ -142,7 +107,7 @@ const extension: ExtensionFactory = (pi) => {
 			}
 
 			try {
-				// Step 1: Enable preview mode on the session
+				// Step 1: enable preview mode on the session.
 				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
 					method: "PATCH",
 					body: JSON.stringify({ preview: true }),
@@ -152,53 +117,58 @@ const extension: ExtensionFactory = (pi) => {
 					return { content: [{ type: "text", text: `Error enabling preview mode: ${patchResp.status} ${errText}` }] };
 				}
 
-				// Step 2: try file mode first when the agent supplied file:.
-				let warnings = "";
-				if (wantsFileMode && params.file) {
-					const hostPath = translateToHostPath(params.file);
-					if (hostPath) {
-						const fileResp = await gatewayFetch(`/api/preview?sessionId=${encodeURIComponent(sessionId)}`, {
-							method: "POST",
-							body: JSON.stringify({ kind: "file", path: hostPath }),
-						});
-						if (fileResp.ok) {
-							return {
-								content: [
-									{ type: "text", text: "Preview panel is open and will auto-update." },
-									{ type: "text", text: buildFileSnapshotBlock(hostPath) },
-								],
-							};
-						}
-						// Server rejected the path (e.g. not host-visible) — fall back.
-						const errText = await fileResp.text().catch(() => "");
-						warnings = `\n[preview_open] file-mode rejected (${fileResp.status} ${errText.slice(0, 200)}); falling back to inline.`;
-					} else {
-						warnings = "\n[preview_open] could not translate path to host (BOBBIT_HOST_CWD not set or path outside cwd); falling back to inline.";
-					}
+				// Step 2: build mount-endpoint body. `html` wins when both are present.
+				let mountBody: { html?: string; file?: string };
+				if (params.html != null) {
+					mountBody = { html: params.html };
+				} else {
+					// Resolve relative paths against process.cwd(). The agent's cwd is
+					// host-visible (worktrees are bind-mounted in WP-F), so the gateway
+					// can read this absolute path directly. No translation needed.
+					const filePath = params.file as string;
+					const absPath = path.isAbsolute(filePath)
+						? filePath
+						: path.resolve(process.cwd(), filePath);
+					mountBody = { file: absPath };
 				}
 
-				// Step 3: inline mode (existing behaviour).
-				if (inlineContent == null && params.file) {
-					const r = readFileBytes(params.file);
-					if (!r.ok) {
-						return { content: [{ type: "text", text: `Error reading file "${params.file}": ${r.err}` }] };
-					}
-					inlineContent = r.bytes;
+				// Step 3: POST the mount endpoint.
+				const mountResp = await gatewayFetch(
+					`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`,
+					{
+						method: "POST",
+						body: JSON.stringify(mountBody),
+					},
+				);
+				if (!mountResp.ok) {
+					const errText = await mountResp.text().catch(() => "");
+					return {
+						content: [{
+							type: "text",
+							text: `Error opening preview: ${mountResp.status} ${errText}`,
+						}],
+					};
 				}
-				const content = inlineContent ?? "";
-				const postResp = await gatewayFetch(`/api/preview?sessionId=${encodeURIComponent(sessionId)}`, {
-					method: "POST",
-					body: JSON.stringify({ html: content }),
-				});
-				if (!postResp.ok) {
-					const errText = await postResp.text();
-					return { content: [{ type: "text", text: `Error writing preview HTML: ${postResp.status} ${errText}` }] };
+				const mountResult = await mountResp.json().catch(() => ({} as any)) as {
+					url?: string;
+					path?: string;
+					entry?: string;
+					mtime?: number;
+				};
+				if (!mountResult.url || !mountResult.path) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error opening preview: malformed response from /api/preview/mount`,
+						}],
+					};
 				}
 
+				// Step 4: stamp v3 marker. Constant-size payload regardless of HTML.
 				return {
 					content: [
-						{ type: "text", text: "Preview panel is open and will auto-update." + warnings },
-						{ type: "text", text: PREVIEW_SNAPSHOT_MARKER + content },
+						{ type: "text", text: "Preview panel is open and will auto-update." },
+						{ type: "text", text: buildPreviewSnapshotV3Block(mountResult.url, mountResult.path) },
 					],
 				};
 			} catch (err: any) {
@@ -206,8 +176,6 @@ const extension: ExtensionFactory = (pi) => {
 			}
 		},
 	});
-
-
 };
 
 export default extension;

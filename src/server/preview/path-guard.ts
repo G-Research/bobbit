@@ -1,5 +1,5 @@
 /**
- * Path-traversal defence for the `/api/preview/asset` endpoint.
+ * Path-traversal defence for the preview content route (`/preview/<sid>/...`).
  *
  * Resolves a user-supplied relative `path` against a per-session `baseDir`
  * and rejects anything that escapes (including symlink-based escapes via

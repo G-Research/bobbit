@@ -341,6 +341,11 @@ export class ReviewDocument extends LitElement {
     this._popoverReferenceRect = range.getBoundingClientRect();
     this._popoverMode = "bottom-sheet";
     this._existingComment = "";
+    // Anchor the popover to the selection rect before clearing the
+    // selection. Bottom-sheet mode doesn't visually use the rect (it docks
+    // to the viewport bottom), but `_syncPopover` returns early when the
+    // rect is null and would otherwise leave the popover unmounted.
+    this._popoverReferenceRect = range.getBoundingClientRect();
     this._popoverOpen = true;
     this._showFloatingBtn = false;
 

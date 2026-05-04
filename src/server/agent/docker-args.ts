@@ -50,6 +50,24 @@ export interface DockerRunConfig {
 	projectId?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
+	/**
+	 * Per-session preview mount (WP-A/F).
+	 *
+	 * - Per-session containers (sessionId set, projectId unset): the host
+	 *   directory `<stateDir>/preview/<sessionId>` is bind-mounted at
+	 *   `/bobbit/preview` so the agent can read back its own preview tree.
+	 * - Per-project containers (projectId set): `<stateDir>/preview/` is
+	 *   bind-mounted at `/bobbit/preview-root` so every session sharing the
+	 *   long-lived container can resolve its own subtree by
+	 *   `BOBBIT_SESSION_ID`.
+	 *
+	 * Note: the gateway runs the actual writes (via `mount.writeInline` /
+	 * `mount.copyFileTree`) — the bind-mount mainly exists for symmetry, so
+	 * tools that read back what they wrote see the same bytes the gateway
+	 * just persisted. The agent never needs the host path; it always POSTs
+	 * to `/api/preview/mount` (WP-D).
+	 */
+	sessionId?: string;
 
 	// ── Resource limits ──────────────────────────────────────────────────
 	/** Container memory limit (default: "32g"). */
@@ -74,7 +92,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const {
 		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath,
-		projectId, stateDir,
+		projectId, stateDir, sessionId,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
 	} = config;
@@ -130,6 +148,25 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// Mount builtin tools directory for cascade-resolved builtin extensions
 	if (builtinToolsDir && builtinToolsDir !== toolsDir) {
 		args.push("-v", `${toDockerPath(builtinToolsDir)}:/tools-builtin:ro`);
+	}
+
+	// ── Per-session preview mount (WP-A/F) ────────────────────────────
+	// `<stateDir>/preview/<sid>/` is the single source of truth for the
+	// preview content; the gateway populates it via mount.writeInline /
+	// mount.copyFileTree. Bind it into the container so the agent (and any
+	// in-container tooling) can read back the same bytes. Replaces the
+	// old BOBBIT_HOST_CWD path-translation dance.
+	if (stateDir && projectId) {
+		// Per-project (long-lived) container: bind the parent so every
+		// session sharing the container resolves its own subtree.
+		const previewRoot = path.join(stateDir, "preview");
+		fs.mkdirSync(previewRoot, { recursive: true });
+		args.push("-v", `${toDockerPath(previewRoot)}:/bobbit/preview-root`);
+	} else if (stateDir && sessionId) {
+		// Per-session container: bind only this session's mount.
+		const previewMount = path.join(stateDir, "preview", sessionId);
+		fs.mkdirSync(previewMount, { recursive: true });
+		args.push("-v", `${toDockerPath(previewMount)}:/bobbit/preview`);
 	}
 
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
