@@ -38,7 +38,13 @@ export class CommentableMarkdown extends LitElement {
     ></review-document>`;
   }
 
-  private _onChange = () => {
+  private _onChange = (e: Event) => {
+    // <review-document> dispatches `annotation-change` with NO detail to
+    // signal a change. We catch it here, swallow the original (so it
+    // doesn't bubble past us and reach our parent's handler with
+    // detail=undefined — which would zero the count), and re-dispatch
+    // an enriched event from `this` carrying the canonical count.
+    e.stopPropagation();
     const count = proposalBackend.count({
       sessionId: this.sessionId,
       bucket: this.bucket,
