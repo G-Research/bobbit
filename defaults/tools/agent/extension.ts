@@ -209,9 +209,112 @@ export function getParentSessionId(ctx: any): string {
 	return "unknown";
 }
 
+// ── read_session helpers ──
+
+function getCallerSessionId(): string | undefined {
+	return process.env.BOBBIT_SESSION_ID || undefined;
+}
+
+interface ReadSessionParams {
+	session_id: string;
+	offset?: number;
+	limit?: number;
+	pattern?: string;
+	case_sensitive?: boolean;
+	context?: number;
+	verbose?: boolean;
+}
+
+async function callReadSessionEndpoint(params: ReadSessionParams): Promise<{ ok: boolean; status: number; body: any }> {
+	const url = getGatewayUrl();
+	const token = getGatewayToken();
+	const qs = new URLSearchParams();
+	if (params.offset !== undefined) qs.set("offset", String(params.offset));
+	if (params.limit !== undefined) qs.set("limit", String(params.limit));
+	if (params.pattern !== undefined && params.pattern !== "") qs.set("pattern", params.pattern);
+	if (params.case_sensitive) qs.set("case_sensitive", "1");
+	if (params.context !== undefined) qs.set("context", String(params.context));
+	if (params.verbose) qs.set("verbose", "1");
+	const suffix = qs.toString() ? `?${qs.toString()}` : "";
+	const headers: Record<string, string> = {
+		"Authorization": `Bearer ${token}`,
+		"Content-Type": "application/json",
+	};
+	const caller = getCallerSessionId();
+	if (caller) headers["x-bobbit-session-id"] = caller;
+	const resp = await fetch(`${url}/api/sessions/${encodeURIComponent(params.session_id)}/transcript${suffix}`, {
+		method: "GET",
+		headers,
+	});
+	let body: any = undefined;
+	try { body = await resp.json(); } catch { body = undefined; }
+	return { ok: resp.ok, status: resp.status, body };
+}
+
 // ── Extension registration ──
 
 const extension: ExtensionFactory = (pi) => {
+	// Register read_session BEFORE the delegate-recursion guard so delegate
+	// sessions can read parent transcripts.
+	pi.registerTool({
+		name: "read_session",
+		label: "Read Session",
+		description:
+			"Read the conversation transcript of another Bobbit session (peer agent, delegate, or archived). " +
+			"Paginated and regex-filterable. Returns compact summaries by default; use `verbose: true` for full content blocks. " +
+			"Negative `offset` indexes from end (Python-style). `pattern` + `context` filters to matches with ±N neighbours.",
+		promptSnippet:
+			"read_session - Read another session's transcript with pagination and regex filtering.",
+		promptGuidelines: [
+			"Default returns compact summaries — use verbose:true only when you need full tool inputs/results",
+			"Tail with offset:-N, limit:N (e.g. -20, 20 for the last 20 messages)",
+			"Find specific events with pattern (regex). Combine with offset:-N, limit:N to get the last N matches.",
+			"Use context:1..5 to expand each pattern match by ±N neighbours",
+		],
+		parameters: Type.Object({
+			session_id: Type.String({ description: "Target session ID." }),
+			offset: Type.Optional(Type.Number({ description: "Starting index. Default 0. Negative indexes from the end." })),
+			limit: Type.Optional(Type.Number({ description: "Max messages to return. Default 20, clamped to [1, 200]." })),
+			pattern: Type.Optional(Type.String({ description: "Regex filter applied to message text + tool blocks." })),
+			case_sensitive: Type.Optional(Type.Boolean({ description: "Default false." })),
+			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5). Only with `pattern`." })),
+			verbose: Type.Optional(Type.Boolean({ description: "Return full content blocks instead of compact summaries." })),
+		}),
+
+		async execute(_toolCallId, params) {
+			let result: { ok: boolean; status: number; body: any };
+			try {
+				result = await callReadSessionEndpoint(params as ReadSessionParams);
+			} catch (err: any) {
+				return {
+					isError: true,
+					content: [{ type: "text", text: JSON.stringify({ error: "transcript_unavailable", detail: err?.message ?? String(err) }) }],
+				};
+			}
+			if (!result.ok) {
+				const code = (result.body && typeof result.body.error === "string") ? result.body.error : "transcript_unavailable";
+				const detail = (result.body && typeof result.body.detail === "string") ? result.body.detail : undefined;
+				return {
+					isError: true,
+					content: [{ type: "text", text: JSON.stringify(detail ? { error: code, detail } : { error: code }) }],
+				};
+			}
+			const envelope = result.body;
+			return {
+				content: [{ type: "text", text: JSON.stringify(envelope) }],
+				details: {
+					session_id: (params as ReadSessionParams).session_id,
+					total: envelope?.total,
+					matchCount: envelope?.matchCount,
+					returned: envelope?.returned,
+					offsetStart: envelope?.offsetStart,
+					offsetEnd: envelope?.offsetEnd,
+					messages: envelope?.messages,
+				},
+			};
+		},
+	});
+
 	// Prevent recursive delegation — delegate sessions should not spawn more delegates
 	if (process.env.BOBBIT_DELEGATE_OF) {
 		// Don't register the delegate tool in delegate sessions
