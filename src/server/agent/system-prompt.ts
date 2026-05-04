@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitConfigDir } from "../bobbit-dir.js";
+import { removeMount as removePreviewMount } from "../preview/mount.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
@@ -537,9 +538,12 @@ export function cleanupSessionPrompt(sessionId: string): void {
 	try {
 		if (fs.existsSync(promptPath)) fs.unlinkSync(promptPath);
 	} catch { /* ignore */ }
-	// Also clean up per-session preview file
+	// Also clean up per-session preview file (legacy single-file path,
+	// retained until WP-G removes the legacy preview routes).
 	const previewPath = path.join(getStateDir(), `preview-${sessionId}.html`);
 	try {
 		if (fs.existsSync(previewPath)) fs.unlinkSync(previewPath);
 	} catch { /* ignore */ }
+	// Per-session preview mount (WP-A): <stateDir>/preview/<sid>/.
+	try { removePreviewMount(sessionId); } catch { /* ignore */ }
 }
