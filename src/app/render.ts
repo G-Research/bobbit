@@ -1,6 +1,7 @@
 import { PREVIEW_THEME_BRIDGE as SHARED_PREVIEW_THEME_BRIDGE, PREVIEW_SWIPE_SCRIPT as SHARED_PREVIEW_SWIPE_SCRIPT } from "../shared/preview-bridge-scripts.js";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
+import "../ui/components/CommentableMarkdown.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
@@ -24,6 +25,7 @@ import {
 import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
@@ -524,6 +526,46 @@ const goalSpecPreviewRef = createRef<HTMLDivElement>();
 const goalSpecTextareaRef = createRef<HTMLTextAreaElement>();
 const rolePromptPreviewRef = createRef<HTMLDivElement>();
 const rolePromptTextareaRef = createRef<HTMLTextAreaElement>();
+// Inline-comments wrapper refs (one per commentable proposal panel).
+const goalCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
+const rolePromptCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
+const staffPromptCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
+// Annotation count fields, mirrored from <commentable-markdown> via
+// the bubbled `annotation-change` event. Used to gate the badge + Send-feedback button.
+let _goalAnnCount = 0;
+let _roleAnnCount = 0;
+let _staffAnnCount = 0;
+// Toast text for "Proposal updated — comments cleared" notifications.
+let _proposalToastText = "";
+let _proposalToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Module-level helper to flash a brief toast above the proposal panel.
+ * Reuses the existing `.review-toast` CSS (auto-fade animation).
+ */
+export function showProposalToast(text: string): void {
+	_proposalToastText = text;
+	if (_proposalToastTimer) clearTimeout(_proposalToastTimer);
+	_proposalToastTimer = setTimeout(() => {
+		_proposalToastText = "";
+		_proposalToastTimer = null;
+		renderApp();
+	}, 2500);
+	renderApp();
+}
+
+/** Reset annotation counts — called after a proposal is dismissed or its body is replaced. */
+export function resetProposalAnnCount(type: "goal" | "role" | "staff"): void {
+	if (type === "goal") _goalAnnCount = 0;
+	else if (type === "role") _roleAnnCount = 0;
+	else if (type === "staff") _staffAnnCount = 0;
+}
+
+/** Render the "comments cleared" toast above a proposal panel, if active. */
+function proposalToast() {
+	if (!_proposalToastText) return "";
+	return html`<div class="review-toast" data-testid="proposal-toast">${_proposalToastText}</div>`;
+}
 const toolDocsPreviewRef = createRef<HTMLDivElement>();
 const toolRendererPreviewRef = createRef<HTMLDivElement>();
 const toolOuterScrollRef = createRef<HTMLDivElement>();
@@ -572,6 +614,12 @@ interface GoalFormConfig {
 	saving?: boolean;
 	createDisabled?: boolean;
 	streaming?: boolean;
+	/**
+	 * When true, render <commentable-markdown> in Preview mode instead of
+	 * <markdown-block> so users can leave inline comments. Set only at the
+	 * proposal-panel call site — the goal-dashboard view stays read-only.
+	 */
+	commentable?: boolean;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -717,7 +765,15 @@ function renderGoalForm(config: GoalFormConfig) {
 			</div>
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
-					<label class="text-xs text-muted-foreground font-medium">Spec</label>
+					<div class="flex items-center gap-1">
+						<label class="text-xs text-muted-foreground font-medium">Spec</label>
+						${config.commentable && !config.specEditMode && _goalAnnCount > 0 ? html`
+							<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
+								data-testid="proposal-comment-count">
+								${_goalAnnCount} comment${_goalAnnCount === 1 ? "" : "s"}
+							</span>
+						` : ""}
+					</div>
 					<button
 						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 						title="Toggle edit/preview mode"
@@ -734,7 +790,15 @@ function renderGoalForm(config: GoalFormConfig) {
 							@input=${config.onSpecChange}
 						></textarea>`
 					: html`<div ${ref(goalSpecPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${config.streaming ? STREAMING_BORDER : ""}">
-							<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>
+							${config.commentable
+								? html`<commentable-markdown
+										${ref(goalCommentableRef)}
+										.markdown=${config.spec || "_No spec content yet_"}
+										.sessionId=${activeSessionId() || ""}
+										.bucket=${"proposal:goal"}
+										@annotation-change=${(e: CustomEvent) => { _goalAnnCount = e.detail?.count ?? 0; renderApp(); }}
+									></commentable-markdown>`
+								: html`<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>`}
 						</div>`
 				}
 			</div>
@@ -742,6 +806,20 @@ function renderGoalForm(config: GoalFormConfig) {
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
+				${config.commentable && _goalAnnCount > 0 && !config.streaming ? Button({
+					variant: "secondary",
+					onClick: () => {
+						const el = goalCommentableRef.value;
+						if (!el) return;
+						const text = el.sendFeedback();
+						if (text && state.remoteAgent) {
+							state.remoteAgent.prompt(text);
+						}
+						_goalAnnCount = 0;
+						renderApp();
+					},
+					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_goalAnnCount})</span>`,
+				}) : ""}
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
@@ -796,6 +874,8 @@ function goalPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
+		if (sessionId) clearProposalAnnotations(sessionId, "goal");
+		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
 		const projectId = state.previewProjectId || undefined;
 		state.previewProjectId = "";
@@ -854,7 +934,8 @@ function goalPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="goal-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal">
+			${proposalToast()}
 			${renderGoalForm({
 				title: state.previewTitle,
 				spec: state.previewSpec,
@@ -914,6 +995,7 @@ function goalPreviewPanel() {
 				onCwdHighlight: (i) => { state.cwdHighlightIndex = i; },
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
+				commentable: true,
 			})}
 		</div>
 	`;
@@ -956,6 +1038,8 @@ function rolePreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
+		if (sessionId) clearProposalAnnotations(sessionId, "role");
+		resetProposalAnnCount("role");
 		delete state.activeProposals.role;
 		// Clean up persisted draft
 		if (sessionId) {
@@ -1003,7 +1087,8 @@ function rolePreviewPanel() {
 		.filter(Boolean);
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="role-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="role-proposal">
+			${proposalToast()}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1097,7 +1182,15 @@ function rolePreviewPanel() {
 				</div>
 				<div class="flex-1 flex flex-col min-h-0">
 					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+						<div class="flex items-center gap-1">
+							<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+							${!state.rolePreviewPromptEditMode && _roleAnnCount > 0 ? html`
+								<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
+									data-testid="proposal-comment-count">
+									${_roleAnnCount} comment${_roleAnnCount === 1 ? "" : "s"}
+								</span>
+							` : ""}
+						</div>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
@@ -1119,13 +1212,33 @@ function rolePreviewPanel() {
 								}}
 							></textarea>`
 						: html`<div ${ref(rolePromptPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}">
-								<markdown-block .content=${state.rolePreviewPrompt || "_No prompt content yet_"}></markdown-block>
+								<commentable-markdown
+									${ref(rolePromptCommentableRef)}
+									.markdown=${state.rolePreviewPrompt || "_No prompt content yet_"}
+									.sessionId=${activeSessionId() || ""}
+									.bucket=${"proposal:role"}
+									@annotation-change=${(e: CustomEvent) => { _roleAnnCount = e.detail?.count ?? 0; renderApp(); }}
+								></commentable-markdown>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${streaming ? streamingBadge() : ""}
+				${_roleAnnCount > 0 && !streaming ? Button({
+					variant: "secondary",
+					onClick: () => {
+						const el = rolePromptCommentableRef.value;
+						if (!el) return;
+						const text = el.sendFeedback();
+						if (text && state.remoteAgent) {
+							state.remoteAgent.prompt(text);
+						}
+						_roleAnnCount = 0;
+						renderApp();
+					},
+					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_roleAnnCount})</span>`,
+				}) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateRole,
@@ -1465,6 +1578,8 @@ function staffPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		state.assistantType = null;
+		if (sessionId) clearProposalAnnotations(sessionId, "staff");
+		resetProposalAnnCount("staff");
 		delete state.activeProposals.staff;
 		localStorage.removeItem("gateway.sessionId");
 		setHashRoute("landing");
@@ -1502,7 +1617,8 @@ function staffPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="staff-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="staff-proposal">
+			${proposalToast()}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1574,7 +1690,15 @@ function staffPreviewPanel() {
 				</div>
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+						<div class="flex items-center gap-1">
+							<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+							${!state.staffPreviewPromptEditMode && _staffAnnCount > 0 ? html`
+								<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
+									data-testid="proposal-comment-count">
+									${_staffAnnCount} comment${_staffAnnCount === 1 ? "" : "s"}
+								</span>
+							` : ""}
+						</div>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
@@ -1595,13 +1719,33 @@ function staffPreviewPanel() {
 								}}
 							></textarea>`
 						: html`<div ${ref(staffPromptPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}" style="min-height:150px; max-height:400px">
-								<markdown-block .content=${state.staffPreviewPrompt || "_No prompt content yet_"}></markdown-block>
+								<commentable-markdown
+									${ref(staffPromptCommentableRef)}
+									.markdown=${state.staffPreviewPrompt || "_No prompt content yet_"}
+									.sessionId=${activeSessionId() || ""}
+									.bucket=${"proposal:staff"}
+									@annotation-change=${(e: CustomEvent) => { _staffAnnCount = e.detail?.count ?? 0; renderApp(); }}
+								></commentable-markdown>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${streaming ? streamingBadge() : ""}
+				${_staffAnnCount > 0 && !streaming ? Button({
+					variant: "secondary",
+					onClick: () => {
+						const el = staffPromptCommentableRef.value;
+						if (!el) return;
+						const text = el.sendFeedback();
+						if (text && state.remoteAgent) {
+							state.remoteAgent.prompt(text);
+						}
+						_staffAnnCount = 0;
+						renderApp();
+					},
+					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_staffAnnCount})</span>`,
+				}) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
@@ -1966,6 +2110,9 @@ function goalProposalPanel() {
 
 	const handleDismiss = () => {
 		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+		const sidEarly = activeSessionId();
+		if (sidEarly) clearProposalAnnotations(sidEarly, "goal");
+		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
 		_proposalInitializedFrom = null;
 		_proposalEnabledOptionalSteps = [];

@@ -4,9 +4,8 @@ import { marked } from "marked";
 import { createTextAnnotator, type TextAnnotator } from "@recogito/text-annotator";
 import "@recogito/text-annotator/text-annotator.css";
 import {
-  addAnnotation,
-  removeAnnotation,
-  getAnnotations,
+  reviewBackend,
+  type AnnotationBackend,
   type ReviewAnnotation,
 } from "./AnnotationStore.js";
 import "./AnnotationPopover.js";
@@ -24,6 +23,12 @@ export class ReviewDocument extends LitElement {
   @property({ type: String }) markdown = "";
   @property({ type: String }) sessionId = "";
   @property({ type: String }) docTitle = "";
+  /**
+   * Pluggable annotation store backend. Defaults to the REST-backed
+   * review-pane store. <commentable-markdown> overrides this with the
+   * ephemeral in-memory `proposalBackend`.
+   */
+  @property({ attribute: false }) backend: AnnotationBackend = reviewBackend;
 
   @state() private _popoverOpen = false;
   @state() private _popoverX = 0;
@@ -383,7 +388,7 @@ export class ReviewDocument extends LitElement {
 
     // If editing an existing annotation, remove the old one first
     if (this._editingAnnotationId) {
-      removeAnnotation(this.sessionId, this.docTitle, this._editingAnnotationId);
+      this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, this._editingAnnotationId);
       try { this._annotator?.removeAnnotation(this._editingAnnotationId); } catch { /* ignore */ }
     }
 
@@ -399,8 +404,8 @@ export class ReviewDocument extends LitElement {
       isCode: sel.isCode,
     };
 
-    addAnnotation(this.sessionId, this.docTitle, ann);
-    this._annotations = getAnnotations(this.sessionId, this.docTitle);
+    this.backend.add({ sessionId: this.sessionId, bucket: this.docTitle }, ann);
+    this._annotations = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     this._pendingSelection = null;
     this._popoverOpen = false;
     this._popoverMode = "popover";
@@ -460,8 +465,8 @@ export class ReviewDocument extends LitElement {
   }
 
   private _removeAnnotation(annotationId: string): void {
-    removeAnnotation(this.sessionId, this.docTitle, annotationId);
-    this._annotations = getAnnotations(this.sessionId, this.docTitle);
+    this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, annotationId);
+    this._annotations = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     this._detachedAnnotations = this._detachedAnnotations.filter(a => a.id !== annotationId);
 
     try {
@@ -474,7 +479,7 @@ export class ReviewDocument extends LitElement {
   }
 
   private _reanchorAnnotations(): void {
-    const existing = getAnnotations(this.sessionId, this.docTitle);
+    const existing = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     if (existing.length === 0) {
       this._annotations = [];
       this._detachedAnnotations = [];

@@ -22,7 +22,8 @@ import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog }
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { setSelectedWorkflowId } from "./render.js";
+import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./render.js";
+import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
@@ -36,6 +37,20 @@ import {
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+
+/**
+ * Extract the markdown body field from a proposal's fields object.
+ * Used by the inline-comments hook to detect when a proposal_update
+ * actually rewrote the commentable body (vs. an idempotent re-emit).
+ */
+function extractProposalBody(
+	fields: Record<string, unknown> | undefined,
+	type: "goal" | "role" | "staff",
+): string {
+	if (!fields) return "";
+	if (type === "goal") return String((fields as any).spec ?? "");
+	return String((fields as any).prompt ?? "");
+}
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -1280,6 +1295,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			if (fields === null) {
 				// proposal_cleared event from DELETE / accept
+				if (type === "goal" || type === "role" || type === "staff") {
+					clearProposalAnnotations(sessionId, type);
+					resetProposalAnnCount(type);
+				}
 				delete state.activeProposals[type];
 				// Recompute assistantHasProposal across remaining slots.
 				state.assistantHasProposal = Object.keys(state.activeProposals).length > 0;
@@ -1290,6 +1309,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const prev = state.activeProposals[type];
 			const merged = plugin.mergeFields(prev?.fields ?? {}, fields);
 			const isFirstEmit = prev == null;
+			// Inline-comments: a new proposal body invalidates any pending
+			// annotations because character offsets won't survive a rewrite.
+			// Only fires for goal/role/staff and only on a true content change
+			// (not the idempotent shallow-merge re-emit).
+			if ((type === "goal" || type === "role" || type === "staff") && !isFirstEmit) {
+				const oldBody = extractProposalBody(prev?.fields, type);
+				const newBody = extractProposalBody(merged, type);
+				if (oldBody !== newBody) {
+					clearProposalAnnotations(sessionId, type);
+					resetProposalAnnCount(type);
+					showProposalToast("Proposal updated — comments cleared");
+				}
+			}
 			// First-emit dismissal short-circuit — generalised from the goal-only
 			// check at session-manager.ts:1062. Skip this only when (a) it's the
 			// very first emit for this slot AND (b) the user previously dismissed
