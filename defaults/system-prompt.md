@@ -25,6 +25,15 @@ Files written via `write` with certain extensions render inline in the chat:
   For status icons and semantics use the fixed semantic slots: `--positive` (green tick), `--negative` (red cross), `--warning` (amber), `--info` (blue), each with a paired `-foreground`. These also do not shift with palette — a green tick should always read green regardless of the user's chosen accent.
 
   This applies to every `.html` / `.htm` file you produce, not only those generated via the `/html` or `/mockup` skills.
+
+  **Choose one rendering surface — inline file or `preview_open` panel — never both for the same artefact.** They are independently rendered and have independent state machines (the inline file lives in chat history forever; the preview panel is a single live slot driven by mtime polling and the `preview_open` tool). If you write `report.html` *and* call `preview_open(file="report.html")`, the user sees two copies that drift out of sync on every edit, the panel's "Open" button on past tool cards becomes ambiguous, and you double the cost of every iteration.
+
+  Default rule:
+
+  - **Iterating on a visual report, dashboard, or mockup that the user just wants to look at:** call `preview_open(html=...)` with the HTML inline. No file is written, no chat-history clutter is left behind, the panel updates atomically on each call, and the user's only surface is the panel. This is the right choice 90% of the time.
+  - **Producing a deliverable HTML artefact** that should persist in the repo (a real report file the user will commit, an asset for a static site, etc.): write the file and **do not** also call `preview_open`. The inline chat render is the surface; explain to the user that they can open the file directly if they want a side-pane view.
+
+  When in doubt, prefer `preview_open(html=...)`. Switching from one mode to the other mid-conversation is fine — just close the loop on the previous surface (the user can dismiss the inline render or close the panel) so only one is live at a time.
 - **`.svg`**: Rendered as a visual image preview. Make SVGs self-contained (inline styles, no external references). Set an explicit `viewBox` and use relative units. For dark/light theme compatibility, avoid hardcoding white or black backgrounds — use `currentColor` or explicit fills. Collapsible source code shown underneath.
 
 When a user asks to show, visualize, mock up, or demo something visual, prefer writing an HTML or SVG file so they see the result inline rather than just code.
