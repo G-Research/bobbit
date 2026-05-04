@@ -114,35 +114,7 @@ export interface Goal {
 	};
 }
 
-export type AppView = "disconnected" | "gateway-starting" | "authenticated" | "session-not-found";
-
-// ============================================================================
-// SESSIONS HYDRATION PROMISE (F1)
-// ============================================================================
-// Resolves when the first post-auth refreshSessions() completes. Code that
-// reads state.gatewaySessions during boot or route dispatch awaits this
-// instead of relying on bootstrap-step ordering — the previous A1/A3/A4
-// attempt removed `await refreshSessions()` from authenticateGateway without
-// providing a contract for consumers to wait, breaking 8 E2E tests.
-
-let _sessionsHydrated: Promise<void> = Promise.resolve();
-let _resolveSessionsHydrated: () => void = () => {};
-
-/** Reset the hydration latch. Called once at boot from initApp so consumers
- *  see an unresolved promise until the first refreshSessions() lands. */
-export function resetSessionsHydration(): void {
-	_sessionsHydrated = new Promise<void>((resolve) => { _resolveSessionsHydrated = resolve; });
-}
-
-/** Mark the latch resolved. Called once from the post-auth refreshSessions().then. */
-export function markSessionsHydrated(): void {
-	_resolveSessionsHydrated();
-}
-
-/** Await the hydration latch. No-op once resolved. */
-export function awaitSessionsHydrated(): Promise<void> {
-	return _sessionsHydrated;
-}
+export type AppView = "disconnected" | "gateway-starting" | "authenticated";
 
 // ============================================================================
 // SIDEBAR WIDTH (user-resizable) — helpers declared before `state` so the
