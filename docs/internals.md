@@ -1938,7 +1938,7 @@ The existing session restore path (on gateway restart) also benefits from worktr
 
 ### Security summary
 
-- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/{sessions,tool-guard,html-snapshots}/` (selective mounts — the host gateway token, TLS keys, and other sensitive state files are not mounted)
+- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/{sessions,tool-guard,html-snapshots}/` (selective mounts — the host gateway token, TLS keys, and other sensitive state files are not mounted), and `/bobbit/preview` (per-session bind-mount of `<stateDir>/preview/<sid>/` — or `/bobbit/preview-root` for the per-project shared parent; see [`docs/preview-architecture.md`](preview-architecture.md))
 - Runs as `node` user (uid=1000), no Docker socket
 - Mount paths validated against blocklist (`/proc`, `/sys`, `/.ssh`, `/.aws`, etc.)
 - Credential keys sanitized (`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -1993,7 +1993,7 @@ Agent process → message_update (full content)
 - **Original event never mutated** — `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event. Only the broadcast/buffer path sees the truncated version.
 - **Dual format support** — both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness.
 - **UI lazy loading** — `WriteRenderer` shows a preview (first 512 chars) with a "Load full content" button. Full content is fetched via `GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks (used by `preview_open` snapshots — see [Preview snapshots & reopening](#preview-snapshots--reopening)). See [docs/rest-api.md — Large content truncation](rest-api.md#large-content-truncation).
-- **`preview_open` snapshot blocks** — `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with the `__preview_snapshot_v1__\n` sentinel. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` — the marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint.
+- **`preview_open` snapshot blocks** — `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with one of the `__preview_snapshot_v{1,2,3}__\n` sentinels. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` — the matched marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. The 512-char preview applies to v1 (legacy raw-HTML) snapshots; v2/v3 snapshots are constant ~250 bytes and never trip the threshold, so the truncation path only fires for legacy v1 archived snapshots in practice. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint.
 - **Streaming throttle** — `remote-agent.ts` throttles `streamMessage` updates to 2x/sec when content is truncated, reducing Lit re-render pressure in the browser.
 
 ### Key files
@@ -2479,6 +2479,8 @@ Only truly global state lives in the server's central state directory.
 | `gateway-restart` | `harness.ts` | Dev restart sentinel |
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
+| `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
+| `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
 
 ### Global
 

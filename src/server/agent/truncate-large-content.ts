@@ -14,8 +14,29 @@
 /** Default threshold: 32KB. Normal code files pass through untouched. */
 export const LARGE_CONTENT_THRESHOLD = 32 * 1024;
 
-/** Sentinel prefix on preview_open snapshot tool_result text blocks. */
-const PREVIEW_SNAPSHOT_MARKER = "__preview_snapshot_v1__\n";
+/**
+ * Sentinel prefixes on preview_open snapshot tool_result text blocks.
+ * Recognises v1/v2/v3 — only v1 ever needs truncation in practice (v2/v3
+ * are constant ~250 bytes), but matching all three keeps the truncation
+ * layer aligned with what the renderer accepts.
+ *
+ * Mirrors `PREVIEW_SNAPSHOT_MARKERS` in `defaults/tools/html/snapshot.ts`;
+ * inlined here because `defaults/` lives outside the server `rootDir` and
+ * `src/ui/tools/renderers/PreviewRenderer.ts` follows the same pattern.
+ */
+const PREVIEW_SNAPSHOT_MARKERS = [
+	"__preview_snapshot_v1__\n",
+	"__preview_snapshot_v2__\n",
+	"__preview_snapshot_v3__\n",
+] as const;
+
+/** Return the matched marker prefix, or undefined if none matches. */
+function matchMarker(text: string): string | undefined {
+	for (const m of PREVIEW_SNAPSHOT_MARKERS) {
+		if (text.startsWith(m)) return m;
+	}
+	return undefined;
+}
 
 export interface TruncatedContent {
 	_truncated: true;
@@ -34,13 +55,14 @@ export interface TruncatedContent {
  */
 export function truncateSnapshotBlock(block: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
 	if (!block || block.type !== "text" || typeof block.text !== "string") return block;
-	if (!block.text.startsWith(PREVIEW_SNAPSHOT_MARKER)) return block;
+	const marker = matchMarker(block.text);
+	if (!marker) return block;
 	if (block._truncated) return block;
 	if (block.text.length <= threshold) return block;
-	const html = block.text.slice(PREVIEW_SNAPSHOT_MARKER.length);
+	const html = block.text.slice(marker.length);
 	return {
 		...block,
-		text: PREVIEW_SNAPSHOT_MARKER,
+		text: marker,
 		_truncated: true,
 		_originalLength: block.text.length,
 		preview: html.slice(0, 512),
