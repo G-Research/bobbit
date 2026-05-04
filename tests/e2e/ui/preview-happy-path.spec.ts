@@ -4,9 +4,10 @@
  * mount with the correct `#mtime=<n>` cache-buster.
  *
  * This test is intentionally minimal — full asset-loading coverage lives
- * in WP-H. We just validate that the Preview tab now produces a
- * `/preview/<sid>/<entry>#mtime=<n>` iframe and not the legacy
- * `/api/preview/render` (file mode) or `srcdoc=` (inline mode) shapes.
+ * in preview-mount-route.spec.ts and preview-new-tab.spec.ts. We just
+ * validate that the Preview tab now produces a `/preview/<sid>/<entry>#mtime=<n>`
+ * iframe and not the legacy `/api/preview/render` (file mode) or `srcdoc=`
+ * (inline mode) shapes.
  */
 import { test, expect } from "./fixtures.js";
 import { openApp, createSessionViaUI } from "./ui-helpers.js";
@@ -14,33 +15,62 @@ import { openApp, createSessionViaUI } from "./ui-helpers.js";
 test.describe("Preview panel iframe URL (WP-E)", () => {
 	test("iframe src is /preview/<sid>/<entry>#mtime=<n>", async ({ page }) => {
 		await openApp(page);
-		const sessionId = await createSessionViaUI(page);
+		await createSessionViaUI(page);
 
-		// Drive the unified preview panel into the Preview tab via the public
-		// state handle exposed on window (`bobbitState` / `__bobbitState`).
-		// We're validating URL-shape, not the SSE bootstrap path — that lives
-		// in WP-H.
+		// Capture the session id from the URL hash (createSessionViaUI returns void).
+		await page.waitForFunction(() => /#\/session\/[\w-]+/.test(location.hash), null, { timeout: 10_000 });
+		const sessionId = await page.evaluate(() => {
+			const m = location.hash.match(/#\/session\/([\w-]+)/);
+			return m?.[1] ?? "";
+		});
+		expect(sessionId).toMatch(/^[a-f0-9-]{36}$/);
+
+		// Drive the unified preview panel through the natural product flow:
+		// 1. PATCH preview=true → WS broadcast flips state.isPreviewSession on
+		//    the client and starts the SSE preview-events subscription.
+		// 2. POST /api/preview/mount → server emits preview-changed → SSE
+		//    bumps state.previewPanelMtime and triggers renderApp().
+		const baseUrl = new URL(page.url()).origin;
+		const patchResp = await page.evaluate(async ({ baseUrl, sessionId }) => {
+			const r = await fetch(`${baseUrl}/api/sessions/${sessionId}`, {
+				method: "PATCH",
+				credentials: "include",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ preview: true }),
+			});
+			return { status: r.status, text: await r.text() };
+		}, { baseUrl, sessionId });
+		expect(patchResp.status).toBe(200);
+
+		await expect.poll(
+			async () => await page.evaluate(() => {
+				const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
+				return s.isPreviewSession === true;
+			}),
+			{ timeout: 10_000 },
+		).toBe(true);
+
+		// Pre-seed the entry on client state. The current SSE handler only
+		// forwards `mtime` (not `entry`), so the entry field would otherwise
+		// stay empty and the preview iframe would render with the
+		// "inline.html" fallback. Setting entry directly lets us assert the
+		// expected `report.html` URL shape after the next render.
 		await page.evaluate(() => {
-			const w = window as any;
-			const state = w.bobbitState ?? w.__bobbitState;
-			if (!state) throw new Error("bobbitState not exposed on window");
-			state.isPreviewSession = true;
-			state.previewPanelActiveTab = "preview";
-			state.previewPanelEntry = "report.html";
-			state.previewPanelMtime = 1234567890;
-			// Trigger a render by dispatching a hashchange or mutating a
-			// dummy field; rely on the next animation frame in case the
-			// app uses microtask-batched rendering.
-			document.dispatchEvent(new Event("visibilitychange"));
-			w.dispatchEvent?.(new Event("resize"));
+			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
+			s.previewPanelEntry = "report.html";
+			s.previewPanelActiveTab = "preview";
 		});
 
-		// Force a render via the global render hook if available.
-		await page.evaluate(() => {
-			const w = window as any;
-			const fn = w.bobbitRenderApp ?? w.__bobbitRenderApp ?? null;
-			if (typeof fn === "function") fn();
-		});
+		const mountResp = await page.evaluate(async ({ baseUrl, sessionId }) => {
+			const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
+				method: "POST",
+				credentials: "include",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ html: "<!DOCTYPE html><body>x</body>", entry: "report.html" }),
+			});
+			return { status: r.status, text: await r.text() };
+		}, { baseUrl, sessionId });
+		expect(mountResp.status).toBe(200);
 
 		// Wait for the iframe to appear and read its src attribute.
 		const iframe = page.locator(".goal-preview-panel iframe").first();
@@ -49,7 +79,7 @@ test.describe("Preview panel iframe URL (WP-E)", () => {
 		expect(src).not.toBeNull();
 		expect(src).toContain(`/preview/${encodeURIComponent(sessionId)}/`);
 		expect(src).toContain("report.html");
-		expect(src).toContain("#mtime=1234567890");
+		expect(src).toMatch(/#mtime=\d+$/);
 		expect(src).not.toContain("/api/preview/render");
 
 		// Open-in-new-tab anchor renders with matching href.
@@ -65,10 +95,11 @@ test.describe("Preview panel iframe URL (WP-E)", () => {
 		const refresh = page.locator('button[title="Refresh preview"]').first();
 		await expect(refresh).toBeVisible();
 		await refresh.click();
-		await page.waitForTimeout(50);
+		await expect.poll(async () => await iframe.getAttribute("src"), {
+			timeout: 5000,
+		}).not.toEqual(src);
 		const src2 = await iframe.getAttribute("src");
 		expect(src2).not.toBeNull();
-		expect(src2).not.toEqual(src);
 		expect(src2).toMatch(/#mtime=\d+$/);
 	});
 });
