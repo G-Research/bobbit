@@ -65,11 +65,9 @@
  *
  * Steer (RPC, not a prompt-text trigger)
  * --------------------------------------
- *  Steer commands (handleCommand → case "steer") emit a synchronous
- *  [STEER_RECEIVED] <text> assistant message for back-compat with
- *  tests/e2e/steer-midturn.spec.ts and tests/e2e/ui/bg-wait-steer-flow.spec.ts,
- *  then abort the in-flight turn and queue a fresh handlePrompt(steeredText)
- *  which produces a real <user-message> in the chat.
+ *  Steer commands (handleCommand → case "steer") abort the in-flight turn
+ *  and queue a fresh handlePrompt(steeredText), which produces a real
+ *  <user-message> in the chat. Tests assert on that transcript event.
  *
  * ----------------------------------------------------------------------
  *
