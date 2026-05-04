@@ -211,7 +211,6 @@ export class AgentInterface extends LitElement {
 	// reflows (which grow `.max-w-5xl` after the initial pin) and re-pins
 	// while `_stickToBottom` is true. Removed on next session navigate /
 	// disconnect.
-	private _imageLoadHandler?: (e: Event) => void;
 
 	// Jump-to-bottom button visibility. Computed purely from geometry in
 	// `_handleScroll`. NEVER mutates `_stickToBottom`.
@@ -397,6 +396,7 @@ export class AgentInterface extends LitElement {
 			this._scrollContainer.addEventListener("wheel", this._handleUserIntent, { passive: true });
 			this._scrollContainer.addEventListener("touchstart", this._handleUserIntent, { passive: true });
 			this._scrollContainer.addEventListener("keydown", this._handleScrollKeydown);
+
 		}
 
 		// Subscribe to external session if provided
@@ -424,10 +424,6 @@ export class AgentInterface extends LitElement {
 			this._scrollContainer.removeEventListener("wheel", this._handleUserIntent);
 			this._scrollContainer.removeEventListener("touchstart", this._handleUserIntent);
 			this._scrollContainer.removeEventListener("keydown", this._handleScrollKeydown);
-			if (this._imageLoadHandler) {
-				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, true);
-				this._imageLoadHandler = undefined;
-			}
 		}
 
 		if (this._pillResizeObserver) {
@@ -474,23 +470,12 @@ export class AgentInterface extends LitElement {
 		}
 		// Single re-pin path on session navigate: pin once after Lit's first
 		// commit. Subsequent async growth (markdown, syntax highlighting,
-		// hydrated tool-content) is caught by the ResizeObserver — every
-		// `delta > 0` tick re-pins via `_pinIfSticking()`. Lazy `<img>`/
-		// `<iframe>` decode reflows are caught by the capture-phase `load`
-		// listener installed below.
+		// hydrated tool-content, lazy `<img>`/`<iframe>` decode reflows) is
+		// caught by the ResizeObserver — every `delta > 0` tick re-pins via
+		// `_pinIfSticking()`. The RO observes the inner `.max-w-5xl` content
+		// container, so any height growth from any source (image decode
+		// included) triggers a re-pin without an explicit `load` listener.
 		this.updateComplete.then(() => this._pinIfSticking());
-
-		// Install a one-shot capture-phase `load` listener on the scroll
-		// container. Catches `<img>` and `<iframe>` load events anywhere in
-		// the subtree (capture phase fires for non-bubbling events too) and
-		// re-pins. Replaces the previous time-bounded settle window.
-		if (this._scrollContainer) {
-			if (this._imageLoadHandler) {
-				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, true);
-			}
-			this._imageLoadHandler = () => this._pinIfSticking();
-			this._scrollContainer.addEventListener("load", this._imageLoadHandler, true);
-		}
 
 		// Set default streamFn with proxy support if not already set
 		if (this.session.streamFn === streamSimple) {
@@ -1233,7 +1218,7 @@ export class AgentInterface extends LitElement {
 			<div class="flex flex-col h-full bg-background text-foreground min-w-0">
 				<!-- Messages Area -->
 				<div class="flex-1 min-h-0 relative">
-					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden">
+					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
 					</div>
 					${this._renderJumpToBottom()}
