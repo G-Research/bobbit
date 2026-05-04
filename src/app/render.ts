@@ -8,7 +8,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Check, Copy, Eye, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -533,6 +533,27 @@ const staffPromptCommentableRef = createRef<import("../ui/components/Commentable
 // Annotation count fields, mirrored from <commentable-markdown> via
 // the bubbled `annotation-change` event. Used to gate the badge + Send-feedback button.
 let _goalAnnCount = 0;
+/** Timestamp of the most recent Spec Copy click; UI flips to "Copied" for 1.5 s. */
+let _specCopiedAt = 0;
+async function _copySpecText(text: string): Promise<void> {
+	try {
+		await navigator.clipboard.writeText(text);
+	} catch {
+		const ta = document.createElement("textarea");
+		ta.value = text;
+		ta.style.position = "fixed";
+		ta.style.opacity = "0";
+		document.body.appendChild(ta);
+		ta.select();
+		try { document.execCommand("copy"); } catch { /* ignore */ }
+		ta.remove();
+	}
+	_specCopiedAt = Date.now();
+	renderApp();
+	setTimeout(() => {
+		if (Date.now() - _specCopiedAt >= 1500) renderApp();
+	}, 1600);
+}
 let _roleAnnCount = 0;
 let _staffAnnCount = 0;
 // Toast text for "Proposal updated — comments cleared" notifications.
@@ -774,13 +795,27 @@ function renderGoalForm(config: GoalFormConfig) {
 							</span>
 						` : ""}
 					</div>
-					<button
-						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-						title="Toggle edit/preview mode"
-						@click=${config.onSpecEditToggle}
-					>
-						${config.specEditMode ? "Preview" : "Edit"}
-					</button>
+					<div class="flex items-center gap-1">
+						${(() => {
+							const justCopied = Date.now() - _specCopiedAt < 1500;
+							return html`<button
+								class="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-border ${justCopied ? "text-primary border-primary" : "text-muted-foreground hover:text-foreground hover:bg-secondary"} transition-colors"
+								title="Copy spec markdown"
+								@click=${() => _copySpecText(config.spec)}
+							>
+								${icon(justCopied ? Check : Copy, "xs")}
+								<span>${justCopied ? "Copied" : "Copy"}</span>
+							</button>`;
+						})()}
+						<button
+							class="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle edit/preview mode"
+							@click=${config.onSpecEditToggle}
+						>
+							${icon(config.specEditMode ? Eye : Pencil, "xs")}
+							<span>${config.specEditMode ? "Preview" : "Edit"}</span>
+						</button>
+					</div>
 				</div>
 				${config.specEditMode
 					? html`<textarea
@@ -2158,6 +2193,7 @@ function goalProposalPanel() {
 		saving: _proposalSaving,
 		createDisabled: !_proposalTitle.trim() || _proposalSaving,
 		streaming: isProposalStreaming("goal_proposal"),
+		commentable: true,
 	});
 }
 

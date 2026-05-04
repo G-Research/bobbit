@@ -156,6 +156,15 @@
 review-document {
   display: block;
   position: relative;
+}
+
+/* The review-pane surface owns its own chrome padding (extra left gutter is
+   purely decorative — the floating "+ Comment" button is mobile-only and
+   absolutely positioned via JS, it does NOT need the 48px gutter). When
+   <review-document> is reused inside a goal/role/staff proposal panel via
+   <commentable-markdown>, the host already provides its own padding, so the
+   element renders flush. */
+review-pane review-document {
   padding: 16px 24px 16px 48px;
 }
 
