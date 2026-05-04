@@ -40,6 +40,8 @@ export interface MountResult {
 	path: string;
 	/** Relative entry filename inside the mount. */
 	entry: string;
+	/** mtime of the entry file in ms since epoch. */
+	mtime: number;
 }
 
 /** Typed error so the route handler can map directly to HTTP. */
@@ -144,6 +146,7 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
 		entry: safeEntry,
+		mtime: fs.statSync(target).mtimeMs,
 	};
 }
 
@@ -256,6 +259,7 @@ export function copyFileTree(sessionId: string, srcFile: string): MountResult {
 		url: `/preview/${sessionId}/${entry}`,
 		path: target,
 		entry,
+		mtime: fs.statSync(target).mtimeMs,
 	};
 }
 
