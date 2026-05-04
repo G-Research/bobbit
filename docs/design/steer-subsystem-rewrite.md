@@ -1,6 +1,6 @@
 # Steer subsystem rewrite — single source of truth, exactly-once, durable
 
-Status: design doc (gate `design-doc`)
+Status: implemented (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`).
 
 ## 1. Problem
 
@@ -341,3 +341,54 @@ The goal spec mandates atomic landing, but the *test ordering* matters:
 1. **Sent-indicator UX**: should we drop the pill entirely (preferred — simpler, no extra state) or keep an ephemeral `inFlightSteerTexts` set for visual feedback during the dispatch→echo window? The audit §6.4 P0 test currently asserts on the pill disappearing; if we drop the pill, we rephrase to "row count → 0".
 2. **Image attachments on live-steer**: out of scope per goal spec, but `_dispatchSteer` currently joins by text only. Confirm no regression for non-image steers. (Audit §6.6 covers the missing image path.)
 3. **Bridge command name**: `clear_queue` vs `drain_steering_queue`. The SDK method is `clearQueue` and clears both queues — `clear_queue` is the honest name. Bobbit only re-enqueues `steering[]`, but draining `followUp[]` too is harmless (we don't expose followUp at our layer).
+
+## 9. Implementation outcome
+
+Landed as the four-commit stack on `goal/steer-subs-bd19361f`:
+
+| Commit | Subject | Role |
+|---|---|---|
+| `f37aadd8` | refactor(steer): remove dispatched flag, single dispatch site | `PromptQueue` simplification + `_dispatchSteer` consolidation |
+| `3d3d34cd` | test(steer): drop STEER_RECEIVED mock ACK; assert on transcript/DOM | Acceptance §6 — mock cleanup + browser/API tests rewritten to scrape `<user-message>` |
+| `377f4bb7` | test(steer): P0 reconnect/multitab/stop-exactly-once + queue unit tests | Acceptance §1/§2/§4/§5 — the five P0 tests |
+| `6ed08fc9` | fix(steer): shadow-ledger reconciliation on abort + AC §3 restart test | Acceptance §3 (gateway restart) + final shadow-ledger lifecycle |
+
+### What landed
+
+- **`PromptQueue`** (`src/server/agent/prompt-queue.ts`): no `dispatched` field, no `markDispatched` / `removeDispatched` / `resetDispatched`. Adds `enqueueAtFront(text, opts)` for reconciliation paths. Row lifetime is exactly `queued → dispatched (= removed)`.
+- **`SessionManager`** (`src/server/agent/session-manager.ts`): single dispatch site `_dispatchSteer()` removes rows from `promptQueue` *before* awaiting `rpcClient.steer()`. `deliverLiveSteer`, `steerQueued`, and the `tool_execution_end` / `agent_end` boundary handlers all funnel through it. `bgProcessManager.abortAllWaits()` has two call sites: inside `_dispatchSteer` (every dispatch) and inside `steerQueued` for the streaming case (so a parked `bash_bg wait` resolves and a tool boundary actually arrives).
+- **Shadow ledger** (`SessionInfo.inFlightSteerTexts: string[]`): mitigation B from §6.1 — chosen because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` and the agent-side dispatch table lives inside `node_modules/@mariozechner/pi-coding-agent`. Push on `_dispatchSteer` post-RPC; splice on `message_end(role:user)` matching by text in `_consumeSteerEcho`; drain in `_reconcileAfterAbort` (re-enqueue at front of `promptQueue` via `enqueueAtFront`).
+- **Reconciliation on abort**: `_reconcileAfterAbort()` runs in two places — `handleAgentLifecycle`'s `agent_end while wasAborting` branch (graceful) and `forceAbort` *before* `rpcClient.stop()` (force-kill). Either way the SDK's pending steers are pulled back into Bobbit's queue and redispatched exactly once after the agent is ready.
+- **Tests**: five P0 specs in place — `tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts` (§1 exactly-once), `tests/e2e/steer-reconnect.spec.ts` (§2 WS reconnect), `tests/e2e/steer-gateway-restart.spec.ts` (§3 gateway restart), `tests/e2e/steer-multitab.spec.ts` (§4 multi-tab convergence), `tests/e2e/ui/queue-ui.spec.ts` PI-10 (§5 sent-indicator removal). Plus `tests/queue-dispatch.spec.ts` and `tests/prompt-queue.spec.ts` rewritten to assert on row-removal + `enqueueAtFront` rather than on the deleted `dispatched` flag.
+- **Mock cleanup**: `tests/e2e/mock-agent-core.mjs` no longer emits `[STEER_RECEIVED] <text>`. Browser tests scrape `<user-message>` elements; API tests read `agent_session.messages`. `grep -r STEER_RECEIVED tests/` returns 0 matches.
+
+### Verification greps
+
+Four invariants the implementation enforces. Each grep should return zero matches against the production tree on `master`:
+
+```bash
+# 1. No legacy ACK string in any test (mock-agent and consumers).
+grep -r "STEER_RECEIVED" tests/
+
+# 2. PromptQueue has no dispatched field or reset/mark/remove triplet.
+grep -E "markDispatched|removeDispatched|resetDispatched" src/
+
+# 3. No dispatched flag on QueuedMessage rows.
+grep -E "\.dispatched|dispatched\?" src/server/agent/prompt-queue.ts
+
+# 4. Single dispatch site — _dispatchSteer/_reconcileAfterAbort/inFlightSteerTexts present.
+grep -c "_dispatchSteer\|_reconcileAfterAbort\|inFlightSteerTexts" src/server/agent/session-manager.ts
+# (this one should be > 0; the others should be 0)
+```
+
+### Deviations from the original design
+
+- **Mitigation B was used, not A.** §6.1 expected we could add a `clear_queue` passthrough to the bridge command-handler shim. At implementation time the shim turned out to live inside the SDK package (read-only `node_modules`), so the destructive drain was implemented Bobbit-side via the shadow ledger — mirroring the SDK's text-match removal logic at our layer. Lifetime is strictly between dispatch and echo, exactly as designed in mitigation B.
+- **Sent-indicator pill** was kept (not dropped per §3.7's preferred option). Audit §6.4's P0 test asserts on its disappearance within 2 s; the simplest path was to keep the existing UI and let row-removal drive it.
+- **`forceAbort` reconciliation order**: design §3.5 calls `_reconcileAfterAbort` before kill in the early phase. Implementation calls it after `session.unsubscribe()` + `await session.rpcClient.stop()`, between bridge teardown and respawn — the SDK mirror is in-process state and is gone with the bridge, so the ledger (Bobbit-owned) is what we drain regardless. The race window described in §6.2 is unchanged.
+
+### Where to look next
+
+- Steer architecture, shadow-ledger lifecycle, and force-kill recovery: [docs/prompt-queue.md — Abort and force-kill recovery](../prompt-queue.md#abort-and-force-kill-recovery).
+- Live-steer call-site map and the two `abortAllWaits` invocation points: [docs/internals.md — Steer-interruptible bash_bg wait](../internals.md#steer-interruptible-bash_bg-wait).
+- Debugging duplicate-on-Stop, lost-after-abort, and reconnect mid-steer scenarios: [docs/debugging.md — Abort, steer & queue](../debugging.md#abort-steer--queue).
