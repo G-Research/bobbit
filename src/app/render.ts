@@ -1,4 +1,3 @@
-import { PREVIEW_THEME_BRIDGE as SHARED_PREVIEW_THEME_BRIDGE, PREVIEW_SWIPE_SCRIPT as SHARED_PREVIEW_SWIPE_SCRIPT } from "../shared/preview-bridge-scripts.js";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import "../ui/components/CommentableMarkdown.js";
@@ -8,7 +7,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, Check, Copy, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -2223,10 +2222,11 @@ function goalProposalPanel() {
 
 /** Theme-bridge + swipe scripts injected into preview iframes. Source of
  *  truth: `src/shared/preview-bridge-scripts.ts` (also imported by the
- *  server's `/api/preview/render` route so client and server emit byte-equal
+ *  server's preview content route so client and server emit byte-equal
  *  payloads). Local aliases preserved to avoid churning call sites. */
-const PREVIEW_THEME_BRIDGE = SHARED_PREVIEW_THEME_BRIDGE;
-const PREVIEW_SWIPE_SCRIPT = SHARED_PREVIEW_SWIPE_SCRIPT;
+// WP-E: theme-bridge / swipe-script constants previously concatenated into
+// the inline `srcdoc=` iframe are gone. The gateway now injects them
+// server-side on text/html responses through the `/preview/<sid>/` mount.
 
 /** Whether the unified panel is active for the current non-assistant session. */
 function hasUnifiedPanel(): boolean {
@@ -2696,19 +2696,21 @@ export function doRenderApp(): void {
 	};
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
+	//
+	// WP-E: single iframe pointing at the per-session preview mount. The agent
+	// writes into <stateDir>/preview/<sid>/, the gateway serves from
+	// `/preview/<sid>/<rel-path>` with cookie auth + theme-bridge injection on
+	// text/html responses. Hot reloads come via SSE bumping `previewPanelMtime`,
+	// which forces the iframe to reload via the `#mtime=<n>` hash.
 	const htmlPreviewContent = () => {
-		const sid = activeSessionId();
-		const mode = state.previewPanelMode;
+		const sid = activeSessionId() || "";
+		const entry = state.previewPanelEntry || "inline.html";
 		const v = state.previewPanelMtime || 0;
-		if (mode === "file" && sid) {
+		if (!sid || !state.previewPanelEntry) {
+			// Empty-state until the first SSE `preview-changed` event lands.
 			return html`
-				<div style="position:relative;flex:1;min-height:0;">
-					<iframe
-						class="w-full border-0"
-						style="position:absolute;inset:0;height:100%;"
-						sandbox="allow-scripts allow-same-origin"
-						src=${`/api/preview/render?sessionId=${encodeURIComponent(sid)}&v=${v}`}
-					></iframe>
+				<div class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
+					No preview yet.
 				</div>
 			`;
 		}
@@ -2718,7 +2720,7 @@ export function doRenderApp(): void {
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts allow-same-origin"
-					.srcdoc=${state.previewPanelHtml + PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT}
+					src=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}#mtime=${v}`}
 				></iframe>
 			</div>
 		`;
@@ -2827,6 +2829,18 @@ export function doRenderApp(): void {
 						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
+						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? html`
+						<a
+							href=${`/preview/${encodeURIComponent(activeSessionId() || "")}/${encodeURIComponent(state.previewPanelEntry)}`}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="text-muted-foreground hover:text-foreground"
+							style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
+							title="Open preview in new tab"
+						>${icon(ExternalLink, "sm")}</a>
+						<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Refresh preview">
+							${icon(RotateCw, "sm")}
+						</button>` : ""}
 						${showPreviewTab ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
 							${icon(Maximize2, "sm")}

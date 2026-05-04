@@ -10,9 +10,9 @@ docs: |-
 detail_docs: |-
   ## Purpose
 
-  Open the live preview side-panel in the Bobbit UI with HTML content. The panel splits the screen alongside the chat, showing a live-rendered iframe. Each subsequent call to `preview_open` updates the content in-place — the panel polls for changes every second.
+  Open the live preview side-panel in the Bobbit UI with HTML content. The panel splits the screen alongside the chat, showing a live-rendered iframe. Each subsequent call to `preview_open` updates the content in-place — changes are pushed live via SSE.
 
-  This replaces the manual workflow of calling gateway APIs, managing session IDs, and writing to specific file paths.
+  Both `html=` and `file=` populate a per-session preview mount served at `/preview/<sid>/`. Sibling assets (images, videos, stylesheets, scripts) resolve as relative URLs from the entry HTML. The tool result is a constant ~150 byte snapshot regardless of HTML size — iterating on a large report does not bloat the conversation.
 
   ## Parameters
 
@@ -90,6 +90,7 @@ detail_docs: |-
   ## Notes / Gotchas
 
   - **Same-origin with Vite dev server** — the preview iframe can reference real app CSS via `<link rel='stylesheet' href='/src/ui/app.css'>` for pixel-accurate mockups.
-  - **Auto-updates** — the panel polls every second. Multiple rapid calls are fine; only the latest content is shown.
-  - **One preview per session** — each session has its own preview. Switching sessions shows the correct preview.
-  - **Fullscreen mode** — the user can click the maximize icon in the preview panel header to expand the preview to fill the main area, with a compact prompt bar at the bottom. Press Escape to exit fullscreen.
+  - **Live updates** — content is pushed via SSE; multiple rapid calls are fine, only the latest content is shown.
+  - **Sibling assets** — when using `file=`, files in the same directory tree as the entry HTML are copied alongside it (capped at 25 MiB). Reference them with relative URLs (e.g. `<img src="thumbs/0001.jpg">`).
+  - **One preview per session** — each session has its own preview mount. Switching sessions shows the correct preview.
+  - **Fullscreen + Open in new tab** — the panel header offers a maximize icon (Escape to exit) and an `Open in new tab` button for full-screen viewing in a separate browser tab.

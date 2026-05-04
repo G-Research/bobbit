@@ -39,10 +39,25 @@ When unsure, default to `preview_open(html=...)`. ~90% of asks fall into the
   a new render with the file's tool-result snapshot, and the "Open" button on
   past tool cards becomes ambiguous because the underlying file may have moved
   on.
-- The preview panel is a single live slot driven by `mtime` polling and the
+- The preview panel is a single live slot driven by SSE hot reload and the
   `preview_open` tool. It always reflects the latest call.
 - If both surfaces are live, "refresh the preview" becomes ambiguous: which
   one? The user shouldn't have to know.
+
+## `html=` vs `file=` — the same surface
+
+Both `preview_open(html=...)` and `preview_open(file=...)` populate the same
+per-session preview mount served at `/preview/<sid>/`. User-visible
+behaviour is identical — same iframe, same theme bridge, same SSE-driven
+refresh.
+
+Use `file=` when the HTML lives on disk already and you want sibling assets
+(images, CSS, video) to resolve as relative URLs. Use `html=` for one-shot
+generated content. The tool result is a constant ~150-byte snapshot
+regardless of HTML size, so iterating on a 5000-line report does not blow
+up your context window.
+
+Full architecture: [docs/preview-architecture.md](../../docs/preview-architecture.md).
 
 ## Theme integration is mandatory
 
