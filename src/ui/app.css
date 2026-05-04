@@ -91,6 +91,38 @@
 	--ansi-bright-magenta: #c040c0;
 	--ansi-bright-cyan: #1a9e9e;
 	--ansi-bright-white: #4a4a4a;
+
+	/* ── Data-viz / chart palette (light mode) ──
+	   Six categorical hues spaced ~60° apart, tuned for legibility on
+	   `--card` and `--background`. Authors of HTML reports, dashboards,
+	   charts and comparison tables should reach for these — they remain
+	   stable across all `data-palette` switches so categorical meaning
+	   does not shift when the user changes the app's accent. Each slot
+	   has a paired `-foreground` for legible text on the fill. */
+	--chart-1: oklch(0.55 0.16 230);  /* blue */
+	--chart-2: oklch(0.62 0.15 75);   /* amber */
+	--chart-3: oklch(0.55 0.15 145);  /* green */
+	--chart-4: oklch(0.55 0.18 305);  /* purple */
+	--chart-5: oklch(0.58 0.18 15);   /* rose */
+	--chart-6: oklch(0.55 0.12 190);  /* teal */
+	--chart-1-foreground: oklch(0.98 0.01 230);
+	--chart-2-foreground: oklch(0.18 0.02 75);
+	--chart-3-foreground: oklch(0.98 0.01 145);
+	--chart-4-foreground: oklch(0.98 0.01 305);
+	--chart-5-foreground: oklch(0.98 0.01 15);
+	--chart-6-foreground: oklch(0.98 0.01 190);
+
+	/* ── Semantic status colours (light mode) ──
+	   Fixed across palettes — a positive ✓ should always read green,
+	   a destructive action always red, regardless of accent hue. */
+	--positive: oklch(0.55 0.15 145);
+	--positive-foreground: oklch(0.98 0.01 145);
+	--negative: oklch(0.55 0.18 25);
+	--negative-foreground: oklch(0.98 0.01 25);
+	--warning: oklch(0.62 0.15 75);
+	--warning-foreground: oklch(0.18 0.02 75);
+	--info: oklch(0.55 0.16 230);
+	--info-foreground: oklch(0.98 0.01 230);
 }
 
 /* Dark mode — warm charcoal with green undertone */
@@ -137,6 +169,33 @@
 	--ansi-bright-magenta: #f7f;
 	--ansi-bright-cyan: #7ff;
 	--ansi-bright-white: #fff;
+
+	/* ── Data-viz / chart palette (dark mode) ──
+	   Lifted lightness (~0.72) so fills stay vivid against `--card`
+	   on dark backgrounds. Foregrounds flip to near-black for text on
+	   the lighter fills. Hues mirror the light-mode set. */
+	--chart-1: oklch(0.72 0.14 230);
+	--chart-2: oklch(0.78 0.14 75);
+	--chart-3: oklch(0.72 0.14 145);
+	--chart-4: oklch(0.72 0.16 305);
+	--chart-5: oklch(0.74 0.16 15);
+	--chart-6: oklch(0.72 0.12 190);
+	--chart-1-foreground: oklch(0.18 0.02 230);
+	--chart-2-foreground: oklch(0.18 0.02 75);
+	--chart-3-foreground: oklch(0.18 0.02 145);
+	--chart-4-foreground: oklch(0.18 0.02 305);
+	--chart-5-foreground: oklch(0.18 0.02 15);
+	--chart-6-foreground: oklch(0.18 0.02 190);
+
+	/* ── Semantic status colours (dark mode) ── */
+	--positive: oklch(0.72 0.14 145);
+	--positive-foreground: oklch(0.18 0.02 145);
+	--negative: oklch(0.72 0.15 25);
+	--negative-foreground: oklch(0.18 0.02 25);
+	--warning: oklch(0.78 0.14 75);
+	--warning-foreground: oklch(0.18 0.02 75);
+	--info: oklch(0.72 0.14 230);
+	--info-foreground: oklch(0.18 0.02 230);
 }
 
 /* ── Notification category colors — Forest palette (default) ── */

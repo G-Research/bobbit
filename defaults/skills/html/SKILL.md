@@ -57,6 +57,21 @@ All values are full `oklch(...)` expressions — use directly, never wrap in `ok
 | `--ring` | Focus rings |
 | `--sidebar` / `--sidebar-foreground` | Sidebar surfaces |
 
+#### Categorical chart palette (for striking visual content)
+
+The core theme is intentionally monochromatic — great for app chrome, flat for charts and comparisons. For anything categorical (series in a chart, columns in a comparison table, distinct cards in a dashboard) use:
+
+| Variable | Purpose |
+|----------|---------|
+| `--chart-1` … `--chart-6` | Six categorical hues, ~60° apart, stable across palette switches |
+| `--chart-{1…6}-foreground` | Legible text colour on the matching fill |
+| `--positive` / `--positive-foreground` | Success / pass / green-tick semantics |
+| `--negative` / `--negative-foreground` | Failure / destructive / red-cross semantics |
+| `--warning` / `--warning-foreground` | Caution / amber semantics |
+| `--info` / `--info-foreground` | Informational / neutral-blue semantics |
+
+Chart and semantic slots **do not** shift with `data-palette` — series 1 always reads the same hue, and a green tick stays green regardless of the user's accent. Lightness is theme-tuned, so contrast against `--card` is WCAG-safe in both light and dark mode.
+
 For transparency/alpha, use `color-mix`:
 ```css
 background: color-mix(in oklch, var(--primary) 10%, transparent);

@@ -20,6 +20,10 @@ Files written via `write` with certain extensions render inline in the chat:
 
   Therefore: **never hardcode hex/rgb colours and never define your own `:root` palette or `prefers-color-scheme` rules in HTML reports, dashboards or mockups.** Always reference the theme variables (`color: var(--foreground); background: var(--card); border-color: var(--border);` etc.) so the document seamlessly tracks Bobbit's light/dark/palette state. For tints and translucent fills use `color-mix(in oklch, var(--primary) 10%, transparent)` rather than fixed `rgba()`. The variable values are full `oklch(...)` expressions — use them as-is, do **not** wrap them in another `oklch()` call.
 
+  **For categorical / data-viz / striking visual content** — comparison tables, scorecards, charts, dashboards, anything that needs visually distinct categories — the core palette (`--primary`, `--accent`, `--ring`) is intentionally monochromatic and will look flat. Use the dedicated chart slots instead: `--chart-1` through `--chart-6` are six categorical hues spaced ~60° apart on the colour wheel, paired with `--chart-1-foreground` … `--chart-6-foreground` for legible text on the fill. They are stable across all `data-palette` switches — series 1 always means the same colour — and lightness-tuned per theme so contrast against `--card` stays in the WCAG-safe range in both light and dark mode.
+
+  For status icons and semantics use the fixed semantic slots: `--positive` (green tick), `--negative` (red cross), `--warning` (amber), `--info` (blue), each with a paired `-foreground`. These also do not shift with palette — a green tick should always read green regardless of the user's chosen accent.
+
   This applies to every `.html` / `.htm` file you produce, not only those generated via the `/html` or `/mockup` skills.
 - **`.svg`**: Rendered as a visual image preview. Make SVGs self-contained (inline styles, no external references). Set an explicit `viewBox` and use relative units. For dark/light theme compatibility, avoid hardcoding white or black backgrounds — use `currentColor` or explicit fills. Collapsible source code shown underneath.
 
