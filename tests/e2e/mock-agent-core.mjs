@@ -1714,16 +1714,10 @@ export class MockAgentCore {
 			case "steer": {
 				// Production behaviour: steer interrupts the current turn and
 				// the steered text becomes a fresh user prompt with its own
-				// assistant turn. Two listeners care about the result:
-				//   - Legacy E2E tests (steer-midturn.spec.ts,
-				//     bg-wait-steer-flow.spec.ts) scan for an assistant
-				//     message_end whose text contains both 'STEER_RECEIVED' and
-				//     the steered text — we emit that synchronously below as a
-				//     back-compat marker.
-				//   - New tests scan the rendered chat for a <user-message>
-				//     matching the steered text — we get that by queueing a
-				//     real handlePrompt round-trip after the in-flight turn
-				//     finishes.
+				// assistant turn. Tests scan the rendered chat for a
+				// <user-message> matching the steered text — we get that by
+				// queueing a real handlePrompt round-trip after the in-flight
+				// turn finishes.
 				//
 				// Crucially we do NOT null out currentAbortController here:
 				// the in-flight handlePrompt is still on the call stack and
@@ -1732,12 +1726,6 @@ export class MockAgentCore {
 				// which lets the in-flight burst overlap with the steered
 				// handlePrompt and corrupts ordering.
 				const steeredText = msg.message || msg.text || "";
-				const marker = {
-					role: "assistant",
-					content: [{ type: "text", text: `[STEER_RECEIVED] ${steeredText}` }],
-				};
-				this.conversationMessages.push(marker);
-				this.emit({ type: "message_end", message: marker });
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 				}

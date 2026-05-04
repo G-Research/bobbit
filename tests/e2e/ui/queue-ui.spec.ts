@@ -24,8 +24,8 @@ test.describe("Queue UI E2E", () => {
 
 	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort @smoke", async ({ page, rec }) => {
 		// PI-10: Queue a message, click Steer, verify delivery WITHOUT aborting.
-		// The mock agent emits [STEER_RECEIVED] text when it gets a steer RPC,
-		// which appears in the chat as visible text.
+		// The mock agent's handlePrompt round-trip renders the steered text
+		// as a user-message in the chat.
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
@@ -60,12 +60,15 @@ test.describe("Queue UI E2E", () => {
 		await rec.capture("Steer clicked — Sent badge visible");
 
 		// PI-10 step 3: Agent receives the steer at the next tool boundary.
-		// The mock agent emits [STEER_RECEIVED] which appears in chat.
+		// The steered text renders as a user-message in chat.
 		// Verify it appears WITHOUT clicking abort.
 		await expect(
-			page.getByText("STEER_RECEIVED").first(),
+			page.locator("user-message").filter({ hasText: "steer me now" }).first(),
 		).toBeVisible({ timeout: 10_000 });
-		await rec.capture("STEER_RECEIVED rendered in chat");
+		await rec.capture("steered user-message rendered in chat");
+
+		// AC §5: queue row drops once the steer is delivered.
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 15_000 });
 	});
 
 	test("PI-10b: batch steer — two pills promoted, both delivered without abort", async ({ page, rec }) => {
@@ -105,12 +108,18 @@ test.describe("Queue UI E2E", () => {
 		await rec.capture("Both pills steered — Sent x2");
 
 		// PI-10b step 5: Agent receives both steers at the next tool boundary.
-		// The mock agent emits [STEER_RECEIVED] in chat.
+		// Each steered text renders as a user-message in chat.
 		// Verify delivery WITHOUT aborting.
 		await expect(
-			page.getByText("STEER_RECEIVED").first(),
+			page.locator("user-message").filter({ hasText: "batch steer A" }).first(),
 		).toBeVisible({ timeout: 10_000 });
-		await rec.capture("STEER_RECEIVED rendered");
+		await expect(
+			page.locator("user-message").filter({ hasText: "batch steer B" }).first(),
+		).toBeVisible({ timeout: 10_000 });
+		await rec.capture("both steered user-messages rendered");
+
+		// AC §5: queue rows drop once the steers are delivered.
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 15_000 });
 	});
 
 	test("story 22: draft text persists across page reload", async ({ page, rec }) => {
