@@ -62,6 +62,8 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
+import * as previewMount from "./preview/mount.js";
+import { broadcastPreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
@@ -6878,6 +6880,84 @@ async function handleApiRoute(
 		if (sessionId) deletePreviewMeta(sessionId);
 		json({ ok: true });
 		return;
+	}
+
+	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
+	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
+	// {url, path, entry, mtime}. See docs/design/embedded-html-preview-rewrite.md §6.
+	if (url.pathname === "/api/preview/mount" && req.method === "POST") {
+		const sessionId = url.searchParams.get("sessionId") || "";
+		if (!VALID_SESSION_ID.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
+			json({ error: "Forbidden: session out of scope" }, 403);
+			return;
+		}
+		const body = await readBody(req).catch(() => ({}));
+		const hasHtml = typeof body?.html === "string";
+		const hasFile = typeof body?.file === "string" && body.file.length > 0;
+		if (!hasHtml && !hasFile) {
+			json({ error: "Body must contain one of 'html' or 'file'" }, 400);
+			return;
+		}
+		try {
+			let result: previewMount.MountResult;
+			if (hasHtml) {
+				// `html` wins over `file` when both are provided.
+				let entry: string | undefined;
+				if (typeof body.entry === "string" && body.entry.length > 0) {
+					const e = body.entry;
+					if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
+						json({ error: "Invalid entry name" }, 400);
+						return;
+					}
+					entry = e;
+				}
+				result = previewMount.writeInline(sessionId, body.html as string, entry);
+			} else {
+				const filePath = body.file as string;
+				if (!path.isAbsolute(filePath)) {
+					json({ error: "file path must be absolute" }, 400);
+					return;
+				}
+				if (!fs.existsSync(filePath)) {
+					json({ error: "file not found" }, 404);
+					return;
+				}
+				let stat: fs.Stats;
+				try { stat = fs.statSync(filePath); } catch {
+					json({ error: "file not found" }, 404);
+					return;
+				}
+				if (!stat.isFile()) {
+					json({ error: "path is not a regular file" }, 404);
+					return;
+				}
+				const base = path.basename(filePath).toLowerCase();
+				if (!base.endsWith(".html") && !base.endsWith(".htm")) {
+					json({ error: "file must end in .html or .htm" }, 400);
+					return;
+				}
+				result = previewMount.copyFileTree(sessionId, filePath);
+			}
+			broadcastPreviewChanged(sessionId, {
+				entry: result.entry,
+				mtime: result.mtime,
+				url: result.url,
+				path: result.path,
+			});
+			json(result);
+			return;
+		} catch (err: any) {
+			if (err && err instanceof previewMount.PreviewMountError) {
+				json({ error: err.message }, err.statusCode);
+				return;
+			}
+			json({ error: `preview mount failed: ${err?.message ?? String(err)}` }, 500);
+			return;
+		}
 	}
 
 	// GET /api/preview/render?sessionId=xxx — render preview HTML with <base> + bridge scripts
