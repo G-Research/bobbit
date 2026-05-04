@@ -173,7 +173,7 @@ function renderReport(tests: CapturedTest[], ffmpegMissing: boolean): string {
 	const totalBeats = tests.reduce((a, t) => a + t.beats.length, 0);
 	const totalBytes = tests.reduce((a, t) => a + (t.videoBytes ?? 0), 0);
 	const banner = ffmpegMissing
-		? `<div style="background:#fff3cd;border:1px solid #ffe69c;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#664d03">
+		? `<div style="background:color-mix(in oklch, var(--warning) 18%, transparent);border:1px solid color-mix(in oklch, var(--warning) 45%, transparent);border-radius:6px;padding:12px 16px;margin-bottom:18px;color:var(--foreground)">
     <strong>ffmpeg not found.</strong> Videos and per-beat thumbnails were skipped.
     Install ffmpeg (<code>apt install ffmpeg</code> / <code>brew install ffmpeg</code> / <code>choco install ffmpeg</code>)
     or set <code>FFMPEG_PATH</code> to the binary path, then re-run with <code>RECORDSCREEN=1</code>.
@@ -183,37 +183,48 @@ function renderReport(tests: CapturedTest[], ffmpegMissing: boolean): string {
 <html><head><meta charset="utf-8"/>
 <title>Tier 2.5 — beat report</title>
 <style>
-  :root { --fg: #1a1a1a; --muted: #666; --bg: #f6f7fa; --card: #fff; --border: #dcdde2; --accent: #2256d1; }
-  body { font: 14px/1.45 system-ui, -apple-system, sans-serif; max-width: 1180px; margin: 24px auto; padding: 0 16px; color: var(--fg); background: var(--bg); }
+  /* Theme tokens are injected by Bobbit's preview bridge. Defensive fallbacks
+     for standalone open (file://) — kept light/neutral and overridden by
+     :root values from the bridge. See defaults/docs/html-rendering.md. */
+  :root {
+    --background: #f6f7fa;
+    --foreground: #1a1a1a;
+    --card: #ffffff;
+    --muted-foreground: #666;
+    --border: #dcdde2;
+    --primary: #2256d1;
+    --warning: #b58105;
+  }
+  body { font: 14px/1.45 system-ui, -apple-system, sans-serif; max-width: 1180px; margin: 24px auto; padding: 0 16px; color: var(--foreground); background: var(--background); }
   h1 { margin-top: 0; }
   .summary, .scenario { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-bottom: 22px; }
   .summary table { border-collapse: collapse; width: 100%; }
-  .summary td { padding: 6px 12px; border-bottom: 1px solid #eee; }
-  .summary td:first-child { color: var(--muted); }
+  .summary td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+  .summary td:first-child { color: var(--muted-foreground); }
   .summary tr:last-child td { border-bottom: 0; }
   .scenario h2 { margin: 0 0 4px; font-size: 18px; }
-  .scenario .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; font-variant-numeric: tabular-nums; }
-  video { display: block; width: 100%; max-width: 100%; height: auto; background: #000; border-radius: 4px; border: 1px solid #ccc; }
+  .scenario .meta { color: var(--muted-foreground); font-size: 12px; margin-bottom: 12px; font-variant-numeric: tabular-nums; }
+  video { display: block; width: 100%; max-width: 100%; height: auto; background: #000; border-radius: 4px; border: 1px solid var(--border); }
   .num { font-variant-numeric: tabular-nums; }
-  .missing { color: #b00; font-weight: 600; }
+  .missing { color: var(--negative, #b00); font-weight: 600; }
   .toc { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-  .toc a { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--accent); text-decoration: none; font-size: 12px; }
-  .toc a:hover { border-color: var(--accent); }
-  kbd { background: #eee; border: 1px solid #ccc; border-bottom-width: 2px; border-radius: 3px; padding: 1px 5px; font-family: ui-monospace, monospace; font-size: 0.85em; }
-  .player-tip { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .toc a { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--primary); text-decoration: none; font-size: 12px; }
+  .toc a:hover { border-color: var(--primary); }
+  kbd { background: color-mix(in oklch, var(--foreground) 10%, transparent); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 3px; padding: 1px 5px; font-family: ui-monospace, monospace; font-size: 0.85em; }
+  .player-tip { color: var(--muted-foreground); font-size: 12px; margin-top: 6px; }
   .beats { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
-  .beat { border: 1px solid var(--border); border-radius: 6px; background: #fafafa; cursor: pointer; padding: 6px; transition: border-color 100ms, transform 100ms; }
-  .beat:hover { border-color: var(--accent); transform: translateY(-1px); }
-  .beat.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(34,86,209,0.18); }
+  .beat { border: 1px solid var(--border); border-radius: 6px; background: color-mix(in oklch, var(--card) 70%, var(--background)); cursor: pointer; padding: 6px; transition: border-color 100ms, transform 100ms; }
+  .beat:hover { border-color: var(--primary); transform: translateY(-1px); }
+  .beat.active { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 35%, transparent); }
   .beat img { display: block; width: 100%; height: auto; border-radius: 3px; }
-  .beat .lbl { font-size: 12px; color: var(--fg); margin-top: 6px; line-height: 1.3; }
-  .beat .nt { font-variant-numeric: tabular-nums; color: var(--muted); margin-right: 4px; }
+  .beat .lbl { font-size: 12px; color: var(--foreground); margin-top: 6px; line-height: 1.3; }
+  .beat .nt { font-variant-numeric: tabular-nums; color: var(--muted-foreground); margin-right: 4px; }
 </style>
 </head>
 <body>
 <h1>Tier 2.5 — beat report</h1>
 ${banner}
-<p style="color:var(--muted);max-width:780px">
+<p style="color:var(--muted-foreground);max-width:780px">
   Each test below captures a labeled <em>beat</em> at every meaningful UX moment.
   The video holds each beat for ${BEAT_HOLD_MS} ms so you can read the labels
   and observe each state. Click any thumbnail to seek the video to that beat.
