@@ -8,7 +8,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, Check, Copy, Eye, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Check, Copy, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -2449,7 +2449,8 @@ export function doRenderApp(): void {
 	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 	const isTeamLead = activeSession?.role === "team-lead";
 	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
-		<div class="flex items-center gap-1 shrink-0">
+		<div class="flex items-center gap-1 shrink-0 relative">
+			${proposalToast()}
 			${Button({
 				variant: "ghost",
 				size: "sm",
@@ -2460,6 +2461,23 @@ export function doRenderApp(): void {
 				className: "h-7 px-2 text-muted-foreground",
 				title: "View System Prompt",
 			})}
+			<span data-testid="copy-session-link">${Button({
+				variant: "ghost",
+				size: "sm",
+				onClick: async () => {
+					const url = `${location.origin}/session/${activeSid}`;
+					try {
+						await navigator.clipboard.writeText(url);
+						showProposalToast("Link copied");
+					} catch {
+						const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
+						m.CopyLinkFallbackDialog.show(url);
+					}
+				},
+				children: html`<span class="inline-flex items-center gap-1">${icon(Link, "xs")}<span class="text-xs hidden sm:inline">Link</span></span>`,
+				className: "h-7 px-2 text-muted-foreground",
+				title: "Copy session link",
+			})}</span>
 			${Button({
 				variant: "ghost",
 				size: "sm",
