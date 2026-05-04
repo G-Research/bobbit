@@ -169,7 +169,7 @@ The same reconciliation runs on the graceful path: when `handleAgentLifecycle` s
 
 - **Push**: at the bottom of `_dispatchSteer()` once the SDK has definitively accepted the batch text.
 - **Splice**: in `_consumeSteerEcho()`, called from `handleAgentLifecycle` for every event. Silent no-op for non-matching messages (regular prompts, follow-ups, skill-expansion echoes whose body has been rewritten).
-- **Drain**: in `_reconcileAfterAbort()`, on `agent_end` while `wasAborting` and inside `forceAbort()` before the kill.
+- **Drain**: in `_reconcileAfterAbort()`, on `agent_end` while `wasAborting` and inside `forceAbort()` immediately after `rpcClient.stop()` (i.e. after the kill, before the post-respawn `drainQueue`). The ledger is Bobbit-owned in-process state, so its content survives bridge teardown — the timing relative to the kill doesn't affect correctness.
 
 The ledger exists because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` — the natural primitive for "pull undelivered steers back". Mirroring the SDK's text-match removal logic at our layer (mitigation B in the design doc) gives Bobbit a single, bounded reconciliation point without an upstream PR. Bounded growth is enforced by construction: every push has a paired echo or abort-drain; neither path is silently dropped.
 
