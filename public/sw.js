@@ -1,21 +1,11 @@
-// Bobbit Service Worker — PWA installability + offline fallback + cache-first hashed assets.
+// Bobbit Service Worker — PWA installability + offline fallback only.
 //
 // Design:
-//   * Cache-first for `/assets/*` — these URLs are content-addressed
-//     (Vite emits `name-<hash>.js`/`.css`), so the URL itself encodes
-//     the version. A cached response can never be stale because the
-//     hash changes whenever the content does, producing a different
-//     URL. This serves the JS bundle from disk on PWA cold resume
-//     without a network round-trip.
-//   * Network-first for `index.html` and everything else (manifest,
-//     icons, …). HTML must stay network-first so a deploy lands fresh
-//     HTML referencing the new asset hashes; the cached HTML's old
-//     hashes still resolve from cache, but the moment the network
-//     succeeds the new HTML wins. This is the property the previous
-//     PR #450 stack got wrong by combining HTML SWR with asset
-//     cache-first — that produced the "stuck UI after deploy" bug.
-//   * Cache is still consulted for non-asset URLs when the network
-//     fails — true offline / gateway-down fallback.
+//   * Network-first for EVERYTHING (HTML, assets, manifest, icons).
+//     Cache is consulted only when the network fetch fails — i.e. true
+//     offline / gateway-down fallback. This guarantees that as long as
+//     the user is online, they always see the latest deploy and a hard
+//     refresh (Ctrl+Shift+R) will always reach the gateway.
 //   * `BUILD_ID` is replaced at build time by the `bobbit-sw-version`
 //     Vite plugin (and stamped to a fresh value on every dev request).
 //     A new BUILD_ID -> new CACHE_NAME -> activate handler purges every
@@ -23,6 +13,15 @@
 //     `clients.claim()` this means: deploy a new build, the next page
 //     load activates the new SW, and the old caches are wiped before
 //     the user notices.
+//
+// Why we no longer cache `/assets/*` aggressively: the cache-first asset
+// path was the proximate cause of the "stuck UI after server restart"
+// bug. The browser would render an old `index.html` (kept by the
+// network-first HTML fallback) referencing immutable hashed bundles
+// from the SW cache, and no amount of Ctrl+Shift+R would dislodge it
+// because the SW intercepted every subresource fetch. Network-first
+// for assets too removes that failure mode entirely while still
+// allowing offline use of the last-seen build.
 const BUILD_ID = "__BOBBIT_BUILD_ID__";
 const CACHE_NAME = `bobbit-${BUILD_ID}`;
 // The marker `/*__BOBBIT_PRECACHE_CHUNKS__*/` is replaced at build time
@@ -80,30 +79,7 @@ self.addEventListener("fetch", (event) => {
 	// Never touch API or WebSocket traffic — must always hit the gateway.
 	if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws")) return;
 
-	// Cache-first for hashed `/assets/*` URLs. Safe because the URL is
-	// content-addressed: a hash change always invalidates by producing
-	// a new URL the cache won't match. Serves JS/CSS chunks from disk on
-	// PWA cold resume without a network round-trip.
-	if (url.pathname.startsWith("/assets/")) {
-		event.respondWith(
-			(async () => {
-				const cached = await caches.match(req);
-				if (cached) return cached;
-				const response = await fetch(req);
-				if (response.ok && (response.type === "basic" || response.type === "cors")) {
-					const clone = response.clone();
-					caches.open(CACHE_NAME).then((cache) => cache.put(req, clone)).catch(() => {});
-				}
-				return response;
-			})(),
-		);
-		return;
-	}
-
-	// Network-first with offline cache fallback for every other GET
-	// (`/`, `/index.html`, `/manifest.json`, icons, …). HTML stays
-	// network-first so a deploy lands fresh HTML referencing the new
-	// asset hashes.
+	// Network-first with offline cache fallback for every other GET.
 	event.respondWith(
 		fetch(req)
 			.then((response) => {
