@@ -35,6 +35,8 @@ import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
+import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
+import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
@@ -6144,6 +6146,65 @@ async function handleApiRoute(
 			json({ content: toolContent });
 		} catch (err) {
 			json({ error: String(err) }, 500);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/transcript — paginated, regex-filterable transcript reader
+	// Backs the `read_session` tool extension. See `src/server/agent/transcript-reader.ts`.
+	const transcriptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/transcript$/);
+	if (transcriptMatch && req.method === "GET") {
+		const [, targetId] = transcriptMatch;
+		// Resolve target session (live or persisted).
+		const targetPs = sessionManager.getPersistedSession(targetId);
+		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+
+		// Authorization: caller must belong to the same project as the target.
+		// Caller session id is propagated via `x-bobbit-session-id` header by the
+		// extension; if missing, fall back to allow (e.g. UI-initiated calls go
+		// through Bearer auth which already gates by project).
+		const callerSid = req.headers["x-bobbit-session-id"];
+		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
+		if (callerSidStr) {
+			const callerPs = sessionManager.getPersistedSession(callerSidStr);
+			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
+				json({ error: "permission_denied" }, 403); return;
+			}
+		}
+
+		// Parse query params.
+		const qp = url.searchParams;
+		function parseIntParam(name: string): number | undefined {
+			const raw = qp.get(name);
+			if (raw === null) return undefined;
+			const n = Number(raw);
+			if (!Number.isFinite(n)) {
+				throw new TranscriptReaderError("invalid_params", `${name} is not a number`);
+			}
+			return n;
+		}
+		try {
+			const params = {
+				offset: parseIntParam("offset"),
+				limit: parseIntParam("limit"),
+				pattern: qp.get("pattern") ?? undefined,
+				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+				context: parseIntParam("context"),
+				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+			};
+			const ctx: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+			const envelope = await readTranscript(params, {
+				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
+			});
+			json(envelope);
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				const status = err.code === "transcript_unavailable" ? 404 : 400;
+				json({ error: err.code, detail: err.message }, status);
+			} else {
+				json({ error: "internal_error", detail: String(err) }, 500);
+			}
 		}
 		return;
 	}
