@@ -9,22 +9,6 @@ import { expect } from "@playwright/test";
 import { readE2ETokenAsync, base, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 
 /**
- * Wait for the client-side session list to be hydrated to at least N entries.
- *
- * After F1 (PWA Resume v2 §F), the post-auth `refreshSessions()` is fired
- * fire-and-forget so route dispatch can run in parallel. Tests that interact
- * with the sidebar / session-list immediately after navigation should await
- * this helper instead of relying on the previous bootstrap-step ordering.
- */
-export async function waitForGatewaySessions(page: Page, n: number, timeout = 10_000): Promise<void> {
-	await page.waitForFunction(
-		(min: number) => ((window as any).bobbitState?.gatewaySessions?.length ?? 0) >= min,
-		n,
-		{ timeout },
-	);
-}
-
-/**
  * Open the app authenticated via token query param.
  * Waits for the sidebar "New session" button to confirm the app has loaded.
  */
