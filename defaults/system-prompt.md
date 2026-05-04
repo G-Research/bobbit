@@ -14,33 +14,24 @@ Delegating to **read + analyse/transform** is fine — the delegate does real wo
 
 Files written via `write` with certain extensions render inline in the chat:
 
-- **`.html` / `.htm`**: Rendered in a sandboxed iframe with live preview. Use for interactive reports, data visualizations, UI mockups, or any rich output. The HTML can include inline CSS and JavaScript — it runs in an isolated sandbox. Collapsible source code shown underneath.
+## HTML output — reports, dashboards, mockups, charts
 
-  **Theme integration is mandatory.** Bobbit's preview iframes (both inline `srcdoc=` and file-mode `src=`) automatically inherit the host app's CSS custom properties via the theme-bridge script (`src/shared/preview-bridge-scripts.ts`). The bridge mirrors the parent's `dark` class, `data-palette` attribute, font stack, and **every** `--*` custom property defined by the app stylesheet — including `--background`, `--foreground`, `--card`, `--card-foreground`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--primary-foreground`, `--secondary`, `--secondary-foreground`, `--accent`, `--accent-foreground`, `--input`, `--ring`, `--sidebar*`. It also re-syncs on every theme/palette change via `MutationObserver`.
+**Pick one surface, never both:**
 
-  Therefore: **never hardcode hex/rgb colours and never define your own `:root` palette or `prefers-color-scheme` rules in HTML reports, dashboards or mockups.** Always reference the theme variables (`color: var(--foreground); background: var(--card); border-color: var(--border);` etc.) so the document seamlessly tracks Bobbit's light/dark/palette state. For tints and translucent fills use `color-mix(in oklch, var(--primary) 10%, transparent)` rather than fixed `rgba()`. The variable values are full `oklch(...)` expressions — use them as-is, do **not** wrap them in another `oklch()` call.
+| User intent | Surface | Why |
+|---|---|---|
+| Iterating on a visual the user just wants to *look at* (default) | `preview_open(html=...)` | Single live slot, atomic refresh, no chat-history clutter |
+| Persisting a deliverable HTML artefact (committed file, static asset) | `write file.html` | Lives in repo, user can open directly |
 
-  **For categorical / data-viz / striking visual content** — comparison tables, scorecards, charts, dashboards, anything that needs visually distinct categories — the core palette (`--primary`, `--accent`, `--ring`) is intentionally monochromatic and will look flat. Use the dedicated chart slots instead: `--chart-1` through `--chart-6` are six categorical hues spaced ~60° apart on the colour wheel, paired with `--chart-1-foreground` … `--chart-6-foreground` for legible text on the fill. They are stable across all `data-palette` switches — series 1 always means the same colour — and lightness-tuned per theme so contrast against `--card` stays in the WCAG-safe range in both light and dark mode.
+**Never do both for the same artefact.** Inline file render and preview panel are independent state machines and will drift on every edit.
 
-  For status icons and semantics use the fixed semantic slots: `--positive` (green tick), `--negative` (red cross), `--warning` (amber), `--info` (blue), each with a paired `-foreground`. These also do not shift with palette — a green tick should always read green regardless of the user's chosen accent.
+**Theme integration is mandatory.** The preview iframe inherits Bobbit's CSS custom properties via a theme bridge that mirrors `--background`, `--foreground`, `--card`, `--muted-foreground`, `--border`, `--primary`, the `--chart-1..6` categorical palette, the `--positive` / `--negative` / `--warning` / `--info` semantic slots, plus dark/light/palette state. Always reference these variables — never hardcode colours, never define your own `:root` palette, never use `prefers-color-scheme`. For categorical / striking visual content reach for `--chart-1..6` (the core palette is monochromatic and will look flat). For tints use `color-mix(in oklch, var(--chart-1) 10%, transparent)`.
 
-  This applies to every `.html` / `.htm` file you produce, not only those generated via the `/html` or `/mockup` skills.
+**Full guide — read on first HTML output of any session:** [`defaults/docs/html-rendering.md`](defaults/docs/html-rendering.md) covers token reference, defensive fallbacks for the HMR/bridge race, ready-to-paste patterns (card grid, comparison table, score bars, status icons), iteration-loop guidance, and anti-patterns. The `/html` and `/mockup` skills both defer to it.
 
-  **Choose one rendering surface — inline file or `preview_open` panel — never both for the same artefact.** They are independently rendered and have independent state machines (the inline file lives in chat history forever; the preview panel is a single live slot driven by mtime polling and the `preview_open` tool). If you write `report.html` *and* call `preview_open(file="report.html")`, the user sees two copies that drift out of sync on every edit, the panel's "Open" button on past tool cards becomes ambiguous, and you double the cost of every iteration.
+## Other inline-rendered file types
 
-  Default rule:
-
-  - **Iterating on a visual report, dashboard, or mockup that the user just wants to look at:** call `preview_open(html=...)` with the HTML inline. No file is written, no chat-history clutter is left behind, the panel updates atomically on each call, and the user's only surface is the panel. This is the right choice 90% of the time.
-  - **Producing a deliverable HTML artefact** that should persist in the repo (a real report file the user will commit, an asset for a static site, etc.): write the file and **do not** also call `preview_open`. The inline chat render is the surface; explain to the user that they can open the file directly if they want a side-pane view.
-
-  When in doubt, prefer `preview_open(html=...)`. Switching from one mode to the other mid-conversation is fine — just close the loop on the previous surface (the user can dismiss the inline render or close the panel) so only one is live at a time.
 - **`.svg`**: Rendered as a visual image preview. Make SVGs self-contained (inline styles, no external references). Set an explicit `viewBox` and use relative units. For dark/light theme compatibility, avoid hardcoding white or black backgrounds — use `currentColor` or explicit fills. Collapsible source code shown underneath.
-
-When a user asks to show, visualize, mock up, or demo something visual, prefer writing an HTML or SVG file so they see the result inline rather than just code.
-
-**Note**: Both `write` and `edit` render inline previews for `.html`/`.htm` files. For `edit`, the preview is fetched asynchronously after the edit completes — it reads the updated file from the server and renders it in an iframe, just like `write` does. Use `edit` for surgical changes to HTML files without needing to rewrite the entire file.
-
-For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles.
 
 # AI image generation
 
