@@ -1798,7 +1798,7 @@ Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with 
 
 Each sandboxed project gets a single 256-bit token shared by all sessions in that project. Generated via `SandboxTokenStore.register(projectId)`, in-memory only (regenerated on restart). Sessions are added to the scope via `addSession(projectId, sessionId)`. Auth tries admin token first, then `SandboxTokenStore`.
 
-**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
+**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview/mount`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
@@ -2013,64 +2013,57 @@ Agent process → message_update (full content)
 
 ## Preview snapshots & reopening
 
-The `preview_open` tool drives a single live preview side-panel in the UI. Each call overwrites the panel — there are no tabs, no history slots. But every past `preview_open` widget in chat history renders an **Open** button that re-hydrates its captured HTML back into the panel on demand, so users can flip between previous previews without re-running the agent.
+The `preview_open` tool drives a single live preview side-panel in the UI. Each call overwrites the panel — there are no tabs, no history slots. But every past `preview_open` widget in chat history renders an **Open** button that re-hydrates the preview on demand by re-posting to the same mount endpoint, so users can flip between previous previews without re-running the agent.
 
 ### Why
 
-Previews are transient by design: the agent iterates on a mockup by calling `preview_open` repeatedly, and each call replaces the panel. Once a newer call lands, the earlier HTML is gone from the panel — but the chat history still shows the widget for the earlier call, which is confusing if clicking it does nothing. Capturing the resolved HTML into the tool_result (so it persists in the session `.jsonl`) and giving each widget an Open button closes the loop. Crucially, the snapshot must **not** re-enter the agent's context on later turns, or large mockups would bloat token counts on every subsequent prompt.
-
-Full design rationale is in [docs/design/reopenable-preview-widgets.md](design/reopenable-preview-widgets.md).
+Previews are transient by design: the agent iterates on a mockup by calling `preview_open` repeatedly, and each call replaces the panel. Once a newer call lands, the earlier preview is gone from the panel — but the chat history still shows the widget for the earlier call, which is confusing if clicking it does nothing. Persisting a tiny snapshot marker (URL + path, never the HTML body) into the tool_result and giving each widget an Open button closes the loop. Full architecture in [docs/preview-architecture.md](preview-architecture.md).
 
 ### Data flow
 
 ```
 Agent calls preview_open({html|file})
-       │
-       └─→ extension (defaults/tools/html/extension.ts)
-              │  1. Resolve content (inline html or fs.readFileSync(file))
-              │  2. PATCH /api/sessions/:id {preview:true}
-              │  3. POST  /api/preview?sessionId=… {html}
-              └─→ tool_result = [
-                   {type:"text", text:"Preview panel is open …"},
-                   {type:"text", text: PREVIEW_SNAPSHOT_MARKER + html}
-                 ]
-       │
-       └─→ session.jsonl persists BOTH blocks (full HTML)
-       │
-       └─→ emitSessionEvent → truncateLargeToolContent
-              │  walks toolResult messages via truncateSnapshotBlock()
-              │  if snapshot > 32KB: rewrite to {marker, _truncated, preview, _originalLength}
-              └─→ broadcast + EventBuffer hold the stub; agent’s next turn
-                  reads the stub from its own transcript (never the full HTML)
+   └─→ extension (defaults/tools/html/extension.ts)
+        1. PATCH /api/sessions/:id {preview:true}
+        2. POST  /api/preview/mount?sessionId=… {html} or {file}
+           — server writes into <stateDir>/preview/<sid>/, broadcasts
+             preview-changed via subscribePreviewChanged
+        tool_result = [
+          {type:"text", text:"Preview panel is open …"},
+          {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON {kind:"preview", url, path}}
+        ]
+   └─→ session.jsonl persists both blocks (each ≤ 250 bytes total)
+   └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
+       {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
 
-User clicks Open on widget #N (PreviewRenderer.ts)
-       │  If the in-memory block has full text (not _truncated), use it directly.
-       │  Otherwise GET /api/sessions/:id/tool-content/:mi/:bi (server reads
-       │    the .jsonl and returns block.text for type:"text" blocks).
-       └─→ strip PREVIEW_SNAPSHOT_MARKER →
-            PATCH /api/sessions/:id {preview:true} →
-            POST  /api/preview?sessionId=… {html}
-            — same endpoints the extension used, same single-panel pipeline.
+User clicks Open on widget #N (PreviewRenderer.ts):
+   └─→ parse v3 marker → POST /api/preview/mount?sessionId=… {html|file}
+   └─→ same endpoint the extension uses; SSE picks up; iframe re-renders.
 ```
 
 ### Key design decisions
 
-- **Versioned sentinel over a structured block type** — `__preview_snapshot_v1__\n` is a prefix on a plain `{type:"text"}` block rather than a new block type. This keeps the tool_result shape standard (agents and older clients treat it as an extra status line) and lets the truncation layer detect snapshot blocks with a single string check. The `v1` suffix reserves room for future format changes.
-- **Extension captures, not the server** — the HTML is resolved once in the tool process (where `params.html` or `fs.readFileSync(params.file)` already lives) and flows through the normal tool_result path. The server doesn't need a special "snapshot store" — the `.jsonl` already persists tool_results durably.
-- **Truncation preserves the marker** — `truncateSnapshotBlock()` keeps the marker prefix on the stub so downstream consumers (another truncation pass, the UI renderer deciding whether to show Open) can still recognise the block without inspecting `_truncated`.
-- **Backwards compatible** — historical `preview_open` results that pre-date the feature have only a single status block. `PreviewRenderer.ts` detects this (no marker block) and renders Open in a disabled state rather than crashing or silently doing nothing.
-- **No change to `/api/preview` or the panel** — Open replays through the exact endpoints the extension uses. The preview panel, its polling loop (`src/app/preview-panel.ts`), and the single-slot contract are untouched.
+- **Constant-size snapshots (≤ 250 bytes)** — tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
+- **Bytes never re-enter agent context** — the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
+- **v1/v2 markers preserved in renderer-only code paths** — archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
+- **Cookie auth for the content origin** — `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens.
+- **SSE replaces 1 s polling for hot reload** — `subscribePreviewChanged` pushes `preview-changed` events; the panel bumps `#mtime=<n>` on the iframe `src` to force reload, typically within 100 ms of the agent writing.
+- **Truncation layer recognises all three markers** — `truncateSnapshotBlock()` matches against `PREVIEW_SNAPSHOT_MARKERS`. v3 blocks are always tiny so the lazy-load branch is dead code for v3, but kept live for legacy archived sessions whose v1/v2 blocks may exceed the 32 KB threshold.
 
 ### Key files
 
 | File | Purpose |
 |---|---|
-| `defaults/tools/html/snapshot.ts` | `PREVIEW_SNAPSHOT_MARKER` constant, `isSnapshotBlock`, `extractSnapshot` helpers |
-| `defaults/tools/html/extension.ts` | Emits the 2-block tool_result (status + snapshot) after PATCH/POST succeed |
-| `src/server/agent/truncate-large-content.ts` | `truncateSnapshotBlock()` handles marker-prefixed text blocks in `toolResult` messages; wired into both `truncateLargeToolContent()` (live events) and `truncateLargeToolContentInMessages()` (history loads) |
-| `src/server/server.ts` | `/api/sessions/:id/tool-content/:mi/:bi` falls back to `block.text` when the block is a plain `type:"text"` block (snapshot blocks have no `arguments`/`input`) |
-| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button: state machine (idle → Opening → Opened ✔ / error), disabled for streaming and legacy single-block results, inline-or-lazy-load, strip marker, PATCH + POST |
-| `tests/preview-renderer.spec.ts`, `tests/preview-extension.test.ts`, `tests/truncate-large-content.test.ts`, `tests/e2e/preview-snapshot.spec.ts`, `tests/e2e/ui/preview-reopen.spec.ts` | Unit, server-side, and browser E2E coverage |
+| `src/server/preview/mount.ts` | Per-session mount lifecycle (write/copy/remove/watch) |
+| `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
+| `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel |
+| `src/server/auth/cookie.ts` | `bobbit_session` cookie store and verifier |
+| `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
+| `defaults/tools/html/extension.ts` | Tool extension emits `[status, v3-snapshot]` tool_result after PATCH + POST mount |
+| `src/server/agent/truncate-large-content.ts` | Recognises v1/v2/v3 markers (via `PREVIEW_SNAPSHOT_MARKERS`); v3 blocks always small so lazy-load only fires on legacy archived sessions |
+| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button dispatch: v3 → mount endpoint; v1/v2 → mount endpoint with `{html}`/`{file}` (read-only legacy) |
+| `src/app/preview-panel.ts` | EventSource SSE subscription + bootstrap GET |
+| `tests/preview-{mount,cookie,content-route,extension,renderer}*`, `tests/e2e/preview-{mount-route,token-cost}.spec.ts`, `tests/e2e/ui/preview-{happy-path,new-tab,archived-snapshot}.spec.ts` | Unit, API E2E, browser E2E coverage |
 
 ---
 
