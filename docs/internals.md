@@ -966,6 +966,10 @@ Full design (file format, error codes, restore-handler edge cases, test plan): [
 
 Each proposal preview panel exposes `data-panel="<type>-proposal"` for E2E targeting. The project panel keeps its three-view structure (`view-tab-{components|workflows|diff}`) on top of the unified slot — see [Project-proposal panel structure](#project-proposal-panel-structure).
 
+### Inline comments on goal/role/staff proposals
+
+The Preview-mode markdown body of goal, role, and staff proposals is mounted via `<commentable-markdown>` (a thin wrapper around the existing `<review-document>`) so users can select text and attach inline comments without retyping quotes into the chat. Annotations are ephemeral — backed by an in-memory store (`src/ui/components/review/proposal-annotations.ts`) keyed by `(sessionId, "proposal:<type>")`, with no server persistence. They survive Edit↔Preview toggles, but are cleared on dismiss, on `proposal_cleared`, on a `proposal_update` whose body actually changed (offsets won't survive a rewrite), and on reload. A "Send feedback" button composes a quoted-text+comment chat message via `state.remoteAgent.prompt` and clears the bucket. Tool and project proposals are out of scope (YAML / no single markdown body). Full design: [docs/design/proposal-inline-comments.md](design/proposal-inline-comments.md).
+
 ### Out of scope
 
 - Diff/undo history of edits. Agents see the latest file contents only.
