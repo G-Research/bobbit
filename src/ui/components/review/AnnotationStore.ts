@@ -7,6 +7,16 @@
  * On session connect, `initAnnotationStore()` hydrates cache from server.
  */
 
+// ── Pluggable backend interface (used by <review-document>) ──────────
+
+export type AnnotationKey = { sessionId: string; bucket: string };
+
+export interface AnnotationBackend {
+  add(key: AnnotationKey, ann: ReviewAnnotation): void;
+  remove(key: AnnotationKey, id: string): void;
+  get(key: AnnotationKey): ReviewAnnotation[];
+}
+
 export interface ReviewAnnotation {
   id: string;
   /** The quoted/selected text */
@@ -264,6 +274,14 @@ export function composeReviewFeedback(
 
   return `## Review Feedback\n\n${sections.join("\n\n")}`;
 }
+
+// ── Default backend adapter (REST-backed review-pane store) ─────────
+
+export const reviewBackend: AnnotationBackend = {
+  add: (k, a) => addAnnotation(k.sessionId, k.bucket, a),
+  remove: (k, id) => removeAnnotation(k.sessionId, k.bucket, id),
+  get: (k) => getAnnotations(k.sessionId, k.bucket),
+};
 
 // ── beforeunload: flush cache to server via sendBeacon ───────────────
 

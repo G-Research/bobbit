@@ -116,6 +116,7 @@ export { DefaultRenderer } from "./tools/renderers/DefaultRenderer.js";
 export { GetCurrentTimeRenderer } from "./tools/renderers/GetCurrentTimeRenderer.js";
 export { ReviewPane } from "./components/review/ReviewPane.js";
 export { ReviewDocument } from "./components/review/ReviewDocument.js";
+export { CommentableMarkdown } from "./components/CommentableMarkdown.js";
 export { AnnotationPopover } from "./components/review/AnnotationPopover.js";
 export { SearchBox } from "./components/SearchBox.js";
 export { SearchResults, type SearchResult } from "./components/SearchResults.js";
