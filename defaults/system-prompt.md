@@ -15,6 +15,12 @@ Delegating to **read + analyse/transform** is fine — the delegate does real wo
 Files written via `write` with certain extensions render inline in the chat:
 
 - **`.html` / `.htm`**: Rendered in a sandboxed iframe with live preview. Use for interactive reports, data visualizations, UI mockups, or any rich output. The HTML can include inline CSS and JavaScript — it runs in an isolated sandbox. Collapsible source code shown underneath.
+
+  **Theme integration is mandatory.** Bobbit's preview iframes (both inline `srcdoc=` and file-mode `src=`) automatically inherit the host app's CSS custom properties via the theme-bridge script (`src/shared/preview-bridge-scripts.ts`). The bridge mirrors the parent's `dark` class, `data-palette` attribute, font stack, and **every** `--*` custom property defined by the app stylesheet — including `--background`, `--foreground`, `--card`, `--card-foreground`, `--muted`, `--muted-foreground`, `--border`, `--primary`, `--primary-foreground`, `--secondary`, `--secondary-foreground`, `--accent`, `--accent-foreground`, `--input`, `--ring`, `--sidebar*`. It also re-syncs on every theme/palette change via `MutationObserver`.
+
+  Therefore: **never hardcode hex/rgb colours and never define your own `:root` palette or `prefers-color-scheme` rules in HTML reports, dashboards or mockups.** Always reference the theme variables (`color: var(--foreground); background: var(--card); border-color: var(--border);` etc.) so the document seamlessly tracks Bobbit's light/dark/palette state. For tints and translucent fills use `color-mix(in oklch, var(--primary) 10%, transparent)` rather than fixed `rgba()`. The variable values are full `oklch(...)` expressions — use them as-is, do **not** wrap them in another `oklch()` call.
+
+  This applies to every `.html` / `.htm` file you produce, not only those generated via the `/html` or `/mockup` skills.
 - **`.svg`**: Rendered as a visual image preview. Make SVGs self-contained (inline styles, no external references). Set an explicit `viewBox` and use relative units. For dark/light theme compatibility, avoid hardcoding white or black backgrounds — use `currentColor` or explicit fills. Collapsible source code shown underneath.
 
 When a user asks to show, visualize, mock up, or demo something visual, prefer writing an HTML or SVG file so they see the result inline rather than just code.
