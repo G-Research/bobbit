@@ -187,7 +187,7 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(JSON.parse(calls[0].body)).toEqual({ preview: true });
 
 		expect(calls[1].method).toBe("POST");
-		expect(calls[1].url).toContain(`/api/preview?sessionId=${SESSION_ID}`);
+		expect(calls[1].url).toContain(`/api/preview/mount?sessionId=${SESSION_ID}`);
 		const postBody = JSON.parse(calls[1].body);
 		expect(postBody.html).toBe(html);
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
@@ -251,11 +251,11 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.length).toBe(2);
 		expect(calls[0].method).toBe("PATCH");
 		expect(calls[1].method).toBe("POST");
-		expect(calls[1].url).toContain(`/api/preview?sessionId=${SESSION_ID}`);
+		expect(calls[1].url).toContain(`/api/preview/mount?sessionId=${SESSION_ID}`);
 		const postBody = JSON.parse(calls[1].body);
-		expect(postBody.kind).toBe("file");
-		expect(postBody.path).toBe(filePath);
+		expect(postBody.file).toBe(filePath);
 		expect(postBody.html).toBeUndefined();
+		expect(postBody.kind).toBeUndefined();
 	});
 
 	test("v2 marker: server 404 → button shows 'File no longer available' and stays disabled", async ({ page }) => {

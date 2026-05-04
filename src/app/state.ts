@@ -284,6 +284,8 @@ export const state = {
 	previewPanelHtml: "" as string,
 	previewPanelMode: "inline" as "inline" | "file",
 	previewPanelMtime: 0 as number,
+	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
+	previewPanelEntry: "" as string,
 	previewPanelFullscreen: false,
 
 	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
