@@ -513,14 +513,15 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 ### Preview
 
-The preview side-panel iframe is fed by these endpoints. Two modes are supported: **inline** (agent supplies raw HTML) and **file** (agent supplies a path to an HTML file on disk; sibling assets are served over HTTP without the agent ever reading their bytes). Full reference: [docs/preview-file-mode.md](preview-file-mode.md).
+The preview side-panel iframe is fed by a per-session content mount served from a cookie-authed origin path. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
+
+**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/preview` | Get preview HTML + mode for a session (`?sessionId=`). Response: `{ html, mtime, kind: "inline" \| "file", entry? }`. |
-| `POST` | `/api/preview` | Set preview for a session (`?sessionId=`). Body is either `{ html }` (inline mode; deletes any existing meta sidecar) or `{ kind: "file", path: "/abs/path/report.html" }` (file mode). On success returns `{ ok: true, kind, entry?, mtime }`. `400 baseDir not host-visible` if the gateway can't read `path` (sandbox translation failed) — the `preview_open` extension catches this specific 400 and retries with inline. |
-| `GET` | `/api/preview/render` | Render preview HTML for the iframe (`?sessionId=`). Server injects `<base href="/api/preview/asset?sessionId=…&path=">` into `<head>` plus the shared theme-bridge/swipe scripts before `</body>`. `200 text/html; charset=utf-8`; `400` invalid sessionId; `404` no preview state. |
-| `GET` | `/api/preview/asset` | Serve a sibling asset relative to the session's `baseDir` (`?sessionId=`, `?path=<rel>`). File mode only. Path-traversal-guarded (rejects `../`, encoded variants, backslashes, absolute paths, and symlink escapes via `realpathSync`). 25 MiB cap per asset. `200` asset bytes; `400` invalid sessionId / missing path / traversal rejected; `404` no preview state, inline-mode session, or file not found; `413` over the size cap. `Cache-Control: no-store`. |
+| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount. Body is one of `{ html, entry? }` (inline) or `{ file: "/abs/path/report.html" }` (copy entry + sibling tree). Returns `200 { url, path, entry, mtime }`. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm`; `403` sandbox-out-of-scope or symlink escape; `404` source file missing; `413` mount exceeds 100 MiB or copy exceeds 25 MiB. On success the server fans out a `preview-changed` SSE event. |
+| `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns the same `{ url, path, entry, mtime }` shape, or `404 { error: "no preview mount" }` if the mount is missing or empty. |
+| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path}` after every successful `POST /api/preview/mount`. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
 
 ### Search
 
