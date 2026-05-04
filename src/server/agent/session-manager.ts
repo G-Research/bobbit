@@ -1607,13 +1607,49 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
 
-		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
-		dispatchPromise.catch((err: any) => {
-			console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
-			// Revert optimistic status on failure
+		// Snapshot the rows we're about to dispatch so we can re-enqueue them
+		// if the agent rejects the prompt (e.g. "Agent is already processing."
+		// when drainQueue races the SDK's finishRun() during a graceful abort).
+		const dispatchedRowsForRecovery = steered.length > 0
+			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true }))
+			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
+
+		const recoverDispatchedRows = (reason: string) => {
+			console.warn(`[session-manager] drainQueue dispatch failed for ${session.id} (${reason}); re-enqueueing ${dispatchedRowsForRecovery.length} row(s) at front`);
+			// Re-enqueue at front in original order so the next drain re-dispatches
+			// the same batch. Reverse iteration because enqueueAtFront unshifts.
+			for (const r of [...dispatchedRowsForRecovery].reverse()) {
+				session.promptQueue.enqueueAtFront(r.text, {
+					images: r.images,
+					attachments: r.attachments,
+					isSteered: r.isSteered,
+				});
+			}
 			session.status = "idle";
 			broadcast(session.clients, { type: "session_status", status: "idle" });
-		});
+			this.broadcastQueue(session);
+			// Schedule a follow-up drain on the next tick so the rows we just
+			// re-enqueued get another chance once the bridge has finished its
+			// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
+			// (including the SDK's finally{finishRun()}) run first.
+			setTimeout(() => { this.drainQueue(session); }, 0);
+		};
+
+		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
+		dispatchPromise
+			.then((resp: any) => {
+				// The bridge resolves with `{success:false, error}` when the agent
+				// rejects the command (the most common case is the abort/drainQueue
+				// race below). Treat that the same as a thrown rejection — recover
+				// the dequeued rows so a future drain can redispatch them.
+				if (resp && resp.success === false) {
+					recoverDispatchedRows(resp.error || "unknown");
+				}
+			})
+			.catch((err: any) => {
+				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
+				recoverDispatchedRows(err?.message || String(err));
+			});
 	}
 
 	/**
