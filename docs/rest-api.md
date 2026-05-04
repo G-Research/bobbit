@@ -28,6 +28,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
+| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 
 
 ### Proposal drafts

@@ -89,6 +89,10 @@ registerLazyToolRenderer("javascript_repl", async () => {
 	const { javascriptReplRenderer } = await import("./javascript-repl.js");
 	return javascriptReplRenderer;
 });
+registerLazyToolRenderer("read_session", async () => {
+	const { ReadSessionRenderer } = await import("./renderers/ReadSessionRenderer.js");
+	return new ReadSessionRenderer();
+});
 // gate_verification_live custom element is loaded lazily via
 // `src/ui/lazy/gate-verification-live.ts` from GateToolRenderers.
 
