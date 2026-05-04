@@ -27,11 +27,9 @@ export function resolveSystemPromptPath(): string | undefined {
 
 /** Module-level cache of the prompts directory. Set once by ensurePromptsDir(). */
 let _promptsDir: string | undefined;
-let _stateDir: string | undefined;
 
 /** Initialize the prompts directory from a stateDir. Called by server startup. */
 export function initPromptDirs(stateDir: string): void {
-	_stateDir = stateDir;
 	_promptsDir = path.join(stateDir, "session-prompts");
 	if (!fs.existsSync(_promptsDir)) {
 		fs.mkdirSync(_promptsDir, { recursive: true });
@@ -45,11 +43,6 @@ function getPromptsDir(): string {
 	// Recreating on access keeps writes robust without masking real errors.
 	if (!fs.existsSync(_promptsDir)) fs.mkdirSync(_promptsDir, { recursive: true });
 	return _promptsDir;
-}
-
-function getStateDir(): string {
-	if (!_stateDir) throw new Error("system-prompt: initPromptDirs() not called");
-	return _stateDir;
 }
 
 /**
@@ -537,12 +530,6 @@ export function cleanupSessionPrompt(sessionId: string): void {
 	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
 	try {
 		if (fs.existsSync(promptPath)) fs.unlinkSync(promptPath);
-	} catch { /* ignore */ }
-	// Also clean up per-session preview file (legacy single-file path,
-	// retained until WP-G removes the legacy preview routes).
-	const previewPath = path.join(getStateDir(), `preview-${sessionId}.html`);
-	try {
-		if (fs.existsSync(previewPath)) fs.unlinkSync(previewPath);
 	} catch { /* ignore */ }
 	// Per-session preview mount (WP-A): <stateDir>/preview/<sid>/.
 	try { removePreviewMount(sessionId); } catch { /* ignore */ }

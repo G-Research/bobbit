@@ -12,6 +12,29 @@ let currentSid: string | null = null;
 export function startPreviewSubscription(sessionId: string): void {
 	stopPreviewSubscription();
 	currentSid = sessionId;
+
+	// Bootstrap: GET the current mount state so the iframe can render
+	// immediately on session-select instead of waiting for the next
+	// preview-changed event. 404 = no mount yet (skip).
+	void (async () => {
+		try {
+			const r = await fetch(
+				`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`,
+				{ credentials: "include" },
+			);
+			if (!r.ok) return;
+			if (currentSid !== sessionId) return; // session switched mid-flight
+			const data = await r.json();
+			if (typeof data?.entry === "string" && data.entry) {
+				state.previewPanelEntry = data.entry;
+			}
+			if (typeof data?.mtime === "number") {
+				state.previewPanelMtime = data.mtime;
+			}
+			renderApp();
+		} catch { /* ignore bootstrap failures */ }
+	})();
+
 	try {
 		es = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/preview-events`, {
 			withCredentials: true,

@@ -371,12 +371,4 @@ describe("cleanupSessionPrompt", () => {
 		// Should not throw
 	});
 
-	it("also removes preview HTML file", () => {
-		const previewPath = path.join(stateDir, "preview-cleanup-preview.html");
-		fs.writeFileSync(previewPath, "<html>preview</html>", "utf-8");
-		assert.ok(fs.existsSync(previewPath));
-
-		cleanupSessionPrompt("cleanup-preview");
-		assert.ok(!fs.existsSync(previewPath));
-	});
 });

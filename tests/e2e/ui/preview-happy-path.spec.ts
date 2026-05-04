@@ -50,14 +50,10 @@ test.describe("Preview panel iframe URL (WP-E)", () => {
 			{ timeout: 10_000 },
 		).toBe(true);
 
-		// Pre-seed the entry on client state. The current SSE handler only
-		// forwards `mtime` (not `entry`), so the entry field would otherwise
-		// stay empty and the preview iframe would render with the
-		// "inline.html" fallback. Setting entry directly lets us assert the
-		// expected `report.html` URL shape after the next render.
+		// Switch to Preview tab so the iframe is visible. The SSE handler
+		// forwards `entry` from the broadcast — no client-side pre-seed needed.
 		await page.evaluate(() => {
 			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
-			s.previewPanelEntry = "report.html";
 			s.previewPanelActiveTab = "preview";
 		});
 

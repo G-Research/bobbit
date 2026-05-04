@@ -52,15 +52,11 @@ test.describe("Preview Open-in-new-tab (criterion 5)", () => {
 			{ timeout: 10_000 },
 		).toBe(true);
 
-		// Pre-seed previewPanelEntry on the client. The SSE handler currently
-		// only forwards `mtime` (not `entry`) on bumps from the mount endpoint,
-		// so the entry field stays empty and the panel header anchor is gated
-		// off (see render.ts:`showPreviewTab && previewPanelEntry`). Setting
-		// entry directly on state lets the next renderApp() call produce the
-		// link. The mount POST below triggers that renderApp via SSE.
+		// Switch to the Preview tab so the panel header anchor is gated on.
+		// `previewPanelEntry` arrives via the SSE preview-changed broadcast
+		// emitted by the mount POST below — no client-side pre-seed needed.
 		await page.evaluate(() => {
 			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
-			s.previewPanelEntry = "report.html";
 			s.previewPanelActiveTab = "preview";
 		});
 

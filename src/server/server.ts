@@ -65,7 +65,7 @@ import { handlePreviewRequest } from "./preview/content-route.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
-import { broadcastPreviewChanged } from "./preview/events.js";
+import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
@@ -6883,6 +6883,50 @@ async function handleApiRoute(
 		}
 	}
 
+	// GET /api/preview/mount?sessionId=<sid> — bootstrap the preview panel after
+	// session select. Returns the current entry/mtime/url/path for the mount,
+	// or 404 if the mount is empty / nonexistent. Same auth as the POST.
+	if (url.pathname === "/api/preview/mount" && req.method === "GET") {
+		const sessionId = url.searchParams.get("sessionId") || "";
+		if (!VALID_SESSION_ID.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
+			json({ error: "Forbidden: session out of scope" }, 403);
+			return;
+		}
+		try {
+			const { pickEntry } = await import("./preview/content-route.js");
+			const dir = previewMount.mountDir(sessionId);
+			const entry = pickEntry(dir);
+			if (!entry) {
+				json({ error: "no preview mount" }, 404);
+				return;
+			}
+			const entryPath = path.join(dir, entry);
+			let stat: fs.Stats;
+			try { stat = fs.statSync(entryPath); } catch {
+				json({ error: "no preview mount" }, 404);
+				return;
+			}
+			json({
+				url: `/preview/${sessionId}/${entry}`,
+				path: entryPath,
+				entry,
+				mtime: Math.floor(stat.mtimeMs),
+			});
+			return;
+		} catch (err: any) {
+			if (err && err instanceof previewMount.PreviewMountError) {
+				json({ error: err.message }, err.statusCode);
+				return;
+			}
+			json({ error: `preview mount lookup failed: ${err?.message ?? String(err)}` }, 500);
+			return;
+		}
+	}
+
 	// GET /api/sessions/:sid/preview-events — SSE stream of preview-changed events
 	// for the per-session preview mount. Cookie auth (or admin bearer) only;
 	// sandbox tokens are not permitted (handled by the route-guard above).
@@ -6907,10 +6951,12 @@ async function handleApiRoute(
 		// Initial hello so the client knows the stream is live.
 		res.write(`event: hello\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
 
-		const { watchMount: watchPreviewMount } = await import("./preview/mount.js");
-		const unsubscribe = watchPreviewMount(sid, () => {
+		// Subscribe to the in-process preview-changed channel populated by the
+		// mount POST endpoint. Payload shape `{entry, mtime, url, path}` is
+		// forwarded verbatim — the client reads `entry` to seed the iframe.
+		const unsubscribe = subscribePreviewChanged(sid, payload => {
 			try {
-				res.write(`event: preview-changed\ndata: ${JSON.stringify({ mtime: Date.now() })}\n\n`);
+				res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
 			} catch { /* socket closed */ }
 		});
 		const keepalive = setInterval(() => {

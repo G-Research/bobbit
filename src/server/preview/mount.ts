@@ -94,7 +94,7 @@ function validateEntry(entry: string): string {
 	if (entry.indexOf("/") >= 0 || entry.indexOf("\\") >= 0) {
 		throw new PreviewMountError(400, "Invalid entry");
 	}
-	if (entry.indexOf("..") >= 0 && (entry.startsWith("..") || entry.endsWith(".."))) {
+	if (entry.includes("..")) {
 		throw new PreviewMountError(400, "Invalid entry");
 	}
 	return entry;
@@ -146,7 +146,7 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
 		entry: safeEntry,
-		mtime: fs.statSync(target).mtimeMs,
+		mtime: Math.floor(fs.statSync(target).mtimeMs),
 	};
 }
 
@@ -259,7 +259,7 @@ export function copyFileTree(sessionId: string, srcFile: string): MountResult {
 		url: `/preview/${sessionId}/${entry}`,
 		path: target,
 		entry,
-		mtime: fs.statSync(target).mtimeMs,
+		mtime: Math.floor(fs.statSync(target).mtimeMs),
 	};
 }
 
