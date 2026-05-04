@@ -2,25 +2,52 @@ import "./app.css";
 import "./storage.js"; // must initialize before anything else
 import { mark, markPaint, installResumeHooks } from "./perf.js";
 mark("main:module"); // earliest reachable mark — module evaluation start
-import { ChatPanel } from "../ui/index.js";
 import {
 	state,
-	setRenderApp,
 	renderApp,
+	setRenderApp,
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	activeSessionId,
 	resetSessionsHydration,
 } from "./state.js";
-import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, startPostAuthBackgroundFetches } from "./session-manager.js";
-import { RemoteAgent } from "./remote-agent.js";
-import { migrateLegacyVisitedMap } from "./render-helpers.js";
-import { doRenderApp } from "./render.js";
-// goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
-// See docs/design/ui-bundle-size-reduction.md (Task A).
+import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
+
+// ---------------------------------------------------------------------------
+// §G — Pre-first-paint critical path is intentionally TINY.
+//
+// Everything else — render.ts (the Lit-templated views), session-manager.ts
+// (connect/auth/refresh), api.ts (gatewayFetch + RemoteAgent transitively),
+// dialogs.ts, goal-entry.ts, render-helpers.ts, mobile-header.ts and the
+// custom-element side-effect graph behind ../ui/index.js — is loaded via
+// dynamic `import()` after the skeleton paints. The skeleton in index.html
+// keeps the screen non-blank during that window; once renderApp() lands the
+// real UI we hide it (single removal point, no re-show path).
+//
+// Do NOT add static imports of anything that is not strictly required to
+// stamp `init:first-paint`. The bundle-size assertion in
+// `tests/pre-first-paint-budget.test.ts` enforces this.
+// ---------------------------------------------------------------------------
+
+// Light caches for the route-level dynamic imports we touch repeatedly.
+let _renderModule: typeof import("./render.js") | null = null;
+let _sessionManagerModule: typeof import("./session-manager.js") | null = null;
+let _apiModule: typeof import("./api.js") | null = null;
 let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
+
+async function loadRender() {
+	if (!_renderModule) _renderModule = await import("./render.js");
+	return _renderModule;
+}
+async function loadSessionManager() {
+	if (!_sessionManagerModule) _sessionManagerModule = await import("./session-manager.js");
+	return _sessionManagerModule;
+}
+async function loadApi() {
+	if (!_apiModule) _apiModule = await import("./api.js");
+	return _apiModule;
+}
 async function loadDashboardData(goalId: string): Promise<void> {
 	if (!_goalDashboardModule) _goalDashboardModule = await import("./goal-dashboard.js");
 	return _goalDashboardModule.loadDashboardData(goalId);
@@ -30,13 +57,6 @@ function clearDashboardState(): void {
 	// and importing it here would defeat the route-level code-split.
 	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
 }
-import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
-
-// ============================================================================
-// WIRE UP RENDER
-// ============================================================================
-
-setRenderApp(doRenderApp);
 
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
@@ -54,10 +74,11 @@ async function waitForGateway(url: string, token: string): Promise<void> {
 	const POLL_INTERVAL = 1500;
 	const MAX_WAIT = 120_000;
 	const start = Date.now();
+	const sm = await loadSessionManager();
 
 	while (true) {
 		try {
-			await authenticateGateway(url, token);
+			await sm.authenticateGateway(url, token);
 			return; // Success
 		} catch (err: any) {
 			// Auth failures are permanent — don't retry
@@ -99,6 +120,11 @@ async function handleHashChange(): Promise<void> {
 			renderApp();
 			return;
 		}
+
+		const sm = await loadSessionManager();
+		const api = await loadApi();
+		const { applyProjectPalette, connectToSession, flushAndTeardownDraft } = sm;
+		const { refreshSessions } = api;
 
 		// Flush and tear down draft handlers when leaving a session view.
 		// Session-to-session switches handle this via selectSession(), but
@@ -333,8 +359,6 @@ async function initApp() {
 
 	// Palette is loaded from server preferences after gateway auth (see below)
 
-	state.chatPanel = new ChatPanel();
-
 	// Check for token in URL (passed by gateway auto-open)
 	const params = new URLSearchParams(window.location.search);
 	const urlToken = params.get("token");
@@ -372,9 +396,53 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		state.appView = "gateway-starting";
 	}
+
+	// §G: stamp init:first-paint as early as possible. The skeleton is
+	// already on screen (it's static HTML in index.html) — we don't need
+	// renderApp() to run before stamping the mark. The real Lit views
+	// land asynchronously below once render.ts has loaded.
 	mark("init:first-render");
-	renderApp();
 	markPaint("init:first-paint");
+
+	// B1: when resuming directly into /session/:id, pre-warm the WebSocket in
+	// parallel with `waitForGateway` and the lazy module loads. The
+	// TCP+TLS+upgrade+auth_ok round-trips overlap with `/api/health` and the
+	// dynamic-import network/parse, so by the time `connectToSession` runs the
+	// connect promise is often already settled.
+	if (savedUrl && savedToken) {
+		const initialRoute = getRouteFromHash();
+		if (initialRoute.view === "session" && initialRoute.sessionId) {
+			try {
+				const { RemoteAgent } = await import("./remote-agent.js");
+				const preAgent = new RemoteAgent();
+				const connectPromise = preAgent.connect(savedUrl, savedToken, initialRoute.sessionId)
+					.catch((err) => {
+						// Swallow — connectToSession will re-throw via the awaited
+						// promise and surface the standard error UI. Without the catch,
+						// an unhandled rejection lands before the consumer attaches.
+						throw err;
+					});
+				// Defuse unhandled-rejection: re-attached when consumed.
+				connectPromise.catch(() => { /* will surface via connectToSession */ });
+				state.preWarmedAgent = { sessionId: initialRoute.sessionId, agent: preAgent, connectPromise };
+				mark("ws:prewarm-start");
+			} catch { /* non-fatal */ }
+		}
+	}
+
+	// Now lazy-load render.ts so we can install setRenderApp and render
+	// the real shell. The skeleton remains visible until the first
+	// renderApp() lands. This is also when we wire up the chat panel
+	// container (state.chatPanel is created lazily by session-manager
+	// when a session is actually connected).
+	const { doRenderApp } = await loadRender();
+	setRenderApp(doRenderApp);
+	renderApp();
+	// state.chatPanel is created lazily by session-manager when the user
+	// actually connects to a session — none of the unauthenticated views
+	// (disconnected / gateway-starting / session-not-found / landing) render
+	// it, so deferring saves the ChatPanel + AgentInterface custom-element
+	// graph from the bootstrap chunk.
 
 	// §E PWA-resume skeleton — hide on first paint of the real app. Single
 	// removal point; no re-show path. The skeleton is a sibling of #app and
@@ -392,35 +460,19 @@ async function initApp() {
 	// during async init (gateway wait, session refresh) are not silently missed.
 	window.addEventListener("hashchange", handleHashChange);
 
-	// B1: when resuming directly into /session/:id, pre-warm the WebSocket in
-	// parallel with `waitForGateway`. The TCP+TLS+upgrade+auth_ok round-trips
-	// overlap with `/api/health`, so by the time `connectToSession` runs the
-	// connect promise is often already settled.
-	if (savedUrl && savedToken) {
-		const initialRoute = getRouteFromHash();
-		if (initialRoute.view === "session" && initialRoute.sessionId) {
-			try {
-				const preAgent = new RemoteAgent();
-				const connectPromise = preAgent.connect(savedUrl, savedToken, initialRoute.sessionId)
-					.catch((err) => {
-						// Swallow — connectToSession will re-throw via the awaited
-						// promise and surface the standard error UI. Without the catch,
-						// an unhandled rejection lands before the consumer attaches.
-						throw err;
-					});
-				// Defuse unhandled-rejection: re-attached when consumed.
-				connectPromise.catch(() => { /* will surface via connectToSession */ });
-				state.preWarmedAgent = { sessionId: initialRoute.sessionId, agent: preAgent, connectPromise };
-				mark("ws:prewarm-start");
-			} catch { /* non-fatal */ }
-		}
-	}
+	// Lazy-load helpers we'll need below.
+	const { migrateLegacyVisitedMap } = await import("./render-helpers.js");
 
 	if (savedUrl && savedToken) {
 		try {
 			mark("init:gateway-wait-start");
 			await waitForGateway(savedUrl, savedToken);
 			mark("init:gateway-wait-end");
+
+			const sm = await loadSessionManager();
+			const api = await loadApi();
+			const { connectToSession, startPostAuthBackgroundFetches } = sm;
+			const { gatewayFetch, refreshSessions } = api;
 
 			// A1: fire post-auth REST fetches as side-effects so route
 			// dispatch can run in parallel. Resolves the sessionsHydrated
@@ -517,7 +569,7 @@ async function initApp() {
 	// ========================================================================
 
 	// Helper: build ordered session list and navigate up/down
-	function navigateSession(direction: "up" | "down"): void {
+	async function navigateSession(direction: "up" | "down"): Promise<void> {
 		const allSessions = state.gatewaySessions;
 		const nonDelegate = allSessions.filter((s) => !s.delegateOf);
 		const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
@@ -551,7 +603,8 @@ async function initApp() {
 			}
 			const nextId = ordered[nextIndex];
 			if (nextId && nextId !== currentId) {
-				connectToSession(nextId, true);
+				const sm = await loadSessionManager();
+				sm.connectToSession(nextId, true);
 			}
 		}
 	}
@@ -564,7 +617,11 @@ async function initApp() {
 			{ key: "n", ctrlOrMeta: false, shift: false, alt: true },
 		],
 		allowInInput: true,
-		handler: () => { if (state.appView === "authenticated") createAndConnectSession(); },
+		handler: async () => {
+			if (state.appView !== "authenticated") return;
+			const sm = await loadSessionManager();
+			sm.createAndConnectSession();
+		},
 	});
 
 	registerShortcut({
@@ -682,9 +739,12 @@ async function initApp() {
 	registerShortcut({
 		id: "terminate-session", label: "Terminate session", category: "Sessions",
 		defaultBindings: [{ key: "d", ctrlOrMeta: true, shift: true, alt: false }],
-		handler: () => {
+		handler: async () => {
 			const id = activeSessionId();
-			if (id) terminateSession(id);
+			if (id) {
+				const sm = await loadSessionManager();
+				sm.terminateSession(id);
+			}
 		},
 	});
 
@@ -711,6 +771,8 @@ async function initApp() {
 	document.addEventListener("visibilitychange", async () => {
 		if (document.visibilityState !== "visible") return;
 		if (state.appView !== "authenticated") return;
+		const api = await loadApi();
+		const { gatewayFetch, refreshSessions, resetPrPollThrottle } = api;
 		// Reset PR poll throttle so the next session poll refreshes PR badges immediately
 		resetPrPollThrottle();
 		// Trigger an immediate session refresh (includes PR status due to throttle reset)
