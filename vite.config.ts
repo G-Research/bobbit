@@ -266,11 +266,15 @@ function dynamicGatewayProxy(): Plugin {
 		configureServer(server) {
 			// --- HTTP proxy for /api/* ----------------------------------
 			server.middlewares.use((req, res, next) => {
-				// Proxy /api/* and /manifest.json (the gateway serves a dynamic manifest
-				// that bakes the auth token into start_url for PWA installs).
+				// Proxy /api/*, /manifest.json (gateway serves a dynamic manifest
+				// that bakes the auth token into start_url for PWA installs), and
+				// /preview/* (per-session HTML preview mounts served by the gateway
+				// — without this, Vite's SPA fallback returns index.html and the
+				// iframe ends up rendering a nested Bobbit app).
 				const u = req.url || "";
 				const isManifest = u === "/manifest.json" || u.startsWith("/manifest.json?");
-				if (!u.startsWith("/api") && !isManifest) return next();
+				const isPreview = u.startsWith("/preview/");
+				if (!u.startsWith("/api") && !isManifest && !isPreview) return next();
 				const target = new URL(readGatewayUrl());
 				const opts: http.RequestOptions = {
 					hostname: target.hostname,
