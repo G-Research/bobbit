@@ -1746,7 +1746,8 @@ export class SessionManager {
 				// a model malfunction. Queued steered messages represent fresh
 				// user intent that should dispatch immediately — leaving the
 				// flag set would park them until the next enqueuePrompt's
-				// implicit unstick.
+				// implicit unstick, which is exactly the bug repro'd by
+				// tests/e2e/ui/steer-during-bash-tool.spec.ts (MOCK_ABORT_AS_ERROR).
 				// Reset the consecutive-error counter too — a Stop click is a
 				// successful user-controlled exit, not a streak of failures.
 				session.lastTurnErrored = false;
