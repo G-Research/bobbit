@@ -1,7 +1,5 @@
 import "./app.css";
 import "./storage.js"; // must initialize before anything else
-import { mark, markPaint, installResumeHooks } from "./perf.js";
-mark("main:module"); // earliest reachable mark — module evaluation start
 import { ChatPanel } from "../ui/index.js";
 import {
 	state,
@@ -14,7 +12,6 @@ import {
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
-import { RemoteAgent } from "./remote-agent.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
@@ -326,8 +323,6 @@ async function handleHashChange(): Promise<void> {
 // ============================================================================
 
 async function initApp() {
-	mark("init:start");
-	installResumeHooks();
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
@@ -372,62 +367,20 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		state.appView = "gateway-starting";
 	}
-	mark("init:first-render");
 	renderApp();
-	markPaint("init:first-paint");
-
-	// §E PWA-resume skeleton — hide on first paint of the real app. Single
-	// removal point; no re-show path. The skeleton is a sibling of #app and
-	// outside Lit's render target, so this is safe for Lit.
-	try {
-		const sk = document.getElementById("bobbit-skeleton");
-		if (sk) {
-			sk.setAttribute("hidden", "");
-			sk.style.setProperty("display", "none", "important");
-			sk.style.setProperty("pointer-events", "none", "important");
-		}
-	} catch { /* never block bootstrap */ }
 
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
 	window.addEventListener("hashchange", handleHashChange);
 
-	// B1: when resuming directly into /session/:id, pre-warm the WebSocket in
-	// parallel with `waitForGateway`. The TCP+TLS+upgrade+auth_ok round-trips
-	// overlap with `/api/health`, so by the time `connectToSession` runs the
-	// connect promise is often already settled.
-	if (savedUrl && savedToken) {
-		const initialRoute = getRouteFromHash();
-		if (initialRoute.view === "session" && initialRoute.sessionId) {
-			try {
-				const preAgent = new RemoteAgent();
-				const connectPromise = preAgent.connect(savedUrl, savedToken, initialRoute.sessionId)
-					.catch((err) => {
-						// Swallow — connectToSession will re-throw via the awaited
-						// promise and surface the standard error UI. Without the catch,
-						// an unhandled rejection lands before the consumer attaches.
-						throw err;
-					});
-				// Defuse unhandled-rejection: re-attached when consumed.
-				connectPromise.catch(() => { /* will surface via connectToSession */ });
-				state.preWarmedAgent = { sessionId: initialRoute.sessionId, agent: preAgent, connectPromise };
-				mark("ws:prewarm-start");
-			} catch { /* non-fatal */ }
-		}
-	}
-
 	if (savedUrl && savedToken) {
 		try {
-			mark("init:gateway-wait-start");
 			await waitForGateway(savedUrl, savedToken);
-			mark("init:gateway-wait-end");
 
-			// A2: load saved preferences fire-and-forget. The palette is
-			// already applied inline (`index.html`); showTimestamps and
-			// playAgentFinishSound are not visible on first paint.
-			gatewayFetch("/api/preferences").then(async (prefRes) => {
-				if (!prefRes.ok) return;
-				try {
+			// Load saved preferences (palette, timestamps, AI gateway)
+			try {
+				const prefRes = await gatewayFetch("/api/preferences");
+				if (prefRes.ok) {
 					const prefs = await prefRes.json();
 					if (prefs.palette && prefs.palette !== "forest") {
 						document.documentElement.dataset.palette = prefs.palette;
@@ -435,14 +388,15 @@ async function initApp() {
 					} else {
 						localStorage.removeItem('palette');
 					}
+					// Apply showTimestamps
 					if (prefs.showTimestamps) {
 						document.documentElement.dataset.showTimestamps = "true";
 					}
+					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
-				} catch { /* non-fatal */ }
-				mark("init:prefs-loaded");
-			}).catch(() => { /* non-fatal */ });
+				}
+			} catch {}
 
 			// Fire-and-forget one-shot migration of legacy localStorage read state
 			// to the server. Idempotent — guarded by the localStorage key.
