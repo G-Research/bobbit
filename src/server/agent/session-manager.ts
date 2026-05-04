@@ -1387,8 +1387,6 @@ export class SessionManager {
 	deliverLiveSteer(sessionId: string, message: string): Promise<unknown> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
-		const bg = (this as any).bgProcessManager;
-		if (bg) bg.abortAllWaits(sessionId);
 
 		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
 		// there is no live turn to inject into, so we either dispatch a regular
@@ -1399,9 +1397,8 @@ export class SessionManager {
 				console.log(
 					`[session-manager] Session ${sessionId} has ${consec} consecutive errored turns; parking live-steer. Human action required.`
 				);
-				// Preserve PI-25b/c invariant: persist to promptQueue so it survives
-				// Stop/Retry. Keep isSteered; do NOT mark dispatched (no in-flight
-				// turn to inject into). drainQueue will pick it up after user Retry.
+				// Persist to promptQueue so it survives Stop/Retry. drainQueue will
+				// pick it up after user Retry.
 				const queued = session.promptQueue.enqueue(message, { isSteered: true });
 				this.broadcastQueue(session);
 				return Promise.resolve({ queued: true, parked: true, id: queued.id });
@@ -1416,17 +1413,12 @@ export class SessionManager {
 			return this.enqueuePrompt(sessionId, message, { isSteered: true });
 		}
 
-		// Persist the live-steer text in promptQueue as {isSteered, dispatched}
-		// so it survives abort. The SDK parks the steer until the next tool
-		// boundary and discards it if the turn is aborted; without a server-side
-		// record the text would be silently lost. The happy path cleans up via
-		// the `message_end(user)` → removeDispatched() hook in handleAgentLifecycle.
-		// On abort, the agent_end handler re-arms non-flushed steered rows so
-		// drainQueue redelivers them. See goal "Fix steer-lost-on-abort bug".
+		// Happy path: enqueue then dispatch via the single _dispatchSteer site.
+		// _dispatchSteer removes the row from promptQueue *before* awaiting the
+		// RPC, so the SDK becomes the sole authority for in-flight steer text.
 		const queued = session.promptQueue.enqueue(message, { isSteered: true });
-		session.promptQueue.markDispatched(queued.id);
 		this.broadcastQueue(session);
-		return session.rpcClient.steer(message);
+		return this._dispatchSteer(session, [queued]);
 	}
 
 	/**
@@ -1466,26 +1458,33 @@ export class SessionManager {
 	}
 
 	/**
-	 * Batch all steered+undispatched messages and dispatch via rpcClient.steer().
-	 * Marks each as dispatched so they aren't sent again.
-	 * Called from handleAgentLifecycle on tool_execution_end events.
+	 * Single dispatch site for steered prompts. Removes rows from promptQueue
+	 * *before* awaiting rpcClient.steer() so the SDK becomes the sole
+	 * authority for in-flight steer text. On RPC failure, rows are
+	 * re-enqueued at the front in original order (steered group still sorts
+	 * first via PromptQueue.reorder()).
+	 *
+	 * Tool-boundary callers may pre-pop rows with dequeueAllSteered() — in
+	 * that case remove() is a no-op (returns false), broadcastQueue stays
+	 * idempotent.
 	 */
-	private _dispatchSteeredMessages(session: SessionInfo): void {
-		const steeredMessages = session.promptQueue.toArray()
-			.filter((m: any) => m.isSteered && !m.dispatched);
-		if (steeredMessages.length === 0) return;
-
-		const batchText = steeredMessages.map((m: any) => m.text).join("\n");
-		for (const m of steeredMessages) {
-			session.promptQueue.markDispatched(m.id);
-		}
-
-		// Same abort behaviour as deliverLiveSteer — unblock any bash_bg wait first.
+	private async _dispatchSteer(session: SessionInfo, rows: QueuedMessage[]): Promise<void> {
+		if (rows.length === 0) return;
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(session.id);
-		session.rpcClient.steer(batchText).catch((err: any) => {
-			console.error(`[session-manager] Failed to dispatch steered messages for ${session.id}:`, err);
-		});
+		const batchText = rows.map(r => r.text).join("\n");
+		for (const r of rows) session.promptQueue.remove(r.id);
+		this.broadcastQueue(session);
+		try {
+			await session.rpcClient.steer(batchText);
+		} catch (err) {
+			for (const r of [...rows].reverse()) {
+				session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
+			}
+			this.broadcastQueue(session);
+			console.error(`[session-manager] _dispatchSteer failed for ${session.id}:`, err);
+			throw err;
+		}
 	}
 
 	/** Reorder queued messages to match the given ID list. */
@@ -1527,7 +1526,7 @@ export class SessionManager {
 			next = { ...steered[0], text: batchText };
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
-			next = session.promptQueue.dequeueUndispatched();
+			next = session.promptQueue.dequeue();
 		}
 
 		this.broadcastQueue(session);
@@ -1585,7 +1584,8 @@ export class SessionManager {
 		// queue and delivered together when the tool finishes, before the
 		// agent starts its next step.
 		if (event.type === "tool_execution_end") {
-			this._dispatchSteeredMessages(session);
+			const steered = session.promptQueue.dequeueAllSteered();
+			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -1598,13 +1598,6 @@ export class SessionManager {
 				// Any non-error terminal assistant message resets the cap budget.
 				// Only stopReason:"error" advances the counter.
 				session.consecutiveErrorTurns = 0;
-			}
-		}
-
-		// When a steered user message appears in chat, remove the dispatched pill
-		if (event.type === "message_end" && event.message?.role === "user") {
-			if (session.promptQueue.removeDispatched()) {
-				this.broadcastQueue(session);
 			}
 		}
 
@@ -1626,25 +1619,16 @@ export class SessionManager {
 				session.oneTimeGrantedTools = [];
 			}
 
-			// Dispatch any remaining steered messages before going idle.
-			// Most steers are dispatched at tool boundaries (tool_execution_end),
-			// but if steers arrive after the last tool call or during a non-tool
-			// turn, they would otherwise be lost. This is the safety net.
-			this._dispatchSteeredMessages(session);
+			// Safety net: if steers arrived after the last tool call or during a
+			// non-tool turn (no tool_execution_end fired), dispatch them now.
+			if (session.status !== "aborting") {
+				const steered = session.promptQueue.dequeueAllSteered();
+				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
+			}
 
-			// If this agent_end is the result of an abort, re-arm any steered
-			// rows still flagged dispatched. Those are live-steers (or batched
-			// steers) the SDK parked and then discarded when the turn was torn
-			// down. Any successfully-delivered steer has already been removed
-			// via the message_end(user) → removeDispatched() hook above, so
-			// whatever remains is genuinely undelivered. drainQueue below will
-			// redispatch them (steered first, then normal) once the session is
-			// idle. Edge case: if the SDK delivered the steer to the transcript
-			// but the unsubscribe raced and we missed the message_end, we may
-			// redeliver once — at-least-once is preferred over lost user text.
 			const wasAborting = session.status === "aborting";
 			if (wasAborting) {
-				session.promptQueue.resetDispatched();
+				// Queue may have been mutated mid-abort; rebroadcast canonical state.
 				this.broadcastQueue(session);
 			}
 
@@ -4717,10 +4701,6 @@ export class SessionManager {
 			// Swap in the new bridge
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
-
-			// Reset dispatched flags so steered messages that were sent to the
-			// now-dead process are picked up by drainQueue after restart.
-			session.promptQueue.resetDispatched();
 
 			session.status = "idle";
 			broadcast(session.clients, { type: "session_status", status: "idle" });

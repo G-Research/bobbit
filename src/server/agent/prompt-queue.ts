@@ -62,51 +62,36 @@ export class PromptQueue {
 		return this.queue.shift();
 	}
 
-	/** Pop all consecutive steered+undispatched messages from the front. Returns empty array if front is not an undispatched steered message. */
+	/** Pop all consecutive steered messages from the front. Returns empty array if front is not steered. */
 	dequeueAllSteered(): QueuedMessage[] {
 		const result: QueuedMessage[] = [];
-		while (this.queue.length > 0 && this.queue[0].isSteered && !this.queue[0].dispatched) {
+		while (this.queue.length > 0 && this.queue[0].isSteered) {
 			result.push(this.queue.shift()!);
 		}
 		return result;
 	}
 
 	/**
-	 * Pop the next undispatched message, removing any already-dispatched
-	 * messages from the front. Used by drainQueue to skip steered messages
-	 * that were already sent mid-turn.
+	 * Insert a message at the front of the queue. Used by reconciliation paths
+	 * (e.g. RPC failure rollback) that need to put a row back at index 0.
+	 * Calls reorder() so the steered group still sorts first.
 	 */
-	dequeueUndispatched(): QueuedMessage | undefined {
-		while (this.queue.length > 0 && this.queue[0].dispatched) {
-			this.queue.shift();
-		}
-		return this.queue.shift();
-	}
-
-	/** Remove all dispatched messages from the queue. Returns true if any were removed. */
-	removeDispatched(): boolean {
-		const before = this.queue.length;
-		this.queue = this.queue.filter(m => !m.dispatched);
-		return this.queue.length < before;
-	}
-
-	/**
-	 * Clear the dispatched flag on all queue items.
-	 * Used after force-kill restart so drainQueue picks up messages that were
-	 * dispatched to stdin of a now-dead process.
-	 */
-	resetDispatched(): void {
-		for (const m of this.queue) {
-			m.dispatched = false;
-		}
-	}
-
-	/** Mark a message as dispatched (sent mid-turn, kept for UI display). */
-	markDispatched(messageId: string): boolean {
-		const msg = this.queue.find(m => m.id === messageId);
-		if (!msg) return false;
-		msg.dispatched = true;
-		return true;
+	enqueueAtFront(text: string, opts?: {
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		isSteered?: boolean;
+	}): QueuedMessage {
+		const msg: QueuedMessage = {
+			id: randomUUID(),
+			text,
+			isSteered: opts?.isSteered ?? false,
+			createdAt: Date.now(),
+		};
+		if (opts?.images?.length) msg.images = opts.images;
+		if (opts?.attachments?.length) msg.attachments = opts.attachments;
+		this.queue.unshift(msg);
+		this.reorder();
+		return msg;
 	}
 
 	/** Peek at the front of the queue without removing. */
