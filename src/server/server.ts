@@ -60,6 +60,8 @@ import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImag
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
+import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import { handlePreviewRequest } from "./preview/content-route.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
@@ -567,6 +569,7 @@ export function createGateway(config: GatewayConfig) {
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
+	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
 		systemPromptPath: config.systemPromptPath,
@@ -640,10 +643,22 @@ export function createGateway(config: GatewayConfig) {
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
+		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
+
+		// Content-origin preview route — served before API auth so iframe loads
+		// can authenticate via the bobbit_session cookie instead of the bearer
+		// token (iframes cannot set Authorization headers).
+		if (url.pathname.startsWith("/preview/")) {
+			await handlePreviewRequest(req, res, url.pathname, {
+				cookieStore,
+				isLocalhost: isLocalhostMode,
+				adminBearerToken: config.authToken,
+			});
+			return;
+		}
 
 		// API routes
 		if (url.pathname.startsWith("/api/")) {
-			const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
@@ -660,9 +675,14 @@ export function createGateway(config: GatewayConfig) {
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
 
+			// Cookie auth short-circuit — if the browser presents a known
+			// bobbit_session cookie, treat the request as admin-authenticated
+			// and skip the bearer-token check below.
+			const hasValidCookie = cookieTryAuth(req, cookieStore);
+
 			// Auth check — skipped in localhost mode (only local processes can connect)
 			let sandboxScope: SandboxScope | undefined;
-			if (!isLocalhostMode && !isPublicEndpoint) {
+			if (!isLocalhostMode && !isPublicEndpoint && !hasValidCookie) {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
 					: url.searchParams.get("token"); // Allow token in query param for links opened in new tabs
@@ -690,7 +710,17 @@ export function createGateway(config: GatewayConfig) {
 						return;
 					}
 					sandboxScope = scope;
+				} else {
+					// Successful admin Bearer auth — mint session cookie if absent
+					// so subsequent requests (including iframe content origin) can
+					// authenticate without the Bearer token leaking into URLs.
+					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode });
 				}
+			} else if (!isPublicEndpoint && isLocalhostMode) {
+				// Localhost mode: skip auth check, still mint the cookie so the
+				// browser can use the same cookie auth path on non-localhost
+				// deployments later (and the SSE endpoint below remains uniform).
+				issueCookieIfMissing(req, res, cookieStore, { localhost: true });
 			}
 
 			// Enforce sandbox route guard
@@ -6944,6 +6974,49 @@ async function handleApiRoute(
 		const stream = fs.createReadStream(guard.resolved);
 		stream.on("error", () => { try { res.end(); } catch { /* ok */ } });
 		stream.pipe(res);
+		return;
+	}
+
+	// GET /api/sessions/:sid/preview-events — SSE stream of preview-changed events
+	// for the per-session preview mount. Cookie auth (or admin bearer) only;
+	// sandbox tokens are not permitted (handled by the route-guard above).
+	const previewEventsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/preview-events$/);
+	if (previewEventsMatch && req.method === "GET") {
+		const sid = previewEventsMatch[1];
+		if (!VALID_SESSION_ID.test(sid)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (sandboxScope) {
+			json({ error: "Forbidden" }, 403);
+			return;
+		}
+		res.writeHead(200, {
+			"Content-Type": "text/event-stream",
+			"Cache-Control": "no-cache",
+			"Connection": "keep-alive",
+			"X-Accel-Buffering": "no",
+		});
+		try { (res as { flushHeaders?: () => void }).flushHeaders?.(); } catch { /* ok */ }
+		// Initial hello so the client knows the stream is live.
+		res.write(`event: hello\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
+
+		const { watchMount: watchPreviewMount } = await import("./preview/mount.js");
+		const unsubscribe = watchPreviewMount(sid, () => {
+			try {
+				res.write(`event: preview-changed\ndata: ${JSON.stringify({ mtime: Date.now() })}\n\n`);
+			} catch { /* socket closed */ }
+		});
+		const keepalive = setInterval(() => {
+			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
+		}, 25_000);
+		if (typeof keepalive.unref === "function") keepalive.unref();
+		const cleanup = () => {
+			clearInterval(keepalive);
+			try { unsubscribe(); } catch { /* ok */ }
+		};
+		req.on("close", cleanup);
+		req.on("error", cleanup);
 		return;
 	}
 
