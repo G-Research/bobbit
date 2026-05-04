@@ -17,6 +17,7 @@ import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
+import { markPaint } from "./perf.js";
 import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
@@ -896,7 +897,22 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const url = localStorage.getItem(GW_URL_KEY)!;
 		const token = localStorage.getItem(GW_TOKEN_KEY)!;
 
-		const remote = new RemoteAgent();
+		// B1: consume a pre-warmed agent if it was constructed for this session
+		// during initApp's parallel connect. Otherwise discard it (stale) and
+		// fall through to the normal connect path.
+		let remote: RemoteAgent;
+		let preWarmedConnect: Promise<void> | null = null;
+		if (state.preWarmedAgent && state.preWarmedAgent.sessionId === sessionId) {
+			remote = state.preWarmedAgent.agent;
+			preWarmedConnect = state.preWarmedAgent.connectPromise;
+			state.preWarmedAgent = null;
+		} else {
+			if (state.preWarmedAgent) {
+				try { state.preWarmedAgent.agent.disconnect(); } catch { /* ignore */ }
+				state.preWarmedAgent = null;
+			}
+			remote = new RemoteAgent();
+		}
 
 		// Start model restore in parallel with WebSocket connect
 		const modelRestorePromise = (async () => {
@@ -910,7 +926,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		})();
 
-		await remote.connect(url, token, sessionId);
+		if (preWarmedConnect) {
+			await preWarmedConnect;
+		} else {
+			await remote.connect(url, token, sessionId);
+		}
 		if (isStale()) { remote.disconnect(); return; }
 
 		// Auto-prompt for new assistant sessions — fire IMMEDIATELY after connect
@@ -1373,6 +1393,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.remoteAgent = remote;
 		state.appView = "authenticated";
 		markSessionVisited(sessionId);
+		// D2: per-session paint mark so resume timelines that land on
+		// /session/:id can attribute the gap between init:first-paint and
+		// the moment session content becomes visible.
+		markPaint("session:first-paint");
 
 		// Detect assistant type from cached session data (no network needed).
 		const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);

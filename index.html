@@ -11,8 +11,42 @@
 		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 		<link rel="apple-touch-icon" href="/icons/icon-192.png" />
 		<title>Bobbit</title>
+		<style id="bobbit-skeleton-css">
+/* §E PWA-resume skeleton — paints from cached HTML before JS executes.
+   Theme-aware via prefers-color-scheme; palette-aware on top. Lives outside
+   Lit's render target (#app), hidden once on init:first-paint. */
+#bobbit-skeleton{position:fixed;inset:0;z-index:0;display:flex;background:#eef0eb;color:#1a1d1a;font:14px/1.4 system-ui,sans-serif;overflow:hidden}
+#bobbit-skeleton .sk-side{width:240px;flex:none;background:#e6e9e2;border-right:1px solid #cdd1c8;padding:12px}
+#bobbit-skeleton .sk-main{flex:1;display:flex;flex-direction:column;min-width:0}
+#bobbit-skeleton .sk-hdr{height:40px;border-bottom:1px solid #cdd1c8;display:flex;align-items:center;padding:0 12px;font-weight:600}
+#bobbit-skeleton .sk-body{flex:1}
+#bobbit-skeleton .sk-row{height:14px;background:#d8dcd1;border-radius:4px;margin:8px 0}
+#bobbit-skeleton .sk-row.w70{width:70%}
+#bobbit-skeleton .sk-row.w50{width:50%}
+@media (prefers-color-scheme: dark){
+#bobbit-skeleton{background:#1a1f1a;color:#d8dcd0}
+#bobbit-skeleton .sk-side{background:#222722;border-right-color:#333}
+#bobbit-skeleton .sk-hdr{border-bottom-color:#333}
+#bobbit-skeleton .sk-row{background:#2c322c}
+}
+@media (max-width:640px){#bobbit-skeleton .sk-side{display:none}}
+#bobbit-skeleton[hidden]{display:none!important;pointer-events:none!important}
+		</style>
 	</head>
 	<body class="bg-background">
+		<div id="bobbit-skeleton" aria-hidden="true">
+			<aside class="sk-side">
+				<div class="sk-row w70"></div>
+				<div class="sk-row"></div>
+				<div class="sk-row w50"></div>
+				<div class="sk-row"></div>
+				<div class="sk-row w70"></div>
+			</aside>
+			<div class="sk-main">
+				<div class="sk-hdr">Bobbit</div>
+				<div class="sk-body"></div>
+			</div>
+		</div>
 		<div id="app"></div>
 		<script>
 			(function() {
