@@ -1507,7 +1507,7 @@ export class RemoteAgent {
 	 * `state.remoteAgent`-based check would no-op the initial review-pane
 	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
-	private _checkReviewToolResult(msg: any): void {
+	private _checkReviewToolResult(msg: any, isLive = false): void {
 		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
 
 		// Extract text content from the message
@@ -1528,9 +1528,20 @@ export class RemoteAgent {
 			try { data = JSON.parse(trimmed); } catch { continue; }
 
 			if (data.action === "review_open" && data.title && data.markdown) {
+				// If the user already submitted this review, suppress reopening it on
+				// REPLAY paths (snapshot loop / non-live message_end). The submitted
+				// flag is per-session and persisted server-side; without this gate, a
+				// page reload would re-open a panel the user explicitly submitted.
+				// On a LIVE event (the agent emits a fresh review_open after a prior
+				// submit) we DO want to reopen — fall through and clear the flag.
+				// RP-09.
+				if (!isLive && this._sessionId && isReviewSubmitted(this._sessionId)) return;
 				const replace = data.replace !== false;
-				// New review opened — clear any prior submitted flag so it persists across reconnects
-				if (this._sessionId) clearReviewSubmitted(this._sessionId);
+				// New review opened on a LIVE event — clear any prior submitted flag
+				// so the panel can reopen on subsequent reconnects. Skip on replay
+				// (the fire-and-forget PUT would race with concurrent server-side
+				// setSubmitted(true) and clobber it on reload). RP-09.
+				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				if (replace || !state.reviewDocuments.has(data.title)) {
 					state.reviewDocuments.set(data.title, { title: data.title, markdown: data.markdown });
@@ -1730,8 +1741,10 @@ export class RemoteAgent {
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
 
-						// Check for review tool results (review_open/review_close JSON)
-						this._checkReviewToolResult(msg);
+						// Check for review tool results (review_open/review_close JSON).
+						// `isLive: true` distinguishes a fresh agent emission from a snapshot
+						// replay so the submitted-flag handling can differentiate. RP-09.
+						this._checkReviewToolResult(msg, /* isLive */ true);
 
 						// Notify ask_user_choices cards on user-message echoes.
 						if (msg.role === "user" || msg.role === "user-with-attachments") {
