@@ -650,6 +650,13 @@ export class MockAgentCore {
 			this.emit({ type: "tool_execution_start", toolName: "Bash", toolId: busyToolId, input: { command: "sleep" } });
 			await this.tick(busyMs);
 			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				// Real-agent fidelity (MOCK_ABORT_TOOL_END=1): the bash tool
+				// extension emits tool_execution_end on abort because the
+				// underlying bash process is killed. Default mock returns
+				// early for backwards compatibility with existing tests.
+				if (this.env.MOCK_ABORT_TOOL_END === "1") {
+					this.emit({ type: "tool_execution_end", toolCallId: busyToolId, toolName: "Bash", isError: true });
+				}
 				this.currentAbortController = null;
 				return;
 			}
@@ -1701,6 +1708,8 @@ export class MockAgentCore {
 				if (this._busyOverride) {
 					return { success: false, error: "Agent is already processing." };
 				}
+				// A fresh prompt restarts the loop — clear the abort window.
+				this._abortedRecently = false;
 				// Respond to ack, then handle prompt async. Serialize onto the
 				// per-instance promise chain so concurrent prompts queue up
 				// rather than interleave (which would double-assign
@@ -1733,6 +1742,19 @@ export class MockAgentCore {
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 				}
+
+				// Real-agent fidelity (MOCK_STEER_QUEUE_DROP=1): the SDK queues
+				// steer text on `_steeringMessages` and only consumes it at the
+				// start of the NEXT loop iteration. If the agent loop has just
+				// been aborted (and won't iterate again until a fresh prompt()),
+				// the steer text is silently dropped — the SDK accepts the RPC
+				// but the message never surfaces as a <user-message>. Default
+				// mock immediately runs handlePrompt(steeredText), which always
+				// surfaces the message; that hides this real-agent failure mode.
+				if (this.env.MOCK_STEER_QUEUE_DROP === "1" && this._abortedRecently) {
+					return { success: true };
+				}
+
 				if (steeredText) {
 					this._promptChain = this._promptChain
 						.catch(() => {})
@@ -1748,6 +1770,14 @@ export class MockAgentCore {
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 					this.currentAbortController = null;
+				}
+				// MOCK_STEER_QUEUE_DROP fidelity: mark a window during which steer
+				// RPCs return success but their text is dropped (matching SDK
+				// behaviour where _steeringMessages is populated but the loop
+				// has exited). Cleared on the next prompt() so a fresh user
+				// turn (which restarts the loop) processes steers normally.
+				if (this.env.MOCK_STEER_QUEUE_DROP === "1") {
+					this._abortedRecently = true;
 				}
 				// Real-agent fidelity (MOCK_ABORT_BUSY=1): the SDK emits agent_end
 				// from `handleRunFailure` while `activeRun` is still set; only the

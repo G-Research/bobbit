@@ -1494,16 +1494,28 @@ export class SessionManager {
 		const batchText = rows.map(r => r.text).join("\n");
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session);
+
+		// Record on the shadow ledger BEFORE the RPC resolves so that an
+		// agent_end firing during the await window (e.g. user aborts mid-steer)
+		// still sees the in-flight entry and can re-enqueue it via
+		// _reconcileAfterAbort. Otherwise the steer text is delivered to the
+		// SDK's _steeringMessages but the aborted agent loop never consumes it,
+		// and the bobbit server has no record of it to redispatch.
+		//
+		// On RPC failure we splice this exact entry back out and re-enqueue
+		// the rows at front of promptQueue, so the next drain redispatches.
+		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
+		session.inFlightSteerTexts.push(batchText);
 		try {
-			await session.rpcClient.steer(batchText);
-			// Record on the shadow ledger AFTER the RPC resolves: the SDK has
-			// definitively accepted the text and pushed it onto _steeringMessages.
-			// _consumeSteerEcho() will splice the entry on the matching
-			// message_end(role:user); _reconcileAfterAbort() will re-enqueue
-			// anything still pending if the turn is aborted before it echoes.
-			if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
-			session.inFlightSteerTexts.push(batchText);
+			const steerResp = await session.rpcClient.steer(batchText);
+			if ((steerResp as any)?.success === false) {
+				throw new Error((steerResp as any)?.error || "steer rejected");
+			}
 		} catch (err) {
+			// Splice this entry from the ledger — it never reached the SDK so
+			// it shouldn't show up as "in-flight" for reconcile.
+			const lidx = session.inFlightSteerTexts.lastIndexOf(batchText);
+			if (lidx !== -1) session.inFlightSteerTexts.splice(lidx, 1);
 			for (const r of [...rows].reverse()) {
 				session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
 			}
@@ -1688,6 +1700,13 @@ export class SessionManager {
 		// queue and delivered together when the tool finishes, before the
 		// agent starts its next step.
 		if (event.type === "tool_execution_end") {
+			// If we're already aborting, do NOT dispatch steers via rpcClient.steer.
+			// The agent loop is being torn down — the SDK would queue the steer
+			// onto _steeringMessages but never consume it, AND the post-abort
+			// drainQueue path would re-enqueue and redispatch via rpcClient.prompt,
+			// causing the steer to fire twice. Leave the steered rows in the queue
+			// so the post-abort drainQueue is the single dispatch site.
+			if (session.status === "aborting") return;
 			const steered = session.promptQueue.dequeueAllSteered();
 			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 		}
