@@ -5,7 +5,6 @@
  * registry that supports rebinding, persistence, and conflict detection.
  */
 
-import { gatewayFetch } from "./api.js";
 
 // ============================================================================
 // TYPES
@@ -249,6 +248,7 @@ export function stopListening(): void {
 
 export async function loadSavedBindings(): Promise<void> {
 	try {
+		const { gatewayFetch } = await import("./api.js");
 		const res = await gatewayFetch("/api/preferences");
 		if (!res.ok) return;
 		const prefs = await res.json();
@@ -279,6 +279,7 @@ export async function saveBindings(): Promise<void> {
 			}
 		}
 		const value = Object.keys(data).length > 0 ? data : null;
+		const { gatewayFetch } = await import("./api.js");
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ shortcuts: value }),
