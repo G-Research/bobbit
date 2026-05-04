@@ -1695,6 +1695,12 @@ export class MockAgentCore {
 		switch (msg.type) {
 			case "prompt":
 			case "follow_up": {
+				// Real-agent fidelity (MOCK_ABORT_BUSY=1): reject prompts that
+				// arrive in the same microtask as agent_end-from-abort, mirroring
+				// pi-agent-core's "Agent is already processing." guard.
+				if (this._busyOverride) {
+					return { success: false, error: "Agent is already processing." };
+				}
 				// Respond to ack, then handle prompt async. Serialize onto the
 				// per-instance promise chain so concurrent prompts queue up
 				// rather than interleave (which would double-assign
@@ -1742,6 +1748,18 @@ export class MockAgentCore {
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 					this.currentAbortController = null;
+				}
+				// Real-agent fidelity (MOCK_ABORT_BUSY=1): the SDK emits agent_end
+				// from `handleRunFailure` while `activeRun` is still set; only the
+				// outer try/finally's `finishRun()` clears it on the next microtask.
+				// A synchronous prompt() call from an agent_end listener (e.g.
+				// drainQueue calling rpcClient.prompt) therefore rejects with
+				// "Agent is already processing." Setting _busyOverride here for one
+				// microtask reproduces that exact race — cleared via setImmediate so
+				// any deferred drain (microtask / setImmediate / setTimeout) succeeds.
+				if (this.env.MOCK_ABORT_BUSY === "1") {
+					this._busyOverride = true;
+					setImmediate(() => { this._busyOverride = false; });
 				}
 				// Emit abort events synchronously — the caller's `await abort()`
 				// resolves on the return value below, after which their listener
