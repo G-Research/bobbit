@@ -7145,17 +7145,7 @@ async function handleApiRoute(
 				}
 			}
 		}
-		// If `submitted` is omitted (or non-boolean), preserve whatever is
-		// already on disk. This is critical: the page-unload beacon historically
-		// sent `submitted: false` whenever the local cache hadn't observed a
-		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
-		// tabs, REST clients, the test harness) on the next page reload (RP-09).
-		// The client now omits the field unless it positively wants to write
-		// `true`; the legacy clear path still goes through the dedicated
-		// /review/submitted PUT.
-		const submitted = typeof body.submitted === "boolean"
-			? body.submitted
-			: reviewAnnotationStore.isSubmitted(sessionId);
+		const submitted = typeof body.submitted === "boolean" ? body.submitted : false;
 		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
 		json({ ok: true });
 		return;
