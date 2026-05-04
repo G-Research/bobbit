@@ -829,8 +829,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewSpecEdited = false;
 		state.previewCwdEdited = false;
 		state.isPreviewSession = sessionData?.preview || false;
-		state.previewPanelHtml = "";
-		state.previewPanelMode = "inline";
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.reviewDocuments = new Map();
@@ -1443,8 +1441,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
-		state.previewPanelHtml = ""; // Clear stale preview from previous session
-		state.previewPanelMode = "inline";
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.reviewDocuments = new Map();

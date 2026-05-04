@@ -21,10 +21,10 @@ export function isSandboxAllowed(
 	// /api/internal/user-question/submit is called from UI widgets (not the
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.
-	// New embedded-preview endpoint (WP-B/WP-D). The legacy /api/preview,
-	// /api/preview/render, /api/preview/asset routes are intentionally NOT
-	// in the sandbox allow-list — the new tool extension goes through
-	// /api/preview/mount, and WP-G deletes the legacy routes.
+	// Embedded-preview mount endpoint — the only preview surface the agent
+	// is allowed to call (WP-B/WP-D/WP-G). Per-session content is served
+	// via the cookie-authed `/preview/<sid>/...` route, which is not
+	// reachable from the agent.
 	if (pathname === "/api/preview/mount" && m === "POST") return true;
 	// Image generation: handler enforces session-scope ownership against sandboxScope
 	// (rejects with 403 if body.sessionId is missing or outside scope).

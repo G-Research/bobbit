@@ -2202,7 +2202,7 @@ function goalProposalPanel() {
 
 /** Theme-bridge + swipe scripts injected into preview iframes. Source of
  *  truth: `src/shared/preview-bridge-scripts.ts` (also imported by the
- *  server's `/api/preview/render` route so client and server emit byte-equal
+ *  server's preview content route so client and server emit byte-equal
  *  payloads). Local aliases preserved to avoid churning call sites. */
 // WP-E: theme-bridge / swipe-script constants previously concatenated into
 // the inline `srcdoc=` iframe are gone. The gateway now injects them

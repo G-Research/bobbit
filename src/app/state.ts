@@ -281,8 +281,6 @@ export const state = {
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
 	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project",
-	previewPanelHtml: "" as string,
-	previewPanelMode: "inline" as "inline" | "file",
 	previewPanelMtime: 0 as number,
 	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
 	previewPanelEntry: "" as string,

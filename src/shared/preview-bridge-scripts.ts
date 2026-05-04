@@ -2,10 +2,9 @@
  * Theme-bridge + swipe-detection scripts injected into preview iframes.
  *
  * Shared by:
- *   - The client (`src/app/render.ts`) when an inline preview is rendered via
- *     `srcdoc=` (concatenated to the inline HTML).
- *   - The server (`/api/preview/render` route) when a file-mode preview is
- *     served via `src=` (injected before the closing `</body>`).
+ *   - The server preview content route (`/preview/<sid>/...`) when serving
+ *     `text/html` documents (injected before the closing `</body>`).
+ *   - Any UI surface that still renders inline preview HTML via `srcdoc=`.
  *
  * Keep these scripts side-effect-light, idempotent, and self-contained — they
  * run in arbitrary user-supplied HTML documents.
@@ -113,7 +112,7 @@ export const PREVIEW_BRIDGE_SCRIPTS = PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIP
 
 /**
  * Inject a `<base>` tag and the bridge scripts into an arbitrary HTML
- * document, used by the server's `/api/preview/render` route.
+ * document, used by the server's preview content route (`/preview/<sid>/...`).
  *
  * - `<base>` goes immediately after the first `<head>` opening tag, or, if
  *   no `<head>` exists, the function prepends `<head>${baseTag}</head>` to
