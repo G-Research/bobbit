@@ -587,6 +587,26 @@ function proposalToast() {
 	if (!_proposalToastText) return "";
 	return html`<div class="review-toast" data-testid="proposal-toast">${_proposalToastText}</div>`;
 }
+
+// Header-only "Link copied" toast — separate state + testid so it doesn't
+// collide with the proposal-toast testid used by `proposalToast()` (the
+// session header is rendered alongside open proposal panels).
+let _headerToastText = "";
+let _headerToastTimer: ReturnType<typeof setTimeout> | null = null;
+export function showHeaderToast(text: string): void {
+	_headerToastText = text;
+	if (_headerToastTimer) clearTimeout(_headerToastTimer);
+	_headerToastTimer = setTimeout(() => {
+		_headerToastText = "";
+		_headerToastTimer = null;
+		renderApp();
+	}, 2500);
+	renderApp();
+}
+function headerToast() {
+	if (!_headerToastText) return "";
+	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
+}
 const toolDocsPreviewRef = createRef<HTMLDivElement>();
 const toolRendererPreviewRef = createRef<HTMLDivElement>();
 const toolOuterScrollRef = createRef<HTMLDivElement>();
@@ -2450,7 +2470,7 @@ export function doRenderApp(): void {
 	const isTeamLead = activeSession?.role === "team-lead";
 	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
 		<div class="flex items-center gap-1 shrink-0 relative">
-			${proposalToast()}
+			${headerToast()}
 			${Button({
 				variant: "ghost",
 				size: "sm",
@@ -2468,7 +2488,7 @@ export function doRenderApp(): void {
 					const url = `${location.origin}/session/${activeSid}`;
 					try {
 						await navigator.clipboard.writeText(url);
-						showProposalToast("Link copied");
+						showHeaderToast("Link copied");
 					} catch {
 						const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
 						m.CopyLinkFallbackDialog.show(url);

@@ -4,7 +4,7 @@
  * Covers the project's hard E2E rule (AGENTS.md):
  *   1. Navigation — open the app, create a session, button visible.
  *   2. Happy path — click → clipboard contains `${origin}/session/<id>`,
- *      and the proposal-toast ("Link copied") appears.
+ *      and the header-toast ("Link copied") appears.
  *   3. Persistence across reload — after page.reload() the button is still
  *      present and click still copies.
  */
@@ -42,8 +42,8 @@ test.describe("Copy session link button (UI)", () => {
 				expect(clip).toBe(expectedUrl);
 			}).toPass({ timeout: 5_000 });
 
-			// Toast appears (reuses [data-testid="proposal-toast"]).
-			const toast = page.locator('[data-testid="proposal-toast"]').first();
+			// Toast appears (header-only [data-testid="header-toast"]).
+			const toast = page.locator('[data-testid="header-toast"]');
 			await expect(toast).toBeVisible({ timeout: 5_000 });
 			await expect(toast).toContainText("Link copied");
 
