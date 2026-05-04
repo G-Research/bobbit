@@ -813,10 +813,26 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: sessionData?.staffAssistant ? "staff"
 			: null);
 		state.assistantTab = "chat";
-		state.assistantHasProposal = false;
-		delete state.activeProposals.goal;
-		delete state.activeProposals.role;
-		delete state.activeProposals.staff;
+		// Drop proposal slots that belong to OTHER sessions only. The previous
+		// behaviour was an unconditional `delete`, but the fast-path reuses the
+		// existing WebSocket — so no fresh `proposal_update {source:"rehydrate"}`
+		// frame ever arrives to repopulate the slot. The result was a visible
+		// goal-proposal panel with empty content (and any in-memory inline
+		// annotations re-anchoring as orphans because their referenced text
+		// disappeared). Mirrors the slow-path guard at the bottom of
+		// connectToSession (~line 1675).
+		for (const t of ["goal", "role", "staff"] as const) {
+			const slot = state.activeProposals[t];
+			if (slot && slot.sessionId !== sessionId) {
+				delete state.activeProposals[t];
+			}
+		}
+		// Recompute hasProposal from what's left.
+		state.assistantHasProposal =
+			(state.activeProposals.goal != null && state.activeProposals.goal.sessionId === sessionId)
+			|| (state.activeProposals.role != null && state.activeProposals.role.sessionId === sessionId)
+			|| (state.activeProposals.staff != null && state.activeProposals.staff.sessionId === sessionId)
+			|| (state.activeProposals.project != null && state.activeProposals.project.sessionId === sessionId);
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
@@ -882,6 +898,33 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
 		startGitStatusPoll(sessionId);
+
+		// Re-fetch proposal drafts for this session. The slow path (fresh
+		// connect) gets these via the WS-auth `proposal_update {source:"rehydrate"}`
+		// broadcast, but the fast path reuses the existing WebSocket so that
+		// broadcast never fires — leaving the proposal slot empty after a
+		// switch-away/back round-trip even though the on-disk draft still
+		// has the user's spec. Fire-and-forget; the unified onProposal
+		// callback consumes the resulting events identically to the
+		// auth-time path.
+		rehydrateProposalsForSession(sessionId).catch((err) => {
+			console.warn("[session-manager] proposal rehydrate failed:", err);
+		});
+
+		// Restore goal/role/project assistant draft state. The slow path
+		// runs these inside its draft-restore promise; the fast path skipped
+		// them which left state.previewSpec / state.rolePreviewPrompt empty
+		// after switch-away/back, breaking the assistant preview panel
+		// (and inline-comment annotation anchoring against an empty body).
+		if (state.assistantType === "goal") {
+			restoreGoalDraft(sessionId).catch((err) => {
+				console.warn("[session-manager] fast-path goal draft restore failed:", err);
+			});
+		} else if (state.assistantType === "role") {
+			restoreRoleDraft(sessionId).catch((err) => {
+				console.warn("[session-manager] fast-path role draft restore failed:", err);
+			});
+		}
 
 		return;
 	}
@@ -2201,6 +2244,51 @@ async function refreshBgProcessesForSession(sessionId: string): Promise<void> {
 			ai.bgProcesses = data.processes || [];
 		}
 	} catch { /* ignore */ }
+}
+
+/**
+ * One-shot REST equivalent of the WS `proposal_update {source:"rehydrate"}`
+ * broadcast that fires on auth. Used by the connectToSession fast-path
+ * (cached chatPanel reuse) which doesn't trigger a fresh WS auth and
+ * therefore never receives the broadcast.
+ *
+ * Fetches all proposal drafts the server has on disk for the session
+ * and dispatches them through the active remoteAgent's `onProposal`
+ * handler — same code path as the auth-time rehydrate, so the unified
+ * `onProposal` callback in setupSessionSubscription consumes them
+ * identically.
+ */
+/**
+ * One-shot REST equivalent of the WS `proposal_update {source:"rehydrate"}`
+ * broadcast that fires on auth. Used by the connectToSession fast-path
+ * (cached chatPanel reuse) which doesn't trigger a fresh WS auth and
+ * therefore never receives the broadcast.
+ *
+ * Fetches all proposal drafts the server has on disk for the session
+ * and dispatches them through the active remoteAgent's `onProposal`
+ * handler — same code path as the auth-time rehydrate, so the unified
+ * `onProposal` callback in connectToSession consumes them identically.
+ */
+async function rehydrateProposalsForSession(sessionId: string): Promise<void> {
+	if (activeSessionId() !== sessionId) return;
+	const remote = state.remoteAgent;
+	if (!remote) return;
+	try {
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/proposals`);
+		if (!res.ok) return;
+		const body = await res.json() as {
+			proposals: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }>;
+		};
+		if (activeSessionId() !== sessionId) return;
+		const onProposal = remote.onProposal;
+		if (!onProposal) return;
+		for (const p of body.proposals) {
+			if (p.proposalType === "goal" || p.proposalType === "role" || p.proposalType === "staff"
+				|| p.proposalType === "project" || p.proposalType === "tool") {
+				onProposal(p.proposalType, p.fields, false, p.rev);
+			}
+		}
+	} catch { /* best-effort */ }
 }
 
 async function killBgProcess(sessionId: string, processId: string): Promise<void> {

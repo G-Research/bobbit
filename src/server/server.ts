@@ -85,6 +85,8 @@ import {
 	deleteProposalFile,
 	editProposalFile,
 	isProposalType,
+	latestRev,
+	listProposalFiles,
 	parseProposalFile,
 	readProposalFile,
 	restoreSnapshot,
@@ -5902,6 +5904,37 @@ async function handleApiRoute(
 		}
 
 		json({ error: "Method not allowed" }, 405);
+		return;
+	}
+
+	// GET /api/sessions/:id/proposals — list all parsed proposal drafts for the session.
+	//
+	// Mirrors the WS-auth `proposal_update {source:"rehydrate"}` broadcast in
+	// `ws/handler.ts` but as a one-shot REST call. Used by the client's fast-path
+	// session switch-back (no fresh WS auth fires, so the broadcast doesn't run
+	// and the client's in-memory proposal slot would otherwise stay stale).
+	const proposalsListMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposals$/);
+	if (proposalsListMatch && req.method === "GET") {
+		const sessionId = proposalsListMatch[1];
+		if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		const stateDir = bobbitStateDir();
+		try {
+			const types = await listProposalFiles(stateDir, sessionId);
+			const proposals: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }> = [];
+			for (const proposalType of types) {
+				const parsed = await parseProposalFile(stateDir, sessionId, proposalType);
+				if (parsed.ok) {
+					const rev = await latestRev(stateDir, sessionId, proposalType);
+					proposals.push({ proposalType, fields: parsed.value.fields, rev });
+				}
+			}
+			json({ proposals });
+		} catch (err) {
+			json({ error: String((err as Error)?.message ?? err) }, 500);
+		}
 		return;
 	}
 
