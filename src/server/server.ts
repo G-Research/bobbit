@@ -29,6 +29,7 @@ import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
+import { resolveGrantPolicy } from "./agent/tool-activation.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
@@ -7577,6 +7578,7 @@ async function handleApiRoute(
 			json({ error: "MCP not initialized" }, 500);
 			return;
 		}
+		let parsedToolForError: string | undefined;
 		try {
 			const body = await new Promise<string>((resolve) => {
 				let data = "";
@@ -7584,6 +7586,7 @@ async function handleApiRoute(
 				req.on("end", () => resolve(data));
 			});
 			const { tool, args } = JSON.parse(body);
+			parsedToolForError = typeof tool === "string" ? tool : undefined;
 			if (!tool) {
 				json({ error: "Missing 'tool' field" }, 400);
 				return;
@@ -7620,11 +7623,107 @@ async function handleApiRoute(
 				}
 			}
 
+			// Layer B per-op never-policy enforcement (§4.3). Resolves the per-op
+			// policy for `mcp__<server>__<op>` even though the model only sees the
+			// aggregated `mcp_<server>` meta-tool — keeps `never` denials honoured
+			// after the meta-tool is granted wholesale.
+			if (toolStr.startsWith("mcp__")) {
+				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
+				const role = roleName ? roleManager.getRole(roleName) : undefined;
+				const sepIdx = toolStr.indexOf("__", 5);
+				const opServer = sepIdx > 5 ? toolStr.slice(5, sepIdx) : "";
+				const opGroup = opServer ? `MCP: ${opServer}` : undefined;
+				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);
+				if (policy === "never") {
+					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
+					return;
+				}
+			}
+
 			const result = await mcpManager.callTool(tool, args || {});
 			json(result);
 		} catch (err) {
 			const e = err as Error;
 			console.error(`[mcp] Tool call failed:`, e.stack || e);
+			// Parse `mcp__<server>__<op>` into structured fields (§5.4).
+			let parsedServer: string | undefined;
+			let parsedOperation: string | undefined;
+			if (parsedToolForError && parsedToolForError.startsWith("mcp__")) {
+				const sepIdx = parsedToolForError.indexOf("__", 5);
+				if (sepIdx > 5) {
+					parsedServer = parsedToolForError.slice(5, sepIdx);
+					parsedOperation = parsedToolForError.slice(sepIdx + 2);
+				}
+			}
+			json({ error: e.message, server: parsedServer, operation: parsedOperation, stack: e.stack }, 500);
+		}
+		return;
+	}
+
+	// POST /api/internal/mcp-describe — discovery endpoint for the `mcp_describe` tool (§3.3)
+	if (url.pathname === "/api/internal/mcp-describe" && req.method === "POST") {
+		const mcpManager = sessionManager.getMcpManager();
+		if (!mcpManager) {
+			json({ error: "MCP not initialized" }, 500);
+			return;
+		}
+		try {
+			const body = await new Promise<string>((resolve) => {
+				let data = "";
+				req.on("data", (chunk: Buffer) => data += chunk.toString());
+				req.on("end", () => resolve(data));
+			});
+			const parsed = JSON.parse(body || "{}");
+			const server: string | undefined = parsed?.server;
+			const operation: string | undefined = parsed?.operation;
+			if (!server || typeof server !== "string") {
+				json({ error: "Missing 'server' field" }, 400);
+				return;
+			}
+
+			const describeSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
+			if (!describeSessionId) {
+				json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
+				return;
+			}
+			const liveSession = sessionManager.getSession(describeSessionId);
+			const persistedSession = liveSession ? null : (
+				projectContextManager.getContextForSession(describeSessionId)?.sessionStore.get(describeSessionId)
+				?? null
+			);
+			if (!liveSession && !persistedSession) {
+				json({ error: `Session "${describeSessionId}" not found` }, 403);
+				return;
+			}
+
+			const statuses = mcpManager.getServerStatuses();
+			const status = statuses.find(s => s.name === server);
+			if (!status || status.status !== "connected") {
+				const reason = status?.error ?? (status ? status.status : "unknown server");
+				json({ error: `server ${server} not connected: ${reason}` }, 503);
+				return;
+			}
+
+			const infos = mcpManager.getToolInfos().filter(i => i.serverName === server);
+			if (operation) {
+				const match = infos.find(i => i.mcpToolName === operation);
+				if (!match) {
+					json({ error: "operation not found" }, 404);
+					return;
+				}
+				json({ tool: { name: match.mcpToolName, description: match.description, inputSchema: match.inputSchema } });
+				return;
+			}
+			json({
+				tools: infos.map(i => ({
+					name: i.mcpToolName,
+					description: i.description,
+					inputSchema: i.inputSchema,
+				})),
+			});
+		} catch (err) {
+			const e = err as Error;
+			console.error(`[mcp] Describe failed:`, e.stack || e);
 			json({ error: e.message, stack: e.stack }, 500);
 		}
 		return;
