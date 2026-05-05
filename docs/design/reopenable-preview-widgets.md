@@ -1,3 +1,9 @@
+> **Historical design doc** — describes the v1 inline-snapshot scheme. The current
+> architecture (per-session mount + content origin + cookie auth + SSE) is
+> documented in [docs/preview-architecture.md](../preview-architecture.md). v1
+> markers are preserved by the renderer for archived sessions only; new code
+> emits only v3.
+
 # Reopenable Preview Widgets — Design Doc
 
 ## Problem

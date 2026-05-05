@@ -2,7 +2,7 @@
  * Renderer for the verification_result tool.
  * Shows verdict badge, markdown summary, and optional HTML report.
  */
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -32,6 +32,7 @@ function verdictBadge(verdict: string): TemplateResult {
 
 export class VerificationResultRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+		ensureMarkdownBlock();
 		const state = getToolState(result, isStreaming);
 
 		// ── Streaming (no result yet) ──

@@ -1,17 +1,35 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { bobbitConfigDir } from "../bobbit-dir.js";
+import { removeMount as removePreviewMount } from "../preview/mount.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Resolve the active system-prompt.md path.
+ * Prefers the user override at `<bobbitConfigDir()>/system-prompt.md`;
+ * falls back to the shipped `<defaultsDir>/system-prompt.md`.
+ * Returns `undefined` only when neither file exists.
+ */
+export function resolveSystemPromptPath(): string | undefined {
+	const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
+	if (fs.existsSync(userPath)) return userPath;
+	// __dirname here is dist/server/agent/, so defaults live at dist/server/defaults/.
+	const defaultPath = path.join(__dirname, "..", "defaults", "system-prompt.md");
+	if (fs.existsSync(defaultPath)) return defaultPath;
+	return undefined;
+}
+
 /** Module-level cache of the prompts directory. Set once by ensurePromptsDir(). */
 let _promptsDir: string | undefined;
-let _stateDir: string | undefined;
 
 /** Initialize the prompts directory from a stateDir. Called by server startup. */
 export function initPromptDirs(stateDir: string): void {
-	_stateDir = stateDir;
 	_promptsDir = path.join(stateDir, "session-prompts");
 	if (!fs.existsSync(_promptsDir)) {
 		fs.mkdirSync(_promptsDir, { recursive: true });
@@ -25,11 +43,6 @@ function getPromptsDir(): string {
 	// Recreating on access keeps writes robust without masking real errors.
 	if (!fs.existsSync(_promptsDir)) fs.mkdirSync(_promptsDir, { recursive: true });
 	return _promptsDir;
-}
-
-function getStateDir(): string {
-	if (!_stateDir) throw new Error("system-prompt: initPromptDirs() not called");
-	return _stateDir;
 }
 
 /**
@@ -246,7 +259,8 @@ export function buildNestingContextSection(ctx: NestingContext): string | undefi
 }
 
 export interface PromptParts {
-	/** Path to the global system prompt file (config/system-prompt.md) */
+	/** Path to the global system prompt file. Resolved via resolveSystemPromptPath():
+	 *  prefers `<bobbitConfigDir()>/system-prompt.md`, falls back to the shipped default. */
 	baseSystemPromptPath?: string;
 	/** Working directory shown to the agent (may be container-internal for sandbox). */
 	cwd: string;
@@ -620,9 +634,6 @@ export function cleanupSessionPrompt(sessionId: string): void {
 	try {
 		if (fs.existsSync(promptPath)) fs.unlinkSync(promptPath);
 	} catch { /* ignore */ }
-	// Also clean up per-session preview file
-	const previewPath = path.join(getStateDir(), `preview-${sessionId}.html`);
-	try {
-		if (fs.existsSync(previewPath)) fs.unlinkSync(previewPath);
-	} catch { /* ignore */ }
+	// Per-session preview mount (WP-A): <stateDir>/preview/<sid>/.
+	try { removePreviewMount(sessionId); } catch { /* ignore */ }
 }

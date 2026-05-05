@@ -7,6 +7,16 @@
  * On session connect, `initAnnotationStore()` hydrates cache from server.
  */
 
+// ── Pluggable backend interface (used by <review-document>) ──────────
+
+export type AnnotationKey = { sessionId: string; bucket: string };
+
+export interface AnnotationBackend {
+  add(key: AnnotationKey, ann: ReviewAnnotation): void;
+  remove(key: AnnotationKey, id: string): void;
+  get(key: AnnotationKey): ReviewAnnotation[];
+}
+
 export interface ReviewAnnotation {
   id: string;
   /** The quoted/selected text */
@@ -203,9 +213,17 @@ export function isReviewSubmitted(sessionId: string): boolean {
 
 /**
  * Clear the submitted flag (e.g. when a new review is opened).
+ *
+ * Only PUTs to the server if the cached value was actually `true` — a
+ * redundant PUT(submitted=false) was racing with concurrent PUT(true) calls
+ * from external clients (test harness, second browser tab) and clobbering
+ * them on reload. Keeping the PUT conditional eliminates the race without
+ * losing the across-reconnect persistence the call site relies on. RP-09.
  */
 export function clearReviewSubmitted(sessionId: string): void {
+  const wasSubmitted = _submittedCache.get(sessionId) === true;
   _submittedCache.set(sessionId, false);
+  if (!wasSubmitted) return;
 
   _serverFetch(`/api/sessions/${sessionId}/review/submitted`, {
     method: "PUT",
@@ -265,31 +283,44 @@ export function composeReviewFeedback(
   return `## Review Feedback\n\n${sections.join("\n\n")}`;
 }
 
+// ── Default backend adapter (REST-backed review-pane store) ─────────
+
+export const reviewBackend: AnnotationBackend = {
+  add: (k, a) => addAnnotation(k.sessionId, k.bucket, a),
+  remove: (k, id) => removeAnnotation(k.sessionId, k.bucket, id),
+  get: (k) => getAnnotations(k.sessionId, k.bucket),
+};
+
 // ── beforeunload: flush cache to server via sendBeacon ───────────────
+//
+// IMPORTANT: this beacon must NEVER write `submitted: false`. The submitted
+// flag has its own dedicated PUT/clear endpoints that the UI already calls
+// synchronously when the user submits or when a fresh review_open arrives.
+// A redundant `submitted: false` from the beacon races with concurrent
+// out-of-band toggles (other tabs, REST clients, the test harness's
+// `setSubmittedViaAPI`) and clobbers them on reload — the original RP-09
+// regression. We only positively beacon `submitted: true` to cover the edge
+// case where the user submits and immediately closes the tab before the
+// dedicated PUT has flushed; the existing PUT is a superset of that
+// guarantee but the beacon is harmless when it agrees.
 
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
-    const beaconedSessions = new Set<string>();
     for (const [sessionId, sessionCache] of _annotationCache) {
-      if (sessionCache.size === 0 && !_submittedCache.has(sessionId)) continue;
+      if (sessionCache.size === 0) continue;
       const annotations: Record<string, ReviewAnnotation[]> = {};
       for (const [docTitle, anns] of sessionCache) {
         annotations[docTitle] = anns;
       }
-      const submitted = _submittedCache.get(sessionId) ?? false;
+      const submitted = _submittedCache.get(sessionId) === true;
+      // Only include `submitted: true`. If the local cache says false we
+      // omit the field so the server keeps whatever it already has.
+      const payload = submitted
+        ? { annotations, submitted: true }
+        : { annotations };
       navigator.sendBeacon(
         `/api/sessions/${sessionId}/review/annotations/bulk`,
-        new Blob([JSON.stringify({ annotations, submitted })], { type: "application/json" }),
-      );
-      beaconedSessions.add(sessionId);
-    }
-    // Beacon submitted sessions not already covered by _annotationCache
-    // (e.g. after clearAllAnnotations removed the session from the cache)
-    for (const [sessionId, submitted] of _submittedCache) {
-      if (beaconedSessions.has(sessionId) || !submitted) continue;
-      navigator.sendBeacon(
-        `/api/sessions/${sessionId}/review/annotations/bulk`,
-        new Blob([JSON.stringify({ annotations: {}, submitted: true })], { type: "application/json" }),
+        new Blob([JSON.stringify(payload)], { type: "application/json" }),
       );
     }
   });

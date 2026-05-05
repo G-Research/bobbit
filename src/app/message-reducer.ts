@@ -77,6 +77,27 @@ function extractText(message: any): string {
 	return "";
 }
 
+/** Whitespace-collapsed text used for plain-text snapshot dedup. */
+function normaliseText(s: string): string {
+	return s.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Plain-text row test: assistant/user rows whose content has no toolCall and
+ * which aren't themselves a toolResult. Snapshot dedup of these rows by
+ * `(role, normalisedText)` defends against id-less / id-mismatched live
+ * `message_end` rows that the id-only filter would let pass through, leaving
+ * the snapshot's regenerated-id copy stacked on top (the new-tab dup bug).
+ */
+function isPlainTextRow(m: any): boolean {
+	if (!m || m.role === "toolResult") return false;
+	if (!Array.isArray(m.content)) return true;
+	for (const c of m.content) {
+		if (c?.type === "toolCall") return false;
+	}
+	return true;
+}
+
 function sortMessages(msgs: OrderedMessage[]): OrderedMessage[] {
 	return msgs.slice().sort((a, b) => {
 		if (a._order !== b._order) return a._order - b._order;
@@ -210,6 +231,19 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					}
 				}
 			}
+			// Plain-text equivalence keys: (role, normalisedText). See
+			// `isPlainTextRow` — defends against id-less live `message_end`
+			// plain-text assistant rows whose ids don't match the snapshot's
+			// regenerated ids. Without this, a visibilitychange-triggered
+			// resync (new-tab in same browser) duplicates each plain-text
+			// assistant reply on every snapshot tick.
+			const serverPlainTextKeys = new Set<string>();
+			for (const m of snapshotRows) {
+				if (!isPlainTextRow(m)) continue;
+				const t = normaliseText(extractText(m));
+				if (t.length === 0) continue;
+				serverPlainTextKeys.add(`${m.role}|${t}`);
+			}
 			const serverHasCompactionMarker = snapshotRows.some((m) => {
 				if (m.role !== "assistant") return false;
 				const t = extractText(m);
@@ -240,6 +274,14 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 								serverAssistantToolCallIds.has(c.id),
 						);
 						if (hasMatchingToolCall) continue;
+					}
+					// Plain-text fallback dedup: drop id-less / id-mismatched
+					// live plain-text rows whose (role, normalisedText) matches
+					// a snapshot row. Skipped for toolCall/toolResult rows
+					// (handled above) so we never weaken existing toolCall dedup.
+					if (isPlainTextRow(m)) {
+						const t = normaliseText(extractText(m));
+						if (t.length > 0 && serverPlainTextKeys.has(`${m.role}|${t}`)) continue;
 					}
 					survivors.push(m);
 					continue;

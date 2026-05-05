@@ -4,8 +4,13 @@ import { PanelRight } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderContext, ToolRenderer, ToolRenderResult } from "../types.js";
 
-/** Must match `defaults/tools/html/snapshot.ts` PREVIEW_SNAPSHOT_MARKER. */
-const PREVIEW_SNAPSHOT_MARKER = "__preview_snapshot_v1__\n";
+/** Must match `defaults/tools/html/snapshot.ts`. */
+// Read-only legacy support for archived sessions stamped before the v3 cutover. Do not extend.
+const PREVIEW_SNAPSHOT_MARKER_V1 = "__preview_snapshot_v1__\n";
+// Read-only legacy support for archived sessions stamped before the v3 cutover. Do not extend.
+const PREVIEW_SNAPSHOT_MARKER_V2 = "__preview_snapshot_v2__\n";
+// WP-E primary path — every new preview_open call emits this marker.
+const PREVIEW_SNAPSHOT_MARKER_V3 = "__preview_snapshot_v3__\n";
 
 interface PreviewOpenParams {
 	html?: string;
@@ -20,6 +25,49 @@ interface SnapshotBlock {
 	preview?: string;
 }
 
+type ParsedSnapshot =
+	| { kind: "inline"; html: string }
+	| { kind: "file"; path: string }
+	| { kind: "preview"; url: string; path: string; entry?: string };
+
+function parseSnapshotText(text: string): ParsedSnapshot | null {
+	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3)) {
+		const body = text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length).trim();
+		try {
+			const parsed = JSON.parse(body);
+			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
+				return {
+					kind: "preview",
+					url: parsed.url,
+					path: typeof parsed.path === "string" ? parsed.path : "",
+					entry: typeof parsed.entry === "string" ? parsed.entry : undefined,
+				};
+			}
+		} catch {
+			/* fall through */
+		}
+		return null;
+	}
+	// Read-only legacy support for archived sessions stamped before the v3 cutover. Do not extend.
+	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V1)) {
+		return { kind: "inline", html: text.slice(PREVIEW_SNAPSHOT_MARKER_V1.length) };
+	}
+	// Read-only legacy support for archived sessions stamped before the v3 cutover. Do not extend.
+	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2)) {
+		const body = text.slice(PREVIEW_SNAPSHOT_MARKER_V2.length).trim();
+		try {
+			const parsed = JSON.parse(body);
+			if (parsed && parsed.kind === "file" && typeof parsed.path === "string" && parsed.path) {
+				return { kind: "file", path: parsed.path };
+			}
+		} catch {
+			/* fall through */
+		}
+		return null;
+	}
+	return null;
+}
+
 /** Find a snapshot text block in a tool_result's content array, returning block + index. */
 function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block: SnapshotBlock; index: number } | null {
 	const content = result?.content;
@@ -28,7 +76,11 @@ function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block:
 		const b = content[i] as any;
 		if (!b || b.type !== "text") continue;
 		if (typeof b.text !== "string") continue;
-		if (b.text.startsWith(PREVIEW_SNAPSHOT_MARKER)) {
+		if (
+			b.text.startsWith(PREVIEW_SNAPSHOT_MARKER_V1) ||
+			b.text.startsWith(PREVIEW_SNAPSHOT_MARKER_V2) ||
+			b.text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3)
+		) {
 			return { block: b as SnapshotBlock, index: i };
 		}
 	}
@@ -116,10 +168,9 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					snapshotText = await fetchToolContent(sessionId, located.messageIndex, located.blockIndex);
 				}
 
-				// 2. Strip marker to get raw HTML
-				const htmlPayload = snapshotText.startsWith(PREVIEW_SNAPSHOT_MARKER)
-					? snapshotText.slice(PREVIEW_SNAPSHOT_MARKER.length)
-					: snapshotText;
+				// 2. Parse snapshot — v1 (inline), v2 (file), or v3 (preview mount).
+				const parsed = parseSnapshotText(snapshotText);
+				if (!parsed) throw new Error("Snapshot block could not be parsed");
 
 				// 3. Enable preview mode (idempotent)
 				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
@@ -128,12 +179,29 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				});
 				if (!patchResp.ok) throw new Error(`PATCH failed: ${patchResp.status}`);
 
-				// 4. Push HTML to the preview panel
-				const postResp = await gatewayFetch(`/api/preview?sessionId=${encodeURIComponent(sessionId)}`, {
-					method: "POST",
-					body: JSON.stringify({ html: htmlPayload }),
-				});
-				if (!postResp.ok) throw new Error(`POST failed: ${postResp.status}`);
+				// 4. v3: mount is already populated server-side; the side panel
+				//        will pick it up via SSE. Nothing else to push.
+				//    v1/v2: re-stamp the per-session preview mount via the new
+				//        unified endpoint (`/api/preview/mount`). WP-G's deletion
+				//        of the legacy `/api/preview` route doesn't break this
+				//        path because we're already on the new endpoint.
+				if (parsed.kind !== "preview") {
+					const postBody: Record<string, unknown> = parsed.kind === "file"
+						? { file: parsed.path }
+						: { html: parsed.html };
+					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
+						method: "POST",
+						body: JSON.stringify(postBody),
+					});
+					if (!postResp.ok) {
+						if (parsed.kind === "file" && (postResp.status === 400 || postResp.status === 404)) {
+							btn.textContent = "File no longer available";
+							btn.disabled = true;
+							return;
+						}
+						throw new Error(`POST failed: ${postResp.status}`);
+					}
+				}
 
 				btn.textContent = "Opened ✓";
 				setTimeout(() => {

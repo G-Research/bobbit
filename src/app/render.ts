@@ -1,5 +1,6 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
+import "../ui/components/CommentableMarkdown.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
@@ -7,7 +8,7 @@ import yaml from "yaml";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, FileText, FolderOpen, FolderPlus, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -24,6 +25,7 @@ import {
 import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
@@ -57,20 +59,78 @@ import { cwdCombobox } from "./cwd-combobox.js";
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
-import { renderGoalDashboard } from "./goal-dashboard.js";
-import "./goal-dashboard.css";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
-import { renderRoleManagerPage } from "./role-manager-page.js";
-import "./role-manager.css";
-import { renderToolManagerPage } from "./tool-manager-page.js";
-import "./tool-manager.css";
-import { renderWorkflowPage } from "./workflow-page.js";
-import "./workflow-page.css";
 import "./config-scope.css";
-import { renderStaffPage } from "./staff-page.js";
-import { renderSkillsPage } from "./skills-page.js";
-import { renderSettingsPage } from "./settings-page.js";
-import { renderSearchPage, initSearchPage, resetSearchPage } from "./search-page.js";
+
+// ---------------------------------------------------------------------------
+// Lazy route page loader — see docs/design/ui-bundle-size-reduction.md (Task A)
+// ---------------------------------------------------------------------------
+const _pageCache: Record<string, ((...args: unknown[]) => unknown)> = {};
+const _pageLoading: Record<string, boolean> = {};
+
+/** Centred placeholder while a route chunk is in-flight. */
+function loadingPlaceholder() {
+	return html`<div class="flex-1 min-h-0 flex items-center justify-center">${bobbitLoadingAnimation()}</div>`;
+}
+
+/**
+ * Dynamic-import a route page module on first access. Caches the named export
+ * in module scope and triggers `renderApp()` once the chunk lands so the
+ * placeholder is replaced with the real page on the next paint.
+ */
+function lazyPage(
+	key: string,
+	importer: () => Promise<Record<string, unknown>>,
+	exportName: string,
+) {
+	const fn = _pageCache[key];
+	if (fn) return fn();
+	if (!_pageLoading[key]) {
+		_pageLoading[key] = true;
+		importer().then((m) => {
+			const exp = m[exportName];
+			if (typeof exp === "function") {
+				_pageCache[key] = exp as (...args: unknown[]) => unknown;
+			}
+			renderApp();
+		}).catch((err) => {
+			_pageLoading[key] = false;
+			console.error(`Failed to load page chunk "${key}":`, err);
+		});
+	}
+	return loadingPlaceholder();
+}
+
+/**
+ * Call a named export on a lazy-loaded page module. If `loadIfMissing` is
+ * true (default), the chunk is fetched and the export is invoked on arrival.
+ * If false, this is a no-op when the chunk hasn't been loaded yet — used for
+ * "cleanup on leave" hooks like `resetSearchPage` where there's nothing to
+ * clean up if the page was never visited.
+ */
+function lazyPageCall(
+	key: string,
+	importer: () => Promise<Record<string, unknown>>,
+	exportName: string,
+	loadIfMissing = true,
+): void {
+	const cacheKey = `${key}:${exportName}`;
+	const fn = _pageCache[cacheKey];
+	if (fn) {
+		fn();
+		return;
+	}
+	if (!loadIfMissing) return;
+	if (_pageLoading[cacheKey]) return;
+	_pageLoading[cacheKey] = true;
+	importer().then((m) => {
+		const exp = m[exportName];
+		if (typeof exp === "function") {
+			_pageCache[cacheKey] = exp as (...args: unknown[]) => unknown;
+			(exp as () => void)();
+		}
+	}).catch(() => { _pageLoading[cacheKey] = false; });
+}
 
 // ============================================================================
 // MOBILE LANDING PAGE
@@ -130,6 +190,11 @@ function renderMobileLanding() {
 							@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}>
 							${icon(Wrench, "xs")} Tools
 						</button>
+						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
+							title="View skills"
+							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
+							${icon(Zap, "xs")} Skills
+						</button>
 					</div>
 					<div class="flex items-center gap-1">
 						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
@@ -141,11 +206,6 @@ function renderMobileLanding() {
 								setHashRoute("settings", `${projectId}/workflows`, true);
 							}}>
 							${icon(WorkflowIcon, "xs")} Workflows
-						</button>
-						<button class="flex-1 text-sm px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}"
-							title="View skills"
-							@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}>
-							${icon(Zap, "xs")} Skills
 						</button>
 						<button
 							data-new-goal-trigger
@@ -466,6 +526,87 @@ const goalSpecPreviewRef = createRef<HTMLDivElement>();
 const goalSpecTextareaRef = createRef<HTMLTextAreaElement>();
 const rolePromptPreviewRef = createRef<HTMLDivElement>();
 const rolePromptTextareaRef = createRef<HTMLTextAreaElement>();
+// Inline-comments wrapper refs (one per commentable proposal panel).
+const goalCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
+const rolePromptCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
+const staffPromptCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
+// Annotation count fields, mirrored from <commentable-markdown> via
+// the bubbled `annotation-change` event. Used to gate the badge + Send-feedback button.
+let _goalAnnCount = 0;
+/** Timestamp of the most recent Spec Copy click; UI flips to "Copied" for 1.5 s. */
+let _specCopiedAt = 0;
+async function _copySpecText(text: string): Promise<void> {
+	try {
+		await navigator.clipboard.writeText(text);
+	} catch {
+		const ta = document.createElement("textarea");
+		ta.value = text;
+		ta.style.position = "fixed";
+		ta.style.opacity = "0";
+		document.body.appendChild(ta);
+		ta.select();
+		try { document.execCommand("copy"); } catch { /* ignore */ }
+		ta.remove();
+	}
+	_specCopiedAt = Date.now();
+	renderApp();
+	setTimeout(() => {
+		if (Date.now() - _specCopiedAt >= 1500) renderApp();
+	}, 1600);
+}
+let _roleAnnCount = 0;
+let _staffAnnCount = 0;
+// Toast text for "Proposal updated — comments cleared" notifications.
+let _proposalToastText = "";
+let _proposalToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Module-level helper to flash a brief toast above the proposal panel.
+ * Reuses the existing `.review-toast` CSS (auto-fade animation).
+ */
+export function showProposalToast(text: string): void {
+	_proposalToastText = text;
+	if (_proposalToastTimer) clearTimeout(_proposalToastTimer);
+	_proposalToastTimer = setTimeout(() => {
+		_proposalToastText = "";
+		_proposalToastTimer = null;
+		renderApp();
+	}, 2500);
+	renderApp();
+}
+
+/** Reset annotation counts — called after a proposal is dismissed or its body is replaced. */
+export function resetProposalAnnCount(type: "goal" | "role" | "staff"): void {
+	if (type === "goal") _goalAnnCount = 0;
+	else if (type === "role") _roleAnnCount = 0;
+	else if (type === "staff") _staffAnnCount = 0;
+}
+
+/** Render the "comments cleared" toast above a proposal panel, if active. */
+function proposalToast() {
+	if (!_proposalToastText) return "";
+	return html`<div class="review-toast" data-testid="proposal-toast">${_proposalToastText}</div>`;
+}
+
+// Header-only "Link copied" toast — separate state + testid so it doesn't
+// collide with the proposal-toast testid used by `proposalToast()` (the
+// session header is rendered alongside open proposal panels).
+let _headerToastText = "";
+let _headerToastTimer: ReturnType<typeof setTimeout> | null = null;
+export function showHeaderToast(text: string): void {
+	_headerToastText = text;
+	if (_headerToastTimer) clearTimeout(_headerToastTimer);
+	_headerToastTimer = setTimeout(() => {
+		_headerToastText = "";
+		_headerToastTimer = null;
+		renderApp();
+	}, 2500);
+	renderApp();
+}
+function headerToast() {
+	if (!_headerToastText) return "";
+	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
+}
 const toolDocsPreviewRef = createRef<HTMLDivElement>();
 const toolRendererPreviewRef = createRef<HTMLDivElement>();
 const toolOuterScrollRef = createRef<HTMLDivElement>();
@@ -526,9 +667,17 @@ interface GoalFormConfig {
 	inlineRolesYaml?: string;
 	inlineRolesYamlError?: string;
 	onInlineRolesYamlChange?: (e: Event) => void;
+
+	/**
+	 * When true, render <commentable-markdown> in Preview mode instead of
+	 * <markdown-block> so users can leave inline comments. Set only at the
+	 * proposal-panel call site — the goal-dashboard view stays read-only.
+	 */
+	commentable?: boolean;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
+	ensureMarkdownBlock();
 	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
 	const worktreePath = linkedProject
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
@@ -694,14 +843,36 @@ function renderGoalForm(config: GoalFormConfig) {
 			</div>
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
-					<label class="text-xs text-muted-foreground font-medium">Spec</label>
-					<button
-						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-						title="Toggle edit/preview mode"
-						@click=${config.onSpecEditToggle}
-					>
-						${config.specEditMode ? "Preview" : "Edit"}
-					</button>
+					<div class="flex items-center gap-1">
+						<label class="text-xs text-muted-foreground font-medium">Spec</label>
+						${config.commentable && !config.specEditMode && _goalAnnCount > 0 ? html`
+							<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
+								data-testid="proposal-comment-count">
+								${_goalAnnCount} comment${_goalAnnCount === 1 ? "" : "s"}
+							</span>
+						` : ""}
+					</div>
+					<div class="flex items-center gap-1">
+						${(() => {
+							const justCopied = Date.now() - _specCopiedAt < 1500;
+							return html`<button
+								class="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-border ${justCopied ? "text-primary border-primary" : "text-muted-foreground hover:text-foreground hover:bg-secondary"} transition-colors"
+								title="Copy spec markdown"
+								@click=${() => _copySpecText(config.spec)}
+							>
+								${icon(justCopied ? Check : Copy, "xs")}
+								<span>${justCopied ? "Copied" : "Copy"}</span>
+							</button>`;
+						})()}
+						<button
+							class="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+							title="Toggle edit/preview mode"
+							@click=${config.onSpecEditToggle}
+						>
+							${icon(config.specEditMode ? Eye : Pencil, "xs")}
+							<span>${config.specEditMode ? "Preview" : "Edit"}</span>
+						</button>
+					</div>
 				</div>
 				${config.specEditMode
 					? html`<textarea
@@ -711,7 +882,15 @@ function renderGoalForm(config: GoalFormConfig) {
 							@input=${config.onSpecChange}
 						></textarea>`
 					: html`<div ${ref(goalSpecPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${config.streaming ? STREAMING_BORDER : ""}">
-							<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>
+							${config.commentable
+								? html`<commentable-markdown
+										${ref(goalCommentableRef)}
+										.markdown=${config.spec || "_No spec content yet_"}
+										.sessionId=${activeSessionId() || ""}
+										.bucket=${"proposal:goal"}
+										@annotation-change=${(e: CustomEvent) => { _goalAnnCount = e.detail?.count ?? 0; renderApp(); }}
+									></commentable-markdown>`
+								: html`<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>`}
 						</div>`
 				}
 			</div>
@@ -753,6 +932,20 @@ function renderGoalForm(config: GoalFormConfig) {
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
+				${config.commentable && _goalAnnCount > 0 && !config.streaming ? Button({
+					variant: "secondary",
+					onClick: () => {
+						const el = goalCommentableRef.value;
+						if (!el) return;
+						const text = el.sendFeedback();
+						if (text && state.remoteAgent) {
+							state.remoteAgent.prompt(text);
+						}
+						_goalAnnCount = 0;
+						renderApp();
+					},
+					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_goalAnnCount})</span>`,
+				}) : ""}
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
@@ -766,6 +959,30 @@ function renderGoalForm(config: GoalFormConfig) {
 }
 
 function goalPreviewPanel() {
+	// Populate previewProjectId for re-attempt / assistant sessions where it
+	// wasn't seeded by the +New Goal picker. Resolution order:
+	// 1. Active session's projectId (server inherits this for re-attempts).
+	// 2. Original goal's projectId via reattemptGoalId.
+	// 3. Match proposal cwd against a registered project's rootPath.
+	if (!state.previewProjectId) {
+		const sid = activeSessionId();
+		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
+		let candidate = sess?.projectId;
+		if (!candidate && sess?.reattemptGoalId) {
+			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
+		}
+		if (!candidate) {
+			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
+			if (cwd) {
+				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+				const target = norm(cwd);
+				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
+			}
+		}
+		if (candidate && state.projects.some(p => p.id === candidate)) {
+			state.previewProjectId = candidate;
+		}
+	}
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 
@@ -805,6 +1022,8 @@ function goalPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		if (isAssistantContext) state.assistantType = null;
+		if (sessionId) clearProposalAnnotations(sessionId, "goal");
+		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
 		const projectId = state.previewProjectId || undefined;
 		state.previewProjectId = "";
@@ -892,7 +1111,8 @@ function goalPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="goal-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal">
+			${proposalToast()}
 			${renderGoalForm({
 				title: state.previewTitle,
 				spec: state.previewSpec,
@@ -970,6 +1190,7 @@ function goalPreviewPanel() {
 					_assistantInlineRolesParsed = v.parsed;
 					renderApp();
 				},
+				commentable: true,
 			})}
 		</div>
 	`;
@@ -993,6 +1214,7 @@ function ensureToolsLoaded(): void {
 }
 
 function rolePreviewPanel() {
+	ensureMarkdownBlock();
 	ensureToolsLoaded();
 	const streaming = isProposalStreaming("role_proposal");
 	queueMicrotask(() => {
@@ -1024,6 +1246,8 @@ function rolePreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		if (isAssistantContext) state.assistantType = null;
+		if (sessionId) clearProposalAnnotations(sessionId, "role");
+		resetProposalAnnCount("role");
 		delete state.activeProposals.role;
 		// Clean up persisted draft
 		if (sessionId) {
@@ -1104,7 +1328,8 @@ function rolePreviewPanel() {
 		.filter(Boolean);
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="role-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="role-proposal">
+			${proposalToast()}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1198,7 +1423,15 @@ function rolePreviewPanel() {
 				</div>
 				<div class="flex-1 flex flex-col min-h-0">
 					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+						<div class="flex items-center gap-1">
+							<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+							${!state.rolePreviewPromptEditMode && _roleAnnCount > 0 ? html`
+								<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
+									data-testid="proposal-comment-count">
+									${_roleAnnCount} comment${_roleAnnCount === 1 ? "" : "s"}
+								</span>
+							` : ""}
+						</div>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
@@ -1220,13 +1453,33 @@ function rolePreviewPanel() {
 								}}
 							></textarea>`
 						: html`<div ${ref(rolePromptPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}">
-								<markdown-block .content=${state.rolePreviewPrompt || "_No prompt content yet_"}></markdown-block>
+								<commentable-markdown
+									${ref(rolePromptCommentableRef)}
+									.markdown=${state.rolePreviewPrompt || "_No prompt content yet_"}
+									.sessionId=${activeSessionId() || ""}
+									.bucket=${"proposal:role"}
+									@annotation-change=${(e: CustomEvent) => { _roleAnnCount = e.detail?.count ?? 0; renderApp(); }}
+								></commentable-markdown>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${streaming ? streamingBadge() : ""}
+				${_roleAnnCount > 0 && !streaming ? Button({
+					variant: "secondary",
+					onClick: () => {
+						const el = rolePromptCommentableRef.value;
+						if (!el) return;
+						const text = el.sendFeedback();
+						if (text && state.remoteAgent) {
+							state.remoteAgent.prompt(text);
+						}
+						_roleAnnCount = 0;
+						renderApp();
+					},
+					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_roleAnnCount})</span>`,
+				}) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateRole,
@@ -1243,6 +1496,7 @@ function rolePreviewPanel() {
 // ============================================================================
 
 function toolPreviewPanel() {
+	ensureMarkdownBlock();
 	const streaming = isProposalStreaming("tool_proposal");
 	queueMicrotask(() => {
 		reconcileFollowTail(toolDocsPreviewRef.value);
@@ -1548,6 +1802,7 @@ function describeCron(cron: string): string {
 }
 
 function staffPreviewPanel() {
+	ensureMarkdownBlock();
 	ensureSandboxStatusLoaded();
 	const streaming = isProposalStreaming("staff_proposal");
 	queueMicrotask(() => {
@@ -1568,6 +1823,8 @@ function staffPreviewPanel() {
 			state.connectionStatus = "disconnected";
 		}
 		if (isAssistantContext) state.assistantType = null;
+		if (sessionId) clearProposalAnnotations(sessionId, "staff");
+		resetProposalAnnCount("staff");
 		delete state.activeProposals.staff;
 		if (isAssistantContext) {
 			localStorage.removeItem("gateway.sessionId");
@@ -1615,7 +1872,8 @@ function staffPreviewPanel() {
 	};
 
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="staff-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="staff-proposal">
+			${proposalToast()}
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
 				<div>
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
@@ -1687,7 +1945,15 @@ function staffPreviewPanel() {
 				</div>
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+						<div class="flex items-center gap-1">
+							<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+							${!state.staffPreviewPromptEditMode && _staffAnnCount > 0 ? html`
+								<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
+									data-testid="proposal-comment-count">
+									${_staffAnnCount} comment${_staffAnnCount === 1 ? "" : "s"}
+								</span>
+							` : ""}
+						</div>
 						<button
 							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
 							title="Toggle edit/preview mode"
@@ -1708,13 +1974,33 @@ function staffPreviewPanel() {
 								}}
 							></textarea>`
 						: html`<div ${ref(staffPromptPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}" style="min-height:150px; max-height:400px">
-								<markdown-block .content=${state.staffPreviewPrompt || "_No prompt content yet_"}></markdown-block>
+								<commentable-markdown
+									${ref(staffPromptCommentableRef)}
+									.markdown=${state.staffPreviewPrompt || "_No prompt content yet_"}
+									.sessionId=${activeSessionId() || ""}
+									.bucket=${"proposal:staff"}
+									@annotation-change=${(e: CustomEvent) => { _staffAnnCount = e.detail?.count ?? 0; renderApp(); }}
+								></commentable-markdown>
 							</div>`
 					}
 				</div>
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${streaming ? streamingBadge() : ""}
+				${_staffAnnCount > 0 && !streaming ? Button({
+					variant: "secondary",
+					onClick: () => {
+						const el = staffPromptCommentableRef.value;
+						if (!el) return;
+						const text = el.sendFeedback();
+						if (text && state.remoteAgent) {
+							state.remoteAgent.prompt(text);
+						}
+						_staffAnnCount = 0;
+						renderApp();
+					},
+					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_staffAnnCount})</span>`,
+				}) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
@@ -2130,6 +2416,30 @@ function syncProposalFormState(): void {
 }
 
 function goalProposalPanel() {
+	// Populate previewProjectId for re-attempt / assistant sessions where it
+	// wasn't seeded by the +New Goal picker. Resolution order:
+	// 1. Active session's projectId (server inherits this for re-attempts).
+	// 2. Original goal's projectId via reattemptGoalId.
+	// 3. Match proposal cwd against a registered project's rootPath.
+	if (!state.previewProjectId) {
+		const sid = activeSessionId();
+		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
+		let candidate = sess?.projectId;
+		if (!candidate && sess?.reattemptGoalId) {
+			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
+		}
+		if (!candidate) {
+			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
+			if (cwd) {
+				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+				const target = norm(cwd);
+				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
+			}
+		}
+		if (candidate && state.projects.some(p => p.id === candidate)) {
+			state.previewProjectId = candidate;
+		}
+	}
 	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
@@ -2205,6 +2515,9 @@ function goalProposalPanel() {
 
 	const handleDismiss = () => {
 		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+		const sidEarly = activeSessionId();
+		if (sidEarly) clearProposalAnnotations(sidEarly, "goal");
+		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
 		_proposalInitializedFrom = null;
 		_proposalEnabledOptionalSteps = [];
@@ -2268,6 +2581,7 @@ function goalProposalPanel() {
 			_proposalInlineRolesParsed = v.parsed;
 			renderApp();
 		},
+		commentable: true,
 	});
 }
 
@@ -2275,107 +2589,13 @@ function goalProposalPanel() {
 // PREVIEW THEME BRIDGE
 // ============================================================================
 
-/** Script injected into preview iframes to sync the app's theme, palette, and
- *  CSS custom properties into the iframe document. Observes changes so toggling
- *  dark/light mode or switching palettes updates the preview in real time. */
-const PREVIEW_THEME_BRIDGE = `<script>
-(function() {
-	try {
-		var root = document.documentElement;
-		var parentRoot = parent.document.documentElement;
-		var parentStyles = parent.getComputedStyle(parentRoot);
-
-		function sync() {
-			/* Mirror dark class */
-			root.classList.toggle('dark', parentRoot.classList.contains('dark'));
-
-			/* Mirror data-palette attribute */
-			var palette = parentRoot.getAttribute('data-palette');
-			if (palette) root.setAttribute('data-palette', palette);
-			else root.removeAttribute('data-palette');
-
-			/* Copy all CSS custom properties from the app stylesheet */
-			var vars = [];
-			try {
-				for (var s = 0; s < parent.document.styleSheets.length; s++) {
-					var sheet = parent.document.styleSheets[s];
-					try {
-						var rules = sheet.cssRules || sheet.rules;
-						for (var r = 0; r < rules.length; r++) {
-							var rule = rules[r];
-							if (rule.style) {
-								for (var i = 0; i < rule.style.length; i++) {
-									var name = rule.style[i];
-									if (name.startsWith('--')) vars.push(name);
-								}
-							}
-						}
-					} catch(e) { /* cross-origin sheet, skip */ }
-				}
-			} catch(e) {}
-
-			/* Deduplicate and copy computed values */
-			var seen = {};
-			for (var v = 0; v < vars.length; v++) {
-				if (seen[vars[v]]) continue;
-				seen[vars[v]] = true;
-				var val = parentStyles.getPropertyValue(vars[v]);
-				if (val) root.style.setProperty(vars[v], val);
-			}
-		}
-
-		/* Copy the app font stack */
-		root.style.fontFamily = parentStyles.fontFamily;
-
-		/* Initial sync */
-		sync();
-
-		/* Watch for class/attribute changes on the parent root element */
-		var observer = new MutationObserver(sync);
-		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
-	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
-})();
-<\/script>`;
-
-// ============================================================================
-// PREVIEW SWIPE (mobile)
-// ============================================================================
-
-/** Script injected into the preview iframe srcdoc to detect horizontal swipes
- *  and send position updates to the parent via postMessage.
- *  Only horizontal swipes are captured; all other gestures pass through normally. */
-const PREVIEW_SWIPE_SCRIPT = `<script>
-(function() {
-	var startX = 0, startY = 0, captured = false, decided = false;
-	document.addEventListener('touchstart', function(e) {
-		startX = e.touches[0].clientX;
-		startY = e.touches[0].clientY;
-		captured = false;
-		decided = false;
-	}, {passive: true});
-	document.addEventListener('touchmove', function(e) {
-		if (decided && !captured) return;
-		var dx = e.touches[0].clientX - startX;
-		var dy = e.touches[0].clientY - startY;
-		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-			decided = true;
-			captured = Math.abs(dx) > Math.abs(dy);
-			if (captured) parent.postMessage({type:'preview-swipe-start'}, '*');
-		}
-		if (captured) {
-			e.preventDefault();
-			parent.postMessage({type:'preview-swipe-move', dx: dx}, '*');
-		}
-	}, {passive: false});
-	document.addEventListener('touchend', function(e) {
-		if (!captured) return;
-		var dx = e.changedTouches[0].clientX - startX;
-		parent.postMessage({type:'preview-swipe-end', dx: dx}, '*');
-		captured = false;
-		decided = false;
-	}, {passive: true});
-})();
-<\/script>`;
+/** Theme-bridge + swipe scripts injected into preview iframes. Source of
+ *  truth: `src/shared/preview-bridge-scripts.ts` (also imported by the
+ *  server's preview content route so client and server emit byte-equal
+ *  payloads). Local aliases preserved to avoid churning call sites. */
+// WP-E: theme-bridge / swipe-script constants previously concatenated into
+// the inline `srcdoc=` iframe are gone. The gateway now injects them
+// server-side on text/html responses through the `/preview/<sid>/` mount.
 
 /** Whether the unified panel is active for the current non-assistant session. */
 function hasUnifiedPanel(): boolean {
@@ -2626,7 +2846,8 @@ export function doRenderApp(): void {
 	const activeSession = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
 	const isTeamLead = activeSession?.role === "team-lead";
 	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
-		<div class="flex items-center gap-1 shrink-0">
+		<div class="flex items-center gap-1 shrink-0 relative">
+			${headerToast()}
 			${Button({
 				variant: "ghost",
 				size: "sm",
@@ -2637,6 +2858,23 @@ export function doRenderApp(): void {
 				className: "h-7 px-2 text-muted-foreground",
 				title: "View System Prompt",
 			})}
+			<span data-testid="copy-session-link">${Button({
+				variant: "ghost",
+				size: "sm",
+				onClick: async () => {
+					const url = `${location.origin}/session/${activeSid}`;
+					try {
+						await navigator.clipboard.writeText(url);
+						showHeaderToast("Link copied");
+					} catch {
+						const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
+						m.CopyLinkFallbackDialog.show(url);
+					}
+				},
+				children: html`<span class="inline-flex items-center gap-1">${icon(Link, "xs")}<span class="text-xs hidden sm:inline">Link</span></span>`,
+				className: "h-7 px-2 text-muted-foreground",
+				title: "Copy session link",
+			})}</span>
 			${Button({
 				variant: "ghost",
 				size: "sm",
@@ -2856,14 +3094,31 @@ export function doRenderApp(): void {
 	};
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
+	//
+	// WP-E: single iframe pointing at the per-session preview mount. The agent
+	// writes into <stateDir>/preview/<sid>/, the gateway serves from
+	// `/preview/<sid>/<rel-path>` with cookie auth + theme-bridge injection on
+	// text/html responses. Hot reloads come via SSE bumping `previewPanelMtime`,
+	// which forces the iframe to reload via the `#mtime=<n>` hash.
 	const htmlPreviewContent = () => {
+		const sid = activeSessionId() || "";
+		const entry = state.previewPanelEntry || "inline.html";
+		const v = state.previewPanelMtime || 0;
+		if (!sid || !state.previewPanelEntry) {
+			// Empty-state until the first SSE `preview-changed` event lands.
+			return html`
+				<div class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
+					No preview yet.
+				</div>
+			`;
+		}
 		return html`
 			<div style="position:relative;flex:1;min-height:0;">
 				<iframe
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts allow-same-origin"
-					.srcdoc=${state.previewPanelHtml + PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT}
+					src=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}#mtime=${v}`}
 				></iframe>
 			</div>
 		`;
@@ -3008,6 +3263,18 @@ export function doRenderApp(): void {
 						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
+						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? html`
+						<a
+							href=${`/preview/${encodeURIComponent(activeSessionId() || "")}/${encodeURIComponent(state.previewPanelEntry)}`}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="text-muted-foreground hover:text-foreground"
+							style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
+							title="Open preview in new tab"
+						>${icon(ExternalLink, "sm")}</a>
+						<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Refresh preview">
+							${icon(RotateCw, "sm")}
+						</button>` : ""}
 						${showPreviewTab ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
 							${icon(Maximize2, "sm")}
@@ -3073,31 +3340,32 @@ export function doRenderApp(): void {
 		// Goal dashboard route
 		const route = getRouteFromHash();
 		if (route.view === "goal-dashboard" && route.goalId) {
-			return renderGoalDashboard();
+			return lazyPage("goal-dashboard", () => import("./goal-dashboard.js"), "renderGoalDashboard");
 		}
 		if (route.view === "roles" || route.view === "role-edit") {
-			return renderRoleManagerPage();
+			return lazyPage("role-manager", () => import("./role-manager-page.js"), "renderRoleManagerPage");
 		}
 		if (route.view === "tools" || route.view === "tool-edit") {
-			return renderToolManagerPage();
+			return lazyPage("tool-manager", () => import("./tool-manager-page.js"), "renderToolManagerPage");
 		}
 		if (route.view === "workflows" || route.view === "workflow-edit") {
-			return renderWorkflowPage();
+			return lazyPage("workflow", () => import("./workflow-page.js"), "renderWorkflowPage");
 		}
 		if (route.view === "staff" || route.view === "staff-edit") {
-			return renderStaffPage();
+			return lazyPage("staff", () => import("./staff-page.js"), "renderStaffPage");
 		}
 		if (route.view === "skills") {
-			return renderSkillsPage();
+			return lazyPage("skills", () => import("./skills-page.js"), "renderSkillsPage");
 		}
 		if (route.view === "settings") {
-			return renderSettingsPage();
+			return lazyPage("settings", () => import("./settings-page.js"), "renderSettingsPage");
 		}
 		if (route.view === "search") {
-			initSearchPage();
-			return renderSearchPage();
+			lazyPageCall("search", () => import("./search-page.js"), "initSearchPage");
+			return lazyPage("search", () => import("./search-page.js"), "renderSearchPage");
 		} else {
-			resetSearchPage();
+			// resetSearchPage is a no-op when the chunk hasn't loaded yet.
+			lazyPageCall("search", () => import("./search-page.js"), "resetSearchPage", false);
 		}
 
 		if (connected && state.assistantType) {
@@ -3142,14 +3410,7 @@ export function doRenderApp(): void {
 							</button>
 						</div>
 						<!-- Preview iframe fills available space -->
-						<div style="position:relative;flex:1;min-height:0;">
-							<iframe
-								class="w-full border-0"
-								style="position:absolute;inset:0;height:100%;"
-								sandbox="allow-scripts allow-same-origin"
-								.srcdoc=${state.previewPanelHtml + PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT}
-							></iframe>
-						</div>
+						${htmlPreviewContent()}
 						<!-- Compact prompt bar at bottom -->
 						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
 							${state.chatPanel}

@@ -21,7 +21,11 @@ export function isSandboxAllowed(
 	// /api/internal/user-question/submit is called from UI widgets (not the
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.
-	if (pathname === "/api/preview" && m === "POST") return true;
+	// Embedded-preview mount endpoint — the only preview surface the agent
+	// is allowed to call (WP-B/WP-D/WP-G). Per-session content is served
+	// via the cookie-authed `/preview/<sid>/...` route, which is not
+	// reachable from the agent.
+	if (pathname === "/api/preview/mount" && m === "POST") return true;
 	// Image generation: handler enforces session-scope ownership against sandboxScope
 	// (rejects with 403 if body.sessionId is missing or outside scope).
 	if (pathname === "/api/image-generation/generate" && m === "POST") return true;

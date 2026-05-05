@@ -21,15 +21,35 @@ import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog }
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { setSelectedWorkflowId } from "./render.js";
+import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./render.js";
+import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
-import { invalidateProjectScopeConfig } from "./settings-page.js";
+// settings-page is dynamic-imported lazily below to keep it out of the main chunk.
+// See docs/design/ui-bundle-size-reduction.md (Task A).
+async function invalidateProjectScopeConfig(projectId: string): Promise<void> {
+	const m = await import("./settings-page.js");
+	m.invalidateProjectScopeConfig(projectId);
+}
 import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+
+/**
+ * Extract the markdown body field from a proposal's fields object.
+ * Used by the inline-comments hook to detect when a proposal_update
+ * actually rewrote the commentable body (vs. an idempotent re-emit).
+ */
+function extractProposalBody(
+	fields: Record<string, unknown> | undefined,
+	type: "goal" | "role" | "staff",
+): string {
+	if (!fields) return "";
+	if (type === "goal") return String((fields as any).spec ?? "");
+	return String((fields as any).prompt ?? "");
+}
 
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
@@ -241,24 +261,46 @@ const goalDraft = createDraftManager({
 		goalAssistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
+		let dismissed = false;
 		if (draft.activeGoalProposal) {
-			state.activeProposals.goal = {
-				sessionId: _sessionId,
-				fields: draft.activeGoalProposal as Record<string, unknown>,
-				streaming: false,
-				rev: 1,
-			};
+			const fields = draft.activeGoalProposal as Record<string, unknown>;
+			if (isProposalDismissedTyped(_sessionId, "goal", fields)) {
+				// User previously dismissed this proposal — keep the draft on disk
+				// (so future edit_proposal events can rehydrate it) but don't
+				// re-open the panel or re-populate the proposal-mirror preview
+				// fields on reload.
+				delete state.activeProposals.goal;
+				dismissed = true;
+			} else {
+				state.activeProposals.goal = {
+					sessionId: _sessionId,
+					fields,
+					streaming: false,
+					rev: 1,
+				};
+			}
 		} else {
 			delete state.activeProposals.goal;
 		}
-		state.previewTitle = draft.previewTitle ?? "";
-		state.previewSpec = draft.previewSpec ?? "";
-		state.previewCwd = draft.previewCwd ?? "";
-		state.previewProjectId = draft.previewProjectId ?? "";
-		state.previewTitleEdited = draft.previewTitleEdited ?? false;
-		state.previewSpecEdited = draft.previewSpecEdited ?? false;
-		state.previewCwdEdited = draft.previewCwdEdited ?? false;
-		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		if (dismissed) {
+			state.previewTitle = "";
+			state.previewSpec = "";
+			state.previewCwd = draft.previewCwd ?? "";
+			state.previewProjectId = draft.previewProjectId ?? "";
+			state.previewTitleEdited = false;
+			state.previewSpecEdited = false;
+			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.assistantHasProposal = false;
+		} else {
+			state.previewTitle = draft.previewTitle ?? "";
+			state.previewSpec = draft.previewSpec ?? "";
+			state.previewCwd = draft.previewCwd ?? "";
+			state.previewProjectId = draft.previewProjectId ?? "";
+			state.previewTitleEdited = draft.previewTitleEdited ?? false;
+			state.previewSpecEdited = draft.previewSpecEdited ?? false;
+			state.previewCwdEdited = draft.previewCwdEdited ?? false;
+			state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		}
 		state.assistantTab = draft.goalAssistantTab ?? "chat";
 	},
 });
@@ -293,27 +335,48 @@ const roleDraft = createDraftManager({
 		roleAssistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
+		let dismissed = false;
 		if (draft.activeRoleProposal) {
-			state.activeProposals.role = {
-				sessionId: _sessionId,
-				fields: draft.activeRoleProposal as Record<string, unknown>,
-				streaming: false,
-				rev: 1,
-			};
+			const fields = draft.activeRoleProposal as Record<string, unknown>;
+			if (isProposalDismissedTyped(_sessionId, "role", fields)) {
+				delete state.activeProposals.role;
+				dismissed = true;
+			} else {
+				state.activeProposals.role = {
+					sessionId: _sessionId,
+					fields,
+					streaming: false,
+					rev: 1,
+				};
+			}
 		} else {
 			delete state.activeProposals.role;
 		}
-		state.rolePreviewName = draft.previewName ?? "";
-		state.rolePreviewLabel = draft.previewLabel ?? "";
-		state.rolePreviewPrompt = draft.previewPrompt ?? "";
-		state.rolePreviewTools = draft.previewTools ?? "";
-		state.rolePreviewAccessory = draft.previewAccessory ?? "none";
-		state.rolePreviewNameEdited = draft.previewNameEdited ?? false;
-		state.rolePreviewLabelEdited = draft.previewLabelEdited ?? false;
-		state.rolePreviewPromptEdited = draft.previewPromptEdited ?? false;
-		state.rolePreviewToolsEdited = draft.previewToolsEdited ?? false;
-		state.rolePreviewAccessoryEdited = draft.previewAccessoryEdited ?? false;
-		state.assistantHasProposal = draft.hasReceivedRoleProposal ?? false;
+		if (dismissed) {
+			state.rolePreviewName = "";
+			state.rolePreviewLabel = "";
+			state.rolePreviewPrompt = "";
+			state.rolePreviewTools = "";
+			state.rolePreviewAccessory = "none";
+			state.rolePreviewNameEdited = false;
+			state.rolePreviewLabelEdited = false;
+			state.rolePreviewPromptEdited = false;
+			state.rolePreviewToolsEdited = false;
+			state.rolePreviewAccessoryEdited = false;
+			state.assistantHasProposal = false;
+		} else {
+			state.rolePreviewName = draft.previewName ?? "";
+			state.rolePreviewLabel = draft.previewLabel ?? "";
+			state.rolePreviewPrompt = draft.previewPrompt ?? "";
+			state.rolePreviewTools = draft.previewTools ?? "";
+			state.rolePreviewAccessory = draft.previewAccessory ?? "none";
+			state.rolePreviewNameEdited = draft.previewNameEdited ?? false;
+			state.rolePreviewLabelEdited = draft.previewLabelEdited ?? false;
+			state.rolePreviewPromptEdited = draft.previewPromptEdited ?? false;
+			state.rolePreviewToolsEdited = draft.previewToolsEdited ?? false;
+			state.rolePreviewAccessoryEdited = draft.previewAccessoryEdited ?? false;
+			state.assistantHasProposal = draft.hasReceivedRoleProposal ?? false;
+		}
 		state.assistantTab = draft.roleAssistantTab ?? "chat";
 	},
 });
@@ -338,19 +401,26 @@ const projectDraft = createDraftManager({
 		assistantTab: state.assistantTab,
 	}),
 	restore: (_sessionId, draft: any) => {
+		let dismissed = false;
 		if (draft.activeProjectProposal) {
 			const p = draft.activeProjectProposal as any;
-			state.activeProposals.project = {
-				sessionId: p.sessionId,
-				fields: p.fields ?? {},
-				mode: p.mode,
-				streaming: typeof p.streaming === "boolean" ? p.streaming : false,
-				rev: typeof p.rev === "number" ? p.rev : 1,
-			};
+			const fields = (p.fields ?? {}) as Record<string, unknown>;
+			if (isProposalDismissedTyped(_sessionId, "project", fields)) {
+				delete state.activeProposals.project;
+				dismissed = true;
+			} else {
+				state.activeProposals.project = {
+					sessionId: p.sessionId,
+					fields,
+					mode: p.mode,
+					streaming: typeof p.streaming === "boolean" ? p.streaming : false,
+					rev: typeof p.rev === "number" ? p.rev : 1,
+				};
+			}
 		} else {
 			delete state.activeProposals.project;
 		}
-		state.assistantHasProposal = draft.hasReceivedProposal ?? false;
+		state.assistantHasProposal = dismissed ? false : (draft.hasReceivedProposal ?? false);
 		state.assistantTab = draft.assistantTab ?? "chat";
 	},
 });
@@ -742,10 +812,26 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			: sessionData?.staffAssistant ? "staff"
 			: null);
 		state.assistantTab = "chat";
-		state.assistantHasProposal = false;
-		delete state.activeProposals.goal;
-		delete state.activeProposals.role;
-		delete state.activeProposals.staff;
+		// Drop proposal slots that belong to OTHER sessions only. The previous
+		// behaviour was an unconditional `delete`, but the fast-path reuses the
+		// existing WebSocket — so no fresh `proposal_update {source:"rehydrate"}`
+		// frame ever arrives to repopulate the slot. The result was a visible
+		// goal-proposal panel with empty content (and any in-memory inline
+		// annotations re-anchoring as orphans because their referenced text
+		// disappeared). Mirrors the slow-path guard at the bottom of
+		// connectToSession (~line 1675).
+		for (const t of ["goal", "role", "staff"] as const) {
+			const slot = state.activeProposals[t];
+			if (slot && slot.sessionId !== sessionId) {
+				delete state.activeProposals[t];
+			}
+		}
+		// Recompute hasProposal from what's left.
+		state.assistantHasProposal =
+			(state.activeProposals.goal != null && state.activeProposals.goal.sessionId === sessionId)
+			|| (state.activeProposals.role != null && state.activeProposals.role.sessionId === sessionId)
+			|| (state.activeProposals.staff != null && state.activeProposals.staff.sessionId === sessionId)
+			|| (state.activeProposals.project != null && state.activeProposals.project.sessionId === sessionId);
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
@@ -758,7 +844,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewSpecEdited = false;
 		state.previewCwdEdited = false;
 		state.isPreviewSession = sessionData?.preview || false;
-		state.previewPanelHtml = "";
+		state.previewPanelMtime = 0;
+		state.previewPanelEntry = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -809,6 +896,33 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		refreshGitStatusForSession(sessionId);
 		refreshBgProcessesForSession(sessionId);
 		startGitStatusPoll(sessionId);
+
+		// Re-fetch proposal drafts for this session. The slow path (fresh
+		// connect) gets these via the WS-auth `proposal_update {source:"rehydrate"}`
+		// broadcast, but the fast path reuses the existing WebSocket so that
+		// broadcast never fires — leaving the proposal slot empty after a
+		// switch-away/back round-trip even though the on-disk draft still
+		// has the user's spec. Fire-and-forget; the unified onProposal
+		// callback consumes the resulting events identically to the
+		// auth-time path.
+		rehydrateProposalsForSession(sessionId).catch((err) => {
+			console.warn("[session-manager] proposal rehydrate failed:", err);
+		});
+
+		// Restore goal/role/project assistant draft state. The slow path
+		// runs these inside its draft-restore promise; the fast path skipped
+		// them which left state.previewSpec / state.rolePreviewPrompt empty
+		// after switch-away/back, breaking the assistant preview panel
+		// (and inline-comment annotation anchoring against an empty body).
+		if (state.assistantType === "goal") {
+			restoreGoalDraft(sessionId).catch((err) => {
+				console.warn("[session-manager] fast-path goal draft restore failed:", err);
+			});
+		} else if (state.assistantType === "role") {
+			restoreRoleDraft(sessionId).catch((err) => {
+				console.warn("[session-manager] fast-path role draft restore failed:", err);
+			});
+		}
 
 		return;
 	}
@@ -1056,6 +1170,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Slice E: state.activeProposals.goal is owned by the unified
 				// onProposal callback (which runs before us with mergeFields).
 				// Legacy callback only handles form-mirror state + summarisation.
+				// First-emit dismissal short-circuit — if the unified callback
+				// just bailed because the user previously dismissed an identical
+				// proposal, don't re-populate the form-mirror preview fields.
+				if (
+					!state.activeProposals.goal &&
+					isProposalDismissedTyped(sessionId, "goal", proposal as unknown as Record<string, unknown>)
+				) {
+					return;
+				}
 				if (!state.previewTitleEdited) state.previewTitle = proposal.title;
 				if (!state.previewCwdEdited && proposal.cwd) state.previewCwd = proposal.cwd;
 				if (!state.previewSpecEdited) state.previewSpec = proposal.spec;
@@ -1098,6 +1221,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		remote.onRoleProposal = (proposal, _streaming = false) => {
 			if (activeSessionId() !== sessionId) return;
 			// Slice E: state.activeProposals.role owned by unified onProposal.
+			// First-emit dismissal short-circuit — mirror goal handling so a
+			// rehydrate of a dismissed role proposal doesn't repopulate form
+			// fields.
+			if (
+				!state.activeProposals.role &&
+				isProposalDismissedTyped(sessionId, "role", proposal as unknown as Record<string, unknown>)
+			) {
+				return;
+			}
 			if (!state.rolePreviewNameEdited) state.rolePreviewName = proposal.name;
 			if (!state.rolePreviewLabelEdited) state.rolePreviewLabel = proposal.label;
 			if (!state.rolePreviewPromptEdited) state.rolePreviewPrompt = proposal.prompt;
@@ -1185,6 +1317,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (activeSessionId() !== sessionId) return;
 			if (fields === null) {
 				// proposal_cleared event from DELETE / accept
+				if (type === "goal" || type === "role" || type === "staff") {
+					clearProposalAnnotations(sessionId, type);
+					resetProposalAnnCount(type);
+				}
 				delete state.activeProposals[type];
 				// Recompute assistantHasProposal across remaining slots.
 				state.assistantHasProposal = Object.keys(state.activeProposals).length > 0;
@@ -1195,6 +1331,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const prev = state.activeProposals[type];
 			const merged = plugin.mergeFields(prev?.fields ?? {}, fields);
 			const isFirstEmit = prev == null;
+			// Inline-comments: a new proposal body invalidates any pending
+			// annotations because character offsets won't survive a rewrite.
+			// Only fires for goal/role/staff and only on a true content change
+			// (not the idempotent shallow-merge re-emit).
+			if ((type === "goal" || type === "role" || type === "staff") && !isFirstEmit) {
+				const oldBody = extractProposalBody(prev?.fields, type);
+				const newBody = extractProposalBody(merged, type);
+				if (oldBody !== newBody) {
+					clearProposalAnnotations(sessionId, type);
+					resetProposalAnnCount(type);
+					showProposalToast("Proposal updated — comments cleared");
+				}
+			}
 			// First-emit dismissal short-circuit — generalised from the goal-only
 			// check at session-manager.ts:1062. Skip this only when (a) it's the
 			// very first emit for this slot AND (b) the user previously dismissed
@@ -1317,7 +1466,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
-		state.previewPanelHtml = ""; // Clear stale preview from previous session
+		state.previewPanelMtime = 0;
+		state.previewPanelEntry = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -1531,10 +1681,30 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// in parallel. Draft restores must complete before we unlock proposal
 		// checking, but they don't depend on refreshSessions.
 		const draftRestorePromise = (async () => {
-			// Clear stale proposals for non-matching assistant types or sessions
-			if (state.assistantType !== "goal") delete state.activeProposals.goal;
-			if (state.assistantType !== "role") delete state.activeProposals.role;
-			if (state.assistantType !== "staff") delete state.activeProposals.staff;
+			// Clear stale proposals for non-matching assistant types or sessions.
+			// IMPORTANT: only clear when the slot does NOT belong to the current
+			// session. The unified `onProposal` handler buffers `proposal_update`
+			// events received between WS-connect and callback-wiring (see
+			// remote-agent.ts), so by the time this draft-restore runs, the
+			// rehydrate-on-attach broadcast for the CURRENT session may have
+			// already populated the slot. Blindly deleting it here drops the
+			// rehydrated state for non-assistant sessions — the exact regression
+			// covered by the proposal-types parity restart-survival E2E tests.
+			// Mirror the project-slot pattern below: keep the slot when it's
+			// scoped to this session, drop it only when it's left over from a
+			// different session.
+			if (state.assistantType !== "goal") {
+				const slot = state.activeProposals.goal;
+				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.goal;
+			}
+			if (state.assistantType !== "role") {
+				const slot = state.activeProposals.role;
+				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.role;
+			}
+			if (state.assistantType !== "staff") {
+				const slot = state.activeProposals.staff;
+				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.staff;
+			}
 			// Project proposal is scoped to the originating session and transient
 			// for non-assistant sessions — mirrors the goal-proposal model. The
 			// project-assistant branch below handles persistence for that session
@@ -2087,6 +2257,51 @@ async function refreshBgProcessesForSession(sessionId: string): Promise<void> {
 			ai.bgProcesses = data.processes || [];
 		}
 	} catch { /* ignore */ }
+}
+
+/**
+ * One-shot REST equivalent of the WS `proposal_update {source:"rehydrate"}`
+ * broadcast that fires on auth. Used by the connectToSession fast-path
+ * (cached chatPanel reuse) which doesn't trigger a fresh WS auth and
+ * therefore never receives the broadcast.
+ *
+ * Fetches all proposal drafts the server has on disk for the session
+ * and dispatches them through the active remoteAgent's `onProposal`
+ * handler — same code path as the auth-time rehydrate, so the unified
+ * `onProposal` callback in setupSessionSubscription consumes them
+ * identically.
+ */
+/**
+ * One-shot REST equivalent of the WS `proposal_update {source:"rehydrate"}`
+ * broadcast that fires on auth. Used by the connectToSession fast-path
+ * (cached chatPanel reuse) which doesn't trigger a fresh WS auth and
+ * therefore never receives the broadcast.
+ *
+ * Fetches all proposal drafts the server has on disk for the session
+ * and dispatches them through the active remoteAgent's `onProposal`
+ * handler — same code path as the auth-time rehydrate, so the unified
+ * `onProposal` callback in connectToSession consumes them identically.
+ */
+async function rehydrateProposalsForSession(sessionId: string): Promise<void> {
+	if (activeSessionId() !== sessionId) return;
+	const remote = state.remoteAgent;
+	if (!remote) return;
+	try {
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/proposals`);
+		if (!res.ok) return;
+		const body = await res.json() as {
+			proposals: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }>;
+		};
+		if (activeSessionId() !== sessionId) return;
+		const onProposal = remote.onProposal;
+		if (!onProposal) return;
+		for (const p of body.proposals) {
+			if (p.proposalType === "goal" || p.proposalType === "role" || p.proposalType === "staff"
+				|| p.proposalType === "project" || p.proposalType === "tool") {
+				onProposal(p.proposalType, p.fields, false, p.rev);
+			}
+		}
+	} catch { /* best-effort */ }
 }
 
 async function killBgProcess(sessionId: string, processId: string): Promise<void> {

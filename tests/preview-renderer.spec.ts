@@ -35,6 +35,7 @@ async function gotoAndWait(page: any) {
 }
 
 const MARKER = "__preview_snapshot_v1__\n";
+const MARKER_V2 = "__preview_snapshot_v2__\n";
 const SESSION_ID = "11111111-1111-1111-1111-111111111111";
 const TOOL_USE_ID = "tool-1";
 
@@ -47,6 +48,20 @@ function makeResultWithSnapshot(html: string) {
 		content: [
 			{ type: "text", text: "Preview panel is open and will auto-update." },
 			{ type: "text", text: MARKER + html },
+		],
+		timestamp: Date.now(),
+	};
+}
+
+function makeFileResultWithSnapshot(filePath: string) {
+	return {
+		role: "toolResult",
+		toolCallId: TOOL_USE_ID,
+		toolName: "preview_open",
+		isError: false,
+		content: [
+			{ type: "text", text: "Preview panel is open and will auto-update." },
+			{ type: "text", text: MARKER_V2 + JSON.stringify({ kind: "file", path: filePath }) + "\n" },
 		],
 		timestamp: Date.now(),
 	};
@@ -172,7 +187,7 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(JSON.parse(calls[0].body)).toEqual({ preview: true });
 
 		expect(calls[1].method).toBe("POST");
-		expect(calls[1].url).toContain(`/api/preview?sessionId=${SESSION_ID}`);
+		expect(calls[1].url).toContain(`/api/preview/mount?sessionId=${SESSION_ID}`);
 		const postBody = JSON.parse(calls[1].body);
 		expect(postBody.html).toBe(html);
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
@@ -216,6 +231,54 @@ test.describe("PreviewOpenRenderer", () => {
 		const postBody = JSON.parse(calls[2].body);
 		expect(postBody.html).toBe(fullHtml);
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
+	});
+
+	test("v2 marker: click POSTs {kind:file, path} and shows Opened", async ({ page }) => {
+		await gotoAndWait(page);
+		const filePath = "/abs/path/to/report.html";
+		await page.evaluate(
+			([params, result]) => {
+				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__resetFetchCalls();
+			},
+			[{ file: filePath }, makeFileResultWithSnapshot(filePath)],
+		);
+
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.length).toBe(2);
+		expect(calls[0].method).toBe("PATCH");
+		expect(calls[1].method).toBe("POST");
+		expect(calls[1].url).toContain(`/api/preview/mount?sessionId=${SESSION_ID}`);
+		const postBody = JSON.parse(calls[1].body);
+		expect(postBody.file).toBe(filePath);
+		expect(postBody.html).toBeUndefined();
+		expect(postBody.kind).toBeUndefined();
+	});
+
+	test("v2 marker: server 404 → button shows 'File no longer available' and stays disabled", async ({ page }) => {
+		await gotoAndWait(page);
+		const filePath = "/abs/path/to/gone.html";
+		await page.evaluate(
+			([params, result]) => {
+				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__setFetchResponse((url: string, init: any) => {
+					if (init?.method === "POST" && String(url).includes("/api/preview")) {
+						return { status: 404, body: { error: "file no longer available" } };
+					}
+					return { status: 200, body: { ok: true } };
+				});
+				(window as any).__resetFetchCalls();
+			},
+			[{ file: filePath }, makeFileResultWithSnapshot(filePath)],
+		);
+
+		await page.locator("[data-preview-open-btn]").click();
+		const btn = page.locator("[data-preview-open-btn]");
+		await expect(btn).toHaveText(/File no longer available/, { timeout: 3000 });
+		await expect(btn).toBeDisabled();
 	});
 
 	test("click error: shows 'Failed — retry' and re-enables button", async ({ page }) => {

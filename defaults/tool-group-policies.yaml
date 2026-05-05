@@ -24,3 +24,11 @@ mcp__playwright: never
 # Banana/Gemini. The external nano-banana MCP hard-codes provider behavior and
 # can drift from the configured session image model.
 mcp__nano-banana: never
+# Team management tools (team_spawn, team_dismiss, team_prompt, team_steer,
+# team_abort, team_complete, team_list) are team-lead-only. The team-lead role
+# overrides this group default with `Team: allow`. For non-team-lead agents,
+# `never` strips the tools from their allowedTools (and from their tool-docs
+# system prompt), avoiding context bloat and removing the temptation to spawn
+# agents from a worker session — where the tool wouldn't work anyway because
+# the team extension is only loaded for the team-lead session.
+Team: never

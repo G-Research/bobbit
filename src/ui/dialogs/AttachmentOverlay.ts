@@ -1,12 +1,34 @@
 import "@mariozechner/mini-lit/dist/ModeToggle.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { renderAsync } from "docx-preview";
 import { html, LitElement } from "lit";
 import { state } from "lit/decorators.js";
 import { Download, X } from "lucide";
-import * as pdfjsLib from "pdfjs-dist";
 import type { Attachment } from "../utils/attachment-utils.js";
+
+// Lazy-loaded heavy deps — keep pdfjs/docx-preview out of the main bundle.
+type PdfjsModule = typeof import("pdfjs-dist");
+let _pdfjsPromise: Promise<PdfjsModule> | null = null;
+async function loadPdfjs(): Promise<PdfjsModule> {
+	if (!_pdfjsPromise) {
+		_pdfjsPromise = import("pdfjs-dist").then((mod) => {
+			mod.GlobalWorkerOptions.workerSrc = new URL(
+				"pdfjs-dist/build/pdf.worker.min.mjs",
+				import.meta.url,
+			).toString();
+			return mod;
+		});
+	}
+	return _pdfjsPromise;
+}
+
+let _docxPreviewPromise: Promise<typeof import("docx-preview")> | null = null;
+async function loadDocxPreview(): Promise<typeof import("docx-preview")> {
+	if (!_docxPreviewPromise) {
+		_docxPreviewPromise = import("docx-preview");
+	}
+	return _docxPreviewPromise;
+}
 import { i18n } from "../utils/i18n.js";
 
 type FileType = "image" | "pdf" | "docx" | "pptx" | "text";
@@ -291,6 +313,7 @@ export class AttachmentOverlay extends LitElement {
 		let pdf: any = null;
 
 		try {
+			const pdfjsLib = await loadPdfjs();
 			// Convert base64 to ArrayBuffer
 			const arrayBuffer = this.base64ToArrayBuffer(this.attachment.content);
 
@@ -369,6 +392,7 @@ export class AttachmentOverlay extends LitElement {
 		if (!container || !this.attachment) return;
 
 		try {
+			const { renderAsync } = await loadDocxPreview();
 			// Convert base64 to ArrayBuffer
 			const arrayBuffer = this.base64ToArrayBuffer(this.attachment.content);
 

@@ -387,7 +387,7 @@ export default function (pi: ExtensionAPI) {
 						]);
 						const info = waitResult.info;
 						if (waitResult.aborted) {
-							return text(`Process ${hdr} wait interrupted by steer. Use 'logs' or 'wait' again to continue monitoring.`);
+							return text(`Process ${hdr} wait interrupted by steer.\n\nThe user has new instructions for you. End your turn now WITHOUT generating further text or tool calls so the steered message can be processed. Do not summarise, do not acknowledge — just stop. The bg process is still running; you can resume monitoring with 'logs' or 'wait' after acting on the steer.`);
 						}
 						if (waitResult.timedOut) {
 							return text(`Process ${hdr} still running after ${waitSec}s (pid=${info.pid}, status=${info.status}). Use "logs", "grep", or "kill" to manage it.`);

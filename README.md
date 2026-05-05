@@ -64,6 +64,8 @@ npm run build     # compile server + bundle UI
 npm start         # start gateway on :3001
 ```
 
+The UI build enforces a **600 kB gzipped budget** on the main `index-*.js` chunk (and 500 kB per non-worker chunk) via `tests/bundle-size.test.ts`. Run `npm run test:bundle` to build and assert in one shot. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md) for the route-splitting and lazy-loading patterns that keep the bundle small.
+
 ### From global install
 
 ```bash

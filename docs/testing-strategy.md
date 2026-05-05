@@ -52,7 +52,7 @@ Prompt interaction user stories (PI-01 through PI-25 plus sub-stories, defined i
 | `git-status-interactions.spec.ts` | PI-19 | Git status widget expand/collapse, file list, action buttons |
 | `bg-process-states.spec.ts` | PI-20 | Background process pill states, log popup |
 | `abort-and-focus.spec.ts` | PI-21, PI-24 | Abort streaming (Stop button + Escape), textarea focus management |
-| `queue-dispatch.spec.ts` | PI-25, PI-21b | PromptQueue batching, resetDispatched, dequeueAllSteered, force-kill recovery, aborting status |
+| `queue-dispatch.spec.ts` | PI-25, PI-21b | PromptQueue batching, `dequeueAllSteered`, `enqueueAtFront`, force-kill recovery via shadow-ledger reconciliation, aborting status |
 | `draft-persistence.spec.ts` | PI-04b, PI-04c | Draft flush promise return, rAF retry replacing queueMicrotask |
 | `review-annotation-focus.spec.ts` | PI-24b | Focus restoration to message editor after annotation cancel |
 
@@ -417,6 +417,17 @@ The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt.
 ### Tier 2.5 — opt-in video capture
 
 A layer **on top of** Tier 2 browser E2E. Tests opt in by importing `tests/e2e/ui/fixtures.ts` (instead of `../gateway-harness.js`) and sprinkling `await rec.capture(label)` at user-visible moments; running with `RECORDSCREEN=1` produces a self-contained scrubbable HTML report at `tests/results/tier-2-5/report.html` (per-test WebM + thumbnail strip). Default off; zero overhead when `RECORDSCREEN` is unset. See [docs/testing-tier-2-5.md](testing-tier-2-5.md).
+
+### Tail-chat / scroll-pin assertions
+
+The tail-chat E2E suite (`tests/e2e/ui/tail-chat-*.spec.ts`) covers the user-facing contract "if I am at the bottom when content arrives, I stay at the bottom" across streaming bursts, tool-result expansion, session-navigate, image / iframe reflows, and user-scroll-up release. The suite exists as its own pattern because the chat scroll surface is uniquely susceptible to test illusions:
+
+- **Outcome-only assertions.** Helpers in `tests/e2e/ui/tail-chat-helpers.ts` — `expectLatestMessagePinned` and `disableScrollAnchoring` — read only `getBoundingClientRect()` of the last rendered message vs the scroll container. Tests must NEVER assert on `_stickToBottom`, `_programmaticEchoes`, `_settleWindowActive`, or any other private field. The previous suite's private-field assertions kept passing even after production paths were neutered to no-ops; the rewritten suite proved sensitive to each path being broken (see the sensitivity matrix in [docs/design/tail-chat-redesign.md](design/tail-chat-redesign.md#outcome-of-the-redesign)).
+- **Force Chromium ≡ Safari.** Always call `disableScrollAnchoring(page)` at the top of a tail-chat test. CSS `overflow-anchor` is Chromium-only; without disabling it inside the test scope, Chromium's default `auto` transparently masks broken JS pin behaviour. Production also sets `overflow-anchor: none` on `agent-interface .overflow-y-auto`, but the helper is belt-and-braces against any nested `auto` reset.
+- **Drive real preconditions.** Use `STREAM_BURST:N`, `STAY_BUSY:Nms`, real tool-result rendering, and *trusted* `page.mouse.wheel` events. Never `dispatchEvent(new WheelEvent)`, never poke `_stickToBottom`, never seed the echo buffer. The canonical pattern is `tests/e2e/ui/tail-chat-real-stream.spec.ts`.
+- **Opt into Tier 2.5 video.** Tail-chat regressions are easiest to diagnose visually; importing `fixtures.ts` and sprinkling `rec.capture("after-burst")` lets a reviewer scrub the failure in seconds when `RECORDSCREEN=1`.
+
+If a test needs a new fact, add a named outcome helper to `tail-chat-helpers.ts` rather than reaching through to a private field. The chat scroll lock contract is documented in [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant).
 
 ## Manual Integration Tests
 

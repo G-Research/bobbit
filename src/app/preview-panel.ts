@@ -1,43 +1,91 @@
-import { gatewayFetch } from "./api.js";
 import { state, renderApp, activeSessionId } from "./state.js";
 
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-let lastMtime = 0;
+// WP-E: SSE subscription to per-session preview mount events.
+// The gateway watches <stateDir>/preview/<sid>/ and emits a `preview-changed`
+// event whenever the agent rewrites the entry file or any sibling asset.
+// We bump `previewPanelMtime` to force the iframe to reload via `#mtime=<n>`.
 
-/** Start polling preview-{sessionId}.html for changes. */
-export function startPreviewPolling(): void {
-	if (pollTimer) return;
-	lastMtime = 0;
-	pollNow();
-	pollTimer = setInterval(pollNow, 1000);
-}
+let es: EventSource | null = null;
+let currentSid: string | null = null;
 
-/** Stop polling. */
-export function stopPreviewPolling(): void {
-	if (pollTimer) {
-		clearInterval(pollTimer);
-		pollTimer = null;
-	}
-	lastMtime = 0;
-}
+/** Start an SSE subscription to preview-events for the given session. */
+export function startPreviewSubscription(sessionId: string): void {
+	stopPreviewSubscription();
+	currentSid = sessionId;
 
-async function pollNow(): Promise<void> {
-	if (!state.isPreviewSession) {
-		stopPreviewPolling();
-		return;
-	}
-	try {
-		const sessionId = activeSessionId();
-		const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
-		const res = await gatewayFetch(`/api/preview${qs}`);
-		if (!res.ok) return;
-		const data = await res.json();
-		if (data.mtime && data.mtime !== lastMtime && data.html) {
-			lastMtime = data.mtime;
-			state.previewPanelHtml = data.html;
+	// Bootstrap: GET the current mount state so the iframe can render
+	// immediately on session-select instead of waiting for the next
+	// preview-changed event. 404 = no mount yet (skip).
+	void (async () => {
+		try {
+			const r = await fetch(
+				`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`,
+				{ credentials: "include" },
+			);
+			if (!r.ok) return;
+			if (currentSid !== sessionId) return; // session switched mid-flight
+			const data = await r.json();
+			if (typeof data?.entry === "string" && data.entry) {
+				state.previewPanelEntry = data.entry;
+			}
+			if (typeof data?.mtime === "number") {
+				state.previewPanelMtime = data.mtime;
+			}
 			renderApp();
-		}
+		} catch { /* ignore bootstrap failures */ }
+	})();
+
+	try {
+		es = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/preview-events`, {
+			withCredentials: true,
+		});
+		es.addEventListener("preview-changed", (ev: MessageEvent) => {
+			try {
+				const data = JSON.parse(ev.data);
+				if (typeof data?.entry === "string" && data.entry) {
+					state.previewPanelEntry = data.entry;
+				}
+				if (typeof data?.mtime === "number") {
+					state.previewPanelMtime = data.mtime;
+				} else {
+					state.previewPanelMtime = Date.now();
+				}
+				renderApp();
+			} catch {
+				/* ignore malformed events */
+			}
+		});
+		es.onerror = () => {
+			// EventSource auto-reconnects; nothing to do here.
+		};
 	} catch {
-		// ignore fetch errors
+		es = null;
 	}
 }
+
+/** Tear down the current SSE subscription. */
+export function stopPreviewSubscription(): void {
+	if (es) {
+		try { es.close(); } catch { /* noop */ }
+		es = null;
+	}
+	currentSid = null;
+}
+
+// --- Backwards-compat shims for legacy call sites ---
+//
+// session-manager.ts still imports `startPreviewPolling` / `stopPreviewPolling`
+// from this module. Re-export them as aliases for the SSE start/stop so we
+// don't have to touch session-manager (constraint: minimal diff).
+
+export function startPreviewPolling(): void {
+	const sid = activeSessionId();
+	if (!sid) return;
+	if (currentSid === sid && es) return;
+	startPreviewSubscription(sid);
+}
+
+export function stopPreviewPolling(): void {
+	stopPreviewSubscription();
+}
+

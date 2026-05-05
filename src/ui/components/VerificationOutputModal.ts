@@ -6,7 +6,7 @@
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 import { getVerificationEventKey } from "../../app/verification-event-bus.js";
 
@@ -46,6 +46,7 @@ export class VerificationOutputModal extends LitElement {
 	override createRenderRoot() { return this; }
 
 	override connectedCallback() {
+		ensureMarkdownBlock();
 		super.connectedCallback();
 		this._abortCtrl = new AbortController();
 		const signal = this._abortCtrl.signal;

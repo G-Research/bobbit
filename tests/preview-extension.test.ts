@@ -1,7 +1,8 @@
 /**
- * Unit tests for the `preview_open` tool extension — specifically that a
- * successful execute() returns a two-block tool_result with a snapshot block
- * containing the resolved HTML prefixed with the versioned marker.
+ * Unit tests for the `preview_open` tool extension — v3 mount-endpoint contract.
+ *
+ * The extension always POSTs to /api/preview/mount?sessionId=<sid> with one of
+ * {html} or {file:absolutePath}, then stamps a v3 marker block into the result.
  */
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -9,7 +10,11 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import extensionFactory from "../defaults/tools/html/extension.ts";
-import { PREVIEW_SNAPSHOT_MARKER } from "../defaults/tools/html/snapshot.ts";
+import {
+	PREVIEW_SNAPSHOT_MARKER_V3,
+	parseSnapshot,
+	buildPreviewSnapshotV3Block,
+} from "../defaults/tools/html/snapshot.ts";
 
 type ToolReg = {
 	name: string;
@@ -20,16 +25,35 @@ const registered: ToolReg[] = [];
 const pi = { registerTool: (t: ToolReg) => { registered.push(t); } } as any;
 
 let origFetch: typeof fetch;
+let fetchResponder: ((url: string, init: any) => { status: number; body: any }) | null = null;
 const fetchCalls: Array<{ url: string; init: any }> = [];
+
+const SID = "11111111-1111-1111-1111-111111111111";
 
 before(() => {
 	process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:1/";
 	process.env.BOBBIT_TOKEN = "test-token";
-	process.env.BOBBIT_SESSION_ID = "11111111-1111-1111-1111-111111111111";
+	process.env.BOBBIT_SESSION_ID = SID;
 	origFetch = globalThis.fetch;
-	// Default: every fetch call is a 200 OK
+	// Default: every fetch call is a 200 OK with a v3-shaped mount response.
 	globalThis.fetch = (async (url: any, init: any) => {
 		fetchCalls.push({ url: String(url), init });
+		if (fetchResponder) {
+			const r = fetchResponder(String(url), init);
+			return new Response(JSON.stringify(r.body), { status: r.status });
+		}
+		// Default mount response.
+		if (String(url).includes("/api/preview/mount")) {
+			return new Response(
+				JSON.stringify({
+					url: `/preview/${SID}/inline.html`,
+					path: `/state/preview/${SID}/inline.html`,
+					entry: "inline.html",
+					mtime: 1714512345678,
+				}),
+				{ status: 200 },
+			);
+		}
 		return new Response(JSON.stringify({ ok: true }), { status: 200 });
 	}) as any;
 	extensionFactory(pi);
@@ -42,6 +66,7 @@ after(() => {
 
 beforeEach(() => {
 	fetchCalls.length = 0;
+	fetchResponder = null;
 });
 
 function getTool(): ToolReg {
@@ -50,71 +75,172 @@ function getTool(): ToolReg {
 	return t;
 }
 
-describe("preview_open extension", () => {
-	it("execute({html}) returns 2 blocks: status + snapshot (marker + html verbatim)", async () => {
+describe("preview_open extension (v3 mount contract)", () => {
+	it("execute({html}) PATCHes the session, POSTs /api/preview/mount with {html}, and returns a v3 snapshot", async () => {
 		const tool = getTool();
 		const rawHtml = "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>";
 		const res = await tool.execute("call-1", { html: rawHtml });
+
 		assert.strictEqual(res.content.length, 2);
 		assert.strictEqual(res.content[0].type, "text");
 		assert.match(res.content[0].text, /Preview panel is open/);
+
 		assert.strictEqual(res.content[1].type, "text");
-		assert.strictEqual(res.content[1].text, PREVIEW_SNAPSHOT_MARKER + rawHtml);
+		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const parsed = parseSnapshot(res.content[1].text);
+		assert.ok(parsed && parsed.kind === "preview");
+
+		// Body bytes must NEVER appear in the snapshot.
+		assert.ok(!res.content[1].text.includes("<h1>Hello</h1>"));
+
+		// Verify the wire calls.
+		const patches = fetchCalls.filter(c => c.init?.method === "PATCH");
+		assert.ok(patches.length >= 1, "expected at least one PATCH /api/sessions/:id");
+
+		const mountPosts = fetchCalls.filter(
+			c => c.init?.method === "POST" && String(c.url).includes("/api/preview/mount"),
+		);
+		assert.strictEqual(mountPosts.length, 1, "expected exactly one POST /api/preview/mount");
+		assert.match(String(mountPosts[0].url), /sessionId=/);
+		const body = JSON.parse(mountPosts[0].init.body);
+		assert.strictEqual(body.html, rawHtml);
+		assert.strictEqual(body.file, undefined);
 	});
 
-	it("execute({file}) stores file contents (not the path) in the snapshot", async () => {
+	it("execute({file}) sends absolute path to /api/preview/mount and returns a v3 snapshot", async () => {
 		const tool = getTool();
-		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-"));
-		const filePath = join(dir, "snap.html");
+		const dir = mkdtempSync(join(tmpdir(), "bobbit-preview-ext-v3-"));
+		const filePath = join(dir, "report.html");
 		const fileContents = "<!DOCTYPE html><body>from-disk</body>";
 		writeFileSync(filePath, fileContents, "utf-8");
+
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/report.html`,
+						path: filePath,
+						entry: "report.html",
+						mtime: 1714512345678,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
+
 		try {
 			const res = await tool.execute("call-2", { file: filePath });
+
 			assert.strictEqual(res.content.length, 2);
-			assert.strictEqual(res.content[1].text, PREVIEW_SNAPSHOT_MARKER + fileContents);
-			// Snapshot must NOT contain the file path literal
-			assert.ok(!res.content[1].text.includes(filePath));
+			assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+
+			// File contents are NEVER in the snapshot.
+			assert.ok(!res.content[1].text.includes("from-disk"));
+
+			const parsed = parseSnapshot(res.content[1].text);
+			assert.ok(parsed && parsed.kind === "preview");
+			if (parsed && parsed.kind === "preview") {
+				assert.match(parsed.url, /^\/preview\//);
+				assert.strictEqual(parsed.path, filePath);
+			}
+
+			const mountPosts = fetchCalls.filter(
+				c => c.init?.method === "POST" && String(c.url).includes("/api/preview/mount"),
+			);
+			assert.strictEqual(mountPosts.length, 1);
+			const body = JSON.parse(mountPosts[0].init.body);
+			assert.strictEqual(body.file, filePath);
+			assert.strictEqual(body.html, undefined);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("error (bad file path) returns a single status block, no snapshot", async () => {
+	it("execute({file}) with relative path resolves against process.cwd() before sending", async () => {
 		const tool = getTool();
-		const res = await tool.execute("call-3", { file: "/nonexistent/path/does-not-exist.html" });
-		assert.strictEqual(res.content.length, 1);
-		assert.strictEqual(res.content[0].type, "text");
-		assert.match(res.content[0].text, /Error reading file/);
+		// Pick a file that exists relative to cwd — package.json is fine.
+		await tool.execute("call-rel", { file: "package.json" });
+		const mountPosts = fetchCalls.filter(
+			c => c.init?.method === "POST" && String(c.url).includes("/api/preview/mount"),
+		);
+		assert.strictEqual(mountPosts.length, 1);
+		const body = JSON.parse(mountPosts[0].init.body);
+		assert.ok(body.file && body.file.length > 0, "file should be set");
+		assert.ok(
+			body.file.endsWith("package.json") && (body.file.startsWith("/") || /^[A-Za-z]:[\\/]/.test(body.file)),
+			`expected absolute path, got ${body.file}`,
+		);
 	});
 
-	it("error (no html/file provided) returns a single block, no snapshot", async () => {
+	it("error: no html/file → single block with no snapshot", async () => {
 		const tool = getTool();
-		const res = await tool.execute("call-4", {});
+		const res = await tool.execute("call-3", {});
 		assert.strictEqual(res.content.length, 1);
 		assert.match(res.content[0].text, /At least one of 'html' or 'file'/);
 	});
 
-	it("error path from HTTP PATCH failure returns a single block", async () => {
+	it("error: PATCH session failure surfaces error", async () => {
 		const tool = getTool();
-		const prevFetch = globalThis.fetch;
-		globalThis.fetch = (async () => new Response("nope", { status: 500 })) as any;
-		try {
-			const res = await tool.execute("call-5", { html: "<p>x</p>" });
-			assert.strictEqual(res.content.length, 1);
-			assert.match(res.content[0].text, /Error enabling preview mode|Error writing preview HTML|Error opening preview/);
-		} finally {
-			globalThis.fetch = prevFetch;
-		}
+		fetchResponder = (_url, init) => {
+			if (init?.method === "PATCH") return { status: 500, body: "server error" };
+			return { status: 200, body: { ok: true } };
+		};
+		const res = await tool.execute("call-4", { html: "<p>x</p>" });
+		assert.strictEqual(res.content.length, 1);
+		assert.match(res.content[0].text, /Error enabling preview mode/);
 	});
 
-	it("on success, PATCH then POST /api/preview are called", async () => {
+	it("error: mount endpoint 404 (file not found) surfaces verbatim with no snapshot", async () => {
 		const tool = getTool();
-		await tool.execute("call-6", { html: "<p>ok</p>" });
-		// At least 2 gateway calls: PATCH session, POST preview
-		const patches = fetchCalls.filter(c => c.init?.method === "PATCH");
-		const posts = fetchCalls.filter(c => c.init?.method === "POST");
-		assert.ok(patches.length >= 1, "expected at least one PATCH");
-		assert.ok(posts.length >= 1, "expected at least one POST");
-		assert.ok(posts.some(c => c.url.includes("/api/preview")), "POST should target /api/preview");
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return { status: 404, body: { error: "file not found" } };
+			}
+			return { status: 200, body: { ok: true } };
+		};
+		const res = await tool.execute("call-5", { file: "/nonexistent/path/does-not-exist.html" });
+		assert.strictEqual(res.content.length, 1);
+		assert.match(res.content[0].text, /Error opening preview/);
+		assert.match(res.content[0].text, /404/);
+	});
+
+	it("`html` wins when both `html` and `file` are provided", async () => {
+		const tool = getTool();
+		await tool.execute("call-both", { html: "<p>inline</p>", file: "/some/path.html" });
+		const mountPosts = fetchCalls.filter(
+			c => c.init?.method === "POST" && String(c.url).includes("/api/preview/mount"),
+		);
+		assert.strictEqual(mountPosts.length, 1);
+		const body = JSON.parse(mountPosts[0].init.body);
+		assert.strictEqual(body.html, "<p>inline</p>");
+		assert.strictEqual(body.file, undefined);
+	});
+
+	it("v3 marker block is constant-size and ≤ 250 bytes for typical session id + entry", async () => {
+		// Direct builder test — simulate a real (longest-realistic) host path.
+		const url = `/preview/${SID}/report.html`;
+		const hostPath =
+			"/Users/jane.developer/Library/Application Support/bobbit/state/preview/" +
+			SID +
+			"/report.html";
+		const block = buildPreviewSnapshotV3Block(url, hostPath);
+		assert.ok(
+			block.length <= 250,
+			`v3 block must be ≤ 250 bytes, got ${block.length} (${block})`,
+		);
+		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const parsed = parseSnapshot(block);
+		assert.ok(parsed && parsed.kind === "preview");
+	});
+
+	it("token cost: snapshot block is constant-size for huge HTML payloads", async () => {
+		const tool = getTool();
+		const huge = "<p>" + "x".repeat(100_000) + "</p>";
+		const res = await tool.execute("call-huge", { html: huge });
+		assert.strictEqual(res.content.length, 2);
+		// Snapshot block must NOT scale with input size.
+		assert.ok(res.content[1].text.length < 500, `snapshot was ${res.content[1].text.length} bytes`);
+		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 	});
 });

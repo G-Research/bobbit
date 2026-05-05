@@ -8,6 +8,8 @@ import path from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { isSetupComplete } from "./setup-status.js";
+export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
@@ -40,6 +42,8 @@ import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
+import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
+import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
@@ -65,8 +69,12 @@ import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImag
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
+import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import { handlePreviewRequest } from "./preview/content-route.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
+import * as previewMount from "./preview/mount.js";
+import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
@@ -90,6 +98,8 @@ import {
 	deleteProposalFile,
 	editProposalFile,
 	isProposalType,
+	latestRev,
+	listProposalFiles,
 	parseProposalFile,
 	readProposalFile,
 	restoreSnapshot,
@@ -572,6 +582,7 @@ export function createGateway(config: GatewayConfig) {
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
+	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
 		agentCliPath: config.agentCliPath,
 		systemPromptPath: config.systemPromptPath,
@@ -645,10 +656,22 @@ export function createGateway(config: GatewayConfig) {
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
+		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
+
+		// Content-origin preview route — served before API auth so iframe loads
+		// can authenticate via the bobbit_session cookie instead of the bearer
+		// token (iframes cannot set Authorization headers).
+		if (url.pathname.startsWith("/preview/")) {
+			await handlePreviewRequest(req, res, url.pathname, {
+				cookieStore,
+				isLocalhost: isLocalhostMode,
+				adminBearerToken: config.authToken,
+			});
+			return;
+		}
 
 		// API routes
 		if (url.pathname.startsWith("/api/")) {
-			const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
@@ -665,9 +688,14 @@ export function createGateway(config: GatewayConfig) {
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
 
+			// Cookie auth short-circuit — if the browser presents a known
+			// bobbit_session cookie, treat the request as admin-authenticated
+			// and skip the bearer-token check below.
+			const hasValidCookie = cookieTryAuth(req, cookieStore);
+
 			// Auth check — skipped in localhost mode (only local processes can connect)
 			let sandboxScope: SandboxScope | undefined;
-			if (!isLocalhostMode && !isPublicEndpoint) {
+			if (!isLocalhostMode && !isPublicEndpoint && !hasValidCookie) {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
 					: url.searchParams.get("token"); // Allow token in query param for links opened in new tabs
@@ -695,7 +723,17 @@ export function createGateway(config: GatewayConfig) {
 						return;
 					}
 					sandboxScope = scope;
+				} else {
+					// Successful admin Bearer auth — mint session cookie if absent
+					// so subsequent requests (including iframe content origin) can
+					// authenticate without the Bearer token leaking into URLs.
+					issueCookieIfMissing(req, res, cookieStore, { localhost: isLocalhostMode });
 				}
+			} else if (!isPublicEndpoint && isLocalhostMode) {
+				// Localhost mode: skip auth check, still mint the cookie so the
+				// browser can use the same cookie auth path on non-localhost
+				// deployments later (and the SSE endpoint below remains uniform).
+				issueCookieIfMissing(req, res, cookieStore, { localhost: true });
 			}
 
 			// Enforce sandbox route guard
@@ -1291,30 +1329,7 @@ export function createGateway(config: GatewayConfig) {
 	};
 }
 
-/** Check if project setup has been completed (sentinel exists or system-prompt.md has been customized). */
-function isSetupComplete(): boolean {
-	// Check sentinel file
-	const sentinelPath = path.join(bobbitStateDir(), "setup-complete");
-	if (fs.existsSync(sentinelPath)) return true;
-
-	// Check if system-prompt.md has been customized beyond the default template
-	const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
-	if (!fs.existsSync(systemPromptPath)) return false;
-
-	// Compare with default template — if the file differs, setup is considered done
-	const defaultTemplatePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults", "system-prompt.md");
-	if (!fs.existsSync(defaultTemplatePath)) {
-		// Can't find default template; if the file exists at all, assume customized
-		return true;
-	}
-	try {
-		const current = fs.readFileSync(systemPromptPath, "utf-8");
-		const defaultContent = fs.readFileSync(defaultTemplatePath, "utf-8");
-		return current.trim() !== defaultContent.trim();
-	} catch {
-		return false;
-	}
-}
+// isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
 
 /** Redact token values in sandbox config for API responses. Never send real secrets to the browser.
  *  `sandbox_tokens` is a structured array (post-native-YAML); other fields stay flat strings. */
@@ -1633,6 +1648,35 @@ async function handleApiRoute(
 			json({ ok: true });
 		} catch (err: any) {
 			json({ error: err.message }, 500);
+		}
+		return;
+	}
+
+	// POST /api/system-prompt/customise — copy shipped default to .bobbit/config/system-prompt.md
+	//   so the user can edit it. If the file already exists it is left unchanged.
+	//   Returns { path, created, content }.
+	if (url.pathname === "/api/system-prompt/customise" && req.method === "POST") {
+		const userPath = path.join(bobbitConfigDir(), "system-prompt.md");
+		const defaultPath = path.join(
+			path.dirname(fileURLToPath(import.meta.url)),
+			"defaults",
+			"system-prompt.md",
+		);
+		let created = false;
+		try {
+			if (!fs.existsSync(userPath)) {
+				if (!fs.existsSync(defaultPath)) {
+					json({ error: "Default system-prompt.md not found in install" }, 500);
+					return;
+				}
+				fs.mkdirSync(path.dirname(userPath), { recursive: true });
+				fs.copyFileSync(defaultPath, userPath);
+				created = true;
+			}
+			const content = fs.readFileSync(userPath, "utf-8");
+			json({ path: userPath, created, content });
+		} catch (err: any) {
+			json({ error: String(err?.message ?? err) }, 500);
 		}
 		return;
 	}
@@ -6443,6 +6487,11 @@ async function handleApiRoute(
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
+		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
+		// redundant initial `model_change` event with its hardcoded default.
+		if (ps.modelProvider && ps.modelId) {
+			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
 			createOpts.roleName = role.name;
@@ -6468,24 +6517,10 @@ async function handleApiRoute(
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
 		if (ps.modelProvider && ps.modelId) {
-			// Fire-and-forget: set the model and persist. For worktree sessions the
-			// agent isn't ready yet, so setModel can fail — persist regardless so
-			// later restore picks it up.
-			const provider = ps.modelProvider;
-			const modelId = ps.modelId;
-			(async () => {
-				try {
-					// Wait briefly for the session to become idle if it's still preparing
-					for (let i = 0; i < 40; i++) {
-						const s = sessionManager.getSession(newSession.id);
-						if (s && (s.status === "idle" || s.status === "streaming")) break;
-						await new Promise(r => setTimeout(r, 50));
-					}
-					const s = sessionManager.getSession(newSession.id);
-					if (s) await s.rpcClient.setModel(provider, modelId).catch(() => {});
-				} catch { /* best-effort */ }
-				sessionManager.persistSessionModel(newSession.id, provider, modelId);
-			})().catch(() => {});
+			// Model is pinned at spawn via createOpts.initialModel above; just
+			// persist the choice so a later restore picks it up. No redundant
+			// post-spawn setModel — that's the whole point of spawn-time pinning.
+			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
 		}
 
 		json({
@@ -6807,6 +6842,37 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/sessions/:id/proposals — list all parsed proposal drafts for the session.
+	//
+	// Mirrors the WS-auth `proposal_update {source:"rehydrate"}` broadcast in
+	// `ws/handler.ts` but as a one-shot REST call. Used by the client's fast-path
+	// session switch-back (no fresh WS auth fires, so the broadcast doesn't run
+	// and the client's in-memory proposal slot would otherwise stay stale).
+	const proposalsListMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposals$/);
+	if (proposalsListMatch && req.method === "GET") {
+		const sessionId = proposalsListMatch[1];
+		if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		const stateDir = bobbitStateDir();
+		try {
+			const types = await listProposalFiles(stateDir, sessionId);
+			const proposals: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }> = [];
+			for (const proposalType of types) {
+				const parsed = await parseProposalFile(stateDir, sessionId, proposalType);
+				if (parsed.ok) {
+					const rev = await latestRev(stateDir, sessionId, proposalType);
+					proposals.push({ proposalType, fields: parsed.value.fields, rev });
+				}
+			}
+			json({ proposals });
+		} catch (err) {
+			json({ error: String((err as Error)?.message ?? err) }, 500);
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/generate-title — auto-generate a title from chat history.
 	// Works for live sessions (calls SessionManager.autoGenerateTitle) and archived
 	// sessions (parses .jsonl). Used by the rename dialog when the session is not
@@ -7046,6 +7112,65 @@ async function handleApiRoute(
 			json({ content: toolContent });
 		} catch (err) {
 			json({ error: String(err) }, 500);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/transcript — paginated, regex-filterable transcript reader
+	// Backs the `read_session` tool extension. See `src/server/agent/transcript-reader.ts`.
+	const transcriptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/transcript$/);
+	if (transcriptMatch && req.method === "GET") {
+		const [, targetId] = transcriptMatch;
+		// Resolve target session (live or persisted).
+		const targetPs = sessionManager.getPersistedSession(targetId);
+		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+
+		// Authorization: caller must belong to the same project as the target.
+		// Caller session id is propagated via `x-bobbit-session-id` header by the
+		// extension; if missing, fall back to allow (e.g. UI-initiated calls go
+		// through Bearer auth which already gates by project).
+		const callerSid = req.headers["x-bobbit-session-id"];
+		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
+		if (callerSidStr) {
+			const callerPs = sessionManager.getPersistedSession(callerSidStr);
+			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
+				json({ error: "permission_denied" }, 403); return;
+			}
+		}
+
+		// Parse query params.
+		const qp = url.searchParams;
+		function parseIntParam(name: string): number | undefined {
+			const raw = qp.get(name);
+			if (raw === null) return undefined;
+			const n = Number(raw);
+			if (!Number.isFinite(n)) {
+				throw new TranscriptReaderError("invalid_params", `${name} is not a number`);
+			}
+			return n;
+		}
+		try {
+			const params = {
+				offset: parseIntParam("offset"),
+				limit: parseIntParam("limit"),
+				pattern: qp.get("pattern") ?? undefined,
+				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+				context: parseIntParam("context"),
+				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+			};
+			const ctx: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+			const envelope = await readTranscript(params, {
+				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
+			});
+			json(envelope);
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				const status = err.code === "transcript_unavailable" ? 404 : 400;
+				json({ error: err.code, detail: err.message }, status);
+			} else {
+				json({ error: "internal_error", detail: String(err) }, 500);
+			}
 		}
 		return;
 	}
@@ -7707,40 +7832,197 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/preview?sessionId=xxx — get preview HTML for a session
+	// ── Preview mount endpoints ──────────────────────────────────────
 	const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-	if (url.pathname === "/api/preview" && req.method === "GET") {
-		const sessionId = url.searchParams.get("sessionId");
-		if (sessionId && !VALID_SESSION_ID.test(sessionId)) {
+
+	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
+	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
+	// {url, path, entry, mtime}. See docs/design/embedded-html-preview-rewrite.md §6.
+	if (url.pathname === "/api/preview/mount" && req.method === "POST") {
+		const sessionId = url.searchParams.get("sessionId") || "";
+		if (!VALID_SESSION_ID.test(sessionId)) {
 			json({ error: "Invalid sessionId" }, 400);
 			return;
 		}
-		const previewPath = sessionId
-			? path.join(bobbitStateDir(), `preview-${sessionId}.html`)
-			: path.join(bobbitStateDir(), "preview.html");
-		try {
-			const content = fs.readFileSync(previewPath, "utf-8");
-			const stat = fs.statSync(previewPath);
-			json({ html: content, mtime: stat.mtimeMs });
-		} catch {
-			json({ html: "", mtime: 0 });
+		if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
+			json({ error: "Forbidden: session out of scope" }, 403);
+			return;
 		}
-		return;
+		const body = await readBody(req).catch(() => ({}));
+		const hasHtml = typeof body?.html === "string";
+		const hasFile = typeof body?.file === "string" && body.file.length > 0;
+		if (!hasHtml && !hasFile) {
+			json({ error: "Body must contain one of 'html' or 'file'" }, 400);
+			return;
+		}
+		try {
+			let result: previewMount.MountResult;
+			if (hasHtml) {
+				// `html` wins over `file` when both are provided.
+				let entry: string | undefined;
+				if (typeof body.entry === "string" && body.entry.length > 0) {
+					const e = body.entry;
+					if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
+						json({ error: "Invalid entry name" }, 400);
+						return;
+					}
+					entry = e;
+				}
+				result = previewMount.writeInline(sessionId, body.html as string, entry);
+			} else {
+				const filePath = body.file as string;
+				if (!path.isAbsolute(filePath)) {
+					json({ error: "file path must be absolute" }, 400);
+					return;
+				}
+				if (!fs.existsSync(filePath)) {
+					json({ error: "file not found" }, 404);
+					return;
+				}
+				let stat: fs.Stats;
+				try { stat = fs.statSync(filePath); } catch {
+					json({ error: "file not found" }, 404);
+					return;
+				}
+				if (!stat.isFile()) {
+					json({ error: "path is not a regular file" }, 404);
+					return;
+				}
+				const base = path.basename(filePath).toLowerCase();
+				if (!base.endsWith(".html") && !base.endsWith(".htm")) {
+					json({ error: "file must end in .html or .htm" }, 400);
+					return;
+				}
+				result = previewMount.copyFileTree(sessionId, filePath);
+			}
+			broadcastPreviewChanged(sessionId, {
+				entry: result.entry,
+				mtime: result.mtime,
+				url: result.url,
+				path: result.path,
+			});
+			json(result);
+			return;
+		} catch (err: any) {
+			if (err && err instanceof previewMount.PreviewMountError) {
+				json({ error: err.message }, err.statusCode);
+				return;
+			}
+			json({ error: `preview mount failed: ${err?.message ?? String(err)}` }, 500);
+			return;
+		}
 	}
 
-	// POST /api/preview?sessionId=xxx — set preview HTML for a session
-	if (url.pathname === "/api/preview" && req.method === "POST") {
-		const body = await readBody(req);
-		const sessionId = url.searchParams.get("sessionId");
-		if (sessionId && !VALID_SESSION_ID.test(sessionId)) {
+	// GET /api/preview/mount?sessionId=<sid> — bootstrap the preview panel after
+	// session select. Returns the current entry/mtime/url/path for the mount,
+	// or 404 if the mount is empty / nonexistent. Same auth as the POST.
+	if (url.pathname === "/api/preview/mount" && req.method === "GET") {
+		const sessionId = url.searchParams.get("sessionId") || "";
+		if (!VALID_SESSION_ID.test(sessionId)) {
 			json({ error: "Invalid sessionId" }, 400);
 			return;
 		}
-		const previewPath = sessionId
-			? path.join(bobbitStateDir(), `preview-${sessionId}.html`)
-			: path.join(bobbitStateDir(), "preview.html");
-		fs.writeFileSync(previewPath, body?.html || "", "utf-8");
-		json({ ok: true });
+		if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
+			json({ error: "Forbidden: session out of scope" }, 403);
+			return;
+		}
+		try {
+			const { pickEntry } = await import("./preview/content-route.js");
+			const dir = previewMount.mountDir(sessionId);
+			const entry = pickEntry(dir);
+			if (!entry) {
+				json({ error: "no preview mount" }, 404);
+				return;
+			}
+			const entryPath = path.join(dir, entry);
+			let stat: fs.Stats;
+			try { stat = fs.statSync(entryPath); } catch {
+				json({ error: "no preview mount" }, 404);
+				return;
+			}
+			json({
+				url: `/preview/${sessionId}/${entry}`,
+				path: entryPath,
+				entry,
+				mtime: Math.floor(stat.mtimeMs),
+			});
+			return;
+		} catch (err: any) {
+			if (err && err instanceof previewMount.PreviewMountError) {
+				json({ error: err.message }, err.statusCode);
+				return;
+			}
+			json({ error: `preview mount lookup failed: ${err?.message ?? String(err)}` }, 500);
+			return;
+		}
+	}
+
+	// GET /api/sessions/:sid/preview-events — SSE stream of preview-changed events
+	// for the per-session preview mount. Cookie auth (or admin bearer) only;
+	// sandbox tokens are not permitted (handled by the route-guard above).
+	const previewEventsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/preview-events$/);
+	if (previewEventsMatch && req.method === "GET") {
+		const sid = previewEventsMatch[1];
+		if (!VALID_SESSION_ID.test(sid)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (sandboxScope) {
+			json({ error: "Forbidden" }, 403);
+			return;
+		}
+		res.writeHead(200, {
+			"Content-Type": "text/event-stream",
+			"Cache-Control": "no-cache",
+			"Connection": "keep-alive",
+			"X-Accel-Buffering": "no",
+		});
+		try { (res as { flushHeaders?: () => void }).flushHeaders?.(); } catch { /* ok */ }
+		// Initial hello so the client knows the stream is live.
+		res.write(`event: hello\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
+
+		// Subscribe to the in-process preview-changed channel populated by the
+		// mount POST endpoint. Payload shape `{entry, mtime, url, path}` is
+		// forwarded verbatim — the client reads `entry` to seed the iframe.
+		const unsubscribe = subscribePreviewChanged(sid, payload => {
+			try {
+				res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
+			} catch { /* socket closed */ }
+		});
+		// Bootstrap: if a mount already exists for this session, emit the
+		// current state synchronously so the just-connected client doesn't
+		// wait for the next agent write. Avoids a race where
+		// broadcastPreviewChanged fires between EventSource open and the
+		// subscription being registered. Payload shape `{entry, mtime, url,
+		// path}` matches broadcastPreviewChanged so the client doesn't need
+		// to distinguish bootstrap from live events.
+		try {
+			const { pickEntry } = await import("./preview/content-route.js");
+			const dir = previewMount.mountDir(sid);
+			if (fs.existsSync(dir)) {
+				const entry = pickEntry(dir);
+				if (entry) {
+					const entryPath = path.join(dir, entry);
+					const stat = fs.statSync(entryPath);
+					res.write(`event: preview-changed\ndata: ${JSON.stringify({
+						entry,
+						mtime: Math.floor(stat.mtimeMs),
+						url: `/preview/${sid}/${entry}`,
+						path: entryPath,
+					})}\n\n`);
+				}
+			}
+		} catch { /* ok — bootstrap is best-effort */ }
+		const keepalive = setInterval(() => {
+			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
+		}, 25_000);
+		if (typeof keepalive.unref === "function") keepalive.unref();
+		const cleanup = () => {
+			clearInterval(keepalive);
+			try { unsubscribe(); } catch { /* ok */ }
+		};
+		req.on("close", cleanup);
+		req.on("error", cleanup);
 		return;
 	}
 
@@ -7963,7 +8245,17 @@ async function handleApiRoute(
 				}
 			}
 		}
-		const submitted = typeof body.submitted === "boolean" ? body.submitted : false;
+		// If `submitted` is omitted (or non-boolean), preserve whatever is
+		// already on disk. This is critical: the page-unload beacon historically
+		// sent `submitted: false` whenever the local cache hadn't observed a
+		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
+		// tabs, REST clients, the test harness) on the next page reload (RP-09).
+		// The client now omits the field unless it positively wants to write
+		// `true`; the legacy clear path still goes through the dedicated
+		// /review/submitted PUT.
+		const submitted = typeof body.submitted === "boolean"
+			? body.submitted
+			: reviewAnnotationStore.isSubmitted(sessionId);
 		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
 		json({ ok: true });
 		return;

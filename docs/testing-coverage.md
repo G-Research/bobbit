@@ -39,6 +39,16 @@ User stories defined in `userstories/sessions.md`, `userstories/resilience.md`, 
 - All stories registered in `tests/e2e/ui/story-registry.ts`; `tools/spec-check.ts` reports per-contract variation coverage (CT-05 at 75%, CT-16 at 100%).
 - **Framework extensions** in `tests/e2e/ui/spec-framework.ts`: `ProjectHandle` entity handle; `SpecContext.createTestSession(name, opts)` accepting `opts.cwd` (worktree-backed) and `opts.goalId` (goal-scoped); `SpecContext.create_session_via_ui()` and `rename_session()` for sidebar-driven flows; `event.disconnect()` to force a WebSocket close; `event.server_crash()` / `event.server_restart()` which throw "requires manual harness" outside `npm run test:manual`.
 
+## Tail-chat / scroll pin
+
+User-facing contract: "if I am at the bottom when content arrives, I stay at the bottom" across streaming bursts, tool-result expansion, session navigate, image/iframe reflows, and user-scroll-up release.
+
+- **Outcome-only helpers** — `tests/e2e/ui/tail-chat-helpers.ts` exports `expectLatestMessagePinned` (reads `getBoundingClientRect()` of the latest message vs the scroll container) and `disableScrollAnchoring` (cascades `overflow-anchor: none` so Chromium ≡ Safari inside the test). Tests assert only on these helpers and on `expect(locator).toBeVisible()` — never on private fields like `_stickToBottom` or `_programmaticEchoes`.
+- **Browser E2E specs** — `tests/e2e/ui/tail-chat-real-stream.spec.ts` (canonical realistic streaming pattern), `tail-chat-tool-expand.spec.ts`, `tail-chat-rapid-stream.spec.ts`, `tail-chat-session-navigate.spec.ts`, `tail-chat-user-scroll-up.spec.ts`, `tail-chat-image-reflow.spec.ts`. Each test drives real preconditions (`STREAM_BURST:N`, `STAY_BUSY:Nms`, trusted `page.mouse.wheel`) and opts into Tier 2.5 video capture so failures are reviewable visually under `RECORDSCREEN=1`.
+- **Sensitivity-verified** — each rewritten test is known to fail when its corresponding production path is neutered (`_pinIfSticking`, RO `delta>0`, image-reflow path inside RO). Matrix documented in [docs/design/tail-chat-redesign.md — Outcome of the redesign](design/tail-chat-redesign.md#outcome-of-the-redesign).
+- **Production invariant** — `agent-interface .overflow-y-auto` ships with inline `overflow-anchor: none` so Chromium and Safari/iOS PWA execute the same JS pin path; CI on Chromium catches what Safari users would otherwise see in production. Contract in [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant).
+- **Lower-tier scroll specs** — unit-level coverage of the scroll lock primitives lives in `tests/agent-interface-scroll.spec.ts` (zero-delta vibration), `tests/agent-interface-scroll-hardening.spec.ts` (echo ring, sub-pixel rounding), `tests/scroll-anchor-shrink.spec.ts`, `tests/collapse-scroll-bugs.spec.ts`, `tests/mobile-scroll-keyboard.spec.ts`, `tests/e2e/ui/jump-to-bottom.spec.ts`.
+
 ## Sidebar child auto-loading
 
 Ensures visible sidebar entries always have their children loaded.

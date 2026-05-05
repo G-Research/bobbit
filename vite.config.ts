@@ -159,8 +159,55 @@ function localhostGuard(): Plugin {
  * Build: stamps once with a content hash + timestamp into the emitted asset.
  */
 function bobbitSwVersion(): Plugin {
-	const PLACEHOLDER = "__BOBBIT_BUILD_ID__";
-	const stamp = (src: string, id: string): string => src.split(PLACEHOLDER).join(id);
+	const BUILD_ID_PLACEHOLDER = "__BOBBIT_BUILD_ID__";
+	// Comment marker (kept as a no-op comment in the unstamped source so
+	// the SW file stays valid JS for tests that load it directly). At
+	// build time we replace the entire `/*...*/` token with a
+	// comma-separated list of quoted hashed paths for the most-likely
+	// next route chunks. The marker sits inside an array literal in
+	// `public/sw.js`, so emitting just the inner JSON-array contents
+	// keeps the syntax valid.
+	const PRECACHE_PLACEHOLDER = "/*__BOBBIT_PRECACHE_CHUNKS__*/";
+	// Source files (relative to project root) whose Vite manifest entries
+	// should be precached.  Keep this list short — extra precache costs
+	// cold-install bandwidth on every deploy.
+	const PRECACHE_SOURCES = [
+		"src/app/goal-dashboard.ts",
+		"src/app/settings-page.ts",
+	];
+	const stamp = (src: string, buildId: string, precacheJson: string): string =>
+		src.split(BUILD_ID_PLACEHOLDER).join(buildId).split(PRECACHE_PLACEHOLDER).join(precacheJson);
+
+	/**
+	 * Read `dist/ui/.vite/manifest.json` and resolve precache URLs for
+	 * `PRECACHE_SOURCES`.  Includes each entry's `file`, plus its
+	 * `imports[]` (transitive, deduped) — without the imports a
+	 * precached chunk would still trigger a cold network for its deps
+	 * on first navigation. `css[]` is included so the route renders
+	 * styled offline.  Returns absolute URL paths (`/assets/...`).
+	 */
+	function resolvePrecacheUrls(distDir: string): string[] {
+		const manifestPath = path.join(distDir, ".vite", "manifest.json");
+		if (!fs.existsSync(manifestPath)) return [];
+		type ManifestEntry = { file: string; imports?: string[]; css?: string[] };
+		let manifest: Record<string, ManifestEntry>;
+		try {
+			manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+		} catch {
+			return [];
+		}
+		const urls = new Set<string>();
+		const visit = (key: string) => {
+			const entry = manifest[key];
+			if (!entry) return;
+			urls.add(`/${entry.file}`);
+			for (const css of entry.css ?? []) urls.add(`/${css}`);
+			for (const imp of entry.imports ?? []) visit(imp);
+		};
+		for (const src of PRECACHE_SOURCES) visit(src);
+		return [...urls].sort();
+	}
+
 	return {
 		name: "bobbit-sw-version",
 		// Dev: intercept GET /sw.js and rewrite the placeholder per request.
@@ -170,7 +217,8 @@ function bobbitSwVersion(): Plugin {
 				const swPath = path.join(process.cwd(), "public", "sw.js");
 				let src: string;
 				try { src = fs.readFileSync(swPath, "utf-8"); } catch { return next(); }
-				const body = stamp(src, `dev-${Date.now()}`);
+				// Dev has no manifest — leave the marker as an empty list.
+				const body = stamp(src, `dev-${Date.now()}`, "");
 				res.writeHead(200, {
 					"Content-Type": "application/javascript; charset=utf-8",
 					// Service workers should not be cached themselves — browsers
@@ -188,13 +236,18 @@ function bobbitSwVersion(): Plugin {
 		closeBundle: {
 			order: "post",
 			handler() {
-				const outFile = path.join(process.cwd(), "dist", "ui", "sw.js");
+				const distDir = path.join(process.cwd(), "dist", "ui");
+				const outFile = path.join(distDir, "sw.js");
 				if (!fs.existsSync(outFile)) return;
 				let src: string;
 				try { src = fs.readFileSync(outFile, "utf-8"); } catch { return; }
-				if (!src.includes(PLACEHOLDER)) return;
+				if (!src.includes(BUILD_ID_PLACEHOLDER) && !src.includes(PRECACHE_PLACEHOLDER)) return;
 				const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-				fs.writeFileSync(outFile, stamp(src, id));
+				const precacheUrls = resolvePrecacheUrls(distDir);
+				// Emit just the inner contents of the array literal — the
+				// surrounding `[ ... ]` already exists in `public/sw.js`.
+				const inner = precacheUrls.map((u) => JSON.stringify(u)).join(", ");
+				fs.writeFileSync(outFile, stamp(src, id, inner));
 			},
 		},
 	};
@@ -206,11 +259,15 @@ function dynamicGatewayProxy(): Plugin {
 		configureServer(server) {
 			// --- HTTP proxy for /api/* ----------------------------------
 			server.middlewares.use((req, res, next) => {
-				// Proxy /api/* and /manifest.json (the gateway serves a dynamic manifest
-				// that bakes the auth token into start_url for PWA installs).
+				// Proxy /api/*, /manifest.json (gateway serves a dynamic manifest
+				// that bakes the auth token into start_url for PWA installs), and
+				// /preview/* (per-session HTML preview mounts served by the gateway
+				// — without this, Vite's SPA fallback returns index.html and the
+				// iframe ends up rendering a nested Bobbit app).
 				const u = req.url || "";
 				const isManifest = u === "/manifest.json" || u.startsWith("/manifest.json?");
-				if (!u.startsWith("/api") && !isManifest) return next();
+				const isPreview = u.startsWith("/preview/");
+				if (!u.startsWith("/api") && !isManifest && !isPreview) return next();
 				const target = new URL(readGatewayUrl());
 				const opts: http.RequestOptions = {
 					hostname: target.hostname,
@@ -277,6 +334,17 @@ export default defineConfig({
 	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
 	build: {
 		outDir: "dist/ui",
+		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)
+		// handles esnext output natively, so we skip transpiler helpers (-1–3% main chunk).
+		target: "esnext",
+		// `modulepreload` polyfill is unused on supported browsers; saves ~2 kB.
+		modulePreload: { polyfill: false },
+		// Tighten the chunk-size warning so bundle regressions are flagged early.
+		// `cssCodeSplit` defaults to true (per-chunk CSS) and is intentionally not overridden.
+		chunkSizeWarningLimit: 600,
+		// Emit `dist/ui/.vite/manifest.json` so the SW plugin can resolve hashed
+		// paths for route-chunk precache (see `bobbitSwVersion`).
+		manifest: true,
 	},
 	server: {
 		host,

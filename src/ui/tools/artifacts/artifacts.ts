@@ -1,5 +1,4 @@
 import { icon } from "@mariozechner/mini-lit";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import type { Agent, AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
 import { StringEnum, type ToolCall } from "@mariozechner/pi-ai";

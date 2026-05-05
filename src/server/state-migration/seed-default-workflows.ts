@@ -125,7 +125,9 @@ Read the design document content from upstream gates.
 Identify:
 1. Features described in the goal/design but not implemented
 2. Acceptance criteria not met by the code changes
-3. Implemented behavior that contradicts the specification`;
+3. Implemented behavior that contradicts the specification
+
+IMPORTANT: Ignore documentation gaps. This gap analysis runs during the implementation phase, BEFORE the documentation gate. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts as gaps — those are addressed by the dedicated documentation gate later in the workflow. Focus exclusively on code/behavior gaps relative to the spec and design.`;
 
 export const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
 

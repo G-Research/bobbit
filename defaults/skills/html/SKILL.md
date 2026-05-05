@@ -9,16 +9,32 @@ allowed-tools: read, grep, find, ls, write, edit, preview_open, bash
 
 Build an interactive HTML interface in the live preview panel for: **$ARGUMENTS**
 
-## How it works
+## Surface
 
-Use `preview_open(html="...")` to render HTML in a split-pane alongside the chat. The panel auto-updates on each call. The user can expand it fullscreen via the maximize icon (Escape to exit).
+Use `preview_open(html=...)`. Do **not** also write a `.html` file for the
+same artefact — the two surfaces drift on every edit. See
+[`defaults/docs/html-rendering.md`](../../docs/html-rendering.md) for the
+full surface-selection rule and complete token reference.
 
-## Setup — always start with this skeleton
+## Skeleton — start here
 
 ```html
 <link rel="stylesheet" href="/src/ui/app.css">
 <style>
-  /* Your custom styles here — use CSS variables from app.css */
+  /* Defensive fallbacks for the bridge / HMR race — overridden by the
+     bridge whenever the parent has these tokens. Always include the
+     chart and semantic ones if you reference them. */
+  :root {
+    --chart-1: oklch(0.52 0.18 250);
+    --chart-2: oklch(0.55 0.16 60);
+    --chart-3: oklch(0.50 0.16 145);
+    --chart-4: oklch(0.50 0.20 305);
+    --chart-5: oklch(0.55 0.20 15);
+    --chart-6: oklch(0.52 0.13 190);
+    --positive: oklch(0.55 0.15 145);
+    --negative: oklch(0.55 0.18 25);
+    --warning:  oklch(0.62 0.15 75);
+  }
   body {
     font-family: var(--font-sans, system-ui, sans-serif);
     background: var(--background);
@@ -35,36 +51,33 @@ Use `preview_open(html="...")` to render HTML in a split-pane alongside the chat
 </script>
 ```
 
-The `<link>` gives you the full Bobbit design system: Tailwind CSS 4, theme variables, and component styles. The preview iframe is same-origin with the Vite dev server, so this works out of the box.
+The `<link>` gives you Tailwind 4 plus every theme variable for pixel-accurate
+fidelity with the real app. The preview iframe is same-origin with the Vite
+dev server, so this works out of the box.
 
-## Design system reference
+## Theme tokens at a glance
 
-### Theme variables (use via `var(--name)`)
+| Group | Tokens | Use for |
+|---|---|---|
+| Surfaces | `--background`, `--foreground`, `--card`, `--card-foreground`, `--muted`, `--muted-foreground`, `--border`, `--popover`, `--secondary`, `--accent`, `--ring`, `--input`, `--sidebar*` | Page chrome, layout, text |
+| Brand | `--primary`, `--primary-foreground` | Single accented action |
+| **Categorical** | `--chart-1` … `--chart-6` (+ `-foreground`) | Distinct categories: chart series, comparison columns, multi-product cards. **Stable across `data-palette` switches.** |
+| **Semantic** | `--positive`, `--negative`, `--warning`, `--info` (+ `-foreground`) | Status icons, validation, alerts. **Fixed across palettes** — green tick stays green. |
 
-All values are full `oklch(...)` expressions — use directly, never wrap in `oklch()`.
+**For striking visual / categorical content always reach for `--chart-*` and
+the semantic slots, not `--primary`/`--accent`/`--ring`.** The core palette is
+intentionally monochromatic and will look flat for charts and comparisons.
 
-| Variable | Purpose |
-|----------|---------|
-| `--background` | Page background |
-| `--foreground` | Primary text |
-| `--card` / `--card-foreground` | Card surfaces |
-| `--primary` / `--primary-foreground` | Primary actions, links |
-| `--secondary` / `--secondary-foreground` | Secondary elements |
-| `--muted` / `--muted-foreground` | Subdued text, disabled states |
-| `--accent` / `--accent-foreground` | Highlights, hover states |
-| `--border` | Borders, dividers |
-| `--input` | Form input borders |
-| `--ring` | Focus rings |
-| `--sidebar` / `--sidebar-foreground` | Sidebar surfaces |
+For tints / translucent fills use `color-mix`:
 
-For transparency/alpha, use `color-mix`:
 ```css
-background: color-mix(in oklch, var(--primary) 10%, transparent);
+background: color-mix(in oklch, var(--chart-1) 10%, transparent);
 ```
 
-### Tailwind CSS 4
+## Tailwind CSS 4
 
 Full Tailwind is available. Use utility classes directly:
+
 ```html
 <div class="flex flex-col gap-4 p-4 rounded-lg border border-border bg-card">
   <h2 class="text-lg font-semibold text-foreground">Title</h2>
@@ -75,26 +88,46 @@ Full Tailwind is available. Use utility classes directly:
 </div>
 ```
 
-### Dark/light mode
-
-Handled automatically — the preview bridge syncs the app's theme. Your UI adapts if you use CSS variables and Tailwind classes. No manual dark mode handling needed.
-
 ## Patterns
 
-### Card layout
+### Card with categorical accent
+
 ```html
-<div class="bg-card rounded-lg border border-border p-4 shadow-sm">
-  <div class="flex items-center justify-between mb-3">
-    <h3 class="font-semibold">Title</h3>
-    <span class="text-xs text-muted-foreground">Subtitle</span>
-  </div>
-  <p class="text-sm text-muted-foreground">Content here</p>
+<div class="card" style="--c: var(--chart-1)">
+  <span class="badge"
+        style="color: var(--c); background: color-mix(in oklch, var(--c) 18%, transparent);
+               border: 1px solid color-mix(in oklch, var(--c) 45%, transparent);">
+    Tag
+  </span>
+  <h3>Title</h3>
 </div>
 ```
 
-### Form controls
+### Score bar
+
 ```html
-<input type="text" class="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring" placeholder="Type here...">
+<div class="bar"
+     style="height: 8px; background: var(--muted); border-radius: 999px; overflow: hidden;">
+  <span style="display:block; height:100%; width:78%;
+               background: var(--chart-1); border-radius: 999px;"></span>
+</div>
+```
+
+### Status icons
+
+```html
+<span style="color: var(--positive)">✓ Pass</span>
+<span style="color: var(--negative)">✗ Fail</span>
+<span style="color: var(--warning)">! Caution</span>
+```
+
+### Form controls
+
+```html
+<input type="text"
+       class="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
+              focus:outline-none focus:ring-2 focus:ring-ring"
+       placeholder="Type here…">
 
 <select class="px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm">
   <option>Option 1</option>
@@ -102,14 +135,16 @@ Handled automatically — the preview bridge syncs the app's theme. Your UI adap
 ```
 
 ### Tabs
+
 ```html
 <div class="flex border-b border-border gap-1">
-  <button class="px-3 py-1.5 text-sm border-b-2 border-primary text-foreground" onclick="switchTab(0)">Tab 1</button>
-  <button class="px-3 py-1.5 text-sm border-b-2 border-transparent text-muted-foreground hover:text-foreground" onclick="switchTab(1)">Tab 2</button>
+  <button class="px-3 py-1.5 text-sm border-b-2 border-primary text-foreground">Tab 1</button>
+  <button class="px-3 py-1.5 text-sm border-b-2 border-transparent text-muted-foreground hover:text-foreground">Tab 2</button>
 </div>
 ```
 
 ### Data table
+
 ```html
 <table class="w-full text-sm">
   <thead>
@@ -125,11 +160,27 @@ Handled automatically — the preview bridge syncs the app's theme. Your UI adap
 </table>
 ```
 
+## Iteration loop
+
+1. **Ship something complete on first call** — real data, real layout, real
+   theme tokens. Not a placeholder.
+2. **Call out design defaults you picked**, so the user can correct course
+   before you over-invest.
+3. **One-liner status updates between calls**, not paragraphs.
+4. **Refresh = single `preview_open` call** with the latest HTML.
+5. **Trust user-reported visual bugs** — they're looking at the pixels.
+
 ## Rules
 
-1. **Always use `preview_open`** — never write a standalone HTML file. The preview panel is the delivery mechanism.
-2. **Always include `<link rel="stylesheet" href="/src/ui/app.css">`** — this gives you the design system.
-3. **Use CSS variables for all colors** — never hardcode hex/rgb values. This ensures dark/light mode works.
-4. **Make it interactive** — add event handlers, state management, filtering, sorting. The user should be able to explore and interact, not just look.
-5. **Iterate** — call `preview_open` repeatedly as you build. Start with structure, add styling, then interactivity. The panel updates in-place.
-6. **Describe changes in chat** — don't dump HTML in chat. Just say what you changed; the user sees it in the panel.
+1. **Always use `preview_open(html=...)`** — never write a standalone HTML
+   file alongside it. One artefact, one surface.
+2. **Always include `<link rel="stylesheet" href="/src/ui/app.css">`** for the
+   design system.
+3. **Use CSS variables for all colours.** Never hardcode hex/rgb. Never
+   define your own `:root` palette beyond the defensive fallback block above.
+4. **Make it interactive.** Add event handlers, state, filtering, sorting.
+   The user should *explore*, not just look.
+5. **Iterate atomically.** Re-call `preview_open` with the full new HTML;
+   don't try to patch in place.
+6. **Describe changes in chat tersely.** The user sees the panel; just say
+   what changed.

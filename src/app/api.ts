@@ -900,15 +900,35 @@ export async function deleteGoal(id: string): Promise<void> {
 
 	// Count non-archived descendants client-side; the dialog uses this to
 	// decide whether to show the cascade-confirmation flow or fall through
-	// to the legacy single-goal confirm.
-	const { countDescendants, showArchiveGoalDialog } = await import("./dialogs.js");
+	// to the team-aware single-goal confirm.
+	const { countDescendants, showArchiveGoalDialog, confirmAction } = await import("./dialogs.js");
 	const descendants = countDescendants(id);
 
 	if (descendants === 0) {
-		// Legacy path — single-goal archive confirmation.
-		const { confirmAction } = await import("./dialogs.js");
-		const confirmed = await confirmAction("Archive Goal", `Archive "${goalTitle}"? It will move to the archived section.`, "Archive", false);
+		// Single-goal path — confirmation wording adapts to whether a team
+		// is currently running on this goal so the user knows the team will
+		// be torn down as part of archive.
+		const sessionsUnderGoal = state.gatewaySessions.filter((s) => s.goalId === id);
+		const isTeamGoal = !!(goal as any)?.team;
+		const teamActive = isTeamGoal && state.gatewaySessions.some(
+			(s) => (s.goalId === id || s.teamGoalId === id)
+				&& s.role === "team-lead"
+				&& s.status !== "terminated",
+		);
+		const title = teamActive ? "Stop team and archive goal?" : "Archive Goal";
+		let body = teamActive
+			? `The team will be stopped and "${goalTitle}" will be archived.`
+			: `Archive "${goalTitle}"? It will move to the archived section.`;
+		if (sessionsUnderGoal.length > 0) {
+			body += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
+		}
+		const confirmLabel = teamActive ? "Stop & Archive" : "Archive";
+		const confirmed = await confirmAction(title, body, confirmLabel, teamActive);
 		if (!confirmed) return;
+		if (teamActive) {
+			const ok = await teardownTeam(id);
+			if (!ok) return;
+		}
 		try {
 			const res = await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
 			if (!res.ok) {

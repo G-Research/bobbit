@@ -1,12 +1,24 @@
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import * as pdfjsLib from "pdfjs-dist";
 import { i18n } from "../../utils/i18n.js";
 import { ArtifactElement } from "./ArtifactElement.js";
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+// Lazy-loaded pdfjs — keeps it out of the main bundle.
+type PdfjsModule = typeof import("pdfjs-dist");
+let _pdfjsPromise: Promise<PdfjsModule> | null = null;
+async function loadPdfjs(): Promise<PdfjsModule> {
+	if (!_pdfjsPromise) {
+		_pdfjsPromise = import("pdfjs-dist").then((mod) => {
+			mod.GlobalWorkerOptions.workerSrc = new URL(
+				"pdfjs-dist/build/pdf.worker.min.mjs",
+				import.meta.url,
+			).toString();
+			return mod;
+		});
+	}
+	return _pdfjsPromise;
+}
 
 @customElement("pdf-artifact")
 export class PdfArtifact extends ArtifactElement {
@@ -109,6 +121,7 @@ export class PdfArtifact extends ArtifactElement {
 		let pdf: any = null;
 
 		try {
+			const pdfjsLib = await loadPdfjs();
 			const arrayBuffer = this.base64ToArrayBuffer(this._content);
 
 			// Cancel any existing loading task

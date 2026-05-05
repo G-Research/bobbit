@@ -14,14 +14,24 @@ Delegating to **read + analyse/transform** is fine — the delegate does real wo
 
 Files written via `write` with certain extensions render inline in the chat:
 
-- **`.html` / `.htm`**: Rendered in a sandboxed iframe with live preview. Use for interactive reports, data visualizations, UI mockups, or any rich output. The HTML can include inline CSS and JavaScript — it runs in an isolated sandbox. Collapsible source code shown underneath.
+## HTML output — reports, dashboards, mockups, charts
+
+**Pick one surface, never both:**
+
+| User intent | Surface | Why |
+|---|---|---|
+| Iterating on a visual the user just wants to *look at* (default) | `preview_open(html=...)` | Single live slot, atomic refresh, no chat-history clutter |
+| Persisting a deliverable HTML artefact (committed file, static asset) | `write file.html` | Lives in repo, user can open directly |
+
+**Never do both for the same artefact.** Inline file render and preview panel are independent state machines and will drift on every edit.
+
+**Theme integration is mandatory.** The preview iframe inherits Bobbit's CSS custom properties via a theme bridge that mirrors `--background`, `--foreground`, `--card`, `--muted-foreground`, `--border`, `--primary`, the `--chart-1..6` categorical palette, the `--positive` / `--negative` / `--warning` / `--info` semantic slots, plus dark/light/palette state. Always reference these variables — never hardcode colours, never define your own `:root` palette, never use `prefers-color-scheme`. For categorical / striking visual content reach for `--chart-1..6` (the core palette is monochromatic and will look flat). For tints use `color-mix(in oklch, var(--chart-1) 10%, transparent)`.
+
+**Full guide — read on first HTML output of any session:** [`defaults/docs/html-rendering.md`](defaults/docs/html-rendering.md) covers token reference, defensive fallbacks for the HMR/bridge race, ready-to-paste patterns (card grid, comparison table, score bars, status icons), iteration-loop guidance, and anti-patterns. The `/html` and `/mockup` skills both defer to it.
+
+## Other inline-rendered file types
+
 - **`.svg`**: Rendered as a visual image preview. Make SVGs self-contained (inline styles, no external references). Set an explicit `viewBox` and use relative units. For dark/light theme compatibility, avoid hardcoding white or black backgrounds — use `currentColor` or explicit fills. Collapsible source code shown underneath.
-
-When a user asks to show, visualize, mock up, or demo something visual, prefer writing an HTML or SVG file so they see the result inline rather than just code.
-
-**Note**: Both `write` and `edit` render inline previews for `.html`/`.htm` files. For `edit`, the preview is fetched asynchronously after the edit completes — it reads the updated file from the server and renders it in an iframe, just like `write` does. Use `edit` for surgical changes to HTML files without needing to rewrite the entire file.
-
-For design mockups, use the `/mockup` skill which provides detailed guidance on high-fidelity previews, live preview panels, and mockup principles. See `.bobbit/config/docs/design-mockups.md` for the full reference.
 
 # AI image generation
 

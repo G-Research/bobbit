@@ -28,6 +28,7 @@ All routes require `Authorization: Bearer <token>`. Token can also be passed as 
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
+| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 
 
 ### Proposal drafts
@@ -281,6 +282,16 @@ Server-level fallback (applied when no project override is set):
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/shutdown` | Graceful server shutdown (used by coverage teardown) |
+| `POST` | `/api/system-prompt/customise` | Copy shipped `defaults/system-prompt.md` to `<bobbitConfigDir>/system-prompt.md` so the user can edit it |
+
+**`POST /api/system-prompt/customise`** — no request body. Behaviour:
+
+- If `<bobbitConfigDir>/system-prompt.md` does not exist, copies `defaults/system-prompt.md` to that path.
+- If the user file already exists, it is left unchanged (no-op overwrite — user edits are never clobbered).
+- Returns `{ path, created, content }` where `path` is the absolute user-override path, `created` is `true` only when the file was just copied this call, and `content` is the current file contents (newly copied default or pre-existing user version).
+- Errors: `500 { error }` if the shipped default is missing from the install or the copy/read fails.
+
+This is the explicit opt-in path for customising the global system prompt. The startup pipeline no longer scaffolds the file — see [internals.md — Config cascade](internals.md#config-cascade) for the runtime resolution rules.
 
 ### Workflows
 
@@ -503,10 +514,15 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 ### Preview
 
+The preview side-panel iframe is fed by a per-session content mount served from a cookie-authed origin path. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
+
+**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/preview` | Get preview HTML for a session (`?sessionId=`) |
-| `POST` | `/api/preview` | Set preview HTML for a session (`?sessionId=`, `{ html }`) |
+| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount. Body is one of `{ html, entry? }` (inline) or `{ file: "/abs/path/report.html" }` (copy entry + sibling tree). Returns `200 { url, path, entry, mtime }`. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm`; `403` sandbox-out-of-scope or symlink escape; `404` source file missing; `413` mount exceeds 100 MiB or copy exceeds 25 MiB. On success the server fans out a `preview-changed` SSE event. |
+| `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns the same `{ url, path, entry, mtime }` shape, or `404 { error: "no preview mount" }` if the mount is missing or empty. |
+| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path}` after every successful `POST /api/preview/mount`. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
 
 ### Search
 

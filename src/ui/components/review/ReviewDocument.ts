@@ -4,12 +4,14 @@ import { marked } from "marked";
 import { createTextAnnotator, type TextAnnotator } from "@recogito/text-annotator";
 import "@recogito/text-annotator/text-annotator.css";
 import {
-  addAnnotation,
-  removeAnnotation,
-  getAnnotations,
+  reviewBackend,
+  type AnnotationBackend,
   type ReviewAnnotation,
 } from "./AnnotationStore.js";
-import "./AnnotationPopover.js";
+import {
+  openAnnotationPopover,
+  closeAnnotationPopover,
+} from "./AnnotationPopover.js";
 import "./review-pane.css";
 
 /**
@@ -24,10 +26,17 @@ export class ReviewDocument extends LitElement {
   @property({ type: String }) markdown = "";
   @property({ type: String }) sessionId = "";
   @property({ type: String }) docTitle = "";
+  /**
+   * Pluggable annotation store backend. Defaults to the REST-backed
+   * review-pane store. <commentable-markdown> overrides this with the
+   * ephemeral in-memory `proposalBackend`.
+   */
+  @property({ attribute: false }) backend: AnnotationBackend = reviewBackend;
 
   @state() private _popoverOpen = false;
-  @state() private _popoverX = 0;
-  @state() private _popoverY = 0;
+  /** Selection (or anchor highlight) rect in viewport coordinates. Passed
+   *  to <annotation-popover> as a virtual-reference rect for Floating UI. */
+  @state() private _popoverReferenceRect: DOMRect | null = null;
   @state() private _selectedText = "";
   @state() private _detachedAnnotations: ReviewAnnotation[] = [];
   @state() private _bannerMessage = "";
@@ -91,6 +100,15 @@ export class ReviewDocument extends LitElement {
   protected updated(changed: Map<string, unknown>): void {
     if (changed.has("markdown") || changed.has("sessionId") || changed.has("docTitle")) {
       this._renderMarkdown();
+    }
+    if (
+      changed.has("_popoverOpen") ||
+      changed.has("_popoverReferenceRect") ||
+      changed.has("_selectedText") ||
+      changed.has("_popoverMode") ||
+      changed.has("_existingComment")
+    ) {
+      this._syncPopover();
     }
   }
 
@@ -209,12 +227,10 @@ export class ReviewDocument extends LitElement {
     this._pendingSelection = { quote, prefix, suffix, start, end, isCode };
     this._selectedText = quote;
 
-    // Position popover near the selection
+    // Anchor popover to the selection rect. Floating UI clamps to the
+    // viewport so the popover never overflows the screen.
     if (sel && sel.rangeCount > 0) {
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      const containerRect = this.getBoundingClientRect();
-      this._popoverX = rect.left - containerRect.left;
-      this._popoverY = rect.bottom - containerRect.top + 8;
+      this._popoverReferenceRect = sel.getRangeAt(0).getBoundingClientRect();
     }
     this._popoverOpen = true;
   }
@@ -317,8 +333,19 @@ export class ReviewDocument extends LitElement {
       } catch { /* fallback — highlight may not appear */ }
     }
 
+    // Capture the selection rect BEFORE clearing the selection. The popover
+    // singleton requires a non-null reference rect (see _syncPopover); on
+    // mobile bottom-sheet mode the rect itself is unused for positioning,
+    // but it must be set or _syncPopover early-returns and the sheet never
+    // opens. Mirrors the desktop _handleSelection path.
+    this._popoverReferenceRect = range.getBoundingClientRect();
     this._popoverMode = "bottom-sheet";
     this._existingComment = "";
+    // Anchor the popover to the selection rect before clearing the
+    // selection. Bottom-sheet mode doesn't visually use the rect (it docks
+    // to the viewport bottom), but `_syncPopover` returns early when the
+    // rect is null and would otherwise leave the popover unmounted.
+    this._popoverReferenceRect = range.getBoundingClientRect();
     this._popoverOpen = true;
     this._showFloatingBtn = false;
 
@@ -355,14 +382,9 @@ export class ReviewDocument extends LitElement {
     this._popoverOpen = true;
     this._showFloatingBtn = false;
 
-    // Position popover near the clicked highlight for desktop
+    // Anchor popover to the highlight rect on desktop; Floating UI handles clamping.
     if (!this._isMobile) {
-      const rect = target.getBoundingClientRect();
-      const containerRect = this._contentEl?.getBoundingClientRect();
-      if (containerRect) {
-        this._popoverX = rect.left - containerRect.left;
-        this._popoverY = rect.bottom - containerRect.top + 4;
-      }
+      this._popoverReferenceRect = target.getBoundingClientRect();
     }
   }
 
@@ -383,7 +405,7 @@ export class ReviewDocument extends LitElement {
 
     // If editing an existing annotation, remove the old one first
     if (this._editingAnnotationId) {
-      removeAnnotation(this.sessionId, this.docTitle, this._editingAnnotationId);
+      this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, this._editingAnnotationId);
       try { this._annotator?.removeAnnotation(this._editingAnnotationId); } catch { /* ignore */ }
     }
 
@@ -399,8 +421,8 @@ export class ReviewDocument extends LitElement {
       isCode: sel.isCode,
     };
 
-    addAnnotation(this.sessionId, this.docTitle, ann);
-    this._annotations = getAnnotations(this.sessionId, this.docTitle);
+    this.backend.add({ sessionId: this.sessionId, bucket: this.docTitle }, ann);
+    this._annotations = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     this._pendingSelection = null;
     this._popoverOpen = false;
     this._popoverMode = "popover";
@@ -460,8 +482,8 @@ export class ReviewDocument extends LitElement {
   }
 
   private _removeAnnotation(annotationId: string): void {
-    removeAnnotation(this.sessionId, this.docTitle, annotationId);
-    this._annotations = getAnnotations(this.sessionId, this.docTitle);
+    this.backend.remove({ sessionId: this.sessionId, bucket: this.docTitle }, annotationId);
+    this._annotations = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     this._detachedAnnotations = this._detachedAnnotations.filter(a => a.id !== annotationId);
 
     try {
@@ -474,7 +496,7 @@ export class ReviewDocument extends LitElement {
   }
 
   private _reanchorAnnotations(): void {
-    const existing = getAnnotations(this.sessionId, this.docTitle);
+    const existing = this.backend.get({ sessionId: this.sessionId, bucket: this.docTitle });
     if (existing.length === 0) {
       this._annotations = [];
       this._detachedAnnotations = [];
@@ -534,6 +556,31 @@ export class ReviewDocument extends LitElement {
     }
   }
 
+  /**
+   * Mirror local popover state into the singleton <annotation-popover>
+   * mounted in <body>. We don't render the element in this component's
+   * template because consumers can be nested inside transformed ancestors
+   * (the carousel slider's `transform: translateX(...)`) which trap any
+   * `position: fixed` descendant to that ancestor's bounding box. Mounting
+   * the popover in <body> sidesteps the trap entirely.
+   */
+  private _syncPopover(): void {
+    if (!this._popoverOpen) {
+      closeAnnotationPopover();
+      return;
+    }
+    const rect = this._popoverReferenceRect;
+    if (!rect) return;
+    openAnnotationPopover({
+      referenceRect: rect,
+      selectedText: this._selectedText,
+      mode: this._popoverMode,
+      existingComment: this._existingComment,
+      onSubmit: (comment) => this._onAnnotationSubmit({ detail: { comment } } as CustomEvent),
+      onCancel: () => this._onAnnotationCancel(),
+    });
+  }
+
   private _destroyAnnotator(): void {
     if (this._annotator) {
       try {
@@ -582,16 +629,7 @@ export class ReviewDocument extends LitElement {
       ${this._toastMessage
         ? html`<div class="review-toast">${this._toastMessage}</div>`
         : ""}
-      <annotation-popover
-        .open=${this._popoverOpen}
-        .x=${this._popoverX}
-        .y=${this._popoverY}
-        .selectedText=${this._selectedText}
-        .mode=${this._popoverMode}
-        .existingComment=${this._existingComment}
-        @annotation-submit=${this._onAnnotationSubmit}
-        @annotation-cancel=${this._onAnnotationCancel}
-      ></annotation-popover>
+      <!-- Annotation popover is mounted as a singleton in <body>; see _syncPopover. -->
     `;
   }
 }

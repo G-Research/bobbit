@@ -142,6 +142,13 @@ export class RemoteAgent {
 	/** Throttle visibility-driven resyncs: Android can fire visibilitychange
 	 *  several times during screen unlock; we only want one resync per wake. */
 	private _lastVisibilityResync = 0;
+	/** True if the WS has dropped since the last successful snapshot apply.
+	 *  Visibility-driven resyncs are skipped while this is false and we already
+	 *  have messages in state — the cached state is correct, and a redundant
+	 *  `requestMessages()` on every tab-focus tick is what triggers the
+	 *  new-tab duplicate-messages bug. Set true on WS close, cleared after
+	 *  any successful snapshot apply. */
+	_hadDisconnectSinceLastSnapshot = true;
 	private _onVisibilityChange = (): void => {
 		if (document.visibilityState !== "visible") return;
 		if (this._intentionalDisconnect) return;
@@ -178,7 +185,16 @@ export class RemoteAgent {
 			// with live message_end deltas. Reconnects after real disconnects
 			// still resync (that path doesn't go through here).
 			if (this._state.isStreaming) return;
-			this.requestMessages();
+			// Skip the message resync when the WS has stayed connected since
+			// the last snapshot AND we already have messages: the cached state
+			// is correct and re-snapshotting on every visibilitychange tick is
+			// what causes the new-tab duplicate-messages bug (each tick re-runs
+			// the snapshot survivor merge against the current `state.messages`,
+			// and any id-less live rows accumulate duplicates). `get_state`
+			// still fires — only the message refetch is skipped.
+			const needsResync =
+				this._hadDisconnectSinceLastSnapshot || this._state.messages.length === 0;
+			if (needsResync) this.requestMessages();
 			this.send({ type: "get_state" });
 			// Nudge subscribers — after a tab wake, Lit property bindings
 			// driven by this agent may not have been reactive while suspended.
@@ -224,13 +240,42 @@ export class RemoteAgent {
 	 *
 	 * `fields === null` signals a `proposal_cleared` event from the server
 	 * (e.g. after accept/dismiss/file-delete).
+	 *
+	 * Buffered: events received before the consumer assigns `onProposal`
+	 * (e.g. server-pushed `proposal_update` from rehydrate-on-attach arriving
+	 * during the post-connect await chain in session-manager.ts) are queued
+	 * and replayed synchronously on first assignment. Without this buffer
+	 * the WS message dispatch races the consumer's callback wiring and
+	 * proposals can be silently dropped — which is the exact regression that
+	 * Task C's lazy artifact loading exposed in the parity-restart-survival
+	 * E2E tests.
 	 */
-	onProposal?: (
+	private _onProposal?: (
 		type: ProposalType,
 		fields: Record<string, unknown> | null,
 		streaming: boolean,
 		rev?: number,
 	) => void;
+	private _bufferedProposalEvents: Array<{
+		type: ProposalType;
+		fields: Record<string, unknown> | null;
+		streaming: boolean;
+		rev?: number;
+	}> = [];
+	get onProposal(): typeof this._onProposal {
+		return this._onProposal;
+	}
+	set onProposal(fn: typeof this._onProposal) {
+		this._onProposal = fn;
+		if (fn && this._bufferedProposalEvents.length > 0) {
+			const pending = this._bufferedProposalEvents;
+			this._bufferedProposalEvents = [];
+			for (const ev of pending) {
+				try { fn(ev.type, ev.fields, ev.streaming, ev.rev); }
+				catch (err) { console.warn("[remote-agent] buffered onProposal replay threw:", err); }
+			}
+		}
+	}
 	/** Callback fired when tool execution updates (for real-time progress). */
 	onWorkflowUpdate?: () => void;
 	/** Callback fired when the server-side prompt queue changes. */
@@ -473,6 +518,10 @@ export class RemoteAgent {
 			};
 
 			this.ws.onclose = () => {
+				// Mark that the WS dropped — the next visibility-driven resync
+				// must run a fresh `requestMessages()` to pick up anything we
+				// missed while disconnected.
+				this._hadDisconnectSinceLastSnapshot = true;
 				if (!settled) {
 					settled = true;
 					if (initial) {
@@ -896,6 +945,10 @@ export class RemoteAgent {
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					// Successful snapshot apply — cached state is now in sync with
+					// the server, so future visibility ticks can short-circuit
+					// `requestMessages()` until the WS drops again.
+					this._hadDisconnectSinceLastSnapshot = false;
 					// Streaming preview: if the snapshot contains the streaming
 					// message id, it's no longer in-flight on this client.
 					this.streamingMessageId = undefined;
@@ -1162,16 +1215,24 @@ export class RemoteAgent {
 				const pType = (msg as any).proposalType;
 				const fields = (msg as any).fields;
 				const rev = typeof (msg as any).rev === "number" ? (msg as any).rev as number : undefined;
-				if (this.onProposal && isProposalType(pType) && fields && typeof fields === "object") {
-					this.onProposal(pType, fields as Record<string, unknown>, false, rev);
+				if (isProposalType(pType) && fields && typeof fields === "object") {
+					if (this._onProposal) {
+						this._onProposal(pType, fields as Record<string, unknown>, false, rev);
+					} else {
+						this._bufferedProposalEvents.push({ type: pType, fields: fields as Record<string, unknown>, streaming: false, rev });
+					}
 				}
 				break;
 			}
 
 			case "proposal_cleared": {
 				const pType = (msg as any).proposalType;
-				if (this.onProposal && isProposalType(pType)) {
-					this.onProposal(pType, null, false);
+				if (isProposalType(pType)) {
+					if (this._onProposal) {
+						this._onProposal(pType, null, false);
+					} else {
+						this._bufferedProposalEvents.push({ type: pType, fields: null, streaming: false });
+					}
 				}
 				break;
 			}
@@ -1425,7 +1486,7 @@ export class RemoteAgent {
 	 * `state.remoteAgent`-based check would no-op the initial review-pane
 	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
-	private _checkReviewToolResult(msg: any): void {
+	private _checkReviewToolResult(msg: any, isLive = false): void {
 		if (this._sessionId && state.selectedSessionId !== this._sessionId) return;
 
 		// Extract text content from the message
@@ -1446,9 +1507,20 @@ export class RemoteAgent {
 			try { data = JSON.parse(trimmed); } catch { continue; }
 
 			if (data.action === "review_open" && data.title && data.markdown) {
+				// If the user already submitted this review, suppress reopening it on
+				// REPLAY paths (snapshot loop / non-live message_end). The submitted
+				// flag is per-session and persisted server-side; without this gate, a
+				// page reload would re-open a panel the user explicitly submitted.
+				// On a LIVE event (the agent emits a fresh review_open after a prior
+				// submit) we DO want to reopen — fall through and clear the flag.
+				// RP-09.
+				if (!isLive && this._sessionId && isReviewSubmitted(this._sessionId)) return;
 				const replace = data.replace !== false;
-				// New review opened — clear any prior submitted flag so it persists across reconnects
-				if (this._sessionId) clearReviewSubmitted(this._sessionId);
+				// New review opened on a LIVE event — clear any prior submitted flag
+				// so the panel can reopen on subsequent reconnects. Skip on replay
+				// (the fire-and-forget PUT would race with concurrent server-side
+				// setSubmitted(true) and clobber it on reload). RP-09.
+				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				if (replace || !state.reviewDocuments.has(data.title)) {
 					state.reviewDocuments.set(data.title, { title: data.title, markdown: data.markdown });
@@ -1669,8 +1741,10 @@ export class RemoteAgent {
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
 
-						// Check for review tool results (review_open/review_close JSON)
-						this._checkReviewToolResult(msg);
+						// Check for review tool results (review_open/review_close JSON).
+						// `isLive: true` distinguishes a fresh agent emission from a snapshot
+						// replay so the submitted-flag handling can differentiate. RP-09.
+						this._checkReviewToolResult(msg, /* isLive */ true);
 
 						// Notify ask_user_choices cards on user-message echoes.
 						if (msg.role === "user" || msg.role === "user-with-attachments") {

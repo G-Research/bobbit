@@ -190,6 +190,8 @@ Two resolution modes:
 
 The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above — it resolves entire config objects by name, not individual settings keys.
 
+The global `system-prompt.md` template participates in the same builtin → user-override pattern but via a dedicated path resolver rather than the `ConfigCascade` class. `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` returns `<bobbitConfigDir()>/system-prompt.md` when present and falls back to the shipped `dist/server/defaults/system-prompt.md`. The file is **not** copied to `.bobbit/config/` on startup; users opt into customisation explicitly via the Settings → General → "Customise system prompt" button (which calls `POST /api/system-prompt/customise` to copy the default into place). Existence of `.bobbit/config/system-prompt.md` is itself the customisation signal used by `isSetupComplete()` (in `src/server/setup-status.ts`).
+
 > **Workflows are NOT in the cascade.** Workflows live exclusively inline in each registered project's `project.yaml::workflows` block — there is no system-scope or builtin workflow layer. `ConfigCascade.resolveWorkflows(projectId)` reads only the project layer; without a `projectId` it returns `[]`. See [Workflows are project-scoped only](#workflows-are-project-scoped-only) below for the rationale.
 
 #### Why a cascade?
@@ -260,7 +262,7 @@ On server startup, standalone stores (`roleStore`) are seeded with builtins that
 
 #### Scaffolding
 
-`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is also still copied.
+`scaffoldBobbitDir()` creates an empty `config/roles/` directory. Roles resolve at runtime via the cascade — no files are copied. Workflows are not scaffolded as a directory because they live inline in `project.yaml::workflows`. Tools are still copied from defaults because they contain provider configs and `extension.ts` code that `updateToolMetadata()` modifies in-place. `system-prompt.md` is **no longer** copied or scaffolded — it resolves at runtime via `resolveSystemPromptPath()` (see [Config cascade](#config-cascade)) and is created on disk only when the user clicks "Customise system prompt" in Settings (`POST /api/system-prompt/customise`). The shipped `defaults/docs/` tree is similarly never copied or overwritten; consumers (e.g. the `/mockup` skill) read from `defaults/docs/` directly.
 
 #### Session setup integration
 
@@ -978,6 +980,10 @@ Full design (file format, error codes, restore-handler edge cases, test plan): [
 
 Each proposal preview panel exposes `data-panel="<type>-proposal"` for E2E targeting. The project panel keeps its three-view structure (`view-tab-{components|workflows|diff}`) on top of the unified slot — see [Project-proposal panel structure](#project-proposal-panel-structure).
 
+### Inline comments on goal/role/staff proposals
+
+The Preview-mode markdown body of goal, role, and staff proposals is mounted via `<commentable-markdown>` (a thin wrapper around the existing `<review-document>`) so users can select text and attach inline comments without retyping quotes into the chat. Annotations are ephemeral — backed by an in-memory store (`src/ui/components/review/proposal-annotations.ts`) keyed by `(sessionId, "proposal:<type>")`, with no server persistence. They survive Edit↔Preview toggles, but are cleared on dismiss, on `proposal_cleared`, on a `proposal_update` whose body actually changed (offsets won't survive a rewrite), and on reload. A "Send feedback" button composes a quoted-text+comment chat message via `state.remoteAgent.prompt` and clears the bucket. Tool and project proposals are out of scope (YAML / no single markdown body). Full design: [docs/design/proposal-inline-comments.md](design/proposal-inline-comments.md).
+
 ### Out of scope
 
 - Diff/undo history of edits. Agents see the latest file contents only.
@@ -1077,6 +1083,25 @@ Locked by `tests/session-restore-last-activity.test.ts` — source-scan assertio
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
 | `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
 | `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
+
+---
+
+## Archived-session state push on auth
+
+Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame — the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder (`claude-opus-4-6`) until a manual reload.
+
+### Helper and call sites
+
+`buildArchivedStateData(archived, sessionManager, sessionId)` in `src/server/ws/handler.ts` returns the data block for `{ type: "state", data }` and is the single source of truth for archived state shape. Two call sites:
+
+- **Archived auth-ok branch.** Right after `session_title`, the handler builds the payload and sends it. This is the fix — the footer now reads the persisted model on first connect, with no round-trip required.
+- **Legacy `get_state` handler.** The same helper drives the response, so the reconnect path stays consistent with first-connect.
+
+The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow, maxTokens, reasoning}` from `inferMeta(archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. Persisted `modelProvider`/`modelId` come from the archived row in the session store.
+
+The footer model picker remains read-only/disabled for archived sessions — the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from `tests/e2e/ui/archived-session-model.spec.ts`.
+
+Client-side, the `claude-opus-4-6` placeholder default in `src/app/remote-agent.ts` is unchanged — it only matters before the server `state` frame arrives, which is now immediate.
 
 ---
 
@@ -1210,6 +1235,59 @@ This is what makes "my `code-reviewer` role always runs on opus" work without ch
 ### UI
 
 The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to **Prompt** and **Tool Access**, labelled **Model**. It reuses the model picker and thinking dropdown components from the settings page, with a leading "(use default)" option that maps to the empty string → omitted from YAML. The standard origin badge / Customize / Revert flow operates on the whole role record, so touching either field flips builtin→overridden and Revert clears them along with any other overrides.
+
+---
+
+## Spawn-time model pinning
+
+Without spawn-time pinning, every session emitted two `model_change` events at startup — pi-coding-agent booted with its CLI default (`anthropic/claude-opus-4-7`) and Bobbit then called `setModel` ~13 ms later — which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
+
+Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single `model_change` event. The legacy path — boot with the CLI default, then call `setModel` post-spawn — still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
+
+### Bridge options and CLI flags
+
+`RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
+
+- `initialModel?: string` — literal `<provider>/<modelId>`.
+- `initialThinkingLevel?: string` — one of `off|minimal|low|medium|high`.
+
+`buildAgentArgs(options)` in the same file translates them to `--model <provider>/<modelId>` and `--thinking <level>` and prepends them to the agent argv. Malformed values (no `/`, unknown level) are silently dropped — the post-spawn helpers will still bind correctly.
+
+### Resolution helpers
+
+`SessionManager.resolveInitialModel(role, projectId)` and `resolveInitialThinkingLevel(role, projectId)` mirror the precedence used at session start:
+
+1. Role override (`role.model` / `role.thinkingLevel` from the resolved cascade).
+2. `default.sessionModel` / `default.sessionThinkingLevel` preference (or `default.reviewModel` for verification sub-sessions).
+3. `undefined` — the aigw best-ranked fallback runs post-spawn via `tryAutoSelectModel` and emits a second `model_change` only on a cold cache.
+
+`resolveBridgeOptions` in `src/server/agent/session-setup.ts` is the single call site for the normal-create pipeline; `session-manager.ts` re-runs the helpers at the role-respawn and force-abort respawn sites; `verification-harness.ts` does it at all three reviewer/QA sub-session sites; `server.ts` does it at the continue-archived endpoint. The pinned values are stored on `session.spawnPinnedModel` and `session.spawnPinnedThinkingLevel`.
+
+### Skip-setModel branch preserves hard-fail-on-mismatch
+
+`applyModelString` and `applyReviewModelOverrides` in `src/server/agent/review-model-override.ts` accept `skipSetModel?: boolean`. When `true`, the helper skips the `setModel` RPC but still calls `rpc.getState()` and throws on mismatch — the same contract as the unconditional `setModel` path. `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` and the three verification sub-session sites set `skipSetModel: true` exactly when `session.spawnPinnedModel` equals the model they would otherwise bind. Net effect: the read-back verification still runs, but the redundant `setModel` RPC (and its `model_change` event) is elided.
+
+### Pool-claimed sessions
+
+The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** — it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too — there is no special pool path that emits two `model_change` events. The remaining two-event case is the aigw cold-cache discovery fallback, where the model is not resolvable at spawn time.
+
+### Out of scope
+
+- The client-side placeholder default (`anthropic/claude-opus-4-6`) seeded in `src/app/remote-agent.ts` until the first server `state` frame arrives. Replacing it with `null` would require auditing every `state.model` consumer.
+- Patching pi-coding-agent to suppress its own initial `model_change` when spawned with `--model`. The current behaviour is benign — the event simply matches the bound model.
+
+### Key files
+
+| File | Role |
+|---|---|
+| `src/server/agent/rpc-bridge.ts` | `RpcBridgeOptions.initialModel`/`initialThinkingLevel`, `buildAgentArgs` |
+| `src/server/agent/session-setup.ts` | `resolveBridgeOptions` injects pinned values into `bridgeOptions`; persists them onto the session |
+| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevel`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
+| `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
+| `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
+| `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
+| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection |
+| `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
 
 ---
 
@@ -1734,7 +1812,7 @@ Containers run on a dedicated Docker bridge network (`bobbit-sandbox-net`) with 
 
 Each sandboxed project gets a single 256-bit token shared by all sessions in that project. Generated via `SandboxTokenStore.register(projectId)`, in-memory only (regenerated on restart). Sessions are added to the scope via `addSession(projectId, sessionId)`. Auth tries admin token first, then `SandboxTokenStore`.
 
-**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
+**Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview/mount`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
@@ -1874,7 +1952,7 @@ The existing session restore path (on gateway restart) also benefits from worktr
 
 ### Security summary
 
-- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/{sessions,tool-guard,html-snapshots}/` (selective mounts — the host gateway token, TLS keys, and other sensitive state files are not mounted)
+- Container sees `/workspace`, `/workspace-wt/`, `/agent-modules` (ro), `/tools` (ro), `/bobbit-state/{sessions,tool-guard,html-snapshots}/` (selective mounts — the host gateway token, TLS keys, and other sensitive state files are not mounted), and `/bobbit/preview` (per-session bind-mount of `<stateDir>/preview/<sid>/` — or `/bobbit/preview-root` for the per-project shared parent; see [`docs/preview-architecture.md`](preview-architecture.md))
 - Runs as `node` user (uid=1000), no Docker socket
 - Mount paths validated against blocklist (`/proc`, `/sys`, `/.ssh`, `/.aws`, etc.)
 - Credential keys sanitized (`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -1929,7 +2007,7 @@ Agent process → message_update (full content)
 - **Original event never mutated** — `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event. Only the broadcast/buffer path sees the truncated version.
 - **Dual format support** — both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness.
 - **UI lazy loading** — `WriteRenderer` shows a preview (first 512 chars) with a "Load full content" button. Full content is fetched via `GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks (used by `preview_open` snapshots — see [Preview snapshots & reopening](#preview-snapshots--reopening)). See [docs/rest-api.md — Large content truncation](rest-api.md#large-content-truncation).
-- **`preview_open` snapshot blocks** — `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with the `__preview_snapshot_v1__\n` sentinel. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` — the marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint.
+- **`preview_open` snapshot blocks** — `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with one of the `__preview_snapshot_v{1,2,3}__\n` sentinels. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` — the matched marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. The 512-char preview applies to v1 (legacy raw-HTML) snapshots; v2/v3 snapshots are constant ~250 bytes and never trip the threshold, so the truncation path only fires for legacy v1 archived snapshots in practice. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint.
 - **Streaming throttle** — `remote-agent.ts` throttles `streamMessage` updates to 2x/sec when content is truncated, reducing Lit re-render pressure in the browser.
 
 ### Key files
@@ -1949,64 +2027,57 @@ Agent process → message_update (full content)
 
 ## Preview snapshots & reopening
 
-The `preview_open` tool drives a single live preview side-panel in the UI. Each call overwrites the panel — there are no tabs, no history slots. But every past `preview_open` widget in chat history renders an **Open** button that re-hydrates its captured HTML back into the panel on demand, so users can flip between previous previews without re-running the agent.
+The `preview_open` tool drives a single live preview side-panel in the UI. Each call overwrites the panel — there are no tabs, no history slots. But every past `preview_open` widget in chat history renders an **Open** button that re-hydrates the preview on demand by re-posting to the same mount endpoint, so users can flip between previous previews without re-running the agent.
 
 ### Why
 
-Previews are transient by design: the agent iterates on a mockup by calling `preview_open` repeatedly, and each call replaces the panel. Once a newer call lands, the earlier HTML is gone from the panel — but the chat history still shows the widget for the earlier call, which is confusing if clicking it does nothing. Capturing the resolved HTML into the tool_result (so it persists in the session `.jsonl`) and giving each widget an Open button closes the loop. Crucially, the snapshot must **not** re-enter the agent's context on later turns, or large mockups would bloat token counts on every subsequent prompt.
-
-Full design rationale is in [docs/design/reopenable-preview-widgets.md](design/reopenable-preview-widgets.md).
+Previews are transient by design: the agent iterates on a mockup by calling `preview_open` repeatedly, and each call replaces the panel. Once a newer call lands, the earlier preview is gone from the panel — but the chat history still shows the widget for the earlier call, which is confusing if clicking it does nothing. Persisting a tiny snapshot marker (URL + path, never the HTML body) into the tool_result and giving each widget an Open button closes the loop. Full architecture in [docs/preview-architecture.md](preview-architecture.md).
 
 ### Data flow
 
 ```
 Agent calls preview_open({html|file})
-       │
-       └─→ extension (defaults/tools/html/extension.ts)
-              │  1. Resolve content (inline html or fs.readFileSync(file))
-              │  2. PATCH /api/sessions/:id {preview:true}
-              │  3. POST  /api/preview?sessionId=… {html}
-              └─→ tool_result = [
-                   {type:"text", text:"Preview panel is open …"},
-                   {type:"text", text: PREVIEW_SNAPSHOT_MARKER + html}
-                 ]
-       │
-       └─→ session.jsonl persists BOTH blocks (full HTML)
-       │
-       └─→ emitSessionEvent → truncateLargeToolContent
-              │  walks toolResult messages via truncateSnapshotBlock()
-              │  if snapshot > 32KB: rewrite to {marker, _truncated, preview, _originalLength}
-              └─→ broadcast + EventBuffer hold the stub; agent’s next turn
-                  reads the stub from its own transcript (never the full HTML)
+   └─→ extension (defaults/tools/html/extension.ts)
+        1. PATCH /api/sessions/:id {preview:true}
+        2. POST  /api/preview/mount?sessionId=… {html} or {file}
+           — server writes into <stateDir>/preview/<sid>/, broadcasts
+             preview-changed via subscribePreviewChanged
+        tool_result = [
+          {type:"text", text:"Preview panel is open …"},
+          {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON {kind:"preview", url, path}}
+        ]
+   └─→ session.jsonl persists both blocks (each ≤ 250 bytes total)
+   └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
+       {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
 
-User clicks Open on widget #N (PreviewRenderer.ts)
-       │  If the in-memory block has full text (not _truncated), use it directly.
-       │  Otherwise GET /api/sessions/:id/tool-content/:mi/:bi (server reads
-       │    the .jsonl and returns block.text for type:"text" blocks).
-       └─→ strip PREVIEW_SNAPSHOT_MARKER →
-            PATCH /api/sessions/:id {preview:true} →
-            POST  /api/preview?sessionId=… {html}
-            — same endpoints the extension used, same single-panel pipeline.
+User clicks Open on widget #N (PreviewRenderer.ts):
+   └─→ parse v3 marker → POST /api/preview/mount?sessionId=… {html|file}
+   └─→ same endpoint the extension uses; SSE picks up; iframe re-renders.
 ```
 
 ### Key design decisions
 
-- **Versioned sentinel over a structured block type** — `__preview_snapshot_v1__\n` is a prefix on a plain `{type:"text"}` block rather than a new block type. This keeps the tool_result shape standard (agents and older clients treat it as an extra status line) and lets the truncation layer detect snapshot blocks with a single string check. The `v1` suffix reserves room for future format changes.
-- **Extension captures, not the server** — the HTML is resolved once in the tool process (where `params.html` or `fs.readFileSync(params.file)` already lives) and flows through the normal tool_result path. The server doesn't need a special "snapshot store" — the `.jsonl` already persists tool_results durably.
-- **Truncation preserves the marker** — `truncateSnapshotBlock()` keeps the marker prefix on the stub so downstream consumers (another truncation pass, the UI renderer deciding whether to show Open) can still recognise the block without inspecting `_truncated`.
-- **Backwards compatible** — historical `preview_open` results that pre-date the feature have only a single status block. `PreviewRenderer.ts` detects this (no marker block) and renders Open in a disabled state rather than crashing or silently doing nothing.
-- **No change to `/api/preview` or the panel** — Open replays through the exact endpoints the extension uses. The preview panel, its polling loop (`src/app/preview-panel.ts`), and the single-slot contract are untouched.
+- **Constant-size snapshots (≤ 250 bytes)** — tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
+- **Bytes never re-enter agent context** — the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
+- **v1/v2 markers preserved in renderer-only code paths** — archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
+- **Cookie auth for the content origin** — `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens.
+- **SSE replaces 1 s polling for hot reload** — `subscribePreviewChanged` pushes `preview-changed` events; the panel bumps `#mtime=<n>` on the iframe `src` to force reload, typically within 100 ms of the agent writing.
+- **Truncation layer recognises all three markers** — `truncateSnapshotBlock()` matches against `PREVIEW_SNAPSHOT_MARKERS`. v3 blocks are always tiny so the lazy-load branch is dead code for v3, but kept live for legacy archived sessions whose v1/v2 blocks may exceed the 32 KB threshold.
 
 ### Key files
 
 | File | Purpose |
 |---|---|
-| `defaults/tools/html/snapshot.ts` | `PREVIEW_SNAPSHOT_MARKER` constant, `isSnapshotBlock`, `extractSnapshot` helpers |
-| `defaults/tools/html/extension.ts` | Emits the 2-block tool_result (status + snapshot) after PATCH/POST succeed |
-| `src/server/agent/truncate-large-content.ts` | `truncateSnapshotBlock()` handles marker-prefixed text blocks in `toolResult` messages; wired into both `truncateLargeToolContent()` (live events) and `truncateLargeToolContentInMessages()` (history loads) |
-| `src/server/server.ts` | `/api/sessions/:id/tool-content/:mi/:bi` falls back to `block.text` when the block is a plain `type:"text"` block (snapshot blocks have no `arguments`/`input`) |
-| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button: state machine (idle → Opening → Opened ✔ / error), disabled for streaming and legacy single-block results, inline-or-lazy-load, strip marker, PATCH + POST |
-| `tests/preview-renderer.spec.ts`, `tests/preview-extension.test.ts`, `tests/truncate-large-content.test.ts`, `tests/e2e/preview-snapshot.spec.ts`, `tests/e2e/ui/preview-reopen.spec.ts` | Unit, server-side, and browser E2E coverage |
+| `src/server/preview/mount.ts` | Per-session mount lifecycle (write/copy/remove/watch) |
+| `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
+| `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel |
+| `src/server/auth/cookie.ts` | `bobbit_session` cookie store and verifier |
+| `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
+| `defaults/tools/html/extension.ts` | Tool extension emits `[status, v3-snapshot]` tool_result after PATCH + POST mount |
+| `src/server/agent/truncate-large-content.ts` | Recognises v1/v2/v3 markers (via `PREVIEW_SNAPSHOT_MARKERS`); v3 blocks always small so lazy-load only fires on legacy archived sessions |
+| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button dispatch: v3 → mount endpoint; v1/v2 → mount endpoint with `{html}`/`{file}` (read-only legacy) |
+| `src/app/preview-panel.ts` | EventSource SSE subscription + bootstrap GET |
+| `tests/preview-{mount,cookie,content-route,extension,renderer}*`, `tests/e2e/preview-{mount-route,token-cost}.spec.ts`, `tests/e2e/ui/preview-{happy-path,new-tab,archived-snapshot}.spec.ts` | Unit, API E2E, browser E2E coverage |
 
 ---
 
@@ -2153,11 +2224,13 @@ Long waits made the agent feel unresponsive: users would type a correction, see 
 
 ### Call sites
 
-Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId, message)`, which calls `bgProcessManager.abortAllWaits(sessionId)` before forwarding to `session.rpcClient.steer(message)`. All steer paths that run while the agent is `streaming` go through this helper:
+Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId, message)`, which enqueues the row into `promptQueue` and hands it to the single `SessionManager._dispatchSteer()` site. `_dispatchSteer` calls `bgProcessManager.abortAllWaits(sessionId)` before awaiting `rpcClient.steer(batchText)`, so every dispatch path runs through one abort site. All steer entry points that run while the agent is `streaming` go through this helper:
 
-- `src/server/ws/handler.ts` — `case "steer"` (user-initiated live steer).
-- `src/server/agent/team-manager.ts` — `injectSteerMessage()` and the task-completion nudge (mid-turn `team_steer`).
-- `src/server/agent/session-manager.ts` — `SessionManager.drainQueue()` when dispatching a batch of steered messages while streaming (same abort behaviour, inline rather than through `deliverLiveSteer` because the rpc call is wrapped in batching).
+- `src/server/ws/handler.ts` — `case "steer"` (user-initiated live steer) calls `deliverLiveSteer` → `_dispatchSteer`.
+- `src/server/agent/team-manager.ts` — `injectSteerMessage()` and the task-completion nudge (mid-turn `team_steer`) call `deliverLiveSteer` → `_dispatchSteer`.
+- `src/server/agent/session-manager.ts` — `SessionManager.steerQueued()` flips `isSteered=true` and (if `status === "streaming"`) calls `bgProcessManager.abortAllWaits()` so a parked `bash_bg wait` resolves and a tool boundary actually arrives. The boundary handler in `handleAgentLifecycle` (`tool_execution_end`, with `agent_end` non-aborting as a safety net for non-tool turns) drains all consecutive steered rows via `dequeueAllSteered()` and hands them to `_dispatchSteer`.
+
+Net result: `bgProcessManager.abortAllWaits(sessionId)` has exactly two call sites — once inside `_dispatchSteer` (every dispatch) and once inside `steerQueued` for the streaming case (so the parked wait resolves *before* a tool boundary can occur). Down from three pre-rewrite, with cleaner semantics.
 
 ### Termination cleanup
 
@@ -2168,7 +2241,7 @@ Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId
 | File | Purpose |
 |---|---|
 | `src/server/agent/bg-process-manager.ts` | `waits` registry, `registerWait`/`unregisterWait`/`abortAllWaits`, `waitForExit` with `AbortSignal` support |
-| `src/server/agent/session-manager.ts` | `deliverLiveSteer()` helper; `drainQueue()` abort-before-dispatch; `terminateSession()` termination-time abort |
+| `src/server/agent/session-manager.ts` | `deliverLiveSteer()` helper; single `_dispatchSteer()` site (one `abortAllWaits` per dispatch); `steerQueued()` (one `abortAllWaits` to unblock parked waits); `_consumeSteerEcho()` / `_reconcileAfterAbort()` shadow-ledger lifecycle; `terminateSession()` termination-time abort |
 | `src/server/agent/team-manager.ts` | Team-initiated steers routed through `deliverLiveSteer()` |
 | `src/server/ws/handler.ts` | WebSocket `case "steer"` routed through `deliverLiveSteer()` |
 | `src/server/server.ts` | `/bg-processes/:pid/wait` REST handler — creates the `AbortController`, registers it, passes `signal` to `waitForExit`, unregisters in `finally` |
@@ -2184,21 +2257,47 @@ Two surfaces in the chat client previously relied on time-based heuristics that 
 
 ### Chat scroll lock invariant
 
-`AgentInterface` (`src/ui/components/AgentInterface.ts`) keeps the message viewport pinned to the bottom only while `_stickToBottom` is true. The flag is governed by three rules — no timers, no debounces:
+**What this is for.** The chat surface in `AgentInterface` (`src/ui/components/AgentInterface.ts`) is a streaming transcript: tool-use cards appear, tool-result blocks expand asynchronously as their content lands, markdown highlights and lazy-loaded images reflow, and the whole viewport must continue tracking the bottom of the conversation while the agent is talking. "Tail-chat" is the user-facing contract that says *if I am at the bottom when content arrives, I stay at the bottom*. The mechanism that enforces this contract is the scroll lock — a single boolean intent flag plus the bookkeeping needed to grow the scroll container without confusing browser-emitted echo events for user intent.
 
-1. **Auto-scroll only on positive delta.** The `ResizeObserver` callback computes `delta = newScrollHeight - _lastScrollHeight`. `delta < 0` (shrink) updates the cached height and returns. `delta === 0` is a no-op — the original snap-back bug came from clamping `scrollTop = scrollHeight` on every zero-delta RO fire, which converted a benign sub-pixel reflow into a vibration loop. Only `delta > 0` (real growth) triggers a programmatic scroll, and only when `_stickToBottom` is already true.
-2. **Programmatic scrolls are filtered, not timed.** Before each programmatic `scrollTop` write the code latches `(_lastProgrammaticScrollTop, _lastProgrammaticScrollHeight)`. The matching browser-emitted scroll event is consumed exactly once and the latch is cleared, so a later coincidental geometry match still counts as user intent. This replaces the previous `_isAutoScrolling` timer that would silently drop user scroll-ups whenever the RO happened to fire faster than its 150ms re-arm window.
-3. **User intent is observed, not inferred.** Explicit `wheel`, `touchstart`, and `keydown` (PageUp/Down, Arrow Up/Down, Home, End) listeners on the scroll container set `_stickToBottom = false` immediately. Geometry alone cannot reliably distinguish a user scroll-up from a programmatic one across browsers and pointer types, so the listeners are the source of truth for "the user took control". The 10px stick-to-bottom tail in `_handleScroll` is just a tolerance for sub-pixel rounding — not an intent heuristic.
+**Why this section exists.** Earlier iterations layered defenses on top of each other — a programmatic-scroll latch, a settle window, a carry-over flag, a jump-button suppression timer, a triple-rAF chain, a 10 %/10 px stick-grace band, an `_isAutoScrolling` debounce. Each layer was added to mask a race introduced by the previous one. The result was eight scroll-lock fields, three independent timing windows, and three failure modes the layers could not actually paper over (new tool-card insert, tool-result expand, session navigate). The rewrite collapses everything to one flag, one re-pin path, and one echo ring. **Do not re-introduce a deleted mechanism without first proving the new model can't handle the case** — every one of the deleted pieces was eventually shown to be masking a bug elsewhere rather than fixing one.
 
-**Sub-pixel echo tolerance.** The programmatic-scroll echo latch in `_handleScroll` compares `scrollTop` / `scrollHeight` with `Math.abs(observed - latched) < 1` rather than strict equality. HiDPI displays and fractional `devicePixelRatio` round browser-emitted `scroll` event values by sub-pixel amounts, so a strict-equality echo filter would leak a programmatic write through as user intent and silently flip `_stickToBottom = false`.
+`_stickToBottom` is the only state. It is governed by **four rules** — no timers, no debounces, no settle windows, no geometry-based inference:
 
-**`_wasAtBottomAtLastUserScroll` carry-over.** `_handleScroll` records the *current* `_stickToBottom` value into `_wasAtBottomAtLastUserScroll` on every non-echo recompute. The `state_update` branch of `setupSessionSubscription` then scroll-to-bottoms when **either** `_stickToBottom` is true **or** `_wasAtBottomAtLastUserScroll` was true at fire time. This closes the race where a transient scroll event between two server frames (e.g. layout-induced sub-pixel scroll-up that exceeds the 10px tail) flips `_stickToBottom = false` for one tick and the next state-update would otherwise leave the user staring at older content. Cleared explicitly on `_handleUserIntent` / `_handleScrollKeydown` so a real user scroll-up still wins.
+1. **One intent flag.** `_stickToBottom` is the single source of truth for "viewport is pinned". Geometry NEVER mutates it. It flips **FALSE** only via observed user gestures — the `wheel`, `touchstart`, and `keydown` (PageUp/Down, Arrow Up/Down, Home, End) listeners on the scroll container. It flips **TRUE** only at programmatic restore points: `_pinIfSticking()`, `_handleJumpToBottomClick`, `setupSessionSubscription` (session navigate), and `sendMessage` (user submitted a turn).
+2. **One re-pin path — `_pinIfSticking()`.** Every programmatic restoration goes through this helper. When `_stickToBottom` is true and the viewport is not already within 1 px of the bottom, it pushes a `(scrollTop, scrollHeight)` echo entry into the ring buffer and writes `scrollTop = scrollHeight` (the browser clamps). It is the only function that mutates `scrollTop` for stick-to-bottom purposes. Call sites: ResizeObserver callback when `delta > 0` (also covers `<img>` / `<iframe>` / KaTeX / Mermaid decode reflows — the RO observes the content container with `box: "border-box"` and fires the same frame as the decode); `_updateAndPin()` (the funnel for every transcript-mutating session event — `message_update`, `tool_execution_update`, `state_update`, compaction/turn/agent events); `setupSessionSubscription` post-`updateComplete`; `sendMessage`; and jump-to-bottom click.
+3. **Ring-buffer echo latch — `_programmaticEchoes`.** The browser emits a `scroll` event for every programmatic `scrollTop` write, asynchronously. Multiple writes can be in flight before any echo fires (RO tick + state_update + load all in the same frame). The previous single-pair latch dropped the older echo on the second write, leaking it through `_handleScroll` as user intent. The new model uses a small ring (capacity 4); `_handleScroll` consumes the **oldest** matching entry within `< 1 px` tolerance (HiDPI device-pixel rounding) and splices it. Non-matching events fall through to geometry, which **only** updates jump-button visibility.
+4. **User intent is observed, not inferred.** Geometry alone cannot reliably distinguish a user scroll-up from a programmatic write across browsers, pointer types, and momentum-scroll quirks. The wheel/touch/keydown listeners are the source of truth for "the user took control". If the user does not generate one of those events, `_stickToBottom` does not flip false — full stop. There is no "close enough to bottom" heuristic, no carry-over flag, no geometric grace band.
 
-**Session-load settle window.** `_settleWindowActive` + `_settleWindowDeadline` (`performance.now() + 2000`) are armed on every `setupSessionSubscription` call — not just first mount — alongside the existing `_stickToBottom = true` + `updateComplete.then(_scrollToBottom)`. While the window is active and `_stickToBottom` is true, every `ResizeObserver` tick re-calls `_scrollToBottom()`, absorbing async layout growth from late-resolving markdown / code blocks / images. Exits on **(a)** `scrollHeight` unchanged across two consecutive RO ticks (tracked via `_lastSettleScrollHeight`), **(b)** `performance.now() > _settleWindowDeadline`, or **(c)** any user-intent event (`_handleUserIntent`, `_handleScrollKeydown` clear `_settleWindowActive` immediately). Torn down in `disconnectedCallback` — no leaked timers or flags.
+**Session-navigate flow.** `setupSessionSubscription` resets `_stickToBottom = true`, clears the echo ring, awaits `this.updateComplete`, and calls `_pinIfSticking()`. All subsequent async growth — markdown highlighting, hydrated tool-content, lazy `<img>` / `<iframe>` decode reflows, KaTeX/Mermaid, image-reflow paths — is caught by the ResizeObserver: every `delta > 0` tick re-pins. Termination is event-driven (no `delta > 0` ticks → no work), not deadline-driven. There is no separate `load` listener: the RO fires the same frame as the decode reflow, so a parallel image-load handler would only be a redundant second write.
 
-**Jump-to-bottom button.** `_showJumpToBottom` is recomputed in `_handleScroll` as `scrollHeight - scrollTop - clientHeight > clientHeight * 0.5` and rendered by `_renderJumpToBottom()` (icon-only on `_isMobileViewport`, label otherwise; reuses existing button vocabulary, opacity-transition hide). Click handler runs `_scrollToBottom()` and sets `_stickToBottom = true` + `_wasAtBottomAtLastUserScroll = true` — no new parallel flag. `_stickToBottom` remains the single source of truth for "viewport is pinned".
+**`overflow-anchor: none` on the scroll container.** `agent-interface .overflow-y-auto` has inline `overflow-anchor: none`. CSS scroll-anchoring is Chromium-only (Safari has no implementation — see MDN "limited availability"); leaving it on would mean Chromium silently masked broken JS pin behaviour while Safari/iOS PWA users got only what `_pinIfSticking` + RO actually delivered. With anchoring off everywhere, the JS pin path is the single contract — any regression surfaces on both engines, and Tier 2 / 2.5 tests on Chromium catch what users see on Safari.
 
-When modifying scroll behaviour: do not introduce new timers, do not widen the 10px tail, do not introduce a parallel flag (the button reuses `_stickToBottom`), and do not reach for `_isAutoScrolling`-style flags. If a new code path scrolls programmatically, it must update the latch via the same helper used by the existing auto-scroll path so its echo gets consumed. Behavioural twin tests: `tests/agent-interface-scroll.spec.ts` (the `delta === 0` no-op case is the canonical regression), `tests/agent-interface-scroll-hardening.spec.ts` (sub-pixel echo, 10px tail, carry-over, settle window), and `tests/e2e/ui/jump-to-bottom.spec.ts` (button visibility threshold + click).
+**Jump-to-bottom button.** `_showJumpToBottom` is recomputed in `_handleScroll` purely from geometry (`scrollHeight - scrollTop - clientHeight > clientHeight * 0.5`). This is the **only** thing geometry is allowed to drive. The recompute does NOT mutate `_stickToBottom`. Click handler: `_stickToBottom = true`, hide the button, call `_pinIfSticking()`. The ring-buffer latch absorbs the resulting echoes — there is no post-click suppression timer.
+
+**Auto-scroll on positive delta only.** The ResizeObserver callback computes `delta = newScrollHeight - _lastScrollHeight`. `delta < 0` (shrink) runs the post-collapse clamp from `tests/collapse-scroll-bugs.spec.ts` and returns. `delta === 0` is a no-op — the canonical vibration regression came from clamping `scrollTop = scrollHeight` on every zero-delta RO fire, which converted a benign sub-pixel reflow into a feedback loop. Only `delta > 0` calls `_pinIfSticking()`.
+
+#### Removed mechanisms (do NOT re-introduce)
+
+Each was added to fix a symptom but masked a deeper race introduced by an earlier mechanism. Every one is now redundant under the four-rule model. If you find yourself reaching for one, the bug is somewhere else.
+
+- **`_lastProgrammaticScrollTop` / `_lastProgrammaticScrollHeight` (single-pair echo latch).** Dropped older echoes when a second programmatic write landed before the first echo fired, leaking the older one as user intent. Replaced by `_programmaticEchoes` (ring of 4).
+- **`_wasAtBottomAtLastUserScroll` (carry-over flag).** Existed to paper over a transient `_stickToBottom = false` flip caused by geometry-based intent inference between two server frames. With geometry no longer touching the flag, the underlying flip never happens, so there is nothing to carry over.
+- **`_settleWindowActive` / `_settleWindowDeadline` / `_lastSettleScrollHeight` / `_settleQuietTickCount` (3 s post-navigate settle window).** A timer-bounded loop that re-pinned on every RO tick for up to 3 s after session navigate. Exited on "two consecutive quiet ticks" — which fired *before* lazy markdown highlights and image decodes, dropping case (3). Replaced by the always-on RO `delta > 0` re-pin: termination is now "the content stopped growing", not "the deadline expired".
+- **`_suppressJumpUntilTs` (600 ms jump-button click-suppression timer).** Hid the button for 600 ms after a jump click so the post-click programmatic scroll didn't re-show it via geometry. Unnecessary now: the ring-buffer latch consumes the click's echo before geometry sees it, and geometry can't flip `_stickToBottom` regardless.
+- **Triple-rAF chain in `setupSessionSubscription`.** Three nested `requestAnimationFrame` calls trying to land after every conceivable async layout step. Always either too short (lazy images) or theatrical (rAF#3 was a no-op in 99 % of frames). Replaced by `await this.updateComplete` + one `_pinIfSticking()` (subsequent reflows caught by RO `delta > 0`).
+- **Geometry-based intent flip in `_handleScroll`.** "If `scrollTop + clientHeight < scrollHeight - 10 px` then `_stickToBottom = false`." This was the root of nearly every leak: HiDPI rounding, momentum-scroll overshoot, layout-induced sub-pixel scroll, and the "echo coincidentally matches geometry" race all triggered it. `_handleScroll` now consumes echoes and updates button visibility — nothing else.
+- **10 % / 10 px stick-grace band.** A tolerance widened in successive patches to mask the geometry flip's misfires. Gone with the geometry flip.
+- **`requestAnimationFrame` re-assert inside `_scrollToBottom`.** A defensive second write one frame after the first to "catch" any layout that landed in the gap. Bypassed the ring buffer (no echo entry), so its own echo could leak through as user intent. The single write inside `_pinIfSticking()` is sufficient — RO catches anything that arrives later.
+- **`_imageLoadHandler` / capture-phase `load` listener on the scroll container.** Added to catch lazy `<img>` / `<iframe>` decode reflows on session-navigate when the settle window was still in play. Redundant under the four-rule model: the ResizeObserver is observing the content container with `box: "border-box"` and fires the same frame as the decode reflow, so its `delta > 0` branch already re-pins. Keeping a parallel `load` path meant two writes for the same reflow (one extra echo to absorb) and a separate failure mode if either path drifted. Image-reflow coverage is now `tests/e2e/ui/tail-chat-image-reflow.spec.ts`, asserting via `expectLatestMessagePinned` after a streamed markdown image — if RO ever stops covering the image-decode path, the test fails on its own.
+
+#### Rules for future modifications
+
+- **No timers in the scroll-lock code path.** The only acceptable timing primitives are `requestAnimationFrame` and Lit's `updateComplete`. No `setTimeout`, no `performance.now()` deadlines.
+- **No parallel flags.** The jump-to-bottom button reuses `_stickToBottom`. Anything that needs to ask "is the viewport pinned?" reads that one field.
+- **Geometry never mutates intent.** `_handleScroll` consumes echoes and recomputes `_showJumpToBottom`. That is its entire contract.
+- **All programmatic scrollTop writes go through `_pinIfSticking()`** (or, if you must, `_pushEcho()` followed by the write — same effect). A direct `scrollTop = ...` write skips the ring and its echo will leak.
+
+**Behavioural tests.** `tests/agent-interface-scroll.spec.ts` (the canonical `delta === 0` vibration regression), `tests/agent-interface-scroll-hardening.spec.ts` (sub-pixel echo absorbing, ring-buffer multi-write race, geometry-doesn't-flip-flag), `tests/scroll-anchor-shrink.spec.ts` (shrink/grow while scrolled up), `tests/collapse-scroll-bugs.spec.ts` (post-collapse clamp), `tests/mobile-scroll-keyboard.spec.ts`, `tests/e2e/ui/jump-to-bottom.spec.ts` (button visibility threshold + click), and `tests/e2e/ui/tail-chat-*.spec.ts` (reliability scenarios: real streaming burst, tool-card expand, rapid stream, session-navigate, user-scroll-up release, image-reflow). The tail-chat suite drives **real preconditions** (`STREAM_BURST`, `STAY_BUSY`, `page.mouse.wheel`, etc.) and asserts via outcome-only helpers — `expectLatestMessagePinned` reads only `getBoundingClientRect()` of the latest message vs the scroll container, and `disableScrollAnchoring` cascades `overflow-anchor: none` so Chromium ≡ Safari for the duration of the test. Tests must NEVER read `_stickToBottom`, `_programmaticEchoes`, `_settleWindowActive`, or any other private field; if a test needs a new fact, add a public outcome to `tail-chat-helpers.ts` rather than reaching through. See [docs/design/tail-chat-redesign.md — Outcome of the redesign](design/tail-chat-redesign.md#outcome-of-the-redesign).
 
 ### Proposal panel scroll lock invariant
 
@@ -2235,7 +2334,7 @@ A per-tag map rather than a single boolean because the six panels can be in inde
 Transcript ordering is a single-source-of-truth concern owned by the pure reducer in `src/app/message-reducer.ts`. `RemoteAgent.handleServerMessage` / `handleAgentEvent` are thin dispatchers that translate WebSocket frames into actions and apply them via `reduce(state, action)`; the reducer's `messages` array is the canonical render input — there are no client-only buckets and no render-time sort. The invariant is:
 
 - **Every message carries an `_order: number` and `_insertionTick: number`, and the reducer sorts by `(_order ASC, _insertionTick ASC)` exactly once per `apply()`.** Server live events use the monotonic per-session `seq` (positive integer). Snapshot rows use `_order = SNAPSHOT_ORDER_FLOOR + i` (≡ `-1_000_000_000 + i`) so every snapshot order is strictly less than every live `seq`, no coordination required. `tool_permission_needed` frames are stamped via `EventBuffer.pushFrame()` and treated like a live event. Synthetics (compaction marker, system notifications, error rows) sit at `highestSeq + 0.5`. Optimistic prompts/steers sit at `Number.MAX_SAFE_INTEGER - 1e9 + tick` so they always tail-position until the server echo replaces them by id (or by text fallback when the optimistic id is `^optimistic_`).
-- **The server snapshot is authoritative for any id it contains.** On a `snapshot` action the reducer drops every prior row whose id appears in the snapshot, then merges in the surviving client-only rows (optimistic / synthetic / permission). Permission cards survive iff their id is not in the snapshot **and** no snapshot row has a greater `_order` — the old `_pendingPermissionCards` `maxServerTs` cutoff is gone. The synthetic compaction marker also falls back to a text-prefix check (`"Context compacted"`) so a legacy snapshot row without a stable id still wins. The survivor filter additionally drops live server-origin `toolResult` rows and `toolCall`-bearing `assistant` rows whose `toolCallId` (resp. assistant-content `toolCall.id`) matches a snapshot row — toolResult `message_end` frames frequently arrive without a string `id` (real LLM streams, mock-agent transcripts), and id-only equivalence would let the un-id'd live row pass through alongside the snapshot's id'd copy (Bug 2 / scenario 08 bg-3, regression-tested by `tests/dual-render-bg3.test.ts`).
+- **The server snapshot is authoritative for any id it contains.** On a `snapshot` action the reducer drops every prior row whose id appears in the snapshot, then merges in the surviving client-only rows (optimistic / synthetic / permission). Permission cards survive iff their id is not in the snapshot **and** no snapshot row has a greater `_order` — the old `_pendingPermissionCards` `maxServerTs` cutoff is gone. The synthetic compaction marker also falls back to a text-prefix check (`"Context compacted"`) so a legacy snapshot row without a stable id still wins. **The survivor filter applies four equivalence tiers, in order, to live server-origin rows:** (1) string `id` match; (2) `toolResult` rows whose `toolCallId` matches a snapshot row's `toolCallId`; (3) `assistant` rows containing a `toolCall` whose `id` matches a snapshot assistant row's inner `toolCall.id`; (4) plain-text rows (assistant/user with no `toolCall` content and not a `toolResult`) whose `(role, normalisedText)` matches a snapshot row — detected via the `isPlainTextRow` and `normaliseText` helpers. Tiers 2 and 3 cover the un-id'd `message_end` case for tool-bearing rows (Bug 2 / scenario 08 bg-3, regression-tested by `tests/dual-render-bg3.test.ts`); tier 4 covers id-less / id-mismatched live plain-text `message_end` rows that would otherwise duplicate on every visibility-driven snapshot tick (new-tab dup bug, regression-tested by `tests/e2e/ui/new-tab-no-duplicate-messages.spec.ts`). **Invariant: tier 4 must NEVER apply to `toolResult` rows** — those are owned by tier 2; widening tier 4 to cover them would re-open the bash_bg.wait dup bug because two distinct bg waits with identical text content but different `toolCallId`s would collapse to one. Do not add a fifth tier without first checking whether one of the existing four can be extended.
 - **Render trusts the reducer verbatim.** `MessageList.buildRenderItems` keys every row by id (synthetic fallback `synth:${origin}:${order}:${tick}` for rows without server ids) — no `msg:${i}` index keys, no render-time sort. The streaming-message preview is hidden at render time when `state.streamingMessage?.id === m.id`; the old `_deferredAssistantMessage` mutable slot is gone.
 - **Thirteen actions cover every transcript mutation.** `live-event`, `snapshot`, `optimistic-prompt`, `optimistic-steer`, `permission-needed`, `permission-resolved`, `compaction-placeholder`, `compaction-result`, `system-notification`, `error`, `deny-permission-filter`, `replace-messages`, `reset`. If a new transcript-touching code path can't be expressed as one of these, add a new action — do not bypass the reducer with a direct push. The pre-reducer mechanisms `_deferredAssistantMessage`, `_liveEventMessages`, `_pendingPermissionCards`, `_compactionSyntheticMessages`, `flushDeferredMessage`, optimistic-text dedupe, the snapshot-merge stable-sort by `(timestamp, insertionOrder)`, and `MessageList.buildRenderItems` index keys have all been deleted; if you find yourself wanting to reintroduce one, the design is wrong.
 
@@ -2277,7 +2376,7 @@ This is strictly better than the pre-fix state: one-off glitches self-heal on th
 ### Entry points
 
 - `SessionManager.enqueuePrompt` (`src/server/agent/session-manager.ts`) — user / REST prompt arrival.
-- `SessionManager.deliverLiveSteer` — WS `{type:"steer"}` and team-manager steer paths. Still persists to `promptQueue` as `{ isSteered: true, dispatched: true }` **before** dispatching, to preserve the PI-25b/c invariant that steers survive a Stop/retry roundtrip.
+- `SessionManager.deliverLiveSteer` — WS `{type:"steer"}` and team-manager steer paths. Enqueues into `promptQueue` as `{ isSteered: true }` and hands to `_dispatchSteer`, which removes the row before awaiting `rpcClient.steer()` and pushes the batch text onto the shadow ledger on success. The PI-25b/c invariant that steers survive a Stop/retry roundtrip is preserved by the shadow ledger → `_reconcileAfterAbort` → `enqueueAtFront` → post-respawn `drainQueue` chain, not by an in-row `dispatched` flag (which has been deleted).
 - Both emit a one-line log on the implicit-unstick path recording `sessionId`, `source` (`enqueuePrompt` vs `deliverLiveSteer`), and current `consecutiveErrorTurns`, so the rescue-vs-park ratio is observable in practice.
 
 ### Team-manager suppression removed
@@ -2335,6 +2434,8 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 **Data:** `PersistedGoal.reattemptOf`, `PersistedSession.reattemptGoalId`. API: `POST /api/sessions` accepts `reattemptGoalId`; goals accept `reattemptOf`.
 
+**Visibility:** the "Re-attempt" button is shown whenever the goal has no active team and no live (non-terminated) session — covering fresh, shelved, stopped-team, archived, and merged goals. It is hidden only while a team-lead session or any other live session is running for the goal. Sidebar predicate lives in `src/app/render-helpers.ts`; dashboard nav predicate lives in `src/app/goal-dashboard.ts::renderNavBar`.
+
 ---
 
 ## Disk state
@@ -2343,7 +2444,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
-| `system-prompt.md` | `cli.ts` | Global system prompt template |
+| `system-prompt.md` | `cli.ts`, `system-prompt.ts::resolveSystemPromptPath` | Global system prompt template (read directly from `defaults/`; only copied to `.bobbit/config/` when the user opts in via `POST /api/system-prompt/customise`) |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
 | `workflows/*.yaml` | (legacy) | Historical default workflow seeds. No longer copied into new projects — the server seeds nothing; the project assistant designs workflows. Not read by `BuiltinConfigProvider` at runtime. See [No default workflow scaffold](#no-default-workflow-scaffold). |
@@ -2394,6 +2495,8 @@ Only truly global state lives in the server's central state directory.
 | `gateway-restart` | `harness.ts` | Dev restart sentinel |
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
+| `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
+| `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
 
 ### Global
 

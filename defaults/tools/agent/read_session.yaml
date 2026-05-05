@@ -1,0 +1,138 @@
+name: read_session
+description: "Read the conversation transcript of another Bobbit session — peer agent, delegate, or archived session."
+summary: "Paginated, regex-filterable read of a session transcript."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Agent
+renderer: src/ui/tools/renderers/ReadSessionRenderer.ts
+docs: |-
+  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. `verbose: true` includes full content blocks (subject to the standard 32 KB tool-result cap with lazy-load).
+detail_docs: >-
+  ## Purpose
+
+
+  Read the conversation transcript of another Bobbit session — a peer team
+  agent, a delegate session, or an archived session. The tool resolves the
+  session's JSONL file server-side so callers never deal with paths, sandbox
+  remapping, or filesystem permissions.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `session_id` | string | yes | Target session ID. |
+
+  | `offset` | number | no | Default `0`. Negative indexes from the end (Python-style). `-1` is the last message; `-20` is the start of the last 20. |
+
+  | `limit` | number | no | Default `20`. Clamped to `[1, 200]`. |
+
+  | `pattern` | string | no | Regex to filter messages. Matches against the flattened text (text blocks + tool inputs + tool results). |
+
+  | `case_sensitive` | boolean | no | Default `false`. |
+
+  | `context` | number | no | `0..5`. Only meaningful with `pattern`. Expands each match by ±N neighbours; the deduplicated match-with-context list is what `offset`/`limit` then paginate. |
+
+  | `verbose` | boolean | no | Default `false`. When true, returns full content blocks instead of compact summaries. Subject to the 32 KB tool-result cap (with lazy-load). |
+
+
+  ## Indexing & filter semantics
+
+
+  - **Indexing** is 0-based in transcript order. Negative `offset` resolves
+  Python-style: `offset=-1, limit=1` is the last message; `offset=-20,
+  limit=20` is the last 20 messages. Out-of-range windows return `messages:
+  []` with `total` populated — never an error.
+
+  - **When `pattern` is set**, the `offset`/`limit` window applies over the
+  deduplicated match-with-context list, **not** the raw transcript. The
+  `matchCount` field reports how many true hits exist (pre-context
+  expansion).
+
+
+  ## Output envelope
+
+
+  ```json
+
+  {
+    "total": 142,
+    "matchCount": 17,
+    "returned": 20,
+    "offsetStart": 122,
+    "offsetEnd": 141,
+    "messages": [
+      {
+        "index": 122,
+        "role": "assistant",
+        "ts": "2026-05-04T12:34:56Z",
+        "text": "compact text up to ~800 chars",
+        "toolUses":    [{ "name": "bash", "inputPreview": "{\"cmd\":\"…\"}" }],
+        "toolResults": [{ "name": "bash", "preview": "…" }]
+      }
+    ]
+  }
+
+  ```
+
+
+  In `verbose: true` mode each message carries a full `content` array of
+  `{ type, text|tool_use|tool_result, … }` blocks instead of `text` /
+  `toolUses` / `toolResults`.
+
+
+  When `messages` is empty, both `offsetStart` and `offsetEnd` are `-1`.
+
+  `matchCount` is omitted when no `pattern` is supplied.
+
+
+  ## Errors
+
+
+  All errors return structured codes (not prose):
+
+
+  | Code | HTTP | Cause |
+
+  |------|------|-------|
+
+  | `session_not_found` | 404 | No session with that id. |
+
+  | `transcript_unavailable` | 404 | Session exists but its `agentSessionFile` is missing or empty. |
+
+  | `invalid_regex` | 400 | `pattern` failed to compile. |
+
+  | `invalid_params` | 400 | `limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc. |
+
+  | `permission_denied` | 403 | Cross-project read. |
+
+
+  ## Examples
+
+
+  ```
+
+  # Tail the last 20 messages
+
+  read_session(session_id="abc-123", offset=-20, limit=20)
+
+
+  # Find the last 5 errors
+
+  read_session(session_id="abc-123", pattern="error", offset=-5, limit=5)
+
+
+  # Show context around each "TypeError"
+
+  read_session(session_id="abc-123", pattern="TypeError", context=2)
+
+
+  # Get the full content of one message
+
+  read_session(session_id="abc-123", offset=42, limit=1, verbose=true)
+
+  ```

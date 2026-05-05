@@ -14,7 +14,18 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
-import { loadDashboardData, clearDashboardState } from "./goal-dashboard.js";
+// goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
+// See docs/design/ui-bundle-size-reduction.md (Task A).
+let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
+async function loadDashboardData(goalId: string): Promise<void> {
+	if (!_goalDashboardModule) _goalDashboardModule = await import("./goal-dashboard.js");
+	return _goalDashboardModule.loadDashboardData(goalId);
+}
+function clearDashboardState(): void {
+	// No-op when the dashboard chunk hasn't been loaded yet — nothing to clear,
+	// and importing it here would defeat the route-level code-split.
+	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
+}
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 
 // ============================================================================
@@ -22,6 +33,10 @@ import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-
 // ============================================================================
 
 setRenderApp(doRenderApp);
+
+// Expose state on window for E2E tests (harmless in production — the state
+// object is already mutable from devtools and contains no secrets).
+(window as any).__bobbitState = state;
 
 // ============================================================================
 // GATEWAY STARTUP POLLING

@@ -8,7 +8,7 @@
 import { LitElement, html, nothing, type TemplateResult, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import "../../components/LiveTimer.js";
 import "../../components/VerificationOutputModal.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
@@ -101,6 +101,7 @@ export class GateVerificationLive extends LitElement {
 	}
 
 	override connectedCallback() {
+		ensureMarkdownBlock();
 		super.connectedCallback();
 		this._abortCtrl = new AbortController();
 		document.addEventListener("gate-verification-event", (e) => this._onEvent(e), { signal: this._abortCtrl.signal });

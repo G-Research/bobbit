@@ -104,6 +104,11 @@ export interface SessionSetupPlan {
 	skipAutoModel?: boolean;
 	skipAutoThinking?: boolean;
 
+	// Pin model/thinking-level at spawn time (verification sub-sessions use this).
+	// Bypasses the role/preference resolver in resolveBridgeOptions.
+	initialModel?: string;
+	initialThinkingLevel?: string;
+
 	// Sandbox worktree: branch to create inside the container
 	sandboxBranch?: string;
 	sandboxBaseBranch?: string;
@@ -151,6 +156,8 @@ export interface PipelineContext {
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
 	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
 	buildWorkflowList: (projectId?: string) => string;
+	resolveInitialModel: (role: string | undefined, projectId: string | undefined) => string | undefined;
+	resolveInitialThinkingLevel: (role: string | undefined, projectId: string | undefined) => string | undefined;
 	/**
 	 * Persist agentSessionFile + other live-state-derived fields. Optional —
 	 * tests may construct a context without this; in that case a hard restart
@@ -211,6 +218,23 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	// Wire tool manager for extension path resolution in RpcBridge
 	if (ctx.toolManager) {
 		plan.bridgeOptions.toolManager = ctx.toolManager;
+	}
+
+	// Pin model + thinking level at spawn time so pi-coding-agent doesn't emit
+	// a redundant initial `model_change` event with its hardcoded default.
+	// Explicit caller-supplied values (verification harness) win; otherwise
+	// resolve from role/preferences when auto-select is enabled.
+	if (plan.initialModel && /^[^/]+\/.+$/.test(plan.initialModel)) {
+		plan.bridgeOptions.initialModel = plan.initialModel;
+	} else if (!plan.skipAutoModel) {
+		const pinned = ctx.resolveInitialModel(plan.role, plan.projectId);
+		if (pinned) plan.bridgeOptions.initialModel = pinned;
+	}
+	if (plan.initialThinkingLevel) {
+		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
+	} else if (!plan.skipAutoThinking) {
+		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role, plan.projectId);
+		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
 }
 
@@ -574,15 +598,13 @@ export async function executeWorktreeAsync(
 		if (components.length > 0) {
 			try {
 				const { runComponentSetups } = await import("../skills/worktree-setup.js");
-				const { execFile } = await import("node:child_process");
-				const { promisify } = await import("node:util");
-				const pExecFile = promisify(execFile);
+				const { execShellCommand } = await import("./shell-util.js");
 				await runComponentSetups({
 					components,
 					branchContainer: worktreeCwd,
 					primaryWorktreeRoot: plan.repoPath!,
 					exec: async (cmd, cwd, env) => {
-						await pExecFile("sh", ["-c", cmd], { cwd, env, timeout: 120_000 });
+						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 					},
 				});
 			} catch (err) {
@@ -660,6 +682,8 @@ export async function executeWorktreeAsync(
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools;
+	if (plan.bridgeOptions.initialModel) session.spawnPinnedModel = plan.bridgeOptions.initialModel;
+	if (plan.bridgeOptions.initialThinkingLevel) session.spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 
 	// Store container ID from project sandbox
 	if (plan.bridgeOptions.containerId) {
@@ -765,6 +789,8 @@ export async function executeWorktreeAsync(
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	const spawnPinnedModel = plan.bridgeOptions.initialModel;
+	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 	const eventBuffer = new EventBuffer();
 	const now = Date.now();
 
@@ -796,6 +822,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		role: plan.role,
 		accessory: plan.accessory,
 		promptQueue: new PromptQueue(),
+		spawnPinnedModel,
+		spawnPinnedThinkingLevel,
 	};
 
 	// Mark session as sandboxed (typed field)

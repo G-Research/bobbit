@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import { html, nothing, svg, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
@@ -18,7 +18,6 @@ import {
 	setArchivedSectionExpanded,
 	type GatewaySession,
 	type Goal,
-	type GoalState,
 	type Project,
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
@@ -37,10 +36,6 @@ const _goalChildrenFetched = new Set<string>();
 /** Clear the on-demand child fetch guard (called when archived state is reset). */
 export function clearGoalChildrenFetchedCache(): void {
 	_goalChildrenFetched.clear();
-}
-
-export function escapeHtml(s: string): string {
-	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 // ============================================================================
@@ -131,22 +126,6 @@ export function getProjectAccentColor(project: Project): string {
 	return isDark
 		? (project.colorDark || project.color || "var(--muted-foreground)")
 		: (project.colorLight || project.color || "var(--muted-foreground)");
-}
-
-/** Render a small colored chip showing a project name. Used in search results. */
-export function renderProjectBadge(project: Project) {
-	const bg = getProjectAccentColor(project);
-	return html`<span
-		class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium leading-none"
-		style="background: ${bg}20; color: ${bg}; border: 1px solid ${bg}30;"
-		title="Project: ${project.name}"
-	>${project.name}</span>`;
-}
-
-export function shortenPath(fullPath: string): string {
-	const parts = fullPath.split(/[/\\]/).filter(Boolean);
-	if (parts.length <= 3) return parts.join("/");
-	return "…/" + parts.slice(-3).join("/");
 }
 
 export function formatSessionAge(timestamp: number): string {
@@ -252,10 +231,6 @@ let _timeRefreshTimer: ReturnType<typeof setInterval> | null = null;
 export function startTimeRefresh(): void {
 	if (_timeRefreshTimer) return;
 	_timeRefreshTimer = setInterval(() => renderApp(), 60_000);
-}
-
-export function stopTimeRefresh(): void {
-	if (_timeRefreshTimer) { clearInterval(_timeRefreshTimer); _timeRefreshTimer = null; }
 }
 
 // ============================================================================
@@ -581,9 +556,6 @@ function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 	</div>`;
 }
 
-// Back-compat alias used by sidebar.ts
-export { renderSessionRow as renderSidebarSession };
-
 // ============================================================================
 // ARCHIVED SESSION ROW
 // ============================================================================
@@ -833,14 +805,16 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	`;
 
 	const pr = state.prStatusCache.get(goal.id);
-	const canArchive = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
-	const reattemptBtn = (goal.archived || canArchive) ? html`
+	const showArchive = !goal.archived;
+	const isWorkMerged = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
+	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
+	const reattemptBtn = !hasActiveSession ? html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}
 			title="Re-attempt goal">${icon(RotateCcw, "xs")}</button>
 	` : nothing;
 
-	const archiveBtn = canArchive ? html`
+	const archiveBtn = showArchive ? html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-secondary-foreground"}"
 			@click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}
 			title="Archive goal">${icon(Trash2, "xs")}</button>
@@ -850,7 +824,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		<div class="pl-2 py-1 ${mobile ? "text-xs" : "text-[11px]"} text-muted-foreground">
 			${goal.archived
 				? html`<span style="color:var(--text-tertiary)">Archived</span>`
-				: canArchive
+				: isWorkMerged
 				? html`<span style="vertical-align:middle">Work merged —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-secondary/50 text-muted-foreground text-[10px] font-normal hover:bg-secondary/80 hover:text-foreground transition-colors align-middle" title="Archive goal" @click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}>${icon(Trash2, "xs")}Archive</button>`
 				: isTeamGoal
 				? html`<span style="vertical-align:middle">No agents —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary text-[10px] font-semibold hover:bg-primary/20 transition-colors align-middle ${isPreparing ? "opacity-60 pointer-events-none" : ""}" title="${isPreparing ? "Setting up worktree\u2026" : "Start team"}" @click=${handleStartTeam} ?disabled=${isLoading || isPreparing}>${isPreparing ? html`<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : html`<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>`}${isLoading ? "Starting\u2026" : isPreparing ? "Setting up\u2026" : "Start Team"}</button>`
@@ -1021,43 +995,3 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	`;
 }
 
-// ============================================================================
-// GOAL STATE ICON
-// ============================================================================
-
-export function goalStateIcon(goalState: GoalState, size = 14) {
-	const C = 2 * Math.PI * 10;
-	const blue = "#3b82f6";
-	const green = "#22c55e";
-	const grey = "#6b7280";
-
-	let circleContent: ReturnType<typeof svg>;
-	if (goalState === "complete") {
-		circleContent = svg`<circle cx="12" cy="12" r="10" fill="none" stroke="${green}" stroke-width="2"/>`;
-	} else if (goalState === "in-progress") {
-		const progress = (240 / 360) * C;
-		circleContent = svg`
-			<circle cx="12" cy="12" r="10" fill="none" stroke="${grey}" stroke-width="2" opacity="0.4"/>
-			<circle cx="12" cy="12" r="10" fill="none" stroke="${blue}" stroke-width="2"
-				stroke-dasharray="${progress} ${C}"
-				stroke-dashoffset="0"
-				transform="rotate(-90 12 12)"/>
-		`;
-	} else {
-		const opacity = goalState === "shelved" ? "0.3" : "0.5";
-		circleContent = svg`<circle cx="12" cy="12" r="10" fill="none" stroke="${grey}" stroke-width="2" opacity="${opacity}"/>`;
-	}
-
-	const lineColor = goalState === "complete" ? green : goalState === "in-progress" ? blue : grey;
-	const lineOpacity = goalState === "shelved" ? "0.3" : goalState === "todo" ? "0.5" : "1";
-
-	return html`
-		<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" style="display:block;flex-shrink:0;">
-			${circleContent}
-			${svg`<line x1="22" x2="18" y1="12" y2="12" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-			${svg`<line x1="6" x2="2" y1="12" y2="12" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-			${svg`<line x1="12" x2="12" y1="6" y2="2" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-			${svg`<line x1="12" x2="12" y1="22" y2="18" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" opacity="${lineOpacity}"/>`}
-		</svg>
-	`;
-}

@@ -24,11 +24,34 @@
 // allowing offline use of the last-seen build.
 const BUILD_ID = "__BOBBIT_BUILD_ID__";
 const CACHE_NAME = `bobbit-${BUILD_ID}`;
+// The marker `/*__BOBBIT_PRECACHE_CHUNKS__*/` is replaced at build time
+// by the `bobbit-sw-version` Vite plugin with the comma-separated hashed
+// paths of the most-likely next route chunks (goal-dashboard,
+// settings-page) plus their transitive imports/css. Pre-warming these
+// during install means the first navigation hits the cache instead of
+// the network — cold-launch parse cost becomes the only bottleneck
+// after a deploy. In dev / unstamped sources the marker is a no-op
+// comment so the file stays valid JS.
+const PRECACHE_ROUTE_CHUNKS = [/*__BOBBIT_PRECACHE_CHUNKS__*/];
 
-self.addEventListener("install", () => {
+self.addEventListener("install", (event) => {
 	// Activate immediately so a new build replaces the old SW on the next
 	// navigation rather than waiting for every tab to close first.
 	self.skipWaiting();
+	// Best-effort pre-warm of likely-next route chunks so the first
+	// navigation to e.g. /goal-dashboard hits the cache instead of the
+	// network. Failures must not block install (e.g. unstamped dev SW
+	// has an empty list).
+	if (PRECACHE_ROUTE_CHUNKS.length > 0) {
+		event.waitUntil((async () => {
+			try {
+				const cache = await caches.open(CACHE_NAME);
+				await cache.addAll(PRECACHE_ROUTE_CHUNKS);
+			} catch {
+				// Pre-cache is best-effort; ignore failures.
+			}
+		})());
+	}
 });
 
 self.addEventListener("activate", (event) => {
