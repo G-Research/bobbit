@@ -653,7 +653,7 @@ The default `/git-status` call uses `git status --porcelain=v1 -uno` (summary: s
 **Host path** (no `containerId`) goes through `runBatchGitStatusNative` in `src/server/skills/git-status-native.ts`, which fans out direct `git.exe` invocations via `child_process.execFile` (argv array - no shell) in two parallel phases:
 
 - **Phase A** (`Promise.all`, ~6 calls): current branch, `origin/HEAD` symbolic-ref, master/main verify, `status --porcelain`, upstream tracking branch.
-- **Phase B** (`Promise.all`, ~4 calls): ahead/behind counts vs upstream and vs primary, after Phase A resolves the primary ref.
+- **Phase B** (`Promise.all`, ~6 calls): ahead/behind counts vs upstream and vs primary, plus two `git diff --shortstat` calls (`<pref>...HEAD` for committed delta + `HEAD` for uncommitted delta) parsed by `parseShortstat()` into `insertionsVsPrimary` / `deletionsVsPrimary` on `GitStatusResult`. Untracked files aren't counted (matches `git diff` semantics; `~N` already covers them). Parse failure or on-primary falls back to `0/0` silently. After Phase A resolves the primary ref.
 
 Per-call timeout is 3s; only the HEAD lookup is mandatory (any other failure falls back to safe defaults matching the legacy bash behaviour - missing upstream → `hasUpstream=false`, count failures → 0, etc.). Wall-clock is dominated by the slowest single git call (~50-150ms on Windows, ~10-30ms on Linux). This replaces the earlier approach that piped a multi-line script through Git Bash on Windows - that one cold spawn cost 500-1000ms per refresh and the in-script git invocations ran sequentially.
 
