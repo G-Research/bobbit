@@ -250,6 +250,54 @@ export class AgentInterface extends LitElement {
 			this.requestUpdate();
 		}
 	};
+
+	/**
+	 * Window-level Escape handler. Aborts the streaming agent regardless of
+	 * which element has focus, matching the Stop button. Suppressed when a
+	 * modal/popover is open so Escape can dismiss those instead.
+	 *
+	 * The MessageEditor textarea also handles Escape locally via its own
+	 * keydown listener — when focus is in the textarea both handlers fire,
+	 * which is harmless because session.abort() is idempotent server-side.
+	 */
+	private _handleGlobalEscape = (e: KeyboardEvent) => {
+		if (e.key !== "Escape") return;
+		if (e.defaultPrevented) return;
+		const session = this.session;
+		if (!session || !session.state?.isStreaming) return;
+
+		// Bail out if any modal/popover is open. Covers ARIA-tagged dialogs,
+		// known dialog custom elements, lightbox overlays, and any element
+		// signalling "open" via [data-popover-open] / [open].
+		// Bail out if a real modal/popover is currently open. We only check
+		// markers that are present *only when an overlay is mounted*: ARIA
+		// dialog roles, the lightbox attachment overlay, modals appended to
+		// document.body by Lit dialogs, and popover-open state markers. Inline
+		// footer components like <search-box> / <agent-model-selector> are NOT
+		// included — they're always in the DOM and don't represent open state.
+		if (typeof document !== "undefined") {
+			const dialogSelector = [
+				'[role="dialog"]',
+				'[aria-modal="true"]',
+				"attachment-overlay",
+				"verification-output-modal",
+				"annotation-popover",
+				"project-picker-popover",
+				"continue-session-chooser",
+				"copy-link-fallback-dialog",
+			].join(",");
+			if (document.querySelector(dialogSelector)) return;
+		}
+
+		// Don't double-fire when MessageEditor's local handler will already abort.
+		// MessageEditor sits inside this component; let its existing focused-textarea
+		// path handle that case (it already calls onAbort).
+		const active = (typeof document !== "undefined" ? document.activeElement : null) as HTMLElement | null;
+		if (active?.tagName === "TEXTAREA" || active?.tagName === "INPUT") return;
+
+		e.preventDefault();
+		session.abort();
+	};
 	// Server-authoritative queue state, updated via onQueueUpdate callback
 	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
 	private _cachedToolResults?: Map<string, ToolResultMessage>;
@@ -408,6 +456,14 @@ export class AgentInterface extends LitElement {
 			this._isMobileViewport = !this._mobileMediaQuery.matches;
 			this._mobileMediaQuery.addEventListener("change", this._handleMobileMediaChange);
 		}
+
+		// Global Escape handler: abort the streaming agent regardless of focus,
+		// unless a modal/popover is open. Capture phase so a focused textarea's
+		// own Escape handler still runs (it calls onAbort too — server-side
+		// abort is idempotent), but unfocused users get the same Stop behaviour.
+		if (typeof document !== "undefined") {
+			document.addEventListener("keydown", this._handleGlobalEscape, true);
+		}
 	}
 
 	override disconnectedCallback() {
@@ -437,6 +493,7 @@ export class AgentInterface extends LitElement {
 		}
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
+		document.removeEventListener("keydown", this._handleGlobalEscape, true);
 
 		if (this._unsubscribeSession) {
 			this._unsubscribeSession();
