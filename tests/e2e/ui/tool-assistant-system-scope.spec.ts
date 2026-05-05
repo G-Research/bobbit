@@ -42,17 +42,9 @@ test.describe("Tools page — New Tool with system scope", () => {
 		// Click "New Tool" (system scope is the default).
 		const newToolBtn = page.locator("button").filter({ hasText: /New Tool/ }).first();
 		await expect(newToolBtn).toBeVisible({ timeout: 10_000 });
+		const postPromise = page.waitForResponse((resp) => resp.request().method() === "POST" && new URL(resp.url()).pathname === "/api/sessions", { timeout: 10_000 });
 		await newToolBtn.click();
-
-		// Wait for the POST to resolve.
-		await page.waitForFunction(() => {
-			// Resolves when something other than the original tools view is mounted
-			// or when navigation back to a chat session happens.
-			return true;
-		}, { timeout: 5_000 }).catch(() => { /* fallthrough */ });
-
-		// Give the POST a moment to fire and resolve.
-		await page.waitForTimeout(500);
+		await postPromise;
 
 		expect(postBody, "POST /api/sessions body must be captured").not.toBeNull();
 		expect(postBody.toolAssistant).toBe(true);
@@ -74,8 +66,9 @@ test.describe("Tools page — New Tool with system scope", () => {
 
 		const newToolBtn = page.locator("button").filter({ hasText: /New Tool/ }).first();
 		await expect(newToolBtn).toBeVisible({ timeout: 10_000 });
+		const postPromise = page.waitForResponse((resp) => resp.request().method() === "POST" && new URL(resp.url()).pathname === "/api/sessions", { timeout: 10_000 });
 		await newToolBtn.click();
-		await page.waitForTimeout(500);
+		await postPromise;
 		expect(postStatus).toBe(201);
 	});
 });

@@ -43,13 +43,12 @@ test.describe("Splash screen — 0 projects", () => {
 				sessionPosts.push(req.url());
 			}
 		});
+		// Race: click and ensure no /api/sessions POST happens within a short window.
+		const stray = page.waitForRequest((req) => req.method() === "POST" && req.url().includes("/api/sessions"), { timeout: 1500 }).catch(() => null);
 		await splashLabel.click();
-
-		// The project dialog renders an input asking for the project root path.
-		// The exact dialog implementation varies; assert generically that some
-		// dialog appeared by waiting briefly then checking no session POST occurred.
-		await page.waitForTimeout(500);
-		expect(sessionPosts, "splash 'New Project' click must NOT POST /api/sessions").toEqual([]);
+		const racedReq = await stray;
+		expect(racedReq, "splash 'New Project' click must NOT POST /api/sessions").toBeNull();
+		expect(sessionPosts).toEqual([]);
 	});
 
 	test("persistence — reload still shows 'New Project' with zero projects", async ({ page }) => {
