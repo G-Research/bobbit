@@ -757,6 +757,8 @@ export interface GitStatusData {
 	aheadOfPrimary: number;
 	behindPrimary: number;
 	mergedIntoPrimary: boolean;
+	insertionsVsPrimary: number;
+	deletionsVsPrimary: number;
 	unpushed: boolean;
 	status: Array<{ file: string; status: string }>;
 }

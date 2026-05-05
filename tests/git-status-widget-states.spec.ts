@@ -182,6 +182,63 @@ test.describe("GitStatusWidget render states", () => {
 		expect(counts.fetch).toBe(1);
 	});
 
+	test("+/- line-count segments render on feature branch", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			loading: false,
+			branch: "feature/x",
+			primaryBranch: "master",
+			isOnPrimary: false,
+			clean: true,
+			aheadOfPrimary: 1,
+			insertionsVsPrimary: 12,
+			deletionsVsPrimary: 4,
+		});
+		const pill = page.locator('git-status-widget button[data-state="ready"]');
+		await expect(pill).toBeVisible();
+		await expect(pill).toContainText("+12");
+		await expect(pill).toContainText("-4");
+		const plus = pill.locator("span.text-green-600", { hasText: "+12" });
+		const minus = pill.locator("span.text-red-600", { hasText: "-4" });
+		await expect(plus).toHaveCount(1);
+		await expect(minus).toHaveCount(1);
+	});
+
+	test("+/- segments hidden when both counts are 0", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			loading: false,
+			branch: "feature/x",
+			primaryBranch: "master",
+			isOnPrimary: false,
+			clean: true,
+			aheadOfPrimary: 0,
+			insertionsVsPrimary: 0,
+			deletionsVsPrimary: 0,
+		});
+		const pill = page.locator('git-status-widget button[data-state="ready"]');
+		await expect(pill).toBeVisible();
+		await expect(pill).not.toContainText(/\+\d/);
+		await expect(pill).not.toContainText(/-\d/);
+	});
+
+	test("+/- segments suppressed on primary branch even when non-zero", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			loading: false,
+			branch: "master",
+			primaryBranch: "master",
+			isOnPrimary: true,
+			clean: true,
+			insertionsVsPrimary: 12,
+			deletionsVsPrimary: 4,
+		});
+		const pill = page.locator('git-status-widget button[data-state="ready"]');
+		await expect(pill).toBeVisible();
+		await expect(pill).not.toContainText("+12");
+		await expect(pill).not.toContainText("-4");
+	});
+
 	test("skeleton is non-interactive (no dropdown-open event)", async ({ page }) => {
 		await gotoAndWait(page);
 		await mount(page, { loading: true, branch: "" });

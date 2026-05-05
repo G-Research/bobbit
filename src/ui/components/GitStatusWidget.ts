@@ -14,6 +14,8 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Number }) behind = 0;
     @property({ type: Number }) aheadOfPrimary = 0;
     @property({ type: Number }) behindPrimary = 0;
+    @property({ type: Number }) insertionsVsPrimary = 0;
+    @property({ type: Number }) deletionsVsPrimary = 0;
     @property({ type: Boolean }) mergedIntoPrimary = false;
     @property({ type: Boolean }) unpushed = false;
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
@@ -73,6 +75,8 @@ export class GitStatusWidget extends LitElement {
         status?: Array<{ file: string; status: string }>;
         aheadOfPrimary?: number;
         behindPrimary?: number;
+        insertionsVsPrimary?: number;
+        deletionsVsPrimary?: number;
     }>;
 
     /** Files for a per-repo entry, tolerating both `statusFiles` and `status`. */
@@ -227,6 +231,14 @@ export class GitStatusWidget extends LitElement {
         // Ahead of primary (blue)
         if (!this.isOnPrimary && this.aheadOfPrimary > 0) {
             segments.push(html`<span class="text-blue-600 dark:text-blue-400 shrink-0" style="font-weight:500">↑${this.aheadOfPrimary}</span>`);
+        }
+        // Insertions vs primary (green)
+        if (!this.isOnPrimary && this.insertionsVsPrimary > 0) {
+            segments.push(html`<span class="text-green-600 dark:text-green-400 shrink-0" style="font-weight:500">+${this.insertionsVsPrimary}</span>`);
+        }
+        // Deletions vs primary (red)
+        if (!this.isOnPrimary && this.deletionsVsPrimary > 0) {
+            segments.push(html`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">-${this.deletionsVsPrimary}</span>`);
         }
         return segments;
     }
