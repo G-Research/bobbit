@@ -28,6 +28,7 @@ import {
 	buildMetaToolInputSchema,
 	buildMetaToolDescription,
 } from "../mcp/mcp-meta.js";
+import type { McpToolDef } from "../mcp/mcp-types.js";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 
@@ -246,9 +247,11 @@ export function computeEffectiveAllowedTools(
 		seen.add(metaName.toLowerCase());
 		result.push(metaName);
 	}
-	// Always include the discovery tool when any MCP server is registered.
+	// Always include the discovery tool when any MCP server is registered,
+	// unless policy denies it (role override or group policy on `mcp_describe`).
 	if (mcpInfos.length > 0 && !seen.has('mcp_describe')) {
-		result.push('mcp_describe');
+		const policy = resolveGrantPolicy('mcp_describe', 'MCP', role, toolManager, groupPolicyStore);
+		if (!isNeverPolicy(policy)) result.push('mcp_describe');
 	}
 
 	allowedToolsCache.set(cacheKey, result.slice());
@@ -392,7 +395,7 @@ ${toolRegistrations}
  */
 export function generateMcpMetaExtension(
 	serverName: string,
-	ops: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>,
+	ops: McpToolDef[],
 	unavailableReason?: string,
 ): string {
 	const metaName = makeMetaToolName(serverName);
@@ -434,8 +437,8 @@ export default function(pi) {
 `;
 	}
 
-	const description = buildMetaToolDescription(serverName, ops as never, docsRelPath);
-	const schema = jsonSchemaToTypeBox(buildMetaToolInputSchema(ops as never));
+	const description = buildMetaToolDescription(serverName, ops, docsRelPath);
+	const schema = jsonSchemaToTypeBox(buildMetaToolInputSchema(ops));
 	const opNames = ops.map(o => o.name);
 
 	return `import { Type } from "@sinclair/typebox";
@@ -695,7 +698,13 @@ export function writeMcpProxyExtensions(
 	let extDir: string;
 	if (filtering) {
 		// Collect only the MCP tool names from allowedTools for the hash
-		const mcpAllowed = allowedTools!.filter(t => t.toLowerCase().startsWith("mcp__")).sort();
+		// Include both legacy per-op names (`mcp__<server>__<op>`) and meta-tool
+		// names (`mcp_<server>`, `mcp_describe`). The single-underscore prefix
+		// already covers both `mcp_describe` and `mcp_<server>`.
+		const mcpAllowed = allowedTools!.filter(t => {
+			const lower = t.toLowerCase();
+			return lower.startsWith("mcp__") || lower.startsWith("mcp_");
+		}).sort();
 		const hashInput = mcpAllowed.join(",").toLowerCase();
 		const hash = createHash("sha256").update(hashInput).digest("hex").slice(0, 8);
 		extDir = path.join(baseExtDir, hash);
@@ -735,7 +744,7 @@ export function writeMcpProxyExtensions(
 	// Failure-isolation: emit a stub meta-tool for any configured server in
 	// `error` state (see §5.3) so the model still sees a tool but every call
 	// returns a structured unavailable message instead of crashing the turn.
-	const statuses = (mcpManager as { getServerStatuses?: () => Array<{ name: string; status: string; error?: string }> }).getServerStatuses?.() ?? [];
+	const statuses = mcpManager.getServerStatuses();
 	const writeServer = (serverName: string, code: string): void => {
 		const filePath = path.join(extDir, `${serverName}.ts`);
 		let needWrite = true;

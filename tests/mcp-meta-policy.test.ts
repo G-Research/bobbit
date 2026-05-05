@@ -174,4 +174,19 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 		assert.ok(!allowed.includes("mcp_describe"));
 		assert.ok(!allowed.some(t => t.startsWith("mcp_")));
 	});
+
+	it("role policy `mcp_describe: never` excludes mcp_describe even when servers exist", () => {
+		const tm = mockToolManager({});
+		const role = { toolPolicies: { mcp_describe: "never" as const } };
+		const allowed = computeEffectiveAllowedTools(tm as any, role, undefined, mockMcpManager(mcpInfos) as any);
+		assert.ok(!allowed.includes("mcp_describe"), "mcp_describe should be excluded when role policy is never");
+		assert.ok(allowed.includes("mcp_pw"), "per-server meta-tools still present");
+	});
+
+	it("group policy `MCP: never` excludes mcp_describe", () => {
+		const tm = mockToolManager({});
+		const gps = mockGroupPolicyStore({ MCP: "never" });
+		const allowed = computeEffectiveAllowedTools(tm as any, undefined, gps, mockMcpManager(mcpInfos) as any);
+		assert.ok(!allowed.includes("mcp_describe"));
+	});
 });

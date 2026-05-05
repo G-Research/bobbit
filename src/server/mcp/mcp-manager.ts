@@ -262,6 +262,7 @@ export class McpManager {
 
     const client = this._createClient(name);
     try {
+      // Guard for test-injected stubs that may pre-set connected=true.
       if (!client.connected) {
         await client.connect(config);
       }
