@@ -36,6 +36,7 @@ import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
+import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -1919,18 +1920,15 @@ export class VerificationHarness {
 			// under the team-lead that triggered the verification. Without
 			// this, reviewer sessions persist with teamLeadSessionId=undefined
 			// and the archived render path lumps them under "unmapped" — they
-			// only surface under the LAST archived team-lead. The user's
-			// image #50 was that exact symptom: archived workers existed on
-			// disk but didn't show under the team-leads they actually
-			// belonged to.
-			const reviewerTeamLeadId = this.teamManager?.getTeamState(goalId)?.teamLeadSessionId;
-			this.sessionManager!.updateSessionMeta(sessionId, {
-				role: roleName,
-				teamGoalId: goalId,
-				accessory: role.accessory || "magnifying-glass",
-				nonInteractive: true,
-				...(reviewerTeamLeadId ? { teamLeadSessionId: reviewerTeamLeadId } : {}),
-			});
+			// only surface under the LAST archived team-lead. Pure-helper
+			// contract pinned by tests/verification-reviewer-meta.test.ts.
+			this.sessionManager!.updateSessionMeta(sessionId, buildVerificationReviewerMeta({
+				kind: "llm-review",
+				roleName,
+				goalId,
+				roleAccessory: role.accessory,
+				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
+			}));
 
 			// Register in team store (if team manager available)
 			if (this.teamManager) {
@@ -2250,14 +2248,13 @@ export class VerificationHarness {
 			const qaTitlePrefix = step.name?.trim()
 				|| (step.role ? `QA (${step.role})` : "QA");
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
-			const qaTeamLeadId = this.teamManager?.getTeamState(goalId)?.teamLeadSessionId;
-			this.sessionManager!.updateSessionMeta(qaSessionId, {
-				role: qaRoleName,
-				teamGoalId: goalId,
-				accessory: role.accessory || "stamp",
-				nonInteractive: true,
-				...(qaTeamLeadId ? { teamLeadSessionId: qaTeamLeadId } : {}),
-			});
+			this.sessionManager!.updateSessionMeta(qaSessionId, buildVerificationReviewerMeta({
+				kind: "agent-qa",
+				roleName: qaRoleName,
+				goalId,
+				roleAccessory: role.accessory,
+				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
+			}));
 
 			// Register in team store
 			if (this.teamManager) {

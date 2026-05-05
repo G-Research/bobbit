@@ -842,9 +842,22 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const renderTeamGroup = () => {
 		if (!teamLead) return goalSessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
-		// Archived members belonging to the live lead
+		// Archived members belonging to the live lead. Includes:
+		//  (a) explicit link: `teamLeadSessionId === teamLead.id`
+		//  (b) legacy fallback: `teamLeadSessionId` undefined — the live lead
+		//      is the safest receiver because it's the agent the user is
+		//      most likely watching. Without this, legacy reviewer/QA
+		//      sessions (which never stamped the field) vanish entirely
+		//      under a live team-lead. The boot-time backfill in
+		//      SessionStore stamps most of these via heuristic; this
+		//      render-side fallback covers ambiguous remainders.
 		const archivedForLiveLead = state.showArchived
-			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
+			? state.archivedSessions.filter(s =>
+				s.teamGoalId === goal.id
+				&& !s.delegateOf
+				&& s.role !== "team-lead"
+				&& (s.teamLeadSessionId === teamLead.id || !s.teamLeadSessionId)
+			)
 			: [];
 		// Sub-goals this team-lead spawned (via goal_spawn_child).
 		// They render INSIDE this team-lead's expanded block so collapsing
