@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { McpClient } from "./mcp-client.js";
+import { isValidOperationSchema } from "./mcp-meta.js";
 import type {
   McpServerConfig,
   McpToolDef,
@@ -43,6 +44,12 @@ export interface McpToolInfo {
 /** Max tool name length (Anthropic API limit). */
 const MAX_TOOL_NAME_LENGTH = 64;
 
+/** Per-call timeout for `tools/list` (failure isolation, design §5.1). */
+const DEFAULT_LIST_TOOLS_TIMEOUT_MS = 10_000;
+
+/** Per-call timeout for `tools/call` (failure isolation, design §5.1). */
+const DEFAULT_CALL_TOOL_TIMEOUT_MS = 30_000;
+
 export class McpManager {
   private clients = new Map<string, McpClient>();
   private toolDefs = new Map<string, McpToolDef[]>();
@@ -57,9 +64,44 @@ export class McpManager {
   private additionalProjects: Array<{cwd: string, configStore: ProjectConfigReader}> = [];
   private stateDir: string | undefined;
 
-  constructor(private cwd: string, projectConfigStore?: ProjectConfigReader, stateDir?: string) {
+  /** Override-able for tests via constructor opts. */
+  private listToolsTimeoutMs: number = DEFAULT_LIST_TOOLS_TIMEOUT_MS;
+  private callToolTimeoutMs: number = DEFAULT_CALL_TOOL_TIMEOUT_MS;
+
+  constructor(
+    private cwd: string,
+    projectConfigStore?: ProjectConfigReader,
+    stateDir?: string,
+    opts?: { listToolsTimeoutMs?: number; callToolTimeoutMs?: number },
+  ) {
     this.projectConfigStore = projectConfigStore ?? null;
     this.stateDir = stateDir;
+    if (opts?.listToolsTimeoutMs !== undefined) this.listToolsTimeoutMs = opts.listToolsTimeoutMs;
+    if (opts?.callToolTimeoutMs !== undefined) this.callToolTimeoutMs = opts.callToolTimeoutMs;
+  }
+
+  /**
+   * Construct a new MCP client. Test seam: subclasses / tests can override this
+   * to return a stub without spawning a real subprocess.
+   */
+  protected _createClient(name: string): McpClient {
+    return new McpClient(name);
+  }
+
+  /**
+   * Race a promise against a timeout. On timeout, rejects with
+   * `<label> timed out after <ms> ms`. Used for per-call failure isolation.
+   */
+  private _withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${ms} ms`));
+      }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
 
   /** Register additional project directories for MCP server discovery. */
@@ -218,20 +260,57 @@ export class McpManager {
     this.configs.set(name, config);
     this.errors.delete(name);
 
-    const client = new McpClient(name);
+    const client = this._createClient(name);
     try {
-      await client.connect(config);
+      if (!client.connected) {
+        await client.connect(config);
+      }
       this.clients.set(name, client);
 
-      // Fetch and cache tool definitions
-      const tools = await client.listTools();
-      this.toolDefs.set(name, tools);
+      // Fetch tool definitions with a timeout — a hung `tools/list` must not
+      // block sibling-server discovery (design §5.1).
+      let rawTools: McpToolDef[];
+      try {
+        rawTools = await this._withTimeout(
+          client.listTools(),
+          this.listToolsTimeoutMs,
+          `MCP server "${name}" tools/list`,
+        );
+      } catch (err) {
+        const reason = (err as Error).message;
+        console.error(`[mcp] tools/list failed for "${name}": ${reason}`);
+        this.errors.set(name, reason);
+        // Server stays in errored state with empty toolDefs — sibling servers
+        // are unaffected. Keep the client around so getServerStatuses() can
+        // report `error` while .connected is true; downstream callTool will
+        // simply find no tools to dispatch.
+        this.toolDefs.set(name, []);
+        return;
+      }
+
+      // Filter out malformed-schema ops (design §5.2). Surviving ops are
+      // still usable; the bad ones are dropped from the meta-tool's enum.
+      const validTools: McpToolDef[] = [];
+      for (const tool of rawTools) {
+        if (isValidOperationSchema(tool)) {
+          validTools.push(tool);
+        } else {
+          console.warn(
+            `[mcp] dropping invalid op "${name}/${tool?.name ?? "<unnamed>"}": malformed schema`,
+          );
+        }
+      }
+
+      this.toolDefs.set(name, validTools);
 
       // Generate/update doc cache and summaries
-      this._updateDocCache(name, tools);
+      this._updateDocCache(name, validTools);
 
       console.log(
-        `[mcp] Connected to server "${name}" — ${tools.length} tool(s) available`,
+        `[mcp] Connected to server "${name}" — ${validTools.length} tool(s) available` +
+          (validTools.length !== rawTools.length
+            ? ` (${rawTools.length - validTools.length} dropped)`
+            : ""),
       );
     } catch (err) {
       const msg = (err as Error).message;
@@ -501,7 +580,11 @@ export class McpManager {
       );
     }
 
-    return client.callTool(toolName, args);
+    return this._withTimeout(
+      client.callTool(toolName, args),
+      this.callToolTimeoutMs,
+      `MCP tool "${bobbitToolName}"`,
+    );
   }
 
   /**
