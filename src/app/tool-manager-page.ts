@@ -3,7 +3,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, gatewayFetch, type ToolInfo, type RoleData } from "./api.js";
+import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
@@ -174,6 +174,8 @@ let currentView: View = "list";
 let tools: ToolInfo[] = [];
 let roles: RoleData[] = [];
 let groupPolicies: Record<string, string> = {};
+let mcpServers: McpServerInfo[] = [];
+let expandedMcpServers = new Set<string>();
 let selectedTool: ToolInfo | null = null;
 let loading = true;
 let editDescription = "";
@@ -264,10 +266,11 @@ export async function loadToolPageData(): Promise<void> {
 	loading = true;
 	saving = false;
 	renderApp();
-	const [t, r, gp] = await Promise.all([fetchToolsScoped(), fetchRoles(), fetchGroupPolicies()]);
+	const [t, r, gp, mcp] = await Promise.all([fetchToolsScoped(), fetchRoles(), fetchGroupPolicies(), fetchMcpServers()]);
 	tools = t;
 	roles = r;
 	groupPolicies = gp;
+	mcpServers = mcp;
 	// Start with all groups collapsed
 	collapsedGroups = new Set(TOOL_GROUPS);
 	// Also collapse any groups not in TOOL_GROUPS
@@ -448,6 +451,69 @@ function toggleGroup(group: string): void {
 	renderApp();
 }
 
+function toggleMcpServer(name: string): void {
+	if (expandedMcpServers.has(name)) {
+		expandedMcpServers.delete(name);
+	} else {
+		expandedMcpServers.add(name);
+	}
+	renderApp();
+}
+
+function renderMcpSection(): TemplateResult {
+	if (mcpServers.length === 0) return html``;
+	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+	// Build a quick lookup so we can render per-op rows using existing tool data when available.
+	const toolByName = new Map<string, ToolInfo>();
+	for (const t of tools) toolByName.set(t.name, t);
+	return html`
+		<div class="tool-group" data-testid="mcp-section">
+			<div class="tool-group-header" style="cursor: default;">
+				<span class="tool-group-name">MCP</span>
+				<span class="tool-group-count">${mcpServers.length} server${mcpServers.length !== 1 ? "s" : ""}</span>
+			</div>
+			<div class="tool-group-items">
+				${mcpServers.map((server) => {
+					const expanded = expandedMcpServers.has(server.name);
+					const statusClass = server.status === "connected"
+						? "text-emerald-600"
+						: server.status === "error"
+							? "text-red-600"
+							: "text-muted-foreground";
+					return html`
+						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name}>
+							<div class="tool-row" tabindex="0" role="button"
+								data-testid="mcp-server-toggle"
+								@click=${() => toggleMcpServer(server.name)}
+								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMcpServer(server.name); } }}>
+								<span class="tool-row-name inline-flex items-center gap-2">
+									<span style="display:inline-block;transform:rotate(${expanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
+									${server.name}
+									<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
+								</span>
+								<span class="tool-row-desc">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
+							</div>
+							${server.status === "error" && server.error
+								? html`<div class="text-xs text-red-600 px-3 pb-2" data-testid="mcp-server-error">${server.error}</div>`
+								: nothing}
+							${expanded
+								? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
+										${server.tools.length === 0
+											? html`<div class="tools-note px-3 py-2">No operations available.</div>`
+											: server.tools.map((op) => {
+													const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
+													return renderToolRow(tool);
+												})}
+									</div>`
+								: nothing}
+						</div>
+					`;
+				})}
+			</div>
+		</div>
+	`;
+}
+
 // ============================================================================
 // RENDER: NAV BAR
 // ============================================================================
@@ -569,9 +635,12 @@ function renderListView(): TemplateResult {
 		`;
 	}
 
-	// Group tools
+	// Group tools — MCP tools collapse into a dedicated section below, so exclude
+	// any tool whose name follows the mcp__<server>__<op> pattern from the
+	// regular per-group rendering.
 	const groups = new Map<string, ToolInfo[]>();
 	for (const tool of tools) {
+		if (tool.name.startsWith("mcp__")) continue;
 		const g = tool.group || "Other";
 		const list = groups.get(g) || [];
 		list.push(tool);
@@ -623,6 +692,7 @@ function renderListView(): TemplateResult {
 					</div>
 				`;
 			})}
+			${renderMcpSection()}
 		</div>
 	`;
 }
