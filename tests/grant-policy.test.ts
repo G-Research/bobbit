@@ -230,6 +230,7 @@ describe("computeToolActivationArgs", () => {
 			getExtensionPath: (groupDir: string, filename: string) => `${toolsBase}/${groupDir}/${filename}`,
 		};
 		const mcpManager = {
+			getServerStatuses: () => [],
 			getToolInfos: () => [
 				{
 					name: "mcp__nano-banana__generate_image",

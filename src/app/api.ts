@@ -1381,6 +1381,38 @@ export async function fetchRoles(): Promise<RoleData[]> {
 	}
 }
 
+// ============================================================================
+// MCP API
+// ============================================================================
+
+export interface McpOperationInfo {
+	/** Bobbit-prefixed tool name: mcp__<server>__<op>. */
+	name: string;
+	/** Description shown in the UI. */
+	description: string;
+}
+
+export interface McpServerInfo {
+	name: string;
+	status: "connected" | "disconnected" | "error";
+	toolCount: number;
+	error?: string;
+	tools: McpOperationInfo[];
+}
+
+/** GET /api/mcp-servers — returns one entry per registered MCP server with its operations. */
+export async function fetchMcpServers(): Promise<McpServerInfo[]> {
+	try {
+		const res = await gatewayFetch("/api/mcp-servers");
+		if (!res.ok) return [];
+		const data = await res.json();
+		if (!Array.isArray(data)) return [];
+		return data as McpServerInfo[];
+	} catch {
+		return [];
+	}
+}
+
 export interface ToolInfo {
 	name: string;
 	description: string;
