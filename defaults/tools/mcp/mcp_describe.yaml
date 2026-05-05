@@ -1,0 +1,59 @@
+name: mcp_describe
+description: "Describe operations exposed by an MCP server — returns JSON Schemas on demand."
+summary: "Discovery tool for MCP server operations. Returns one or all operation schemas."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: MCP
+docs: |-
+  Returns the JSON Schema for an MCP server's operations. If `operation` is omitted, lists all operations on the server with their descriptions and input schemas. If `operation` is provided, returns just that one operation's schema. Pair this with the `mcp_<server>` meta-tool: discover an op with `mcp_describe`, then invoke it via `mcp_<server>(operation, args)`.
+detail_docs: >-
+  ## Purpose
+
+
+  `mcp_describe` is the on-demand discovery tool for MCP server operations.
+  Bobbit aggregates each MCP server's operations behind a single
+  `mcp_<server>` meta-tool to keep the model's tool surface small. The
+  meta-tool's `input_schema` constrains `operation` to an `enum` of valid
+  operation names, but does not embed the per-operation argument schemas.
+  Use `mcp_describe` to fetch those schemas only when you actually need to
+  call the operation.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `server` | string | yes | MCP server name (the `<server>` part of `mcp__<server>__<op>`). |
+
+  | `operation` | string | no | If given, returns the schema for just this one operation. If omitted, returns every operation on the server. |
+
+
+  ## Output
+
+
+  Markdown-formatted text. One `## <operation>` section per operation, each
+  containing the operation's description (if any) followed by a fenced JSON
+  block with the full `inputSchema`. When the server is unknown or
+  unavailable, the response is a single line `error: <message>` so the
+  model can decide whether to retry or fall back.
+
+
+  ## Examples
+
+
+  ```
+
+  # List every operation on the gr-halo server
+
+  mcp_describe(server="gr-halo")
+
+
+  # Get the schema for one specific operation
+
+  mcp_describe(server="gr-halo", operation="get-direct-reports")
+
+  ```
