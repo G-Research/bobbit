@@ -1,6 +1,6 @@
 # MCP meta-tool aggregation — design doc
 
-Status: design
+Status: implemented
 Owner: this goal
 Implementation partition: §9
 

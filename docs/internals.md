@@ -1689,7 +1689,9 @@ Config format matches Claude Code `.mcp.json`:
 }
 ```
 
-Tools exposed as `mcp__<server>__<tool>`. Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`.
+**Tool surface:** the model sees one **meta-tool per server** named `mcp_<server>(operation, args)` plus a shared `mcp_describe(server, operation?)` discovery tool. The legacy per-op identifier `mcp__<server>__<tool>` remains the internal routing key (used by `_toolNameMap`, `tool-group-policies.yaml` keys like `mcp__playwright`, the dispatcher, and existing tests) but is no longer exposed to the model. Failed servers degrade to a stub meta-tool that reports the failure reason rather than aborting the agent turn. See [docs/mcp-meta-tools.md](mcp-meta-tools.md) for the user-facing overview and [docs/design/mcp-meta-tool-aggregation.md](design/mcp-meta-tool-aggregation.md) for the architecture.
+
+Transports: stdio (spawn) and HTTP (POST JSON-RPC). Env vars (`${VAR}`) expanded from `process.env`.
 
 ### MCP tool documentation
 
@@ -1706,7 +1708,7 @@ When an MCP server connects, `McpManager` auto-generates documentation for its t
 
 **Prompt layout** - `getToolDocsForPrompt()` in `tool-manager.ts` produces a single `# Tools` section (not two separate sections). Each group renders: summary lines → per-tool doc blocks → a footer link. Built-in groups link to `defaults/tools/<groupDir>/<tool>.yaml` (`detail_docs` field); MCP groups link to `.bobbit/state/mcp-tool-docs/<serverName>.md`.
 
-**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`
+**API:** `GET /api/mcp-servers`, `POST /api/mcp-servers/:name/restart`, `POST /api/internal/mcp-call`, `POST /api/internal/mcp-describe`. See also [docs/mcp-meta-tools.md](mcp-meta-tools.md).
 
 ---
 
