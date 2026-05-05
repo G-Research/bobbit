@@ -32,6 +32,18 @@ Key behaviors:
 - The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section for every registered project. On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
 - Persistence is atomic (write to `.tmp` then rename).
 
+### Synthetic system project
+
+A hidden, synthetic project with id `system` is registered at server startup by `projectRegistry.registerSystemProject(<bobbitStateDir>/system-project)` (see `src/server/server.ts` startup hook calling `registerSystemProject()` in `src/server/agent/project-registry.ts`). Idempotent — safe to call repeatedly.
+
+**Purpose.** System-scope tool authoring (editing `defaults/tools/` style configuration that isn't tied to any user project) needs a persistence anchor for its sessions. Without one, the tool-assistant flow would either force the user to register a real project before authoring system-wide tools, or hit `POST /api/sessions` with no resolvable project and 400. The synthetic system project gives those sessions a valid `projectId` (`"system"`) and a real `.bobbit/state/` directory to land in.
+
+**Hidden flag.** `hidden: true` causes `GET /api/projects` to filter the project out, so it never reaches the client's `state.projects`. UI surfaces (sidebar grouping, project pickers, the splash-screen new-session gating) therefore behave as if it doesn't exist. Internal lookups by id still resolve normally; lookups by `rootPath` or `cwd` (`findByPath`, `findByCwd`) skip hidden projects so the install dir cannot accidentally match the system anchor.
+
+**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.json` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
+
+**Which UI surfaces produce sessions here.** Currently only the Tools page "New Tool" button when its scope selector is set to System (`src/app/tool-manager-page.ts::createToolAssistantSession()` passes `projectId: "system"`). Splash-screen "New Session" / "Quick Session" never lands here — those flows are gated on `state.projects.length` and either prompt for project creation, bind to the sole project, or open the splash project picker (`state.splashProjectPickerOpen` in `src/app/render.ts`). The 400 "projectId required" failure mode for these buttons is closed by gating, not by the system project.
+
 ### Per-project state isolation
 
 Each registered project is a self-contained unit on disk. State (goals, sessions, tasks, teams, gates, search, costs) lives in `<project-root>/.bobbit/state/`, not in a central directory. The server aggregates across all projects.
