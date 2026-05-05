@@ -85,6 +85,15 @@ test.describe("tail-chat: tool-result <details> toggle reflow keeps pin", () => 
 		await page.locator("#__details_summary").click();
 		await rec.capture("Clicked <details> summary — 400 px reflow");
 
+		// Wait for the RO + rAF re-pin to settle. The contract is
+		// "latest message bottom-pinned across the reflow", not "pinned
+		// within the same animation frame as the synchronous reflow" — RO
+		// fires after layout, then rAF runs scrollToBottom. Two rAFs of
+		// settle is consistent with how the rest of the suite waits.
+		await page.evaluate(
+			() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))),
+		);
+
 		// Sample at 50 ms intervals for 1 s. Latest message bottom must
 		// not drop more than 8 px below the viewport bottom in any sample.
 		const samples: Array<{ t: number; belowFold: number; dist: number }> = [];
