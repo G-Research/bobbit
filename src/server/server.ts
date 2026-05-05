@@ -512,8 +512,16 @@ export function createGateway(config: GatewayConfig) {
 	// sessions have a valid persistence anchor without forcing the user to
 	// register a real project. Idempotent — hidden from UI listings via the
 	// `hidden: true` filter on GET /api/projects.
+	//
+	// Anchor at a dedicated subdir under bobbitDir so the ProjectContext's
+	// derived stateDir (`<rootPath>/.bobbit/state`) cannot collide with any
+	// user project rooted at the install dir or with the global stateDir —
+	// otherwise the system context would load the same goals.json/sessions.json
+	// as a user project rooted at getProjectRoot() (e.g. test fixtures).
 	try {
-		projectRegistry.registerSystemProject(getProjectRoot());
+		const systemRoot = path.join(stateDir, "system-project");
+		fs.mkdirSync(systemRoot, { recursive: true });
+		projectRegistry.registerSystemProject(systemRoot);
 	} catch (err) {
 		console.warn(`[startup] Failed to register system project: ${err}`);
 	}
