@@ -508,6 +508,16 @@ export function createGateway(config: GatewayConfig) {
 	// never registers a project implicitly.
 	const projectRegistry = new ProjectRegistry(stateDir);
 
+	// Register the synthetic "system" project so system-scope tool-assistant
+	// sessions have a valid persistence anchor without forcing the user to
+	// register a real project. Idempotent — hidden from UI listings via the
+	// `hidden: true` filter on GET /api/projects.
+	try {
+		projectRegistry.registerSystemProject(getProjectRoot());
+	} catch (err) {
+		console.warn(`[startup] Failed to register system project: ${err}`);
+	}
+
 	// Run one-time migration from centralized to per-project state
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
 
@@ -1903,7 +1913,9 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		json(projectRegistry.list());
+		// Filter out hidden projects (e.g. the synthetic "system" project) so
+		// they never appear in the client's state.projects.
+		json(projectRegistry.list().filter(p => !p.hidden));
 		return;
 	}
 
@@ -2086,7 +2098,10 @@ async function handleApiRoute(
 		// Test-only bypass: BOBBIT_E2E=1 + ?force=1 allows deleting the last
 		// project so GR-09 (zero-project first-run UX) can exercise the empty state.
 		const forceDelete = process.env.BOBBIT_E2E === "1" && url.searchParams.get("force") === "1";
-		if (project && projectRegistry.list().length === 1 && !forceDelete) {
+		// The synthetic "system" project (hidden) doesn't count toward the
+		// "at least one real project" guard.
+		const visibleCount = projectRegistry.list().filter(p => !p.hidden).length;
+		if (project && !project.hidden && visibleCount === 1 && !forceDelete) {
 			json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
 			return;
 		}

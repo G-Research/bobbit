@@ -17,7 +17,17 @@ export interface RegisteredProject {
   colorLight: string;   // Accent color for light mode (always present)
   colorDark: string;    // Accent color for dark mode (always present)
   provisional?: boolean; // True while a project assistant is setting up this project
+  /**
+   * True for synthetic projects that should be filtered out of UI listings
+   * but still resolvable by id (e.g. the "system" project used as the
+   * persistence anchor for system-scope tool-assistant sessions). Hidden
+   * projects must never appear in /api/projects responses.
+   */
+  hidden?: boolean;
 }
+
+/** Stable id for the synthetic system project. */
+export const SYSTEM_PROJECT_ID = "system";
 
 export class ProjectRegistry {
   private projects = new Map<string, RegisteredProject>();
@@ -72,21 +82,26 @@ export class ProjectRegistry {
     return this.projects.get(id);
   }
 
-  /** Find a project whose rootPath matches (normalized). */
+  /** Find a project whose rootPath matches (normalized). Excludes hidden
+   * synthetic projects (e.g. "system") so that real-project lookups don't
+   * accidentally match the install-dir anchor of the hidden system project. */
   getByPath(rootPath: string): RegisteredProject | undefined {
     const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
+      if (p.hidden) continue;
       if (path.resolve(p.rootPath) === normalized) return p;
     }
     return undefined;
   }
 
-  /** Find the project whose rootPath contains the given cwd (longest match wins). */
+  /** Find the project whose rootPath contains the given cwd (longest match wins).
+   * Excludes hidden synthetic projects — they should never match by cwd. */
   findByCwd(cwd: string): RegisteredProject | undefined {
     const normalized = path.resolve(cwd).replace(/\\/g, "/").toLowerCase();
     let best: RegisteredProject | undefined;
     let bestLen = 0;
     for (const p of this.projects.values()) {
+      if (p.hidden) continue;
       const root = path.resolve(p.rootPath).replace(/\\/g, "/").toLowerCase();
       if ((normalized === root || normalized.startsWith(root + "/")) && root.length > bestLen) {
         best = p;
@@ -207,6 +222,43 @@ export class ProjectRegistry {
     }
     this.projects.delete(id);
     this.save();
+  }
+
+  /**
+   * Register the synthetic "system" project anchored at the bobbit install
+   * directory. Idempotent — safe to call repeatedly. Used as the
+   * `projectId` for system-scope tool-assistant sessions so they have a
+   * valid persistence anchor without forcing the user to register a real
+   * project. Marked `hidden: true` so callers can filter it out of UI
+   * listings.
+   */
+  registerSystemProject(rootPath: string): RegisteredProject {
+    const existing = this.projects.get(SYSTEM_PROJECT_ID);
+    if (existing) return existing;
+    if (!path.isAbsolute(rootPath)) {
+      throw new Error(`rootPath must be absolute, got: ${rootPath}`);
+    }
+    // Scaffold .bobbit dirs only if rootPath exists. The bobbit install dir
+    // normally does, but tests may pass a placeholder.
+    if (fs.existsSync(rootPath)) {
+      const bobbitDir = path.join(rootPath, ".bobbit");
+      try {
+        fs.mkdirSync(path.join(bobbitDir, "config"), { recursive: true });
+        fs.mkdirSync(path.join(bobbitDir, "state"), { recursive: true });
+      } catch { /* best-effort — read-only install dirs are fine */ }
+    }
+    const project: RegisteredProject = {
+      id: SYSTEM_PROJECT_ID,
+      name: "System",
+      rootPath,
+      createdAt: Date.now(),
+      colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
+      colorDark: DEFAULT_PROJECT_COLOR_DARK,
+      hidden: true,
+    };
+    this.projects.set(project.id, project);
+    this.save();
+    return project;
   }
 
   /**

@@ -385,9 +385,17 @@ async function createToolAssistantSession(): Promise<void> {
 	state.creatingSession = true;
 	renderApp();
 	try {
+		// Bind the tool-assistant session to whichever scope the Tools page is
+		// currently editing. System scope routes to the synthetic "system"
+		// project that the server registers at startup; project scope routes
+		// to that project. Either way the POST always carries a projectId so
+		// the server's resolveProjectForRequest() never 400s on a missing
+		// project.
+		const scope = getConfigScope();
+		const projectId = scope === "system" ? "system" : scope;
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ toolAssistant: true }),
+			body: JSON.stringify({ toolAssistant: true, projectId }),
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
