@@ -1377,6 +1377,8 @@
       this.behind = 0;
       this.aheadOfPrimary = 0;
       this.behindPrimary = 0;
+      this.insertionsVsPrimary = 0;
+      this.deletionsVsPrimary = 0;
       this.mergedIntoPrimary = false;
       this.unpushed = false;
       this.statusFiles = [];
@@ -1547,6 +1549,12 @@
       }
       if (!this.isOnPrimary && this.aheadOfPrimary > 0) {
         segments.push(b2`<span class="text-blue-600 dark:text-blue-400 shrink-0" style="font-weight:500">↑${this.aheadOfPrimary}</span>`);
+      }
+      if (!this.isOnPrimary && this.insertionsVsPrimary > 0) {
+        segments.push(b2`<span class="text-green-600 dark:text-green-400 shrink-0" style="font-weight:500">+${this.insertionsVsPrimary}</span>`);
+      }
+      if (!this.isOnPrimary && this.deletionsVsPrimary > 0) {
+        segments.push(b2`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">-${this.deletionsVsPrimary}</span>`);
       }
       return segments;
     }
@@ -2360,6 +2368,12 @@
   __decorateClass([
     n4({ type: Number })
   ], GitStatusWidget.prototype, "behindPrimary", 2);
+  __decorateClass([
+    n4({ type: Number })
+  ], GitStatusWidget.prototype, "insertionsVsPrimary", 2);
+  __decorateClass([
+    n4({ type: Number })
+  ], GitStatusWidget.prototype, "deletionsVsPrimary", 2);
   __decorateClass([
     n4({ type: Boolean })
   ], GitStatusWidget.prototype, "mergedIntoPrimary", 2);

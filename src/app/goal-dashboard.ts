@@ -75,6 +75,8 @@ interface GoalRepoEntry {
 	aheadOfPrimary?: number;
 	behindPrimary?: number;
 	mergedIntoPrimary?: boolean;
+	insertionsVsPrimary?: number;
+	deletionsVsPrimary?: number;
 	status?: Array<{ file: string; status: string }>;
 	statusFiles?: Array<{ file: string; status: string }>;
 	summary?: string;
@@ -87,6 +89,8 @@ interface GoalGitStatus {
 	aheadOfPrimary: number;
 	behindPrimary: number;
 	mergedIntoPrimary: boolean;
+	insertionsVsPrimary?: number;
+	deletionsVsPrimary?: number;
 	hasUpstream?: boolean;
 	ahead?: number;
 	behind?: number;
@@ -1333,6 +1337,8 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.behind=${gs?.behind ?? 0}
 						.aheadOfPrimary=${gs?.aheadOfPrimary ?? 0}
 						.behindPrimary=${gs?.behindPrimary ?? 0}
+						.insertionsVsPrimary=${gs?.insertionsVsPrimary ?? 0}
+						.deletionsVsPrimary=${gs?.deletionsVsPrimary ?? 0}
 						.mergedIntoPrimary=${gs?.mergedIntoPrimary ?? false}
 						.unpushed=${gs?.unpushed ?? false}
 						.statusFiles=${gs?.status ?? []}

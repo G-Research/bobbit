@@ -230,6 +230,7 @@ export interface GitStatusResult {
 	status: { file: string; status: string }[];
 	hasUpstream: boolean; ahead: number; behind: number;
 	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
+	insertionsVsPrimary: number; deletionsVsPrimary: number;
 	clean: boolean; summary: string; unpushed: boolean;
 	/** true if porcelain (Phase B) was skipped or timed-out */
 	partial?: boolean;

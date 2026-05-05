@@ -566,3 +566,57 @@ Independent work streams for the implementer team:
 6. **Browser E2E** — §8.4. Depends on streams 1 + 3 + 5.
 
 Sensible parallelism: 1+2+5 in parallel → 3+4 → 6.
+
+---
+
+## 13. Line counts vs primary (2026-05 addendum)
+
+The pill renders two extra segments after `↑${aheadOfPrimary}` and before the PR icon:
+
+- `+<insertions>` (green, `text-green-600 dark:text-green-400`)
+- `-<deletions>` (red, `text-red-600 dark:text-red-400`)
+
+Final segment order: `~N ↓N ↑N +X -Y <PR icon>`. Both segments are hidden when `isOnPrimary` is true (consistent with `↑/↓ primary` suppression) or when `insertionsVsPrimary === 0 && deletionsVsPrimary === 0`. Same compact styling as `~N` (`shrink-0`, `font-weight:500`, 11px).
+
+### Server
+
+In `src/server/skills/git-status-native.ts` (and the mirrored container batch script), Phase B fans out two extra `git diff --shortstat` calls in parallel with the existing rev-list ahead/behind counts:
+
+```
+git diff --shortstat <pref>...HEAD     # committed delta vs primary (three-dot)
+git diff --shortstat HEAD              # uncommitted delta (working tree vs HEAD, staged + unstaged)
+```
+
+Insertions and deletions are summed across both. Untracked files are deliberately NOT counted — matches `git diff` semantics, and the existing `~N` segment already advertises untracked-file presence.
+
+`parseShortstat()` parses lines of the form `N file[s] changed, M insertion[s](+), K deletion[s](-)` (either insertions or deletions may be absent; plural/singular both accepted). Empty input or any parse failure returns `{insertions: 0, deletions: 0}`. On the primary branch (or when `origin/<primary>` doesn't verify) the diff calls are skipped and the result fields default to `0`.
+
+New fields on `GitStatusResult`:
+
+```ts
+insertionsVsPrimary: number;  // default 0
+deletionsVsPrimary: number;   // default 0
+```
+
+Multi-repo `repos[]` envelope entries carry the same two fields so future per-repo accordion UI can surface them (not rendered in this iteration).
+
+### Constraints
+
+`PER_CALL_TIMEOUT_MS = 3000` is unchanged. The two extra calls run inside the existing Phase B `Promise.all`, so worst-case wall-clock is unaffected (still bounded by the slowest single git invocation). On parse failure the rest of the status result is never blocked — silent `0/0` fallback.
+
+### Client wiring
+
+`GitStatusWidget` adds:
+
+```ts
+@property({ type: Number }) insertionsVsPrimary = 0;
+@property({ type: Number }) deletionsVsPrimary = 0;
+```
+
+`_pillSegments()` pushes the `+N` / `-N` segments after the existing ones, gated on `!isOnPrimary && (insertionsVsPrimary > 0 || deletionsVsPrimary > 0)`. Wired through every site that already passes `aheadOfPrimary=` to the widget.
+
+### Out of scope
+
+- Per-file insertion/deletion counts in the dropdown (already linkable via the diff modal).
+- Counting vs `@{u}` upstream instead of `origin/<primary>`.
+- Surfacing the new numbers in the per-repo accordion UI.
