@@ -132,6 +132,47 @@ stickiness band is intentionally tighter than button visibility so a
 user-driven scroll-down through the band hides the button before any
 auto-relock fires.
 
+### Design trade-offs
+
+Three decisions deserve explicit rationale because cheaper-looking
+alternatives exist and each was tried at some point in the four-commit
+history below.
+
+**Why two flags instead of one.** A single `_stickToBottom` boolean
+conflates two distinct questions: *do we currently want to be at the
+bottom?* (intent) and *did the user explicitly scroll away?* (history).
+The near-bottom override needs both: a 30-px wheel-up should toggle
+intent off transiently but must NOT promote to the "escaped" state, so
+that the next content growth re-pins automatically. With one flag the
+RO callback has to guess based on geometry; with two it just reads
+`_isAtBottom && !_escapedFromLock` and is always right.
+
+**Why the deferred scroll handler.** A `scroll` event fired during an
+in-flight resize is structurally indistinguishable from a real user
+scroll — same target, same `scrollTop`, same dispatch order. Upstream
+solves this by running RO and scroll handlers on staggered task
+boundaries: RO sets `_resizeDifference` synchronously; the scroll
+handler defers via `setTimeout(0)` so it observes the flag. Cheaper
+alternatives we rejected:
+
+- *Synchronous resize-bail* (read `el.scrollHeight` in the scroll
+  handler and compare to a cached value) — misses the case where the
+  resize has committed to layout but RO hasn't ticked, which is
+  exactly when the false-positive button shows up.
+- *Single-frame `requestAnimationFrame` defer* — RO tick can land in a
+  later frame than the scroll event, so rAF defer doesn't always
+  catch it. `setTimeout(0)` is one task later, which is sufficient.
+
+**Why a spring animation only on jump-click.** Every other re-pin
+site (RO growth, image-load, sendMessage, session-navigate) is reacting
+to content the user has already committed to seeing at the tail —
+animating those would introduce visible lag during streaming bursts.
+The jump-click is the only call site where the user just told us
+"take me to the tail"; a 200–300 ms spring there feels intentional
+rather than abrupt and matches upstream's UX. The spring re-reads its
+target every tick so concurrent RO growth during the animation
+doesn't strand the user 200 px above the bottom.
+
 ### Sensitivity matrix
 
 Each defense was neutered one at a time. "✅ fails" = the matching test
