@@ -232,6 +232,19 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 		if (newBody === opts.body) return opts;
 		return { ...opts, body: newBody as BodyInit };
 	}
+	// POST /api/projects: auto-inject acceptCanonical:true so tests using
+	// tmpdir()-derived rootPaths (which on macOS are symlinks /var/folders ->
+	// /private/var/folders) don't 400 with code:"symlink_root". Tests can opt
+	// out by setting acceptCanonical:false explicitly in their body.
+	if (method === "POST" && path === "/api/projects" && typeof opts.body === "string") {
+		try {
+			const parsed = JSON.parse(opts.body) as Record<string, unknown>;
+			if (typeof parsed === "object" && parsed !== null && parsed.rootPath !== undefined && parsed.acceptCanonical === undefined) {
+				parsed.acceptCanonical = true;
+				return { ...opts, body: JSON.stringify(parsed) };
+			}
+		} catch { /* not JSON, leave alone */ }
+	}
 	return opts;
 }
 
