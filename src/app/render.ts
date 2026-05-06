@@ -45,6 +45,103 @@ import { viewTabs as projectViewTabs, componentsView as projectComponentsView, w
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
+// ──────────────────────────────────────────────────────────────────────
+// Splash-screen new-session gating
+//
+// 0 projects → button label becomes "New Project" → showProjectDialog().
+// 1 project  → "New Session" creates a session bound to that project.
+// ≥2 projects → "New Session" opens a small project picker popover.
+//
+// All paths always pass an explicit projectId so the server's
+// resolveProjectForRequest() never 400s with "projectId required".
+// ──────────────────────────────────────────────────────────────────────
+let _splashPickerAnchorRect: DOMRect | null = null;
+
+function _splashSessionLabel(): string {
+	return state.projects.length === 0 ? "New Project" : "New Session";
+}
+
+function _splashSessionIcon() {
+	return state.projects.length === 0 ? icon(FolderPlus, "sm") : icon(Plus, "sm");
+}
+
+function _onSplashSessionClick(e: Event): void {
+	// Prevent bubble-to-document so the global outside-click handler below
+	// doesn't immediately close the picker we're about to open.
+	e.stopPropagation();
+	const projects = state.projects;
+	if (projects.length === 0) {
+		showProjectDialog();
+		return;
+	}
+	if (projects.length === 1) {
+		const p = projects[0];
+		createAndConnectSession(undefined, undefined, p.rootPath, undefined, undefined, p.id);
+		return;
+	}
+	// ≥2 projects — open the splash project picker, anchored at the button.
+	const btn = e.currentTarget as HTMLElement | null;
+	_splashPickerAnchorRect = btn ? btn.getBoundingClientRect() : null;
+	state.splashProjectPickerOpen = true;
+	renderApp();
+}
+
+function _splashProjectPicker() {
+	if (!state.splashProjectPickerOpen) return "";
+	const projects = state.projects;
+	const MARGIN = 8;
+	const width = Math.min(280, window.innerWidth - MARGIN * 2);
+	const rect = _splashPickerAnchorRect;
+	const top = rect ? rect.bottom + 4 : 80;
+	// Center horizontally on the anchor when possible, else on viewport.
+	const anchorCx = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+	let left = anchorCx - width / 2;
+	left = Math.max(MARGIN, Math.min(left, window.innerWidth - width - MARGIN));
+	return html`
+		<div
+			data-testid="splash-project-picker"
+			class="fixed z-50 rounded-md shadow-lg py-1"
+			style="background: var(--popover); border: 1px solid var(--border); width:${width}px; top:${top}px; left:${left}px; max-height:60vh; overflow-y:auto;"
+			@click=${(e: Event) => e.stopPropagation()}
+		>
+			<div class="px-3 pt-2 pb-1.5 text-xs font-semibold text-foreground">New session in…</div>
+			${projects.map(p => {
+				const isDark = document.documentElement.classList.contains("dark");
+				const color = isDark
+					? (p.colorDark || p.color || "var(--muted-foreground)")
+					: (p.colorLight || p.color || "var(--muted-foreground)");
+				return html`
+					<button
+						class="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-2"
+						data-testid="splash-project-picker-item"
+						@click=${() => {
+							state.splashProjectPickerOpen = false;
+							createAndConnectSession(undefined, undefined, p.rootPath, undefined, undefined, p.id);
+						}}
+					>
+						<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
+						<span class="flex-1 truncate">${p.name}</span>
+					</button>
+				`;
+			})}
+		</div>
+	`;
+}
+
+// Close splash picker on outside click / Escape.
+document.addEventListener("click", () => {
+	if (state.splashProjectPickerOpen) {
+		state.splashProjectPickerOpen = false;
+		renderApp();
+	}
+});
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+	if (state.splashProjectPickerOpen && e.key === "Escape") {
+		state.splashProjectPickerOpen = false;
+		renderApp();
+	}
+});
+
 /** Preview the worktree path that goal-manager will create. */
 function worktreePreviewPath(cwd: string, title: string): string {
 	const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -249,9 +346,10 @@ function renderMobileLanding() {
 										${Button({
 											variant: "ghost",
 											disabled: state.creatingSession,
-											onClick: () => createAndConnectSession(),
-											children: html`<span class="inline-flex items-center gap-1.5">${icon(Plus, "sm")} Quick Session</span>`,
+											onClick: (e?: Event) => _onSplashSessionClick(e ?? new Event("click")),
+											children: html`<span class="inline-flex items-center gap-1.5" data-testid="splash-quick-session-label">${_splashSessionIcon()} ${state.projects.length === 0 ? "New Project" : "Quick Session"}</span>`,
 										})}
+										${_splashProjectPicker()}
 									</div>
 								</div>`
 							: html`
@@ -3337,6 +3435,13 @@ export function doRenderApp(): void {
 	};
 
 	const mainArea = () => {
+		// Instant-loader gate: show bouncing bobbit immediately when a session
+		// is being created or connected, regardless of current route. This must
+		// be the first check so clicks on session-creation entry points feel
+		// responsive within one render frame.
+		if (state.creatingSession || state.connectingSessionId) {
+			return html`<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+		}
 		// Goal dashboard route
 		const route = getRouteFromHash();
 		if (route.view === "goal-dashboard" && route.goalId) {
@@ -3445,11 +3550,6 @@ export function doRenderApp(): void {
 		}
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
 
-		// Show bouncing bobbit while connecting or creating a session
-		if (state.connectingSessionId || state.creatingSession) {
-			return html`<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>`;
-		}
-
 		if (desktop) {
 			return html`
 				<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
@@ -3459,11 +3559,12 @@ export function doRenderApp(): void {
 						variant: "default",
 						size: "sm",
 						disabled: state.creatingSession,
-						onClick: () => createAndConnectSession(),
+						onClick: (e?: Event) => _onSplashSessionClick(e ?? new Event("click")),
 						children: state.creatingSession
 							? html`<span class="inline-flex items-center gap-1.5"><svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg> Creating…</span>`
-							: html`<span class="inline-flex items-center gap-1.5">${icon(Plus, "sm")} New Session</span>`,
+							: html`<span class="inline-flex items-center gap-1.5" data-testid="splash-new-session-label">${_splashSessionIcon()} ${_splashSessionLabel()}</span>`,
 					})}
+					${_splashProjectPicker()}
 				</div>
 			`;
 		}

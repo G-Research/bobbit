@@ -36,6 +36,8 @@ import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
+import { resolveGrantPolicy } from "./agent/tool-activation.js";
+import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
@@ -81,7 +83,7 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
@@ -237,6 +239,7 @@ export interface GitStatusResult {
 	status: { file: string; status: string }[];
 	hasUpstream: boolean; ahead: number; behind: number;
 	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
+	insertionsVsPrimary: number; deletionsVsPrimary: number;
 	clean: boolean; summary: string; unpushed: boolean;
 	/** true if porcelain (Phase B) was skipped or timed-out */
 	partial?: boolean;
@@ -512,6 +515,24 @@ export function createGateway(config: GatewayConfig) {
 	// UI forces the user through "Add Project" before any goal/session work. Bobbit
 	// never registers a project implicitly.
 	const projectRegistry = new ProjectRegistry(stateDir);
+
+	// Register the synthetic "system" project so system-scope tool-assistant
+	// sessions have a valid persistence anchor without forcing the user to
+	// register a real project. Idempotent — hidden from UI listings via the
+	// `hidden: true` filter on GET /api/projects.
+	//
+	// Anchor at a dedicated subdir under bobbitDir so the ProjectContext's
+	// derived stateDir (`<rootPath>/.bobbit/state`) cannot collide with any
+	// user project rooted at the install dir or with the global stateDir —
+	// otherwise the system context would load the same goals.json/sessions.json
+	// as a user project rooted at getProjectRoot() (e.g. test fixtures).
+	try {
+		const systemRoot = path.join(stateDir, "system-project");
+		fs.mkdirSync(systemRoot, { recursive: true });
+		projectRegistry.registerSystemProject(systemRoot);
+	} catch (err) {
+		console.warn(`[startup] Failed to register system project: ${err}`);
+	}
 
 	// Run one-time migration from centralized to per-project state
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
@@ -1937,7 +1958,9 @@ async function handleApiRoute(
 
 	// GET /api/projects
 	if (url.pathname === "/api/projects" && req.method === "GET") {
-		json(projectRegistry.list());
+		// Filter out hidden projects (e.g. the synthetic "system" project) so
+		// they never appear in the client's state.projects.
+		json(projectRegistry.list().filter(p => !p.hidden));
 		return;
 	}
 
@@ -1986,7 +2009,22 @@ async function handleApiRoute(
 				}
 			}
 
-			const project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark });
+			const acceptCanonical = body.acceptCanonical === true;
+			let project;
+			try {
+				project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
+			} catch (regErr: any) {
+				if (regErr instanceof SymlinkProjectRootError) {
+					json({
+						error: "Project root is a symlink",
+						code: "symlink_root",
+						rootPath: regErr.rootPath,
+						canonical: regErr.canonical,
+					}, 400);
+					return;
+				}
+				throw regErr;
+			}
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {
@@ -2120,7 +2158,10 @@ async function handleApiRoute(
 		// Test-only bypass: BOBBIT_E2E=1 + ?force=1 allows deleting the last
 		// project so GR-09 (zero-project first-run UX) can exercise the empty state.
 		const forceDelete = process.env.BOBBIT_E2E === "1" && url.searchParams.get("force") === "1";
-		if (project && projectRegistry.list().length === 1 && !forceDelete) {
+		// The synthetic "system" project (hidden) doesn't count toward the
+		// "at least one real project" guard.
+		const visibleCount = projectRegistry.list().filter(p => !p.hidden).length;
+		if (project && !project.hidden && visibleCount === 1 && !forceDelete) {
 			json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
 			return;
 		}
@@ -2906,6 +2947,28 @@ async function handleApiRoute(
 			if (origGoal) {
 				cwd = origGoal.cwd || cwd;
 				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
+			}
+		}
+
+		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted,
+		// or a project whose rootPath is gone). spawn("node", { cwd }) on Windows
+		// reports a missing cwd as ENOENT, masquerading as if the `node` binary was missing.
+		// Fall back to the project rootPath when we have a resolved project to anchor the
+		// fallback. If no project is resolved yet, leave cwd alone — the resolver below
+		// will reject a bogus cwd with the canonical 400 rather than silently rewriting
+		// it to defaultCwd (which would mask user error and match an unrelated project).
+		if (cwd && !fs.existsSync(cwd) && resolvedProjectId) {
+			const staleCwd = cwd;
+			const proj = projectRegistry.get(resolvedProjectId);
+			let fallback: string | undefined;
+			if (proj && fs.existsSync(proj.rootPath)) fallback = proj.rootPath;
+			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
+			if (fallback) {
+				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
+				cwd = fallback;
+			} else {
+				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+				return;
 			}
 		}
 
@@ -7851,12 +7914,18 @@ async function handleApiRoute(
 		const body = await readBody(req).catch(() => ({}));
 		const hasHtml = typeof body?.html === "string";
 		const hasFile = typeof body?.file === "string" && body.file.length > 0;
+		const hasAssets = Array.isArray(body?.assets);
+		const hasManifest = typeof body?.manifest === "string" && body.manifest.length > 0;
 		if (!hasHtml && !hasFile) {
 			json({ error: "Body must contain one of 'html' or 'file'" }, 400);
 			return;
 		}
+		if (hasHtml && (hasAssets || hasManifest)) {
+			json({ error: "`assets`/`manifest` only valid with `file`" }, 400);
+			return;
+		}
 		try {
-			let result: previewMount.MountResult;
+			let result: previewMount.MountResult | previewMount.MountFileResult;
 			if (hasHtml) {
 				// `html` wins over `file` when both are provided.
 				let entry: string | undefined;
@@ -7893,7 +7962,58 @@ async function handleApiRoute(
 					json({ error: "file must end in .html or .htm" }, 400);
 					return;
 				}
-				result = previewMount.copyFileTree(sessionId, filePath);
+				// Collect assets from inline `assets[]` and optional `manifest` JSON.
+				const declared: string[] = [];
+				if (hasAssets) {
+					for (const a of body.assets as unknown[]) {
+						if (typeof a !== "string") {
+							json({ error: "`assets[]` entries must be strings" }, 400);
+							return;
+						}
+						declared.push(a);
+					}
+				}
+				if (hasManifest) {
+					const manifestRel = body.manifest as string;
+					if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
+						manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
+						json({ error: "Invalid manifest path" }, 400);
+						return;
+					}
+					const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
+					if (!fs.existsSync(manifestAbs)) {
+						json({ error: `Manifest '${manifestRel}' not found` }, 404);
+						return;
+					}
+					let manifestParsed: any;
+					try {
+						manifestParsed = JSON.parse(fs.readFileSync(manifestAbs, "utf-8"));
+					} catch (err: any) {
+						json({ error: `Manifest JSON parse error: ${err?.message ?? err}` }, 400);
+						return;
+					}
+					if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
+						json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
+						return;
+					}
+					for (const a of manifestParsed.assets) {
+						if (typeof a !== "string") {
+							json({ error: "Manifest `assets[]` entries must be strings" }, 400);
+							return;
+						}
+						declared.push(a);
+					}
+				}
+				// De-duplicate while preserving order.
+				const seen = new Set<string>();
+				const dedup: string[] = [];
+				for (const a of declared) {
+					const k = a.trim();
+					if (seen.has(k)) continue;
+					seen.add(k);
+					dedup.push(a);
+				}
+				result = previewMount.mountFile(sessionId, filePath, dedup);
 			}
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,
@@ -8454,7 +8574,15 @@ async function handleApiRoute(
 		const toolInfos = mcpManager.getToolInfos();
 		const result = statuses.map(s => ({
 			...s,
-			tools: toolInfos.filter(t => t.serverName === s.name).map(t => ({ name: t.name, description: t.description })),
+			tools: toolInfos.filter(t => t.serverName === s.name).map(t => {
+				const parsed = parseMcpToolName(t.name);
+				return {
+					name: t.name,
+					description: t.description,
+					subNamespace: parsed?.sub,
+					op: parsed?.op ?? t.mcpToolName,
+				};
+			}),
 		}));
 		json(result);
 		return;
@@ -8512,6 +8640,7 @@ async function handleApiRoute(
 			json({ error: "MCP not initialized" }, 500);
 			return;
 		}
+		let parsedToolForError: string | undefined;
 		try {
 			const body = await new Promise<string>((resolve) => {
 				let data = "";
@@ -8519,6 +8648,7 @@ async function handleApiRoute(
 				req.on("end", () => resolve(data));
 			});
 			const { tool, args } = JSON.parse(body);
+			parsedToolForError = typeof tool === "string" ? tool : undefined;
 			if (!tool) {
 				json({ error: "Missing 'tool' field" }, 400);
 				return;
@@ -8555,11 +8685,106 @@ async function handleApiRoute(
 				}
 			}
 
+			// Layer B per-op never-policy enforcement (§4.3). Resolves the per-op
+			// policy for `mcp__<server>__<op>` even though the model only sees the
+			// aggregated `mcp_<server>` meta-tool — keeps `never` denials honoured
+			// after the meta-tool is granted wholesale.
+			if (toolStr.startsWith("mcp__")) {
+				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
+				const role = roleName ? roleManager.getRole(roleName) : undefined;
+				const parsed = parseMcpToolName(toolStr);
+				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
+				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);
+				if (policy === "never") {
+					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
+					return;
+				}
+			}
+
 			const result = await mcpManager.callTool(tool, args || {});
 			json(result);
 		} catch (err) {
 			const e = err as Error;
 			console.error(`[mcp] Tool call failed:`, e.stack || e);
+			// Parse `mcp__<server>__<op>` into structured fields (§5.4).
+			let parsedServer: string | undefined;
+			let parsedOperation: string | undefined;
+			if (parsedToolForError && parsedToolForError.startsWith("mcp__")) {
+				const parsedErr = parseMcpToolName(parsedToolForError);
+				if (parsedErr) {
+					parsedServer = parsedErr.server;
+					parsedOperation = parsedErr.sub ? `${parsedErr.sub}__${parsedErr.op}` : parsedErr.op;
+				}
+			}
+			json({ error: e.message, server: parsedServer, operation: parsedOperation, stack: e.stack }, 500);
+		}
+		return;
+	}
+
+	// POST /api/internal/mcp-describe — discovery endpoint for the `mcp_describe` tool (§3.3)
+	if (url.pathname === "/api/internal/mcp-describe" && req.method === "POST") {
+		const mcpManager = sessionManager.getMcpManager();
+		if (!mcpManager) {
+			json({ error: "MCP not initialized" }, 500);
+			return;
+		}
+		try {
+			const body = await new Promise<string>((resolve) => {
+				let data = "";
+				req.on("data", (chunk: Buffer) => data += chunk.toString());
+				req.on("end", () => resolve(data));
+			});
+			const parsed = JSON.parse(body || "{}");
+			const server: string | undefined = parsed?.server;
+			const operation: string | undefined = parsed?.operation;
+			if (!server || typeof server !== "string") {
+				json({ error: "Missing 'server' field" }, 400);
+				return;
+			}
+
+			const describeSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
+			if (!describeSessionId) {
+				json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
+				return;
+			}
+			const liveSession = sessionManager.getSession(describeSessionId);
+			const persistedSession = liveSession ? null : (
+				projectContextManager.getContextForSession(describeSessionId)?.sessionStore.get(describeSessionId)
+				?? null
+			);
+			if (!liveSession && !persistedSession) {
+				json({ error: `Session "${describeSessionId}" not found` }, 403);
+				return;
+			}
+
+			const statuses = mcpManager.getServerStatuses();
+			const status = statuses.find(s => s.name === server);
+			if (!status || status.status !== "connected") {
+				const reason = status?.error ?? (status ? status.status : "unknown server");
+				json({ error: `server ${server} not connected: ${reason}` }, 503);
+				return;
+			}
+
+			const infos = mcpManager.getToolInfos().filter(i => i.serverName === server);
+			if (operation) {
+				const match = infos.find(i => i.mcpToolName === operation);
+				if (!match) {
+					json({ error: "operation not found" }, 404);
+					return;
+				}
+				json({ tool: { name: match.mcpToolName, description: match.description, inputSchema: match.inputSchema } });
+				return;
+			}
+			json({
+				tools: infos.map(i => ({
+					name: i.mcpToolName,
+					description: i.description,
+					inputSchema: i.inputSchema,
+				})),
+			});
+		} catch (err) {
+			const e = err as Error;
+			console.error(`[mcp] Describe failed:`, e.stack || e);
 			json({ error: e.message, stack: e.stack }, 500);
 		}
 		return;

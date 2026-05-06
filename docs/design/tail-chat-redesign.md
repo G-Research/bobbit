@@ -9,6 +9,208 @@ The proposal-panel variant in `src/app/follow-tail.ts` is **out of scope**.
 
 ---
 
+## Outcome of the use-stick-to-bottom port
+
+*Supersedes the rest of this document.* The post-PR-#468 regressions
+(false-positive Jump button on Chromium desktop and tail-chat lost mid-
+stream on iOS PWA) were resolved by porting the
+[`use-stick-to-bottom`](https://github.com/stackblitz-labs/use-stick-to-bottom)
+algorithm (731⭐, powers bolt.new) into vanilla TypeScript inside
+`AgentInterface.ts`. The historical inventory and analysis below remain
+for context, but the implementation no longer matches the section 6
+proposal verbatim — the upstream library's empirically-tested model
+turned out to handle several races we hadn't fully spelled out.
+
+### New state model
+
+| Field | Role |
+|---|---|
+| `_isAtBottom: boolean` (default `true`) | Sticky intent. Toggleable by gestures, RO callback, jump-to-bottom click. |
+| `_escapedFromLock: boolean` (default `false`) | True ONLY after a user-driven scroll-up that takes the viewport OUT of the near-bottom band. Cleared by jump-to-bottom click, sendMessage, session navigate, near-bottom auto-relock, or `setAutoScroll(true)`. |
+| `_resizeDifference: number` | Set by RO callback on every height delta; reset via `requestAnimationFrame(() => setTimeout(…, 1))`. The deferred scroll handler bails when this is non-zero — disambiguates resize-driven scroll events from user intent. |
+| `_lastScrollTop: number` | Reference for up/down classification in the deferred scroll handler. |
+| `_ignoreScrollToTop: number \| null` | Single-value latch set immediately before any programmatic `scrollTop` write. Replaces the 4-entry `_programmaticEchoes` ring buffer (deferred handler renders the ring obsolete — within one task only one programmatic write commits). |
+| `_animation` | Spring rAF state used by the jump-to-bottom click landing. |
+| `_lastUserGestureTs: number` | `performance.now()` of the latest wheel/touch/keydown gesture. Used by the deferred handler to gate user-vs-programmatic scroll-event classification — see "Gesture freshness gate" below. |
+
+### Constants
+
+- `STICK_TO_BOTTOM_OFFSET_PX = 70` — near-bottom band, matches upstream.
+- Spring defaults `damping = 0.7, stiffness = 0.05, mass = 1.25` — upstream defaults.
+- `USER_GESTURE_WINDOW_MS = 500` — "recent gesture" window for the freshness gate.
+
+### Geometry getters
+
+- `_targetScrollTop()` = `scrollHeight - 1 - clientHeight` (the `-1` is intentional, matches upstream; avoids float-rounding edge cases where the browser clamps `scrollTop` 1 sub-pixel above the integer target).
+- `_scrollDifference()` = `targetScrollTop - scrollTop`.
+- `_isNearBottom()` = `scrollDifference <= STICK_TO_BOTTOM_OFFSET_PX`.
+
+### Deferred scroll handler
+
+Fires synchronously on every `scroll` event but coalesces work into a
+follow-up `setTimeout(0)` macrotask so any RO tick fired in the same
+frame has had a chance to set `_resizeDifference` first. Snapshots
+`(scrollTop, _ignoreScrollToTop, _lastUserGestureTs)` at dispatch time
+so wheel→scroll pairs are treated atomically.
+
+Deferred body, in order:
+
+1. **Resize-in-flight bail.** If `_resizeDifference !== 0`, recompute the
+   jump button (closes Bug A from the issue analysis: button visibility
+   must be recomputed on every tick, including bail paths) and return.
+2. **Echo latch.** If `scrollTop ≈ ignoreScrollToTop`, recompute the
+   jump button and return.
+3. **Gesture freshness gate.** If no wheel/touch/keydown gesture has
+   fired within `USER_GESTURE_WINDOW_MS`, treat the scroll event as
+   programmatic-from-elsewhere. If we're sticky and have drifted, queue
+   a `requestAnimationFrame` re-pin; recompute the jump button; return.
+   This preserves the contract that `el.scrollTop = X` (test harness or
+   other on-page component) does NOT escape the lock if intent is still
+   sticky.
+4. **Up/down classification.** Compare to `lastScrollTop`:
+   - User scroll OUT of the near-bottom band ⇒ `_escapedFromLock = true; _isAtBottom = false`.
+   - Scroll down ⇒ `_escapedFromLock = false`.
+5. **Near-bottom dominates.** If `_isNearBottom()`, force
+   `_escapedFromLock = false; _isAtBottom = true`. Internalises
+   upstream's `isAtBottom = isAtBottom || isNearBottom` public-API
+   semantic so a 30-px wheel-up auto-relocks on the next content growth
+   without requiring a Jump click.
+6. **Recompute jump button.**
+
+### Synchronous user-gesture handlers
+
+- **`wheel` (deltaY < 0)**: `_isAtBottom = false`; cancel any in-flight
+  spring; refresh button. Does NOT set `_escapedFromLock` synchronously
+  — that decision is made by the deferred handler once scrollTop has
+  actually moved, based on whether the wheel carried us out of the band.
+- **`touchstart`**: cancel animation; deferred handler classifies.
+- **`keydown` PageUp/ArrowUp/Home**: full escape (sets both flags) —
+  these keys always carry the user out of the band on a single press.
+- **`keydown` PageDown/ArrowDown/End**: cancel animation; deferred handler
+  classifies (typically auto-relocks on near-bottom).
+
+### ResizeObserver callback
+
+1. Compute `delta = newHeight - lastObservedHeight`.
+2. If `delta === 0` (width-only reflow) bail.
+3. Set `_resizeDifference = delta`; schedule reset via `rAF + setTimeout(1ms)`.
+4. **Overscroll clamp** (Bug E): if `scrollTop > targetScrollTop`, write
+   `scrollTop = target`.
+5. **Positive growth**: if `_isAtBottom && !_escapedFromLock`,
+   `scrollToBottom({ animate: false })` synchronously.
+6. **Negative shrink**: if `_isNearBottom() && !_escapedFromLock`,
+   re-engage stick (`_isAtBottom = true`) and apply the post-collapse
+   clamp inherited from the previous algorithm
+   (`tests/collapse-scroll-bugs.spec.ts`).
+
+### `scrollToBottomNow({ animate? })`
+
+Promise-returning. With `animate: false` (default — used by RO growth,
+image-load handler, session navigate, sendMessage), writes
+`scrollTop = target` synchronously and resolves on the next rAF. With
+`animate: true` (jump-to-bottom click only), runs a spring rAF loop
+(damping 0.7, stiffness 0.05, mass 1.25) until `|delta| < 0.5 &&
+|velocity| < 0.5`, re-reading the target each tick so RO growth during
+the animation moves the goalpost.
+
+### Capture-phase `load` handler
+
+Installed once per session navigate on the scroll container. Catches
+`<img>`/`<iframe>` decode reflows that fire BEFORE the next RO tick —
+the load event lands on the same task as the layout commit, so pinning
+synchronously here avoids a single-frame visible drift on Safari/iOS
+where `overflow-anchor` has limited availability. NOT redundant with
+the RO `delta>0` path: the RO callback runs on a microtask boundary
+and can lag the load event by up to a frame.
+
+### Jump-button visibility
+
+Two-part: `!_isAtBottom && (dist > 0.5 × clientHeight)`. Recomputed at
+every deferred-handler tick (including bail paths). The 50 % threshold
+is legacy from `tests/e2e/ui/jump-to-bottom.spec.ts` — the 70 px
+stickiness band is intentionally tighter than button visibility so a
+user-driven scroll-down through the band hides the button before any
+auto-relock fires.
+
+### Design trade-offs
+
+Three decisions deserve explicit rationale because cheaper-looking
+alternatives exist and each was tried at some point in the four-commit
+history below.
+
+**Why two flags instead of one.** A single `_stickToBottom` boolean
+conflates two distinct questions: *do we currently want to be at the
+bottom?* (intent) and *did the user explicitly scroll away?* (history).
+The near-bottom override needs both: a 30-px wheel-up should toggle
+intent off transiently but must NOT promote to the "escaped" state, so
+that the next content growth re-pins automatically. With one flag the
+RO callback has to guess based on geometry; with two it just reads
+`_isAtBottom && !_escapedFromLock` and is always right.
+
+**Why the deferred scroll handler.** A `scroll` event fired during an
+in-flight resize is structurally indistinguishable from a real user
+scroll — same target, same `scrollTop`, same dispatch order. Upstream
+solves this by running RO and scroll handlers on staggered task
+boundaries: RO sets `_resizeDifference` synchronously; the scroll
+handler defers via `setTimeout(0)` so it observes the flag. Cheaper
+alternatives we rejected:
+
+- *Synchronous resize-bail* (read `el.scrollHeight` in the scroll
+  handler and compare to a cached value) — misses the case where the
+  resize has committed to layout but RO hasn't ticked, which is
+  exactly when the false-positive button shows up.
+- *Single-frame `requestAnimationFrame` defer* — RO tick can land in a
+  later frame than the scroll event, so rAF defer doesn't always
+  catch it. `setTimeout(0)` is one task later, which is sufficient.
+
+**Why a spring animation only on jump-click.** Every other re-pin
+site (RO growth, image-load, sendMessage, session-navigate) is reacting
+to content the user has already committed to seeing at the tail —
+animating those would introduce visible lag during streaming bursts.
+The jump-click is the only call site where the user just told us
+"take me to the tail"; a 200–300 ms spring there feels intentional
+rather than abrupt and matches upstream's UX. The spring re-reads its
+target every tick so concurrent RO growth during the animation
+doesn't strand the user 200 px above the bottom.
+
+### Sensitivity matrix
+
+Each defense was neutered one at a time. "✅ fails" = the matching test
+failed as expected; revert restored green.
+
+| Neuter | Expected failing test | Result |
+|---|---|---|
+| `STICK_TO_BOTTOM_OFFSET_PX = 0` | `tail-chat-near-bottom-relock.spec.ts` | ✅ fails |
+| Remove `gestureFresh` programmatic-scroll gate (treats every non-echo scroll as user intent) | `tail-chat-jump-button-false-positive.spec.ts` | ✅ fails |
+| Re-add Bug A: `_refreshJumpButton` only flips TO `true` from raw geometry, never back to `false` | `tail-chat-jump-button-false-positive.spec.ts` | ✅ fails |
+| Remove capture-phase `_imageLoadHandler` | `tail-chat-image-reflow.spec.ts` | ⚠️ passes in headless Chromium (RO catches the same reflow within a frame). Defense retained for documented Safari/iOS PWA race window where `overflow-anchor` is unavailable and load fires before RO; manual iOS verification documented in PR. |
+
+### What we deliberately did not port from upstream
+
+- **Selection guard** (`isSelecting()`). Our composer rarely overlaps
+  the chat selection; would complicate the deferred-handler contract
+  without a regression to point at. Defer until a real bug surfaces.
+- **`ScrollBehavior: "smooth"`** override. Production CSS already
+  uses `scroll-behavior: auto`; nothing to override.
+- **`mergeAnimations` cache**. Single animation profile (the jump
+  click); no need for the 14-line memoiser.
+
+### Public surface preserved
+
+- `setAutoScroll(enabled)` — routes through new flag model.
+- `_stickToBottom` getter/setter and `_programmaticEchoes` array —
+  legacy compat shims so existing E2E test setup (which pokes
+  `ai._stickToBottom = true` and pushes echo entries) keeps working
+  without a flood of test edits. Production code paths use the new
+  flags directly.
+- `data-testid="jump-to-bottom"` button + `style.opacity` /
+  `style.pointerEvents` visibility model — unchanged.
+- `overflow-anchor: none` inline style on the scroll container —
+  retained. Single-contract: JS pin path is the only thing keeping the
+  viewport at the tail; Chromium ≡ Safari.
+
+---
+
 ## 1. Existing scroll mechanisms inventory (line-referenced)
 
 All references are against `src/ui/components/AgentInterface.ts` at HEAD

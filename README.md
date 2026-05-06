@@ -113,6 +113,8 @@ Agents can ask you structured multiple-choice questions mid-task via the builtin
 ### MCP Server Integration
 Use any [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server with Bobbit. Drop a `.mcp.json` in your project root (same format as Claude Code) and Bobbit auto-discovers, connects, and exposes all MCP tools — appearing in the Tools UI, system prompts, and role-based access control.
 
+Each MCP server is presented to the model as a **single tool** (`mcp_<server>`) with on-demand operation discovery via `mcp_describe` — fixing context bloat and the OpenAI 128-tool cap when many MCP servers are installed. See [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md).
+
 ### Cost Tracking
 Per-session token usage and cost, aggregated to goal and task level. Always know what you're spending.
 

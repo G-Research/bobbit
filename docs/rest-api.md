@@ -213,7 +213,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/projects` | List all registered projects. |
-| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. |
+| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). |
 | `GET` | `/api/projects/:id` | Get a single project. |
 | `PUT` | `/api/projects/:id` | Update name/color. |
 | `DELETE` | `/api/projects/:id` | Unregister (does not delete files). Returns **400** `{"error":"Cannot delete the last remaining project — add another project first"}` when deleting would leave zero projects. Under `BOBBIT_E2E=1`, `?force=1` bypasses the guard for tests that need to exercise the zero-project UX. |
@@ -496,6 +496,7 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 | `GET` | `/api/mcp-servers` | List all discovered MCP servers with status, tool count, and tool names |
 | `POST` | `/api/mcp-servers/:name/restart` | Disconnect and reconnect an MCP server (also re-discovers from config files) |
 | `POST` | `/api/internal/mcp-call` | Proxy a tool call to an MCP server (`{ tool: "mcp__server__name", args: {...} }`) |
+| `POST` | `/api/internal/mcp-describe` | Return the JSON Schema for an MCP server's operations (`{ server, operation? }` → `{ tools: [...] }` or `{ tool: {...} }`); used by the `mcp_describe` discovery tool |
 
 **`GET /api/mcp-servers`** returns an array of server objects:
 ```json
@@ -510,7 +511,9 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 **`POST /api/mcp-servers/:name/restart`** re-discovers servers from config files before connecting, so newly added servers can be started without a gateway restart.
 
-**`POST /api/internal/mcp-call`** is the internal proxy endpoint used by generated agent extensions. Returns the raw MCP `{ content, isError }` response.
+**`POST /api/internal/mcp-call`** is the internal proxy endpoint used by generated agent extensions. Returns the raw MCP `{ content, isError }` response. Enforces Layer B per-op `never`-policy denial via `resolveGrantPolicy` before dispatching. On error, the response body includes structured `{ error, server, operation }` fields when the tool name is parseable.
+
+**`POST /api/internal/mcp-describe`** returns either `{ tools: [{ name, description, inputSchema }] }` (when `operation` is omitted) or `{ tool: {...} }` (when given). Returns 503 with `{ error: "server <name> not connected: <reason>" }` for unknown/disconnected servers, 404 for unknown operations. Auth: same `X-Bobbit-Session-Id` header as `mcp-call`. See [docs/mcp-meta-tools.md](mcp-meta-tools.md).
 
 ### Preview
 
@@ -520,7 +523,7 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount. Body is one of `{ html, entry? }` (inline) or `{ file: "/abs/path/report.html" }` (copy entry + sibling tree). Returns `200 { url, path, entry, mtime }`. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm`; `403` sandbox-out-of-scope or symlink escape; `404` source file missing; `413` mount exceeds 100 MiB or copy exceeds 25 MiB. On success the server fans out a `preview-changed` SSE event. |
+| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount. Body is one of `{ html, entry? }` (inline) or `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy entry plus explicitly declared siblings). Returns `200 { url, path, entry, mtime }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
 | `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns the same `{ url, path, entry, mtime }` shape, or `404 { error: "no preview mount" }` if the mount is missing or empty. |
 | `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path}` after every successful `POST /api/preview/mount`. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
 

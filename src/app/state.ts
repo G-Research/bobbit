@@ -330,6 +330,9 @@ export const state = {
 	/** Whether the new-session role picker dropdown is open */
 	rolePickerOpen: false,
 
+	/** Whether the splash-screen project picker (≥2 projects) is open. */
+	splashProjectPickerOpen: false,
+
 	/** Docker sandbox status (fetched on demand) */
 	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
 

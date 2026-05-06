@@ -11,10 +11,7 @@ import * as path from "node:path";
 
 export type PathGuardResult =
 	| { ok: true; resolved: string; size: number }
-	| { ok: false; status: 400 | 404 | 413; error: string };
-
-/** 25 MiB cap mirroring the existing image-upload cap. */
-export const MAX_ASSET_SIZE = 25 * 1024 * 1024;
+	| { ok: false; status: 400 | 404; error: string };
 
 /**
  * Resolve `rel` under `baseDir` and return the absolute path if safe, or a
@@ -25,8 +22,11 @@ export const MAX_ASSET_SIZE = 25 * 1024 * 1024;
  *   400 — input shape rejected (missing, NUL, absolute, backslash) or
  *         resolved path escapes baseDir (including via symlinks).
  *   404 — resolved path doesn't exist OR isn't a regular file.
- *   413 — file exceeds MAX_ASSET_SIZE.
  *   ok  — path is safe to stream, returns absolute resolved path + size.
+ *
+ * Note: there is no size cap here. Asset inclusion into the mount is
+ * agent-driven and explicit (see `mountFile` in `mount.ts`); the agent is
+ * responsible for declaring only what it needs.
  */
 export function resolveAssetPath(baseDir: string, rel: string | null | undefined): PathGuardResult {
 	// 2. Missing
@@ -63,7 +63,13 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 	} catch {
 		// File doesn't exist; check that the *unresolved* path is contained
 		// before reporting 404 (prevents leaking which paths exist outside).
-		if (!isContained(resolved, baseReal)) {
+		// Accept containment under either the canonical baseReal OR the
+		// lexical baseDir — on macOS, baseDir often lives under `/var/...`
+		// (symlinked to `/private/var/...`); `path.resolve` keeps the
+		// un-canonical prefix so the missing path lexically sits under
+		// baseDir but `isContained(resolved, baseReal)` rejects it.
+		// path.resolve has already collapsed `..` so the lexical check is safe.
+		if (!isContained(resolved, baseReal) && !isContained(resolved, baseDir)) {
 			return { ok: false, status: 400, error: "Path traversal rejected" };
 		}
 		return { ok: false, status: 404, error: "File not found" };
@@ -82,9 +88,6 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 	}
 	if (!stat.isFile()) {
 		return { ok: false, status: 404, error: "Not a regular file" };
-	}
-	if (stat.size > MAX_ASSET_SIZE) {
-		return { ok: false, status: 413, error: "Asset exceeds 25 MiB cap" };
 	}
 
 	return { ok: true, resolved: resolvedReal, size: stat.size };

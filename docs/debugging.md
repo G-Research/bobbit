@@ -204,14 +204,13 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 - `renderApp()` debounced via `requestAnimationFrame` — multiple calls collapse
 - For synchronous DOM updates, use `renderAppSync()`
 
-## Scroll snap-back / vibration in idle session
+## Scroll snap-back / vibration / tail-chat lost / false-positive Jump button
 
-- **Symptom**: in a completely idle session, dragging the scrollbar up snaps the viewport back to the bottom (often as a visible "vibration"). Resizing the window breaks the loop temporarily.
-- **Root cause in one line**: zero-delta `ResizeObserver` fires were re-clamping `scrollTop = scrollHeight` while a timer-based `_isAutoScrolling` guard silently swallowed the user's scroll events.
-- **Where the fix lives**: `src/ui/components/AgentInterface.ts` — the RO callback now no-ops on `delta === 0` and only auto-scrolls on `delta > 0`. The timer guard is gone. Programmatic scroll echoes are filtered via the `_lastProgrammaticScrollTop`/`_lastProgrammaticScrollHeight` latch in `_handleScroll` with sub-pixel tolerance (`Math.abs(... ) < 1`) for HiDPI rounding. User intent is captured via `_handleUserIntent` (wheel/touchstart) and `_handleScrollKeydown` (PageUp/Down/Home/End/Arrow). Stickiness tail is 10px (was 50px → 5px → 10px to absorb HiDPI rounding without losing tail).
-- **Hardening (cc47a4e7)**: `_wasAtBottomAtLastUserScroll` carry-over consulted in the `state_update` branch of `setupSessionSubscription` — a transient scroll-up that flips `_stickToBottom` false for one tick still scrolls on the next state update (cleared on real user intent). Session-load settle window (`_settleWindowActive` + `_settleWindowDeadline`, 2000ms, re-armed per `setupSessionSubscription`) re-scrolls on each RO tick while sticky, exits on stable `scrollHeight` / deadline / user intent; torn down in `disconnectedCallback`. Jump-to-bottom button (`_showJumpToBottom`) appears when `scrollHeight - scrollTop - clientHeight > clientHeight * 0.5`; click runs `_scrollToBottom()` + sets `_stickToBottom = true` (no parallel flag).
-- **Invariant**: see [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant). Do not reintroduce timer-based auto-scroll guards; do not widen the 10px tail; do not add a parallel "is at bottom" flag (the jump-to-bottom button reuses `_stickToBottom`).
-- **Repro tests**: `tests/agent-interface-scroll.spec.ts` (canonical `delta === 0` no-op regression — with `stickToBottom=true` and a small user scroll inside the tail, an RO fire with `delta === 0` must preserve `scrollTop`); `tests/agent-interface-scroll-hardening.spec.ts` (sub-pixel echo tolerance, 10px tail, `_wasAtBottomAtLastUserScroll` carry-over, settle window); `tests/e2e/ui/jump-to-bottom.spec.ts` (button visibility threshold + click).
+- **Symptom (master pre-fix)**: in a streaming session, the chat stops following the bottom mid-stream, and/or the Jump-to-bottom pill appears even when scrollTop is already at the bottom. Both regressions also reproduce on iOS PWA.
+- **Root cause in one line**: post-PR-#468 the JS pin path (`_stickToBottom` flag + `_programmaticEchoes` ring + `_pinIfSticking`) became the single contract (CSS `overflow-anchor: none` retained), but it lacked resize-vs-scroll disambiguation, a near-bottom relock band, an overscroll clamp, and a paint-vs-RO race defense — all of which Chromium's deleted `overflow-anchor: auto` had been silently masking.
+- **Where the fix lives**: `src/ui/components/AgentInterface.ts` — the scroll-lock subsystem is now a vanilla-TS port of [`use-stick-to-bottom`](https://github.com/stackblitz-labs/use-stick-to-bottom). Two-flag intent model (`_isAtBottom` + `_escapedFromLock`); `STICK_TO_BOTTOM_OFFSET_PX = 70` near-bottom band (auto-relock when user scrolls back within 70 px of bottom); `_resizeDifference` records RO delta and the deferred scroll handler (`setTimeout(0)`) bails when non-zero; `_ignoreScrollToTop` single-value latch replaces the echo ring; capture-phase `_imageLoadHandler` covers the paint-vs-RO race for async image/iframe decode; `scrollToBottom({ animate })` provides a Promise-returning spring path used by jump-click. User-intent listeners (wheel/touchstart/keydown) are the only synchronous writers of `_escapedFromLock = true; _isAtBottom = false`. `_stickToBottom` and `_programmaticEchoes` survive as compat shims routing to the new model.
+- **Invariant**: see [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant) for the full state inventory and contract. Do NOT re-introduce the deleted defenses listed there — `_wasAtBottomAtLastUserScroll`, the `_settleWindowActive`/`_settleWindowDeadline` settle window, `_suppressJumpUntilTs`, geometry-based intent flips in the scroll handler, the `_programmaticEchoes` ring buffer as primary echo mechanism, the 10 px stickiness tail, or the "single source of truth" `_stickToBottom`-only model. Each was masking a race introduced by an earlier layer; reaching for one means the bug is elsewhere. `_imageLoadHandler` is NOT in the do-NOT-re-add list — it was restored.
+- **Repro tests**: 9 tail-chat E2E specs in `tests/e2e/ui/tail-chat-*.spec.ts`. Notably `tail-chat-jump-button-false-positive.spec.ts` is the deterministic reproducer for the false-positive Jump button; `tail-chat-near-bottom-relock.spec.ts` covers the 70 px auto-relock band; `tail-chat-tool-expand-reflow.spec.ts` covers `<details>` toggle reflow; `tail-chat-image-reflow.spec.ts` covers the paint-vs-RO race that motivates `_imageLoadHandler`. All tests are outcome-only (`getBoundingClientRect()` + computed style) — never assert on private fields. The full sensitivity matrix mapping each defense to the test that fails when neutered lives in [docs/design/tail-chat-redesign.md — Outcome of the use-stick-to-bottom port](design/tail-chat-redesign.md#outcome-of-the-use-stick-to-bottom-port).
 
 ## Stale messages trailing after newer ones on session navigate
 
@@ -442,7 +441,12 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - State is per-project: goals, sessions, tasks, teams, gates, search, costs all live in `<project-root>/.bobbit/state/`
 - `ProjectContextManager` manages all `ProjectContext` instances and routes store access
 - Project registry at `<server-cwd>/.bobbit/state/projects.json` — check file exists and is valid JSON
-- **No default project.** The server never auto-registers one. A fresh install has an empty `projects.json` and the UI forces Add Project before any goal/session work. `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require an explicit `projectId` or a `cwd` matching a registered project's `rootPath` and return **400** `"projectId required: ..."` otherwise (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)).
+- **No default user project.** The server never auto-registers a *user* project. A fresh install has an empty `projects.json` (visible projects only) and the UI forces Add Project before any goal/session work in user projects. `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require an explicit `projectId` or a `cwd` matching a registered project's `rootPath` and return **400** `"projectId required: ..."` otherwise (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)).
+- **Synthetic `system` project carve-out.** At startup the server registers a hidden synthetic project (id `system`, anchored at `<bobbitStateDir>/system-project/`, `hidden: true`) via `registerSystemProject()`. It does **not** appear in `GET /api/projects` and is invisible to `state.projects`, but it is a valid `projectId` for `POST /api/sessions`. System-scope tool-assistant sessions (Tools page → New Tool with scope = System) explicitly pass `projectId: "system"` instead of relying on `cwd` resolution, which is why they no longer 400. See [internals.md — Synthetic system project](internals.md#synthetic-system-project).
+- **Diagnosing a user-visible 400 "projectId required":**
+  1. Was the request from a system-scope tool assistant? It must carry `projectId: "system"` in the POST body — if `cwd`-only, it will 400 because `findByCwd` skips hidden projects.
+  2. Was the request from the splash-screen "New Session" / "Quick Session" button? Those are gated on `state.projects.length` (0 → New Project CTA, 1 → bound session, ≥2 → splash picker via `state.splashProjectPickerOpen`); a 400 here means the gating regressed.
+  3. Confirm the system project is registered — `state.projects` will not show it (by design), but its presence is observable via the server log line on startup or by inspecting `<bobbitStateDir>/projects.json` directly. There is no `?includeHidden=1` query flag.
 - `GET /api/projects` to list all registered projects
 - Sessions/goals not appearing? Check `projectId` field matches the expected project. Verify the correct project's `sessions.json` / `goals.json` contains the record
 - Sidebar not grouping? Project folder rows are always shown — check that `state.projects` is populated and `renderProjectHeader()` is being called
@@ -666,7 +670,6 @@ Diagnose:
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts` (the four reminder sites). Tests: `tests/verification-reminder-race.test.ts`, API E2E `tests/e2e/gate-verification-resume.spec.ts`. See [docs/internals.md — Reminder race after restart-resume](internals.md#reminder-race-after-restart-resume).
 
-
 ## Verification step fails with `Role "X" not found. Available roles: ...`
 
 The verification harness (or `team_spawn`) couldn't resolve a role name to either a goal-scoped inline role or a project/server/builtin store entry. This is a fail-loud error by design — the agent must see what's available so it can pick a valid name or propose a new one.
@@ -707,3 +710,155 @@ Tests pinning the contract:
 
 - `tests/proposal-types-goal-inline.test.ts` — round-trip + structural validators.
 - `tests/e2e/api-goals-propose-inline.spec.ts` — seed→read draft preserves both keys; POST /api/goals with both fields snapshots them onto the goal record.
+
+## MCP server unavailable / partial outage
+
+Failed MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.
+
+## MCP per-op `never` policy not enforced
+
+Two-layer enforcement:
+- **Layer A (model-facing)**: meta-tool aggregation collapses N×M ops into one `mcp_<server>` tool, so per-op grants flow through `mcpPolicyPrefix` regex which matches BOTH `mcp__pw__snap` and `mcp_pw`.
+- **Layer B (server-side)**: `POST /api/internal/mcp-call` calls `resolveGrantPolicy(tool, …)` before `mcpManager.callTool` and returns 403 on `never`.
+
+If a per-op policy isn't taking effect, check both layers.
+
+## MCP server dropdown reads "Allow (default)" but agent is denied
+
+Historical bug, fixed on `master`. `defaults/tool-group-policies.yaml` used to ship `mcp__playwright: never` and `mcp__nano-banana: never` as builtin denials. The Tools page can't render cascade origin, so the dropdown showed "Allow (default)" while the guard actually blocked every call. Removed in commit `5e633d40` ("MCP policy parity: drop builtin denials so default is allow"). MCP groups now default to `allow` like every other tool group — see [internals.md — MCP groups default to `allow`](internals.md#mcp-groups-default-to-allow).
+
+If you still see this on an old build, upgrade — or check `.bobbit/config/tool-group-policies.yaml` for an explicit user override that shadows the (now-empty) builtin layer. Per-role denials (e.g. `qa-tester` blocking `mcp__playwright`) are intentional and live in role YAML, not group policy.
+
+## Tools page "MCP" section missing or empty
+
+`GET /api/mcp-servers` returns the structured list (`{name,status,toolCount,tools[]}`). `src/app/tool-manager-page.ts::renderMcpSection()` filters them out of normal group rendering and shows one row per server in a dedicated MCP section. Empty section means `getMcpManager()` returned no configs — check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`.
+
+## Auto-nudge flooding
+
+Symptom: team-lead receives many `team_agent_finished` steers in quick succession. Cause: missing dedup. The `nudgePending` guard in `TeamManager` coalesces concurrent nudges into one delivery; if a regression removes it, a flood returns. Reviewer / QA sub-sessions are additionally filtered by `kind: "reviewer"` in `resubscribeTeamEvents()` and `notifyTeamLead()` — they must never nudge the team lead.
+
+## `bash_bg wait` not interrupted by steer
+
+A steer should abort any in-flight `bash_bg wait` within ~100 ms. The bg process itself is **not** killed; only the wait call resolves with `{ aborted: true }`. Diagnose:
+1. The live-steer caller routes through `SessionManager.deliverLiveSteer()` — this invokes `bgProcessManager.abortAllWaits(sessionId)` before `rpcClient.steer()`.
+2. The wait registry on `BgProcessManager` — `registerWait`/`unregisterWait` from `/bg-processes/:pid/wait`; `abortAllWaits()` iterates the set.
+3. `terminateSession` also calls `abortAllWaits()` before `cleanup()` so terminating sessions never leak hung wait handlers.
+
+Tests: `tests/bg-process-manager.test.ts`, `tests/e2e/bg-wait-steer-abort.spec.ts`.
+
+## Streaming dedup / reorder (events carry seq+ts)
+
+Events carry `seq`+`ts`; on reconnect the client sends `{type:"resume", fromSeq}`. See [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md) for the protocol and dedup ring.
+
+## WS overflow guard
+
+`decideOverflowAction` in `src/server/ws/ws-overflow-guard.ts` decides drop / coalesce / disconnect when the per-session WS write buffer is over budget. Transient spikes are tolerated via a deferred re-check before disconnecting.
+
+## Continue-Archived button missing
+
+Only renders when (a) the session is archived, (b) it has no `goalId`, (c) it has no `delegateOf`, AND (d) the project is still registered. If the button is absent, check those four predicates against the session record.
+
+## Continued session missing earlier transcript
+
+`POST /api/sessions/:archivedId/continue` clones the source `.jsonl` losslessly. If the new session is missing earlier history, confirm the cloned `.jsonl` actually exists at the new `agentSessionFile` path. Worktree-backed sources are rebased onto the worktree-cwd slug-dir in `executeWorktreeAsync` — a missing rebase is the usual cause.
+
+## Stale draft resurrection
+
+`SessionStore.setDraft()` rejects writes with an older `gen` than the latest persisted draft. If a stale draft seems to revive after a newer save, check the `gen` monotonicity in the store.
+
+## Proposal panel empty after reload
+
+`proposal_update` events that arrive before the proposal panel UI binds its handler are buffered in `_bufferedProposalEvents` inside `src/app/remote-agent.ts` (getter/setter on the handler property). Rehydrate-on-attach can race ahead of UI wiring; the buffer is the entry point for diagnosis.
+
+## Inline-comment annotations on goal/role/staff proposals
+
+Ephemeral in-memory backend `proposalBackend` in `src/ui/components/review/proposal-annotations.ts`, keyed by `(sessionId, "proposal:<type>")`. Cleared by:
+- `proposal_update` body-diff hook in `src/app/session-manager.ts` (`extractProposalBody` + `clearProposalAnnotations`).
+- Dismiss / `proposal_cleared`.
+- Reload (never persisted).
+
+The `commentable: true` flag on `GoalFormConfig` is set ONLY at the goal-proposal-panel call site (`goalPreviewPanel()`), not the goal-dashboard reuse, so dashboard markdown stays read-only.
+
+## "Send feedback" button missing on a proposal panel
+
+Only renders when annotation count > 0 AND the proposal is not streaming (`isProposalStreaming("<tag>_proposal")` false). Badge has the same gating in Preview mode.
+
+## "Open proposal" on old card destroys later edits
+
+Each `propose_*` tool result carries a `__proposal_rev_v1__:<n>` marker. Clicking "Open proposal" on a stale card with a lower revision intentionally falls back to legacy archived-session behaviour rather than overwriting the live draft. If you see destruction of later edits, check the marker is being parsed.
+
+## Proposal panel doesn't update after `edit_proposal`
+
+Check the WS `proposal_update` frame fired by the `edit_proposal` handler and the structured error code (`not_found`, `no_match`, `multiple_matches`, `empty_replacement`). A failed `edit_proposal` does NOT mutate the on-disk draft.
+
+## Image generation failure
+
+`POST /api/image-generation/generate` returns `400` for malformed input and `500 { error }` for provider-side failures. It must never return `502` or `503` — those indicate a regression in the route handler.
+
+## Header toast vs proposal toast testid collision
+
+The session-header toast (e.g. "Link copied" from the Copy-link button) uses `showHeaderToast()` and `data-testid="header-toast"`. The proposal-panel toast uses `showProposalToast()` and `data-testid="proposal-toast"`. Two separate state slots and two separate `<div class="review-toast">` instances in `src/app/render.ts` — do NOT collapse them onto a shared testid; E2E selectors in `tests/e2e/ui/copy-session-link.spec.ts` and `tests/e2e/ui/proposal-inline-comments.spec.ts` would alias.
+
+## `read_session` returns `permission_denied`
+
+Caller and target session belong to different projects. The tool extension sets the `x-bobbit-session-id` request header automatically; the server compares the two sessions' `projectId` values and rejects cross-project reads. Other structured error codes: `session_not_found`, `transcript_unavailable`, `invalid_regex`, `invalid_params`. Files: `src/server/agent/transcript-reader.ts`, `defaults/tools/agent/read_session.yaml` + `extension.ts`.
+
+## Mobile annotation popover doesn't open after tapping "Add comment"
+
+`_onMobileAddComment` in `src/ui/components/review/ReviewDocument.ts` must set `_popoverReferenceRect` from the current selection range before mounting the bottom-sheet popover; the `updated()` reaction keys off that field. Symptom after the singleton refactor was an empty render because the rect stayed `null`.
+
+## Tier 2.5 report missing / ffmpeg failed
+
+The HTML video-capture report is only emitted when `RECORDSCREEN=1`. If ffmpeg is missing, set `FFMPEG_PATH` or install ffmpeg system-wide. See [docs/testing-tier-2-5.md](testing-tier-2-5.md).
+
+## OAuth callback never completes
+
+If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-status?flowId=&provider=` directly to see whether the server received the callback. Files: `src/server/auth/oauth.ts`; REST: `/api/oauth/*`.
+
+## Bundle-size assertion fails
+
+`tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and asserts ≤ 600 kB gzipped, plus ≤ 500 kB gzipped for any non-worker chunk. Check `dist/ui/.vite/manifest.j
+ manifest.json` exists; ensure `npm run build:ui` ran first; the test reads gzipped sizes directly from `dist/ui/assets/`. The `pdf.worker.min-*.mjs` chunk is whitelisted. See [docs/design/ui-bundle-size-reduction.md](design/ui-bundle-size-reduction.md).
+
+## Markdown not rendering in chat / proposal panel
+
+`<markdown-block>` is lazy-loaded via `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts`. The consumer must call it in its `connectedCallback()` or first `render()`. Symptom of forgetting: markdown shows as raw text until something else triggers the load. Lit upgrades the custom element asynchronously when the chunk lands.
+
+## Page chunk fails to load on first navigation
+
+`lazyPage()` in `src/app/render.ts` returns `loadingPlaceholder()` while the dynamic `import()` resolves, then caches the module and calls `renderApp()`. If the chunk 404s, the placeholder sticks. Check Network panel for the failed `dist/ui/assets/<page>-*.js` and verify the chunk name in the `lazyPage()` call matches a manifest entry.
+
+## Lazy tool renderer placeholder sticks
+
+Symptom: a `preview_open` (or other lazy-loaded tool: `gate_inspect`, `verification_result`, `extract_document`, `javascript_repl`, `read_session`) widget renders as the card-shaped placeholder — header icon + tool name + a disabled "Loading…" button — and never swaps in the real renderer. The Open / Inspect / etc. button never appears even after the lazy chunk should have landed.
+
+Likely causes:
+
+1. A `<tool-message>` or `<tool-group>` instance didn't receive the `bobbit-tool-renderer-loaded` event (`TOOL_RENDERER_LOADED_EVENT` in `src/ui/tools/renderer-registry.ts`). Most often because the listener wasn't attached — the consumer must register it in `connectedCallback()` and remove it in `disconnectedCallback()`. Any new rendering surface that calls `renderTool()` directly needs the same listener wiring.
+2. The loader threw and the failure was swallowed. The registry installs a `makeLoadFailureRenderer` fallback that paints an error card ("Renderer failed to load — refresh to retry"), so an indefinite spinner means the failure path itself is broken — most likely `startLoad()` didn't dispatch the event on the rejection branch.
+
+Fix path:
+
+- Confirm `startLoad()` in `src/ui/tools/renderer-registry.ts` dispatches `TOOL_RENDERER_LOADED_EVENT` on **both** success and failure branches with `detail: { toolName }` on `document`.
+- Confirm `<tool-message>` (`src/ui/components/Messages.ts`) and `<tool-group>` (`src/ui/components/ToolGroup.ts`) add the listener in `connectedCallback`, filter on `e.detail.toolName` matching this instance's tool, and call `requestUpdate()`.
+- Check the browser console for `[tool-registry] failed to lazy-load renderer for "<name>"` — if present, the loader itself rejected and the fallback card should now be visible.
+
+## QA screenshot token bloat
+
+The QA extension must emit `[screenshot_file]<path>[/screenshot_file]` markers, not `[screenshot_base64]…`. Inline base64 blows the model context budget. Check the extension under the QA tool group.
+
+## Stale project-proposal panel after `propose_project`
+
+`onProjectProposal` shallow-merges the incoming proposal into the panel state. If a field disappears or stays stale, verify the merge isn't replacing the whole object and check the `proposal_update` envelope shape.
+
+## `lastActivity` reads "just now" after restart
+
+The `isUserVisibleActivity` filter in `src/server/agent/session-manager.ts` decides which event types bump `lastActivity`. Internal heartbeats / state pushes are excluded. If every restored session reads as "just now", check the filter hasn't been weakened.
+
+## Symlinked project root rejected with `code: symlink_root`
+
+`POST /api/projects` returns HTTP 400 `{ error, code: "symlink_root", rootPath, canonical }` when the supplied `rootPath` differs from `realpathSync(rootPath)`. The add-project dialog handles this transparently: it catches `SymlinkRootError` from `src/app/api.ts`, shows a confirm modal (`data-testid="symlink-confirm"`), and re-submits with `body.acceptCanonical: true` on accept. CLI/scripted callers must either pre-resolve the path themselves or include `acceptCanonical: true` in the body. The throw originates in `detectSymlinkRoot()` / `SymlinkProjectRootError` in `src/server/agent/project-registry.ts`. `registerProvisional()` and `registerSystemProject()` auto-accept canonical and never surface this error. See [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling).
+
+## `findByCwd` returns undefined for a symlinked cwd
+
+Should not happen post-fix. `ProjectRegistry.findByCwd()` canonicalises both the registered `rootPath` and the incoming `cwd` via `realpathSync` (with a try/catch fallback to the textual path on EPERM/ENOENT — Windows raises EPERM on some junctions) before the prefix comparison. If a project is registered at the canonical path and a session whose `cwd` reaches the server through a symlink fails to resolve, verify the canonicalisation block in `src/server/agent/project-registry.ts::findByCwd` is still in place and the fallback isn't swallowing real errors. Note `getByPath()` is intentionally NOT canonicalised — that's the duplicate-path guard at registration, a different concern from runtime cwd resolution.

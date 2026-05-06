@@ -12,7 +12,7 @@ detail_docs: |-
 
   Open the live preview side-panel in the Bobbit UI with HTML content. The panel splits the screen alongside the chat, showing a live-rendered iframe. Each subsequent call to `preview_open` updates the content in-place — changes are pushed live via SSE.
 
-  Both `html=` and `file=` populate a per-session preview mount served at `/preview/<sid>/`. Sibling assets (images, videos, stylesheets, scripts) resolve as relative URLs from the entry HTML. The tool result is a constant ~150 byte snapshot regardless of HTML size — iterating on a large report does not bloat the conversation.
+  Both `html=` and `file=` populate a per-session preview mount served at `/preview/<sid>/`. Asset inclusion is **explicit**: `file=` copies only the named entry file unless you also pass `assets` (or a `manifest` JSON file) declaring the sibling files (CSS / images / videos / scripts) to copy in. The tool result is a constant ~150 byte snapshot regardless of HTML size — iterating on a large report does not bloat the conversation.
 
   ## Parameters
 
@@ -20,8 +20,10 @@ detail_docs: |-
   |------|------|----------|-------------|
   | `html` | string | No (one of html/file required) | Raw HTML content to render in the preview panel. |
   | `file` | string | No (one of html/file required) | Path to an HTML file on disk to load into the preview. |
+  | `assets` | string[] | No | Sibling asset paths to include alongside `file`. Each entry is relative to the entry file's directory; literals (`styles.css`, `sub/foo.png`) and single-segment globs (`img/*.png`, `chart.?.svg`) are supported. `**` is not supported. |
+  | `manifest` | string | No | Path (relative to the entry file's directory) to a JSON file of the form `{ "assets": [...] }`. Concatenated with `assets`. |
 
-  If both are provided, `html` takes precedence.
+  If both `html` and `file` are provided, `html` takes precedence. `assets`/`manifest` are only valid alongside `file`.
 
   ## When to Use
 
@@ -41,8 +43,14 @@ detail_docs: |-
   # Show inline HTML in the preview panel
   preview_open(html="<h1>Hello</h1><p>This appears in the side panel</p>")
 
-  # Load an existing HTML file into the preview
+  # Load an existing HTML file into the preview (no siblings)
   preview_open(file="mockups/dashboard.html")
+
+  # Load an HTML file plus declared sibling assets
+  preview_open(file="mockups/dashboard.html", assets=["styles.css", "logo.svg", "img/*.png"])
+
+  # Same, via a manifest file (mockups/preview-manifest.json)
+  preview_open(file="mockups/dashboard.html", manifest="preview-manifest.json")
 
   # Update the preview with new content (panel stays open)
   preview_open(html="<h1>Updated</h1><p>Content refreshed automatically</p>")
@@ -91,6 +99,6 @@ detail_docs: |-
 
   - **Same-origin with Vite dev server** — the preview iframe can reference real app CSS via `<link rel='stylesheet' href='/src/ui/app.css'>` for pixel-accurate mockups.
   - **Live updates** — content is pushed via SSE; multiple rapid calls are fine, only the latest content is shown.
-  - **Sibling assets** — when using `file=`, files in the same directory tree as the entry HTML are copied alongside it (capped at 25 MiB). Reference them with relative URLs (e.g. `<img src="thumbs/0001.jpg">`).
+  - **Sibling assets** — explicit opt-in. Pass `assets=[...]` or `manifest="..."` to declare which sibling files to copy into the preview mount. Undeclared siblings are NOT copied (they would 404 if referenced from the entry HTML). Paths are relative to the entry file's directory, must stay within it, and may use `*`/`?` globs in a single segment.
   - **One preview per session** — each session has its own preview mount. Switching sessions shows the correct preview.
   - **Fullscreen + Open in new tab** — the panel header offers a maximize icon (Escape to exit) and an `Open in new tab` button for full-screen viewing in a separate browser tab.

@@ -16,8 +16,10 @@ import {
 	GOAL_STATE_LABELS,
 	type Goal,
 	type GoalState,
+	type Project,
 } from "./state.js";
-import { gatewayFetch, updateGoal } from "./api.js";
+import { gatewayFetch, updateGoal, SymlinkRootError } from "./api.js";
+import "../ui/components/ErrorDetails.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
@@ -81,7 +83,7 @@ export function confirmAction(title: string, message: string, confirmLabel = "Co
 	});
 }
 
-export function showConnectionError(title: string, message: string): void {
+export function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): void {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
 
@@ -101,7 +103,7 @@ export function showConnectionError(title: string, message: string): void {
 				${DialogContent({
 					children: html`
 						${DialogHeader({ title })}
-						<p class="text-sm text-destructive mt-2">${message}</p>
+						<div class="mt-2"><error-details .message=${message} .code=${opts?.code} .stack=${opts?.stack}></error-details></div>
 					`,
 				})}
 				${DialogFooter({
@@ -116,6 +118,81 @@ export function showConnectionError(title: string, message: string): void {
 		}),
 		container,
 	);
+}
+
+/**
+ * Confirm-canonical-path modal shown when `registerProject` rejects with a
+ * SymlinkRootError. Renders alongside (NOT closing) the parent add-project
+ * dialog so the user can hit Cancel and return to it cleanly.
+ */
+function promptSymlinkConfirm(
+	_name: string,
+	rootPath: string,
+	canonical: string,
+	onConfirm: (canonical: string) => void,
+	onCancel: () => void,
+): Promise<void> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		const close = () => {
+			render(html``, container);
+			container.remove();
+			resolve();
+		};
+
+		const cancel = () => {
+			close();
+			onCancel();
+		};
+
+		const confirm = () => {
+			close();
+			onConfirm(canonical);
+		};
+
+		render(
+			Dialog({
+				isOpen: true,
+				onClose: cancel,
+				width: "min(480px, 92vw)",
+				height: "auto",
+				backdropClassName: "bg-black/50 backdrop-blur-sm",
+				children: html`
+					${DialogContent({
+						children: html`
+							${DialogHeader({ title: "Symlinked project root" })}
+							<div class="flex flex-col gap-2 mt-2 text-sm" data-testid="symlink-confirm">
+								<p class="text-foreground">
+									<code class="font-mono text-xs px-1 py-0.5 rounded bg-secondary text-secondary-foreground" data-testid="symlink-rootpath">${rootPath}</code>
+									is a symlink to
+									<code class="font-mono text-xs px-1 py-0.5 rounded bg-secondary text-secondary-foreground" data-testid="symlink-canonical">${canonical}</code>.
+								</p>
+								<p class="text-muted-foreground text-xs">
+									Bobbit will register the canonical path to avoid worktree corruption. Continue?
+								</p>
+							</div>
+						`,
+					})}
+					${DialogFooter({
+						className: "px-6 pb-4",
+						children: html`
+							<div class="flex gap-2 justify-end">
+								${Button({ variant: "ghost", onClick: cancel, children: "Cancel" })}
+								${Button({
+									variant: "default",
+									onClick: confirm,
+									children: html`<span data-testid="confirm-use-canonical">Use canonical path</span>`,
+								})}
+							</div>
+						`,
+					})}
+				`,
+			}),
+			container,
+		);
+	});
 }
 
 // ============================================================================
@@ -320,7 +397,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 					case "error":
 						return html`
 							<div class="flex flex-col gap-2">
-								<p class="text-sm text-red-500">${error}</p>
+								<error-details .message=${error}></error-details>
 								${Button({ variant: "default", size: "sm", onClick: () => { step = "loading"; startFlow(); }, children: "Try again" })}
 							</div>
 						`;
@@ -486,7 +563,7 @@ export function openGatewayDialog(): void {
 										},
 									})}
 								</div>
-								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
+								${error ? html`<error-details .message=${error}></error-details>` : ""}
 								<p class="text-xs text-muted-foreground">
 									Start the gateway:
 									<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx bobbit</code>
@@ -558,7 +635,7 @@ export async function showQrCodeDialog(): Promise<void> {
 						${DialogHeader({ title: "Continue on Phone" })}
 						<div class="flex flex-col items-center gap-3 mt-3">
 							${error
-								? html`<p class="text-sm text-red-500">${error}</p>`
+								? html`<error-details .message=${error}></error-details>`
 								: firstTimeOs === "ios"
 									? html`
 											<div class="rounded-lg overflow-hidden bg-white p-2">
@@ -1270,7 +1347,39 @@ export function showProjectDialog(): void {
 
 			if (detection.hasBobbit) {
 				// Path A: Auto-import
-				const project = await registerProject(detection.name, trimmedPath, undefined);
+				let project: Project | null = null;
+				try {
+					project = await registerProject(detection.name, trimmedPath, undefined);
+				} catch (e) {
+					if (e instanceof SymlinkRootError) {
+						await promptSymlinkConfirm(detection.name, trimmedPath, e.canonical, async (canonical) => {
+							try {
+								const p2 = await registerProject(detection.name, canonical, undefined, false, true);
+								if (p2) {
+									setProjects(await fetchProjects());
+									renderApp();
+									cleanup();
+								} else {
+									loading = false;
+									renderDialog();
+								}
+							} catch (err2) {
+								showConnectionError(
+									"Failed to register project",
+									err2 instanceof Error ? err2.message : String(err2),
+								);
+								loading = false;
+								renderDialog();
+							}
+						}, () => {
+							loading = false;
+							error = "";
+							renderDialog();
+						});
+						return;
+					}
+					throw e;
+				}
 				if (project) {
 					setProjects(await fetchProjects());
 					renderApp();

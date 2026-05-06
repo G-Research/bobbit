@@ -2500,14 +2500,36 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 // ============================================================================
 
 export async function startReattempt(goalId: string): Promise<void> {
-	const res = await gatewayFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify({
-			assistantType: "goal",
-			reattemptGoalId: goalId,
-		}),
-	});
-	if (!res.ok) throw new Error(`Failed: ${res.status}`);
-	const { id } = await res.json();
-	await connectToSession(id, false, { assistantType: "goal" });
+	if (state.creatingSession) return;
+	// Pre-fill preview project/cwd from the original goal so the proposal panel
+	// binds to the correct project immediately and avoids a brief
+	// "No project selected for this goal" flash on connect.
+	const goal = state.goals.find(g => g.id === goalId);
+	const project = goal ? state.projects.find(p => p.id === goal.projectId) : undefined;
+	state.creatingSession = true;
+	if (goal && goal.projectId) state.previewProjectId = goal.projectId;
+	if (project && !state.previewCwdEdited) state.previewCwd = project.rootPath;
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({
+				assistantType: "goal",
+				reattemptGoalId: goalId,
+			}),
+		});
+		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		const { id } = await res.json();
+		// Clear creatingSession before connecting — connectToSession handles its
+		// own loading state via connectingSessionId, and we want the user to see
+		// the chat panel (with textarea) immediately, not a loading spinner.
+		state.creatingSession = false;
+		await connectToSession(id, false, { assistantType: "goal" });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		showConnectionError("Failed to re-attempt goal", msg);
+	} finally {
+		state.creatingSession = false;
+		renderApp();
+	}
 }

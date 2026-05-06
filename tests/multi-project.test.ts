@@ -12,8 +12,11 @@ import path from "node:path";
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-// Set BOBBIT_DIR before any dynamic imports
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "multi-proj-test-"));
+// Set BOBBIT_DIR before any dynamic imports.
+// Canonicalize via realpathSync so macOS `/var → /private/var` symlink doesn't
+// trip ProjectRegistry's symlink-root guard (PR #494). Cross-platform: on
+// Linux/Windows the canonical path equals the input, so this is a no-op there.
+const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "multi-proj-test-")));
 process.env.BOBBIT_DIR = tmpRoot;
 fs.mkdirSync(path.join(tmpRoot, "state"), { recursive: true });
 fs.mkdirSync(path.join(tmpRoot, "config"), { recursive: true });

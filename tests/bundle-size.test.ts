@@ -55,7 +55,17 @@ function fmt(bytes: number): string {
 	return `${(bytes / 1024).toFixed(2)} KB`;
 }
 
-test("UI bundle size — main chunk + per-chunk budgets", { skip: !existsSync(ASSETS_DIR) ? "dist/ui/assets/ missing — run `npm run build:ui` first" : false }, () => {
+function bundleSkipReason(): string | false {
+	if (!existsSync(ASSETS_DIR)) {
+		return "dist/ui/assets/ missing — run `npm run build:ui` first";
+	}
+	if (!existsSync(MANIFEST_PATH)) {
+		return "dist/ui/.vite/manifest.json missing — run `npm run build:ui` first";
+	}
+	return false;
+}
+
+test("UI bundle size — main chunk + per-chunk budgets", { skip: bundleSkipReason() }, () => {
 	const entries = readdirSync(ASSETS_DIR)
 		.filter((name) => CHUNK_RE.test(name))
 		.filter((name) => statSync(join(ASSETS_DIR, name)).isFile());

@@ -17,6 +17,51 @@ export interface RegisteredProject {
   colorLight: string;   // Accent color for light mode (always present)
   colorDark: string;    // Accent color for dark mode (always present)
   provisional?: boolean; // True while a project assistant is setting up this project
+  /**
+   * True for synthetic projects that should be filtered out of UI listings
+   * but still resolvable by id (e.g. the "system" project used as the
+   * persistence anchor for system-scope tool-assistant sessions). Hidden
+   * projects must never appear in /api/projects responses.
+   */
+  hidden?: boolean;
+}
+
+/** Stable id for the synthetic system project. */
+export const SYSTEM_PROJECT_ID = "system";
+
+/**
+ * Detect whether `rootPath` resolves through a symlink to a different
+ * absolute path. Best-effort — EPERM/ENOENT are swallowed and treated as
+ * non-symlink.
+ */
+export function detectSymlinkRoot(
+  rootPath: string,
+): { symlink: false } | { symlink: true; canonical: string } {
+  try {
+    const real = fs.realpathSync(rootPath);
+    const a = path.resolve(rootPath);
+    const b = path.resolve(real);
+    if (a !== b) return { symlink: true, canonical: b };
+  } catch {
+    /* best-effort */
+  }
+  return { symlink: false };
+}
+
+/**
+ * Thrown by `register()` (and friends) when the supplied rootPath is a
+ * symlink to a different canonical path and the caller has not opted in via
+ * `acceptCanonical`. The REST surface translates this into a structured 400
+ * carrying both paths so the UI can prompt the user.
+ */
+export class SymlinkProjectRootError extends Error {
+  readonly code = "symlink_root";
+  constructor(public readonly rootPath: string, public readonly canonical: string) {
+    super(
+      `rootPath ${rootPath} is a symlink to ${canonical}; pass acceptCanonical to register the canonical path.`,
+    );
+    this.name = "SymlinkProjectRootError";
+  }
 }
 
 export class ProjectRegistry {
@@ -72,22 +117,37 @@ export class ProjectRegistry {
     return this.projects.get(id);
   }
 
-  /** Find a project whose rootPath matches (normalized). */
+  /** Find a project whose rootPath matches (normalized). Excludes hidden
+   * synthetic projects (e.g. "system") so that real-project lookups don't
+   * accidentally match the install-dir anchor of the hidden system project. */
   getByPath(rootPath: string): RegisteredProject | undefined {
     const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
+      if (p.hidden) continue;
       if (path.resolve(p.rootPath) === normalized) return p;
     }
     return undefined;
   }
 
-  /** Find the project whose rootPath contains the given cwd (longest match wins). */
+  /** Find the project whose rootPath contains the given cwd (longest match wins).
+   * Excludes hidden synthetic projects — they should never match by cwd.
+   *
+   * Both sides are canonicalized via realpathSync (best-effort, with textual
+   * fallback on EPERM/ENOENT) so a cwd reached through a symlink resolves to
+   * a project registered at the canonical path (or vice versa).
+   * `getByPath()` is intentionally NOT canonicalized — it is used as a
+   * duplicate-path guard for `register()` and must match exactly what the
+   * caller passed. */
   findByCwd(cwd: string): RegisteredProject | undefined {
-    const normalized = path.resolve(cwd).replace(/\\/g, "/").toLowerCase();
+    const resolveReal = (p: string) => {
+      try { return fs.realpathSync(p); } catch { return p; }
+    };
+    const normalized = path.resolve(resolveReal(cwd)).replace(/\\/g, "/").toLowerCase();
     let best: RegisteredProject | undefined;
     let bestLen = 0;
     for (const p of this.projects.values()) {
-      const root = path.resolve(p.rootPath).replace(/\\/g, "/").toLowerCase();
+      if (p.hidden) continue;
+      const root = path.resolve(resolveReal(p.rootPath)).replace(/\\/g, "/").toLowerCase();
       if ((normalized === root || normalized.startsWith(root + "/")) && root.length > bestLen) {
         best = p;
         bestLen = root.length;
@@ -105,7 +165,7 @@ export class ProjectRegistry {
   register(
     name: string,
     rootPath: string,
-    opts?: { color?: string; palette?: string; colorLight?: string; colorDark?: string },
+    opts?: { color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean },
   ): RegisteredProject {
     if (!path.isAbsolute(rootPath)) {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
@@ -113,6 +173,19 @@ export class ProjectRegistry {
 
     if (!fs.existsSync(rootPath)) {
       throw new Error("Project root path does not exist: " + rootPath);
+    }
+
+    // Symlink guard: if rootPath resolves through a symlink, require the
+    // caller to opt in to the canonical path. Otherwise worktree creation,
+    // .bobbit/state scaffolding, and path-containment checks would operate
+    // inconsistently against both the symlink and its target.
+    const sym = detectSymlinkRoot(rootPath);
+    if (sym.symlink) {
+      if (opts?.acceptCanonical) {
+        rootPath = sym.canonical;
+      } else {
+        throw new SymlinkProjectRootError(rootPath, sym.canonical);
+      }
     }
 
     // Check for duplicate rootPath
@@ -210,6 +283,50 @@ export class ProjectRegistry {
   }
 
   /**
+   * Register the synthetic "system" project anchored at the bobbit install
+   * directory. Idempotent — safe to call repeatedly. Used as the
+   * `projectId` for system-scope tool-assistant sessions so they have a
+   * valid persistence anchor without forcing the user to register a real
+   * project. Marked `hidden: true` so callers can filter it out of UI
+   * listings.
+   */
+  registerSystemProject(rootPath: string): RegisteredProject {
+    const existing = this.projects.get(SYSTEM_PROJECT_ID);
+    if (existing) return existing;
+    if (!path.isAbsolute(rootPath)) {
+      throw new Error(`rootPath must be absolute, got: ${rootPath}`);
+    }
+    // The system project is hidden and synthetic — there is no user-facing
+    // confirm dialog. Silently use the canonical path if rootPath is a
+    // symlink to keep state consistent.
+    {
+      const sym = detectSymlinkRoot(rootPath);
+      if (sym.symlink) rootPath = sym.canonical;
+    }
+    // Scaffold .bobbit dirs only if rootPath exists. The bobbit install dir
+    // normally does, but tests may pass a placeholder.
+    if (fs.existsSync(rootPath)) {
+      const bobbitDir = path.join(rootPath, ".bobbit");
+      try {
+        fs.mkdirSync(path.join(bobbitDir, "config"), { recursive: true });
+        fs.mkdirSync(path.join(bobbitDir, "state"), { recursive: true });
+      } catch { /* best-effort — read-only install dirs are fine */ }
+    }
+    const project: RegisteredProject = {
+      id: SYSTEM_PROJECT_ID,
+      name: "System",
+      rootPath,
+      createdAt: Date.now(),
+      colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
+      colorDark: DEFAULT_PROJECT_COLOR_DARK,
+      hidden: true,
+    };
+    this.projects.set(project.id, project);
+    this.save();
+    return project;
+  }
+
+  /**
    * Register a provisional project (used by project assistant sessions).
    * Provisional projects are real persisted projects with `provisional: true`.
    * For scaffolding (Path C), the rootPath may not exist yet — skip existence check.
@@ -218,6 +335,14 @@ export class ProjectRegistry {
   registerProvisional(name: string, rootPath: string): RegisteredProject {
     if (!path.isAbsolute(rootPath)) {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
+    }
+    // Provisional projects are transient assistant scaffolds — the user is
+    // not shown a path-confirmation dialog at this point. Silently use the
+    // canonical path if rootPath is a symlink, matching the
+    // acceptCanonical=true branch of register().
+    {
+      const sym = detectSymlinkRoot(rootPath);
+      if (sym.symlink) rootPath = sym.canonical;
     }
 
     // Deduplicate: reuse existing provisional project at same path

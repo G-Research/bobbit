@@ -70,6 +70,22 @@ async function runGit(
 	}
 }
 
+/** Parse `git diff --shortstat` output:
+ *   ` 3 files changed, 12 insertions(+), 4 deletions(-)`
+ *   ` 1 file changed, 5 insertions(+)`
+ *   ` 2 files changed, 3 deletions(-)`
+ *   ` 0 files changed`        (or empty)
+ * Either insertions or deletions may be absent. Returns 0/0 on empty/parse failure. */
+export function parseShortstat(raw: string): { insertions: number; deletions: number } {
+	if (!raw) return { insertions: 0, deletions: 0 };
+	const ins = /(\d+)\s+insertions?\(\+\)/.exec(raw);
+	const del = /(\d+)\s+deletions?\(-\)/.exec(raw);
+	return {
+		insertions: ins ? parseInt(ins[1], 10) || 0 : 0,
+		deletions: del ? parseInt(del[1], 10) || 0 : 0,
+	};
+}
+
 /** Parse porcelain v1 output into the GitStatusResult.status[] / summary shape.
  * Verbatim port from the legacy `runBatchGitStatus` reducer. */
 function parsePorcelain(raw: string): { status: { file: string; status: string }[]; clean: boolean; summary: string } {
@@ -142,12 +158,20 @@ async function runHost(cwd: string, untracked: boolean): Promise<GitStatusResult
 	const b0 = await runGit(["rev-parse", "--verify", `origin/${primaryBranch}`], cwd);
 	const pref = b0.ok ? `origin/${primaryBranch}` : primaryBranch;
 
-	// Phase B — four parallel rev-list counts.
-	const [b1, b2, b3, b4] = await Promise.all([
+	// Phase B — four parallel rev-list counts + two shortstat diffs.
+	const [b1, b2, b3, b4, b5, b6] = await Promise.all([
 		runGit(["rev-list", "--count", "@{u}..HEAD"], cwd),
 		runGit(["rev-list", "--count", "HEAD..@{u}"], cwd),
 		runGit(["rev-list", "--count", `${pref}..HEAD`], cwd),
 		runGit(["rev-list", "--count", `HEAD..${pref}`], cwd),
+		// shortstat against primary committed delta (three-dot)
+		!isOnPrimary && b0.ok
+			? runGit(["diff", "--shortstat", `${pref}...HEAD`], cwd)
+			: Promise.resolve({ stdout: "", ok: true }),
+		// shortstat against working tree (uncommitted: staged + unstaged)
+		!isOnPrimary
+			? runGit(["diff", "--shortstat", "HEAD"], cwd)
+			: Promise.resolve({ stdout: "", ok: true }),
 	]);
 
 	let ahead = 0;
@@ -160,10 +184,16 @@ async function runHost(cwd: string, untracked: boolean): Promise<GitStatusResult
 	let aheadOfPrimary = 0;
 	let behindPrimary = 0;
 	let mergedIntoPrimary = false;
+	let insertionsVsPrimary = 0;
+	let deletionsVsPrimary = 0;
 	if (!isOnPrimary) {
 		aheadOfPrimary = b3.ok ? (parseInt(b3.stdout, 10) || 0) : 0;
 		behindPrimary = b4.ok ? (parseInt(b4.stdout, 10) || 0) : 0;
 		mergedIntoPrimary = aheadOfPrimary === 0;
+		const c = parseShortstat(b5.ok ? b5.stdout : "");
+		const w = parseShortstat(b6.ok ? b6.stdout : "");
+		insertionsVsPrimary = c.insertions + w.insertions;
+		deletionsVsPrimary = c.deletions + w.deletions;
 	}
 
 	return {
@@ -177,6 +207,8 @@ async function runHost(cwd: string, untracked: boolean): Promise<GitStatusResult
 		aheadOfPrimary,
 		behindPrimary,
 		mergedIntoPrimary,
+		insertionsVsPrimary,
+		deletionsVsPrimary,
 		clean,
 		summary,
 		unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
@@ -217,6 +249,10 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		'git rev-list --count "$PREF..HEAD" 2>/dev/null || echo 0',
 		'printf "\\0"',
 		'git rev-list --count "HEAD..$PREF" 2>/dev/null || echo 0',
+		'printf "\\0"',
+		'git diff --shortstat "$PREF...HEAD" 2>/dev/null || true',
+		'printf "\\0"',
+		'git diff --shortstat HEAD 2>/dev/null || true',
 	].join("\n");
 
 	const { stdout } = await execFileAsync(
@@ -257,10 +293,16 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 	let aheadOfPrimary = 0;
 	let behindPrimary = 0;
 	let mergedIntoPrimary = false;
+	let insertionsVsPrimary = 0;
+	let deletionsVsPrimary = 0;
 	if (!isOnPrimary) {
 		aheadOfPrimary = parseInt(sections[8] || "0", 10) || 0;
 		behindPrimary = parseInt(sections[9] || "0", 10) || 0;
 		mergedIntoPrimary = aheadOfPrimary === 0;
+		const c = parseShortstat(sections[10] || "");
+		const w = parseShortstat(sections[11] || "");
+		insertionsVsPrimary = c.insertions + w.insertions;
+		deletionsVsPrimary = c.deletions + w.deletions;
 	}
 
 	const { status, clean, summary } = parsePorcelain(sections[4] || "");
@@ -276,6 +318,8 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		aheadOfPrimary,
 		behindPrimary,
 		mergedIntoPrimary,
+		insertionsVsPrimary,
+		deletionsVsPrimary,
 		clean,
 		summary,
 		unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,

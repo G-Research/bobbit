@@ -83,31 +83,31 @@ test.describe("POST /api/preview/mount (v3)", () => {
 		expect(resp.status).toBe(400);
 	});
 
-	test("file= with sibling tree copies into mount; sibling URL serves correct MIME bytes", async () => {
-		// Build a source tree: report.html + sibling.png + nested image.
+	test("file= with explicit assets[] copies entry + declared assets only", async () => {
 		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mr-src-"));
 		try {
 			const entry = path.join(src, "report.html");
 			writeFileSync(entry, `<!DOCTYPE html><body><img src="sibling.png"><img src="thumbs/x.png"></body>`);
-			// Tiny 1×1 png-ish bytes — content-route serves by extension via mime table.
 			const pngBytes = Buffer.from([
 				0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 				0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 			]);
 			writeFileSync(path.join(src, "sibling.png"), pngBytes);
+			writeFileSync(path.join(src, "undeclared.txt"), "should-not-be-copied");
 			mkdirSync(path.join(src, "thumbs"));
 			writeFileSync(path.join(src, "thumbs", "x.png"), pngBytes);
 
 			const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 				method: "POST",
-				body: JSON.stringify({ file: entry }),
+				body: JSON.stringify({ file: entry, assets: ["sibling.png", "thumbs/x.png"] }),
 			});
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
 			expect(body.entry).toBe("report.html");
 			expect(body.url).toBe(`/preview/${sessionId}/report.html`);
+			expect(Array.isArray(body.assets)).toBe(true);
+			expect(body.assets.sort()).toEqual(["sibling.png", "thumbs/x.png"]);
 
-			// Now fetch the sibling via the content origin (cookie auth).
 			const cookie = await mintCookie();
 			const assetResp = await fetch(`${base()}/preview/${sessionId}/sibling.png`, {
 				headers: { Cookie: cookie },
@@ -117,12 +117,111 @@ test.describe("POST /api/preview/mount (v3)", () => {
 			const buf = Buffer.from(await assetResp.arrayBuffer());
 			expect(buf.equals(pngBytes)).toBe(true);
 
-			// Nested asset under thumbs/ resolves too.
 			const nested = await fetch(`${base()}/preview/${sessionId}/thumbs/x.png`, {
 				headers: { Cookie: cookie },
 			});
 			expect(nested.status).toBe(200);
-			expect(nested.headers.get("content-type") || "").toMatch(/image\/png/);
+
+			// Undeclared sibling must NOT be copied — 404 from content origin.
+			const undeclared = await fetch(`${base()}/preview/${sessionId}/undeclared.txt`, {
+				headers: { Cookie: cookie },
+			});
+			expect(undeclared.status).toBe(404);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+		}
+	});
+
+	test("file= without assets copies only entry; siblings 404", async () => {
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mr-src-bare-"));
+		try {
+			const entry = path.join(src, "report.html");
+			writeFileSync(entry, `<!DOCTYPE html><body>bare</body>`);
+			writeFileSync(path.join(src, "styles.css"), "body{}");
+
+			const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ file: entry }),
+			});
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.entry).toBe("report.html");
+			expect(body.assets).toEqual([]);
+
+			const cookie = await mintCookie();
+			const entryResp = await fetch(`${base()}/preview/${sessionId}/report.html`, {
+				headers: { Cookie: cookie },
+			});
+			expect(entryResp.status).toBe(200);
+
+			const cssResp = await fetch(`${base()}/preview/${sessionId}/styles.css`, {
+				headers: { Cookie: cookie },
+			});
+			expect(cssResp.status).toBe(404);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+		}
+	});
+
+	test("file= with manifest reads assets from JSON file", async () => {
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mr-manifest-"));
+		try {
+			const entry = path.join(src, "report.html");
+			writeFileSync(entry, `<!DOCTYPE html><body>m</body>`);
+			writeFileSync(path.join(src, "styles.css"), "body{}");
+			writeFileSync(path.join(src, "preview-manifest.json"), JSON.stringify({ assets: ["styles.css"] }));
+
+			const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ file: entry, manifest: "preview-manifest.json" }),
+			});
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.assets).toEqual(["styles.css"]);
+
+			const cookie = await mintCookie();
+			const cssResp = await fetch(`${base()}/preview/${sessionId}/styles.css`, {
+				headers: { Cookie: cookie },
+			});
+			expect(cssResp.status).toBe(200);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+		}
+	});
+
+	test("html= with assets= → 400", async () => {
+		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+			method: "POST",
+			body: JSON.stringify({ html: "<h1>x</h1>", assets: ["foo.css"] }),
+		});
+		expect(resp.status).toBe(400);
+	});
+
+	test("file= with `..` in assets → 400", async () => {
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mr-bad-"));
+		try {
+			const entry = path.join(src, "report.html");
+			writeFileSync(entry, `<h1>x</h1>`);
+			const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ file: entry, assets: ["../escape"] }),
+			});
+			expect(resp.status).toBe(400);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+		}
+	});
+
+	test("file= with missing literal asset → 404", async () => {
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mr-missing-"));
+		try {
+			const entry = path.join(src, "report.html");
+			writeFileSync(entry, `<h1>x</h1>`);
+			const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ file: entry, assets: ["missing.css"] }),
+			});
+			expect(resp.status).toBe(404);
 		} finally {
 			rmSync(src, { recursive: true, force: true });
 		}
