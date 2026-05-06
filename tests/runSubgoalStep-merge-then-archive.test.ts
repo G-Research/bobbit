@@ -38,6 +38,39 @@ describe("runSubgoalStep — merge + archive flow", () => {
 		assert.ok(tearIdx < archIdx, "teardownTeam must precede archiveAfterMerge");
 	});
 
+	it("R-028: archiveGoalAfterMerge sets state=complete BEFORE archiving (Lesson 4.2 rescue path)", async () => {
+		// Order is load-bearing: the archived snapshot must have
+		// state=complete on disk so the rescue-path tier-2 short-circuit fires.
+		// Wrap goalStore.update to log the state stamp; wrap goalStore.archive
+		// to log the archive call. Assert state-complete < archive.
+		const fx = await buildFixture();
+		after(() => fx.cleanup());
+
+		const storeCalls: string[] = [];
+		const origUpdate = fx.goalStore.update.bind(fx.goalStore);
+		const origArchive = fx.goalStore.archive.bind(fx.goalStore);
+		(fx.goalStore as any).update = (id: string, updates: any) => {
+			if (updates && updates.state === "complete") storeCalls.push(`state-complete:${id}`);
+			return origUpdate(id, updates);
+		};
+		(fx.goalStore as any).archive = (id: string) => {
+			storeCalls.push(`archive:${id}`);
+			return origArchive(id);
+		};
+
+		const step = buildSubgoalStep({ planId: "p-order" });
+		const { signal, active, stepIndex } = buildActive(fx.parent.id);
+		const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+		assert.equal(result.passed, true);
+
+		const stateIdx = storeCalls.findIndex(c => c.startsWith("state-complete:"));
+		const archiveIdx = storeCalls.findIndex(c => c.startsWith("archive:"));
+		assert.notEqual(stateIdx, -1, `expected state-complete log entry, got: ${storeCalls.join(", ")}`);
+		assert.notEqual(archiveIdx, -1, `expected archive log entry, got: ${storeCalls.join(", ")}`);
+		assert.ok(stateIdx < archiveIdx,
+			`state=complete must be set BEFORE archive(). order: ${storeCalls.join(" → ")}`);
+	});
+
 	it("alreadyMerged child → still tears down + archives, returns passed=true", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());

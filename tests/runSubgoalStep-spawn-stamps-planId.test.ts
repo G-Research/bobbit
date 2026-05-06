@@ -71,6 +71,67 @@ describe("runSubgoalStep — Lesson 4.1: stamp spawnedFromPlanId immediately aft
 		assert.equal(create.opts.workflowId, "general");
 	});
 
+	it("R-001: child gate state is initialised after spawn (mirrors POST /spawn-child)", async () => {
+		const fx = await buildFixture();
+		after(() => fx.cleanup());
+
+		const step = buildSubgoalStep({ planId: "phase-1-gates" });
+		const { signal, active, stepIndex } = buildActive(fx.parent.id);
+		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+
+		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		assert.equal(children.length, 1);
+		const gates = fx.gateStore.getGatesForGoal(children[0].id);
+		assert.ok(gates.length > 0,
+			`expected gates to be initialised for child ${children[0].id}, got 0 — ` +
+			`without initGatesForGoal the child's ready-to-merge gate has no row to poll.`);
+	});
+
+	it("R-002: harness-spawned child stamps spawnedBySessionId from parent's team-lead session", async () => {
+		const fx = await buildFixture();
+		after(() => fx.cleanup());
+
+		// Stub teamManager.getTeamState to return a known team-lead session id.
+		const teamLeadId = "team-lead-session-xyz";
+		(fx.mockTeamManager as any).getTeamState = (_id: string) => ({
+			goalId: fx.parent.id,
+			teamLeadSessionId: teamLeadId,
+			agents: [],
+			maxConcurrent: 1,
+		});
+
+		const step = buildSubgoalStep({ planId: "p-attribution" });
+		const { signal, active, stepIndex } = buildActive(fx.parent.id);
+		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+
+		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		assert.equal(children.length, 1);
+		assert.equal(children[0].spawnedBySessionId, teamLeadId,
+			"harness-spawned child must inherit parent's team-lead session id for sidebar nesting");
+
+		// Sanity: the updateGoal call carrying spawnedFromPlanId also carries
+		// spawnedBySessionId (single atomic write).
+		const stamp = fx.calls.find(c => c.kind === "updateGoal" && c.updates.spawnedFromPlanId);
+		assert.ok(stamp && stamp.kind === "updateGoal");
+		assert.equal(stamp.updates.spawnedBySessionId, teamLeadId);
+	});
+
+	it("R-002: omits spawnedBySessionId when parent has no live team", async () => {
+		const fx = await buildFixture();
+		after(() => fx.cleanup());
+
+		// Default mockTeamManager has no getTeamState — the harness sees
+		// `teamManager.getTeamState?.(...)` return undefined.
+		const step = buildSubgoalStep({ planId: "p-no-tl" });
+		const { signal, active, stepIndex } = buildActive(fx.parent.id);
+		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+
+		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		assert.equal(children.length, 1);
+		assert.equal(children[0].spawnedBySessionId, undefined,
+			"must NOT stamp spawnedBySessionId when no team-lead session is available");
+	});
+
 	it("the persisted child goal record carries spawnedFromPlanId on disk", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());

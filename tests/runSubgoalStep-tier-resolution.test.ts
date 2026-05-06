@@ -150,6 +150,44 @@ describe("resolvePlanStepChild — tier preference (Lesson 4.19)", () => {
 		assert.equal(reloaded?.spawnedFromPlanId, planId, "rescue path must back-fill spawnedFromPlanId");
 	});
 
+	it("R-009: Tier 5 rescue back-fills spawnedFromPlanId end-to-end via runSubgoalStep", async () => {
+		// The existing direct-call test above asserts the resolver returns
+		// source='rescue' and that the back-fill landed. R-009 adds the
+		// end-to-end variant: drive the rescue path through `runSubgoalStep`
+		// itself and assert the back-fill is committed before the next signal.
+		const fx = await buildFixture();
+		after(() => fx.cleanup());
+
+		const planId = "e2e-rescue-plan-id";
+		const orphanTitle = "Stranded by older code";
+		fx.goalStore.put({
+			id: "e2e-orphan",
+			title: orphanTitle,
+			cwd: fx.tmpRoot,
+			state: "in-progress",
+			spec: "",
+			createdAt: 100,
+			updatedAt: 100,
+			parentGoalId: fx.parent.id,
+			// spawnedFromPlanId intentionally undefined.
+		} as any);
+
+		const step = buildSubgoalStep({ planId, title: orphanTitle });
+		const { signal, active, stepIndex } = buildActive(fx.parent.id, planId);
+		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+
+		// Wait one microtask for the lazy back-fill to flush.
+		await new Promise(r => setImmediate(r));
+
+		const rehydrated = fx.goalStore.get("e2e-orphan");
+		assert.equal(rehydrated?.spawnedFromPlanId, planId,
+			"Tier-5 rescue must back-fill spawnedFromPlanId on the resolved orphan");
+		// And no fresh spawn happened — the orphan was reused.
+		const created = fx.calls.find(c => c.kind === "createGoal");
+		assert.equal(created, undefined,
+			"Tier-5 rescue must reuse the orphan, not spawn a duplicate child");
+	});
+
 	it("returns source='none' when no candidate matches", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());

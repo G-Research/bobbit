@@ -54,7 +54,7 @@ export interface Fixture {
 	cleanup: () => void;
 	/** Override the default ready-to-merge hook (returns "passed" by default). */
 	setReadyToMergeHook: (
-		fn: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled">,
+		fn: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout">,
 	) => void;
 	setSetupHook: (fn: (childGoalId: string) => Promise<void>) => void;
 	/** Override mergeChild's outcome (default merged=true). */
@@ -159,7 +159,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		undefined,
 	);
 	// Default: ready-to-merge passes immediately.
-	let readyHook: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled"> =
+	let readyHook: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout"> =
 		async () => "passed";
 	let setupHook: ((childGoalId: string) => Promise<void>) | undefined = async () => {};
 	(harness as any)._subgoalHooks = {

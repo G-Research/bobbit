@@ -10,7 +10,8 @@ import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
-import { stripSubgoalStepsForChildInheritance, type WorkflowGate, type VerifyStep } from "./workflow-store.js";
+import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
+import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell } from "./shell-util.js";
@@ -435,7 +436,7 @@ export class VerificationHarness {
 
 	/** Override hook for tests so they can stub the spawn/wait/merge sub-steps. */
 	_subgoalHooks?: {
-		waitForReadyToMerge?: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled">;
+		waitForReadyToMerge?: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout">;
 		setupChildAndStartTeam?: (childGoalId: string) => Promise<void>;
 	};
 
@@ -2824,6 +2825,24 @@ export class VerificationHarness {
 	 * `_persistActive` whenever the resolved child is archived-non-complete or
 	 * tier-1.5 mismatches the live state.
 	 */
+	/**
+	 * R-012 — extract the four duplicated cache-wipe blocks. Wipes the
+	 * cached `childGoalId` pointer on a subgoal step in `active.steps[i]`
+	 * and persists the active verification record. No-ops when the active
+	 * record / step / subgoal descriptor is missing.
+	 */
+	private _wipeSubgoalCachedPointer(
+		active: ActiveVerification | undefined,
+		stepIndex: number | undefined,
+	): void {
+		if (!active || stepIndex === undefined) return;
+		const st = active.steps[stepIndex];
+		if (st?.subgoal) {
+			st.subgoal.childGoalId = undefined;
+			this._persistActive();
+		}
+	}
+
 	resolvePlanStepChild(
 		parentGoalId: string,
 		planId: string,
@@ -2865,19 +2884,11 @@ export class VerificationHarness {
 				if (!cached.archived) {
 					return { child: cached, source: "cached-pointer" };
 				}
-				// archived && state !== "complete" → stale pointer; wipe.
-				if (opts?.active && opts?.stepIndex !== undefined && opts.active.steps[opts.stepIndex]) {
-					const st = opts.active.steps[opts.stepIndex];
-					if (st.subgoal) st.subgoal.childGoalId = undefined;
-					this._persistActive();
-				}
+				// archived && state !== "complete" → stale pointer; wipe (R-012).
+				this._wipeSubgoalCachedPointer(opts?.active, opts?.stepIndex);
 			} else {
-				// pointed-at goal vanished — wipe the pointer
-				if (opts?.active && opts?.stepIndex !== undefined && opts.active.steps[opts.stepIndex]) {
-					const st = opts.active.steps[opts.stepIndex];
-					if (st.subgoal) st.subgoal.childGoalId = undefined;
-					this._persistActive();
-				}
+				// pointed-at goal vanished — wipe the pointer (R-012).
+				this._wipeSubgoalCachedPointer(opts?.active, opts?.stepIndex);
 			}
 		}
 
@@ -2981,10 +2992,7 @@ export class VerificationHarness {
 		// pointer wipe; this guard handles the case where the resolved child
 		// itself is archived-non-complete (tier-4 hit).
 		if (resolved.source === "archived-other" && resolved.child) {
-			if (active.steps[stepIndex]?.subgoal) {
-				active.steps[stepIndex].subgoal!.childGoalId = undefined;
-				this._persistActive();
-			}
+			this._wipeSubgoalCachedPointer(active, stepIndex);
 			resolved = { source: "none" };
 		}
 
@@ -3049,42 +3057,20 @@ export class VerificationHarness {
 				// A parent that defined custom roles and a custom workflow
 				// inline on itself expects every subgoal-spawned child to
 				// inherit them — same invariant as `goal_spawn_child`.
+				// R-003 — single-source workflow resolution shared with the
+				// REST spawn-child path (see spawn-child-workflow.ts).
 				const workflowStore = ctx.workflowStore;
-				const preferredWorkflowId = sg.workflowId;
-				let resolvedChildWorkflow: import("./workflow-store.js").Workflow | undefined;
-				let childWorkflowId: string | undefined = preferredWorkflowId;
-				if (preferredWorkflowId && workflowStore?.get(preferredWorkflowId)) {
-					// sg.workflowId resolves — use it directly.
-					childWorkflowId = preferredWorkflowId;
-				} else if (parent.workflow) {
-					// Inherit the parent's workflow, stripping parent-specific
-					// subgoal verify-steps so the child doesn't re-execute
-					// the parent's plan. Non-meta workflows pass through
-					// untouched (pure deep-clone).
-					resolvedChildWorkflow = stripSubgoalStepsForChildInheritance(parent.workflow);
-					childWorkflowId = resolvedChildWorkflow.id;
-					if (preferredWorkflowId && preferredWorkflowId !== resolvedChildWorkflow.id) {
-						console.warn(
-							`[verification-harness] Subgoal step "${step.name}" referenced workflowId="${preferredWorkflowId}" which is not registered; inheriting parent workflow "${resolvedChildWorkflow.id}" (with parent subgoal steps stripped).`,
-						);
-					}
-				} else if (workflowStore?.get("feature")) {
-					console.warn(
-						`[verification-harness] Subgoal step "${step.name}" has no resolvable workflow (sg.workflowId="${preferredWorkflowId ?? "unset"}", parent has no workflow); falling back to "feature".`,
-					);
-					childWorkflowId = "feature";
-				} else {
-					const firstAvailable = workflowStore?.getAll().find(w => !w.hidden);
-					if (firstAvailable) {
-						console.warn(
-							`[verification-harness] Subgoal step "${step.name}" has no resolvable workflow; falling back to first available "${firstAvailable.id}".`,
-						);
-						childWorkflowId = firstAvailable.id;
-					}
-				}
+				const { workflow: resolvedChildWorkflow, workflowId: childWorkflowId } =
+					resolveChildWorkflow(parent, sg, undefined, workflowStore);
+				// R-032/033 — prefer structuredClone over JSON.parse/stringify
+				// (this is the harness:3086 site called out by the review).
 				const inheritedInlineRoles = parent.inlineRoles
-					? JSON.parse(JSON.stringify(parent.inlineRoles))
+					? structuredClone(parent.inlineRoles)
 					: undefined;
+				// R-002 — attribute harness-spawned children to the parent's
+				// team-lead session so the sidebar nests them under the
+				// spawning team-lead (matches POST /spawn-child).
+				const parentTeamLeadSessionId = teamManager?.getTeamState?.(parentGoalId)?.teamLeadSessionId ?? undefined;
 				const child = await goalManager.createGoal(sg.title, parent.cwd, {
 					spec: sg.spec,
 					workflowId: childWorkflowId,
@@ -3094,8 +3080,19 @@ export class VerificationHarness {
 					parentGoalId,
 					inlineRoles: inheritedInlineRoles,
 				});
-				await goalManager.updateGoal(child.id, { spawnedFromPlanId: planId });
+				await goalManager.updateGoal(child.id, {
+					spawnedFromPlanId: planId,
+					...(parentTeamLeadSessionId ? { spawnedBySessionId: parentTeamLeadSessionId } : {}),
+				});
 				// END Lesson 4.1 critical sequence.
+
+				// R-001 — initialise the child's gate state. Mirrors the
+				// `initGatesForGoal` call in POST /api/goals/:id/spawn-child.
+				// Without this, gateStore.getGatesForGoal(child.id) returns []
+				// and `_waitForChildReadyToMerge` polls forever.
+				if (child.workflow) {
+					ctx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
+				}
 
 				childGoalId = child.id;
 				if (active.steps[stepIndex]) {
@@ -3135,6 +3132,13 @@ export class VerificationHarness {
 				// for THIS step so the harness re-runs naturally on re-signal.
 				return { passed: false, output: `Subgoal ${childGoalId} archived externally (state != complete) — re-signal to re-resolve` };
 			}
+			if (waitOutcome === "timeout") {
+				// R-011 — 24h ceiling exceeded. Release the semaphore via the
+				// `finally` and surface a non-fatal failure so the harness
+				// re-runs the step on the next signal (treated like
+				// `archived-other` from the caller's perspective).
+				return { passed: false, output: `Subgoal ${childGoalId} wait timed out (>24h) — re-signal to retry` };
+			}
 			// ready-to-merge passed — proceed to merge.
 
 			// ── 8. Merge + archive ────────────────────────────────────
@@ -3172,7 +3176,7 @@ export class VerificationHarness {
 		_parentGoalId: string,
 		childGoalId: string,
 		active: ActiveVerification,
-	): Promise<"passed" | "archived-complete" | "archived-other" | "cancelled"> {
+	): Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout"> {
 		// Test seam: allow callers to swap in a deterministic resolver.
 		if (this._subgoalHooks?.waitForReadyToMerge) {
 			const aborter = { aborted: !!active.cancelled };
@@ -3188,15 +3192,26 @@ export class VerificationHarness {
 		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
 		if (!ctx) return "archived-other"; // child evaporated — equivalent to external archive
 		const POLL_MS = 500;
+		// R-011 — cap the wait at 24h so a stuck child can't hold a
+		// rootSubgoalSemaphore slot indefinitely. The caller treats
+		// `"timeout"` like `"archived-other"` (release semaphore + retry on
+		// the next harness pass).
+		const MAX_WAIT_MS = 24 * 60 * 60 * 1000;
+		const startedAt = Date.now();
 		while (true) {
 			if (active.cancelled) return "cancelled";
 			const child = ctx.goalStore.get(childGoalId);
 			if (!child) return "archived-other";
+			// R-034 — defensive: if a tier-resolver bug somehow yields a child
+			// belonging to a different parent (cross-tree), treat it as
+			// externally archived rather than waiting on it.
+			if (child.parentGoalId !== _parentGoalId) return "archived-other";
 			if (child.archived === true) {
 				return child.state === "complete" ? "archived-complete" : "archived-other";
 			}
 			const rtm = ctx.gateStore.getGate(childGoalId, "ready-to-merge");
 			if (rtm?.status === "passed") return "passed";
+			if (Date.now() - startedAt >= MAX_WAIT_MS) return "timeout";
 			// paused / pending / failed all continue the wait — only an external
 			// archive or a passed ready-to-merge is terminal.
 			await new Promise(r => setTimeout(r, POLL_MS));
