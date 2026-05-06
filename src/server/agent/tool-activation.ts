@@ -27,6 +27,7 @@ import {
 	makeMetaToolName,
 	buildMetaToolInputSchema,
 	buildMetaToolDescription,
+	parseMcpToolName,
 } from "../mcp/mcp-meta.js";
 import type { McpToolDef } from "../mcp/mcp-types.js";
 
@@ -135,23 +136,37 @@ export function resolveGrantPolicy(
 	toolManager: ToolManager | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 ): GrantPolicy {
-	const mcpPrefix = mcpPolicyPrefix(toolName);
+	const mcpKeys = mcpPolicyKeys(toolName);
 
-	// 1. Role-level tool-specific override
+	// 1. Role-level tool-specific override (exact tool name match)
 	if (role?.toolPolicies?.[toolName]) return normalizePolicy(role.toolPolicies[toolName]);
 
-	// 2. Role-level group override (e.g. "mcp__playwright" matches "mcp__playwright__snap")
-	if (mcpPrefix && role?.toolPolicies?.[mcpPrefix]) return normalizePolicy(role.toolPolicies[mcpPrefix]);
+	// 2. Role-level overrides — prefer the most specific MCP key (tool > group),
+	//    then non-MCP toolGroup. Examples:
+	//      tool name `mcp__gr__ai-adoption__list-articles`
+	//        → tool key `mcp__gr__ai-adoption` beats group key `mcp__gr`.
+	//      tool name `mcp__playwright__snap` (flat)
+	//        → tool=group=`mcp__playwright` (single lookup).
+	if (mcpKeys) {
+		if (mcpKeys.tool !== mcpKeys.group && role?.toolPolicies?.[mcpKeys.tool]) {
+			return normalizePolicy(role.toolPolicies[mcpKeys.tool]);
+		}
+		if (role?.toolPolicies?.[mcpKeys.group]) return normalizePolicy(role.toolPolicies[mcpKeys.group]);
+	}
 	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
 	// 3. Tool definition default from YAML
 	const toolDef = toolManager?.getToolByName(toolName);
 	if (toolDef?.grantPolicy) return normalizePolicy(toolDef.grantPolicy);
 
-	// 4. Group-level default policy
+	// 4. Group-level default policy — same precedence (tool key > group key).
 	if (groupPolicyStore) {
-		if (mcpPrefix) {
-			const mcpGp = groupPolicyStore.getGroupPolicy(mcpPrefix);
+		if (mcpKeys) {
+			if (mcpKeys.tool !== mcpKeys.group) {
+				const mcpToolGp = groupPolicyStore.getGroupPolicy(mcpKeys.tool);
+				if (mcpToolGp) return normalizePolicy(mcpToolGp);
+			}
+			const mcpGp = groupPolicyStore.getGroupPolicy(mcpKeys.group);
 			if (mcpGp) return normalizePolicy(mcpGp);
 		}
 		if (toolGroup) {
@@ -165,25 +180,87 @@ export function resolveGrantPolicy(
 }
 
 /**
- * Extract the MCP server policy-key from a tool name. Two name shapes resolve
- * to the same `mcp__<server>` policy key, so a single YAML/group-policy entry
- * (e.g. `mcp__playwright`) covers both surfaces:
+ * Two-level MCP policy keys derived from a tool name. Used by
+ * `resolveGrantPolicy` to consult the most-specific match first.
  *
- *   - Legacy per-op tool name `mcp__<server>__<op>` → `mcp__<server>`.
- *   - Meta-tool name `mcp_<server>` (single underscore) → `mcp__<server>`.
+ *   - `group` covers an entire MCP server (every sub-namespace under it).
+ *   - `tool`  covers one sub-namespace meta-tool (or, for flat servers,
+ *             equals `group`).
  *
- * Exported so unit tests can lock the regex behaviour against drift.
+ * Examples (all four name shapes):
+ *
+ *   | Tool name                                   | group              | tool                          |
+ *   |---------------------------------------------|--------------------|-------------------------------|
+ *   | `mcp__gr__ai-adoption__list-articles`       | `mcp__gr`          | `mcp__gr__ai-adoption`        |
+ *   | `mcp__playwright__click` (flat)             | `mcp__playwright`  | `mcp__playwright`             |
+ *   | `mcp_gr__ai-adoption` (meta + sub)          | `mcp__gr`          | `mcp__gr__ai-adoption`        |
+ *   | `mcp_playwright` (meta flat)                | `mcp__playwright`  | `mcp__playwright`             |
+ */
+export interface McpPolicyKeys {
+	group: string;
+	tool: string;
+}
+
+/**
+ * Compute the `{group, tool}` policy keys for a Bobbit tool name. Returns
+ * `undefined` for non-MCP tool names. Single source of truth — callers
+ * should not parse MCP names directly.
+ */
+export function mcpPolicyKeys(toolName: string): McpPolicyKeys | undefined {
+	if (typeof toolName !== "string" || toolName.length === 0) return undefined;
+
+	// Legacy per-op shape: `mcp__<server>__<rest>`. Use parseMcpToolName so
+	// gateway-style names with a sub-namespace produce the granular tool key.
+	if (toolName.startsWith("mcp__")) {
+		const parsed = parseMcpToolName(toolName);
+		if (!parsed) return undefined;
+		const group = `mcp__${parsed.server}`;
+		const tool = parsed.sub ? `mcp__${parsed.server}__${parsed.sub}` : group;
+		return { group, tool };
+	}
+
+	// Meta-tool shape: `mcp_<server>` or `mcp_<server>__<sub>` (single
+	// underscore prefix). First char after `mcp_` must NOT be `_` — that
+	// would make it the legacy `mcp__…` form already handled above.
+	const meta = toolName.match(/^mcp_([^_][^_]*(?:_[^_][^_]*)*)((?:__.*)?)$/);
+	if (!meta) {
+		// Looser fallback: anything starting with `mcp_` followed by a non-`_` char.
+		const fallback = toolName.match(/^mcp_([^_].*)$/);
+		if (!fallback) return undefined;
+		const rest = fallback[1];
+		const idx = rest.indexOf("__");
+		if (idx === -1) {
+			const group = `mcp__${rest}`;
+			return { group, tool: group };
+		}
+		const server = rest.slice(0, idx);
+		const sub = rest.slice(idx + 2);
+		if (server.length === 0 || sub.length === 0) {
+			const group = `mcp__${rest}`;
+			return { group, tool: group };
+		}
+		return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+	}
+	const server = meta[1];
+	const tail = meta[2]; // either "" or `__<sub>`
+	if (!tail) {
+		const group = `mcp__${server}`;
+		return { group, tool: group };
+	}
+	const sub = tail.slice(2);
+	return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+}
+
+/**
+ * Backward-compat helper — returns the **group**-level MCP policy key for a
+ * tool name, or `undefined` for non-MCP names. New code should call
+ * `mcpPolicyKeys` to also get the tool-level key.
+ *
+ * Unchanged for legacy callers: `mcp__<server>__<op>` → `mcp__<server>`,
+ * `mcp_<server>` → `mcp__<server>`.
  */
 export function mcpPolicyPrefix(toolName: string): string | undefined {
-	// Legacy per-op:  "mcp__server__op"  → "mcp__server"
-	const legacy = toolName.match(/^(mcp__.+?)__/);
-	if (legacy) return legacy[1];
-	// Meta-tool:      "mcp_server"       → "mcp__server"
-	// First char after `mcp_` must NOT be `_` (else it'd be the legacy form
-	// stripped of its trailing op, which we never want to match here).
-	const meta = toolName.match(/^mcp_([^_].*)$/);
-	if (meta) return `mcp__${meta[1]}`;
-	return undefined;
+	return mcpPolicyKeys(toolName)?.group;
 }
 
 /**
@@ -226,23 +303,26 @@ export function computeEffectiveAllowedTools(
 		if (!isNeverPolicy(policy)) result.push(tool.name);
 	}
 
-	// MCP tools — collapse per-op entries into one meta-tool per server.
-	// The model only sees `mcp_<server>` plus the shared `mcp_describe`;
-	// per-op `mcp__<server>__<op>` names are kept as the internal routing
-	// identifier (mcp-manager + /api/internal/mcp-call) but never appear here.
-	const byServer = new Map<string, string /* group */>();
+	// MCP tools — collapse per-op entries into one meta-tool per (server, sub-namespace).
+	// Gateway-style servers expose two-level names like `mcp__gr__ai-adoption__list`;
+	// each distinct sub-namespace becomes its own meta-tool `mcp_<server>__<sub>`.
+	// Flat servers (no sub) collapse to one meta-tool `mcp_<server>`.
+	const byKey = new Map<string /* server\0sub */, { server: string; sub?: string }>();
 	for (const info of mcpInfos) {
 		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
 		if (isNeverPolicy(opPolicy)) continue;
-		// Also drop ops blocked at the meta level — i.e. if `mcp_<server>` (or its
-		// `mcp__<server>` policy prefix) resolves to `never`.
-		const metaName = makeMetaToolName(info.serverName);
+		const parsed = parseMcpToolName(info.name);
+		if (!parsed) continue;
+		// Drop ops blocked at the meta level — the meta-tool name's own policy
+		// (which cascades through `mcpPolicyKeys` to the group / tool keys).
+		const metaName = makeMetaToolName(parsed.server, parsed.sub);
 		const serverPolicy = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore);
 		if (isNeverPolicy(serverPolicy)) continue;
-		if (!byServer.has(info.serverName)) byServer.set(info.serverName, info.group);
+		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
+		if (!byKey.has(k)) byKey.set(k, { server: parsed.server, sub: parsed.sub });
 	}
-	for (const serverName of byServer.keys()) {
-		const metaName = makeMetaToolName(serverName);
+	for (const { server, sub } of byKey.values()) {
+		const metaName = makeMetaToolName(server, sub);
 		if (seen.has(metaName.toLowerCase())) continue;
 		seen.add(metaName.toLowerCase());
 		result.push(metaName);
@@ -397,9 +477,11 @@ export function generateMcpMetaExtension(
 	serverName: string,
 	ops: McpToolDef[],
 	unavailableReason?: string,
+	sub?: string,
 ): string {
-	const metaName = makeMetaToolName(serverName);
-	const docsRelPath = `mcp-tool-docs/${serverName}.md`;
+	const metaName = makeMetaToolName(serverName, sub);
+	const docsKey = sub ? `${serverName}__${sub}` : serverName;
+	const docsRelPath = `mcp-tool-docs/${docsKey}.md`;
 
 	const isStub = unavailableReason !== undefined || ops.length === 0;
 
@@ -462,7 +544,9 @@ export default function(pi) {
       if (typeof operation !== "string" || !validOps.has(operation)) {
         return { content: [{ type: "text", text: JSON.stringify({ error: "invalid_operation", server: ${JSON.stringify(serverName)}, operation: operation }) }] };
       }
-      const fullName = "mcp__" + ${JSON.stringify(serverName)} + "__" + operation;
+      const fullName = ${sub
+			? `"mcp__" + ${JSON.stringify(serverName)} + "__" + ${JSON.stringify(sub)} + "__" + operation`
+			: `"mcp__" + ${JSON.stringify(serverName)} + "__" + operation`};
       const body = JSON.stringify({ tool: fullName, args: args });
       const url = new URL(gwUrl + "/api/internal/mcp-call");
       const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
@@ -548,28 +632,39 @@ export function computeToolPolicies(
 	}
 
 	// MCP meta-tools — Layer A pre-flight surface the guard sees. One
-	// `mcp_<server>` entry per server with at least one non-`never` op,
-	// aggregating the per-op policies:
+	// `mcp_<server>__<sub>` entry per (server, sub-namespace) with at least one
+	// non-`never` op (or `mcp_<server>` for flat servers). Aggregates the
+	// per-op policies:
 	//   - any 'ask' → 'ask'   (most cautious; user is prompted on first use)
 	//   - all 'allow' → 'allow'
 	//   - all 'never' → entry omitted (the meta-tool isn't registered)
 	//
-	// Per-op `ask` aggregated up to the server-level fires once on first use
-	// of that server; subsequent ops on the same server flow through. Real
+	// Per-op `ask` aggregated up to the (server,sub) level fires once on
+	// first use; subsequent ops in the same sub-namespace flow through. Real
 	// per-op gating is only honoured at level `never` (Layer B).
-	const opsByServer = new Map<string, { name: string; group: string; policy: GrantPolicy }[]>();
+	const opsByKey = new Map<string, {
+		server: string;
+		sub?: string;
+		ops: { name: string; group: string; policy: GrantPolicy }[];
+	}>();
 	for (const info of mcpInfos) {
+		const parsed = parseMcpToolName(info.name);
+		if (!parsed) continue;
 		const opPolicy = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
-		let arr = opsByServer.get(info.serverName);
-		if (!arr) { arr = []; opsByServer.set(info.serverName, arr); }
-		arr.push({ name: info.name, group: info.group, policy: opPolicy });
+		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
+		let entry = opsByKey.get(k);
+		if (!entry) {
+			entry = { server: parsed.server, sub: parsed.sub, ops: [] };
+			opsByKey.set(k, entry);
+		}
+		entry.ops.push({ name: info.name, group: info.group, policy: opPolicy });
 	}
-	for (const [serverName, ops] of opsByServer) {
+	for (const { server, sub, ops } of opsByKey.values()) {
 		const nonNever = ops.filter(o => !isNeverPolicy(o.policy));
 		if (nonNever.length === 0) continue; // all ops blocked — don't surface meta-tool
-		const metaName = makeMetaToolName(serverName);
+		const metaName = makeMetaToolName(server, sub);
 		if (result[metaName]) continue;
-		const group = ops[0]?.group ?? `MCP: ${serverName}`;
+		const group = ops[0]?.group ?? `MCP: ${server}`;
 		// Honour an explicit role-level meta-tool override first.
 		const rawMetaPolicy = resolveGrantPolicy(metaName, group, role, toolManager, groupPolicyStore);
 		let aggregated: 'allow' | 'ask' | 'never';
@@ -715,14 +810,23 @@ export function writeMcpProxyExtensions(
 
 	const extensionPaths: string[] = [];
 
-	// Group tool infos by server — only include tools that are not 'never'
-	const toolsByServer = new Map<string, typeof infos>();
+	// Group tool infos by (server, sub-namespace) — only include tools that
+	// are not 'never'. Each (server, sub) pair becomes one meta-tool / one
+	// emitted extension file.
+	interface KeyEntry {
+		server: string;
+		sub?: string;
+		tools: Array<{ info: typeof infos[number]; op: string }>;
+	}
+	const toolsByKey = new Map<string, KeyEntry>();
 	for (const info of infos) {
-		// If filtering, check if tool is in allowed set OR if the meta-tool for
-		// this server is in the allowed set (the model-facing surface only
-		// includes `mcp_<server>` — per-op names are hidden).
+		const parsed = parseMcpToolName(info.name);
+		if (!parsed) continue;
+		// If filtering, check if the bobbit name is in the allowed set OR if
+		// the meta-tool for this (server, sub) is. The model-facing surface
+		// only includes `mcp_<server>__<sub>` — per-op names are hidden.
 		if (allowedSet) {
-			const metaName = makeMetaToolName(info.serverName).toLowerCase();
+			const metaName = makeMetaToolName(parsed.server, parsed.sub).toLowerCase();
 			if (!allowedSet.has(info.name.toLowerCase()) && !allowedSet.has(metaName)) {
 				continue;
 			}
@@ -732,21 +836,27 @@ export function writeMcpProxyExtensions(
 		if (role || toolManager || groupPolicyStore) {
 			const p = resolveGrantPolicy(info.name, info.group, role, toolManager, groupPolicyStore);
 			if (isNeverPolicy(p)) continue;
-			const metaName = makeMetaToolName(info.serverName);
+			const metaName = makeMetaToolName(parsed.server, parsed.sub);
 			const sp = resolveGrantPolicy(metaName, info.group, role, toolManager, groupPolicyStore);
 			if (isNeverPolicy(sp)) continue;
 		}
 
-		if (!toolsByServer.has(info.serverName)) toolsByServer.set(info.serverName, []);
-		toolsByServer.get(info.serverName)!.push(info);
+		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
+		let entry = toolsByKey.get(k);
+		if (!entry) {
+			entry = { server: parsed.server, sub: parsed.sub, tools: [] };
+			toolsByKey.set(k, entry);
+		}
+		entry.tools.push({ info, op: parsed.op });
 	}
 
 	// Failure-isolation: emit a stub meta-tool for any configured server in
 	// `error` state (see §5.3) so the model still sees a tool but every call
 	// returns a structured unavailable message instead of crashing the turn.
 	const statuses = mcpManager.getServerStatuses();
-	const writeServer = (serverName: string, code: string): void => {
-		const filePath = path.join(extDir, `${serverName}.ts`);
+	const writeFile = (server: string, sub: string | undefined, code: string): void => {
+		const basename = sub ? `${server}__${sub}` : server;
+		const filePath = path.join(extDir, `${basename}.ts`);
 		let needWrite = true;
 		try {
 			if (fs.readFileSync(filePath, "utf-8") === code) needWrite = false;
@@ -755,27 +865,34 @@ export function writeMcpProxyExtensions(
 		extensionPaths.push(filePath);
 	};
 
-	const handled = new Set<string>();
+	const handled = new Set<string>(); // keys: `server\0sub`
+	const handledServersErrored = new Set<string>();
 
-	// Stubs for error-state servers (no usable ops by definition).
+	// Stubs for error-state servers — no sub knowledge possible (server
+	// failed before listing tools), so always land at `<server>.ts`.
 	for (const status of statuses) {
 		if (status.status !== "error") continue;
 		const code = generateMcpMetaExtension(status.name, [], status.error ?? "server in error state");
-		writeServer(status.name, code);
-		handled.add(status.name);
+		writeFile(status.name, undefined, code);
+		handled.add(`${status.name}\u0000`);
+		handledServersErrored.add(status.name);
 	}
 
-	// Real meta extensions for connected servers with at least one allowed op.
-	for (const [serverName, tools] of toolsByServer) {
-		if (handled.has(serverName)) continue;
-		const opDefs = tools.map(t => ({
-			name: t.mcpToolName,
-			description: t.description,
-			inputSchema: t.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
+	// Real meta extensions for each (server, sub) with at least one allowed op.
+	for (const entry of toolsByKey.values()) {
+		const k = `${entry.server}\u0000${entry.sub ?? ""}`;
+		if (handled.has(k)) continue;
+		// If the server itself is in error state we already emitted a stub at
+		// `<server>.ts` and shouldn't shadow it with a connected meta extension.
+		if (handledServersErrored.has(entry.server) && !entry.sub) continue;
+		const opDefs = entry.tools.map(({ info, op }) => ({
+			name: op,
+			description: info.description,
+			inputSchema: info.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
 		}));
-		const code = generateMcpMetaExtension(serverName, opDefs);
-		writeServer(serverName, code);
-		handled.add(serverName);
+		const code = generateMcpMetaExtension(entry.server, opDefs, undefined, entry.sub);
+		writeFile(entry.server, entry.sub, code);
+		handled.add(k);
 	}
 
 	mcpProxyCache.set(cacheKey, extensionPaths.slice());
