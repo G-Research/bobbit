@@ -73,7 +73,9 @@ const extension: ExtensionFactory = (pi) => {
 			"The preview panel appears alongside the chat and auto-updates when you call this tool again.",
 		parameters: Type.Object({
 			html: Type.Optional(Type.String({ description: "Raw HTML content to preview. Takes priority over 'file' if both are provided." })),
-			file: Type.Optional(Type.String({ description: "Path to an HTML file to load and preview. Sibling files in the same directory are copied alongside it." })),
+			file: Type.Optional(Type.String({ description: "Path to an HTML file to load and preview. Only the entry file is copied unless `assets`/`manifest` declare siblings." })),
+			assets: Type.Optional(Type.Array(Type.String(), { description: "Optional list of sibling asset paths (relative to the entry file's directory) to copy into the preview mount. Supports literal paths and single-segment globs (e.g. 'styles.css', 'img/*.png'). '**' is not supported." })),
+			manifest: Type.Optional(Type.String({ description: "Optional path (relative to the entry file's directory) to a JSON manifest of the form { \"assets\": [...] }. Concatenated with inline `assets`." })),
 		}),
 
 		async execute(_toolCallId, params) {
@@ -118,7 +120,7 @@ const extension: ExtensionFactory = (pi) => {
 				}
 
 				// Step 2: build mount-endpoint body. `html` wins when both are present.
-				let mountBody: { html?: string; file?: string };
+				let mountBody: { html?: string; file?: string; assets?: string[]; manifest?: string };
 				if (params.html != null) {
 					mountBody = { html: params.html };
 				} else {
@@ -130,6 +132,12 @@ const extension: ExtensionFactory = (pi) => {
 						? filePath
 						: path.resolve(process.cwd(), filePath);
 					mountBody = { file: absPath };
+					if (Array.isArray(params.assets) && params.assets.length > 0) {
+						mountBody.assets = params.assets as string[];
+					}
+					if (typeof params.manifest === "string" && params.manifest.length > 0) {
+						mountBody.manifest = params.manifest;
+					}
 				}
 
 				// Step 3: POST the mount endpoint.

@@ -46,10 +46,13 @@ Layout:
 
 | Constraint | Value | Source |
 |---|---|---|
-| Per-session mount ceiling | 100 MiB | `MAX_MOUNT_BYTES` |
-| Per-`copyFileTree` cap | 25 MiB | `MAX_COPY_BYTES` |
 | Inline default entry | `inline.html` | `DEFAULT_INLINE_ENTRY` |
 | Entry filename | single segment, no `/` `\` `..` `\0` | `validateEntry` |
+
+Asset inclusion is **explicit**: `mountFile` copies only the named entry plus
+caller-declared `assets[]` (literals or single-segment globs). There is no
+BFS-of-everything fallback and no size cap — the agent is responsible for
+declaring only what it needs. Undeclared siblings are not copied.
 
 **Lifecycle.** Mount is created lazily on the first `preview_open` for a
 session. `removeMount(sid)` is wired into the session-archive / cleanup path
@@ -59,14 +62,16 @@ and is idempotent on bad input.
 `fs.renameSync`s into place — readers never see a half-written entry. Failures
 unlink the tmp file before propagating.
 
-**`copyFileTree` semantics.** Wipes the mount, BFS-walks the source directory
-(realpath-resolved), copies regular files only, hardlinks where supported and
-falls back to `copyFile`. Symlinks that resolve outside the source root throw
-`PreviewMountError(403)` after the wipe — the mount is left empty so the
-caller sees a clean 403 rather than a partial tree.
+**`mountFile` semantics.** Wipes the mount, copies the entry file, then
+copies each declared asset — literals (`styles.css`, `sub/file.png`) or
+single-segment globs (`img/*.png`, `chart.?.svg`). `**`, `[...]`, and
+`{a,b}` are rejected. Each resolved asset's realpath must stay within the
+entry's source directory; symlink escapes throw `PreviewMountError(403)`.
+Literal assets that don't exist throw `404`; globs with no matches are not
+an error. Hardlinks where supported, falls back to `copyFile`.
 
 **Errors.** All failures throw `PreviewMountError` with `statusCode` (`400` /
-`403` / `404` / `413`); the route handler maps directly to HTTP.
+`403` / `404` / `500`); the route handler maps directly to HTTP.
 
 ## Content origin: `/preview/<sid>/<rel-path>`
 
@@ -165,9 +170,18 @@ The client subscribes via the standard EventSource and bumps
 Accepts one of:
 
 - `{ "html": "<…>", "entry"?: "report.html" }` — write inline. `entry` must
-  be a single path segment.
-- `{ "file": "/abs/path/report.html" }` — copy entry + sibling tree. `file`
-  must be absolute and end in `.html` / `.htm`.
+  be a single path segment. `assets`/`manifest` are not valid here.
+- `{ "file": "/abs/path/report.html", "assets"?: ["styles.css", "img/*.png"], "manifest"?: "preview-manifest.json" }`
+  — copy entry plus declared assets. `file` must be absolute and end in
+  `.html` / `.htm`. `assets[]` entries are paths relative to the entry's
+  directory; literals and single-segment globs (`*`, `?`) are supported.
+  `manifest` (relative to the entry's dir) points to a JSON file of the form
+  `{ "assets": ["..."] }`; its array is concatenated with inline `assets`.
+  Undeclared siblings are not copied.
+
+Success for the `file` form additionally returns `assets: string[]` — the
+resolved relative asset paths actually copied (useful for renderer round-
+tripping).
 
 Returns `200 { url, path, entry, mtime }`:
 
@@ -184,10 +198,9 @@ Errors propagate from `PreviewMountError`:
 
 | Status | When |
 |---|---|
-| `400` | invalid sessionId, missing body, bad entry, non-absolute file path, file not `.html`/`.htm`, html not a string |
+| `400` | invalid sessionId, missing body, bad entry, non-absolute file path, file not `.html`/`.htm`, html not a string, `assets`/`manifest` passed with `html`, invalid asset path (absolute / `..` / backslash / `**` / `[...]` / `{a,b}`), manifest JSON parse error or missing `assets[]` |
 | `403` | sandbox out of scope, symlink escapes source tree |
-| `404` | source file missing, source not a regular file |
-| `413` | mount or copy exceeds the 100 MiB / 25 MiB caps |
+| `404` | source file missing, source not a regular file, manifest file missing, literal asset missing |
 | `500` | unexpected copy failure |
 
 After every success the server calls `broadcastPreviewChanged(sessionId, …)`
@@ -254,7 +267,7 @@ back the preview tree sees the same bytes the gateway just wrote.
 
 | File | Responsibility |
 |---|---|
-| `src/server/preview/mount.ts` | Per-session mount lifecycle, atomic writes, `copyFileTree`, watcher, ceilings |
+| `src/server/preview/mount.ts` | Per-session mount lifecycle, atomic writes, `mountFile` (explicit asset opt-in), watcher |
 | `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler, entry pick, `<base>` + bridge injection |
 | `src/server/preview/path-guard.ts` | Path-traversal defence (realpath-based) |
 | `src/server/preview/mime.ts` | MIME-type lookup |
