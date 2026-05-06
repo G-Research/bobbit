@@ -100,8 +100,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_goal",
 		label: "Propose Goal",
-		description: "Submit a goal proposal for user review. Call this when you have gathered enough information to propose a goal.",
-		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields.",
+		description: "Submit a goal proposal for user review. Call this when you have gathered enough information to propose a goal. Prefer an existing project workflow (`workflow: \"feature\"`, `\"bug-fix\"`, etc.) and existing roles — `inlineWorkflow` / `inlineRoles` should be the exception, used when the user explicitly asked or when no existing workflow/role genuinely fits the work (e.g. a research goal has nothing to build or test, so the `feature` workflow would fail every command gate). Inline snapshots propagate to every subgoal spawned from this goal, so pick them carefully — unnecessary customisation fragments the project.",
+		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields. Reuse existing workflow/roles by default; inlineWorkflow / inlineRoles only when genuinely needed.",
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title (must be under 29 characters)" }),
 			spec: Type.String({ description: "Markdown spec content. Include: brief description, key requirements, constraints, technical approach" }),

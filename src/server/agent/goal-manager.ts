@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, shouldSkipRemotePush } from "../skills/git.js";
-import type { WorkflowStore, Workflow } from "./workflow-store.js";
+import { normalizeWorkflow, type WorkflowStore, type Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
@@ -269,9 +269,17 @@ export class GoalManager {
 		const NO_WORKFLOWS_MSG =
 			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
-			// Use pre-resolved workflow (from config cascade)
+			// Use pre-resolved workflow (from config cascade or inline body).
+			// Run through normalizeWorkflow so a snake_case-only inline workflow
+			// (`depends_on`, `inject_downstream`) is converted to the runtime
+			// camelCase shape. Without this, inline workflows passed via
+			// `body.workflow` on POST /api/goals and goal_spawn_child bypassed
+			// the normalizer and stored gates with undefined `dependsOn`,
+			// which broke gate_signal and the goals dashboard with
+			// "gateDef.dependsOn is not iterable".
+			const normalized = normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
 			goal.workflowId = workflowId;
-			goal.workflow = JSON.parse(JSON.stringify(resolvedWorkflow));
+			goal.workflow = JSON.parse(JSON.stringify(normalized));
 		} else if (workflowId && workflowStore) {
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {

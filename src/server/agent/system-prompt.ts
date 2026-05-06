@@ -234,12 +234,15 @@ export function buildNestingContextSection(ctx: NestingContext): string | undefi
 		parts.push(
 			"## Goal nesting context (CHILD GOAL)\n\n" +
 			`You are the team lead of a CHILD goal. Parent: \`${parentTitle}\` (id: \`${parentId}\`). Root: \`${rootTitle}\` (id: \`${rootId}\`).\n\n` +
+			"**Your scope is STRICTLY your own `# Goal` spec above — nothing else.**\n\n" +
+			"If your spec quotes, references, or describes your parent's broader mission, the other sibling goals, the parent's acceptance criteria, or the overall plan — that context is background only. **Do not act on it.** Your parent's team-lead is responsible for the parent's mission; siblings are handled by their own team-leads. If you find yourself about to spawn a child to cover work that reads like a sibling's responsibility, STOP — that is the parent's job.\n\n" +
 			"**Critical constraints:**\n" +
 			`- Your branch (\`${goalBranch}\`) merges INTO the parent's branch (\`${parentBranch}\`) LOCALLY when ready-to-merge passes. The parent's team-lead handles that merge automatically — you do not call \`git merge\` yourself.\n` +
 			"- **DO NOT raise a PR.** Only the root team-lead raises a PR (to `master`). If you call `gh pr create`, you create work the root must clean up.\n" +
+			"- **DO NOT spawn sibling goals.** Your siblings already exist (or will be spawned by your parent). If you need work that sounds like a sibling, surface it to your parent via `ready-to-merge` feedback rather than spawning it yourself.\n" +
 			`- Your worktree was created off \`${parentBranch}\` HEAD at spawn time. Sibling goals spawned later see your committed work after the parent's merge.\n` +
 			"- If a sibling completed before you started, you should already see their commits via the parent's branch tip.\n" +
-			"- You can decompose YOUR work into deeper nested sub-goals if useful — same `parent` workflow + `goal_spawn_child` tool. There is no depth cap (the renderer limits visual depth, not the data model)."
+			"- You MAY decompose YOUR own work into deeper nested sub-goals (not siblings) via `goal_spawn_child` if the work is large enough to warrant its own team-lead. Rule of thumb: sub-goals are for decomposition WITHIN your spec, not expansion BEYOND your spec."
 		);
 	}
 
@@ -252,7 +255,11 @@ export function buildNestingContextSection(ctx: NestingContext): string | undefi
 		"| `task_create` | Sub-second to minutes | Same branch (no worktree) | Tracking work items, todos, dependencies between work units within this goal |\n" +
 		"| `team_spawn` | Minutes to hours | New worktree on a sub-branch of THIS goal's branch (e.g. `goal-X-coder-Y`) | Code-writing, review, QA — work that ends with the agent merging back into your goal branch |\n" +
 		"| `subgoal` (via `goal_spawn_child` or via the `subgoal` verify-step in your plan) | Hours to days | Whole new goal record, own goal branch off YOUR branch HEAD, own team-lead, own ready-to-merge gate, own PR-or-local-merge | Independent units of work that themselves benefit from a full goal lifecycle (charter / plan / execution / integration / merge) — e.g. version slices (v0.1, v0.2, v1.0) of a feature, or distinct sub-features that each need their own coder + reviewer + QA flow |\n\n" +
-		"Rule of thumb: if the work is small enough to verify in one gate signal, use `task_create` or `team_spawn`. If it's large enough to need its own gates and team, use `subgoal`. **Subgoals are not free** — each one spawns a full team-lead session and a worktree. Don't decompose a 10-minute task into a subgoal."
+		"Rule of thumb: if the work is small enough to verify in one gate signal, use `task_create` or `team_spawn`. If it's large enough to need its own gates and team, use `subgoal`. **Subgoals are not free** — each one spawns a full team-lead session and a worktree. Don't decompose a 10-minute task into a subgoal.\n\n" +
+		"### Subgoal workflow, roles, and spec\n\n" +
+		"- **Workflow — reuse by default.** A subgoal without an explicit workflow inherits yours (with the parent's subgoal verify-steps stripped), which is the right behaviour when the child's work fits the same gate shape. Override with `inlineWorkflow` / `workflowId` ONLY when the user explicitly asked OR when no existing workflow genuinely fits (e.g. a research subgoal under a build→test→docs parent — there's nothing to build or test). Don't invent a custom workflow just because the inherited one isn't a perfect match.\n" +
+		"- **Roles — reuse by default.** Your `inlineRoles` propagate to every subgoal, so custom roles you or the user defined are already available. Before adding a new inline role for a subgoal, check whether an existing project role or inherited inline role fits. Add new ones only when the user asked, or when no existing role's prompt matches the work.\n" +
+		"- **The spec is the ENTIRE scope.** The `spec` you pass to `goal_spawn_child` becomes the child's full mission. Do not paste your own spec, do not list sibling goals, do not restate parent-level acceptance criteria — the child treats all of it as work it must complete. Write the child's spec as if the parent didn't exist."
 	);
 
 	return parts.join("\n\n");

@@ -131,6 +131,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		goalStore,
 		goalManager: realGm,
 		gateStore,
+		workflowStore: wf,
 		project: { id: "p" } as any,
 		projectConfigStore: cfg,
 	};

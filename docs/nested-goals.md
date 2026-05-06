@@ -402,14 +402,41 @@ roles AND the workflow are inherited from the parent:
   `body.inlineRoles` (`{...parent, ...body}`). Child entries with the
   same name override the parent's; new names extend the set. A parent
   goal can define audit-wide roles once (e.g. `synthesis-reviewer`) and
-  every spawned subgoal inherits them automatically.
+  every spawned subgoal inherits them automatically. The subgoal
+  verify-step path (`runSubgoalStep` in `verification-harness.ts`) now
+  also propagates `parent.inlineRoles` to the child it spawns, matching
+  the `goal_spawn_child` merge contract.
 - `goal.workflow`: precedence is `body.workflow` (inline override) →
-  `parent.workflow` (deep-cloned snapshot — same freeze-at-creation
-  pattern) → `body.workflowId` lookup against the project workflow
-  store. So a parent that proposed an `inlineWorkflow` propagates it
-  to every child unless the agent explicitly overrides. To use a
-  different STORED workflow on the child, pass `workflowId`; to use a
-  different one-off workflow, pass `inlineWorkflow`.
+  `parent.workflow` routed through `stripSubgoalStepsForChildInheritance`
+  (see below) → `body.workflowId` lookup against the project workflow
+  store. So a parent that proposed an `inlineWorkflow` propagates its
+  structural scaffold (gates, dependencies, ready-to-merge) to every
+  child unless the agent explicitly overrides. To use a different
+  STORED workflow on the child, pass `workflowId`; to use a different
+  one-off workflow, pass `inlineWorkflow`.
+
+**`stripSubgoalStepsForChildInheritance`** (in `src/server/agent/workflow-store.ts`)
+runs on every inherited meta-workflow snapshot (`isParentMetaWorkflow`
+= id === "parent" OR execution gate contains subgoal verify-steps):
+
+1. Strips `type: "subgoal"` entries from `execution.verify[]` — the
+   parent's plan items don't belong on the child.
+2. Drops any gate strictly between `execution` and `ready-to-merge` in
+   the DAG. Those gates (e.g. `integration` in the builtin `parent`
+   workflow, `synthesis` in custom research-style parent workflows)
+   aggregate across children — "all 5 sibling artefacts exist",
+   "cross-component integration review". A child goal can never
+   satisfy them; inheriting would deadlock the child on
+   `ready-to-merge`.
+3. Rewires `ready-to-merge.dependsOn` to depend directly on
+   `execution`, since the intermediate aggregation gates are gone.
+
+Upstream gates (charter, plan-review, goal-plan) are preserved — they
+make sense at both levels. For non-meta workflows (the `feature`,
+`bug-fix`, `general` shapes), this helper is a pure deep-clone —
+nothing is altered. Tests: `tests/child-workflow-inheritance.test.ts`
+pins the strip contract; `tests/runSubgoalStep-inline-roles-inheritance.test.ts`
+pins the role propagation through the subgoal-verify-step path.
 
 **Critical companion** for the inheritance to actually work: spawn-child
 calls `gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g

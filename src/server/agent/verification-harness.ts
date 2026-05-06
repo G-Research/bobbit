@@ -10,7 +10,7 @@ import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
-import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
+import { stripSubgoalStepsForChildInheritance, type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell } from "./shell-util.js";
@@ -3038,12 +3038,61 @@ export class VerificationHarness {
 				// Spawn a fresh child. Lesson 4.1: stamp spawnedFromPlanId
 				// IMMEDIATELY after createGoal — no other awaits or calls in
 				// between. The very next line MUST be the updateGoal call.
+				//
+				// Resolve the child's workflow + roles with a cascade that
+				// mirrors `goal_spawn_child` at server.ts:
+				//   workflow: sg.workflowId (store lookup) → parent.workflow
+				//             (stripped of subgoal verify-steps when it's a
+				//             meta-workflow) → "feature" store lookup → first
+				//             non-hidden workflow in the store.
+				//   roles:    inherit `parent.inlineRoles` deep-cloned.
+				// A parent that defined custom roles and a custom workflow
+				// inline on itself expects every subgoal-spawned child to
+				// inherit them — same invariant as `goal_spawn_child`.
+				const workflowStore = ctx.workflowStore;
+				const preferredWorkflowId = sg.workflowId;
+				let resolvedChildWorkflow: import("./workflow-store.js").Workflow | undefined;
+				let childWorkflowId: string | undefined = preferredWorkflowId;
+				if (preferredWorkflowId && workflowStore?.get(preferredWorkflowId)) {
+					// sg.workflowId resolves — use it directly.
+					childWorkflowId = preferredWorkflowId;
+				} else if (parent.workflow) {
+					// Inherit the parent's workflow, stripping parent-specific
+					// subgoal verify-steps so the child doesn't re-execute
+					// the parent's plan. Non-meta workflows pass through
+					// untouched (pure deep-clone).
+					resolvedChildWorkflow = stripSubgoalStepsForChildInheritance(parent.workflow);
+					childWorkflowId = resolvedChildWorkflow.id;
+					if (preferredWorkflowId && preferredWorkflowId !== resolvedChildWorkflow.id) {
+						console.warn(
+							`[verification-harness] Subgoal step "${step.name}" referenced workflowId="${preferredWorkflowId}" which is not registered; inheriting parent workflow "${resolvedChildWorkflow.id}" (with parent subgoal steps stripped).`,
+						);
+					}
+				} else if (workflowStore?.get("feature")) {
+					console.warn(
+						`[verification-harness] Subgoal step "${step.name}" has no resolvable workflow (sg.workflowId="${preferredWorkflowId ?? "unset"}", parent has no workflow); falling back to "feature".`,
+					);
+					childWorkflowId = "feature";
+				} else {
+					const firstAvailable = workflowStore?.getAll().find(w => !w.hidden);
+					if (firstAvailable) {
+						console.warn(
+							`[verification-harness] Subgoal step "${step.name}" has no resolvable workflow; falling back to first available "${firstAvailable.id}".`,
+						);
+						childWorkflowId = firstAvailable.id;
+					}
+				}
+				const inheritedInlineRoles = parent.inlineRoles
+					? JSON.parse(JSON.stringify(parent.inlineRoles))
+					: undefined;
 				const child = await goalManager.createGoal(sg.title, parent.cwd, {
 					spec: sg.spec,
-					workflowId: sg.workflowId ?? "feature",
+					workflowId: childWorkflowId,
+					resolvedWorkflow: resolvedChildWorkflow,
 					projectId: parent.projectId,
 					sandboxed: parent.sandboxed,
 					parentGoalId,
+					inlineRoles: inheritedInlineRoles,
 				});
 				await goalManager.updateGoal(child.id, { spawnedFromPlanId: planId });
 				// END Lesson 4.1 critical sequence.
