@@ -13,7 +13,7 @@ import {
 	ChevronUp,
 } from "lucide";
 import { renderTool } from "../tools/index.js";
-import { isSkippedToolResult } from "../tools/renderer-registry.js";
+import { isSkippedToolResult, TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
 
 /** Icon lookup by tool name — mirrors individual renderers */
 const TOOL_ICONS: Record<string, any> = {
@@ -83,9 +83,25 @@ export class ToolGroup extends LitElement {
 		return this;
 	}
 
+	// When a lazy tool renderer's chunk resolves, the registry dispatches
+	// `bobbit-tool-renderer-loaded` on document. Pull our own update so the
+	// placeholder is replaced even if a top-level renderApp() short-circuits.
+	private _onRendererLoaded = (e: Event) => {
+		const detail = (e as CustomEvent).detail;
+		if (detail?.toolName && this.toolName && detail.toolName === this.toolName) {
+			this.requestUpdate();
+		}
+	};
+
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
+		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback();
+		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 	}
 
 	private _toggle() {

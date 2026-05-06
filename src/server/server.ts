@@ -2902,15 +2902,19 @@ async function handleApiRoute(
 		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted,
 		// or a project whose rootPath is gone). spawn("node", { cwd }) on Windows
 		// reports a missing cwd as ENOENT, masquerading as if the `node` binary was missing.
-		// Only fall back when an explicit project context exists — otherwise let
-		// resolveProjectForRequest below 400 with its own "projectId required" message
-		// for projectless requests with bogus cwd.
+		// Fall back to the project rootPath when we have a resolved project to anchor the
+		// fallback. If no project is resolved yet, leave cwd alone — the resolver below
+		// will reject a bogus cwd with the canonical 400 rather than silently rewriting
+		// it to defaultCwd (which would mask user error and match an unrelated project).
 		if (cwd && !fs.existsSync(cwd) && resolvedProjectId) {
 			const staleCwd = cwd;
 			const proj = projectRegistry.get(resolvedProjectId);
-			if (proj && fs.existsSync(proj.rootPath)) {
-				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${proj.rootPath}`);
-				cwd = proj.rootPath;
+			let fallback: string | undefined;
+			if (proj && fs.existsSync(proj.rootPath)) fallback = proj.rootPath;
+			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
+			if (fallback) {
+				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
+				cwd = fallback;
 			} else {
 				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
 				return;

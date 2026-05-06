@@ -308,6 +308,42 @@ test.describe("Reopenable preview widgets (browser E2E)", () => {
 		void makeV3Result;
 	});
 
+	test("placeholder is stable while preview_open chunk loads (lazy registry)", async ({ page }) => {
+		await gotoAndWait(page);
+
+		const htmlA = "<!DOCTYPE html><body>placeholder-test</body>";
+		const result = makeResultWithSnapshot(htmlA, "tool-A");
+
+		// Mount a real <tool-message> for preview_open. This drives the lazy
+		// registry: first render returns the placeholder (card + disabled
+		// Loading button), the chunk resolves, the registry dispatches
+		// `bobbit-tool-renderer-loaded`, and <tool-message> requestUpdate()s
+		// itself — the Open button must materialise INSIDE the same card.
+		await page.evaluate(
+			([params, result]) => {
+				(window as any).__mountPreviewToolMessage(
+					document.getElementById("container")!,
+					params,
+					result,
+					"tool-A",
+				);
+			},
+			[{ html: htmlA }, result],
+		);
+
+		// Card wrapper present from t=0 — the placeholder uses isCustom=false
+		// so <tool-message> emits the standard card.
+		await expect(page.locator("tool-message .border.rounded-md")).toHaveCount(1);
+
+		// The Open button materialises inside the SAME card within 2s.
+		await expect(
+			page.locator('tool-message .border.rounded-md [data-testid="preview-open-button"]'),
+		).toBeVisible({ timeout: 2000 });
+
+		// Card wrapper still present after resolve (continuity, no flash).
+		await expect(page.locator("tool-message .border.rounded-md")).toHaveCount(1);
+	});
+
 	test("archived fallback: legacy single-block preview_open renders disabled button", async ({ page }) => {
 		await gotoAndWait(page);
 

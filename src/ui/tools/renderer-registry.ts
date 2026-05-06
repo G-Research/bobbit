@@ -3,7 +3,7 @@ import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";
-import { ChevronsUpDown, ChevronUp, Loader } from "lucide";
+import { AlertTriangle, ChevronsUpDown, ChevronUp, FileQuestion, Loader } from "lucide";
 import type { ToolRenderer, ToolRenderResult } from "./types.js";
 
 /** Possible states for a tool call header icon/styling. */
@@ -58,6 +58,20 @@ export function registerLazyToolRenderer(toolName: string, loader: LazyRendererL
 	pendingLazy.set(toolName, loader);
 }
 
+/** Custom DOM event dispatched on `document` after a lazy renderer resolves
+ *  (success or failure). Mounted `<tool-message>` / `<tool-group>` elements
+ *  listen for this and pull their own `requestUpdate()`. The `detail.toolName`
+ *  matches the registry key. See AGENTS.md → "Add a heavy tool renderer". */
+export const TOOL_RENDERER_LOADED_EVENT = "bobbit-tool-renderer-loaded";
+
+function dispatchRendererLoaded(toolName: string): void {
+	try {
+		document.dispatchEvent(new CustomEvent(TOOL_RENDERER_LOADED_EVENT, { detail: { toolName } }));
+	} catch {
+		/* document may not exist in some test fixtures */
+	}
+}
+
 function startLoad(toolName: string, loader: LazyRendererLoader): void {
 	if (inFlight.has(toolName)) return;
 	const p = loader()
@@ -66,31 +80,79 @@ function startLoad(toolName: string, loader: LazyRendererLoader): void {
 			toolRenderers.set(toolName, renderer as ToolRenderer);
 			pendingLazy.delete(toolName);
 			inFlight.delete(toolName);
-			// Trigger a re-render so transcript picks up the resolved renderer.
+			// Notify mounted tool-message / tool-group instances FIRST so each
+			// can pull its own update even if renderApp() short-circuits.
+			dispatchRendererLoaded(toolName);
+			// Belt-and-braces top-down re-render.
 			import("../../app/state.js")
 				.then(({ renderApp }) => renderApp())
 				.catch(() => { /* state module may not exist in unit-test fixtures */ });
 			return renderer as ToolRenderer;
 		})
 		.catch((err) => {
-			inFlight.delete(toolName);
 			// eslint-disable-next-line no-console
 			console.error(`[tool-registry] failed to lazy-load renderer for "${toolName}":`, err);
-			throw err;
+			const fallback = makeLoadFailureRenderer(toolName);
+			toolRenderers.set(toolName, fallback);
+			pendingLazy.delete(toolName);
+			inFlight.delete(toolName);
+			dispatchRendererLoaded(toolName);
+			import("../../app/state.js")
+				.then(({ renderApp }) => renderApp())
+				.catch(() => { /* state module may not exist in unit-test fixtures */ });
+			// Resolve to the fallback so the inFlight promise does not surface
+			// as an unhandled rejection — callers ignore the value anyway.
+			return fallback;
 		});
 	inFlight.set(toolName, p);
 }
 
+/**
+ * Placeholder shown while a lazy renderer's chunk is loading. Uses the
+ * standard card wrapper (isCustom=false) and the same `renderHeader()`
+ * shape every other tool renderer emits, plus a generic disabled
+ * "Loading…" button row to reserve vertical space. This keeps the layout
+ * stable across the lazy boundary — the real renderer's content slots in
+ * with no card-vs-no-card jump and no button materialising from nothing.
+ */
 function makePlaceholderRenderer(toolName: string): ToolRenderer {
 	return {
 		render(_params, _result, _isStreaming): ToolRenderResult {
 			return {
 				content: html`
-					<div class="flex items-center gap-2 text-sm text-muted-foreground">
-						<span class="inline-block text-foreground">${icon(Loader, "sm")}</span>
-						<span class="font-mono">${toolName}</span>
+					<div class="flex items-center justify-between gap-2">
+						<div class="flex-1 min-w-0">
+							${renderHeader("inprogress", FileQuestion, html`<span class="font-mono">${toolName}</span>`)}
+						</div>
+						<button
+							disabled
+							class="text-xs px-2 py-0.5 rounded border border-border bg-transparent text-muted-foreground opacity-50 cursor-not-allowed"
+							title="Loading renderer…"
+							data-lazy-renderer-placeholder-btn
+						>Loading…</button>
 					</div>
 				`,
+				isCustom: false,
+			};
+		},
+	};
+}
+
+/**
+ * Fallback renderer registered when a lazy loader rejects. Renders the
+ * standard card with an error header so the user sees a real failure state
+ * instead of an indefinite spinner. Re-mounted `<tool-message>` instances
+ * pick this up via the same `bobbit-tool-renderer-loaded` event.
+ */
+function makeLoadFailureRenderer(toolName: string): ToolRenderer {
+	return {
+		render(_params, _result, _isStreaming): ToolRenderResult {
+			return {
+				content: renderHeader(
+					"error",
+					AlertTriangle,
+					html`<span class="font-mono">${toolName}</span> — Renderer failed to load — refresh to retry`,
+				),
 				isCustom: false,
 			};
 		},
