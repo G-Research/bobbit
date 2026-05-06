@@ -3,7 +3,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
-import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo } from "./api.js";
+import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
@@ -176,6 +176,8 @@ let roles: RoleData[] = [];
 let groupPolicies: Record<string, string> = {};
 let mcpServers: McpServerInfo[] = [];
 let expandedMcpServers = new Set<string>();
+/** Per-tool (sub-namespace) expansion. Key: `<server>::<sub>` (`<server>::` for flat). */
+let expandedMcpTools = new Set<string>();
 let selectedTool: ToolInfo | null = null;
 let loading = true;
 let editDescription = "";
@@ -468,6 +470,57 @@ function toggleMcpServer(name: string): void {
 	renderApp();
 }
 
+function toggleMcpTool(server: string, sub: string | undefined): void {
+	const key = `${server}::${sub ?? ""}`;
+	if (expandedMcpTools.has(key)) {
+		expandedMcpTools.delete(key);
+	} else {
+		expandedMcpTools.add(key);
+	}
+	renderApp();
+}
+
+/**
+ * Parse an MCP bobbit name (`mcp__<server>__<op>` or
+ * `mcp__<server>__<sub>__<op>`) client-side as a fallback when the server
+ * payload doesn't supply `subNamespace` / `op`. Server-side single source
+ * of truth is `parseMcpToolName()` in `src/server/mcp/mcp-meta.ts`.
+ */
+function parseMcpNameLocal(serverName: string, opInfo: McpOperationInfo): { sub?: string; op: string } {
+	if (opInfo.op !== undefined) return { sub: opInfo.subNamespace, op: opInfo.op };
+	const prefix = `mcp__${serverName}__`;
+	const rest = opInfo.name.startsWith(prefix) ? opInfo.name.slice(prefix.length) : opInfo.name;
+	const sepIdx = rest.indexOf("__");
+	if (sepIdx < 0) return { op: rest };
+	return { sub: rest.slice(0, sepIdx), op: rest.slice(sepIdx + 2) };
+}
+
+async function handleMcpPolicyChange(key: string, value: string): Promise<void> {
+	await updateGroupPolicy(key, value || null);
+	groupPolicies = await fetchGroupPolicies();
+	renderApp();
+}
+
+function renderMcpPolicySelect(key: string, current: string, testid: string): TemplateResult {
+	return html`
+		<select class="tool-group-select"
+			data-testid=${testid}
+			.value=${current}
+			@click=${(e: Event) => e.stopPropagation()}
+			@keydown=${(e: KeyboardEvent) => e.stopPropagation()}
+			@change=${async (e: Event) => {
+				e.stopPropagation();
+				const val = (e.target as HTMLSelectElement).value;
+				await handleMcpPolicyChange(key, val);
+			}}>
+			<option value="" ?selected=${!current}>Allow (default)</option>
+			<option value="allow" ?selected=${current === "allow"}>Allow</option>
+			<option value="ask" ?selected=${current === "ask"}>Ask</option>
+			<option value="never" ?selected=${current === "never"}>Never</option>
+		</select>
+	`;
+}
+
 function renderMcpSection(): TemplateResult {
 	if (mcpServers.length === 0) return html``;
 	const chevronSvg = html`<svg class="tool-group-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
@@ -488,29 +541,76 @@ function renderMcpSection(): TemplateResult {
 						: server.status === "error"
 							? "text-red-600"
 							: "text-muted-foreground";
+					const serverPolicyKey = `mcp__${server.name}`;
+					const serverPolicy = groupPolicies[serverPolicyKey] || "";
+
+					// Group ops by sub-namespace. Flat servers — ops with no
+					// `subNamespace` — collapse into a single bucket keyed by `""`,
+					// which renders as one tool row whose name = the server.
+					const bySub = new Map<string, McpOperationInfo[]>();
+					for (const op of server.tools) {
+						const parsed = parseMcpNameLocal(server.name, op);
+						const key = parsed.sub ?? "";
+						const list = bySub.get(key) ?? [];
+						list.push(op);
+						bySub.set(key, list);
+					}
+					const subKeys = Array.from(bySub.keys()).sort();
+
 					return html`
 						<div class="mcp-server-row" data-testid="mcp-server-row" data-server-name=${server.name}>
-							<div class="tool-row" tabindex="0" role="button"
+							<div class="tool-group-header"
 								data-testid="mcp-server-toggle"
+								tabindex="0" role="button"
+								style="cursor: pointer;"
 								@click=${() => toggleMcpServer(server.name)}
 								@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMcpServer(server.name); } }}>
-								<span class="tool-row-name inline-flex items-center gap-2">
-									<span style="display:inline-block;transform:rotate(${expanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
-									${server.name}
-									<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
-								</span>
-								<span class="tool-row-desc">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
+								<span style="display:inline-flex;transform:rotate(${expanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
+								<span class="tool-group-name">${server.name}</span>
+								<span class="text-xs ${statusClass}" data-testid="mcp-server-status">${server.status}</span>
+								<span class="tool-group-count">${server.toolCount} operation${server.toolCount !== 1 ? "s" : ""}</span>
+								<span class="tool-group-policy-label">Group Policy:</span>
+								${renderMcpPolicySelect(serverPolicyKey, serverPolicy, "mcp-server-policy")}
 							</div>
 							${server.status === "error" && server.error
 								? html`<div class="text-xs text-red-600 px-3 pb-2" data-testid="mcp-server-error">${server.error}</div>`
 								: nothing}
 							${expanded
-								? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
-										${server.tools.length === 0
+								? html`<div class="tool-group-items" style="padding-left: 1rem;">
+										${subKeys.length === 0
 											? html`<div class="tools-note px-3 py-2">No operations available.</div>`
-											: server.tools.map((op) => {
-													const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
-													return renderToolRow(tool);
+											: subKeys.map((sub) => {
+													const ops = bySub.get(sub)!;
+													const hasSub = sub.length > 0;
+													const toolPolicyKey = hasSub ? `mcp__${server.name}__${sub}` : `mcp__${server.name}`;
+													const toolPolicy = groupPolicies[toolPolicyKey] || "";
+													const toolKey = `${server.name}::${sub}`;
+													const toolExpanded = expandedMcpTools.has(toolKey);
+													const toolLabel = hasSub ? sub : server.name;
+													return html`
+														<div class="mcp-tool-row" data-testid="mcp-tool-row" data-tool-name=${toolLabel}>
+															<div class="tool-group-header"
+																data-testid="mcp-tool-toggle"
+																tabindex="0" role="button"
+																style="cursor: pointer;"
+																@click=${() => toggleMcpTool(server.name, hasSub ? sub : undefined)}
+																@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMcpTool(server.name, hasSub ? sub : undefined); } }}>
+																<span style="display:inline-flex;transform:rotate(${toolExpanded ? 0 : -90}deg);transition:transform 0.15s;">${chevronSvg}</span>
+																<span class="tool-group-name">${toolLabel}</span>
+																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
+																<span class="tool-group-policy-label">Tool Policy:</span>
+																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy")}
+															</div>
+															${toolExpanded
+																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
+																		${ops.map((op) => {
+																			const tool = toolByName.get(op.name) ?? { name: op.name, description: op.description, group: `MCP: ${server.name}` } as ToolInfo;
+																			return renderToolRow(tool);
+																		})}
+																	</div>`
+																: nothing}
+														</div>
+													`;
 												})}
 									</div>`
 								: nothing}

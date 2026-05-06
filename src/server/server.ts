@@ -30,6 +30,7 @@ import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
 import { resolveGrantPolicy } from "./agent/tool-activation.js";
+import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
@@ -7543,7 +7544,15 @@ async function handleApiRoute(
 		const toolInfos = mcpManager.getToolInfos();
 		const result = statuses.map(s => ({
 			...s,
-			tools: toolInfos.filter(t => t.serverName === s.name).map(t => ({ name: t.name, description: t.description })),
+			tools: toolInfos.filter(t => t.serverName === s.name).map(t => {
+				const parsed = parseMcpToolName(t.name);
+				return {
+					name: t.name,
+					description: t.description,
+					subNamespace: parsed?.sub,
+					op: parsed?.op ?? t.mcpToolName,
+				};
+			}),
 		}));
 		json(result);
 		return;
@@ -7653,9 +7662,8 @@ async function handleApiRoute(
 			if (toolStr.startsWith("mcp__")) {
 				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
 				const role = roleName ? roleManager.getRole(roleName) : undefined;
-				const sepIdx = toolStr.indexOf("__", 5);
-				const opServer = sepIdx > 5 ? toolStr.slice(5, sepIdx) : "";
-				const opGroup = opServer ? `MCP: ${opServer}` : undefined;
+				const parsed = parseMcpToolName(toolStr);
+				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
 				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);
 				if (policy === "never") {
 					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
@@ -7672,10 +7680,10 @@ async function handleApiRoute(
 			let parsedServer: string | undefined;
 			let parsedOperation: string | undefined;
 			if (parsedToolForError && parsedToolForError.startsWith("mcp__")) {
-				const sepIdx = parsedToolForError.indexOf("__", 5);
-				if (sepIdx > 5) {
-					parsedServer = parsedToolForError.slice(5, sepIdx);
-					parsedOperation = parsedToolForError.slice(sepIdx + 2);
+				const parsedErr = parseMcpToolName(parsedToolForError);
+				if (parsedErr) {
+					parsedServer = parsedErr.server;
+					parsedOperation = parsedErr.sub ? `${parsedErr.sub}__${parsedErr.op}` : parsedErr.op;
 				}
 			}
 			json({ error: e.message, server: parsedServer, operation: parsedOperation, stack: e.stack }, 500);

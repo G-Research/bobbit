@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { computeEffectiveAllowedTools, computeToolActivationArgs, resolveGrantPolicy, writeMcpProxyExtensions } = await import("../src/server/agent/tool-activation.ts");
+const { computeEffectiveAllowedTools, computeToolActivationArgs, resolveGrantPolicy, writeMcpProxyExtensions, mcpPolicyKeys, mcpPolicyPrefix } = await import("../src/server/agent/tool-activation.ts");
 
 // Minimal mock ToolManager — only needs getToolByName()
 function mockToolManager(tools: Record<string, { grantPolicy?: string }>) {
@@ -184,6 +184,119 @@ describe("resolveGrantPolicy", () => {
 	it("normalizes legacy never-ask to never", () => {
 		const role = { toolPolicies: { "my_tool": "never-ask" as any } };
 		assert.equal(resolveGrantPolicy("my_tool", "Group", role, undefined), "never");
+	});
+});
+
+// ── mcpPolicyKeys: shape coverage for all four name forms ──────────────
+
+describe("mcpPolicyKeys — four name shapes", () => {
+	it("per-op sub-namespaced → group=mcp__<server>, tool=mcp__<server>__<sub>", () => {
+		assert.deepEqual(
+			mcpPolicyKeys("mcp__gr__ai-adoption__list-articles"),
+			{ group: "mcp__gr", tool: "mcp__gr__ai-adoption" },
+		);
+	});
+
+	it("per-op flat → group=tool=mcp__<server>", () => {
+		assert.deepEqual(
+			mcpPolicyKeys("mcp__playwright__click"),
+			{ group: "mcp__playwright", tool: "mcp__playwright" },
+		);
+	});
+
+	it("meta sub-namespaced → group=mcp__<server>, tool=mcp__<server>__<sub>", () => {
+		assert.deepEqual(
+			mcpPolicyKeys("mcp_gr__ai-adoption"),
+			{ group: "mcp__gr", tool: "mcp__gr__ai-adoption" },
+		);
+	});
+
+	it("meta flat → group=tool=mcp__<server>", () => {
+		assert.deepEqual(
+			mcpPolicyKeys("mcp_playwright"),
+			{ group: "mcp__playwright", tool: "mcp__playwright" },
+		);
+	});
+
+	it("non-MCP names return undefined", () => {
+		assert.equal(mcpPolicyKeys("read"), undefined);
+		assert.equal(mcpPolicyKeys(""), undefined);
+	});
+
+	it("backward-compat mcpPolicyPrefix returns the group key", () => {
+		assert.equal(mcpPolicyPrefix("mcp__gr__ai-adoption__list-articles"), "mcp__gr");
+		assert.equal(mcpPolicyPrefix("mcp_gr__ai-adoption"), "mcp__gr");
+		assert.equal(mcpPolicyPrefix("mcp_playwright"), "mcp__playwright");
+	});
+});
+
+describe("resolveGrantPolicy — tool-key beats group-key", () => {
+	it("role tool-key (`mcp__gr__ai-adoption`) wins over role group-key (`mcp__gr`)", () => {
+		const role = {
+			toolPolicies: {
+				"mcp__gr": "never" as const,
+				"mcp__gr__ai-adoption": "ask" as const,
+			},
+		};
+		assert.equal(
+			resolveGrantPolicy("mcp__gr__ai-adoption__list-articles", "MCP: gr", role, undefined),
+			"ask",
+		);
+	});
+
+	it("role tool-key applies to the meta-tool name `mcp_gr__ai-adoption`", () => {
+		const role = {
+			toolPolicies: { "mcp__gr__ai-adoption": "never" as const },
+		};
+		assert.equal(
+			resolveGrantPolicy("mcp_gr__ai-adoption", "MCP: gr", role, undefined),
+			"never",
+		);
+	});
+
+	it("role group-key applies to all sub-namespace meta-tools (no tool-key set)", () => {
+		const role = { toolPolicies: { "mcp__gr": "never" as const } };
+		assert.equal(resolveGrantPolicy("mcp_gr__ai-adoption", "MCP: gr", role, undefined), "never");
+		assert.equal(resolveGrantPolicy("mcp_gr__jira", "MCP: gr", role, undefined), "never");
+	});
+
+	it("group-store tool-key wins over group-store group-key", () => {
+		const role = {};
+		const tm = mockToolManager({});
+		const gps = mockGroupPolicyStore({
+			"mcp__gr": "never",
+			"mcp__gr__ai-adoption": "ask",
+		});
+		assert.equal(
+			resolveGrantPolicy("mcp__gr__ai-adoption__list-articles", "MCP: gr", role, tm, gps),
+			"ask",
+		);
+		assert.equal(
+			resolveGrantPolicy("mcp__gr__jira__get-queue", "MCP: gr", role, tm, gps),
+			"never",
+		);
+	});
+
+	it("flat server: legacy `mcp__playwright` still applies as group key", () => {
+		const role = {};
+		const tm = mockToolManager({});
+		const gps = mockGroupPolicyStore({ "mcp__playwright": "never" });
+		assert.equal(
+			resolveGrantPolicy("mcp__playwright__click", "MCP: playwright", role, tm, gps),
+			"never",
+		);
+		assert.equal(
+			resolveGrantPolicy("mcp_playwright", "MCP: playwright", role, tm, gps),
+			"never",
+		);
+	});
+
+	it("role tool-key on a flat server (group=tool) still resolves", () => {
+		const role = { toolPolicies: { "mcp__playwright": "ask" as const } };
+		assert.equal(
+			resolveGrantPolicy("mcp__playwright__click", "MCP: playwright", role, undefined),
+			"ask",
+		);
 	});
 });
 
