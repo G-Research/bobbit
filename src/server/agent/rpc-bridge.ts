@@ -259,7 +259,7 @@ export class RpcBridge {
 			const tlsEnv = fs.existsSync(caCertPath)
 				? { NODE_EXTRA_CA_CERTS: caCertPath }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
-			this.process = spawn("node", [cliPath, ...args], {
+			this.process = spawn(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
 				env: {

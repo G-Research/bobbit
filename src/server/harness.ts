@@ -109,7 +109,7 @@ function launchServer(): void {
 	}
 	console.log(`\n[harness] Launching server (port ${PORT})...`);
 	lastLaunchAt = Date.now();
-	child = spawn("node", [CLI_PATH, ...forwardedArgs], {
+	child = spawn(process.execPath, [CLI_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
 		env: { ...process.env },

@@ -228,8 +228,13 @@ Pass if the integrated tree is coherent. Fail with concrete issues if not.`;
  *
  * Phase 3 of nested goals — see SUBGOALS-SPEC §2 / §5 and
  * docs/_phase-3-notes.md. The execution gate's verify[] starts EMPTY; the
- * team-lead populates it via `propose_*` and the goal-plan signal freezes
- * the array (mutation classifier kicks in for further changes).
+ * team-lead populates it via `goal_plan_propose` with `subgoal`-typed
+ * verify-steps (see `SeededVerifyStep.type === "subgoal"`), and the
+ * goal-plan signal freezes the array (mutation classifier kicks in for
+ * further changes). Each subgoal step's `subgoal` payload (`planId`,
+ * `title`, `spec`, optional `workflowId` / `suggestedRole`) is consumed
+ * by the verification harness's `runSubgoalStep`, which spawns/resolves
+ * a child goal and waits for its `ready-to-merge` to pass.
  *
  * Gate sequence: charter → plan-review → goal-plan → execution → integration → ready-to-merge.
  *
