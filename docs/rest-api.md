@@ -213,7 +213,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/projects` | List all registered projects. |
-| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. |
+| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). |
 | `GET` | `/api/projects/:id` | Get a single project. |
 | `PUT` | `/api/projects/:id` | Update name/color. |
 | `DELETE` | `/api/projects/:id` | Unregister (does not delete files). Returns **400** `{"error":"Cannot delete the last remaining project — add another project first"}` when deleting would leave zero projects. Under `BOBBIT_E2E=1`, `?force=1` bypasses the guard for tests that need to exercise the zero-project UX. |
