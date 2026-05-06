@@ -11,13 +11,126 @@
 		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 		<link rel="apple-touch-icon" href="/icons/icon-192.png" />
 		<title>Bobbit</title>
+		<script>
+			/*
+			 * Inline theme + palette bootstrap. MUST run before any styles paint
+			 * — otherwise we get a flash of the wrong theme on cold launch /
+			 * iOS PWA snapshot restore. Mirrors mini-lit's applyTheme(): the
+			 * stored 'theme' key is 'light' | 'dark' | 'system' (or absent =
+			 * system). When 'system', use prefers-color-scheme. The .dark class
+			 * is the single source of truth for dark mode in src/ui/app.css and
+			 * everywhere in the codebase.
+			 */
+			(function () {
+				try {
+					var theme = localStorage.getItem("theme") || "system";
+					var isDark =
+						theme === "dark" ||
+						(theme === "system" &&
+							window.matchMedia &&
+							window.matchMedia("(prefers-color-scheme: dark)").matches);
+					if (isDark) document.documentElement.classList.add("dark");
+					var p = localStorage.getItem("palette");
+					if (p && p !== "forest") document.documentElement.dataset.palette = p;
+				} catch (e) { /* ignore */ }
+			})();
+		</script>
+		<style>
+			/* ─────────────────────────────────────────────────────────────────
+			 *  PWA RESUME SKELETON
+			 *  Inline so it paints the moment HTML parses — no JS, no external
+			 *  CSS, no font loading. Lives as a sibling of #app and is hidden
+			 *  by CSS :has() the moment Lit puts anything into #app — pure CSS,
+			 *  no JS coupling, no main.ts edit. :has() is supported on iOS
+			 *  Safari 15.4+ and Chromium 105+ (our PWA target).
+			 *
+			 *  src/ui/app.css (which seeds --background etc. for :root and
+			 *  .dark) is part of the JS bundle and is NOT loaded at first
+			 *  paint, so we hardcode colour values here. Light values match
+			 *  the seeded forest light tokens; dark values match the seeded
+			 *  forest dark tokens (#2b2d2b is the existing theme-color meta).
+			 * ─────────────────────────────────────────────────────────────── */
+			html, body { margin: 0; padding: 0; height: 100%; }
+			body { background: #f5f6f3; color: #1a1d1a; }
+			html.dark body { background: #2b2d2b; color: #e8eae5; }
+
+			.bobbit-skeleton {
+				position: fixed;
+				inset: 0;
+				display: flex;
+				font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+				background: #f5f6f3;
+				color: #1a1d1a;
+				overflow: hidden;
+			}
+			html.dark .bobbit-skeleton { background: #2b2d2b; color: #e8eae5; }
+
+			.bobbit-skeleton__sidebar {
+				width: 240px;
+				flex: none;
+				background: rgba(0, 0, 0, 0.04);
+				border-right: 1px solid rgba(0, 0, 0, 0.08);
+				padding: 16px 12px;
+			}
+			html.dark .bobbit-skeleton__sidebar {
+				background: rgba(255, 255, 255, 0.03);
+				border-right-color: rgba(255, 255, 255, 0.08);
+			}
+			@media (max-width: 767px) { .bobbit-skeleton__sidebar { display: none; } }
+
+			.bobbit-skeleton__main {
+				flex: 1;
+				display: flex;
+				flex-direction: column;
+				min-width: 0;
+			}
+			.bobbit-skeleton__header {
+				height: 44px;
+				flex: none;
+				border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+			}
+			html.dark .bobbit-skeleton__header { border-bottom-color: rgba(255, 255, 255, 0.08); }
+			.bobbit-skeleton__body { flex: 1; }
+
+			.bobbit-skeleton__row {
+				height: 12px;
+				border-radius: 4px;
+				background: rgba(0, 0, 0, 0.07);
+				margin: 10px 0;
+			}
+			html.dark .bobbit-skeleton__row { background: rgba(255, 255, 255, 0.06); }
+			.bobbit-skeleton__row.--w70 { width: 70%; }
+			.bobbit-skeleton__row.--w50 { width: 50%; }
+			.bobbit-skeleton__row.--w90 { width: 90%; }
+
+			/* Hide the skeleton the moment Lit populates #app. */
+			body:has(#app > *) .bobbit-skeleton { display: none !important; }
+		</style>
 	</head>
 	<body class="bg-background">
+		<!--
+			Inline boot skeleton. Sibling of #app — auto-hidden via
+			body:has(#app > *) the moment Lit's first render adds anything
+			to #app. aria-hidden so screen readers don't announce it.
+		-->
+		<div class="bobbit-skeleton" aria-hidden="true">
+			<aside class="bobbit-skeleton__sidebar">
+				<div class="bobbit-skeleton__row --w70"></div>
+				<div class="bobbit-skeleton__row"></div>
+				<div class="bobbit-skeleton__row --w50"></div>
+				<div class="bobbit-skeleton__row"></div>
+				<div class="bobbit-skeleton__row --w70"></div>
+				<div class="bobbit-skeleton__row --w90"></div>
+				<div class="bobbit-skeleton__row --w50"></div>
+			</aside>
+			<div class="bobbit-skeleton__main">
+				<div class="bobbit-skeleton__header"></div>
+				<div class="bobbit-skeleton__body"></div>
+			</div>
+		</div>
 		<div id="app"></div>
 		<script>
 			(function() {
-				var p = localStorage.getItem('palette');
-				if (p && p !== 'forest') document.documentElement.dataset.palette = p;
 				// Inject the PWA manifest link with the auth token baked in so iOS
 				// installs a tokenized start_url. Done via JS (rather than a static
 				// <link> tag) to guarantee the href includes the token BEFORE Safari
