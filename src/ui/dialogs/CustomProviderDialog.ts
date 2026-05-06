@@ -8,6 +8,7 @@ import type { Model } from "@mariozechner/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/api.js";
+import "../components/ErrorDetails.js";
 import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store.js";
 
 export class CustomProviderDialog extends DialogBase {
@@ -256,7 +257,7 @@ export class CustomProviderDialog extends DialogBase {
 											disabled: this.testing || !this.baseUrl,
 											children: this.testing ? i18n("Testing...") : i18n("Test Connection"),
 										})}
-										${this.testError ? html` <div class="text-sm text-destructive">${this.testError}</div> ` : ""}
+										${this.testError ? html` <error-details .message=${this.testError}></error-details> ` : ""}
 										${
 											this.discoveredModels.length > 0
 												? html`
