@@ -1386,10 +1386,19 @@ export async function fetchRoles(): Promise<RoleData[]> {
 // ============================================================================
 
 export interface McpOperationInfo {
-	/** Bobbit-prefixed tool name: mcp__<server>__<op>. */
+	/** Bobbit-prefixed tool name: mcp__<server>__<op> or mcp__<server>__<sub>__<op>. */
 	name: string;
 	/** Description shown in the UI. */
 	description: string;
+	/**
+	 * Sub-namespace for gateway-style servers (e.g. "ai-adoption" in
+	 * `mcp__gr__ai-adoption__list-articles`). undefined ⇒ flat server.
+	 * Server-side single source of truth: `parseMcpToolName()` in
+	 * `src/server/mcp/mcp-meta.ts`.
+	 */
+	subNamespace?: string;
+	/** Operation name (everything after the sub, or after the server if no sub). */
+	op?: string;
 }
 
 export interface McpServerInfo {
