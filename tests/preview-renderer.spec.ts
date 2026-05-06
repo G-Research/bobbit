@@ -31,7 +31,9 @@ const PAGE = `file://${FIXTURE}`;
 
 async function gotoAndWait(page: any) {
 	await page.goto(PAGE);
-	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
+	// 30s timeout: under suite contention the IIFE bundle (with lit + state.js dynamic
+	// imports) can take longer than 10s to evaluate before the entry sets __ready.
+	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 30_000 });
 }
 
 const MARKER = "__preview_snapshot_v1__\n";
