@@ -49,10 +49,13 @@ Layout:
 | Inline default entry | `inline.html` | `DEFAULT_INLINE_ENTRY` |
 | Entry filename | single segment, no `/` `\` `..` `\0` | `validateEntry` |
 
-Asset inclusion is **explicit**: `mountFile` copies only the named entry plus
-caller-declared `assets[]` (literals or single-segment globs). There is no
-BFS-of-everything fallback and no size cap — the agent is responsible for
-declaring only what it needs. Undeclared siblings are not copied.
+Asset inclusion is **explicit opt-in**: `mountFile` copies only the named
+entry plus caller-declared `assets[]` (literals or single-segment globs).
+There is no BFS-of-the-parent-directory fallback and no size cap — the
+agent is responsible for declaring only what it needs. Undeclared siblings
+are never copied into the mount and never reach the content origin. See
+[Mount endpoints — Explicit asset opt-in](#explicit-asset-opt-in-file-form)
+for the full contract, validation rules, and rationale.
 
 **Lifecycle.** Mount is created lazily on the first `preview_open` for a
 session. `removeMount(sid)` is wired into the session-archive / cleanup path
@@ -170,38 +173,100 @@ The client subscribes via the standard EventSource and bumps
 Accepts one of:
 
 - `{ "html": "<…>", "entry"?: "report.html" }` — write inline. `entry` must
-  be a single path segment. `assets`/`manifest` are not valid here.
+  be a single path segment. `assets`/`manifest` are not valid here and
+  produce a `400`.
 - `{ "file": "/abs/path/report.html", "assets"?: ["styles.css", "img/*.png"], "manifest"?: "preview-manifest.json" }`
-  — copy entry plus declared assets. `file` must be absolute and end in
-  `.html` / `.htm`. `assets[]` entries are paths relative to the entry's
-  directory; literals and single-segment globs (`*`, `?`) are supported.
-  `manifest` (relative to the entry's dir) points to a JSON file of the form
-  `{ "assets": ["..."] }`; its array is concatenated with inline `assets`.
-  Undeclared siblings are not copied.
+  — copy entry plus declared assets (see below). `file` must be absolute
+  and end in `.html` / `.htm`.
 
-Success for the `file` form additionally returns `assets: string[]` — the
-resolved relative asset paths actually copied (useful for renderer round-
-tripping).
+#### Explicit asset opt-in (`file` form)
 
-Returns `200 { url, path, entry, mtime }`:
+Asset inclusion is **agent-driven** — the gateway never walks the parent
+directory. `mountFile` copies *only* the named entry HTML, plus whatever
+the caller explicitly declares via `assets[]` and/or a `manifest` file.
+Undeclared siblings stay on the host filesystem and never enter the
+per-session mount.
+
+**Why explicit opt-in.** The original implementation BFS-walked the
+parent directory of the entry file (capped at 25 MiB). This had two
+problems:
+
+- **Privacy / accidental exposure.** Anything sitting next to the entry
+  HTML — drafts, `.env` files, uncommitted notes, other agents' work in
+  progress — was copied into the mount and served over HTTP. The
+  ergonomic default leaked sibling content.
+- **Footgun on real worktrees.** Pointing `file` at an HTML report
+  inside a project worktree typically tripped the 25 MiB cap and
+  failed with `413`, forcing agents into ad-hoc workarounds like
+  `cp report.html /tmp/x/`.
+
+Making declaration explicit fixes both. The agent only copies what it
+needs; the cap is no longer load-bearing and has been removed.
+
+**Inline `assets[]`.** Each entry is a path relative to the entry
+file's directory. Both literals and **single-segment** globs are
+supported:
+
+```json
+{
+  "file": "/.../report.html",
+  "assets": ["styles.css", "logo.svg", "img/*.png", "chart.?.svg"]
+}
+```
+
+**Manifest file.** `manifest` is a path (relative to the entry's
+directory) pointing at a sibling JSON file of the form:
+
+```json
+{ "assets": ["styles.css", "img/*.png"] }
+```
+
+The manifest's array is concatenated with inline `assets[]` (de-duplicated
+in order). Use whichever fits — they compose.
+
+**Validation rules** (apply to both `assets[]` entries and the manifest's
+resolved array, enforced in `mount.ts` and the path-guard):
+
+| Rejected | Why |
+|---|---|
+| Absolute paths (`/etc/passwd`, `C:/...`) | Must be relative to the entry's directory |
+| `..` segments | No escapes out of the entry directory |
+| Backslash `\` | Forward-slash only; cross-platform consistency |
+| NUL (`\0`) | Defence in depth against path smuggling |
+| `**` recursive globs | Encourages over-broad inclusion |
+| Character classes `[abc]` | Not implemented |
+| Brace expansion `{a,b}` | Not implemented |
+| Symlinks whose realpath escapes the entry directory | Realpath-based check, returns `403` |
+
+Single-segment `*` and `?` globs match within one path segment only —
+`img/*.png` matches `img/foo.png` but not `img/sub/foo.png`.
+
+**Error matrix:**
+
+| Status | When |
+|---|---|
+| `400` | invalid sessionId, missing body, bad entry, non-absolute `file` path, `file` not `.html`/`.htm`, `html` not a string, `assets`/`manifest` passed alongside `html`, non-string `assets[]` entry, invalid asset path (absolute / `..` / `\` / `\0` / `**` / `[...]` / `{a,b}`), manifest JSON parse error, manifest missing `assets[]` array |
+| `403` | sandbox out of scope; symlink whose realpath escapes the entry's source directory |
+| `404` | source `file` missing or not a regular file; `manifest` file missing; **literal** asset missing (a glob with zero matches is *not* an error) |
+| `500` | unexpected copy failure |
+
+**Response shape.** Returns `200` with:
 
 ```json
 {
   "url":   "/preview/3f2c…/report.html",
   "path":  "C:/Users/.../bobbit/state/preview/3f2c…/report.html",
   "entry": "report.html",
-  "mtime": 1775853741666
+  "mtime": 1775853741666,
+  "assets": ["img/chart.png", "styles.css"]
 }
 ```
 
-Errors propagate from `PreviewMountError`:
-
-| Status | When |
-|---|---|
-| `400` | invalid sessionId, missing body, bad entry, non-absolute file path, file not `.html`/`.htm`, html not a string, `assets`/`manifest` passed with `html`, invalid asset path (absolute / `..` / backslash / `**` / `[...]` / `{a,b}`), manifest JSON parse error or missing `assets[]` |
-| `403` | sandbox out of scope, symlink escapes source tree |
-| `404` | source file missing, source not a regular file, manifest file missing, literal asset missing |
-| `500` | unexpected copy failure |
+The `assets[]` field is echoed back only on the `file` form, sorted, and
+contains the resolved relative paths actually copied (after glob
+expansion and de-duplication). The inline `html` form omits it. Renderer
+reopen flows can round-trip this list back into a follow-up
+`POST /api/preview/mount` to re-stamp the same mount.
 
 After every success the server calls `broadcastPreviewChanged(sessionId, …)`
 to fan out a `preview-changed` SSE event to every subscribed tab.
