@@ -491,6 +491,17 @@ export class ToolMessage extends LitElement {
 
 	private _onPreviewReady = () => { this.requestUpdate(); };
 
+	// When a lazy tool renderer's chunk resolves, the registry dispatches
+	// `bobbit-tool-renderer-loaded` on document. Pull our own update so the
+	// placeholder is replaced even if a top-level renderApp() short-circuits.
+	private _onRendererLoaded = (e: Event) => {
+		const detail = (e as CustomEvent).detail;
+		const name = this.tool?.name || this.toolCall?.name;
+		if (detail?.toolName && name && detail.toolName === name) {
+			this.requestUpdate();
+		}
+	};
+
 	// For the non-blocking ask_user_choices widget: when a new message arrives,
 	// the tool_use card may need to flip to Answered mode because the transcript
 	// now contains a matching `[ask_user_choices_response ...]` envelope.
@@ -549,6 +560,7 @@ export class ToolMessage extends LitElement {
 		this.style.display = "block";
 		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
+		document.addEventListener("bobbit-tool-renderer-loaded", this._onRendererLoaded);
 		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
@@ -556,6 +568,7 @@ export class ToolMessage extends LitElement {
 		super.disconnectedCallback();
 		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
+		document.removeEventListener("bobbit-tool-renderer-loaded", this._onRendererLoaded);
 		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 
