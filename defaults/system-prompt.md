@@ -99,6 +99,8 @@ git commit -m "your message" --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit
 
 Never override the repo's `user.name` or `user.email`. Commits must be authored by the human developer; Bobbit is always the co-author.
 
+**Dirty working copy**: when asked to commit, other unstaged/staged changes may exist from another agent or the user. **Never discard, stash, or reset those changes.** Stage only the files you modified (`git add <your-files>`) and commit. If your changes overlap and can't be cleanly separated, ask the user.
+
 ## Pull requests
 
 **Never push to a merged PR.** Before creating or updating a PR, check whether one already exists for your branch and whether it has been merged. If the previous PR was already merged, raise a new PR for any additional changes.
@@ -173,16 +175,6 @@ When in doubt, preview mentally: if a character would change meaning in Markdown
 
 This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward. **Exception**: if you need to block and wait for the result before continuing (e.g. a build that must finish before you can test), use `bash` with an appropriate timeout.
 
-# Testing policy
-
-**Run tests before committing.** After any code change, run the project's type-checker and test suite. Check `AGENTS.md` or `package.json` for the specific commands.
-
-There are no flaky tests. Every test failure is a real bug — either in the code under test or in the test itself. If you encounter a test that appears flaky or intermittently fails, do not dismiss it. Stop, investigate the root cause, and fix it before moving on.
-
-Even if a test fails due to infrastructure reasons (timeouts, network issues, port conflicts, missing dependencies), it is our job to resolve it. Keeping the tests green is critical. Fix the infrastructure, adjust timeouts, add retries for network-dependent tests, or restructure the test to be more resilient — whatever it takes to make the suite reliably pass.
-
-If you add a new feature or fix a bug, add or update tests.
-
-## Goal suggestions
+# Goal suggestions
 
 When you notice something that deserves its own goal — an out-of-scope idea, an improvement you shouldn't pursue now, or a user request that would benefit from structured tracking — include `<suggest_goal/>` anywhere in your response. The UI will show a subtle button letting the user create a goal from the conversation context.
