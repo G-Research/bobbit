@@ -20,19 +20,97 @@ const MAX_DESCRIPTION_LEN = 400;
 const UNAVAILABLE_OP = "__unavailable__";
 
 /**
- * Sanitise a server name into a meta-tool name matching Anthropic API rules
- * (`[a-zA-Z0-9_-]+`, ≤64 chars total). Replaces invalid chars with `_` and
- * truncates to 64 chars including the `mcp_` prefix.
- *
- * @throws if `serverName` is empty or whitespace-only.
+ * Result of parsing a Bobbit MCP tool name. Pure structural parse — does not
+ * check whether the server is connected or whether the operation exists.
  */
-export function makeMetaToolName(serverName: string): string {
+export interface ParsedMcpToolName {
+	/** MCP server name (e.g. "gr", "playwright"). */
+	server: string;
+	/** Sub-namespace if any (e.g. "ai-adoption"). undefined ⇒ flat server. */
+	sub?: string;
+	/** Operation name (everything after the sub, or after the server if no sub). */
+	op: string;
+}
+
+/**
+ * Single source of truth for parsing canonical Bobbit MCP per-op tool names
+ * of the form `mcp__<server>__<rest>`. Strips the `mcp__<server>__` prefix
+ * and splits the remainder on the FIRST `__`:
+ *
+ *   - 0 separators → `{server, op}` (flat server)
+ *   - ≥1 separator → `{server, sub: <left>, op: <right-literal-with-remaining-__>}`
+ *
+ * Returns `null` for any non-MCP name (no leading `mcp__`, missing op, etc.)
+ * so callers can short-circuit cleanly.
+ *
+ * | Input                                  | server   | sub           | op              |
+ * |----------------------------------------|----------|---------------|-----------------|
+ * | mcp__gr__ai-adoption__list-articles    | gr       | ai-adoption   | list-articles   |
+ * | mcp__gr__ai-adoption__create-article   | gr       | ai-adoption   | create-article  |
+ * | mcp__gr__jira__get-queue               | gr       | jira          | get-queue       |
+ * | mcp__playwright__click                 | playwright | (none)      | click           |
+ * | mcp__foo__a__b__c                      | foo      | a             | b__c (literal)  |
+ */
+export function parseMcpToolName(bobbitName: string): ParsedMcpToolName | null {
+	if (typeof bobbitName !== "string") return null;
+	if (!bobbitName.startsWith("mcp__")) return null;
+	const remainder = bobbitName.slice(5); // after "mcp__"
+	const idx = remainder.indexOf("__");
+	if (idx <= 0) return null; // no server or no op segment
+	const server = remainder.slice(0, idx);
+	const after = remainder.slice(idx + 2);
+	if (after.length === 0) return null;
+	const subIdx = after.indexOf("__");
+	if (subIdx === -1) {
+		return { server, op: after };
+	}
+	const sub = after.slice(0, subIdx);
+	const op = after.slice(subIdx + 2);
+	if (sub.length === 0 || op.length === 0) {
+		// Treat malformed like flat to be defensive — fall back to flat.
+		return { server, op: after };
+	}
+	return { server, sub, op };
+}
+
+/**
+ * Sanitise a server (and optional sub-namespace) into a meta-tool name
+ * matching Anthropic API rules (`[a-zA-Z0-9_-]+`, ≤64 chars total).
+ *
+ * Shapes:
+ *   - `makeMetaToolName("playwright")`         → `"mcp_playwright"`
+ *   - `makeMetaToolName("gr", "ai-adoption")`   → `"mcp_gr__ai-adoption"`
+ *
+ * 64-char cap preserves the server segment — when sub is provided and the
+ * combined name would overflow, the sub-namespace is truncated first; if
+ * even the bare `mcp_<server>` exceeds 64 chars we fall through to the
+ * single-arg truncation behaviour.
+ *
+ * @throws if `serverName` is empty or whitespace-only, or if `sub` is
+ *   provided but empty.
+ */
+export function makeMetaToolName(serverName: string, sub?: string): string {
 	if (typeof serverName !== "string" || serverName.trim().length === 0) {
 		throw new Error("makeMetaToolName: serverName must be a non-empty string");
 	}
-	const sanitised = serverName.replace(/[^a-zA-Z0-9_-]/g, "_");
-	const full = `${MCP_META_PREFIX}${sanitised}`;
-	return full.length > MAX_TOOL_NAME_LEN ? full.slice(0, MAX_TOOL_NAME_LEN) : full;
+	const sanServer = serverName.replace(/[^a-zA-Z0-9_-]/g, "_");
+	if (sub === undefined) {
+		const full = `${MCP_META_PREFIX}${sanServer}`;
+		return full.length > MAX_TOOL_NAME_LEN ? full.slice(0, MAX_TOOL_NAME_LEN) : full;
+	}
+	if (typeof sub !== "string" || sub.trim().length === 0) {
+		throw new Error("makeMetaToolName: sub must be a non-empty string when provided");
+	}
+	const sanSub = sub.replace(/[^a-zA-Z0-9_-]/g, "_");
+	const head = `${MCP_META_PREFIX}${sanServer}__`;
+	if (head.length >= MAX_TOOL_NAME_LEN) {
+		// Server alone already saturates the budget — fall back to flat name.
+		const flat = `${MCP_META_PREFIX}${sanServer}`;
+		return flat.length > MAX_TOOL_NAME_LEN ? flat.slice(0, MAX_TOOL_NAME_LEN) : flat;
+	}
+	const budget = MAX_TOOL_NAME_LEN - head.length;
+	const subTrunc = sanSub.length > budget ? sanSub.slice(0, budget) : sanSub;
+	return head + subTrunc;
 }
 
 /**

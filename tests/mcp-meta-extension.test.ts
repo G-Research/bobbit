@@ -10,7 +10,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { generateMcpMetaExtension } = await import("../src/server/agent/tool-activation.ts");
+const { generateMcpMetaExtension, writeMcpProxyExtensions } = await import("../src/server/agent/tool-activation.ts");
+const os = await import("node:os");
+const pathMod = await import("node:path");
+const fsMod = await import("node:fs");
 
 describe("generateMcpMetaExtension — happy path", () => {
 	const ops = [
@@ -123,5 +126,157 @@ describe("generateMcpMetaExtension — name sanitisation", () => {
 		]);
 		// Forward slash must become underscore via makeMetaToolName.
 		assert.match(code, /name:\s*"mcp_scope_server"/);
+	});
+});
+
+describe("generateMcpMetaExtension — sub-namespace (gateway) shape", () => {
+	const ops = [
+		{ name: "list-articles", inputSchema: { type: "object", properties: {} } },
+		{ name: "create-article", inputSchema: { type: "object", properties: {} } },
+	];
+
+	const code = generateMcpMetaExtension("gr", ops, undefined, "ai-adoption");
+
+	it("emits meta-tool name `mcp_<server>__<sub>`", () => {
+		assert.match(code, /name:\s*"mcp_gr__ai-adoption"/);
+	});
+
+	it("docs path includes both server and sub", () => {
+		assert.match(code, /mcp-tool-docs\/gr__ai-adoption\.md/);
+	});
+
+	it("execute body dispatches the original `mcp__<server>__<sub>__<op>` name", () => {
+		assert.match(
+			code,
+			/"mcp__"\s*\+\s*"gr"\s*\+\s*"__"\s*\+\s*"ai-adoption"\s*\+\s*"__"\s*\+\s*operation/,
+		);
+	});
+
+	it("op enum lists ONLY the ops belonging to this sub-namespace", () => {
+		assert.match(code, /Type\.Literal\("list-articles"\)/);
+		assert.match(code, /Type\.Literal\("create-article"\)/);
+	});
+});
+
+describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
+	const path = pathMod;
+	const fs = fsMod;
+
+	function tmpBobbitDir() {
+		return fs.mkdtempSync(path.join(os.tmpdir(), "mcp-meta-ext-"));
+	}
+
+	function setIsolatedBobbit(t: any): void {
+		const dir = tmpBobbitDir();
+		const orig = process.env.BOBBIT_DIR;
+		process.env.BOBBIT_DIR = dir;
+		t.after(() => {
+			if (orig === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = orig;
+		});
+	}
+
+	it("gateway server with two sub-namespaces emits TWO extension files", (t) => {
+		setIsolatedBobbit(t);
+
+		const infos = [
+			{
+				name: "mcp__gr__ai-adoption__list-articles",
+				serverName: "gr",
+				mcpToolName: "ai-adoption__list-articles",
+				group: "MCP: gr",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+			{
+				name: "mcp__gr__ai-adoption__create-article",
+				serverName: "gr",
+				mcpToolName: "ai-adoption__create-article",
+				group: "MCP: gr",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+			{
+				name: "mcp__gr__jira__get-queue",
+				serverName: "gr",
+				mcpToolName: "jira__get-queue",
+				group: "MCP: gr",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const mgr = {
+			getToolInfos: () => infos,
+			getServerStatuses: () => [],
+		} as any;
+
+		const paths = writeMcpProxyExtensions(mgr);
+		assert.equal(paths.length, 2, "two extension files for two sub-namespaces");
+		const basenames = paths.map(p => path.basename(p)).sort();
+		assert.deepEqual(basenames, ["gr__ai-adoption.ts", "gr__jira.ts"]);
+
+		const aiAdopt = fs.readFileSync(paths.find(p => p.endsWith("gr__ai-adoption.ts"))!, "utf-8");
+		assert.match(aiAdopt, /name:\s*"mcp_gr__ai-adoption"/);
+		assert.match(aiAdopt, /Type\.Literal\("list-articles"\)/);
+		assert.match(aiAdopt, /Type\.Literal\("create-article"\)/);
+		// `jira` ops must NOT appear in the ai-adoption extension.
+		assert.doesNotMatch(aiAdopt, /Type\.Literal\("get-queue"\)/);
+
+		const jira = fs.readFileSync(paths.find(p => p.endsWith("gr__jira.ts"))!, "utf-8");
+		assert.match(jira, /name:\s*"mcp_gr__jira"/);
+		assert.match(jira, /Type\.Literal\("get-queue"\)/);
+		assert.doesNotMatch(jira, /Type\.Literal\("list-articles"\)/);
+	});
+
+	it("flat server emits ONE extension file at <server>.ts", (t) => {
+		setIsolatedBobbit(t);
+
+		const infos = [
+			{
+				name: "mcp__playwright__click",
+				serverName: "playwright",
+				mcpToolName: "click",
+				group: "MCP: playwright",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+			{
+				name: "mcp__playwright__snap",
+				serverName: "playwright",
+				mcpToolName: "snap",
+				group: "MCP: playwright",
+				description: "",
+				inputSchema: { type: "object", properties: {} },
+			},
+		];
+		const mgr = {
+			getToolInfos: () => infos,
+			getServerStatuses: () => [],
+		} as any;
+
+		const paths = writeMcpProxyExtensions(mgr);
+		assert.equal(paths.length, 1);
+		assert.equal(path.basename(paths[0]), "playwright.ts");
+		const code = fs.readFileSync(paths[0], "utf-8");
+		assert.match(code, /name:\s*"mcp_playwright"/);
+		assert.match(code, /Type\.Literal\("click"\)/);
+		assert.match(code, /Type\.Literal\("snap"\)/);
+	});
+
+	it("error-state stub still lands at <server>.ts (no sub knowledge)", (t) => {
+		setIsolatedBobbit(t);
+
+		const mgr = {
+			getToolInfos: () => [],
+			getServerStatuses: () => [
+				{ name: "broken", status: "error", toolCount: 0, error: "timeout" },
+			],
+		} as any;
+		const paths = writeMcpProxyExtensions(mgr);
+		assert.equal(paths.length, 1);
+		assert.equal(path.basename(paths[0]), "broken.ts");
+		const code = fs.readFileSync(paths[0], "utf-8");
+		assert.match(code, /name:\s*"mcp_broken"/);
+		assert.match(code, /unavailable/);
 	});
 });
