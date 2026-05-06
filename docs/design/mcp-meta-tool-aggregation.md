@@ -205,8 +205,13 @@ read tool-docs/mcp-<name>.md.
 
 The tool-docs reference is a **relative path** so it works under both the
 default `<stateDir>/mcp-tool-docs/<server>.md` and project-local docs
-dirs. Description hard-cap: 1500 chars (truncate the operations list and
-suffix `, …(N more)` if needed — measured in `buildMetaToolDescription`).
+dirs. Description hard-cap: 400 chars (truncate the operations list and
+append `... (N more)` if needed — measured in `buildMetaToolDescription`).
+
+> **Implementation note (re-attempt).** The original spec proposed 1500
+> chars; the shipped implementation tightened this to 400 because per-op
+> name lists rarely exceed that and the budget was being used to repeat
+> information already available via `mcp_describe`.
 
 ### 2.2 `mcp_describe` discovery tool
 
@@ -770,8 +775,8 @@ All paths are repo-relative.
 - **`tests/mcp-meta-schema.test.ts`** (NEW)
   - `buildMetaToolInputSchema([…ops])` produces the right `enum` order
     and shape; idempotent on duplicate op names.
-  - `buildMetaToolDescription(server, ops)` truncates to ≤ 1500 chars
-    and ends with `, …(N more)` when truncation hits.
+  - `buildMetaToolDescription(server, ops)` truncates to ≤ 400 chars
+    and ends with `... (N more)` when truncation hits.
   - `isValidOperationSchema` accepts a vanilla MCP op, rejects each of:
     missing name, name with spaces, non-object inputSchema, properties
     being an array, required containing non-strings.
@@ -1041,9 +1046,17 @@ addressed in this re-attempt:
 names so callers can short-circuit cleanly. Six unit tests cover the table
 in `docs/mcp-meta-tools.md`.
 
+**Companion helper:** `mcpPolicyKeys(toolName)` in
+`src/server/agent/tool-activation.ts` returns `{group, tool}` for both
+the legacy `mcp__<server>__<rest>` form and the meta-tool
+`mcp_<server>[__<sub>]` form. `mcpPolicyPrefix` is kept as a thin wrapper
+returning the group key, so legacy callers and tests pass unchanged.
+
 Every existing site that re-parsed names ad-hoc — `mcp-manager._parseToolName`,
-the `byServer` aggregation map in `tool-activation.ts`, `mcpPolicyPrefix`,
-the two `indexOf("__", 5)` parses in `server.ts` — routes through this helper.
+the `byServer` aggregation map in `tool-activation.ts`, `mcpPolicyPrefix` /
+`mcpPolicyKeys`, the two `indexOf("__", …)` parses in `server.ts` — routes
+through this helper. Reintroducing an ad-hoc parse at any of these sites
+brings back the gateway-grouping bug (one giant flat-enum meta-tool).
 
 ### Two-level meta-tools
 
@@ -1070,6 +1083,14 @@ Two-level keys can both appear in `tool-group-policies.yaml` and per-role
 | Group (whole server)     | `mcp__gr`               | every `mcp_gr__<sub>` meta-tool     |
 | Tool (one sub-namespace) | `mcp__gr__ai-adoption`  | `mcp_gr__ai-adoption` only          |
 | Flat server              | `mcp__playwright`       | `mcp_playwright` (= group = tool)   |
+
+### `/api/mcp-servers` payload
+
+The payload is extended **additively**: each operation entry carries
+`subNamespace?: string` and `op: string` alongside `name` and
+`description`, derived server-side from `parseMcpToolName`. The Tools
+page groups by `subNamespace` client-side without re-parsing. Older
+clients that ignore the new fields keep working unchanged.
 
 ### Tools page UI
 
