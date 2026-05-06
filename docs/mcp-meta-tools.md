@@ -120,26 +120,73 @@ A misbehaving MCP server no longer takes down the agent turn:
   the error response, so the meta extension surfaces a clean structured
   error.
 
+## Two-level meta-tools (gateway servers)
+
+Gateway-style MCP servers proxy several upstream sub-MCPs and emit
+two-level operation names like `mcp__gr__ai-adoption__list-articles`. Bobbit
+parses these structurally so each sub-namespace surfaces as its **own**
+meta-tool, instead of collapsing into a single giant enum.
+
+**Mental model:** MCP server = group, sub-namespace = tool, op = parameter.
+
+The single source of truth is `parseMcpToolName()` in
+`src/server/mcp/mcp-meta.ts`. Strip `mcp__<server>__`, split the remainder on
+the **first** `__`:
+
+| Input                                  | server       | sub           | op                |
+|----------------------------------------|--------------|---------------|-------------------|
+| `mcp__gr__ai-adoption__list-articles`  | `gr`         | `ai-adoption` | `list-articles`   |
+| `mcp__gr__ai-adoption__create-article` | `gr`         | `ai-adoption` | `create-article`  |
+| `mcp__gr__jira__get-queue`             | `gr`         | `jira`        | `get-queue`       |
+| `mcp__playwright__click`               | `playwright` | (none)        | `click`           |
+| `mcp__playwright__snap`                | `playwright` | (none)        | `snap`            |
+| `mcp__foo__a__b__c`                    | `foo`        | `a`           | `b__c` (literal)  |
+
+Meta-tool identity follows the same rule: `mcp_<server>__<sub>` when a
+sub-namespace exists, `mcp_<server>` when flat. The dispatcher remains
+`POST /api/internal/mcp-call` and still receives the original
+`mcp__<server>__<sub>__<op>` (or `mcp__<server>__<op>`) string — the
+meta-tool layer is purely the model-facing surface.
+
+### Policy keys
+
+Both keys may appear in `tool-group-policies.yaml` and per-role
+`toolPolicies`. Most-specific wins (tool > group), and role overrides project.
+
+| Scope                       | Key                       | Covers                                   |
+|-----------------------------|---------------------------|------------------------------------------|
+| Group (whole server)        | `mcp__gr`                 | every `mcp_gr__<sub>` meta-tool          |
+| Tool (one sub-namespace)    | `mcp__gr__ai-adoption`    | `mcp_gr__ai-adoption` only               |
+| Flat server                 | `mcp__playwright`         | `mcp_playwright` (= group = tool)        |
+
+A legacy 3-segment key `mcp__server__op` is treated as a **tool key**
+(sub-namespace) by default. Flat-server users with such keys are unaffected
+because flat servers never carry sub-namespaces.
+
 ## Tools page UI
 
 The Tools page surfaces one row per MCP **server** under a dedicated "MCP"
-section, sibling to the existing builtin sections. This matches what the
-model sees.
+section, sibling to the existing builtin sections. Each server row mirrors a
+built-in tool group:
 
-Each server row shows:
+- **Server header** (`data-testid="mcp-server-toggle"`): chevron, name, status
+  pill (`connected` / `error` / `disconnected`), operation count, and a
+  group-policy `<select>` (`data-testid="mcp-server-policy"`; key
+  `mcp__<server>`). Click to toggle expansion.
+- **Server expanded**: one **tool row** per sub-namespace
+  (`data-testid="mcp-tool-row"`), each with its own `<select>`
+  (`data-testid="mcp-tool-policy"`; key `mcp__<server>__<sub>` for sub,
+  `mcp__<server>` for flat) and a click-to-expand toggle
+  (`data-testid="mcp-tool-toggle"`). Flat servers render exactly one tool row
+  whose name matches the server.
+- **Operation rows** (deepest level, `data-testid="mcp-server-ops"`):
+  read-only listing with description. Operation is a parameter, not a tool —
+  no policy dropdown at this depth.
 
-- server name
-- connection status pill (`connected` / `error` / `disconnected`)
-- operation count
-- the existing group-policy `<select>`
-- a chevron expand toggle
-
-Expanding a server row reveals one row per operation — the same per-op rows
-that existed before, with their full schemas. Status is fetched from
-`GET /api/mcp-servers` (unchanged endpoint).
-
-This means top-level tool count visible to the user matches the model's view,
-with the option to drill into any server when needed.
+Both the server and tool selects route through `updateGroupPolicy(key, value)`
+(no backend change — the endpoint already accepts arbitrary keys). This means
+top-level tool count visible to the user matches the model's view, with the
+option to drill into any server when needed.
 
 ## Policy resolution
 

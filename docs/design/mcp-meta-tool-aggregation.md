@@ -1013,3 +1013,92 @@ deferred:
   endpoints in `src/server/server.ts`. `mcp-client.ts` is untouched.
 - ✅ All file paths and function references include line numbers /
   named symbols quoted from current `master`.
+
+---
+
+## Re-attempt: gateway grouping & policy UX
+
+The protocol-level rewrite above shipped. Two real-world gaps for
+**gateway-style MCP servers** (one MCP server proxying multiple sub-MCPs and
+emitting two-level tool names like `mcp__gr__ai-adoption__list-articles`) are
+addressed in this re-attempt:
+
+1. Such servers used to collapse into one giant meta-tool with a flat enum of
+   `ai-adoption__list-articles, ai-adoption__create-article, jira__get-queue, …`.
+2. The Tools page MCP section had no policy `<select>` at any level — only
+   `tool-group-policies.yaml` editing worked.
+
+### Mental model
+
+> MCP server = group, sub-namespace = tool, op = parameter.
+
+### Parser (single source of truth)
+
+`parseMcpToolName(bobbitName)` in `src/server/mcp/mcp-meta.ts` returns
+`{ server, sub?, op }`. Strip `mcp__<server>__`, split the remainder on the
+**first** `__` — 0 separators ⇒ flat (`{server, op}`); ≥ 1 ⇒
+`{server, sub: <left>, op: <right-literal>}`. Returns `null` for non-MCP
+names so callers can short-circuit cleanly. Six unit tests cover the table
+in `docs/mcp-meta-tools.md`.
+
+Every existing site that re-parsed names ad-hoc — `mcp-manager._parseToolName`,
+the `byServer` aggregation map in `tool-activation.ts`, `mcpPolicyPrefix`,
+the two `indexOf("__", 5)` parses in `server.ts` — routes through this helper.
+
+### Two-level meta-tools
+
+`generateMcpMetaExtension` is keyed by `(server, sub?)` instead of `(server)`.
+Each `(server, sub)` pair produces ONE meta-tool, named `mcp_<server>__<sub>`
+(or `mcp_<server>` for flat). The op enum lists ops for that sub-namespace
+only. The execute body still dispatches the original
+`mcp__<server>__<sub>__<op>` (or `mcp__<server>__<op>` for flat) — dispatcher
+unchanged.
+
+`writeMcpProxyExtensions` writes one file per `(server, sub?)`. Stub
+extensions for error-state servers continue to land at `<server>.ts` (no sub
+knowledge possible — server failed before listing tools).
+
+### Policy keys
+
+Two-level keys can both appear in `tool-group-policies.yaml` and per-role
+`toolPolicies`. `mcpPolicyPrefix` returns `{group, tool}`; callers consult
+**tool-key first, then group-key**, preserving existing precedence
+(role > project > group default > system fallback).
+
+| Scope                    | Key                     | Covers                              |
+|--------------------------|-------------------------|-------------------------------------|
+| Group (whole server)     | `mcp__gr`               | every `mcp_gr__<sub>` meta-tool     |
+| Tool (one sub-namespace) | `mcp__gr__ai-adoption`  | `mcp_gr__ai-adoption` only          |
+| Flat server              | `mcp__playwright`       | `mcp_playwright` (= group = tool)   |
+
+### Tools page UI
+
+`renderMcpSection()` in `src/app/tool-manager-page.ts` rewritten so each
+server row mirrors a built-in tool group:
+
+- **Server header** with chevron + status pill + group-policy `<select>`
+  (`data-testid="mcp-server-policy"`, key `mcp__<server>`).
+- **Server expanded** → one tool row per sub-namespace
+  (`data-testid="mcp-tool-row"`, with `mcp-tool-policy` select keyed
+  `mcp__<server>__<sub>`). Flat servers collapse to a single tool row whose
+  name = server.
+- **Operations** (deepest, `mcp-server-ops`) are read-only — `operation` is a
+  parameter, not a tool.
+
+`/api/mcp-servers` payload is extended with `subNamespace?: string` and
+`op: string` per operation entry. The UI groups by `subNamespace`
+client-side. Backward-compatible (additive).
+
+### Backward compatibility
+
+- Existing `mcp__<server>` entries keep working as **group keys** under the
+  new precedence.
+- Per-op policies (`mcp__<server>__<op>` or
+  `mcp__<server>__<sub>__<op>`) keep being matched at the per-op level by
+  `resolveGrantPolicy(info.name, …)` before meta-aggregation.
+- 3-segment legacy keys are treated as **tool keys** by default. Flat-server
+  users with such keys are unaffected because flat servers never carry
+  sub-namespaces.
+
+See [docs/mcp-meta-tools.md](../mcp-meta-tools.md) for the user-facing
+documentation.
