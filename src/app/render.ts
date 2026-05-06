@@ -2986,6 +2986,13 @@ export function doRenderApp(): void {
 	};
 
 	const mainArea = () => {
+		// Instant-loader gate: show bouncing bobbit immediately when a session
+		// is being created or connected, regardless of current route. This must
+		// be the first check so clicks on session-creation entry points feel
+		// responsive within one render frame.
+		if (state.creatingSession || state.connectingSessionId) {
+			return html`<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+		}
 		// Goal dashboard route
 		const route = getRouteFromHash();
 		if (route.view === "goal-dashboard" && route.goalId) {
@@ -3093,11 +3100,6 @@ export function doRenderApp(): void {
 			`;
 		}
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
-
-		// Show bouncing bobbit while connecting or creating a session
-		if (state.connectingSessionId || state.creatingSession) {
-			return html`<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>`;
-		}
 
 		if (desktop) {
 			return html`
