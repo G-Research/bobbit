@@ -76,7 +76,7 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
@@ -1973,7 +1973,22 @@ async function handleApiRoute(
 				}
 			}
 
-			const project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark });
+			const acceptCanonical = body.acceptCanonical === true;
+			let project;
+			try {
+				project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
+			} catch (regErr: any) {
+				if (regErr instanceof SymlinkProjectRootError) {
+					json({
+						error: "Project root is a symlink",
+						code: "symlink_root",
+						rootPath: regErr.rootPath,
+						canonical: regErr.canonical,
+					}, 400);
+					return;
+				}
+				throw regErr;
+			}
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {

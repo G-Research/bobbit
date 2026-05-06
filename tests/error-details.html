@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>error-details — unit test fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 16px; }
+</style>
+</head>
+<body>
+<div id="mount"></div>
+
+<script type="module">
+// Plain-DOM mirror of `src/ui/components/ErrorDetails.ts`.
+// If this fixture drifts from source, behaviour will diverge — keep the
+// rendered structure (message div, optional code div, optional <details>
+// with <pre> child) in sync.
+
+class ErrorDetails extends HTMLElement {
+  static get observedAttributes() { return []; }
+
+  constructor() {
+    super();
+    this._message = "";
+    this._code = undefined;
+    this._stack = undefined;
+  }
+
+  set message(v) { this._message = v == null ? "" : String(v); this._render(); }
+  get message() { return this._message; }
+  set code(v) { this._code = v == null || v === "" ? undefined : String(v); this._render(); }
+  get code() { return this._code; }
+  set stack(v) { this._stack = v == null || v === "" ? undefined : String(v); this._render(); }
+  get stack() { return this._stack; }
+
+  connectedCallback() { this._render(); }
+
+  _esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+  }
+
+  _render() {
+    const message = this._esc(this._message);
+    const codeBlock = this._code
+      ? `<div class="text-xs text-destructive/60 mt-1 font-mono" data-testid="error-details-code">${this._esc(this._code)}</div>`
+      : "";
+    const stackBlock = this._stack
+      ? `<details class="mt-2" data-testid="error-details-stack">
+           <summary class="cursor-pointer text-xs text-muted-foreground">Show stack trace</summary>
+           <pre class="mt-1 p-2 text-[11px] bg-muted/40 rounded overflow-x-auto whitespace-pre-wrap font-mono">${this._esc(this._stack)}</pre>
+         </details>`
+      : "";
+    this.innerHTML = `
+      <div class="text-sm text-destructive font-medium" data-testid="error-details-message">${message}</div>
+      ${codeBlock}
+      ${stackBlock}
+    `;
+  }
+}
+
+if (!customElements.get("error-details")) {
+  customElements.define("error-details", ErrorDetails);
+}
+
+window.mount = ({ message, code, stack }) => {
+  const mount = document.getElementById("mount");
+  mount.innerHTML = "";
+  const el = document.createElement("error-details");
+  el.message = message;
+  if (code !== undefined) el.code = code;
+  if (stack !== undefined) el.stack = stack;
+  mount.appendChild(el);
+  return el;
+};
+
+window._testReady = true;
+</script>
+</body>
+</html>

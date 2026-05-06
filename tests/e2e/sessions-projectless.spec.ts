@@ -33,6 +33,9 @@
  * Use raw (uninjected) fetch via `rawApiFetch` so the harness's default-
  * project auto-injection doesn't mask the bug.
  */
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 import { test, expect } from "./in-process-harness.js";
 import { rawApiFetch, defaultProjectId, readE2EToken } from "./e2e-setup.js";
 
@@ -47,9 +50,15 @@ test.describe("POST /api/sessions — projectless reproducer", () => {
 		// Server must reject with the canonical "projectId required" error.
 		// (Splash-screen bug today: with zero projects registered, body `{}`
 		// hits this same path because no project matches.)
+		//
+		// The cwd MUST exist on disk — if the server sees a non-existent cwd
+		// it falls back to `config.defaultCwd` (the spawn-ENOENT guard added
+		// in commit bc6047ef), which would let the harness's default project
+		// resolve and mask the resolver-contract failure we're locking in here.
+		const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bogus-cwd-"));
 		const resp = await rawApiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ cwd: "/nonexistent/bogus-path-no-project-here" }),
+			body: JSON.stringify({ cwd: tmpRoot }),
 		});
 		const text = await resp.text();
 		expect(
@@ -58,6 +67,7 @@ test.describe("POST /api/sessions — projectless reproducer", () => {
 		).toBe(400);
 		expect(text).toMatch(/projectId required/);
 		expect(text).toMatch(/does not match any registered project/);
+		try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
 	});
 
 	test("tool assistant with system scope succeeds (system project resolved)", async () => {

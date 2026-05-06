@@ -30,9 +30,22 @@ export function resetPrPollThrottle(): void {
 }
 
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
-async function showConnectionError(title: string, message: string): Promise<void> {
+async function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): Promise<void> {
 	const { showConnectionError: show } = await import("./dialogs.js");
-	show(title, message);
+	show(title, message, opts);
+}
+
+/**
+ * Thrown by `registerProject()` when the server reports the supplied
+ * `rootPath` resolves through a symlink to a different canonical path and
+ * the caller did not pass `acceptCanonical: true`. The dialog catches this
+ * and prompts the user to confirm registering the canonical path.
+ */
+export class SymlinkRootError extends Error {
+	constructor(public readonly rootPath: string, public readonly canonical: string) {
+		super(`rootPath ${rootPath} is a symlink to ${canonical}`);
+		this.name = "SymlinkRootError";
+	}
 }
 
 // ============================================================================
@@ -465,23 +478,38 @@ export async function browseDirectory(dirPath?: string): Promise<{
   return res.json();
 }
 
-export async function registerProject(name: string, rootPath: string, color?: string, upsert?: boolean): Promise<Project | null> {
+export async function registerProject(name: string, rootPath: string, color?: string, upsert?: boolean, acceptCanonical?: boolean): Promise<Project | null> {
   try {
     const body: Record<string, unknown> = { name, rootPath };
     if (color) body.color = color;
     if (upsert) body.upsert = true;
+    if (acceptCanonical) body.acceptCanonical = true;
     const res = await gatewayFetch("/api/projects", {
       method: "POST",
       body: JSON.stringify(body),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Failed: ${res.status}`);
+      // Symlink-root structured response (HTTP 400). Throw a typed error so
+      // the dialog can present a confirm-canonical-path UI rather than the
+      // generic connection-error modal.
+      if (data && data.code === "symlink_root" && typeof data.canonical === "string") {
+        throw new SymlinkRootError(data.rootPath || rootPath, data.canonical);
+      }
+      // Preserve structured error info for downstream display.
+      const err = new Error(data.error || `Failed: ${res.status}`);
+      (err as any).code = data.code;
+      (err as any).stack = data.stack || (err as any).stack;
+      throw err;
     }
     return await res.json();
   } catch (err) {
+    if (err instanceof SymlinkRootError) throw err;
     const { showConnectionError } = await import("./dialogs.js");
-    showConnectionError("Failed to register project", err instanceof Error ? err.message : String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = err && typeof err === "object" ? (err as any).code : undefined;
+    const stack = err instanceof Error ? err.stack : undefined;
+    showConnectionError("Failed to register project", msg, { code, stack });
     return null;
   }
 }
