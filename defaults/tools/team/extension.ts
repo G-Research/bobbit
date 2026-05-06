@@ -9,57 +9,27 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import fs from "node:fs";
-import path from "node:path";
-import { homedir } from "node:os";
+import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const goalId = process.env.BOBBIT_GOAL_ID;
 	if (!sessionId || !goalId) {
+		console.error("[team-lead-tools] BOBBIT_GOAL_ID / BOBBIT_SESSION_ID missing — tools not registered");
 		return;
 	}
 
-	let token: string;
-	let baseUrl: string;
-	const envToken = process.env.BOBBIT_TOKEN;
-	const envUrl = process.env.BOBBIT_GATEWAY_URL;
-	if (envToken && envUrl) {
-		token = envToken;
-		baseUrl = envUrl.replace(/\/+$/, "");
-	} else {
-		try {
-			const stateDir = process.env.BOBBIT_DIR
-				? path.join(process.env.BOBBIT_DIR, "state")
-				: path.join(homedir(), ".pi");
-			const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-			const urlFile = process.env.BOBBIT_DIR ? "gateway-url" : "gateway-url";
-			token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
-			baseUrl = fs.readFileSync(path.join(stateDir, urlFile), "utf-8").trim().replace(/\/+$/, "");
-		} catch {
-			console.error("[team-lead-tools] Cannot read gateway credentials — tools not registered");
-			return;
-		}
+	const credsResult = readGatewayCreds();
+	if ("error" in credsResult) {
+		console.error(`[team-lead-tools] Cannot read gateway credentials — tools not registered: ${credsResult.error}`);
+		return;
 	}
+	const creds = credsResult;
 
 	// ── HTTP helper ───────────────────────────────────────────────────
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
-		const resp = await fetch(`${baseUrl}${urlPath}`, {
-			method,
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-			body: body !== undefined ? JSON.stringify(body) : undefined,
-		});
-		const text = await resp.text();
-		let data: unknown;
-		try { data = JSON.parse(text); } catch { data = text; }
-		if (!resp.ok) {
-			const msg = typeof data === "object" && data !== null && "error" in data
-				? String((data as Record<string, unknown>).error)
-				: `HTTP ${resp.status}: ${text}`;
-			throw new Error(msg);
-		}
-		return data;
+		return apiCall(creds, method, urlPath, body);
 	}
 
 	function ok(data: unknown) {

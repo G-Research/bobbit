@@ -274,6 +274,39 @@ describe("classifyMutation", () => {
 		assert.deepEqual(r.diff.modified, ["x"]);
 	});
 
+	it("criterion split across two adjacent step specs does NOT pass coverage (R-013)", () => {
+		// Steps are normalised individually then `.join("\n")`'d, so a
+		// criterion that straddles the boundary between two step specs
+		// must NOT match — the literal "\n" sits between them and the
+		// criterion (which has no "\n") can't span it. This pins the
+		// segment-boundary contract.
+		const current: ClassifierPlanStep[] = [];
+		const proposed = [
+			step("a", { phase: 1, spec: "this step ends with: foo bar" }),
+			step("b", { phase: 1, spec: "baz then more text" }),
+		];
+		const r = classifyMutation({
+			current,
+			proposed,
+			rootAcceptanceCriteria: ["foo bar baz"],
+			rootSpec: "",
+		});
+		assert.equal(r.kind, "criteria-drop");
+		assert.deepEqual(r.uncoveredCriteria, ["foo bar baz"]);
+	});
+
+	it("criterion fully inside one step spec passes coverage (positive control)", () => {
+		const proposed = [step("a", { phase: 1, spec: "this step covers foo bar baz inline" })];
+		const r = classifyMutation({
+			current: [],
+			proposed,
+			rootAcceptanceCriteria: ["foo bar baz"],
+			rootSpec: "",
+		});
+		assert.equal(r.kind, "expansion");
+		assert.equal(r.uncoveredCriteria, undefined);
+	});
+
 	it("uncoveredCriteria empty when all criteria covered by rootSpec", () => {
 		const r = classifyMutation({
 			current: [],

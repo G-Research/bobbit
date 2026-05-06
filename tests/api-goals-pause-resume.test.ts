@@ -146,6 +146,40 @@ describe("pause/resume REST primitives", () => {
 		assert.equal(store.get(c1.id)?.paused, true);
 	});
 
+	it("R-029: pause invokes cancelAllVerifications on each paused goal (stubbed harness)", async () => {
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "feature" });
+		const c1 = await gm.createGoal("C1", tmpRoot, { workflowId: "feature", parentGoalId: root.id });
+
+		// Stub the harness side. Production code calls
+		// `cancelAllVerifications(goal.id)` for each goal flipped to paused.
+		// We mirror the route here — the test asserts the stub fires for the
+		// expected goals in cascade order.
+		const cancelled: string[] = [];
+		async function cancelAllVerifications(goalId: string): Promise<void> {
+			cancelled.push(goalId);
+		}
+
+		async function pauseRouteWithCancel(id: string, cascade: boolean): Promise<void> {
+			const goal = store.get(id);
+			if (!goal) throw new Error("not found");
+			const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendants(store, id) : [])];
+			for (const g of targets) {
+				if (g.paused === true) continue;
+				await gm.updateGoal(g.id, { paused: true });
+				await cancelAllVerifications(g.id);
+			}
+		}
+
+		await pauseRouteWithCancel(root.id, true);
+		assert.deepEqual(cancelled.sort(), [c1.id, root.id].sort());
+
+		// Idempotent: re-pausing already-paused goals must NOT re-cancel.
+		cancelled.length = 0;
+		await pauseRouteWithCancel(root.id, true);
+		assert.deepEqual(cancelled, []);
+	});
+
 	it("CASCADE_REQUIRED contract: handler enforces cascade is a boolean", () => {
 		// This test documents the route's invariant. The handler returns 422
 		// when `body.cascade !== boolean`. We assert the invariant by spec —

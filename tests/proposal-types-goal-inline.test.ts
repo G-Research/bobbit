@@ -198,6 +198,32 @@ describe("goal proposal — structural validation when inline fields are present
 		}
 	});
 
+	it("accepts inlineRoles.toolPolicies with allow|ask|never values (R-021)", () => {
+		// The goal-spawn-child tool tightens toolPolicies to the union of
+		// 'allow' | 'ask' | 'never'. The proposal serializer carries the
+		// values through verbatim. Keep these in sync — a typo'd policy
+		// value should fail validation at the call site, not surface as
+		// an opaque gate-spawn error later.
+		const inlineRoles = {
+			r: {
+				name: "r",
+				label: "R",
+				promptTemplate: "P",
+				toolPolicies: { gate_signal: "never", goal_spawn_child: "allow", verification_result: "ask" },
+			},
+		};
+		const fields = { title: "ok-roles", spec: "s\n", inlineRoles };
+		const content = goal.serialize(fields);
+		const parsed = goal.parse(content);
+		assert.equal(parsed.ok, true);
+		if (parsed.ok) {
+			assert.deepEqual(
+				(parsed.value.fields.inlineRoles as Record<string, { toolPolicies: Record<string, string> }>).r.toolPolicies,
+				inlineRoles.r.toolPolicies,
+			);
+		}
+	});
+
 	it("rejects inlineRoles passed as an array (must be an object)", () => {
 		const fields = {
 			title: "bad-roles",

@@ -153,6 +153,12 @@ export class GoalStore {
 							// `inject_downstream`) — pre-fix inline workflows
 							// bypassed normalization and broke gate_signal
 							// with "gateDef.dependsOn is not iterable".
+							// R-010: drop malformed inlineRoles (must be a plain object)
+							// before they reach resolveRole() and crash team-spawn.
+							if (g.inlineRoles && (typeof g.inlineRoles !== "object" || Array.isArray(g.inlineRoles))) {
+								console.warn(`[goal-store] Dropping malformed inlineRoles on goal ${g.id}`);
+								delete g.inlineRoles;
+							}
 							if (g.workflow && typeof g.workflow === "object") {
 								const needsNormalize = Array.isArray(g.workflow.gates) && g.workflow.gates.some((gate: Record<string, unknown>) =>
 									gate && typeof gate === "object" && !Array.isArray((gate as { dependsOn?: unknown }).dependsOn));
@@ -239,12 +245,21 @@ export class GoalStore {
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
-		this.generation++;
 		// Strip undefined values to avoid overwriting existing fields
 		const cleaned: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(updates)) {
 			if (v !== undefined) cleaned[k] = v;
 		}
+		// R-007: skip the write entirely when no field actually changes.
+		// `updateGoal({})` after the cleaned-undefined sweep used to bump
+		// generation, rewrite goals.json, and emit a goal_state_changed
+		// cascade for nothing. Return value still indicates "goal exists"
+		// (true) rather than "a write happened" — callers historically
+		// only used it as a found/not-found signal.
+		const existingAsRec = existing as unknown as Record<string, unknown>;
+		const changed = Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k]);
+		if (!changed) return true;
+		this.generation++;
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		this.save();
 		this.onIndexUpdate?.(existing);

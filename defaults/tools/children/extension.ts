@@ -14,66 +14,32 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import fs from "node:fs";
-import path from "node:path";
-import { homedir } from "node:os";
+import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const goalId = process.env.BOBBIT_GOAL_ID;
 	if (!sessionId || !goalId) {
+		console.error("[children-tools] BOBBIT_GOAL_ID / BOBBIT_SESSION_ID missing — tools not registered");
 		return;
 	}
 
-	let token: string;
-	let baseUrl: string;
-	const envToken = process.env.BOBBIT_TOKEN;
-	const envUrl = process.env.BOBBIT_GATEWAY_URL;
-	if (envToken && envUrl) {
-		token = envToken;
-		baseUrl = envUrl.replace(/\/+$/, "");
-	} else {
-		try {
-			const stateDir = process.env.BOBBIT_DIR
-				? path.join(process.env.BOBBIT_DIR, "state")
-				: path.join(homedir(), ".pi");
-			const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-			const urlFile = process.env.BOBBIT_DIR ? "gateway-url" : "gateway-url";
-			token = fs.readFileSync(path.join(stateDir, tokenFile), "utf-8").trim();
-			baseUrl = fs.readFileSync(path.join(stateDir, urlFile), "utf-8").trim().replace(/\/+$/, "");
-		} catch {
-			console.error("[children-tools] Cannot read gateway credentials — tools not registered");
-			return;
-		}
+	const credsResult = readGatewayCreds();
+	if ("error" in credsResult) {
+		console.error(`[children-tools] Cannot read gateway credentials — tools not registered: ${credsResult.error}`);
+		return;
 	}
+	const creds = credsResult;
 
 	// ── HTTP helper ───────────────────────────────────────────────────
+	// All children calls carry `X-Bobbit-Spawning-Session` so the server can
+	// stamp `spawnedBySessionId` on POST /spawn-child (sidebar nesting
+	// behaviour). Other endpoints ignore the header.
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
-		const resp = await fetch(`${baseUrl}${urlPath}`, {
-			method,
-			headers: {
-				Authorization: `Bearer ${token}`,
-				"Content-Type": "application/json",
-				// Identifies the team-lead session that's calling — server
-				// uses this on POST /spawn-child to stamp `spawnedBySessionId`
-				// on the new child so the sidebar can render it nested under
-				// this session (collapse-with-team-lead behaviour). Other
-				// endpoints ignore it.
-				"X-Bobbit-Spawning-Session": sessionId,
-			},
-			body: body !== undefined ? JSON.stringify(body) : undefined,
+		return apiCall(creds, method, urlPath, body, {
+			extraHeaders: { "X-Bobbit-Spawning-Session": sessionId },
 		});
-		const text = await resp.text();
-		let data: unknown;
-		try { data = JSON.parse(text); } catch { data = text; }
-		if (!resp.ok) {
-			const msg = typeof data === "object" && data !== null && "error" in data
-				? String((data as Record<string, unknown>).error)
-				: `HTTP ${resp.status}: ${text}`;
-			throw new Error(msg);
-		}
-		return data;
 	}
 
 	function ok(data: unknown) {
@@ -101,7 +67,11 @@ export default function (pi: ExtensionAPI) {
 				label: Type.String(),
 				promptTemplate: Type.String(),
 				accessory: Type.Optional(Type.String()),
-				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.String())),
+				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.Union([
+					Type.Literal("allow"),
+					Type.Literal("ask"),
+					Type.Literal("never"),
+				]))),
 				model: Type.Optional(Type.String()),
 				thinkingLevel: Type.Optional(Type.String()),
 			}), {
@@ -148,20 +118,30 @@ export default function (pi: ExtensionAPI) {
 				suggestedRole: Type.Optional(Type.String()),
 				phase: Type.Optional(Type.Number()),
 			}), { description: "Array of subgoal-typed plan steps." }),
+			fallback: Type.Optional(Type.Literal("spawn-children-direct", { description: "Opt-in to the spawn-children-direct fallback when this goal's workflow has no `execution` gate to hold a frozen plan. Without this opt-in, the classifier/freeze flow is required and a 400 NO_EXECUTION_GATE is surfaced as-is. Pass when you intentionally chose a non-parent workflow but still want a list of subgoals spawned." })),
 		}),
 		async execute(_id, params) {
 			try {
 				return ok(await api("PATCH", `/api/goals/${goalId}/plan`, { proposedSteps: params.steps }));
 			} catch (e: any) {
-				// Auto-fallback: when the goal's workflow has no execution gate
-				// the classifier/freeze flow doesn't apply — but the user's
-				// intent is plain (a list of subgoals to spawn). Loop
-				// goal_spawn_child for each step, idempotent on planId.
-				// Returning a shaped result instead of an error keeps the agent
-				// flow uninterrupted: the team-lead sees `fallback: "spawn-
-				// children-direct"` and knows the children were spawned but
-				// the freeze/replan classifier is unavailable on this workflow.
+				// Auto-fallback (opt-in only): when the goal's workflow has no
+				// execution gate the classifier/freeze flow doesn't apply.
+				// Previously this swallowed the freeze classifier silently —
+				// a goal that *intentionally* used a non-parent workflow would
+				// get cycle-cascade-spawn behaviour without any signal. Now
+				// the caller MUST pass `fallback: "spawn-children-direct"`
+				// to opt in. Otherwise the original NO_EXECUTION_GATE error
+				// is re-thrown unchanged so the team-lead sees and decides.
 				if (typeof e?.message === "string" && /NO_EXECUTION_GATE|no 'execution' gate/i.test(e.message)) {
+					if (params.fallback !== "spawn-children-direct") {
+						return err(
+							`${e.message}\n\n` +
+							`This goal's workflow has no 'execution' gate, so the classifier/freeze flow is unavailable. ` +
+							`To spawn the steps as child goals directly (skipping the freeze/replan classifier), ` +
+							`re-call goal_plan_propose with fallback: "spawn-children-direct". ` +
+							`To use the full freeze/replan flow, recreate the goal with the 'parent' workflow.`,
+						);
+					}
 					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; error?: string }> = [];
 					for (const step of params.steps) {
 						try {

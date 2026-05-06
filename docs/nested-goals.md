@@ -327,6 +327,31 @@ explicit confirmation. Wired into the dashboard's `handleEndTeam`.
 
 ## Sub-goal sidebar placement
 
+### `spawnedBySessionId` semantics (R-045)
+
+`spawnedBySessionId` captures the session id of the team-lead **at the
+moment `goal_spawn_child` was called** — it is the SPAWNING session
+at creation time, not necessarily the team-lead session that is live
+right now. The two diverge when:
+
+- The original team-lead was torn down and a new team-lead was spawned
+  for the same parent goal (re-attempt, transient-error restart). The
+  child still points at the old, now-archived team-lead via
+  `spawnedBySessionId`. This is intentional — the field records
+  attribution ("this team-lead instance owned this delegation") rather
+  than a live pointer.
+- A legacy sub-goal pre-dates the field and `backfillSpawnedBySessionId`
+  fills it in. The backfill helper uses the parent's *currently
+  persisted* `teamLeadSessionId`, not a historical one — so for legacy
+  records the field is approximated by "team-lead session id of the
+  parent goal at backfill time". This is the slight-but-acceptable
+  divergence under multi-team-lead history; treat backfilled values as
+  best-effort attribution, not provenance.
+
+Render code never assumes the spawning session is live. The archived
+render path folds sub-goals whose spawning session is gone back to the
+parent-goal level (`src/app/sidebar.ts::teamLeadIdsAttributable`).
+
 Sub-goals stamped with `spawnedBySessionId` render INSIDE the spawning
 team-lead's expanded block in the sidebar — collapsing that team-lead
 hides both its workers AND the sub-goals it spawned, as one unit. The

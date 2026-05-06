@@ -246,7 +246,7 @@ export class GoalManager {
 		// Deep-clone so a caller mutating the source object can't poison
 		// the goal's frozen copy.
 		if (inlineRoles && Object.keys(inlineRoles).length > 0) {
-			goal.inlineRoles = JSON.parse(JSON.stringify(inlineRoles));
+			goal.inlineRoles = structuredClone(inlineRoles);
 		}
 
 		// Stamp nested-goal lineage. Always set on every newly created goal
@@ -279,7 +279,7 @@ export class GoalManager {
 			// "gateDef.dependsOn is not iterable".
 			const normalized = normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
 			goal.workflowId = workflowId;
-			goal.workflow = JSON.parse(JSON.stringify(normalized));
+			goal.workflow = structuredClone(normalized);
 		} else if (workflowId && workflowStore) {
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {
@@ -290,7 +290,7 @@ export class GoalManager {
 				throw new Error(`Workflow not found: ${workflowId}`);
 			}
 			goal.workflowId = workflowId;
-			goal.workflow = JSON.parse(JSON.stringify(wf));
+			goal.workflow = structuredClone(wf);
 		} else if (workflowId) {
 			// Lesson 4.3: workflowId given but neither resolvedWorkflow nor a
 			// workflowStore is available — this is the silent-fail path that
@@ -307,7 +307,7 @@ export class GoalManager {
 			const defaultWf = workflowStore.get("general");
 			if (defaultWf) {
 				goal.workflowId = "general";
-				goal.workflow = JSON.parse(JSON.stringify(defaultWf));
+				goal.workflow = structuredClone(defaultWf);
 			} else if (workflowStore.getAll().length === 0) {
 				throw new Error(NO_WORKFLOWS_MSG);
 			}

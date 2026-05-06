@@ -27,6 +27,16 @@ export type MutationKind = "noop" | "fix-up" | "expansion" | "restructure" | "cr
  * Subgoal-typed plan step shape consumed by the classifier. Mirrors the
  * subset of `VerifyStep` we care about — kept structural-only so the
  * classifier is decoupled from `workflow-store.ts` evolution.
+ *
+ * Field precedence: `effectiveTitle()`, `effectiveSpec()` and the workflow /
+ * suggested-role accessors prefer the **top-level** field over the nested
+ * `subgoal` field. Both are accepted so callers can hand us the raw verify-
+ * step (which carries the subgoal payload) or a normalised step (with the
+ * subgoal fields hoisted to the top). When BOTH are set with conflicting
+ * values, the top-level wins and a one-line `console.warn` is emitted from
+ * `effectiveTitle()` to surface the inconsistency at classification time.
+ * Tightening the type to forbid this would break legacy plan-step shapes;
+ * the precedence + warn path is the documented contract.
  */
 export interface ClassifierPlanStep {
 	planId: string;
@@ -80,12 +90,26 @@ export interface ClassifyMutationResult {
  * SUBGOALS-SPEC §3.6 mandates this comparison for criteria-coverage so the
  * team-lead can paraphrase capitalisation/whitespace without tripping the
  * criteria-drop classifier. Hashes don't work for the same reason.
+ *
+ * Locale: pinned to `"en"` so a Turkish-locale `İ` criterion matches its
+ * dotless lowercase form rather than producing a spurious criteria-drop in
+ * Turkish/Azerbaijani user environments.
  */
 function normalise(s: string): string {
-	return s.replace(/\s+/g, " ").trim().toLowerCase();
+	return s.replace(/\s+/g, " ").trim().toLocaleLowerCase("en");
 }
 
+/** One-shot guard so we don't spam the log when many steps disagree. */
+let _warnedConflict = false;
 function effectiveTitle(s: ClassifierPlanStep): string | undefined {
+	if (s.title !== undefined && s.subgoal?.title !== undefined && s.title !== s.subgoal.title && !_warnedConflict) {
+		_warnedConflict = true;
+		console.warn(
+			`[plan-mutation] ClassifierPlanStep ${s.planId} has conflicting top-level title (${JSON.stringify(s.title)}) ` +
+			`and subgoal.title (${JSON.stringify(s.subgoal.title)}) — top-level wins. ` +
+			`Normalise call sites to set one or the other.`,
+		);
+	}
 	return s.title ?? s.subgoal?.title;
 }
 
@@ -177,6 +201,12 @@ export function classifyMutation(input: ClassifyMutationInput): ClassifyMutation
 		for (const id of phaseChanges) {
 			const c = currentByPlanId.get(id);
 			const p = proposedByPlanId.get(id);
+			// Construction invariant (R-014): `phaseChanges` is built above by
+			// iterating `proposed` and only pushing when both `c` (looked up
+			// in `currentByPlanId`) and `s` exist with differing phases — so
+			// both lookups here are guaranteed to hit. The lint-friendly
+			// guard below is dead code retained as a belt-and-braces against
+			// a future refactor that decouples this loop from the build site.
 			if (!c || !p) continue;
 			if ((p.phase ?? 0) < (c.phase ?? 0)) {
 				phaseDecrease = true;

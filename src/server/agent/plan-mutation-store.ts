@@ -38,11 +38,35 @@ export interface PendingMutation {
 /** 24h TTL — see SUBGOALS-SPEC §3.6. */
 export const DEFAULT_MUTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** Daily sweep cadence for `pruneExpired`. */
+export const DEFAULT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 export class PlanMutationStore {
 	private readonly dir: string;
+	private sweepTimer?: NodeJS.Timeout;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, opts?: { startSweep?: boolean; sweepIntervalMs?: number }) {
 		this.dir = path.join(stateDir, "plan-mutations");
+		// Daily best-effort sweep so the 24h TTL actually trims disk usage
+		// instead of relying on read-time filtering only. Opt-out for tests
+		// via `{ startSweep: false }` so timers don't keep the test runner
+		// alive. The timer is `unref()`'d so it never blocks process exit.
+		const startSweep = opts?.startSweep ?? true;
+		if (startSweep) {
+			const interval = opts?.sweepIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
+			this.sweepTimer = setInterval(() => {
+				try { this.pruneExpired(); } catch (err) { console.warn("[plan-mutation-store] periodic sweep failed:", err); }
+			}, interval);
+			this.sweepTimer.unref?.();
+		}
+	}
+
+	/** Cancel the periodic sweep timer (idempotent). */
+	stopSweep(): void {
+		if (this.sweepTimer) {
+			clearInterval(this.sweepTimer);
+			this.sweepTimer = undefined;
+		}
 	}
 
 	private fileFor(goalId: string): string {
