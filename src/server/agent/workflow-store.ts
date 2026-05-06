@@ -126,7 +126,7 @@ function normalizeStep(raw: unknown): VerifyStep {
 	return step;
 }
 
-function normalizeGate(raw: unknown): WorkflowGate {
+export function normalizeGate(raw: unknown): WorkflowGate {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
 	const gate: WorkflowGate = {
 		id: typeof r.id === "string" ? r.id : "",
@@ -148,7 +148,142 @@ function normalizeGate(raw: unknown): WorkflowGate {
 	return gate;
 }
 
-function normalizeWorkflow(raw: unknown, idHint: string): Workflow | null {
+/**
+ * Detect whether a workflow is the `parent` meta-workflow — the one whose
+ * `execution` gate drives subgoal verify-steps. Used to decide whether a
+ * child inheriting the parent's workflow snapshot should strip the
+ * parent-specific subgoal entries from `execution.verify[]` (see
+ * `stripSubgoalStepsForChildInheritance`). Children still inherit the
+ * workflow's structural scaffold — gates, dependencies, synthesis /
+ * ready-to-merge / etc. — just not the parent's plan items.
+ *
+ * Detection is conservative: either the id is `"parent"` OR the execution
+ * gate contains at least one `verify[]` entry with `type === "subgoal"`.
+ * Either signal is sufficient — we treat the workflow as a meta-workflow.
+ */
+export function isParentMetaWorkflow(wf: Workflow | undefined | null): boolean {
+	if (!wf) return false;
+	if (wf.id === "parent") return true;
+	const exec = wf.gates.find(g => g.id === "execution");
+	if (!exec || !Array.isArray(exec.verify)) return false;
+	return exec.verify.some(v => v?.type === "subgoal");
+}
+
+/**
+ * Prepare a parent meta-workflow snapshot for inheritance by a child goal.
+ *
+ * For a meta-workflow (`isParentMetaWorkflow`), produces a child-scoped clone:
+ *
+ * 1. **Strip subgoal entries from `execution.verify[]`** — the parent's plan
+ *    items don't belong on the child.
+ * 2. **Drop aggregation gates** — any gate strictly between `execution` and
+ *    `ready-to-merge` in the DAG (transitively downstream of `execution` AND
+ *    upstream of `ready-to-merge`) is parent-scoped by construction: those
+ *    gates aggregate across children (e.g. "all 5 sibling artefacts exist",
+ *    "synthesis review of memory-synthesized.md"). A child goal can never
+ *    satisfy them; inheriting would deadlock the child on `ready-to-merge`.
+ * 3. **Rewire `ready-to-merge`** to depend directly on `execution`, since the
+ *    intermediate aggregation gates no longer exist.
+ *
+ * Upstream gates (charter, plan-review, goal-plan — everything that
+ * `execution` transitively depends on) ARE preserved. A child's team-lead
+ * writes its own charter/plan/etc. for its own scope; those gates make sense
+ * at both levels. Gates outside the execution→ready-to-merge branch entirely
+ * (optional side-gates) are preserved.
+ *
+ * For non-meta workflows this is a pure deep-clone — nothing is altered.
+ * Callers should gate on `isParentMetaWorkflow` when they want to avoid the
+ * clone for non-inheritance paths; this helper is safe to call either way.
+ */
+export function stripSubgoalStepsForChildInheritance(wf: Workflow): Workflow {
+	const clone = JSON.parse(JSON.stringify(wf)) as Workflow;
+	if (!isParentMetaWorkflow(clone)) return clone;
+
+	// 1. Strip parent-specific subgoal entries from execution.verify[].
+	const exec = clone.gates.find(g => g.id === "execution");
+	if (exec && Array.isArray(exec.verify)) {
+		exec.verify = exec.verify.filter(v => v?.type !== "subgoal");
+	}
+	if (!exec) return clone; // defensive — isParentMetaWorkflow guarantees exec
+
+	// 2. Identify aggregation gates: strictly downstream of `execution` AND
+	//    strictly upstream of `ready-to-merge`. BFS on dependencies both
+	//    directions.
+	const byId = new Map(clone.gates.map(g => [g.id, g]));
+	const rtm = clone.gates.find(g => g.id === "ready-to-merge");
+
+	// transitively-downstream-of-execution: reverse-DAG BFS from execution
+	// following "X depends on Y" → X is downstream of Y.
+	const downstreamOfExec = new Set<string>();
+	const queue: string[] = [];
+	for (const g of clone.gates) {
+		if (Array.isArray(g.dependsOn) && g.dependsOn.includes("execution")) {
+			downstreamOfExec.add(g.id);
+			queue.push(g.id);
+		}
+	}
+	while (queue.length > 0) {
+		const id = queue.shift()!;
+		for (const g of clone.gates) {
+			if (downstreamOfExec.has(g.id)) continue;
+			if (Array.isArray(g.dependsOn) && g.dependsOn.includes(id)) {
+				downstreamOfExec.add(g.id);
+				queue.push(g.id);
+			}
+		}
+	}
+
+	// transitively-upstream-of-rtm: forward-DAG BFS from ready-to-merge.
+	const upstreamOfRtm = new Set<string>();
+	if (rtm) {
+		const q2: string[] = [...(rtm.dependsOn ?? [])];
+		for (const d of q2) upstreamOfRtm.add(d);
+		while (q2.length > 0) {
+			const id = q2.shift()!;
+			const g = byId.get(id);
+			if (!g) continue;
+			for (const d of (g.dependsOn ?? [])) {
+				if (!upstreamOfRtm.has(d)) {
+					upstreamOfRtm.add(d);
+					q2.push(d);
+				}
+			}
+		}
+	}
+
+	// Aggregation = downstream-of-exec ∩ upstream-of-rtm, excluding exec/rtm themselves.
+	const aggregationGateIds = new Set<string>();
+	for (const id of downstreamOfExec) {
+		if (id === "execution" || id === "ready-to-merge") continue;
+		if (rtm && upstreamOfRtm.has(id)) aggregationGateIds.add(id);
+	}
+
+	if (aggregationGateIds.size > 0) {
+		// 3. Drop aggregation gates.
+		clone.gates = clone.gates.filter(g => !aggregationGateIds.has(g.id));
+		// 3b. Rewire ready-to-merge to depend directly on execution (it was
+		// previously depending on the now-removed aggregation gates).
+		const rtmClone = clone.gates.find(g => g.id === "ready-to-merge");
+		if (rtmClone) {
+			const kept = (rtmClone.dependsOn ?? []).filter(id => !aggregationGateIds.has(id));
+			// Ensure execution is in the dependency list (the aggregation
+			// gates were the only bridge between exec and rtm in the DAG).
+			if (!kept.includes("execution")) kept.push("execution");
+			rtmClone.dependsOn = kept;
+		}
+		// 3c. Any other gate that depended on a removed aggregation gate
+		// gets its reference pruned (defensive — shouldn't happen in
+		// well-formed meta-workflows but don't leave dangling refs).
+		for (const g of clone.gates) {
+			if (!Array.isArray(g.dependsOn)) continue;
+			g.dependsOn = g.dependsOn.filter(id => !aggregationGateIds.has(id));
+		}
+	}
+
+	return clone;
+}
+
+export function normalizeWorkflow(raw: unknown, idHint: string): Workflow | null {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : null;
 	if (!r) return null;
 	const id = typeof r.id === "string" && r.id ? r.id : idHint;

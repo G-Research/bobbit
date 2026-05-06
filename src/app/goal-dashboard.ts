@@ -2061,7 +2061,7 @@ const PLAN_PADDING = 16;
 const PLAN_RENDER_DEPTH_CAP = 3;
 
 /** Compute the node + edge layout for a single plan (one goal's plan). */
-function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number): {
+function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, parentGoalId: string): {
 	nodes: PlanLayoutNode[];
 	edges: PlanEdge[];
 	width: number;
@@ -2074,15 +2074,23 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number): 
 		if (list) list.push(s); else phaseMap.set(s.phase, [s]);
 	}
 	const phases = Array.from(phaseMap.keys()).sort((a, b) => a - b);
-	const candidates: PlanNodeChild[] = allGoals.map(g => ({
-		id: g.id,
-		parentGoalId: g.parentGoalId,
-		spawnedFromPlanId: g.spawnedFromPlanId,
-		state: g.state as any,
-		archived: !!g.archived,
-		paused: !!g.paused,
-		createdAt: g.createdAt,
-	}));
+	// Scope candidates to THIS goal's direct children. Without this,
+	// resolvePlanNodeChild matches any goal in the dashboard with the same
+	// spawnedFromPlanId — so opening "See Archived" (which loads archived
+	// goals from unrelated goal trees into state.goals) made the Plan tab
+	// show those archived siblings' failure states against the current
+	// (unstarted) goal's plan nodes. Cross-goal pollution.
+	const candidates: PlanNodeChild[] = allGoals
+		.filter(g => g.parentGoalId === parentGoalId)
+		.map(g => ({
+			id: g.id,
+			parentGoalId: g.parentGoalId,
+			spawnedFromPlanId: g.spawnedFromPlanId,
+			state: g.state as any,
+			archived: !!g.archived,
+			paused: !!g.paused,
+			createdAt: g.createdAt,
+		}));
 	const nodes: PlanLayoutNode[] = [];
 	const colNodesByPhase = new Map<number, PlanLayoutNode[]>();
 	let maxColH = 0;
@@ -2148,9 +2156,9 @@ function planNodeBorderColor(s: PlanNodeState): string {
 	}
 }
 
-function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): TemplateResult | typeof nothing {
+function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, ownerGoalId: string): TemplateResult | typeof nothing {
 	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
-	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0);
+	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0, ownerGoalId);
 	// Right-edge → left-edge routing avoids the bug where a source node
 	// stacked below its destination in the same phase column produced an
 	// upward vertical segment that crossed sibling nodes. The default
@@ -2167,7 +2175,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 					// recursive computePlanStepsForGoal already runs once per
 					// expanded child below); doing it here gates the chevron.
 					const childHasSubPlan = n.childGoal
-						? computePlanStepsForGoal(n.childGoal as any, allGoals).length > 0
+						? computePlanStepsForGoal(n.childGoal as any, allGoals, { isNested: true }).length > 0
 						: false;
 					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}">
 					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
@@ -2199,7 +2207,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 			</svg>
 			${nodes.filter(n => n.childGoal && _isPlanExpanded(n.childGoal.id)).map(n => {
 				const child = n.childGoal!;
-				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals);
+				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals, { isNested: true });
 				// Leaf children (no formal sub-plan, no own ad-hoc children)
 				// render NOTHING — the parent node already names them, the
 				// "No sub-plan for X" line was just noise. Chevron is also
@@ -2213,7 +2221,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 				return html`
 					<div data-testid="plan-subtree" data-parent-goal-id="${child.id}"
 						style="margin-left:24px;border-left:2px solid var(--border);padding-left:8px;">
-						${renderPlanLevel(childPlanSteps, allGoals, depth + 1)}
+						${renderPlanLevel(childPlanSteps, allGoals, depth + 1, child.id)}
 					</div>
 				`;
 			})}
@@ -2222,9 +2230,9 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number): Te
 }
 
 /** Compute plan steps for an arbitrary goal (top-level or nested). */
-function computePlanStepsForGoal(goal: Goal, allGoals: Goal[]): PlanStep[] {
+function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { isNested?: boolean }): PlanStep[] {
 	const formalGate = goal.workflow?.gates.find(g => g.id === "execution");
-	const formalSteps: FormalPlanStep[] | undefined = (formalGate as any)?.verify
+	let formalSteps: FormalPlanStep[] | undefined = (formalGate as any)?.verify
 		?.filter((v: any) => v.type === "subgoal" && v.subgoal)
 		.map((v: any, idx: number) => ({
 			planId: v.subgoal.planId,
@@ -2244,6 +2252,20 @@ function computePlanStepsForGoal(goal: Goal, allGoals: Goal[]): PlanStep[] {
 			title: g.title,
 			workflowId: g.workflowId,
 		}));
+	// Guard against inherited parent-workflow snapshots rendering phantom
+	// plan steps. When a child goal inherited its parent's `parent`
+	// meta-workflow (legacy pre-fix data), its execution gate lists subgoal
+	// verify-steps the child is NOT executing. At the TOP level we trust
+	// the goal's formal plan even if no children have been spawned (first
+	// render of a fresh goal). But when recursing into a nested child,
+	// formalSteps only count if at least one of the child's own children
+	// resolves one of them — otherwise we're looking at an inherited echo
+	// of the ancestor's plan.
+	if (opts?.isNested && formalSteps && formalSteps.length > 0) {
+		const formalPlanIds = new Set(formalSteps.map(s => s.planId));
+		const anyResolved = childSynthesis.some(c => c.spawnedFromPlanId && formalPlanIds.has(c.spawnedFromPlanId));
+		if (!anyResolved) formalSteps = undefined;
+	}
 	return buildPlanSteps({ formalSteps, childGoals: childSynthesis });
 }
 
@@ -2256,7 +2278,7 @@ function renderPlanTab(): TemplateResult {
 	}
 	return html`
 		<div class="tab-panel-inner" data-testid="plan-tab" style="overflow-x:auto;">
-			${renderPlanLevel(steps, allGoals as any, 0)}
+			${renderPlanLevel(steps, allGoals as any, 0, currentGoal.id)}
 		</div>
 	`;
 }

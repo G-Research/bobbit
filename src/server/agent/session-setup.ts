@@ -29,7 +29,7 @@ import type { ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
-import type { PromptParts } from "./system-prompt.js";
+import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
@@ -55,6 +55,39 @@ function resolveGoalToolsExtPath(ctx: PipelineContext): string {
 function resolveProposalToolsExtPath(ctx: PipelineContext): string {
 	if (ctx.toolManager) return ctx.toolManager.getExtensionPath("proposals", "extension.ts");
 	return path.join(TOOLS_DIR, "proposals", "extension.ts");
+}
+
+/**
+ * Build a NestingContext from a goal for the team-lead system prompt. Walks
+ * the parent chain (at most one hop for the parent, one hop for the root) to
+ * resolve titles and branches.
+ *
+ * Returns `{ team: true, parent: undefined }` for a root team goal so Stanza A
+ * renders, and `{ team: true, parent: {...} }` for a child team goal so
+ * Stanza B fires its "DO NOT raise a PR / DO NOT spawn siblings" guardrail.
+ * For non-team goals returns `{ team: false }` — `buildNestingContextSection`
+ * short-circuits and no section renders.
+ */
+function buildNestingContext(
+	goal: import("./goal-store.js").PersistedGoal,
+	goalManager: GoalManager,
+): NestingContext {
+	const ctx: NestingContext = { team: !!goal.team, goalBranch: goal.branch };
+	if (!goal.team) return ctx;
+	if (goal.parentGoalId) {
+		const parent = goalManager.getGoal(goal.parentGoalId);
+		if (parent) {
+			ctx.parent = { id: parent.id, title: parent.title, branch: parent.branch };
+		}
+	}
+	const rootId = goal.rootGoalId;
+	if (rootId && rootId !== goal.id) {
+		const root = goalManager.getGoal(rootId);
+		if (root) {
+			ctx.root = { id: root.id, title: root.title, branch: root.branch };
+		}
+	}
+	return ctx;
 }
 
 /** Delegate spawn timeout (30 seconds). */
@@ -395,6 +428,18 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			}
 		}
 
+		// Nesting awareness — only the team-lead session of a goal needs the
+		// root/child stanzas + the subgoal/team_spawn/task_create decision
+		// rule. Contributors and QA/reviewer sub-sessions get nothing here
+		// (they inherit their scope from their task spec). Stamping the
+		// stanza at the right role is what actually surfaces Stanza B's
+		// "DO NOT raise a PR / DO NOT spawn siblings" guardrail to child
+		// team-leads — before this was populated, the child agent had no
+		// structural awareness that its spec might be parent-flavoured.
+		const nestingContext = plan.roleName === "team-lead" && goal
+			? buildNestingContext(goal, ctx.goalManager)
+			: undefined;
+
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
@@ -411,6 +456,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			nestingContext,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}

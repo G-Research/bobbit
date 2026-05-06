@@ -100,8 +100,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_goal",
 		label: "Propose Goal",
-		description: "Submit a goal proposal for user review.",
-		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields.",
+		description: "Submit a goal proposal for user review. Prefer existing project workflow + roles; inlineWorkflow / inlineRoles only when no existing one fits or the user asked for it. Inline snapshots propagate to subgoals.",
+		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields. Reuse existing workflow/roles by default.",
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),

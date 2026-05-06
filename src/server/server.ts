@@ -24,7 +24,7 @@ import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { classifyMutation, type ClassifierPlanStep } from "./agent/plan-mutation.js";
 import { DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "./agent/plan-mutation-store.js";
 import { parseAcceptanceCriteria } from "../shared/parse-acceptance-criteria.js";
-import type { Workflow } from "./agent/workflow-store.js";
+import { stripSubgoalStepsForChildInheritance, type Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -3540,24 +3540,24 @@ async function handleApiRoute(
 			}
 
 			// Inline workflow resolution for the child. Precedence:
-			//   1. body.workflow — explicit override from the spawn-child caller
-			//   2. parent.workflow — inherited from the parent's snapshotted
-			//      workflow when the body doesn't override. Mirrors the
-			//      inlineRoles inheritance below: a parent that defined an
-			//      inline workflow propagates it to children unless the agent
-			//      explicitly chooses a different one. Without this, children
-			//      defaulted to the project's "feature" workflow lookup, which
-			//      either fails on bare projects (no stored "feature") or
-			//      produces a child whose gates don't match the parent's plan.
+			//   1. body.workflow — explicit inline override.
+			//   2. parent.workflow — inherit the parent's snapshotted workflow.
+			//      When the parent is a `parent` meta-workflow (execution gate
+			//      drives subgoal verify-steps), `stripSubgoalStepsForChildInheritance`
+			//      removes the parent's subgoal entries from execution.verify[]
+			//      so the child gets the structural scaffold (gates,
+			//      dependencies, synthesis / ready-to-merge) without the
+			//      parent's specific plan items. The child's team-lead fills
+			//      its own plan via propose+edit. For non-meta workflows this
+			//      is a pure deep-clone.
+			//   3. body.workflowId — lookup in the project's workflow store
+			//      (handled downstream by goal-manager.createGoal).
 			const inlineWorkflowBody = (body as { workflow?: unknown }).workflow;
 			let resolvedWorkflowForChild: import("./agent/workflow-store.js").Workflow | undefined;
 			if (inlineWorkflowBody && typeof inlineWorkflowBody === "object") {
 				resolvedWorkflowForChild = inlineWorkflowBody as import("./agent/workflow-store.js").Workflow;
 			} else if (parent.workflow) {
-				// Deep-clone so the child's snapshot is independent — same
-				// freeze-at-creation pattern as goal-manager's existing
-				// snapshot logic.
-				resolvedWorkflowForChild = JSON.parse(JSON.stringify(parent.workflow)) as import("./agent/workflow-store.js").Workflow;
+				resolvedWorkflowForChild = stripSubgoalStepsForChildInheritance(parent.workflow);
 			}
 
 			// Inline roles — merge parent's snapshot with the body's. Child

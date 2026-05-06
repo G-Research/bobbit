@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Workflow } from "./workflow-store.js";
+import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
 
@@ -147,6 +147,19 @@ export class GoalStore {
 							// Default setupStatus for existing goals
 							if (!g.setupStatus) {
 								g.setupStatus = "ready";
+							}
+							// Lazy-migrate workflow snapshots that were written
+							// in YAML shape (snake_case `depends_on`,
+							// `inject_downstream`) — pre-fix inline workflows
+							// bypassed normalization and broke gate_signal
+							// with "gateDef.dependsOn is not iterable".
+							if (g.workflow && typeof g.workflow === "object") {
+								const needsNormalize = Array.isArray(g.workflow.gates) && g.workflow.gates.some((gate: Record<string, unknown>) =>
+									gate && typeof gate === "object" && !Array.isArray((gate as { dependsOn?: unknown }).dependsOn));
+								if (needsNormalize) {
+									const normalized = normalizeWorkflow(g.workflow, g.workflow.id || g.workflowId || "");
+									if (normalized) g.workflow = normalized;
+								}
 							}
 							this.goals.set(g.id, g);
 						}
