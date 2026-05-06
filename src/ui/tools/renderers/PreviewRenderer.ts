@@ -179,12 +179,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				});
 				if (!patchResp.ok) throw new Error(`PATCH failed: ${patchResp.status}`);
 
-				// 4. v3: mount is already populated server-side; the side panel
-				//        will pick it up via SSE. Nothing else to push.
-				//    v1/v2: re-stamp the per-session preview mount via the new
-				//        unified endpoint (`/api/preview/mount`). WP-G's deletion
-				//        of the legacy `/api/preview` route doesn't break this
-				//        path because we're already on the new endpoint.
+				// 4. v3: mount is already populated server-side; v1/v2: re-stamp
+				//    the per-session preview mount via `/api/preview/mount`.
+				let entryFromPost: string | undefined;
+				let mtimeFromPost: number | undefined;
 				if (parsed.kind !== "preview") {
 					const postBody: Record<string, unknown> = parsed.kind === "file"
 						? { file: parsed.path }
@@ -201,6 +199,34 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						}
 						throw new Error(`POST failed: ${postResp.status}`);
 					}
+					try {
+						const data = await postResp.json();
+						if (typeof data?.entry === "string" && data.entry) entryFromPost = data.entry;
+						if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
+					} catch { /* ignore — body parse is best-effort */ }
+				}
+
+				// 5. Imperatively refresh the preview side-panel client-side.
+				//    SSE only fires on new mount writes — for v3 reopens the
+				//    mount already exists so no SSE arrives. Bump the mtime to
+				//    force the iframe to reload (its src includes `#mtime=<n>`
+				//    as a cache buster) and set the entry from the snapshot URL.
+				try {
+					const { state: appState, renderApp } = await import("../../../app/state.js");
+					let entry = entryFromPost;
+					if (!entry && parsed.kind === "preview") {
+						entry = parsed.entry;
+						if (!entry && typeof parsed.url === "string") {
+							// parsed.url is `/preview/<sid>/<entry>` — extract <entry>.
+							const m = /^\/preview\/[^/]+\/(.+)$/.exec(parsed.url);
+							if (m) entry = m[1];
+						}
+					}
+					if (entry) (appState as any).previewPanelEntry = entry;
+					(appState as any).previewPanelMtime = mtimeFromPost ?? Date.now();
+					renderApp();
+				} catch {
+					/* state import failure shouldn't block the success animation */
 				}
 
 				btn.textContent = "Opened ✓";

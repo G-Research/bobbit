@@ -20,6 +20,18 @@ function renderPreview(
 	const { state } = await import("../../src/app/state.js");
 	(state as any).remoteAgent = { state: { messages } };
 };
+(window as any).__getPreviewState = async () => {
+	const { state } = await import("../../src/app/state.js");
+	return {
+		previewPanelEntry: (state as any).previewPanelEntry,
+		previewPanelMtime: (state as any).previewPanelMtime,
+	};
+};
+(window as any).__resetPreviewState = async () => {
+	const { state } = await import("../../src/app/state.js");
+	(state as any).previewPanelEntry = "";
+	(state as any).previewPanelMtime = 0;
+};
 (window as any).__getFetchCalls = () => (window as any).__fetchCalls || [];
 (window as any).__resetFetchCalls = () => {
 	(window as any).__fetchCalls = [];

@@ -40,6 +40,7 @@ test.beforeAll(() => {
 
 const PAGE = `file://${FIXTURE}`;
 const MARKER = "__preview_snapshot_v1__\n";
+const MARKER_V3 = "__preview_snapshot_v3__\n";
 
 async function gotoAndWait(page: any) {
 	await page.goto(PAGE);
@@ -189,6 +190,122 @@ test.describe("Reopenable preview widgets (browser E2E)", () => {
 		const post = calls.find((c: any) => c.method === "POST" && c.url.includes("/api/preview"));
 		expect(post).toBeTruthy();
 		expect(JSON.parse(post.body).html).toBe(htmlA);
+	});
+
+	test("v3 reopen imperatively refreshes preview panel state (stale-panel fix)", async ({ page }) => {
+		// Regression test: clicking Open on a v3-snapshot preview_open card must
+		// update state.previewPanelEntry / state.previewPanelMtime imperatively,
+		// because the SSE channel only fires on new mount writes — v3 reopens
+		// reuse the existing mount and would otherwise leave the panel stale.
+		await gotoAndWait(page);
+
+		const sid = "22222222-2222-2222-2222-222222222222";
+		const entryA = "index-A.html";
+		const entryB = "index-B.html";
+		const snapA = MARKER_V3 + JSON.stringify({ kind: "preview", url: `/preview/${sid}/${entryA}`, path: `/state/preview/${sid}/${entryA}`, entry: entryA });
+		const snapB = MARKER_V3 + JSON.stringify({ kind: "preview", url: `/preview/${sid}/${entryB}`, path: `/state/preview/${sid}/${entryB}`, entry: entryB });
+
+		function makeV3Result(text: string, toolCallId: string) {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "preview_open",
+				isError: false,
+				content: [
+					{ type: "text", text: "Preview panel is open and will auto-update." },
+					{ type: "text", text },
+				],
+				timestamp: Date.now(),
+			};
+		}
+
+		await page.evaluate(() => {
+			const container = document.getElementById("container")!;
+			container.innerHTML = '<div id="slot-a"></div><div id="slot-b"></div>';
+		});
+
+		await page.evaluate(
+			([sid, snapA, snapB]) => {
+				const w = window as any;
+				w.__renderPreview(
+					document.getElementById("slot-a")!,
+					{ html: "<p>A</p>" },
+					{
+						role: "toolResult",
+						toolCallId: "tool-A",
+						toolName: "preview_open",
+						isError: false,
+						content: [
+							{ type: "text", text: "Preview panel is open and will auto-update." },
+							{ type: "text", text: snapA },
+						],
+						timestamp: Date.now(),
+					},
+					false,
+					{ sessionId: sid, toolUseId: "tool-A" },
+				);
+				w.__renderPreview(
+					document.getElementById("slot-b")!,
+					{ html: "<p>B</p>" },
+					{
+						role: "toolResult",
+						toolCallId: "tool-B",
+						toolName: "preview_open",
+						isError: false,
+						content: [
+							{ type: "text", text: "Preview panel is open and will auto-update." },
+							{ type: "text", text: snapB },
+						],
+						timestamp: Date.now(),
+					},
+					false,
+					{ sessionId: sid, toolUseId: "tool-B" },
+				);
+			},
+			[sid, snapA, snapB] as const,
+		);
+
+		await page.evaluate(async () => {
+			await (window as any).__resetPreviewState();
+			(window as any).__resetFetchCalls();
+		});
+
+		// Simulate the user already having previewed B (panel currently shows B).
+		await page.locator("#slot-b [data-preview-open-btn]").click();
+		await expect(page.locator("#slot-b [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+		let st = await page.evaluate(() => (window as any).__getPreviewState());
+		expect(st.previewPanelEntry).toBe(entryB);
+		const mtimeAfterB = st.previewPanelMtime;
+		expect(mtimeAfterB).toBeGreaterThan(0);
+
+		// v3 reopen MUST NOT POST to /api/preview/mount — server already has the mount.
+		let calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		const postsB = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
+		expect(postsB.length).toBe(0);
+
+		// Now click Open on the FIRST card (A). Bug repro: panel state stays at B.
+		await page.evaluate(() => (window as any).__resetFetchCalls());
+		await page.locator("#slot-a [data-preview-open-btn]").click();
+		await expect(page.locator("#slot-a [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		st = await page.evaluate(() => (window as any).__getPreviewState());
+		expect(st.previewPanelEntry).toBe(entryA);
+		expect(st.previewPanelMtime).toBeGreaterThanOrEqual(mtimeAfterB);
+
+		calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		const postsA = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
+		expect(postsA.length).toBe(0);
+		const patchA = calls.filter((c: any) => c.method === "PATCH" && c.url.includes("/api/sessions/"));
+		expect(patchA.length).toBeGreaterThanOrEqual(1);
+
+		// Idempotence: clicking Open on A again still keeps entry == A and bumps mtime.
+		const mtimeAfterA = st.previewPanelMtime;
+		await page.locator("#slot-a [data-preview-open-btn]").click();
+		await expect(page.locator("#slot-a [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+		st = await page.evaluate(() => (window as any).__getPreviewState());
+		expect(st.previewPanelEntry).toBe(entryA);
+		expect(st.previewPanelMtime).toBeGreaterThanOrEqual(mtimeAfterA);
+		void makeV3Result;
 	});
 
 	test("archived fallback: legacy single-block preview_open renders disabled button", async ({ page }) => {
