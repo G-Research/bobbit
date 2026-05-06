@@ -12,6 +12,7 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { marked } from "marked";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderTool } from "../tools/index.js";
+import { TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { fetchToolContent } from "../utils/fetch-tool-content.js";
@@ -560,7 +561,7 @@ export class ToolMessage extends LitElement {
 		this.style.display = "block";
 		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
-		document.addEventListener("bobbit-tool-renderer-loaded", this._onRendererLoaded);
+		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
@@ -568,7 +569,7 @@ export class ToolMessage extends LitElement {
 		super.disconnectedCallback();
 		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
-		document.removeEventListener("bobbit-tool-renderer-loaded", this._onRendererLoaded);
+		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 

@@ -3,26 +3,6 @@ sandbox_image: bobbit-agent
 components:
   - name: bobbit
     repo: .
-    worktree_setup_command: npm ci --prefer-offline --no-audit --no-fund
-    commands:
-      build: npm run build
-      check: npm run check
-      unit: npx playwright test --config tests/playwright.config.ts --reporter=json
-        2>/dev/null | node scripts/test-filter.mjs
-      e2e: npx playwright test --grep-invert 'mcp-integration|session-lifecycle-ui'
-        --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node
-        scripts/test-filter.mjs
-    config:
-      qa_start_command: BOBBIT_NO_OPEN='1' BOBBIT_LLM_REVIEW_SKIP='1'
-        BOBBIT_SKIP_NPM_CI='1' PORT=$PORT WORK_DIR=$WORK_DIR
-        BOBBIT_DIR=$WORK_DIR/.bobbit BOBBIT_NO_OPEN=1 BOBBIT_LLM_REVIEW_SKIP=1
-        BOBBIT_SKIP_NPM_CI=1 node dist/server/cli.js --host 127.0.0.1 --port
-        $PORT --no-tls --auth --cwd $WORK_DIR
-      qa_build_command: npm run build
-      qa_health_check: http://127.0.0.1:$PORT/api/health
-      qa_browser_entry: http://127.0.0.1:$PORT/?token=$TOKEN
-      qa_max_duration_minutes: "10"
-      qa_max_scenarios: "5"
 workflows:
   general:
     id: general
@@ -138,13 +118,13 @@ workflows:
               3. Implemented behavior that contradicts the specification
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
@@ -767,13 +747,13 @@ workflows:
               3. Implemented behavior that contradicts the specification
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
@@ -1188,13 +1168,13 @@ workflows:
               analysis?
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
@@ -1600,13 +1580,13 @@ workflows:
               4. Any unrelated or unnecessary changes
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
