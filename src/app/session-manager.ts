@@ -2468,7 +2468,6 @@ export async function startReattempt(goalId: string): Promise<void> {
 	const goal = state.goals.find(g => g.id === goalId);
 	const project = goal ? state.projects.find(p => p.id === goal.projectId) : undefined;
 	state.creatingSession = true;
-	state.creatingSessionForGoalId = goalId;
 	if (goal && goal.projectId) state.previewProjectId = goal.projectId;
 	if (project && !state.previewCwdEdited) state.previewCwd = project.rootPath;
 	renderApp();
@@ -2486,14 +2485,12 @@ export async function startReattempt(goalId: string): Promise<void> {
 		// own loading state via connectingSessionId, and we want the user to see
 		// the chat panel (with textarea) immediately, not a loading spinner.
 		state.creatingSession = false;
-		state.creatingSessionForGoalId = null;
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		showConnectionError("Failed to re-attempt goal", msg);
 	} finally {
 		state.creatingSession = false;
-		state.creatingSessionForGoalId = null;
 		renderApp();
 	}
 }
