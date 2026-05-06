@@ -4,6 +4,14 @@ Status: implemented
 Owner: this goal
 Implementation partition: §9
 
+> **Update (post-merge)**: the goal "MCP policy parity with built-in tools"
+> later removed the builtin denials `mcp__playwright: never` and
+> `mcp__nano-banana: never` from `defaults/tool-group-policies.yaml`.
+> Examples below that show those entries describe the *prior* state; the
+> policy-resolution mechanics (layer A vs B, prefix sharing, per-op `never`
+> overriding meta-allow) are unchanged and remain correct. See
+> `docs/internals.md#mcp-groups-default-to-allow` for current behaviour.
+
 ## 0. TL;DR
 
 Today every MCP operation is exposed to the model as its own top-level tool
