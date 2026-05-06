@@ -80,7 +80,7 @@ the wire protocol below the model changes:
 |---|---|
 | `<stateDir>/mcp-tool-docs/<server>.md` auto-docs | Unchanged — already per-server. |
 | `/api/internal/mcp-call` dispatcher | Unchanged — body is still `{ tool: "mcp__<server>__<op>", args }`. |
-| `tool-group-policies.yaml` keys (`mcp__playwright`, `mcp__nano-banana`, …) | Unchanged — no migration. |
+| `tool-group-policies.yaml` keys (`mcp__<server>` and `mcp__<server>__<sub>`) | Unchanged mechanics. Defaults ship no `mcp__*` denials; users opt out per-server via the user/project YAML or the Tools page. |
 | `McpManager._toolNameMap` and `_parseToolName` | Unchanged. |
 | `GET /api/mcp-servers` | Extended additively — each operation entry now also carries `subNamespace?` and `op` (parsed via `parseMcpToolName`) so the Tools page can group by sub-namespace client-side without re-parsing. |
 | `tests/grant-policy.test.ts` cascade fixtures (`mcp__pw__snap` etc.) | Unchanged — all 25 cases pass as-is. |
@@ -229,10 +229,11 @@ fields.
 
 ## Policy resolution
 
-Per-server YAML keys in `tool-group-policies.yaml` keep working untouched:
+Per-server YAML keys in `tool-group-policies.yaml` keep working untouched. MCP groups default to `allow` — defaults ship no `mcp__*` denials. Users opt out per-server via the user/project YAML or the Tools page; for example:
 
 ```yaml
-# defaults/tool-group-policies.yaml
+# Example user/project override (.bobbit/config/tool-group-policies.yaml)
+# — defaults ship no `mcp__*` denials; MCP groups default to `allow`.
 mcp__playwright: never
 mcp__nano-banana: never
 ```
