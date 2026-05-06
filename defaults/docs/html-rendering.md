@@ -51,11 +51,30 @@ per-session preview mount served at `/preview/<sid>/`. User-visible
 behaviour is identical — same iframe, same theme bridge, same SSE-driven
 refresh.
 
-Use `file=` when the HTML lives on disk already and you want sibling assets
-(images, CSS, video) to resolve as relative URLs. Use `html=` for one-shot
+Use `file=` when the HTML lives on disk already. Use `html=` for one-shot
 generated content. The tool result is a constant ~150-byte snapshot
 regardless of HTML size, so iterating on a 5000-line report does not blow
 up your context window.
+
+**Sibling assets are explicit, not automatic.** Bare `preview_open(file="report.html")`
+copies *only* the entry file into the mount — sibling CSS, images, and
+videos referenced from the HTML will 404 unless you declare them. Two
+opt-in mechanisms:
+
+```
+# Inline asset list (paths relative to the entry file's directory; supports
+# single-segment * and ? globs — `**` / `[...]` / `{a,b}` are rejected):
+preview_open(file="report.html", assets=["styles.css", "img/*.png"])
+
+# Or a sibling JSON manifest with the same `assets` array shape:
+preview_open(file="report.html", manifest="preview-manifest.json")
+```
+
+Why: bare `file=` used to BFS-walk the parent directory and silently expose
+any sibling drafts, secrets, or other agents' WIP. The explicit opt-in
+makes asset inclusion intentional. See
+[docs/preview-architecture.md](../../docs/preview-architecture.md) for the
+full contract.
 
 Full architecture: [docs/preview-architecture.md](../../docs/preview-architecture.md).
 

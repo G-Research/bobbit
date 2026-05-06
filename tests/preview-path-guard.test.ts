@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { resolveAssetPath, MAX_ASSET_SIZE } from "../src/server/preview/path-guard.ts";
+import { resolveAssetPath } from "../src/server/preview/path-guard.ts";
 
 let baseDir: string;
 let outsideFile: string;
@@ -113,7 +113,4 @@ describe("resolveAssetPath", () => {
 		if (!r.ok) assert.strictEqual(r.status, 404);
 	});
 
-	it("MAX_ASSET_SIZE is 25 MiB", () => {
-		assert.strictEqual(MAX_ASSET_SIZE, 25 * 1024 * 1024);
-	});
 });
