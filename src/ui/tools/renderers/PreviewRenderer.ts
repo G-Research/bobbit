@@ -258,6 +258,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				?disabled=${disabled}
 				title=${tooltip}
 				data-preview-open-btn
+				data-testid="preview-open-button"
 				@click=${onClick}
 			>
 				Open
