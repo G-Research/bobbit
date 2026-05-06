@@ -15,6 +15,11 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Pure mirror of the action-button label logic in `dialogs.ts`. We test it
 // in isolation rather than coupling tests to Lit + a DOM. If the dialog code
@@ -168,5 +173,58 @@ describe("REST URL choice", () => {
 		const url = `/api/goals/${goalId}/pause`;
 		assert.equal(url, "/api/goals/g1/pause");
 		// (cascade flag goes in body)
+	});
+	it("R-008: team/teardown probe uses explicit cascade=false", () => {
+		// Pin the wrapper's URL shape — dropping the explicit `?cascade=false`
+		// silently fell through to the server's old default, violating the
+		// AGENTS.md "explicit cascade required" recipe.
+		const src = fs.readFileSync(path.resolve(__dirname, "../src/app/api.ts"), "utf8");
+		assert.ok(
+			src.includes("/team/teardown?cascade=false"),
+			"teardownTeamWithDialog probe must use explicit ?cascade=false (R-008)",
+		);
+	});
+	it("R-008: server team/teardown returns 422 CASCADE_REQUIRED when param omitted", () => {
+		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		// Look for the 422 + CASCADE_REQUIRED handler near the team/teardown
+		// route. Anchor on both tokens to avoid false-positive matches.
+		const teardownIdx = src.indexOf("team|swarm)\\/teardown");
+		assert.ok(teardownIdx > 0, "team/teardown route must exist");
+		const window = src.slice(teardownIdx, teardownIdx + 1500);
+		assert.ok(
+			window.includes("CASCADE_REQUIRED"),
+			"team/teardown must emit CASCADE_REQUIRED when ?cascade= is missing (R-008)",
+		);
+		assert.ok(
+			window.includes("422"),
+			"CASCADE_REQUIRED response must use HTTP 422 (R-008)",
+		);
+	});
+});
+
+describe("showStopTeamDialog return type rename (R-024 / R-040)", () => {
+	it("public type uses 'no-descendants' instead of legacy 'this-only'", () => {
+		const src = fs.readFileSync(path.resolve(__dirname, "../src/app/dialogs.ts"), "utf8");
+		assert.ok(
+			src.includes('"no-descendants"'),
+			"showStopTeamDialog must return 'no-descendants' (R-024)",
+		);
+		// The old name lives in renames-only as a comment reference; assert
+		// the active code paths don't compare against the old literal.
+		assert.ok(
+			!/return\s+"this-only"/.test(src),
+			"showStopTeamDialog must not return 'this-only' (R-024 rename)",
+		);
+	});
+	it("teardownTeamWithDialog short-circuits the no-descendants case so the dialog only ever returns cascade|cancel", () => {
+		const src = fs.readFileSync(path.resolve(__dirname, "../src/app/api.ts"), "utf8");
+		// The dialog import sits inside a 409-handler branch; the wrapper
+		// must guard `count === 0` BEFORE invoking the dialog so the dialog's
+		// own descendantTeamCount === 0 short-circuit is dead code in this
+		// path. Pin the guard via a regex that tolerates whitespace.
+		assert.ok(
+			/body\.count\s*\?\?\s*0\)\s*===\s*0/.test(src),
+			"teardownTeamWithDialog must short-circuit (body.count ?? 0) === 0 before showStopTeamDialog (R-040)",
+		);
 	});
 });

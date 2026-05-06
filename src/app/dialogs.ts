@@ -1719,6 +1719,11 @@ interface CascadeArchiveResult { archived: number }
  *  3. Any other failure → reject (caller decides — typically just refresh).
  */
 export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveResult> {
+	// R-027: this dialog is only invoked from `deleteGoal()` (api.ts) after
+	// the descendant-count is known to be > 0. The no-descendant case is
+	// handled there via the `confirmAction("Archive Goal", ...)` flow per
+	// AGENTS.md "Archive a goal (UI)" recipe — do NOT add direct callers
+	// here that skip that confirm.
 	// Pre-flight: try cascade=false. If the server reports descendants we'll
 	// open the dialog; otherwise treat as a normal archive and we're done.
 	let preflightStatus = 0;
@@ -1850,22 +1855,30 @@ interface CascadePauseResult { paused: number }
  */
 /**
  * Cascade-stop confirmation. Returns:
- *  - "this-only" — server already accepted the no-cascade teardown
- *  - "cascade"   — user picked "Stop all teams"
- *  - "cancel"    — user dismissed
+ *  - "no-descendants" — invoked with `descendantTeamCount === 0`; the
+ *    caller is expected to short-circuit BEFORE calling this dialog
+ *    (see `teardownTeamWithDialog`). The variant is retained as a
+ *    defensive sentinel for direct callers.
+ *  - "cascade"        — user picked "Stop all teams"
+ *  - "cancel"         — user dismissed
+ *
+ * Renamed from "this-only" → "no-descendants" (R-024 / R-040): the old
+ * name implied a user-pickable variant, but the dialog never offered
+ * a "this-only" button — the value was returned only when there were
+ * no descendants to begin with.
  */
 export async function showStopTeamDialog(
 	goal: { id: string; title: string },
 	descendantTeamCount: number,
 	descendants: Array<{ id: string; title: string }>,
-): Promise<"this-only" | "cascade" | "cancel"> {
-	if (descendantTeamCount === 0) return "this-only";
-	return new Promise<"this-only" | "cascade" | "cancel">((resolve) => {
+): Promise<"no-descendants" | "cascade" | "cancel"> {
+	if (descendantTeamCount === 0) return "no-descendants";
+	return new Promise<"no-descendants" | "cascade" | "cancel">((resolve) => {
 		const container = document.createElement("div");
 		document.body.appendChild(container);
 		let working = false;
 
-		const cleanup = (result: "this-only" | "cascade" | "cancel") => {
+		const cleanup = (result: "no-descendants" | "cascade" | "cancel") => {
 			render(html``, container);
 			container.remove();
 			resolve(result);
@@ -2009,6 +2022,9 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 										@change=${(e: Event) => { cascade = (e.target as HTMLInputElement).checked; renderDialog(); }} />
 									<span>Also pause <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"}</span>
 								</label>
+								<p class="text-xs text-muted-foreground/80 mt-2 italic" data-testid="cascade-pause-limitations">
+									Note: pausing stops new gate verifications but does not interrupt streaming agents. To halt a live team-lead immediately, stop the team first.
+								</p>
 							`,
 						})}
 						${DialogFooter({

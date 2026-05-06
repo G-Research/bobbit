@@ -3498,7 +3498,15 @@ async function handleApiRoute(
 		if (!planId) { json({ error: "planId is required" }, 400); return; }
 		if (!title) { json({ error: "title is required" }, 400); return; }
 		if (!spec) { json({ error: "spec is required" }, 400); return; }
-		const workflowId = typeof body.workflowId === "string" ? body.workflowId : "feature";
+		// QA-1: workflowId vs workflow.id alignment. We resolve the inline
+		// workflow snapshot for the child below (`resolvedWorkflowForChild`).
+		// When the snapshot is set, its `.id` is the authoritative workflow
+		// identifier and we MUST pass it as `workflowId` to createGoal so the
+		// stored `goal.workflowId` matches `goal.workflow.id`. The body's
+		// `workflowId` (or the "feature" fallback) is only authoritative when
+		// no inline snapshot is in play. Final assignment happens after
+		// `resolvedWorkflowForChild` is computed below.
+		const bodyWorkflowId = typeof body.workflowId === "string" ? body.workflowId : undefined;
 		const suggestedRole = typeof body.suggestedRole === "string" ? body.suggestedRole : undefined;
 		// Caller (children-tools extension) may identify the spawning team-lead
 		// session so the sidebar can nest the child under it. Header takes
@@ -3559,6 +3567,10 @@ async function handleApiRoute(
 			} else if (parent.workflow) {
 				resolvedWorkflowForChild = stripSubgoalStepsForChildInheritance(parent.workflow);
 			}
+			// QA-1: keep `workflowId` and `workflow.id` aligned. When the
+			// snapshot wins (inline body or parent inheritance), the snapshot's
+			// id is the source of truth; otherwise fall back to body or default.
+			const workflowId = resolvedWorkflowForChild?.id ?? bodyWorkflowId ?? "feature";
 
 			// Inline roles — merge parent's snapshot with the body's. Child
 			// definitions override parent ones for the same name. Mirrors the
@@ -3638,12 +3650,24 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Shared lookup for GET / PATCH `/api/goals/:id/plan`. Returns the goal
+	// and its project context, or null after writing the appropriate 404.
+	type PlanContext = NonNullable<ReturnType<typeof projectContextManager.getContextForGoal>>;
+	const resolvePlanContext = (id: string): { goal: PersistedGoal; ctx: PlanContext } | null => {
+		const g = getGoalAcrossProjects(id);
+		if (!g) { json({ error: "Goal not found" }, 404); return null; }
+		const c = projectContextManager.getContextForGoal(id);
+		if (!c) { json({ error: "Project context not found for goal" }, 404); return null; }
+		return { goal: g, ctx: c };
+	};
+
 	// PATCH /api/goals/:id/plan — submit a plan or replan; classifier-driven.
 	const planPatchMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
 	if (planPatchMatch && req.method === "PATCH") {
 		const id = planPatchMatch[1];
-		const goal = getGoalAcrossProjects(id);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const resolved = resolvePlanContext(id);
+		if (!resolved) return;
+		const { goal } = resolved;
 		// Plan-propose requires a workflow that can hold subgoal-typed verify
 		// steps. Canonically that's the `parent` workflow (charter → plan-review
 		// → goal-plan freeze → execution), but any workflow whose snapshot
@@ -3663,10 +3687,34 @@ async function handleApiRoute(
 			json({ error: "proposedSteps[] is required" }, 400);
 			return;
 		}
+		// R-015: validate each proposed step's shape so a malformed item
+		// surfaces as a precise 400 rather than a confusing 409 RESTRUCTURE
+		// from the classifier (which interprets undefined planId as "all
+		// removed, all added").
+		for (let i = 0; i < body.proposedSteps.length; i++) {
+			const s = body.proposedSteps[i] as Partial<ClassifierPlanStep> & { subgoal?: { spec?: unknown } } | null;
+			if (!s || typeof s !== "object") {
+				json({ error: `proposedSteps[${i}] must be an object`, code: "INVALID_PLAN_STEP", index: i }, 400);
+				return;
+			}
+			if (typeof s.planId !== "string" || s.planId.length === 0) {
+				json({ error: `proposedSteps[${i}].planId must be a non-empty string`, code: "INVALID_PLAN_STEP", index: i }, 400);
+				return;
+			}
+			if (typeof s.title !== "string" || s.title.length === 0) {
+				json({ error: `proposedSteps[${i}].title must be a non-empty string`, code: "INVALID_PLAN_STEP", index: i }, 400);
+				return;
+			}
+			const hasTopSpec = typeof s.spec === "string" && s.spec.length > 0;
+			const hasSubgoalSpec = !!s.subgoal && typeof s.subgoal.spec === "string" && (s.subgoal.spec as string).length > 0;
+			if (!hasTopSpec && !hasSubgoalSpec) {
+				json({ error: `proposedSteps[${i}] must provide either spec or subgoal.spec`, code: "INVALID_PLAN_STEP", index: i }, 400);
+				return;
+			}
+		}
 		const proposedSteps = body.proposedSteps as ClassifierPlanStep[];
 
-		const ctx = projectContextManager.getContextForGoal(id);
-		if (!ctx) { json({ error: "Project context not found for goal" }, 404); return; }
+		const ctx = resolved.ctx;
 		const planMutationStore = ctx.planMutationStore;
 		const goalManager = ctx.goalManager;
 
@@ -3765,27 +3813,25 @@ async function handleApiRoute(
 	const planGetMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
 	if (planGetMatch && req.method === "GET") {
 		const id = planGetMatch[1];
-		const goal = getGoalAcrossProjects(id);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const ctx = projectContextManager.getContextForGoal(id);
-		if (!ctx) { json({ error: "Project context not found for goal" }, 404); return; }
+		const resolved = resolvePlanContext(id);
+		if (!resolved) return;
+		const { goal, ctx } = resolved;
 		const gateId = url.searchParams.get("gateId") ?? "execution";
 		const gate = goal.workflow?.gates.find(g => g.id === gateId);
 		const verify = gate?.verify ?? [];
-		const allGoals = ctx.goalStore.getAll();
 		const steps = verify
 			.filter(v => v.type === "subgoal" && v.subgoal)
 			.map(v => {
 				const sg = v.subgoal!;
-				// Reproduce harness tier preference for the child projection
-				// (Lesson 4.19): live-active > archived-complete > live-other > archived-other.
-				const matches = allGoals.filter(g => g.parentGoalId === id && g.spawnedFromPlanId === sg.planId);
-				const sortByCreatedDesc = (arr: PersistedGoal[]) => arr.slice().sort((a, b) => b.createdAt - a.createdAt);
-				const tier1 = sortByCreatedDesc(matches.filter(g => !g.archived && g.state === "in-progress"))[0];
-				const tier2 = !tier1 ? sortByCreatedDesc(matches.filter(g => g.archived === true && g.state === "complete"))[0] : undefined;
-				const tier3 = !tier1 && !tier2 ? sortByCreatedDesc(matches.filter(g => !g.archived && g.state !== "in-progress"))[0] : undefined;
-				const tier4 = !tier1 && !tier2 && !tier3 ? sortByCreatedDesc(matches.filter(g => g.archived === true && g.state !== "complete"))[0] : undefined;
-				const child = tier1 ?? tier2 ?? tier3 ?? tier4;
+				// R-004: route the tier resolution through the harness's
+				// canonical implementation so the renderer / server / harness
+				// three-way agreement required by Lesson 4.22 has exactly one
+				// authoritative source. The harness's resolvePlanStepChild
+				// covers tiers 1, 1.5, 2, 3, 4 and 5 — the inline 4-tier copy
+				// this replaced was already drifting (no Tier 1.5 / 5).
+				const { child } = verificationHarness.resolvePlanStepChild(id, sg.planId, {
+					expectedTitle: sg.title,
+				});
 				return {
 					planId: sg.planId,
 					title: sg.title,
@@ -3800,8 +3846,7 @@ async function handleApiRoute(
 					} : {}),
 				};
 			});
-		const ctxForGate = projectContextManager.getContextForGoal(id);
-		const gateState = ctxForGate?.gateStore.getGate(id, gateId)?.status ?? "pending";
+		const gateState = ctx.gateStore.getGate(id, gateId)?.status ?? "pending";
 		const frozen = gate?.metadata?.frozen === "true";
 		json({
 			steps,
@@ -3829,6 +3874,27 @@ async function handleApiRoute(
 		const ctx = projectContextManager.getContextForGoal(parentId);
 		if (!ctx) { json({ error: "Project context not found" }, 404); return; }
 		const goalManager = ctx.goalManager;
+		// R-005: refuse to merge a child whose ready-to-merge gate has not
+		// passed. Without this guard a team-lead can manually merge a still-
+		// running or failed child via `goal_merge_child`, which (a) bypasses
+		// the harness invariant that only RTM-passed children merge and
+		// (b) leaves _waitForChildReadyToMerge polling against an already-
+		// merged + still-live child. Allow override via `body.force === true`
+		// for recovery flows where the gate state is itself corrupt.
+		const integrateBody = await readBody(req).catch(() => null);
+		const force = integrateBody && (integrateBody as { force?: unknown }).force === true;
+		if (!force) {
+			const rtm = ctx.gateStore.getGate(childId, "ready-to-merge");
+			if (!rtm || rtm.status !== "passed") {
+				json({
+					error: `Child ${childId}'s ready-to-merge gate has not passed (status=${rtm?.status ?? "unset"}). Pass body.force=true to override.`,
+					code: "RTM_NOT_PASSED",
+					childGoalId: childId,
+					rtmStatus: rtm?.status ?? null,
+				}, 409);
+				return;
+			}
+		}
 		try {
 			const outcome = await goalManager.mergeChild(parentId, childId);
 			if (outcome.merged || outcome.alreadyMerged) {
@@ -3871,7 +3937,8 @@ async function handleApiRoute(
 		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendants(id) : [])];
 		let count = 0;
 		for (const g of targets) {
-			if (g.paused === true) continue;
+			// R-039: symmetric with resume's `if (!g.paused) continue;`.
+			if (g.paused) continue;
 			await goalManager.updateGoal(g.id, { paused: true });
 			await cancelAllVerifications(g.id);
 			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
@@ -3897,7 +3964,8 @@ async function handleApiRoute(
 		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendants(id) : [])];
 		let count = 0;
 		for (const g of targets) {
-			if (g.paused !== true) continue;
+			// R-039: symmetric with the pause loop above.
+			if (!g.paused) continue;
 			await goalManager.updateGoal(g.id, { paused: false });
 			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
 			count++;
@@ -3911,6 +3979,9 @@ async function handleApiRoute(
 	if (mutationDecisionMatch && req.method === "POST") {
 		const goalId = mutationDecisionMatch[1];
 		const requestId = mutationDecisionMatch[2];
+		// R-018: requestId is implicitly scoped to goalId — the store key is
+		// (goalId, requestId), so a cross-goal requestId 404s naturally via
+		// `planMutationStore.get(goalId, requestId)` below.
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const body = await readBody(req).catch(() => null);
@@ -3998,7 +4069,15 @@ async function handleApiRoute(
 			updates.maxConcurrentChildren = n;
 		}
 		await goalManager.updateGoal(id, updates);
-		broadcastToAll({ type: "goal_state_changed", goalId: id });
+		// R-017: include the new policy values in the broadcast so clients
+		// don't need to re-fetch the goal record on every policy change.
+		const updatedGoal = getGoalAcrossProjects(id);
+		broadcastToAll({
+			type: "goal_state_changed",
+			goalId: id,
+			...(updatedGoal?.divergencePolicy !== undefined ? { divergencePolicy: updatedGoal.divergencePolicy } : {}),
+			...(updatedGoal?.maxConcurrentChildren !== undefined ? { maxConcurrentChildren: updatedGoal.maxConcurrentChildren } : {}),
+		});
 		json({ ok: true });
 		return;
 	}
@@ -5898,7 +5977,15 @@ async function handleApiRoute(
 			});
 			json({ commits });
 		} catch (e: any) {
-			json({ error: "Failed to read git log", detail: e.message }, 500);
+			// QA-3: parent goals without a worktree (or any goal where the
+			// branch hasn't been created yet) used to surface a 500 here,
+			// which the dashboard rendered as a hard error toast on every
+			// poll cycle. Returning 200 with an empty array matches the
+			// `!fs.existsSync(goal.cwd)` short-circuit above and keeps the
+			// commit panel quietly empty until git actually has something
+			// to show.
+			console.warn(`[api] commits: git log failed for goal ${goalId} (branch=${branch}):`, e?.message ?? e);
+			json({ commits: [] });
 		}
 		return;
 	}
@@ -6280,7 +6367,20 @@ async function handleApiRoute(
 	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
 	if (teamTeardownMatch && req.method === "POST") {
 		const goalId = teamTeardownMatch[1];
-		const cascade = url.searchParams.get("cascade") === "true";
+		// R-008: require an explicit `?cascade=true|false` query param.
+		// Mirrors the `cascade: boolean` body contract on /pause /resume
+		// /:id (delete). Previously a missing param silently meant `false`,
+		// which violates AGENTS.md's documented "every cascade-affecting
+		// REST call requires explicit cascade" rule.
+		const cascadeParam = url.searchParams.get("cascade");
+		if (cascadeParam !== "true" && cascadeParam !== "false") {
+			json({
+				error: "cascade query param is required (?cascade=true|false)",
+				code: "CASCADE_REQUIRED",
+			}, 422);
+			return;
+		}
+		const cascade = cascadeParam === "true";
 		const ctx = projectContextManager.getContextForGoal(goalId);
 		try {
 			if (!cascade) {

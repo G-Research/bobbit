@@ -85,15 +85,10 @@ function indexGoals(goals: NestableGoal[], opts: ResolvedOpts): BuildIndex {
 	const byId = new Map<string, NestableGoal>();
 	for (const g of visible) byId.set(g.id, g);
 	const childrenByParent = new Map<string | undefined, NestableGoal[]>();
-	// Track which goal ids we've already enqueued for some parent. Prevents
-	// the same id appearing twice in a parent's children list when the input
-	// `goals` has accidental duplicates from a reducer race (Map.set on byId
-	// dedupes the lookup, but the iteration below can still push the same
-	// goal twice into the children list).
-	const enqueued = new Set<string>();
-	for (const g of visible) {
-		if (enqueued.has(g.id)) continue;
-		enqueued.add(g.id);
+	// R-042: dedupe via byId rather than a parallel `enqueued` Set. The byId
+	// Map.set semantics already collapse same-id entries, and we iterate
+	// `byId.values()` here so each unique id is visited exactly once.
+	for (const g of byId.values()) {
 		// Promote orphans (parent not in visible set) to top-level.
 		const effectiveParent = g.parentGoalId !== undefined && byId.has(g.parentGoalId)
 			? g.parentGoalId

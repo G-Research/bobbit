@@ -592,6 +592,18 @@ function startAgentPolling(goalId: string): void {
 	stopAgentPolling();
 	fetchAgents(goalId).then((a) => { agents = a; renderApp(); });
 	agentPollTimer = setInterval(async () => {
+		// QA-2: archived goals don't have a team — polling /team produces a
+		// 404-spam loop that's visible in network logs and burns the goal's
+		// next-render budget. Stop the interval the moment we observe the
+		// goal is archived (server-side WS event already triggered a state
+		// refresh). The team itself is already torn down at archive time.
+		const sidebarGoal = state.goals.find(g => g.id === goalId);
+		if (sidebarGoal?.archived || (currentGoal && currentGoal.id === goalId && currentGoal.archived)) {
+			stopAgentPolling();
+			teamActive = false;
+			renderApp();
+			return;
+		}
 		agents = await fetchAgents(goalId);
 		const teamState = await getTeamState(goalId);
 		teamActive = teamState != null;

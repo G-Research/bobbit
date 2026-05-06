@@ -17,6 +17,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import { GoalStore } from "../src/server/agent/goal-store.ts";
 import { GoalManager } from "../src/server/agent/goal-manager.ts";
@@ -86,6 +89,26 @@ describe("integrate-child REST primitives", () => {
 		await assert.rejects(
 			() => gm.mergeChild(parent.id, "no-child"),
 			(err: any) => /child goal not found/i.test(String(err.message)),
+		);
+	});
+
+	// R-005: source-level invariant that the route guards on the
+	// child's ready-to-merge gate before invoking mergeChild. Direct
+	// HTTP coverage is in the e2e harness; here we pin the source-level
+	// contract so a regression that drops the guard fails CI.
+	it("R-005: route refuses merge unless ready-to-merge gate has passed (or body.force=true)", () => {
+		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		assert.ok(
+			src.includes("RTM_NOT_PASSED"),
+			"integrate-child route must emit RTM_NOT_PASSED when the child's ready-to-merge gate has not passed (R-005)",
+		);
+		assert.ok(
+			/getGate\(childId,\s*"ready-to-merge"\)/.test(src),
+			"integrate-child route must look up gateStore.getGate(childId, 'ready-to-merge') (R-005)",
+		);
+		assert.ok(
+			/integrateBody.*\.force === true/.test(src) || /force === true/.test(src),
+			"integrate-child route must accept body.force=true as a recovery override (R-005)",
 		);
 	});
 });
