@@ -253,4 +253,67 @@ test.describe("Tools page \u2192 MCP section", () => {
 		const toolSelect = aiTool.locator('[data-testid="mcp-tool-policy"]');
 		await expect(toolSelect).toHaveValue("ask");
 	});
+
+	test("fresh install: MCP server-policy dropdown reads empty (Allow default)", async ({ page }) => {
+		await mockMcp(page, GATEWAY_SERVERS);
+		await mockPolicies(page);
+		await openApp(page);
+		await navigateToHash(page, "#/tools");
+
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section).toBeVisible({ timeout: 10_000 });
+
+		const gr = section.locator('[data-server-name="gr"]');
+		const serverSelect = gr.locator('[data-testid="mcp-server-policy"]').first();
+		await expect(serverSelect).toHaveValue("");
+
+		await gr.locator('[data-testid="mcp-server-toggle"]').click();
+		const aiTool = gr.locator('[data-testid="mcp-tool-row"][data-tool-name="ai-adoption"]');
+		const toolSelect = aiTool.locator('[data-testid="mcp-tool-policy"]');
+		await expect(toolSelect).toHaveValue("");
+	});
+
+	test("resetting policy to default fires PUT with policy=null and removes key", async ({ page }) => {
+		await mockMcp(page, GATEWAY_SERVERS);
+		const policyState = await mockPolicies(page, { "mcp__gr": "never" });
+		await openApp(page);
+		await navigateToHash(page, "#/tools");
+
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section).toBeVisible({ timeout: 10_000 });
+
+		const gr = section.locator('[data-server-name="gr"]');
+		const serverSelect = gr.locator('[data-testid="mcp-server-policy"]').first();
+		await expect(serverSelect).toHaveValue("never");
+
+		await serverSelect.selectOption("");
+
+		await expect.poll(() => policyState.puts.length).toBeGreaterThan(0);
+		expect(policyState.puts[policyState.puts.length - 1]).toEqual({ key: "mcp__gr", policy: null });
+		expect(policyState.policies["mcp__gr"]).toBeUndefined();
+	});
+
+	test("reload after reset to default shows empty value persisted", async ({ page }) => {
+		await mockMcp(page, GATEWAY_SERVERS);
+		const policyState = await mockPolicies(page, { "mcp__gr": "never" });
+		await openApp(page);
+		await navigateToHash(page, "#/tools");
+
+		const section = page.locator('[data-testid="mcp-section"]');
+		await expect(section).toBeVisible({ timeout: 10_000 });
+
+		const gr = section.locator('[data-server-name="gr"]');
+		const serverSelect = gr.locator('[data-testid="mcp-server-policy"]').first();
+		await serverSelect.selectOption("");
+		await expect.poll(() => policyState.puts.length).toBeGreaterThan(0);
+
+		await page.reload();
+		await navigateToHash(page, "#/tools");
+
+		const sectionAfter = page.locator('[data-testid="mcp-section"]');
+		await expect(sectionAfter).toBeVisible({ timeout: 10_000 });
+		const grAfter = sectionAfter.locator('[data-server-name="gr"]');
+		const serverSelectAfter = grAfter.locator('[data-testid="mcp-server-policy"]').first();
+		await expect(serverSelectAfter).toHaveValue("");
+	});
 });
