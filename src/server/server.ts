@@ -2916,7 +2916,7 @@ async function handleApiRoute(
 		}
 
 		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted,
-		// or a project whose rootPath is gone). spawn("node", { cwd }) on Windows
+		// or a project whose rootPath is gone). spawn(process.execPath, { cwd }) on Windows
 		// reports a missing cwd as ENOENT, masquerading as if the `node` binary was missing.
 		// Fall back to the project rootPath when we have a resolved project to anchor the
 		// fallback. If no project is resolved yet, leave cwd alone — the resolver below
