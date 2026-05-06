@@ -2,15 +2,18 @@
  * Reproducing test for the "Enforce headless QA browsers" goal.
  *
  * Asserts configuration invariants that guarantee no visible Chromium window
- * is ever launched during a QA (or any other) agent run:
+ * is ever launched during a QA (or any other) agent run.
+ *
+ * Under MCP/builtin policy parity, the YAML group-level `mcp__playwright: never`
+ * denial was removed (MCP groups default to `allow` like every other tool group).
+ * The headless guarantee now relies on three surviving layers:
  *
  *   1. `.claude/.mcp.json` passes `--headless` and `--isolated` to `@playwright/mcp`.
- *   2. `defaults/tool-group-policies.yaml` blocks `mcp__playwright` by default.
- *   3. `defaults/roles/qa-tester.yaml` explicitly blocks `mcp__playwright` too.
+ *   2. `defaults/tool-group-policies.yaml` contains NO builtin mcp__* denials
+ *      (regression guard against re-introducing them).
+ *   3. `defaults/roles/qa-tester.yaml` explicitly blocks `mcp__playwright` at the role layer.
  *   4. `defaults/tools/browser/extension.ts` passes `--headless=new` and
  *      `--disable-gpu` to `chromium.launch`.
- *
- * All 4 assertions MUST fail on current master and pass after the fix.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -37,14 +40,15 @@ test("`.claude/.mcp.json` passes --headless and --isolated to @playwright/mcp", 
   );
 });
 
-test("`defaults/tool-group-policies.yaml` blocks mcp__playwright by default", () => {
+test("`defaults/tool-group-policies.yaml` contains no builtin mcp__* denials (parity with built-in tool groups)", () => {
   const p = path.join(repoRoot, "defaults", "tool-group-policies.yaml");
   const raw = fs.readFileSync(p, "utf8");
   const doc = YAML.parse(raw) ?? {};
-  assert.equal(
-    doc["mcp__playwright"],
-    "never",
-    `defaults/tool-group-policies.yaml must set top-level "mcp__playwright: never"; got ${JSON.stringify(doc["mcp__playwright"])}`,
+  const mcpKeys = Object.keys(doc).filter((k) => k.startsWith("mcp__"));
+  assert.deepEqual(
+    mcpKeys,
+    [],
+    `defaults/tool-group-policies.yaml must NOT contain any top-level mcp__* keys (MCP groups default to "allow" like every other tool group); found: ${JSON.stringify(mcpKeys)}`,
   );
 });
 

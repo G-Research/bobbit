@@ -6,17 +6,11 @@ Ask: allow
 # catalog is useless without an activator. User-typed `/<name>` invocations are
 # unaffected by this policy.
 Skills: allow
-# Block the @playwright/mcp browser group by default: it launches visible
-# Chromium windows on the host on first use, which is disruptive and can
-# steal focus. Agents should use the native `browser_*` tools (defaults/tools/browser)
-# which are guaranteed headless. Projects that legitimately want a headed
-# browser can override this in `.bobbit/config/tool-group-policies.yaml`
-# (`mcp__playwright: allow`) and/or drop `--headless` in their own `.mcp.json`.
-mcp__playwright: never
-# Bobbit owns image model routing through `generate_image`, including Nano
-# Banana/Gemini. The external nano-banana MCP hard-codes provider behavior and
-# can drift from the configured session image model.
-mcp__nano-banana: never
+# MCP server groups default to `allow` like every other tool group — no
+# builtin denials here. Projects/users opt out of a specific MCP server via
+# `.bobbit/config/tool-group-policies.yaml` or the Tools page; roles can
+# override via their `toolPolicies` (e.g. the qa-tester role still blocks
+# `mcp__playwright` at the role layer to guarantee headless browser access).
 # Team management tools (team_spawn, team_dismiss, team_prompt, team_steer,
 # team_abort, team_complete, team_list) are team-lead-only. The team-lead role
 # overrides this group default with `Team: allow`. For non-team-lead agents,
