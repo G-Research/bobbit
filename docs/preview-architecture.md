@@ -106,7 +106,9 @@ fallback is `application/octet-stream`.
 **Path-traversal guard.** `src/server/preview/path-guard.ts::resolveAssetPath`
 rejects backslashes, NULs, absolute paths, and any descendant whose realpath
 escapes the per-session mount. `400` from the guard becomes `403` to the
-caller (traversal); `413` becomes `413` (oversized); `404` becomes `404`.
+caller (traversal); `404` becomes `404`. There is no size guard at read
+time — asset size is the agent's responsibility (see "Explicit asset
+opt-in" above).
 
 **Cache headers.** All responses set `Cache-Control: no-store` plus
 `X-Content-Type-Options: nosniff`. Browser caching never gets between the
