@@ -300,7 +300,6 @@ test.describe("Reopenable preview widgets (browser E2E)", () => {
 
 		// Idempotence: clicking Open on A again still keeps entry == A and bumps mtime.
 		const mtimeAfterA = st.previewPanelMtime;
-		await new Promise((r) => setTimeout(r, 5));
 		await page.locator("#slot-a [data-preview-open-btn]").click();
 		await expect(page.locator("#slot-a [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
 		st = await page.evaluate(() => (window as any).__getPreviewState());
