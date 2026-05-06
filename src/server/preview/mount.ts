@@ -3,18 +3,25 @@
  *
  * Single source of truth for `<bobbitStateDir>/preview/<sid>/`. Owned by
  * the gateway: agent extension POSTs HTML / file paths to a mount endpoint
- * (WP-D), the route handler calls `writeInline` / `copyFileTree` here, and
+ * (WP-D), the route handler calls `writeInline` / `mountFile` here, and
  * the content-origin route (WP-B) serves files back out of `mountDir(sid)`.
+ *
+ * Asset inclusion contract (post opt-in):
+ *   - `writeInline(sid, html, entry?)` writes only the entry — no siblings.
+ *   - `mountFile(sid, srcFile, assets?)` copies only `srcFile` plus the
+ *     declared assets (literals or single-segment globs). Sibling files in
+ *     the source dir that are NOT declared are NOT copied. There is no
+ *     BFS-of-everything fallback. See docs/preview-architecture.md.
  *
  * Public API:
  *   mountDir(sid)                               → host directory
  *   writeInline(sid, html, entry?)              → write inline.html (or chosen entry)
- *   copyFileTree(sid, srcFile)                  → copy srcFile + sibling tree
+ *   mountFile(sid, srcFile, assets?)            → copy entry + declared assets
  *   removeMount(sid)                            → recursive delete (idempotent)
  *   watchMount(sid, onChange)                   → debounced fs watch + unsubscribe
  *
  * All errors are `PreviewMountError` with a `statusCode` so the route handler
- * can map directly to HTTP. Codes: 400 / 403 / 404 / 413.
+ * can map directly to HTTP. Codes: 400 / 403 / 404 / 500.
  */
 
 import * as fs from "node:fs";
@@ -24,11 +31,13 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 /** Same shape as `VALID_SESSION_ID` in `server.ts` (UUID v4-style). */
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
-/** 100 MiB ceiling per session mount. */
+/**
+ * @deprecated The 100 MiB mount ceiling was removed when asset inclusion
+ * became explicit (agents declare what to copy via `assets[]`/`manifest`).
+ * Kept as a re-export for backwards compatibility with imports that exist
+ * elsewhere in-tree; the value is no longer enforced.
+ */
 export const MAX_MOUNT_BYTES = 100 * 1024 * 1024;
-
-/** 25 MiB cap per copyFileTree call (mirrors path-guard MAX_ASSET_SIZE). */
-export const MAX_COPY_BYTES = 25 * 1024 * 1024;
 
 /** Default entry filename when only inline HTML is supplied. */
 export const DEFAULT_INLINE_ENTRY = "inline.html";
@@ -42,6 +51,13 @@ export interface MountResult {
 	entry: string;
 	/** mtime of the entry file in ms since epoch. */
 	mtime: number;
+}
+
+/** Extension of MountResult returned by `mountFile`: echoes resolved assets. */
+export interface MountFileResult extends MountResult {
+	/** Asset paths actually copied, relative to the entry file's directory.
+	 *  Useful for the route handler / renderer to round-trip. */
+	assets: string[];
 }
 
 /** Typed error so the route handler can map directly to HTTP. */
@@ -58,10 +74,6 @@ export class PreviewMountError extends Error {
 // stateDir resolution
 // ──────────────────────────────────────────────────────────────────────────
 
-/**
- * Resolve the preview parent directory `<stateDir>/preview/`. Allows tests
- * to override via `setPreviewRootForTesting`.
- */
 let _previewRootOverride: string | undefined;
 export function setPreviewRootForTesting(dir: string | undefined): void {
 	_previewRootOverride = dir;
@@ -82,8 +94,6 @@ function validateSessionId(sessionId: string): void {
 
 /**
  * Entry must be a single path segment (no separators, no traversal, no NUL).
- * Forbidding `/` and `\\` keeps the entry confined to the mount root — sub-
- * directories are populated only via `copyFileTree`.
  */
 function validateEntry(entry: string): string {
 	if (!entry || typeof entry !== "string") {
@@ -98,6 +108,70 @@ function validateEntry(entry: string): string {
 		throw new PreviewMountError(400, "Invalid entry");
 	}
 	return entry;
+}
+
+/**
+ * Asset path validation per the design doc:
+ *   1. Must be a non-empty string after trimming.
+ *   2. No NUL.
+ *   3. Not absolute (incl. `C:\` Windows drives).
+ *   4. No backslashes — force forward slashes for portability.
+ *   5. No `..` segments after normalisation.
+ *   6. For globs: only `*` and `?` allowed; reject `**`, `[abc]`, `{a,b}`.
+ *
+ * Returns the trimmed asset string. Throws PreviewMountError(400) on reject.
+ */
+function validateAssetSpec(asset: unknown): string {
+	if (typeof asset !== "string") {
+		throw new PreviewMountError(400, "Asset must be a string");
+	}
+	const trimmed = asset.trim();
+	if (trimmed === "") {
+		throw new PreviewMountError(400, "Asset must be a non-empty string");
+	}
+	if (trimmed.indexOf("\0") >= 0) {
+		throw new PreviewMountError(400, `Invalid asset path: ${asset}`);
+	}
+	if (trimmed.indexOf("\\") >= 0) {
+		throw new PreviewMountError(400, `Invalid asset path (use forward slashes): ${asset}`);
+	}
+	if (path.isAbsolute(trimmed) || /^[a-zA-Z]:\//.test(trimmed)) {
+		throw new PreviewMountError(400, `Asset path must be relative: ${asset}`);
+	}
+	// Reject `..` segments.
+	const segments = trimmed.split("/");
+	for (const seg of segments) {
+		if (seg === "..") {
+			throw new PreviewMountError(400, `Asset path may not contain '..': ${asset}`);
+		}
+	}
+	// Reject unsupported glob constructs.
+	if (trimmed.indexOf("**") >= 0) {
+		throw new PreviewMountError(400, `Glob '**' is not supported: ${asset}`);
+	}
+	if (trimmed.indexOf("[") >= 0 || trimmed.indexOf("]") >= 0) {
+		throw new PreviewMountError(400, `Glob character class '[...]' is not supported: ${asset}`);
+	}
+	if (trimmed.indexOf("{") >= 0 || trimmed.indexOf("}") >= 0) {
+		throw new PreviewMountError(400, `Glob brace expansion '{a,b}' is not supported: ${asset}`);
+	}
+	return trimmed;
+}
+
+function isGlob(spec: string): boolean {
+	return spec.indexOf("*") >= 0 || spec.indexOf("?") >= 0;
+}
+
+/** Compile a single-path glob (no `/`) into a RegExp. */
+function compileGlobSegment(segment: string): RegExp {
+	let re = "^";
+	for (const ch of segment) {
+		if (ch === "*") re += "[^/]*";
+		else if (ch === "?") re += "[^/]";
+		else re += ch.replace(/[.+^${}()|\\]/g, "\\$&");
+	}
+	re += "$";
+	return new RegExp(re);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -120,17 +194,6 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 
 	const dir = mountDir(sessionId);
 	const target = path.join(dir, safeEntry);
-	const incoming = Buffer.byteLength(html, "utf-8");
-
-	// Mount-total ceiling: existing bytes (excluding the file we're about to
-	// overwrite) + incoming bytes ≤ MAX_MOUNT_BYTES.
-	let existing = walkSize(dir);
-	if (fs.existsSync(target)) {
-		try { existing -= fs.statSync(target).size; } catch { /* ignore */ }
-	}
-	if (existing + incoming > MAX_MOUNT_BYTES) {
-		throw new PreviewMountError(413, "Preview mount exceeds 100 MiB ceiling");
-	}
 
 	// Atomic write: temp file + rename within the same directory.
 	const tmp = path.join(dir, `.${safeEntry}.tmp-${process.pid}-${Date.now()}`);
@@ -150,7 +213,25 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 	};
 }
 
-export function copyFileTree(sessionId: string, srcFile: string): MountResult {
+/**
+ * Mount the entry HTML file plus a caller-declared list of assets.
+ *
+ * Behaviour:
+ *   - Wipes the mount directory.
+ *   - Copies only `srcFile` plus the resolved `assets` (literals + globs).
+ *   - Globs may use `*` and `?` in a single path segment; `**`/`[...]`/`{a,b}`
+ *     are rejected.
+ *   - Symlink escape: any resolved asset whose realpath is not contained in
+ *     the entry's source dir is rejected with 403.
+ *   - Unmatched literal asset → 404.
+ *
+ * No size cap — the agent is responsible for declaring only what it needs.
+ */
+export function mountFile(
+	sessionId: string,
+	srcFile: string,
+	assets?: string[],
+): MountFileResult {
 	validateSessionId(sessionId);
 	if (!srcFile || typeof srcFile !== "string") {
 		throw new PreviewMountError(400, "srcFile required");
@@ -159,8 +240,6 @@ export function copyFileTree(sessionId: string, srcFile: string): MountResult {
 		throw new PreviewMountError(400, "srcFile must be absolute");
 	}
 
-	// Realpath the source root (parity with path-guard.ts) so symlink escapes
-	// from any descendant can be detected against the same base.
 	const srcDir = path.dirname(srcFile);
 	let srcRoot: string;
 	try {
@@ -180,78 +259,84 @@ export function copyFileTree(sessionId: string, srcFile: string): MountResult {
 	}
 
 	const entry = path.basename(srcFile);
-	validateEntry(entry); // basename should already be a single segment
+	validateEntry(entry);
 
 	const destRoot = mountDir(sessionId);
-
-	// Wipe the existing mount before copy so we mirror the source tree
-	// exactly. Idempotent — caller may invoke `copyFileTree` repeatedly.
 	wipeContents(destRoot);
 
-	// BFS walk srcRoot, copying regular files only. Reject any entry whose
-	// realpath escapes srcRoot (symlinks pointing outside the source tree).
-	let copiedBytes = 0;
-	const queue: string[] = [srcRoot];
-	while (queue.length > 0) {
-		const dir = queue.shift()!;
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-		for (const ent of entries) {
-			const abs = path.join(dir, ent.name);
+	// Copy the entry file.
+	const entryReal = (() => {
+		try { return fs.realpathSync(srcFile); } catch { return srcFile; }
+	})();
+	if (!isContained(entryReal, srcRoot) && entryReal !== path.join(srcRoot, entry)) {
+		// Entry's realpath escapes its declared dir (symlink escape on the entry).
+		throw new PreviewMountError(403, "Entry symlink escapes source tree");
+	}
+	const entryDst = path.join(destRoot, entry);
+	copyOneFile(entryReal, entryDst);
+
+	const resolvedAssets: Set<string> = new Set();
+	const list = Array.isArray(assets) ? assets : [];
+
+	// Pre-validate all asset specs first so we fail fast before any extra work.
+	const specs = list.map(validateAssetSpec);
+
+	for (const spec of specs) {
+		if (isGlob(spec)) {
+			const matches = expandGlob(srcRoot, spec);
+			// A glob that matches nothing is OK (agent may speculatively list
+			// `img/*.png` even when none exist yet). It's not a hard error —
+			// matches the design doc which only specifies 404 for *literal*
+			// missing assets.
+			for (const rel of matches) {
+				const abs = path.join(srcRoot, rel);
+				let real: string;
+				try { real = fs.realpathSync(abs); } catch { continue; }
+				if (!isContained(real, srcRoot)) {
+					throw new PreviewMountError(403, `Asset escapes source tree: ${rel}`);
+				}
+				let st: fs.Stats;
+				try { st = fs.statSync(real); } catch { continue; }
+				if (!st.isFile()) continue;
+				const dst = path.join(destRoot, rel);
+				fs.mkdirSync(path.dirname(dst), { recursive: true });
+				copyOneFile(real, dst);
+				resolvedAssets.add(rel.split(path.sep).join("/"));
+			}
+		} else {
+			// Literal — must exist.
+			const rel = spec; // already forward-slash, no `..`, not absolute
+			const abs = path.resolve(srcRoot, rel);
+			// Containment check against the unresolved path first (file may
+			// not exist as a symlink yet).
+			if (!isContained(abs, srcRoot)) {
+				throw new PreviewMountError(400, `Asset escapes source tree: ${rel}`);
+			}
 			let real: string;
 			try {
 				real = fs.realpathSync(abs);
 			} catch {
-				continue;
+				throw new PreviewMountError(404, `Asset '${rel}' not found`);
 			}
 			if (!isContained(real, srcRoot)) {
-				// Symlink escape — refuse the entire copy. The mount is now
-				// empty (we wiped) which is fine: the caller saw a 403.
-				throw new PreviewMountError(403, "Symlink escapes source tree");
+				throw new PreviewMountError(403, `Asset symlink escapes source tree: ${rel}`);
 			}
 			let st: fs.Stats;
-			try { st = fs.statSync(real); } catch { continue; }
-			const rel = path.relative(srcRoot, real);
-			if (st.isDirectory()) {
-				if (rel) fs.mkdirSync(path.join(destRoot, rel), { recursive: true });
-				queue.push(real);
-				continue;
+			try { st = fs.statSync(real); } catch {
+				throw new PreviewMountError(404, `Asset '${rel}' not found`);
 			}
-			if (!st.isFile()) continue;
-			copiedBytes += st.size;
-			if (copiedBytes > MAX_COPY_BYTES) {
-				throw new PreviewMountError(413, "Source tree exceeds 25 MiB cap");
+			if (!st.isFile()) {
+				throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
 			}
 			const dst = path.join(destRoot, rel);
 			fs.mkdirSync(path.dirname(dst), { recursive: true });
-			// Hardlink-where-supported, fall back to copyFile.
-			try {
-				// If a file already exists at dst (shouldn't after wipe, but
-				// be defensive), unlink first so link() doesn't EEXIST.
-				try { fs.unlinkSync(dst); } catch { /* ignore */ }
-				fs.linkSync(real, dst);
-			} catch {
-				try {
-					fs.copyFileSync(real, dst);
-				} catch (err) {
-					throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`);
-				}
-			}
+			copyOneFile(real, dst);
+			resolvedAssets.add(rel);
 		}
-	}
-
-	// Mount ceiling check after copy.
-	if (walkSize(destRoot) > MAX_MOUNT_BYTES) {
-		throw new PreviewMountError(413, "Preview mount exceeds 100 MiB ceiling");
 	}
 
 	const target = path.join(destRoot, entry);
 	if (!fs.existsSync(target)) {
-		// Source file was a symlink that resolved outside, or vanished mid-walk.
 		throw new PreviewMountError(404, "Entry file missing after copy");
 	}
 
@@ -260,11 +345,12 @@ export function copyFileTree(sessionId: string, srcFile: string): MountResult {
 		path: target,
 		entry,
 		mtime: Math.floor(fs.statSync(target).mtimeMs),
+		assets: Array.from(resolvedAssets).sort(),
 	};
 }
 
 export function removeMount(sessionId: string): void {
-	if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return; // idempotent on bad input
+	if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return;
 	const dir = path.join(previewRoot(), sessionId);
 	try {
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -285,7 +371,7 @@ const _watchers = new Map<string, WatcherEntry>();
 
 export function watchMount(sessionId: string, onChange: () => void): () => void {
 	validateSessionId(sessionId);
-	const dir = mountDir(sessionId); // ensures it exists
+	const dir = mountDir(sessionId);
 
 	let entry = _watchers.get(sessionId);
 	if (!entry) {
@@ -301,9 +387,6 @@ export function watchMount(sessionId: string, onChange: () => void): () => void 
 			if (timer) return;
 			timer = setTimeout(fire, 50);
 		};
-		// `recursive: true` is supported on Win/macOS and modern Linux (Node 20+).
-		// It silently degrades to top-level on older Linux — acceptable: most
-		// preview interactions write through the entry file at the top level.
 		const watcher = fs.watch(dir, { recursive: true }, debounced);
 		watcher.on("error", err => {
 			console.warn(`[preview/mount] watch error for ${sessionId}: ${err}`);
@@ -335,25 +418,68 @@ export function watchMount(sessionId: string, onChange: () => void): () => void 
 // Internals
 // ──────────────────────────────────────────────────────────────────────────
 
-function walkSize(dir: string): number {
-	let total = 0;
-	let entries: fs.Dirent[];
+function copyOneFile(src: string, dst: string): void {
+	try { fs.unlinkSync(dst); } catch { /* ignore */ }
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		fs.linkSync(src, dst);
 	} catch {
-		return 0;
-	}
-	for (const ent of entries) {
-		const abs = path.join(dir, ent.name);
 		try {
-			if (ent.isDirectory()) {
-				total += walkSize(abs);
-			} else if (ent.isFile()) {
-				total += fs.statSync(abs).size;
-			}
-		} catch { /* ignore */ }
+			fs.copyFileSync(src, dst);
+		} catch (err) {
+			throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`);
+		}
 	}
-	return total;
+}
+
+/**
+ * Expand a single-spec glob (e.g. `img/*.png`, `*.css`, `sub/dir/*.js`)
+ * against `srcRoot`. Returns relative paths (POSIX-style, with `/`).
+ *
+ * Implementation: split spec on `/`. For each segment, if it contains a
+ * wildcard, list the directory and match. If not, descend literally. No `**`
+ * support — that was rejected in `validateAssetSpec`.
+ */
+function expandGlob(srcRoot: string, spec: string): string[] {
+	const segments = spec.split("/");
+	let candidates: string[] = [""]; // relative-to-srcRoot directories so far
+	const isFinalSeg = (i: number) => i === segments.length - 1;
+
+	for (let i = 0; i < segments.length; i++) {
+		const seg = segments[i];
+		const next: string[] = [];
+		const wildcard = seg.indexOf("*") >= 0 || seg.indexOf("?") >= 0;
+		const re = wildcard ? compileGlobSegment(seg) : null;
+
+		for (const cand of candidates) {
+			const candAbs = cand === "" ? srcRoot : path.join(srcRoot, cand);
+			if (wildcard) {
+				let entries: fs.Dirent[];
+				try { entries = fs.readdirSync(candAbs, { withFileTypes: true }); } catch { continue; }
+				for (const ent of entries) {
+					if (!re!.test(ent.name)) continue;
+					if (isFinalSeg(i)) {
+						if (ent.isFile() || ent.isSymbolicLink()) {
+							next.push(cand === "" ? ent.name : `${cand}/${ent.name}`);
+						}
+					} else if (ent.isDirectory()) {
+						next.push(cand === "" ? ent.name : `${cand}/${ent.name}`);
+					}
+				}
+			} else {
+				const childAbs = path.join(candAbs, seg);
+				let st: fs.Stats;
+				try { st = fs.statSync(childAbs); } catch { continue; }
+				if (isFinalSeg(i)) {
+					if (st.isFile()) next.push(cand === "" ? seg : `${cand}/${seg}`);
+				} else if (st.isDirectory()) {
+					next.push(cand === "" ? seg : `${cand}/${seg}`);
+				}
+			}
+		}
+		candidates = next;
+		if (candidates.length === 0) break;
+	}
+	return candidates;
 }
 
 function wipeContents(dir: string): void {

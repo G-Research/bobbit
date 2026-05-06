@@ -62,7 +62,7 @@ export interface DockerRunConfig {
 	 *   `BOBBIT_SESSION_ID`.
 	 *
 	 * Note: the gateway runs the actual writes (via `mount.writeInline` /
-	 * `mount.copyFileTree`) — the bind-mount mainly exists for symmetry, so
+	 * `mount.mountFile`) — the bind-mount mainly exists for symmetry, so
 	 * tools that read back what they wrote see the same bytes the gateway
 	 * just persisted. The agent never needs the host path; it always POSTs
 	 * to `/api/preview/mount` (WP-D).
@@ -153,7 +153,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// ── Per-session preview mount (WP-A/F) ────────────────────────────
 	// `<stateDir>/preview/<sid>/` is the single source of truth for the
 	// preview content; the gateway populates it via mount.writeInline /
-	// mount.copyFileTree. Bind it into the container so the agent (and any
+	// mount.mountFile. Bind it into the container so the agent (and any
 	// in-container tooling) can read back the same bytes. Replaces the
 	// old BOBBIT_HOST_CWD path-translation dance.
 	if (stateDir && projectId) {

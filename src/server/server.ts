@@ -6941,12 +6941,18 @@ async function handleApiRoute(
 		const body = await readBody(req).catch(() => ({}));
 		const hasHtml = typeof body?.html === "string";
 		const hasFile = typeof body?.file === "string" && body.file.length > 0;
+		const hasAssets = Array.isArray(body?.assets);
+		const hasManifest = typeof body?.manifest === "string" && body.manifest.length > 0;
 		if (!hasHtml && !hasFile) {
 			json({ error: "Body must contain one of 'html' or 'file'" }, 400);
 			return;
 		}
+		if (hasHtml && (hasAssets || hasManifest)) {
+			json({ error: "`assets`/`manifest` only valid with `file`" }, 400);
+			return;
+		}
 		try {
-			let result: previewMount.MountResult;
+			let result: previewMount.MountResult | previewMount.MountFileResult;
 			if (hasHtml) {
 				// `html` wins over `file` when both are provided.
 				let entry: string | undefined;
@@ -6983,7 +6989,58 @@ async function handleApiRoute(
 					json({ error: "file must end in .html or .htm" }, 400);
 					return;
 				}
-				result = previewMount.copyFileTree(sessionId, filePath);
+				// Collect assets from inline `assets[]` and optional `manifest` JSON.
+				const declared: string[] = [];
+				if (hasAssets) {
+					for (const a of body.assets as unknown[]) {
+						if (typeof a !== "string") {
+							json({ error: "`assets[]` entries must be strings" }, 400);
+							return;
+						}
+						declared.push(a);
+					}
+				}
+				if (hasManifest) {
+					const manifestRel = body.manifest as string;
+					if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
+						manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
+						json({ error: "Invalid manifest path" }, 400);
+						return;
+					}
+					const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
+					if (!fs.existsSync(manifestAbs)) {
+						json({ error: `Manifest '${manifestRel}' not found` }, 404);
+						return;
+					}
+					let manifestParsed: any;
+					try {
+						manifestParsed = JSON.parse(fs.readFileSync(manifestAbs, "utf-8"));
+					} catch (err: any) {
+						json({ error: `Manifest JSON parse error: ${err?.message ?? err}` }, 400);
+						return;
+					}
+					if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
+						json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
+						return;
+					}
+					for (const a of manifestParsed.assets) {
+						if (typeof a !== "string") {
+							json({ error: "Manifest `assets[]` entries must be strings" }, 400);
+							return;
+						}
+						declared.push(a);
+					}
+				}
+				// De-duplicate while preserving order.
+				const seen = new Set<string>();
+				const dedup: string[] = [];
+				for (const a of declared) {
+					const k = a.trim();
+					if (seen.has(k)) continue;
+					seen.add(k);
+					dedup.push(a);
+				}
+				result = previewMount.mountFile(sessionId, filePath, dedup);
 			}
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,

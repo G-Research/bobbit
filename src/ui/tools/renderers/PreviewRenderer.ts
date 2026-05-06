@@ -181,6 +181,16 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 
 				// 4. v3: mount is already populated server-side; v1/v2: re-stamp
 				//    the per-session preview mount via `/api/preview/mount`.
+				//
+				// LEGACY CAVEAT (v2): the original behaviour BFS-walked the source
+				// directory and copied every sibling. The current mount endpoint
+				// requires explicit `assets`/`manifest` opt-in, so v2 reopen will
+				// copy ONLY the entry file — any sibling CSS/images referenced from
+				// the entry HTML will 404. This is acceptable because v2 markers
+				// only exist in archived sessions (read-only legacy); the original
+				// behaviour was already brittle (broken whenever the source file had
+				// been moved/deleted). New previews use v3 and the mount persists
+				// across the renderer's lifetime.
 				let entryFromPost: string | undefined;
 				let mtimeFromPost: number | undefined;
 				if (parsed.kind !== "preview") {
