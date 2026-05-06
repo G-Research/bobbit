@@ -32,6 +32,22 @@ Key behaviors:
 - The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section for every registered project. On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
 - Persistence is atomic (write to `.tmp` then rename).
 
+### Symlinked project rootPath handling
+
+<a id="symlinked-project-rootpath-handling"></a>
+
+When a user registers a project whose `rootPath` is a Linux/macOS symlink (or a Windows directory junction), worktree creation, `.bobbit/state` scaffolding, and path-containment checks risk operating against both the symlink and its target inconsistently — the historical failure mode was state corruption and 400s on goal creation when an agent's `cwd` reached the server through the canonical path while the project was registered under the symlink path (or vice versa).
+
+**Registration contract.** `detectSymlinkRoot(rootPath)` in `src/server/agent/project-registry.ts` returns `{ canonical }` whenever `realpathSync(rootPath) !== rootPath`. `ProjectRegistry.register(input, opts?)` accepts `acceptCanonical?: boolean`; when `detectSymlinkRoot` reports a mismatch and the caller has not opted in, `register()` throws `SymlinkProjectRootError` carrying both paths. `POST /api/projects` translates this throw into a 400 with envelope `{ error, code: "symlink_root", rootPath, canonical }`. The UI add-project dialog catches the matching `SymlinkRootError` (exported from `src/app/api.ts`), prompts the user *"`<rootPath>` is a symlink to `<canonical>`. Bobbit will register the canonical path to avoid worktree corruption. Continue?"*, and on accept re-submits with `acceptCanonical: true`.
+
+`registerProvisional()` and `registerSystemProject()` pass `acceptCanonical: true` silently — they are assistant-internal callsites with no user-facing prompt, and the synthetic system project is anchored at a path Bobbit controls so a symlink there would be a config error worth resolving silently. The provisional path is similarly an internal staging step; rejecting it would surface as an opaque assistant failure rather than the actionable user prompt the API form provides.
+
+**Lookup canonicalisation.** `findByCwd()` canonicalises both the registered `rootPath` and the incoming `cwd` through `realpathSync` (with a try/catch fallback to the textual path on EPERM/ENOENT — Windows raises EPERM on some junctions) before the prefix comparison. This is what closes the "400 on goal creation" bug class even for projects already registered under a symlinked path, because the comparison is post-canonicalisation on both sides.
+
+`getByPath()` is intentionally **not** canonicalised. It serves a different role — it's the duplicate-path guard at registration time, answering "is there already a project registered at exactly this `rootPath` string?" Canonicalising both sides would let `register()` silently fold a symlinked re-registration onto the existing canonical entry, masking what the user thinks they did. The symlink check happens first via `detectSymlinkRoot`; `getByPath()` runs against the already-canonicalised path the caller resolved to.
+
+**Migration policy.** Existing projects registered with a symlinked `rootPath` before this guard landed are **not migrated** — there is no startup sweep. They continue to work because `findByCwd` canonicalisation handles the runtime mismatch. Only new registrations are guarded. Migrating in place would require regenerating worktrees and state-dir paths, which is risky against running sessions and would surprise users; the runtime fix is sufficient.
+
 ### Synthetic system project
 
 A hidden, synthetic project with id `system` is registered at server startup by `projectRegistry.registerSystemProject(<bobbitStateDir>/system-project)` (see `src/server/server.ts` startup hook calling `registerSystemProject()` in `src/server/agent/project-registry.ts`). Idempotent — safe to call repeatedly.
