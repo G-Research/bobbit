@@ -1,6 +1,8 @@
 // Test entry — bundles PreviewOpenRenderer for a file:// fixture.
-import { render } from "lit";
+import { html, render } from "lit";
 import { PreviewOpenRenderer } from "../../src/ui/tools/renderers/PreviewRenderer.js";
+import { renderTool } from "../../src/ui/tools/index.js";
+import "../../src/ui/components/Messages.js";
 
 function renderPreview(
 	container: HTMLElement,
@@ -15,6 +17,51 @@ function renderPreview(
 }
 
 (window as any).__renderPreview = renderPreview;
+void renderTool;
+
+// Mount a real <tool-message> for preview_open so the lazy registry's
+// placeholder → resolve flow runs end-to-end (placeholder card, then the
+// real Open button materialising inside the SAME card via the
+// bobbit-tool-renderer-loaded event → requestUpdate path).
+(window as any).__mountPreviewToolMessage = (
+	container: HTMLElement,
+	params: any,
+	result: any,
+	toolUseId: string = "tool-1",
+	sessionId: string = "11111111-1111-1111-1111-111111111111",
+) => {
+	const toolCall = { id: toolUseId, name: "preview_open", arguments: params || {} };
+	render(
+		html`<tool-message
+			.toolCall=${toolCall}
+			.tool=${{ name: "preview_open" }}
+			.result=${result}
+			.pending=${false}
+			.aborted=${false}
+			.isStreaming=${false}
+		></tool-message>`,
+		container,
+	);
+	void sessionId;
+};
+
+(window as any).__waitForRendererLoaded = (toolName: string, timeoutMs = 3000): Promise<void> => {
+	return new Promise((resolve, reject) => {
+		const onLoad = (e: Event) => {
+			const detail = (e as CustomEvent).detail;
+			if (detail?.toolName === toolName) {
+				document.removeEventListener("bobbit-tool-renderer-loaded", onLoad);
+				clearTimeout(timer);
+				resolve();
+			}
+		};
+		const timer = setTimeout(() => {
+			document.removeEventListener("bobbit-tool-renderer-loaded", onLoad);
+			reject(new Error(`timeout waiting for renderer ${toolName}`));
+		}, timeoutMs);
+		document.addEventListener("bobbit-tool-renderer-loaded", onLoad);
+	});
+};
 (window as any).__setMessages = async (messages: any[]) => {
 	// Inject a fake remoteAgent state so locateToolResultBlock() succeeds.
 	const { state } = await import("../../src/app/state.js");
