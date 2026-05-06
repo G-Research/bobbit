@@ -1,6 +1,19 @@
 /* Import Claude theme from mini-lit */
 @import "@mariozechner/mini-lit/styles/themes/default.css";
 
+/* ── Sidebar font scale (user-adjustable from System Settings → General) ──
+   The default of 1 ensures `var(--sidebar-font-scale, 1)` works during the
+   brief window before state.ts has run. The actual value is set on
+   `document.documentElement` by `applySidebarFontScaleVar()` at module load. */
+:root { --sidebar-font-scale: 1; }
+
+/* The sidebar container sets its base font-size to 12px × scale. All sized
+   children inside the sidebar use em-relative inline styles so they scale
+   proportionally off this base (preserving the visual hierarchy). */
+.sidebar-root {
+	font-size: calc(0.75rem * var(--sidebar-font-scale, 1));
+}
+
 /* ── iOS PWA safe-area + dvh app shell ──
    Used on the top-level app container(s) in src/app/render.ts.
    - `100dvh` avoids iOS Safari/PWA 100vh paint-gap bugs (falls back to 100vh).
