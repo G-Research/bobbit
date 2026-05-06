@@ -264,7 +264,7 @@ function renderMobileLanding() {
 	}
 
 	return html`
-		<div class="flex-1 flex flex-col overflow-y-auto">
+		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root">
 			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					${(() => {

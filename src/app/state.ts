@@ -149,6 +149,28 @@ export function applySidebarWidthVar(w: number): void {
 applySidebarWidthVar(loadSidebarWidth());
 
 // ============================================================================
+// SIDEBAR FONT SCALE — helpers live in `./sidebar-font-scale.ts` (no DOM
+// dependencies, so the Node unit test can import them directly). Re-exported
+// here so existing call sites can keep importing from `./state.js`.
+// ============================================================================
+
+export {
+	SIDEBAR_FONT_SCALE_KEY,
+	SIDEBAR_FONT_SCALE_DEFAULT,
+	SIDEBAR_FONT_SCALE_STOPS,
+	clampSidebarFontScale,
+	loadSidebarFontScale,
+	applySidebarFontScaleVar,
+	nearestStop,
+	type SidebarFontScaleStop,
+} from "./sidebar-font-scale.js";
+
+import { applySidebarFontScaleVar as _applySidebarFontScaleVar, loadSidebarFontScale as _loadSidebarFontScale } from "./sidebar-font-scale.js";
+
+// Apply immediately so the first paint already reflects the saved scale.
+_applySidebarFontScaleVar(_loadSidebarFontScale());
+
+// ============================================================================
 // MUTABLE STATE
 // ============================================================================
 
