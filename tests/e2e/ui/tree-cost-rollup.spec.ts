@@ -61,4 +61,43 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		// Avoid unused-var lint
 		void c1; void c2;
 	});
+
+	test("Tree cost row stays visible when all children are archived", async ({ page }) => {
+		const projectId = await defaultProjectId();
+		const parent = await createGoal({ title: "Tree-cost archived-children parent", projectId, team: false });
+		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+			method: "POST",
+			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "spec" }),
+		});
+		const c1 = (await r1.json()).id as string;
+		const r2 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+			method: "POST",
+			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "spec" }),
+		});
+		const c2 = (await r2.json()).id as string;
+
+		// Archive both children (they're leaves, so cascade=false is fine).
+		const d1 = await apiFetch(`/api/goals/${c1}?cascade=false`, { method: "DELETE" });
+		expect(d1.status).toBeLessThan(400);
+		const d2 = await apiFetch(`/api/goals/${c2}?cascade=false`, { method: "DELETE" });
+		expect(d2.status).toBeLessThan(400);
+
+		// The server-side tree-cost rollup still walks archived descendants.
+		const treeRes = await apiFetch(`/api/goals/${parent.id}/tree-cost`);
+		expect(treeRes.status).toBe(200);
+		const tree = await treeRes.json();
+		expect(tree.breakdown.length).toBeGreaterThan(1);
+
+		await openApp(page);
+		await navigateToHash(page, `#/goal/${parent.id as string}`);
+		await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
+
+		// Row should still be visible despite all children being archived
+		// and "See Archived" being OFF (default state).
+		const treeCostRow = page.locator('[data-testid="tree-cost-row"]').first();
+		await expect(treeCostRow).toBeVisible({ timeout: 10_000 });
+
+		// Cleanup.
+		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	});
 });

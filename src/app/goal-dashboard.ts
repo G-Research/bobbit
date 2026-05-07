@@ -1421,13 +1421,15 @@ function formatTokens(n: number): string {
 }
 
 function renderTreeCostRow(): TemplateResult | typeof nothing {
-	// Show tree cost row when this goal has a real rollup (i.e. children OR
-	// it's a child whose root has children) — single-goal trees are noisy.
 	if (!currentGoal) return nothing;
-	const hasChildren = state.goals.some(g => g.parentGoalId === currentGoal!.id);
-	const isChild = !!currentGoal.parentGoalId;
-	if (!hasChildren && !isChild) return nothing;
 	if (!treeCost) return nothing;
+	// Tree cost is meaningful whenever the rollup spans more than this goal
+	// alone — i.e. there's a parent or any descendant (live or archived).
+	// Drive this off the server-side breakdown so archived children still
+	// keep the row visible (the `state.goals` filter excludes them when
+	// "See Archived" is off).
+	const hasRollup = treeCost.breakdown.length > 1 || !!currentGoal.parentGoalId;
+	if (!hasRollup) return nothing;
 	const total = treeCost.totalCostUsd ?? 0;
 	if (total <= 0 && treeCost.breakdown.length <= 1) return nothing;
 	return html`
