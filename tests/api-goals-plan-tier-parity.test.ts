@@ -119,17 +119,21 @@ describe("GET /plan ↔ resolvePlanStepChild parity", () => {
 		// handler would diverge from the harness again. We assert source-level
 		// presence of the delegated call so the regression is caught before
 		// runtime.
-		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		// The /plan route was extracted to nested-goal-routes.ts (Task D);
+		// check both files so the pin survives future relocations.
+		const serverSrc = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		const routesSrc = fs.readFileSync(path.resolve(__dirname, "../src/server/agent/nested-goal-routes.ts"), "utf8");
+		const combined = serverSrc + "\n" + routesSrc;
 		// The route must call `verificationHarness.resolvePlanStepChild(`.
 		assert.ok(
-			src.includes("verificationHarness.resolvePlanStepChild("),
+			combined.includes("verificationHarness.resolvePlanStepChild("),
 			"GET /plan must delegate to verificationHarness.resolvePlanStepChild — see R-004",
 		);
 		// And NOT carry a 4-tier inline copy.
 		const inlineMarker = "matches.filter(g => !g.archived && g.state === \"in-progress\")";
 		assert.ok(
-			!src.includes(inlineMarker),
-			"Inline 4-tier resolver shape detected in server.ts — route must call the harness instead (R-004 regression)",
+			!combined.includes(inlineMarker),
+			"Inline 4-tier resolver shape detected — route must call the harness instead (R-004 regression)",
 		);
 	});
 });

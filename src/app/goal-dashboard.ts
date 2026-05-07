@@ -15,6 +15,7 @@ import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-visibility.js";
+import { isSubgoalsEnabled } from "./subgoals-flag.js";
 import { renderPlanTab, computePlanStepsForGoal } from "./goal-dashboard-plan-tab.js";
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
 
@@ -241,6 +242,9 @@ export function notifyGoalEventForDashboard(): void {
 
 /** Fetch live+archived descendants for the Plan tab. In-flight guard + staleness check. */
 async function fetchDashboardDescendants(goalId: string): Promise<void> {
+	// §5.6: skip the round-trip when the experimental flag is off — the
+	// Plan tab is hidden in that case so the data would never be rendered.
+	if (!isSubgoalsEnabled()) return;
 	if (dashboardDescendantsInFlight) return;
 	dashboardDescendantsInFlight = true;
 	dashboardDescendantsLastFetchAt = Date.now();
@@ -276,6 +280,9 @@ function dashboardGoalPool(): Goal[] {
 }
 
 async function fetchTreeCost(goalId: string): Promise<void> {
+	// §5.6: skip when the experimental flag is off — the tree-cost row is
+	// only meaningful for nested goals and the row is gated on the same flag.
+	if (!isSubgoalsEnabled()) return;
 	if (treeCostInFlight) return;
 	treeCostInFlight = true;
 	treeCostLastFetchAt = Date.now();

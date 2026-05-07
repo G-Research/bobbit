@@ -138,7 +138,11 @@ describe("integrate-child REST primitives", () => {
 	});
 
 	it("R-005: route refuses merge unless ready-to-merge gate has passed (or body.force=true)", () => {
-		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		// integrate-child route was extracted to nested-goal-routes.ts (Task D);
+		// look in both files so the source-level pin survives the move.
+		const serverSrc = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		const routesSrc = fs.readFileSync(path.resolve(__dirname, "../src/server/agent/nested-goal-routes.ts"), "utf8");
+		const src = serverSrc + "\n" + routesSrc;
 		assert.ok(
 			src.includes("RTM_NOT_PASSED"),
 			"integrate-child route must emit RTM_NOT_PASSED when the child's ready-to-merge gate has not passed (R-005)",
