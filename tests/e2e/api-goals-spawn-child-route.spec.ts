@@ -8,9 +8,10 @@
  *      on the persisted child (header path).
  *   2. `body.spawnedBySessionId` → stamped when no header present
  *      (body fallback path).
- *   3. Header wins over body when both are supplied (header is the
- *      authoritative source — defends against forwarded requests
- *      rewriting the body).
+ *   3. Body wins over header when both are supplied — body.spawnedBySessionId
+ *      is tier 1 in the four-tier cascade (explicit caller claim);
+ *      X-Bobbit-Spawning-Session header is tier 2. See
+ *      src/server/agent/spawn-child-spawnedby.ts.
  *   4. `body.suggestedRole` → persisted on the child goal (commit
  *      7491041c reinstated this after it had been `void`'d).
  *   5. `spawnedFromPlanId` is stamped (existing Lesson 4.1 invariant —
@@ -163,7 +164,10 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 		}
 	});
 
-	test("header wins over body when both present", async () => {
+	test("body wins over header when both present (tier 1 beats tier 2)", async () => {
+		// Cascade order per design: body.spawnedBySessionId is tier 1
+		// (explicit caller claim); X-Bobbit-Spawning-Session header is tier 2.
+		// Body wins. See src/server/agent/spawn-child-spawnedby.ts.
 		const parent = await createParentGoal();
 		const headerSession = `sess-header-${Date.now()}`;
 		const bodySession = `sess-body-${Date.now()}`;
@@ -173,17 +177,17 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				headers: { "X-Bobbit-Spawning-Session": headerSession },
 				body: {
 					planId: "plan-precedence-1",
-					title: "Header-wins child",
+					title: "Body-wins child",
 					spec: "precedence test",
 					spawnedBySessionId: bodySession,
 				},
 			});
 			expect(status).toBe(201);
-			expect(body.spawnedBySessionId).toBe(headerSession);
-			expect(body.spawnedBySessionId).not.toBe(bodySession);
+			expect(body.spawnedBySessionId).toBe(bodySession);
+			expect(body.spawnedBySessionId).not.toBe(headerSession);
 
 			const child = await readGoal(body.id);
-			expect(child.spawnedBySessionId).toBe(headerSession);
+			expect(child.spawnedBySessionId).toBe(bodySession);
 
 			await deleteGoal(body.id);
 		} finally {
