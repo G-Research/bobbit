@@ -417,7 +417,7 @@ Cause: `spawnedBySessionId` was `undefined` on creation (cascade tier 5 hit — 
 Fix locations to inspect when this regresses:
 
 - `src/server/agent/spawn-child-spawnedby.ts` — the cascade itself; treat as the single source of truth for resolution order.
-- `POST /api/goals/:id/spawn-child` handler in `src/server/server.ts` — must call `resolveSpawnedBySessionId` and emit the warn log on tier-5 fall-through.
+- `POST /api/goals/:id/spawn-child` handler in `src/server/agent/nested-goal-routes.ts` (extracted from `server.ts`) — must call `resolveSpawnedBySessionId` and emit the warn log on tier-5 fall-through.
 - `verification-harness.runSubgoalStep` — must call the same helper for the in-process path.
 - `selectSpawnedChildren` — the optional `parentLeadId` argument is the strict-attribution invariant; if a regression drops it, unstamped orphans float across siblings again.
 - `goal-manager.backfillSpawnedBySessionId` — boot-time stamping of legacy records.
@@ -726,6 +726,50 @@ Diagnose:
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts` (the four reminder sites). Tests: `tests/verification-reminder-race.test.ts`, API E2E `tests/e2e/gate-verification-resume.spec.ts`. See [docs/internals.md — Reminder race after restart-resume](internals.md#reminder-race-after-restart-resume).
 
+<<<<<<< HEAD
+=======
+## Verification step fails with `Role "X" not found. Available roles: ...`
+
+The verification harness (or `team_spawn`) couldn't resolve a role name to either a goal-scoped inline role or a project/server/builtin store entry. This is a fail-loud error by design — the agent must see what's available so it can pick a valid name or propose a new one.
+
+Resolution order applied by `resolveRole(goal, name, roleStore)` in `src/server/agent/resolve-role.ts`:
+1. `goal.inlineRoles[name]` — ephemeral, snapshotted at goal creation, frozen forever for that goal
+2. `roleStore.get(name)` — project → server → builtin cascade
+
+The error message lists everything `listAvailableRoles(goal, roleStore)` can find, inline first then store, deduped by name.
+
+Diagnose:
+1. **Misspelt name** — check the spelling in the workflow's `verify[]` step or in the `team_spawn(role=...)` argument against the listed names.
+2. **Inline role expected but missing** — read the goal record from `.bobbit/state/goals.json`. If `inlineRoles` is undefined, the `propose_goal` / `goal_spawn_child` call didn't include the role. Re-propose with `inlineRoles: { <name>: { ... } }`.
+3. **Inline role NOT inherited from parent** — `goal_spawn_child` merges `parent.inlineRoles` with `body.inlineRoles`, child wins on collision. If the parent's inline roles aren't on the child, check the spawn-child handler in `src/server/agent/nested-goal-routes.ts` (extracted from `server.ts` — look for the merge `{...parentInlineRoles, ...bodyInlineRoles}`).
+4. **Custom role missing from project library** — if you intended a permanent role, run `propose_role` and accept the proposal. The role then becomes available across all goals via the cascade.
+
+Tests pinning the precedence rule: `tests/resolve-role.test.ts`. Snapshot + child-merge: `tests/goal-manager-inline-roles.test.ts`. Full HTTP roundtrip: `tests/e2e/api-goals-spawn-child-route.spec.ts`.
+
+Key files: `src/server/agent/resolve-role.ts` (pure helper), `src/server/agent/team-manager.ts::spawnRole`, three sites in `src/server/agent/verification-harness.ts` (model-resolution, llm-review, agent-qa).
+
+## propose_goal inline fields silently dropped
+
+**Symptom:** an agent calls `propose_goal` with `inlineWorkflow` and/or `inlineRoles` and the tool result returns success (`__proposal_rev_v1__:N`), but the draft on disk at `<stateDir>/proposal-drafts/<sessionId>/goal.md` shows only `title`, `cwd`, `workflow`, `options` in the YAML frontmatter — both inline fields are missing. The proposal panel in the UI consequently renders an empty "Advanced: paste inline workflow YAML" textarea and no inline-roles section.
+
+**Cause:** two compounding bugs.
+
+1. The goal serializer at `src/server/proposals/proposal-types.ts` (the `goalPlugin.serialize` function) used to hardcode the four legacy keys `["title", "cwd", "workflow", "options"]` and silently drop everything else. The fix iterates `GOAL_FRONTMATTER_KEYS` (now includes `inlineWorkflow` and `inlineRoles`) and validates the structure of either field when present via `validateGoalInlineFields`.
+2. `defaults/tools/proposals/extension.ts::propose_goal.execute` had a conditional rename `inlineWorkflow → workflow` when `workflow` was empty, which also corrupted the type contract (`workflow` is a string id, `inlineWorkflow` is a full Workflow object). Removed — the two fields are now passed through untouched.
+
+**Diagnose:**
+
+1. Reproduce by calling `propose_goal` with both fields and immediately `view_proposal type:"goal"`. The returned markdown's frontmatter must contain `inlineWorkflow:` and `inlineRoles:` keys.
+2. If the keys are missing, grep `src/server/proposals/proposal-types.ts:43` for `GOAL_FRONTMATTER_KEYS` — it must include both names. Without them, the fix has been reverted.
+3. If the keys are present in the draft but the goal record on `GET /api/goals/:id` doesn't carry them, check the acceptance path: `src/app/render.ts::handleCreateGoal` reads `state.activeProposals.goal?.fields.inlineWorkflow` and `inlineRoles` BEFORE deleting the slot, then passes them to `createGoal()` in `src/app/api.ts:851`. Both call sites (`goalPreviewPanel`, `goalProposalPanel`) must read from the proposal slot.
+4. For the role-acceptance equivalent: `src/app/render.ts::handleCreateRole` snapshots the proposal slot before delete and forwards `toolPolicies` (preferring the explicit Record over the comma-string reconstruction), `model`, `thinkingLevel`, `description` to `createRole()`. The same silent-drop bug class would affect roles when an agent set those fields via `edit_proposal(type="role", ...)`.
+
+Tests pinning the contract:
+
+- `tests/proposal-types-goal-inline.test.ts` — round-trip + structural validators.
+- `tests/e2e/api-goals-propose-inline.spec.ts` — seed→read draft preserves both keys; POST /api/goals with both fields snapshots them onto the goal record.
+
+>>>>>>> ec9da88c (docs: file-location pointers + plan-tab/children-tab + flag-off polling recipe)
 ## MCP server unavailable / partial outage
 
 Failed MCP servers stay in `error` state but don't break the agent. Look for the stub meta extension at `<stateDir>/mcp-extensions/[<hash>/]<server>.ts` whose `execute` returns `MCP server '<name>' is unavailable: <reason>`. Per-call timeouts: 10 s on `tools/list`, 30 s on `tools/call` (constants in `src/server/mcp/mcp-manager.ts`). Schema-validation drops malformed ops via `isValidOperationSchema` from `src/server/mcp/mcp-meta.ts` — sibling ops on the same server stay usable.

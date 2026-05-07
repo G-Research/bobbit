@@ -544,7 +544,10 @@ fallback — sessions with `role === "team-lead"` and
 match wins, multiple matches are ambiguous and skipped. Idempotent
 (only writes when the field is absent), per-goal try/catch (endless-restart guard
 endless-restart guard). Wired in `src/server/server.ts` immediately
-after `restoreTeams`, alongside `backfillCompleteState`. Logs
+after `restoreTeams`, alongside `backfillCompleteState`. The spawn-child
+route itself was extracted from `server.ts` into
+`src/server/agent/nested-goal-routes.ts` (alongside the other
+nested-goal REST handlers); the backfill call site is unchanged. Logs
 `[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal
 <gid>` per stamped goal.
 
