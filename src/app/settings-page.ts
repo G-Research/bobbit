@@ -937,7 +937,7 @@ function renderShortcutsTab() {
 	});
 
 	return html`
-		<div class="flex gap-6 items-start">
+		<div class="flex flex-col md:flex-row gap-4 md:gap-6 md:items-start">
 			<div class="flex-1 min-w-0 flex flex-col gap-4">
 				${sortedCategories.map(
 					([category, entries]) => html`
@@ -960,7 +960,7 @@ function renderShortcutsTab() {
 					})}
 				</div>
 			</div>
-			<div class="shrink-0 w-48 rounded-md border border-border/60 bg-secondary/30 p-3 text-xs text-muted-foreground leading-relaxed">
+			<div class="w-full md:w-48 md:shrink-0 rounded-md border border-border/60 bg-secondary/30 p-3 text-xs text-muted-foreground leading-relaxed">
 				<span class="font-medium text-foreground/80">Tip:</span> When running Bobbit as a browser tab, some shortcut combinations are intercepted by the browser. Install Bobbit as a PWA app to regain complete control.
 			</div>
 		</div>
