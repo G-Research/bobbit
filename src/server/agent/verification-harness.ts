@@ -12,6 +12,7 @@ import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
+import { adaptReadyToMergeVerify, adaptReadyToMergeForChild } from "./child-ready-to-merge.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell } from "./shell-util.js";
@@ -1212,7 +1213,22 @@ export class VerificationHarness {
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		goalSpec?: string,
 	): Promise<void> {
-		const steps = gate.verify;
+		// Runtime safety net for in-flight child goals whose workflow snapshots
+		// predate the spawn-time rewrite. If this is a child's `ready-to-merge`,
+		// transparently rewrite the verify[] for child semantics (merges into
+		// parent's branch locally; no PR). See child-ready-to-merge.ts.
+		let effectiveGate = gate;
+		if (gate.id === "ready-to-merge" && Array.isArray(gate.verify) && gate.verify.length > 0) {
+			const rtmGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+			if (rtmGoal?.mergeTarget === "parent" && rtmGoal.parentGoalId) {
+				const rtmParent = this.projectContextManager?.getContextForGoal(rtmGoal.parentGoalId)?.goalStore.get(rtmGoal.parentGoalId);
+				if (rtmParent?.branch) {
+					const adaptedVerify = adaptReadyToMergeVerify(gate.verify, { parentBranch: rtmParent.branch });
+					effectiveGate = { ...gate, verify: adaptedVerify };
+				}
+			}
+		}
+		const steps = effectiveGate.verify;
 		if (!steps || steps.length === 0) {
 			// No verification — auto-pass
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "passed", steps: [] });
@@ -3060,8 +3076,30 @@ export class VerificationHarness {
 				// R-003 — single-source workflow resolution shared with the
 				// REST spawn-child path (see spawn-child-workflow.ts).
 				const workflowStore = ctx.workflowStore;
-				const { workflow: resolvedChildWorkflow, workflowId: childWorkflowId } =
+				let { workflow: resolvedChildWorkflow, workflowId: childWorkflowId } =
 					resolveChildWorkflow(parent, sg, undefined, workflowStore);
+				// Spawn-time rewrite — every newly-spawned child gets a child-aware
+				// `ready-to-merge` snapshot so it merges into parent's branch locally
+				// and skips the PR step. See child-ready-to-merge.ts.
+				if (parent.branch) {
+					if (resolvedChildWorkflow) {
+						resolvedChildWorkflow = adaptReadyToMergeForChild(
+							resolvedChildWorkflow,
+							{ parentBranch: parent.branch },
+						);
+					} else if (workflowStore) {
+						// Cascade landed on an id-only tier (2/4/5). Materialise the
+						// workflow from the store so we can stamp a child-aware
+						// snapshot onto the child goal at create-time.
+						const fromStore = workflowStore.get(childWorkflowId);
+						if (fromStore) {
+							resolvedChildWorkflow = adaptReadyToMergeForChild(
+								structuredClone(fromStore),
+								{ parentBranch: parent.branch },
+							);
+						}
+					}
+				}
 				// R-032/033 — prefer structuredClone over JSON.parse/stringify
 				// (this is the harness:3086 site called out by the review).
 				const inheritedInlineRoles = parent.inlineRoles

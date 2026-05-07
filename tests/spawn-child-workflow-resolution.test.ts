@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
 	resolveChildWorkflow,
 } from "../src/server/agent/spawn-child-workflow.ts";
+import { adaptReadyToMergeForChild } from "../src/server/agent/child-ready-to-merge.ts";
 import type { PersistedGoal } from "../src/server/agent/goal-store.ts";
 import type {
 	Workflow,
@@ -195,5 +196,44 @@ describe("resolveChildWorkflow — cascade tiers", () => {
 
 		const r = resolveChildWorkflow(parent, sg(), { workflow: malformed }, store);
 		assert.equal(r.workflowId, "feature");
+	});
+
+	it("Tier 3 + adapter: child inherits parent's workflow with rewritten ready-to-merge", () => {
+		// Mirrors what runSubgoalStep does: resolve, then adapt for the child.
+		const parentWorkflow: Workflow = {
+			id: "feature",
+			name: "feature",
+			description: "",
+			gates: [
+				{ id: "execution", name: "Execution", dependsOn: [] },
+				{
+					id: "ready-to-merge",
+					name: "Ready to Merge",
+					dependsOn: ["execution"],
+					verify: [
+						{ name: "Branch pushed to remote", type: "command", run: "git push" },
+						{ name: "Master merged into branch", type: "command", run: "git fetch origin master && git merge origin/master --no-edit" },
+						{ name: "PR raised", type: "command", run: "gh pr view {{branch}}" },
+					],
+				},
+			],
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		const parent = makeParent({ workflow: parentWorkflow, branch: "goal/parent-x" });
+		const resolved = resolveChildWorkflow(parent, sg(), undefined, undefined);
+		assert.ok(resolved.workflow);
+		const adapted = adaptReadyToMergeForChild(resolved.workflow, { parentBranch: parent.branch! });
+		const rtm = adapted.gates.find(g => g.id === "ready-to-merge");
+		assert.ok(rtm?.verify);
+		const masterStep = rtm.verify.find(s => s.name === "Master merged into branch");
+		assert.match(masterStep?.run ?? "", /^echo 'child goal —/);
+		assert.match(masterStep?.run ?? "", /goal\/parent-x/);
+		const prStep = rtm.verify.find(s => s.name === "PR raised");
+		assert.match(prStep?.run ?? "", /^echo 'child goal —/);
+		assert.ok(!prStep!.run!.includes("gh pr"));
+		// Branch-push step is NOT rewritten.
+		const pushStep = rtm.verify.find(s => s.name === "Branch pushed to remote");
+		assert.equal(pushStep?.run, "git push");
 	});
 });
