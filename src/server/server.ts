@@ -27,6 +27,7 @@ import { validateDependsOn, validatePlanDependsOn } from "./agent/depends-on-val
 import { DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "./agent/plan-mutation-store.js";
 import { parseAcceptanceCriteria } from "../shared/parse-acceptance-criteria.js";
 import { stripSubgoalStepsForChildInheritance, type Workflow } from "./agent/workflow-store.js";
+import { resolveSpawnedBySessionId } from "./agent/spawn-child-spawnedby.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -3541,14 +3542,17 @@ async function handleApiRoute(
 		const bodyWorkflowId = typeof body.workflowId === "string" ? body.workflowId : undefined;
 		const suggestedRole = typeof body.suggestedRole === "string" ? body.suggestedRole : undefined;
 		// Caller (children-tools extension) may identify the spawning team-lead
-		// session so the sidebar can nest the child under it. Header takes
-		// precedence over body so the agent's session id is authoritative
-		// even if a forwarded request rewrites the body.
-		const spawnedBySessionId =
-			(typeof req.headers["x-bobbit-spawning-session"] === "string"
-				? (req.headers["x-bobbit-spawning-session"] as string)
-				: undefined)
-			?? (typeof body.spawnedBySessionId === "string" ? body.spawnedBySessionId : undefined);
+		// session so the sidebar can nest the child under it. Resolution is the
+		// shared four-tier cascade — see spawn-child-spawnedby.ts for the tier
+		// order. The teamManager fallback fires for raw cURL spawns that have
+		// neither header nor body field but DO have a parent with a live team.
+		const spawnedByResolution = resolveSpawnedBySessionId({
+			body,
+			headers: req.headers as Record<string, string | string[] | undefined>,
+			parentGoalId: parentId,
+			teamManager,
+		});
+		const spawnedBySessionId = spawnedByResolution.value;
 
 		const ctx = projectContextManager.getContextForGoal(parentId);
 		if (!ctx) { json({ error: "Project context not found for parent goal" }, 404); return; }
@@ -3677,6 +3681,14 @@ async function handleApiRoute(
 			// signal results and dependency state per gate.
 			if (child.workflow) {
 				ctx.gateStore.initGatesForGoal(child.id, child.workflow.gates.map(g => g.id));
+			}
+			if (spawnedByResolution.tier === 5) {
+				// Tier 5: no header, no body field, no live parent team. The
+				// child is still spawned — we never fail a spawn for missing
+				// `spawnedBySessionId`. The sidebar's strict-parent attribution
+				// keeps it visible under the parent. Single warn so the orphan
+				// case is diagnosable without spamming.
+				console.warn(`[spawn-child] spawnedBySessionId could not be derived for goal=${child.id} parent=${parentId}`);
 			}
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
 			json({ id: child.id, suggestedRole, spawnedBySessionId }, 201);

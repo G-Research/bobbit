@@ -869,11 +869,17 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		//
 		// Defensive shaping (filter, dedupe by id, deterministic sort) lives
 		// in the pure helper so it's unit-testable. See sidebar-spawned-children.ts.
+		// `parentLeadId === teamLead.id` here: by construction this branch is
+		// rendering THIS goal's own live team-lead, so unstamped children of
+		// `goal` should attribute to it. The strict-parent fallback in
+		// selectSpawnedChildren prevents an unstamped orphan from being
+		// pulled under a sibling team-lead.
 		const spawnedChildren = selectSpawnedChildren(
 			state.goals,
 			goal.id,
 			teamLead.id,
 			state.showArchived,
+			teamLead.id,
 		);
 		// Cycle guard: build the visited-ancestors set we'll thread through
 		// each child's renderGoalGroup call. Includes this goal's id so any
@@ -956,8 +962,13 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 						// here since the archived-leads branch is itself gated on
 						// `state.showArchived` upstream — we want to include
 						// archived sub-goals when this branch runs.
+						// Strict-parent attribution: pass leadId itself as parentLeadId
+						// because this branch iterates leads that belong to `goal`
+						// (live + archived team-leads of THIS goal). An unstamped
+						// child of `goal` therefore only attaches to its own parent's
+						// lead, never a sibling's.
 						const spawnedSubGoalsOf = (leadId: string) =>
-							selectSpawnedChildren(state.goals, goal.id, leadId, true);
+							selectSpawnedChildren(state.goals, goal.id, leadId, true, leadId);
 						// Cycle guard for the archived-lead branch — same shape as
 						// the live branch above.
 						const archivedAncestors = extendAncestors(opts?.renderedAncestors, goal.id);

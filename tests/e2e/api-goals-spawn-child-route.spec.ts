@@ -502,6 +502,63 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 		}
 	});
 
+	test("X-Bobbit-Session-Id header (tier 3 — defence in depth) → stamps spawnedBySessionId", async () => {
+		// Defence-in-depth: when neither the explicit body field nor the
+		// children-tools-extension `X-Bobbit-Spawning-Session` header is
+		// present, the cascade falls back to `X-Bobbit-Session-Id` — the
+		// generic agent-session header set by every other tool extension
+		// (MCP, read_session, …). A raw cURL spawn issued from inside an
+		// agent therefore stamps correctly even without explicit opt-in.
+		const parent = await createParentGoal();
+		const sessionId = `agent-sess-tier3-${Date.now()}`;
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				headers: { "X-Bobbit-Session-Id": sessionId },
+				body: {
+					planId: "plan-tier3-1",
+					title: "Tier-3 child",
+					spec: "defence-in-depth tier 3",
+				},
+			});
+			expect(status).toBe(201);
+			expect(body.spawnedBySessionId).toBe(sessionId);
+
+			const child = await readGoal(body.id);
+			expect(child.spawnedBySessionId).toBe(sessionId);
+
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("X-Bobbit-Spawning-Session beats X-Bobbit-Session-Id (tier 2 > tier 3)", async () => {
+		const parent = await createParentGoal();
+		const spawning = `spawning-${Date.now()}`;
+		const generic = `generic-${Date.now()}`;
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				headers: {
+					"X-Bobbit-Spawning-Session": spawning,
+					"X-Bobbit-Session-Id": generic,
+				},
+				body: {
+					planId: "plan-tier-precedence-1",
+					title: "Tier-precedence child",
+					spec: "tier 2 wins over tier 3",
+				},
+			});
+			expect(status).toBe(201);
+			expect(body.spawnedBySessionId).toBe(spawning);
+
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
 	test("body.workflow inline → child snapshots its own workflow (bypasses store)", async () => {
 		const parent = await createParentGoal();
 		try {

@@ -22,24 +22,35 @@ export interface SpawnedChildLike {
  * Filter, dedupe, and sort the goals that should appear under a particular
  * team-lead's expanded block.
  *
- *   - Filter: parentGoalId === parentId, spawnedBySessionId === leadId,
- *     archived flag honoured per `showArchived`.
+ *   - Filter: parentGoalId === parentId, then either:
+ *       • stamped child  — spawnedBySessionId === leadId, OR
+ *       • unstamped child — leadId === parentLeadId (defence-in-depth
+ *         strict-parent attribution: an unstamped orphan only attaches
+ *         to its parent's OWN team-lead, never a sibling's).
+ *     Archived flag honoured per `showArchived`.
  *   - Dedupe by id (last-write-wins) — defensive guard against state.goals
  *     containing two copies of the same id during a reducer race.
  *   - Sort: createdAt asc, ties broken by id asc — so two distinct goals
  *     with the same title don't shuffle on every render.
+ *
+ * `parentLeadId` is OPTIONAL. When omitted (or undefined), the unstamped
+ * branch never matches and behaviour is identical to the historical
+ * stamped-only filter — so legacy callers don't need to change.
  */
 export function selectSpawnedChildren<G extends SpawnedChildLike>(
 	goals: readonly G[],
 	parentId: string,
 	leadId: string,
 	showArchived: boolean,
+	parentLeadId?: string,
 ): G[] {
 	const seen = new Set<string>();
 	return goals
 		.filter(g =>
 			g.parentGoalId === parentId
-			&& g.spawnedBySessionId === leadId
+			&& (g.spawnedBySessionId
+				? g.spawnedBySessionId === leadId
+				: parentLeadId !== undefined && leadId === parentLeadId)
 			&& (showArchived || !g.archived))
 		.filter(g => {
 			if (seen.has(g.id)) return false;

@@ -12,6 +12,7 @@ import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch } from "../skills/git.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
+import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
 import { adaptReadyToMergeVerify, adaptReadyToMergeForChild } from "./child-ready-to-merge.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
@@ -3107,8 +3108,14 @@ export class VerificationHarness {
 					: undefined;
 				// R-002 — attribute harness-spawned children to the parent's
 				// team-lead session so the sidebar nests them under the
-				// spawning team-lead (matches POST /spawn-child).
-				const parentTeamLeadSessionId = teamManager?.getTeamState?.(parentGoalId)?.teamLeadSessionId ?? undefined;
+				// spawning team-lead (matches POST /spawn-child). Routed through
+				// the shared cascade so both spawn paths agree; tiers 1–3 do
+				// not apply here (no HTTP body / headers) so this collapses to
+				// tier-4 (parent's live team-lead) or tier-5 (undefined).
+				const parentTeamLeadSessionId = resolveSpawnedBySessionId({
+					parentGoalId,
+					teamManager,
+				}).value;
 				const child = await goalManager.createGoal(sg.title, parent.cwd, {
 					spec: sg.spec,
 					workflowId: childWorkflowId,
