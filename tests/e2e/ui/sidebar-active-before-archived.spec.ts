@@ -126,9 +126,10 @@ test.describe("Active-before-archived sidebar ordering", () => {
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 
 		// Click the See Archived toggle so archived goals are fetched into
-		// state.goals and folded into the live forest.
+		// state.goals and folded into the live forest. The subsequent
+		// `expect(…archivedTitles…).toBeVisible()` calls below gate on the
+		// fetch+render completing, so no separate wait is needed.
 		await page.locator("button").filter({ hasText: "See Archived" }).first().click();
-		await page.waitForTimeout(500);
 
 		// Expand the parent goal so its children render.
 		const parentRow = page.getByText(parentTitle, { exact: false }).first();
