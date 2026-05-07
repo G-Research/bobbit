@@ -142,6 +142,49 @@ describe("sidebar-nesting — buildNestedGoalForest", () => {
 	});
 });
 
+describe("sidebar-nesting — active-before-archived child sort", () => {
+	it("non-archived children render before archived siblings, then by createdAt asc", () => {
+		const forest = buildNestedGoalForest([
+			g({ id: "root", createdAt: 0 }),
+			g({ id: "arc-old", parentGoalId: "root", createdAt: 1, archived: true }),
+			g({ id: "live-new", parentGoalId: "root", createdAt: 100 }),
+			g({ id: "arc-new", parentGoalId: "root", createdAt: 200, archived: true }),
+			g({ id: "live-old", parentGoalId: "root", createdAt: 50 }),
+		], { includeArchived: true });
+		assert.deepEqual(
+			forest[0].children.map(c => c.goal.id),
+			["live-old", "live-new", "arc-old", "arc-new"],
+			"non-archived children must render first, then archived; each bucket sorted createdAt asc",
+		);
+	});
+
+	it("two non-archived + two archived siblings produce [active, active, archived, archived]", () => {
+		const forest = buildNestedGoalForest([
+			g({ id: "root", createdAt: 0 }),
+			g({ id: "a1", parentGoalId: "root", createdAt: 1 }),
+			g({ id: "a2", parentGoalId: "root", createdAt: 2 }),
+			g({ id: "z1", parentGoalId: "root", createdAt: 3, archived: true }),
+			g({ id: "z2", parentGoalId: "root", createdAt: 4, archived: true }),
+		], { includeArchived: true });
+		const kids = forest[0].children;
+		assert.deepEqual(kids.map(c => c.goal.id), ["a1", "a2", "z1", "z2"]);
+		assert.deepEqual(kids.map(c => !!c.goal.archived), [false, false, true, true]);
+		// Boundary should be detectable for the renderer.
+		const firstArchivedIdx = kids.findIndex(c => c.goal.archived === true);
+		assert.equal(firstArchivedIdx, 2);
+	});
+
+	it("same-createdAt ties between an active and an archived sibling break by archived flag, not id", () => {
+		const forest = buildNestedGoalForest([
+			g({ id: "root", createdAt: 0 }),
+			// archived has a smaller id but createdAt collides; active must still come first.
+			g({ id: "aaa", parentGoalId: "root", createdAt: 100, archived: true }),
+			g({ id: "zzz", parentGoalId: "root", createdAt: 100 }),
+		], { includeArchived: true });
+		assert.deepEqual(forest[0].children.map(c => c.goal.id), ["zzz", "aaa"]);
+	});
+});
+
 describe("sidebar-nesting — buildNestedSubtree", () => {
 	it("returns single tree at requested root", () => {
 		const goals: NestableGoal[] = [

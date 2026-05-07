@@ -30,7 +30,7 @@ import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
@@ -803,6 +803,11 @@ function renderNestedNode(
 	// which the user reported as confusing (sub-goals stayed even when the
 	// parent was collapsed).
 	const isExpanded = expandedGoals.has(goal.id);
+	// Active-before-archived divider: when this node's children list mixes
+	// non-archived and archived goals, insert the muted "Archived" divider
+	// at the boundary. The forest sort already groups non-archived first.
+	const firstArchivedIdx = node.children.findIndex(c => c.goal.archived === true);
+	const showChildDivider = firstArchivedIdx > 0;
 	return html`
 		<div data-testid="sidebar-nested-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
 			<div data-testid="sidebar-goal-row">
@@ -810,7 +815,7 @@ function renderNestedNode(
 			</div>
 		</div>
 		${isExpanded ? html`
-			${node.children.map(c => renderNestedNode(projectId, c))}
+			${node.children.map((c, i) => html`${showChildDivider && i === firstArchivedIdx ? archivedDivider() : ""}${renderNestedNode(projectId, c)}`)}
 			${node.truncatedChildrenCount && node.truncatedChildrenCount > 0
 				? renderTruncationRow(projectId, node.truncatedChildrenCount, node.depth + 1)
 				: nothing}
@@ -864,11 +869,19 @@ function renderProjectContent(
 		!g.spawnedBySessionId || !teamLeadIdsAttributable.has(g.spawnedBySessionId)
 	);
 	const forest = buildNestedGoalForest(forestInput as any, { maxDepth, includeArchived: state.showArchived });
+	// Active-before-archived divider at the project-root forest level: when
+	// the previous top-level node was non-archived and the current is
+	// archived, render the muted "Archived" divider in place of the plain
+	// border separator.
 	return html`
-		${forest.map((node, i) => html`
-			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
-			${renderNestedNode(project.id, node)}
-		`)}
+		${forest.map((node, i) => {
+			const prev = i > 0 ? forest[i - 1] : undefined;
+			const crossesBoundary = !!prev && !prev.goal.archived && !!node.goal.archived;
+			return html`
+				${i > 0 ? (crossesBoundary ? archivedDivider() : html`<div class="border-t border-border/30 mx-2"></div>`) : ""}
+				${renderNestedNode(project.id, node)}
+			`;
+		})}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"

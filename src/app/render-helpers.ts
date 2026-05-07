@@ -30,6 +30,20 @@ import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 // FORMATTING
 // ============================================================================
 
+/**
+ * Shared muted divider used to mark the boundary between active and archived
+ * items inside a sidebar group. Render only when both classes are present in
+ * the same group — callers gate on `activeCount > 0 && archivedCount > 0`.
+ * See docs/design `Active-before-archived sidebar ordering`.
+ */
+export const archivedDivider = () => html`
+	<div class="flex items-center gap-2 my-1 mx-2" data-testid="sidebar-archived-divider">
+		<div class="flex-1 border-t border-border/30"></div>
+		<span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Archived</span>
+		<div class="flex-1 border-t border-border/30"></div>
+	</div>
+`;
+
 /** Guard set to prevent repeated on-demand child fetches per goal. */
 const _goalChildrenFetched = new Set<string>();
 
@@ -891,16 +905,25 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		// and archived paths render identical "(<suffix>)" tags.
 		const liveSuffixes = computeTitleSuffixes(spawnedChildren);
 
+		// Active-before-archived ordering: emit live team children + active
+		// spawned-child goals first, then a single muted "Archived" divider,
+		// then archived team workers + archived spawned-child goals.
+		const activeSpawned = spawnedChildren.filter(g => !g.archived);
+		const archivedSpawned = spawnedChildren.filter(g => !!g.archived);
+		const hasArchivedBelow = archivedForLiveLead.length > 0 || archivedSpawned.length > 0;
+		const hasActiveAbove = teamChildren.length > 0 || activeSpawned.length > 0;
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
+					${activeSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
+					${hasActiveAbove && hasArchivedBelow ? archivedDivider() : ""}
 					${archivedForLiveLead.map(s => html`
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}
 					`)}
-					${spawnedChildren.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
+					${archivedSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}

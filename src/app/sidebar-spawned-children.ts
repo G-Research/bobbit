@@ -30,8 +30,9 @@ export interface SpawnedChildLike {
  *     Archived flag honoured per `showArchived`.
  *   - Dedupe by id (last-write-wins) — defensive guard against state.goals
  *     containing two copies of the same id during a reducer race.
- *   - Sort: createdAt asc, ties broken by id asc — so two distinct goals
- *     with the same title don't shuffle on every render.
+ *   - Sort: non-archived before archived, then createdAt asc, ties broken
+ *     by id asc — so active children render above archived ones and two
+ *     distinct goals with the same title don't shuffle on every render.
  *
  * `parentLeadId` is OPTIONAL. When omitted (or undefined), the unstamped
  * branch never matches and behaviour is identical to the historical
@@ -58,6 +59,8 @@ export function selectSpawnedChildren<G extends SpawnedChildLike>(
 			return true;
 		})
 		.sort((a, b) => {
+			const aa = (a.archived ? 1 : 0) - (b.archived ? 1 : 0);
+			if (aa !== 0) return aa;
 			const at = a.createdAt ?? 0;
 			const bt = b.createdAt ?? 0;
 			if (at !== bt) return at - bt;

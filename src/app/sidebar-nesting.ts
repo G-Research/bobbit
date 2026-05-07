@@ -11,8 +11,9 @@
  * is undefined OR points at a goal that does not exist in the input list
  * (orphan promotion — covers archived/cross-project parents).
  *
- * Sort: children at every level are ordered by `createdAt` ASC so the sidebar
- * renders in spawn order. Top-level roots are returned in their original
+ * Sort: children at every level are ordered with non-archived first, then
+ * archived, then by `createdAt` ASC so the sidebar renders active items
+ * before archived ones. Top-level roots are returned in their original
  * input order — the caller decides how to sort the forest itself.
  *
  * Filtering: archived goals are excluded by default. Set `includeArchived`
@@ -103,14 +104,19 @@ function indexGoals(goals: NestableGoal[], opts: ResolvedOpts): BuildIndex {
 		if (list) list.push(g);
 		else childrenByParent.set(effectiveParent, [g]);
 	}
-	// Sort children by createdAt ASC, ties broken by id ASC. The tiebreak is
-	// what makes the order stable across renders when two goals share a
+	// Sort children: non-archived first, then archived, then by createdAt
+	// ASC, ties broken by id ASC. The non-archived-first split puts active
+	// children above completed/archived ones in the sidebar so users find
+	// in-progress work without scrolling past finished siblings. The id
+	// tiebreak makes order stable across renders when two goals share a
 	// createdAt timestamp (e.g. two same-titled siblings created back-to-back
 	// within the same millisecond, or two distinct goals with intentionally
 	// matching createdAt). Without it the user saw same-titled "duplicate"
 	// audits shuffle order between renders.
 	for (const list of childrenByParent.values()) {
 		list.sort((a, b) => {
+			const aa = (a.archived ? 1 : 0) - (b.archived ? 1 : 0);
+			if (aa !== 0) return aa;
 			if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
 			return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 		});

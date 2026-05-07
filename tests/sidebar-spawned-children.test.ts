@@ -95,6 +95,30 @@ describe("selectSpawnedChildren — filter, dedupe, sort", () => {
 		);
 	});
 
+	it("sorts active children before archived; bucket-internal order is createdAt asc with id tiebreak", () => {
+		const goals = [
+			g({ id: "arc-1", parentGoalId: "P", spawnedBySessionId: "L", createdAt: 5, archived: true }),
+			g({ id: "live-2", parentGoalId: "P", spawnedBySessionId: "L", createdAt: 100 }),
+			g({ id: "live-1", parentGoalId: "P", spawnedBySessionId: "L", createdAt: 50 }),
+			g({ id: "arc-2", parentGoalId: "P", spawnedBySessionId: "L", createdAt: 10, archived: true }),
+		];
+		const out = selectSpawnedChildren(goals, "P", "L", true);
+		assert.deepEqual(
+			out.map(x => x.id),
+			["live-1", "live-2", "arc-1", "arc-2"],
+			"active goals must precede archived ones; each bucket sorted createdAt asc",
+		);
+	});
+
+	it("active-before-archived split wins over createdAt: an old archived sibling is still after a new active one", () => {
+		const goals = [
+			g({ id: "old-arc", parentGoalId: "P", spawnedBySessionId: "L", createdAt: 1, archived: true }),
+			g({ id: "new-live", parentGoalId: "P", spawnedBySessionId: "L", createdAt: 999 }),
+		];
+		const out = selectSpawnedChildren(goals, "P", "L", true);
+		assert.deepEqual(out.map(x => x.id), ["new-live", "old-arc"]);
+	});
+
 	it("returns [] when no goal matches", () => {
 		const goals = [g({ id: "a", parentGoalId: "OTHER", spawnedBySessionId: "L" })];
 		assert.deepEqual(selectSpawnedChildren(goals, "P", "L", false), []);
