@@ -150,6 +150,12 @@ export class TeamManager {
 	private lastSpecNudgeTs = new Map<string, number>();
 	/** Throttle window for spec-edit nudges (ms). A flurry of edits within the window collapses to one nudge. */
 	private static readonly SPEC_NUDGE_THROTTLE_MS = 30_000;
+	/** Tracks when each goal's team-lead transitioned to idle. Set on agent_end / resubscribe (when status==idle), cleared on agent_start. */
+	private leadIdleSinceByGoal = new Map<string, number>();
+	/** Last time a stuck-team watchdog nudge fired for a goal. Enforces a 5-min floor between successive stuck-nudges. */
+	private lastNudgeAtPerGoal = new Map<string, number>();
+	/** Periodic 60s sweep that detects fully-idle teams and fires a recovery nudge. */
+	private stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
 	private verificationHarness?: VerificationHarness;
 	/** Base delay before nudging the idle team lead when workers are active (ms). Successive nudges back off exponentially up to MAX_IDLE_NUDGE_DELAY_MS. */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
@@ -163,6 +169,10 @@ export class TeamManager {
 	 * team lead while workers are making real progress.
 	 */
 	private static readonly LONG_STREAMING_THRESHOLD_MS = 30 * 60 * 1000; // 30m
+	/** Stuck-team watchdog sweep interval (60s). */
+	private static readonly STUCK_SWEEP_INTERVAL_MS = 60_000;
+	/** Quiet threshold before the watchdog fires (5min). Reused as the inter-nudge floor. */
+	private static readonly STUCK_QUIET_THRESHOLD_MS = 5 * 60_000;
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
@@ -186,6 +196,105 @@ export class TeamManager {
 			this._localGoalManager = new GoalManager(new GoalStore(dir));
 		}
 		this.restoreTeams();
+		this.startStuckSweep();
+	}
+
+	/**
+	 * Stop watchdog timers and release per-team listeners. Tests call this to
+	 * let the process exit cleanly. Idempotent.
+	 */
+	dispose(): void {
+		this.stopStuckSweep();
+	}
+
+	/**
+	 * Start the periodic stuck-team watchdog sweep. Idempotent — second call
+	 * is a no-op while the timer is already running.
+	 */
+	startStuckSweep(): void {
+		if (this.stuckSweepTimer) return;
+		const t = setInterval(() => {
+			try {
+				this._stuckSweepTick();
+			} catch (err) {
+				console.error("[team-manager] Stuck-team watchdog tick failed:", err);
+			}
+		}, TeamManager.STUCK_SWEEP_INTERVAL_MS);
+		t.unref?.();
+		this.stuckSweepTimer = t;
+	}
+
+	stopStuckSweep(): void {
+		if (this.stuckSweepTimer) {
+			clearInterval(this.stuckSweepTimer);
+			this.stuckSweepTimer = null;
+		}
+	}
+
+	/**
+	 * One tick of the stuck-team watchdog. Walks every active team and fires a
+	 * recovery nudge when ALL of:
+	 *   - team-lead status === "idle"
+	 *   - workers.length > 0
+	 *   - every worker is idle
+	 *   - lead has been idle >= STUCK_QUIET_THRESHOLD_MS
+	 *   - last stuck-nudge for this goal was >= STUCK_QUIET_THRESHOLD_MS ago
+	 *   - !shouldSkipNudge(goalId) — covers paused / archived / in-flight / nudgePending / in-flight subgoals
+	 *
+	 * `now` is injectable for testing. Defaults to Date.now().
+	 */
+	_stuckSweepTick(now: number = Date.now()): void {
+		for (const [goalId, entry] of this.teams) {
+			if (!entry.teamLeadSessionId) continue;
+			if (this.shouldSkipNudge(goalId)) continue;
+
+			const lead = this.sessionManager.getSession(entry.teamLeadSessionId);
+			if (!lead || lead.status !== "idle") continue;
+
+			const workers = this.getActiveWorkers(goalId);
+			if (workers.length === 0) continue; // no-workers timer owns this case
+
+			const allIdle = workers.every((agent) => {
+				const s = this.sessionManager.getSession(agent.sessionId);
+				return !!s && s.status === "idle";
+			});
+			if (!allIdle) continue;
+
+			const leadIdleSince = this.leadIdleSinceByGoal.get(goalId);
+			if (typeof leadIdleSince !== "number") continue;
+			if (now - leadIdleSince < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
+
+			const lastNudgeAt = this.lastNudgeAtPerGoal.get(goalId);
+			if (typeof lastNudgeAt === "number" && now - lastNudgeAt < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
+
+			this._fireStuckNudge(goalId, entry, workers, now, leadIdleSince);
+		}
+	}
+
+	private _fireStuckNudge(
+		goalId: string,
+		entry: TeamEntry,
+		workers: TeamAgent[],
+		now: number,
+		leadIdleSince: number,
+	): void {
+		const minutes = Math.max(0, Math.floor((now - leadIdleSince) / 60_000));
+		const message =
+			`[AUTO-NUDGE] Your team is fully idle and the workflow has stalled.\n` +
+			`All ${workers.length} team agent(s) are idle and you have been idle for ${minutes} minutes.\n` +
+			"Check `task_list` and `gate_list` to identify the next action — either\n" +
+			"merge a finished branch, mark a task complete, or signal the next gate.\n" +
+			"If all gates have passed, call `team_complete`.";
+
+		this.nudgePending.set(goalId, true);
+		this.lastNudgeAtPerGoal.set(goalId, now);
+		try {
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
+		} catch (err) {
+			console.error(`[team-manager] Stuck-team watchdog enqueuePrompt failed for goal ${goalId}:`, err);
+			return;
+		}
+		console.log(`[team-manager] Stuck-team watchdog fired for goal ${goalId} after ${minutes}m idle`);
 	}
 
 	private resolveTeamStore(goalId: string): TeamStore {
@@ -683,11 +792,20 @@ export class TeamManager {
 		// Clean up any previous subscription
 		entry.unsubscribeTeamLeadEvents?.();
 
+		// If the lead is already idle at subscribe time (e.g. resubscribe after
+		// restart), seed leadIdleSinceByGoal so the stuck-team watchdog has a
+		// timestamp to compare against on its next tick.
+		if (session.status === "idle" && !this.leadIdleSinceByGoal.has(goalId)) {
+			this.leadIdleSinceByGoal.set(goalId, Date.now());
+		}
+
 		const unsubscribe = session.rpcClient.onEvent((event: any) => {
 			if (event.type === "agent_end") {
+				this.leadIdleSinceByGoal.set(goalId, Date.now());
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
 				this.nudgePending.delete(goalId);
+				this.leadIdleSinceByGoal.delete(goalId);
 				this.clearIdleNudgeTimer(goalId);
 			}
 		});
@@ -1173,7 +1291,7 @@ export class TeamManager {
 		const now = Date.now();
 		const lastNotify = this.lastNotifyTime.get(workerSessionId);
 		if (lastNotify && now - lastNotify < 30_000) {
-			console.log(`[team-manager] Debounced notification for ${agentId} (last: ${now - lastNotify}ms ago)`);
+			console.log(`[team-manager] notifyTeamLead deferred for ${role}/${agentId} — ${now - lastNotify}ms ago`);
 			return;
 		}
 		this.lastNotifyTime.set(workerSessionId, now);
@@ -1544,6 +1662,8 @@ export class TeamManager {
 
 		// Remove team tracking entirely
 		this.teams.delete(goalId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
 		this.resolveTeamStore(goalId).remove(goalId);
 
 		console.log(`[team-manager] Tore down team for goal ${goalId}`);
