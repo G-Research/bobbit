@@ -19,9 +19,13 @@
  * can't be invoked headlessly without a browser. The E2E test
  * `tests/e2e/ui/sidebar-nesting.spec.ts` covers the full DOM path.
  */
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { buildNestedGoalForest, type NestedGoalNode, type NestableGoal } from "../src/app/sidebar-nesting.ts";
+import { _setSubgoalsEnabledForTesting } from "../src/app/subgoals-flag.ts";
+
+before(() => _setSubgoalsEnabledForTesting(true));
+after(() => _setSubgoalsEnabledForTesting(undefined));
 
 const INDENT_PX_PER_DEPTH = 16;
 

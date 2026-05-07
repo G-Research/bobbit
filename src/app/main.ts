@@ -395,6 +395,9 @@ async function initApp() {
 					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
+					// Apply subgoalsEnabled — default OFF (system-scope feature gate).
+					document.documentElement.dataset.subgoalsEnabled =
+						prefs.subgoalsEnabled === true ? "true" : "false";
 				}
 			} catch {}
 
@@ -680,6 +683,9 @@ async function initApp() {
 			// Apply playAgentFinishSound — default ON when unset.
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";
+			// Apply subgoalsEnabled — default OFF (system-scope feature gate).
+			document.documentElement.dataset.subgoalsEnabled =
+				prefs.subgoalsEnabled === true ? "true" : "false";
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();

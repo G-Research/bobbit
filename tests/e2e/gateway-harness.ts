@@ -143,6 +143,13 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		// Mark setup as complete so the setup wizard doesn't appear in tests
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+		// Default the system-scope Subgoals (Experimental) flag ON for browser
+		// E2E tests. The OFF path is exercised explicitly by
+		// tests/e2e/ui/subgoals-experimental-toggle.spec.ts.
+		writeFileSync(
+			join(bobbitDir, "state", "preferences.json"),
+			JSON.stringify({ subgoalsEnabled: true }, null, 2),
+		);
 
 		// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
 		// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;

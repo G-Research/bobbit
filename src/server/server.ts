@@ -603,6 +603,10 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
+	// Wire the system-scope Subgoals feature gate into the policy cascade so
+	// every tool in the `Children` group resolves to `never` when the flag is
+	// off. See docs/design/subgoals-experimental-toggle.md.
+	groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
@@ -1535,6 +1539,17 @@ async function handleApiRoute(
 		const e = err instanceof Error ? err : new Error(String(err));
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
+
+	/**
+	 * System-scope feature gate for the nested-goals (Subgoals) surface.
+	 * Returns true when enabled; otherwise writes a 403 SUBGOALS_DISABLED
+	 * response and returns false. See docs/design/subgoals-experimental-toggle.md.
+	 */
+	function requireSubgoalsEnabled(): boolean {
+		if (preferencesStore.get("subgoalsEnabled") === true) return true;
+		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
+		return false;
+	}
 
 	// ── Cross-project helper functions ─────────────────────────────
 
@@ -3496,6 +3511,7 @@ async function handleApiRoute(
 	// POST /api/goals/:id/spawn-child — idempotent on planId.
 	const spawnChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/spawn-child$/);
 	if (spawnChildMatch && req.method === "POST") {
+		if (!requireSubgoalsEnabled()) return;
 		const parentId = spawnChildMatch[1];
 		const parent = getGoalAcrossProjects(parentId);
 		if (!parent) { json({ error: "Parent goal not found" }, 404); return; }
@@ -3708,6 +3724,7 @@ async function handleApiRoute(
 	// PATCH /api/goals/:id/plan — submit a plan or replan; classifier-driven.
 	const planPatchMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
 	if (planPatchMatch && req.method === "PATCH") {
+		if (!requireSubgoalsEnabled()) return;
 		const id = planPatchMatch[1];
 		const resolved = resolvePlanContext(id);
 		if (!resolved) return;
@@ -3874,6 +3891,7 @@ async function handleApiRoute(
 	// GET /api/goals/:id/plan — return the current plan + per-step child projection.
 	const planGetMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/plan$/);
 	if (planGetMatch && req.method === "GET") {
+		if (!requireSubgoalsEnabled()) return;
 		const id = planGetMatch[1];
 		const resolved = resolvePlanContext(id);
 		if (!resolved) return;
@@ -3922,6 +3940,7 @@ async function handleApiRoute(
 	// POST /api/goals/:id/integrate-child/:childId — local merge + auto-archive.
 	const integrateChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/integrate-child\/([^/]+)$/);
 	if (integrateChildMatch && req.method === "POST") {
+		if (!requireSubgoalsEnabled()) return;
 		const parentId = integrateChildMatch[1];
 		const childId = integrateChildMatch[2];
 		const parent = getGoalAcrossProjects(parentId);
@@ -3986,6 +4005,7 @@ async function handleApiRoute(
 	// POST /api/goals/:id/pause — cascade required.
 	const pauseMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pause$/);
 	if (pauseMatch && req.method === "POST") {
+		if (!requireSubgoalsEnabled()) return;
 		const id = pauseMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
@@ -4013,6 +4033,7 @@ async function handleApiRoute(
 	// POST /api/goals/:id/resume — cascade required.
 	const resumeMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/resume$/);
 	if (resumeMatch && req.method === "POST") {
+		if (!requireSubgoalsEnabled()) return;
 		const id = resumeMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
@@ -4039,6 +4060,7 @@ async function handleApiRoute(
 	// POST /api/goals/:id/mutation/:requestId/decision — approve/reject queued mutation.
 	const mutationDecisionMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/mutation\/([^/]+)\/decision$/);
 	if (mutationDecisionMatch && req.method === "POST") {
+		if (!requireSubgoalsEnabled()) return;
 		const goalId = mutationDecisionMatch[1];
 		const requestId = mutationDecisionMatch[2];
 		// R-018: requestId is implicitly scoped to goalId — the store key is
@@ -4108,6 +4130,7 @@ async function handleApiRoute(
 	// PATCH /api/goals/:id/policy — set divergencePolicy / maxConcurrentChildren.
 	const policyMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/policy$/);
 	if (policyMatch && req.method === "PATCH") {
+		if (!requireSubgoalsEnabled()) return;
 		const id = policyMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
@@ -8045,6 +8068,7 @@ async function handleApiRoute(
 	// GET /api/goals/:goalId/tree-cost — sum of cost across the descendant goal tree (Lesson 4.21)
 	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
 	if (goalTreeCostMatch && req.method === "GET") {
+		if (!requireSubgoalsEnabled()) return;
 		const goalId = goalTreeCostMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) {

@@ -1638,6 +1638,12 @@ export class RemoteAgent {
 				prefs.playAgentFinishSound === false ? "false" : "true";
 		}
 
+		// Apply subgoalsEnabled — default OFF. See subgoals-flag.ts.
+		if ("subgoalsEnabled" in prefs) {
+			document.documentElement.dataset.subgoalsEnabled =
+				prefs.subgoalsEnabled === true ? "true" : "false";
+		}
+
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {
 			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());

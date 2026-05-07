@@ -6,9 +6,18 @@
  * which case the Plan tab synthesises a living plan from the live children
  * (see `plan-synthesis.ts`).
  *
- * Pure: no DOM, no Lit. Phase 5b consumers (e.g. `goal-dashboard.ts`) call
- * these to decide which tab buttons to render.
+ * Pure: no DOM, no Lit (the `subgoals-flag` helper is also DOM-free in tests
+ * thanks to its test override). Phase 5b consumers (e.g. `goal-dashboard.ts`)
+ * call these to decide which tab buttons to render.
+ *
+ * **Subgoals (Experimental) feature gate**: when the system-scope flag is
+ * OFF, both `shouldShowPlanTab` and `shouldShowChildrenTab` short-circuit
+ * to `false`. Grep confirmed `goal-plan` only ships in the `parent`
+ * workflow (`seed-default-workflows.ts`) which is itself hidden under the
+ * flag, so a flat `false` is exactly correct. See
+ * docs/design/subgoals-experimental-toggle.md.
  */
+import { isSubgoalsEnabled } from "./subgoals-flag.js";
 
 export interface TabVisibilityGoal {
 	id: string;
@@ -30,6 +39,7 @@ export function shouldShowPlanTab(
 	goal: TabVisibilityGoal,
 	allGoals?: TabVisibilityGoal[],
 ): boolean {
+	if (!isSubgoalsEnabled()) return false;
 	if (goal.workflow?.gates.some(g => g.id === "goal-plan")) return true;
 	if (allGoals && allGoals.some(g => g.parentGoalId === goal.id)) return true;
 	return false;
@@ -54,5 +64,6 @@ export function shouldShowChildrenTab(
 	_goal: TabVisibilityGoal,
 	hasAnyChildGoals: boolean,
 ): boolean {
+	if (!isSubgoalsEnabled()) return false;
 	return hasAnyChildGoals;
 }

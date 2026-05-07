@@ -8,6 +8,7 @@ import yaml from "yaml";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
+import { isSubgoalsEnabled } from "./subgoals-flag.js";
 import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
@@ -851,9 +852,11 @@ function renderGoalForm(config: GoalFormConfig) {
 								${inlineActive ? html`
 									<option value="__inline__" selected>Inline${inlineGateCount !== undefined ? ` (${inlineGateCount} gate${inlineGateCount === 1 ? "" : "s"})` : ""}</option>
 								` : ""}
-								${_cachedWorkflows.map((w) => html`
-									<option value=${w.id} ?selected=${!inlineActive && config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
-								`)}
+								${_cachedWorkflows
+									.filter(w => w.id !== "parent" || isSubgoalsEnabled())
+									.map((w) => html`
+										<option value=${w.id} ?selected=${!inlineActive && config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
+									`)}
 							</select>
 						</div>
 					`;

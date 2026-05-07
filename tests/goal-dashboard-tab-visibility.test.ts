@@ -3,7 +3,7 @@
  * Lesson 4.20 anchor: the Plan tab is visible when EITHER a formal
  * `goal-plan` gate exists OR live children synthesise a living plan.
  */
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
 	shouldShowChildrenTab,
@@ -11,6 +11,12 @@ import {
 	shouldShowTasksTab,
 	type TabVisibilityGoal,
 } from "../src/app/goal-dashboard-tab-visibility.ts";
+import { _setSubgoalsEnabledForTesting } from "../src/app/subgoals-flag.ts";
+
+// Pre-existing tests assert the post-flag-flip ON behaviour. The flag
+// itself is gated by an explicit unit test in tests/subgoals-flag.test.ts.
+before(() => _setSubgoalsEnabledForTesting(true));
+after(() => _setSubgoalsEnabledForTesting(undefined));
 
 describe("goal-dashboard-tab-visibility — shouldShowPlanTab", () => {
 	it("true when workflow has a goal-plan gate", () => {

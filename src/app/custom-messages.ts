@@ -3,6 +3,7 @@ import type { AgentMessage, MessageRenderer } from "../ui/index.js";
 import { defaultConvertToLlm, registerMessageRenderer } from "../ui/index.js";
 import { html } from "lit";
 import { gatewayFetch } from "./api.js";
+import { isSubgoalsEnabled } from "./subgoals-flag.js";
 
 // ============================================================================
 // 1. EXTEND AppMessage TYPE VIA DECLARATION MERGING
@@ -90,6 +91,10 @@ async function _decideMutation(goalId: string, requestId: string, decision: "app
 
 const mutationPendingRenderer: MessageRenderer<MutationPendingMessage> = {
 	render: (msg) => {
+		// Belt-and-braces: with the Subgoals (Experimental) flag off the
+		// `mutation_pending` event can't fire (server gate), but if a stale
+		// in-memory transcript carries one, suppress its UI here too.
+		if (!isSubgoalsEnabled()) return html``;
 		const decided = msg.decided;
 		const time = new Date(msg.timestamp).toLocaleTimeString();
 		const kindBadge: Record<string, string> = {

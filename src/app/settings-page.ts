@@ -103,6 +103,7 @@ let _listening = false;
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
+let settingsSubgoalsEnabled = false;
 let customisePromptStatus = "";
 
 // ── Per-project scope config state ──
@@ -1836,6 +1837,8 @@ function loadGeneralSettings() {
 					settingsShowTimestamps = !!prefs.showTimestamps;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
+					// Subgoals (Experimental) — default OFF. See docs/nested-goals.md.
+					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
 					renderApp();
 				}
 			} catch {}
@@ -1884,6 +1887,21 @@ async function togglePlayFinishSound(): Promise<void> {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ playAgentFinishSound: settingsPlayFinishSound }),
+		});
+	} catch {}
+}
+
+async function toggleSubgoalsEnabled(): Promise<void> {
+	settingsSubgoalsEnabled = !settingsSubgoalsEnabled;
+	// Apply synchronously to the dataset so the six client-side gate sites
+	// (workflow picker, Plan/Children tabs, sidebar nesting, mutation card)
+	// flip without waiting on the preferences_changed broadcast.
+	document.documentElement.dataset.subgoalsEnabled = settingsSubgoalsEnabled ? "true" : "false";
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ subgoalsEnabled: settingsSubgoalsEnabled }),
 		});
 	} catch {}
 }
@@ -1969,6 +1987,28 @@ function renderGeneralTab() {
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
 					Play a short notification beep when an agent finishes its turn.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-subgoals-enabled"
+						.checked=${settingsSubgoalsEnabled}
+						@change=${toggleSubgoalsEnabled}
+					/>
+					<span class="text-sm font-medium text-foreground">Subgoals</span>
+					<span
+						class="ml-1 text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+						data-testid="experimental-pill"
+					>Experimental</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Enable nested goals (parent / child / DAG subgoals). Surfaces the
+					<code>parent</code> workflow, the nine <code>Children</code> tools,
+					the Plan tab DAG, and the Children tab on the goal dashboard.
+					Currently experimental — behaviour may change.
 				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">

@@ -38,6 +38,13 @@ export interface GroupPolicyProvider {
 	getGroupPolicy(group: string): GrantPolicy | null;
 	/** Optional bulk-read used by cache fingerprinting. */
 	getAll?(): Record<string, GrantPolicy>;
+	/**
+	 * Optional system-scope feature gate for the nested-goals (Subgoals)
+	 * surface. When set and returning false, every tool in the `Children`
+	 * group is forced to `never` regardless of role / group overrides.
+	 * See docs/design/subgoals-experimental-toggle.md.
+	 */
+	getSubgoalsEnabled?(): boolean;
 }
 
 // ── Process-level caches ────────────────────────────────────────────────────
@@ -136,6 +143,14 @@ export function resolveGrantPolicy(
 	toolManager: ToolManager | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 ): GrantPolicy {
+	// Step 0: system-scope Subgoals feature gate. When the flag is OFF, every
+	// tool in the `Children` group resolves to `never` regardless of role /
+	// group overrides. See docs/design/subgoals-experimental-toggle.md.
+	if (toolGroup === "Children" && groupPolicyStore?.getSubgoalsEnabled
+		&& !groupPolicyStore.getSubgoalsEnabled()) {
+		return 'never';
+	}
+
 	const mcpKeys = mcpPolicyKeys(toolName);
 
 	// 1. Role-level tool-specific override (exact tool name match)
@@ -338,6 +353,7 @@ export function computeEffectiveAllowedTools(
 		kind: 'effectiveAllowedTools_v3',
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
+		subgoalsEnabled: groupPolicyStore?.getSubgoalsEnabled?.() ?? null,
 		tools: availableTools.map(t => [t.name, t.group, t.grantPolicy ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
 		mcp: mcpInfos.map(i => [i.name, i.group]).sort((a, b) => a[0].localeCompare(b[0])),
 	});
@@ -653,6 +669,7 @@ export function computeToolPolicies(
 		kind: 'toolPolicies_v2',
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
+		subgoalsEnabled: groupPolicyStore?.getSubgoalsEnabled?.() ?? null,
 		tools: availableTools.map(t => [t.name, t.group, t.grantPolicy ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
 		mcp: mcpInfos.map(i => [i.name, i.group]).sort((a, b) => a[0].localeCompare(b[0])),
 	});

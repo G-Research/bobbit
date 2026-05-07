@@ -23,7 +23,13 @@
  * exceed `maxDepth`, recursion stops and `truncatedChildrenCount` is set to
  * the number of children that would have been included. The cap matches the
  * sidebar's documented depth-5 cap (Phase 5 spec, Lesson 4.22).
+ *
+ * **Subgoals (Experimental) feature gate**: when the system-scope flag is
+ * off, the forest collapses to a flat list of top-level goals (every input
+ * goal becomes its own root with no children). See
+ * docs/design/subgoals-experimental-toggle.md.
  */
+import { isSubgoalsEnabled } from "./subgoals-flag.js";
 
 export interface NestableGoal {
 	id: string;
@@ -191,6 +197,18 @@ export function buildNestedGoalForest(
 	goals: NestableGoal[],
 	opts?: BuildNestedTreeOpts,
 ): NestedGoalNode[] {
+	// Subgoals (Experimental) feature gate: when off, treat every goal as a
+	// top-level root with no nesting. See docs/design/subgoals-experimental-toggle.md.
+	if (!isSubgoalsEnabled()) {
+		const resolvedFlat = resolveOpts(opts);
+		const visibleFlat = resolvedFlat.includeArchived ? goals : goals.filter(g => !g.archived);
+		return visibleFlat.map(g => ({
+			goal: g,
+			depth: 0,
+			children: [],
+			descendantCount: 0,
+		}));
+	}
 	const resolved = resolveOpts(opts);
 	const idx = indexGoals(goals, resolved);
 	const visible = resolved.includeArchived ? goals : goals.filter(g => !g.archived);

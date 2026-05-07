@@ -6,6 +6,17 @@ restart-resilience invariants see the relevant entries in
 [debugging.md](debugging.md). Implementation specs that drove the feature
 live in `SUBGOALS-SPEC.md` (root of the repo).
 
+> **Status: experimental.** The nested-goals feature is gated behind a
+> system-scope toggle ("Subgoals" in **Settings → System → General**),
+> default OFF. With the toggle off the entire feature surface — the
+> `parent` workflow, the nine `Children`-group tools, the Plan / Children
+> tabs on the goal dashboard, sidebar nesting, mutation-pending cards,
+> and the nested-goal REST routes — is hidden or returns
+> `403 SUBGOALS_DISABLED`. The toggle will be retired and the feature
+> promoted out of experimental status once the parent goal's audit
+> completes. See `docs/design/subgoals-experimental-toggle.md` for the
+> gating implementation.
+
 ## What & why
 
 A **nested goal IS a goal** — same record shape, same store, same gates,

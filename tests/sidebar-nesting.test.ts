@@ -11,13 +11,18 @@
  *   - buildNestedSubtree (happy path + missing root)
  *   - Sibling order by createdAt ASC
  */
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
 	buildNestedGoalForest,
 	buildNestedSubtree,
 	type NestableGoal,
 } from "../src/app/sidebar-nesting.ts";
+import { _setSubgoalsEnabledForTesting } from "../src/app/subgoals-flag.ts";
+
+// Pre-existing tests assert nested behaviour — flag must be ON.
+before(() => _setSubgoalsEnabledForTesting(true));
+after(() => _setSubgoalsEnabledForTesting(undefined));
 
 function g(over: Partial<NestableGoal> & { id: string; createdAt: number }): NestableGoal {
 	return {
