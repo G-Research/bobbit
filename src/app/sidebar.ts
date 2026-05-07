@@ -171,7 +171,7 @@ export function renderRolePickerDropdown() {
 			style="background: var(--popover); border: 1px solid var(--border); width: ${popoverWidth}px; ${topStyle}; right: ${right}px; ${maxHStyle}; display: flex; flex-direction: column;"
 			@click=${(e: Event) => e.stopPropagation()}>
 			<div class="flex items-center px-3 pt-2 pb-1.5 shrink-0">
-				<span class="flex-1 text-xs font-semibold text-foreground">Create New Session${_pickerProjectName ? html` <span class="text-muted-foreground font-normal">in ${_pickerProjectName}</span>` : ""}</span>
+				<span class="flex-1 font-semibold text-foreground">Create New Session${_pickerProjectName ? html` <span class="text-muted-foreground font-normal">in ${_pickerProjectName}</span>` : ""}</span>
 				<button class="p-0.5 rounded hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors" title="Close" @click=${() => { state.rolePickerOpen = false; renderApp(); }}>
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
 				</button>
@@ -179,14 +179,14 @@ export function renderRolePickerDropdown() {
 			<div class="overflow-y-auto flex-1" style="min-height: 0;">
 			<!-- Roles (2-column grid) -->
 			<div>
-				<div class="px-3 pt-1 pb-1.5 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Role</div>
+				<div class="px-3 pt-1 pb-1.5 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Role</div>
 				${allRoles.length === 0
-					? html`<div class="px-3 py-1 text-xs text-muted-foreground">No roles defined</div>`
+					? html`<div class="px-3 py-1 text-muted-foreground">No roles defined</div>`
 					: html`<div class="px-2 pb-1 grid gap-0.5" style="grid-template-columns: 1fr 1fr;">
 						${allRoles.map(role => {
 							const focused = isFocused("role", role.name);
 							return html`
-							<button class="text-left px-2 py-1 text-xs rounded hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-1.5 ${_pickerRole === role.name ? "bg-primary/10 ring-1 ring-primary/30" : ""} ${focused ? "ring-2 ring-ring" : ""}"
+							<button class="text-left px-2 py-1 rounded hover:bg-secondary/50 active:bg-secondary text-foreground flex items-center gap-1.5 ${_pickerRole === role.name ? "bg-primary/10 ring-1 ring-primary/30" : ""} ${focused ? "ring-2 ring-ring" : ""}"
 								@click=${() => selectRole(role.name)}
 								title="Select ${role.label} role">
 								<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, role.accessory, true)}</span>
@@ -199,7 +199,7 @@ export function renderRolePickerDropdown() {
 			<!-- Working Directory (pinned at bottom, hidden when project is set) -->
 			${!_pickerProjectId ? html`
 			<div class="border-t border-border/50 px-3 py-2 shrink-0" style="overflow: visible;">
-				<div class="text-[9px] text-muted-foreground uppercase tracking-wider font-medium mb-1.5">Working Directory</div>
+				<div class="text-muted-foreground uppercase tracking-wider font-medium mb-1.5" style="font-size: 0.75em;">Working Directory</div>
 				${cwdCombobox({
 					value: _pickerCwd,
 					onInput: (v: string) => { _pickerCwd = v; renderApp(); },
@@ -216,9 +216,9 @@ export function renderRolePickerDropdown() {
 				<label class="flex items-center gap-2 cursor-pointer ${isFocused("worktree", "worktree") ? "ring-2 ring-ring rounded" : ""}">
 					<input type="checkbox" .checked=${_pickerWorktree}
 						@change=${(e: Event) => { _pickerWorktree = (e.target as HTMLInputElement).checked; renderApp(); }} />
-					<span class="text-[11px] text-foreground/70">Create worktree</span>
+					<span class="text-foreground/70" style="font-size: 0.9167em;">Create worktree</span>
 					<span title="Creates an isolated git branch and worktree for this session"
-						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						class="text-muted-foreground cursor-help" style="font-size: 0.75em;">ⓘ</span>
 				</label>
 			</div>
 			<!-- Sandbox checkbox (only when docker sandbox is configured) -->
@@ -236,9 +236,9 @@ export function renderRolePickerDropdown() {
 					<input type="checkbox" .checked=${_pickerSandbox}
 						@change=${(e: Event) => { _pickerSandbox = (e.target as HTMLInputElement).checked; renderApp(); }}
 						?disabled=${sandboxDisabled} />
-					<span class="text-[11px] text-foreground/70 ${sandboxDisabled ? 'opacity-50' : ''}">Sandbox (Docker)</span>
+					<span class="text-foreground/70 ${sandboxDisabled ? 'opacity-50' : ''}" style="font-size: 0.9167em;">Sandbox (Docker)</span>
 					<span title=${tooltip}
-						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						class="text-muted-foreground cursor-help" style="font-size: 0.75em;">ⓘ</span>
 						`;
 					})()}
 				</label>
@@ -247,7 +247,7 @@ export function renderRolePickerDropdown() {
 			<!-- Create button (pinned at bottom) -->
 			<div class="border-t border-border/50 px-3 py-2 shrink-0">
 				<button
-					class="w-full text-center px-3 py-1.5 text-sm rounded-md font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90 ${isFocused("create", "create") ? "ring-2 ring-ring ring-offset-1 ring-offset-background" : ""}"
+					class="w-full text-center px-3 py-1.5 rounded-md font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90 ${isFocused("create", "create") ? "ring-2 ring-ring ring-offset-1 ring-offset-background" : ""}" style="font-size: 1.1667em;"
 					@click=${doCreate}
 					title="Create session with selected role"
 				>Create Session</button>
@@ -565,9 +565,9 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
 				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
 				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
-				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} ${mobile ? "text-sm" : "text-sm"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}">${staffExpanded ? "▾" : "▸"}</span>
+				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}font-size: 1.1667em;">${staffExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(Bot, mobile ? "sm" : "xs")}</span>
-				<span class="flex-1 ${mobile ? "text-sm" : "text-[9px]"} text-muted-foreground uppercase tracking-wider font-medium">Staff</span>
+				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: ${mobile ? "1.1667em" : "0.75em"};">Staff</span>
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
 					<button
 						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
@@ -610,13 +610,13 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
 					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "text-xs"} font-normal"><span class="truncate ${mobile ? "text-base" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
+					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : ""} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
-							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
+							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
 							const time = terseRelativeTime(session.lastActivity);
 							if (!time) return "";
 							const unseen = hasUnseenActivity(session);
-							return html`<span class="shrink-0 text-[11px] text-muted-foreground/40">·</span><span class="shrink-0 inline-flex items-center gap-0.5 text-[11px] tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
+							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
 						})() : ""}</div>
 					${mobile
 						? editBtn
@@ -625,7 +625,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
-								return html`<span class="shrink-0 flex items-center gap-0.5 text-[9px] tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:6px;line-height:1;">●</span>` : ""}</span>`;
+								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
 							})() : ""}</span>
 							<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 								${editBtn}
@@ -709,10 +709,10 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 	return html`
 		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
-			<span class="text-sm text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;">${expanded ? "▾" : "▸"}</span>
+			<span class="text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
-			<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};">${project.name}</span>
-			${isProvisional ? html`<span class="text-[9px] text-muted-foreground italic shrink-0">(setting up)</span>` : html`
+			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
+			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
@@ -767,9 +767,9 @@ function renderProjectContent(
 			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
 				style="padding-left:${HEADER_CHEVRON_W}px;"
 				@click=${() => { setUngroupedExpanded(project.id, !ungroupedExp); renderApp(); }}>
-				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-sm text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;">${ungroupedExp ? "▾" : "▸"}</span>
+				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;">${ungroupedExp ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(MessagesSquare, "xs")}</span>
-				<span class="flex-1 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">Sessions</span>
+				<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">Sessions</span>
 				${!isProvisional ? html`
 				<div class="flex items-center relative">
 					<button
@@ -811,12 +811,12 @@ export function renderSidebar() {
 	const isSkillsActive = isRouteActive("skills");
 
 	return html`
-		<div class="shrink-0 h-full flex flex-col sidebar-edge relative" data-testid="sidebar-expanded" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+		<div class="shrink-0 h-full flex flex-col sidebar-edge sidebar-root relative" data-testid="sidebar-expanded" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
 			<div class="sidebar-resize-handle" @pointerdown=${onSidebarResizePointerDown} @dblclick=${onSidebarResizeDoubleClick} title="Drag to resize (double-click to reset)"></div>
 			<div class="flex flex-col border-b border-border/50 px-0.5 py-1 gap-0.5">
 				<div class="flex items-center">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); import("./routing.js").then((m) => m.setHashRoute("roles")); })}
 						title="Manage roles"
 					>
@@ -824,7 +824,7 @@ export function renderSidebar() {
 						<span>Roles</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); import("./routing.js").then((m) => m.setHashRoute("tools")); })}
 						title="Manage tools"
 					>
@@ -832,7 +832,7 @@ export function renderSidebar() {
 						<span>Tools</span>
 					</button>
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); })}
 						title="View skills"
 					>
@@ -842,7 +842,7 @@ export function renderSidebar() {
 				</div>
 				<div class="flex items-center">
 					<button
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); import("./routing.js").then((m) => m.setHashRoute("workflows")); })}
 						title="Manage workflows"
 					>
@@ -851,7 +851,7 @@ export function renderSidebar() {
 					</button>
 					<button
 						data-new-goal-trigger
-						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 text-xs whitespace-nowrap ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${state.projects.length === 0 ? 'text-muted-foreground/50 cursor-not-allowed' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
 						?disabled=${state.projects.length === 0}
 						@click=${(e: Event) => {
 							if (state.projects.length === 0) { showProjectDialog(); return; }
@@ -876,11 +876,11 @@ export function renderSidebar() {
 			</div>
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
 				${state.sessionsLoading
-					? html`<div class="text-center py-6 text-muted-foreground text-xs">Loading…</div>`
+					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
 					: state.sessionsError
 						? html`<div class="text-center py-6">
-								<p class="text-xs text-red-500 mb-2">${state.sessionsError}</p>
-								<button class="text-xs text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
+								<p class="text-red-500 mb-2">${state.sessionsError}</p>
+								<button class="text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: (() => {
 							// Apply search filtering
@@ -967,19 +967,19 @@ export function renderSidebar() {
 								<div class="border-t border-border/30 my-1 mx-2"></div>
 								<div class="flex flex-col gap-0.5 px-2">
 									${state.archivedGoalsHasMore ? html`
-										<button class="text-xs text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>
+										<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>
 									` : ""}
 									${state.archivedSessionsHasMore ? html`
-										<button class="text-xs text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>
+										<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>
 									` : ""}
 								</div>
 							` : ""}
 						`; })()}
 				${state.projects.length === 0 ? html`
 					<div style="padding: 1.5rem 1rem; text-align: center;">
-						<p class="text-muted-foreground" style="margin: 0 0 0.75rem; font-size: 0.8125rem;">No projects configured</p>
+						<p class="text-muted-foreground" style="margin: 0 0 0.75rem; font-size: 1.0833em;">No projects configured</p>
 						<button
-							class="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-xs text-primary-foreground bg-primary hover:bg-primary/90 transition-colors mx-auto"
+							class="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-primary-foreground bg-primary hover:bg-primary/90 transition-colors mx-auto"
 							@click=${() => showProjectDialog()}
 						>
 							${icon(Plus, "xs")}
@@ -989,8 +989,7 @@ export function renderSidebar() {
 				` : html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button
-						class="flex items-center gap-1 px-1 py-1 rounded-md text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full"
-						style="padding-left:${HEADER_CHEVRON_W}px;"
+						class="flex items-center gap-1 px-1 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full" style="font-size: 0.8333em; padding-left:${HEADER_CHEVRON_W}px;"
 						@click=${() => showProjectDialog()}
 						title="Register another project"
 					>
@@ -1001,7 +1000,7 @@ export function renderSidebar() {
 			</div>
 			<div class="flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
-					class="flex items-center gap-1.5 px-3 py-2 text-xs transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
+					class="flex items-center gap-1.5 px-3 py-2 transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 					@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
 					title="Settings (Ctrl+,)"
 				>
@@ -1009,7 +1008,7 @@ export function renderSidebar() {
 					<span>Settings</span>
 				</button>`; })()}
 				<button
-					class="flex items-center gap-1.5 px-2 py-2 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
+					class="flex items-center gap-1.5 px-2 py-2 ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
 					@click=${() => {
 						state.showArchived = !state.showArchived;
 						_archivedBySearch = false; // manual toggle takes precedence
@@ -1029,7 +1028,7 @@ export function renderSidebar() {
 				</button>
 				<span class="flex-1"></span>
 				<button
-					class="flex items-center gap-1.5 px-2 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+					class="flex items-center gap-1.5 px-2 py-2 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
 					@click=${toggleSidebar}
 					title="Collapse sidebar (Ctrl+[)"
 				>
@@ -1057,7 +1056,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
 			>
 				${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory)}
-				<span class="text-[8px] font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(displayTitle)}</span>
+				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
 			</button>
 		`;
 	};
@@ -1077,18 +1076,18 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				class="flex items-center gap-0.5 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${tlActive ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				@click=${() => { if (!tlActive) connectToSession(teamLead.id, true); }}
 			>
-				<span class="text-[9px] text-muted-foreground shrink-0 select-none" style="width:8px;text-align:center;cursor:pointer;"
+				<span class="text-muted-foreground shrink-0 select-none" style="width:8px;text-align:center;cursor:pointer;font-size: 0.75em;"
 					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}
 				>${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span>
 				${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory)}
-				<span class="text-[8px] font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(tlTitle)}</span>
+				<span class="font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
 			</button>
 			${tlExpanded ? children.map(s => html`<div style="padding-left:6px;">${renderCollapsedSession(s)}</div>`) : ""}
 		`;
 	};
 
 	return html`
-		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
+		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
 			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
 				${sortedGoals.map((goal, i) => {
 					const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
@@ -1100,8 +1099,8 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 							title=${goal.title}
 							@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 						>
-							<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
-							<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
+							<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${expanded ? "▾" : "▸"}</span>
+							<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
 						</button>
 						${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 					`;
@@ -1113,8 +1112,8 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 						title="Ungrouped sessions"
 						@click=${() => { setUngroupedExpanded(state.projects[0]?.id || "", !_collapsedUngroupedExp); renderApp(); }}
 					>
-						<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${_collapsedUngroupedExp ? "▾" : "▸"}</span>
-						<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">SES</span>
+						<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${_collapsedUngroupedExp ? "▾" : "▸"}</span>
+						<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">SES</span>
 					</button>
 					${_collapsedUngroupedExp ? ungrouped.map(renderCollapsedSession) : ""}`; })()}
 				` : ungrouped.map(renderCollapsedSession)}
@@ -1133,7 +1132,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 							@click=${() => handleStaffClick(agent)}
 						>
 							${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
-							<span class="text-[8px] font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(agent.name)}</span>
+							<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(agent.name)}</span>
 						</button>
 					`;
 				})}
@@ -1149,8 +1148,8 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 									title=${goal.title}
 									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
 								>
-									<span class="text-[11px] text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;">${expanded ? "▾" : "▸"}</span>
-									<span class="text-[9px] font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1;">${sessionAcronym(goal.title)}</span>
+									<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${expanded ? "▾" : "▸"}</span>
+									<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
 								</button>
 								${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
 							</div>

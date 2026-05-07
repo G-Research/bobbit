@@ -22,7 +22,17 @@ import {
 	type KeyBinding,
 	type ShortcutEntry,
 } from "./shortcut-registry.js";
-import { renderApp, setProjects, state } from "./state.js";
+import {
+	renderApp,
+	setProjects,
+	state,
+	SIDEBAR_FONT_SCALE_KEY,
+	SIDEBAR_FONT_SCALE_DEFAULT,
+	SIDEBAR_FONT_SCALE_STOPS,
+	loadSidebarFontScale,
+	applySidebarFontScaleVar,
+	nearestStop,
+} from "./state.js";
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
@@ -1878,10 +1888,60 @@ async function togglePlayFinishSound(): Promise<void> {
 	} catch {}
 }
 
+function setSidebarFontScaleStop(stopIndex: number): void {
+	const clampedIndex = Math.max(0, Math.min(SIDEBAR_FONT_SCALE_STOPS.length - 1, Math.round(stopIndex)));
+	const value = SIDEBAR_FONT_SCALE_STOPS[clampedIndex].value;
+	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(value)); } catch { /* private mode */ }
+	applySidebarFontScaleVar(value);
+	renderApp();
+}
+
+function resetSidebarFontScale(): void {
+	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(SIDEBAR_FONT_SCALE_DEFAULT)); } catch { /* private mode */ }
+	applySidebarFontScaleVar(SIDEBAR_FONT_SCALE_DEFAULT);
+	renderApp();
+}
+
+function renderSidebarFontScaleControl() {
+	const current = loadSidebarFontScale();
+	const stop = nearestStop(current);
+	const index = SIDEBAR_FONT_SCALE_STOPS.findIndex(s => s.id === stop.id);
+	return html`
+		<div class="flex flex-col gap-1.5">
+			<span class="text-sm font-medium text-foreground">Sidebar font size</span>
+			<p class="text-xs text-muted-foreground">
+				Scale all sidebar text proportionally. Affects only the sidebar — chat, header, and other surfaces are unchanged. Saved per browser.
+			</p>
+			<div class="flex items-center gap-3">
+				<input
+					type="range"
+					min="0"
+					max="${SIDEBAR_FONT_SCALE_STOPS.length - 1}"
+					step="1"
+					.value=${String(index)}
+					data-testid="sidebar-font-scale-slider"
+					class="flex-1 max-w-xs accent-primary cursor-pointer"
+					@input=${(e: Event) => setSidebarFontScaleStop(Number((e.target as HTMLInputElement).value))}
+				/>
+				<span class="text-sm text-foreground tabular-nums min-w-16" data-testid="sidebar-font-scale-label">${stop.label}</span>
+				<button
+					class="text-xs text-muted-foreground hover:text-foreground underline"
+					data-testid="sidebar-font-scale-reset"
+					@click=${resetSidebarFontScale}
+				>Reset to Default</button>
+			</div>
+		</div>
+	`;
+}
+
 function renderGeneralTab() {
 	loadGeneralSettings();
 	return html`
 		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<h2 class="text-sm font-semibold text-foreground uppercase tracking-wider" data-testid="general-appearance-heading">Appearance</h2>
+				${renderSidebarFontScaleControl()}
+			</div>
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">
 					<input
