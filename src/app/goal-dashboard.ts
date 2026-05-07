@@ -182,6 +182,16 @@ let treeCostExpanded = false;
 let treeCostInFlight = false;
 let treeCostLastFetchAt = 0;
 
+/**
+ * Per-dashboard descendant slice (live + archived). Fetched from
+ * `GET /api/goals/:id/descendants` so the Plan tab can resolve archived
+ * children without depending on the sidebar's "See Archived" toggle.
+ * Reset on dashboard navigation / clear.
+ */
+let dashboardDescendants: Goal[] = [];
+let dashboardDescendantsInFlight = false;
+let dashboardDescendantsLastFetchAt = 0;
+
 /** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned (Lesson 4.22). */
 let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
 const PLAN_RERENDER_THROTTLE_MS = 250;
@@ -205,7 +215,50 @@ export function notifyGoalEventForDashboard(): void {
 		if (currentGoalId && !treeCostInFlight && now - treeCostLastFetchAt > 5_000) {
 			void fetchTreeCost(currentGoalId);
 		}
+		if (currentGoalId && !dashboardDescendantsInFlight && now - dashboardDescendantsLastFetchAt > 5_000) {
+			void fetchDashboardDescendants(currentGoalId);
+		}
 	}
+}
+
+/**
+ * Fetch the dashboard's descendant goal list (live + archived) so the Plan
+ * tab can render archived children. Mirrors `fetchTreeCost`'s shape:
+ * in-flight guard + currentGoalId staleness check.
+ */
+async function fetchDashboardDescendants(goalId: string): Promise<void> {
+	if (dashboardDescendantsInFlight) return;
+	dashboardDescendantsInFlight = true;
+	dashboardDescendantsLastFetchAt = Date.now();
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/descendants`);
+		if (!res.ok) return;
+		const data = await res.json() as { goals?: Goal[] };
+		if (currentGoalId === goalId) {
+			dashboardDescendants = Array.isArray(data?.goals) ? data.goals : [];
+			renderApp();
+		}
+	} catch {
+		// best-effort
+	} finally {
+		dashboardDescendantsInFlight = false;
+	}
+}
+
+/**
+ * Merged goals pool used by Plan-tab compute paths. `state.goals` is
+ * authoritative for live goals; `dashboardDescendants` brings in archived
+ * descendants (and any live ones the hot poll may have missed). Dedupe
+ * by id, prefer state.goals (freshest).
+ */
+function dashboardGoalPool(): Goal[] {
+	const seen = new Set<string>();
+	const out: Goal[] = [];
+	for (const g of state.goals) { seen.add(g.id); out.push(g); }
+	for (const g of dashboardDescendants) {
+		if (!seen.has(g.id)) { seen.add(g.id); out.push(g); }
+	}
+	return out;
 }
 
 async function fetchTreeCost(goalId: string): Promise<void> {
@@ -396,6 +449,16 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		// short-circuits when the response hasn't landed yet.
 		void fetchTreeCost(goalId);
 
+		// Fetch descendant goal list (live + archived) so the Plan tab
+		// renders archived children regardless of the sidebar's "See Archived"
+		// toggle. Reset on goal-change so a previous goal's descendants don't
+		// leak.
+		if (!sameGoal) {
+			dashboardDescendants = [];
+			dashboardDescendantsLastFetchAt = 0;
+		}
+		void fetchDashboardDescendants(goalId);
+
 		// Start setup status polling if worktree is still being prepared
 		if (currentGoal && currentGoal.setupStatus === "preparing") {
 			startSetupStatusPoll(goalId);
@@ -490,6 +553,9 @@ export function clearDashboardState(): void {
 	treeCostExpanded = false;
 	treeCostInFlight = false;
 	treeCostLastFetchAt = 0;
+	dashboardDescendants = [];
+	dashboardDescendantsInFlight = false;
+	dashboardDescendantsLastFetchAt = 0;
 	if (_planRerenderTimer != null) { clearTimeout(_planRerenderTimer); _planRerenderTimer = null; }
 	gitStatus = null;
 	gitRepoKnown = 'unknown';
@@ -1665,13 +1731,13 @@ function renderTabBar(): TemplateResult {
 		// (synthesised living-plan). Use ALL goals — archived parent goals
 		// must still surface their plan tree, otherwise the dashboard becomes
 		// blank-staring at a fully-archived tree.
-		if (shouldShowPlanTab(currentGoal as any, state.goals as any)) {
+		if (shouldShowPlanTab(currentGoal as any, dashboardGoalPool() as any)) {
 			// Badge counts the actual nodes the plan view will render (formal
 			// plan steps + ad-hoc children, dedup'd by planId). Falling back to
 			// `childGoals.length` was incorrect for archived parents (filter
 			// excluded archived → badge said 0 while the tab still rendered
 			// formal-plan nodes).
-			const planSteps = computePlanStepsForGoal(currentGoal, state.goals as any);
+			const planSteps = computePlanStepsForGoal(currentGoal, dashboardGoalPool() as any);
 			tabs.push({
 				id: "plan",
 				label: "Plan",
@@ -2194,11 +2260,14 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 					const childHasSubPlan = n.childGoal
 						? computePlanStepsForGoal(n.childGoal as any, allGoals, { isNested: true }).length > 0
 						: false;
-					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}">
+					const isArchived = !!n.childGoal?.archived;
+					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}" data-archived="${isArchived ? 'true' : 'false'}" style="${isArchived ? 'opacity:0.55;' : ''}">
 					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
 						fill=${planNodeFillColor(n.state)}
 						stroke=${planNodeBorderColor(n.state)}
-						stroke-width="1.5"></rect>
+						stroke-width="1.5"
+						stroke-dasharray=${isArchived ? "4 3" : "none"}
+						class=${isArchived ? "plan-node-archived" : ""}></rect>
 					<foreignObject x=${n.x + 6} y=${n.y + 4} width=${n.width - 12} height=${n.height - 8}>
 						<div xmlns="http://www.w3.org/1999/xhtml" style="font-family:inherit;font-size:11px;color:var(--foreground);overflow:hidden;height:100%;display:flex;flex-direction:column;justify-content:space-between;">
 							<div style="display:flex;align-items:center;gap:4px;">
@@ -2209,6 +2278,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 									${_isPlanExpanded(n.childGoal.id) ? "▾" : "▸"}
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
+								${isArchived ? html`<span data-testid="plan-node-archived-pill" style="flex-shrink:0;font-size:9px;font-weight:500;padding:1px 5px;border-radius:8px;background:var(--muted);color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.04em;">archived</span>` : nothing}
 							</div>
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
 								<span>${n.state}</span>
@@ -2290,7 +2360,7 @@ function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { isNested
 
 function renderPlanTab(): TemplateResult {
 	if (!currentGoal) return html``;
-	const allGoals = state.goals;
+	const allGoals = dashboardGoalPool();
 	const steps = computePlanStepsForGoal(currentGoal, allGoals);
 	if (steps.length === 0) {
 		return html`<div class="tab-empty">${svgPlan}<span>No plan yet — propose subgoal steps or spawn a child.</span></div>`;

@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
+import { collectDescendants } from "./agent/goal-descendants.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
@@ -8098,6 +8099,34 @@ async function handleApiRoute(
 			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
 		);
 		json(result);
+		return;
+	}
+
+	// GET /api/goals/:goalId/descendants — full descendant goal records (live + archived)
+	// Powers the Plan tab's data source so archived children remain visible in
+	// the DAG independently of the sidebar's "See Archived" toggle. Not gated
+	// behind requireSubgoalsEnabled() — Plan tab is core dashboard functionality.
+	const goalDescendantsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/descendants$/);
+	if (goalDescendantsMatch && req.method === "GET") {
+		const goalId = goalDescendantsMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) {
+			json({ error: "Goal not found" }, 404);
+			return;
+		}
+		if (!goal.projectId) {
+			json({ goals: [] });
+			return;
+		}
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) {
+			json({ error: "Goal project context not found" }, 404);
+			return;
+		}
+		// All goals (live + archived) — `getAll()` returns both.
+		const allGoals = ctx.goalStore.getAll();
+		const descendants = collectDescendants(goalId, allGoals);
+		json({ goals: descendants });
 		return;
 	}
 
