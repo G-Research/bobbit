@@ -130,6 +130,12 @@ Per-session review annotations are stored server-side so they survive browser cl
 
 #### Nested goals (the 9 `Children` operations + plan/policy)
 
+All routes in this section are gated behind the **Subgoals (Experimental)**
+system-scope toggle (default OFF). When the toggle is off they return
+`403 { code: "SUBGOALS_DISABLED" }` via `requireSubgoalsEnabled()`. The
+`GET /api/goals/:id/tree-cost` route above is gated the same way. See
+[docs/design/subgoals-experimental-toggle.md](design/subgoals-experimental-toggle.md).
+
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/goals/:id/spawn-child` | Create or return an existing child goal under the parent, keyed by `planId`. Body: `{ planId, title, spec, workflowId?, workflow?, suggestedRole?, inlineRoles?, dependsOn?: string[] }`. Idempotent on `planId` (re-call returns the existing child id, 200, instead of 201). `dependsOn[]` lists sibling `planId`s this child waits on — validated against the parent's existing children's `spawnedFromPlanId` values; 400 `SELF_DEPENDENCY`, 400 `UNKNOWN_PLAN_ID {missing}`, or 400 `DEPENDS_ON_CYCLE {path}` on failure. Stamped onto `PersistedGoal.dependsOnPlanIds` immediately after createGoal alongside `spawnedFromPlanId`. The child's branch is created off the parent's branch HEAD; child's `ready-to-merge` will merge LOCALLY into the parent (no remote PR raised). Cycle prevention (separate from depends-on): cannot spawn a child whose id is in the parent's ancestor chain. |
