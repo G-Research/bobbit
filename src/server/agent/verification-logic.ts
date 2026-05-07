@@ -35,7 +35,7 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	// Tool-call schema validation failure from the provider SDK — distinct
 	// from the raw JSON parse errors, which live in TRANSIENT_ERROR_REGEXES.
 	"Validation failed for tool",
-	// Lesson 4.7 — Resumed reviewer agents lose kickoff context after a
+	// resumed-reviewer transient pattern — Resumed reviewer agents lose kickoff context after a
 	// gateway restart. The terse legacy reminder doesn't elicit a tool call;
 	// the agent eventually goes idle. Treating this output as transient
 	// promotes recovery to `_rerunLlmReviewStep`, which rebuilds the kickoff
@@ -44,7 +44,7 @@ export const TRANSIENT_ERROR_PATTERNS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Restart-interrupt suppression (Lesson 4.6)
+// Restart-interrupt suppression (restart-interrupted verifications mark gates pending, not failed)
 // ---------------------------------------------------------------------------
 
 /**

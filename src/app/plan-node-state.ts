@@ -1,8 +1,8 @@
 /**
  * Pure helper for resolving the displayed state of a Plan-tab node from the
- * set of child goals that share its planId (Phase 5a, Lesson 4.19).
+ * set of child goals that share its planId (Phase 5a, tier-based child resolution).
  *
- * Lesson 4.19 — when multiple children share a `spawnedFromPlanId` (the
+ * tier-based child resolution — when multiple children share a `spawnedFromPlanId` (the
  * archived/merged success child plus a stranded zombie sibling), naïve
  * "live > archived" tie-break shadowed the real success child and the Plan
  * tab rendered the zombie as failed. Fix: tier-based preference where a

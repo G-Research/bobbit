@@ -165,7 +165,7 @@ test.describe("QA Seed — API E2E", () => {
 		const resp = await apiFetch(seededGateway, `/api/goals/${goalId}/team`);
 		expect(resp.status).toBe(200);
 		const team = await resp.json();
-		// Lesson 4.11C zombie-reviewer sweep (subgoals branch) unregisters
+		// zombie-reviewer sweep zombie-reviewer sweep (subgoals branch) unregisters
 		// reviewer agents whose underlying session is missing/terminated. The
 		// QA seed marks all sessions terminated, so the reviewer is correctly
 		// reaped on boot. The coder survives because it's role="coder" and

@@ -38,7 +38,7 @@ describe("runSubgoalStep — merge + archive flow", () => {
 		assert.ok(tearIdx < archIdx, "teardownTeam must precede archiveAfterMerge");
 	});
 
-	it("R-028: archiveGoalAfterMerge sets state=complete BEFORE archiving (Lesson 4.2 rescue path)", async () => {
+	it("R-028: archiveGoalAfterMerge sets state=complete BEFORE archiving (stale-pointer invalidation rescue path)", async () => {
 		// Order is load-bearing: the archived snapshot must have
 		// state=complete on disk so the rescue-path tier-2 short-circuit fires.
 		// Wrap goalStore.update to log the state stamp; wrap goalStore.archive

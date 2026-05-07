@@ -27,7 +27,7 @@ export interface TreeCostEntry {
 	tokensOut: number;
 }
 
-/** Aggregate tree-cost rollup result (Lesson 4.21). */
+/** Aggregate tree-cost rollup result (tree-cost rollup). */
 export interface TreeCostBreakdown {
 	rootGoalId: string;
 	totalCostUsd: number;
@@ -74,7 +74,7 @@ export class CostTracker {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
 	/** Monotonically increasing tick — bumped on every cost mutation.
-	 *  Used by `computeTreeCost` for cache invalidation (Lesson 4.21). */
+	 *  Used by `computeTreeCost` for cache invalidation (tree-cost rollup). */
 	private generation = 0;
 
 	constructor(stateDir: string) {
@@ -182,7 +182,7 @@ export class CostTracker {
 }
 
 // ---------------------------------------------------------------------------
-// Tree cost rollup (Lesson 4.21)
+// Tree cost rollup (tree-cost rollup)
 // ---------------------------------------------------------------------------
 
 /** Cache entry for `computeTreeCost`. Keyed by `rootGoalId`. */

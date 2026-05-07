@@ -1,5 +1,5 @@
 /**
- * Phase 1 — Lesson 4.3: GoalManager constructed without a WorkflowStore must
+ * Phase 1 — WorkflowStore-required invariant: GoalManager constructed without a WorkflowStore must
  * fail loudly when workflowId is given but neither resolvedWorkflow nor a
  * workflowStore is available.
  *
@@ -59,14 +59,14 @@ function makeFeatureWorkflow(): Workflow {
 	};
 }
 
-describe("GoalManager — Lesson 4.3 fail-loud branch", () => {
+describe("GoalManager — WorkflowStore-required invariant fail-loud branch", () => {
 	it("throws when workflowId is given but no workflowStore was constructed AND no resolvedWorkflow was passed", async () => {
 		// Construct manager with NO workflowStore (the buggy PR #409 setup).
 		const goalStore = new GoalStore(stateDir);
 		const gm = new GoalManager(goalStore);
 		await assert.rejects(
 			() => gm.createGoal("test", tmpRoot, { workflowId: "feature" }),
-			/Lesson 4.3/,
+			/WorkflowStore-required invariant/,
 		);
 	});
 
@@ -74,7 +74,7 @@ describe("GoalManager — Lesson 4.3 fail-loud branch", () => {
 		// Subtle: workflowStore is provided via opts but get(id) returns
 		// undefined for the requested id AND getAll() returns empty — this
 		// hits the canonical "no workflows configured" message, NOT the
-		// Lesson 4.3 path. Verifies the two error paths don't overlap.
+		// WorkflowStore-required invariant path. Verifies the two error paths don't overlap.
 		const goalStore = new GoalStore(stateDir);
 		const cfg = new ProjectConfigStore(configDir);
 		const wf = new InlineWorkflowStore(cfg);

@@ -1,5 +1,5 @@
 /**
- * Lesson 4.6 — Restart-interrupt suppression.
+ * restart-interrupt suppression — Restart-interrupt suppression.
  *
  * `_resumeOneVerification` consults `shouldSuppressRestartInterrupt` to decide
  * whether the gate should fall back to `pending` (with a benign team-lead
@@ -77,7 +77,7 @@ describe("isRestartInterruptedStep", () => {
 		assert.equal(isRestartInterruptedStep(step), false);
 	});
 
-	test("matches the new 'Agent did not call verification_result after server restart' marker (Lesson 4.7 boundary)", () => {
+	test("matches the new 'Agent did not call verification_result after server restart' marker (resumed-reviewer transient pattern boundary)", () => {
 		const step = { passed: false, type: "llm-review", output: "Agent did not call verification_result after server restart and reminder." };
 		assert.equal(isRestartInterruptedStep(step), true);
 	});

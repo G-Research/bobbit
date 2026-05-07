@@ -1,5 +1,5 @@
 /**
- * Phase 3 / Lesson 4.2 — A cached `childGoalId` that points at an archived
+ * Phase 3 / stale-pointer invalidation — A cached `childGoalId` that points at an archived
  * non-complete child is a dead pointer. The harness MUST wipe the pointer
  * (and persist the wipe via `_persistActive`) before falling through to
  * spawn a fresh child.
@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import { buildFixture, buildActive, buildSubgoalStep } from "./helpers/run-subgoal-step-fixture.ts";
 
-describe("runSubgoalStep — Lesson 4.2: stale archived non-complete cached pointer is wiped + spawns fresh", () => {
+describe("runSubgoalStep — stale archived non-complete cached pointer is wiped + spawns fresh", () => {
 	it("cached pointer at archived+shelved → wiped + new child spawned", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
@@ -78,7 +78,7 @@ describe("runSubgoalStep — Lesson 4.2: stale archived non-complete cached poin
 		assert.notEqual(fresh!.id, "deleted-id");
 	});
 
-	it("cached pointer at archived+complete is preserved (success terminal — Lesson 4.2 second branch)", async () => {
+	it("cached pointer at archived+complete is preserved (success terminal — stale-pointer invalidation second branch)", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
 

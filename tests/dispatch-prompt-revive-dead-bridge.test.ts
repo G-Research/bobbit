@@ -1,5 +1,5 @@
 /**
- * Lesson 4.9 — Auto-revive a dead RPC bridge before dispatching a brand-new
+ * dead-bridge auto-revive — Auto-revive a dead RPC bridge before dispatching a brand-new
  * prompt.
  *
  * The fix is in the private helper
@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 /**
  * Mirrors the production logic in
  * `SessionManager._dispatchPromptWithReviveOnDeadBridge`. If the production
- * code drifts from this shape, the spec for Lesson 4.9 has changed and the
+ * code drifts from this shape, the spec for dead-bridge auto-revive has changed and the
  * test should be updated alongside the source — that's a deliberate guard.
  */
 async function dispatchPromptWithReviveOnDeadBridge(
@@ -56,7 +56,7 @@ function makeSession(running: boolean) {
 	};
 }
 
-describe("Lesson 4.9 — auto-revive dead RPC bridge on prompt dispatch", () => {
+describe("auto-revive dead RPC bridge on prompt dispatch", () => {
 	it("calls restartAgent exactly once when rpcClient.running === false at the new-prompt site", async () => {
 		const sessions = new Map<string, any>();
 		sessions.set("sess-1", makeSession(false));
@@ -138,7 +138,7 @@ describe("Lesson 4.9 — auto-revive dead RPC bridge on prompt dispatch", () => 
 	});
 });
 
-describe("Lesson 4.9 — source-grep guard", async () => {
+describe("dead-bridge auto-revive — source-grep guard", async () => {
 	const fs = await import("node:fs");
 	const path = await import("node:path");
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "session-manager.ts");

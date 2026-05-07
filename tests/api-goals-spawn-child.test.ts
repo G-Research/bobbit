@@ -11,7 +11,7 @@
  *      branch finds an existing child and returns its id without creating
  *      a duplicate.
  *   2. Validation: planId / title / spec required (server returns 400).
- *   3. Lesson 4.1 invariant: spawnedFromPlanId is stamped immediately
+ *   3. stamp-immediately invariant: spawnedFromPlanId is stamped immediately
  *      after createGoal — sub-millisecond gap.
  *   4. Cycle prevention: GoalManager.createGoal rejects parents in the
  *      ancestor chain.
@@ -101,7 +101,7 @@ describe("spawn-child REST primitives", () => {
 		assert.equal(children.length, 1);
 	});
 
-	it("Lesson 4.1 invariant: spawnedFromPlanId is stamped after createGoal", async () => {
+	it("stamp-immediately invariant: spawnedFromPlanId is stamped after createGoal", async () => {
 		const { gm, store } = makeManager();
 		const parent = await gm.createGoal("Parent", tmpRoot, { workflowId: "parent" });
 

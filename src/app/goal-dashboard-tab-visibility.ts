@@ -1,7 +1,7 @@
 /**
  * Pure predicates for the goal dashboard tab strip (Phase 5a).
  *
- * Encodes Lesson 4.20: the Plan tab is visible if the goal has a formal
+ * Encodes Plan-tab visibility rule: the Plan tab is visible if the goal has a formal
  * `goal-plan` gate OR if it has at least one (non-archived) child goal — in
  * which case the Plan tab synthesises a living plan from the live children
  * (see `plan-synthesis.ts`).
@@ -28,7 +28,7 @@ export interface TabVisibilityGoal {
 /**
  * Visible if a formal `goal-plan` gate exists on the goal's snapshotted
  * workflow OR if at least one (non-archived) child synthesises a living plan
- * (Lesson 4.20).
+ * (Plan-tab visibility / mutation classifier anchor).
  *
  * The caller is expected to filter `allGoals` to non-archived goals when it
  * wants the "living plan" mode. We accept the full list and only check

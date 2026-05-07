@@ -1,5 +1,5 @@
 /**
- * Lesson 4.8 — Context-rich reminder for live (not resumed) reviewers.
+ * context-rich reminder — Context-rich reminder for live (not resumed) reviewers.
  *
  * The two-sentence legacy reminder didn't elicit a tool call when reviewers
  * emitted their verdict as chat-text and ended turn. The new

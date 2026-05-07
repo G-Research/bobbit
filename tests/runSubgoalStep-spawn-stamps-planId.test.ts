@@ -1,5 +1,5 @@
 /**
- * Phase 3 / Lesson 4.1 — `spawnedFromPlanId` MUST be stamped IMMEDIATELY
+ * Phase 3 / stamp-immediately invariant — `spawnedFromPlanId` MUST be stamped IMMEDIATELY
  * after `createGoal` in `runSubgoalStep`. No other awaits, no other manager
  * calls between `createGoal(...)` and `updateGoal(child.id, { spawnedFromPlanId })`.
  *
@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 
 import { buildFixture, buildActive, buildSubgoalStep } from "./helpers/run-subgoal-step-fixture.ts";
 
-describe("runSubgoalStep — Lesson 4.1: stamp spawnedFromPlanId immediately after createGoal", () => {
+describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoal", () => {
 	it("the very next call after createGoal is updateGoal({ spawnedFromPlanId })", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
@@ -34,7 +34,7 @@ describe("runSubgoalStep — Lesson 4.1: stamp spawnedFromPlanId immediately aft
 		// The IMMEDIATELY next call MUST be updateGoal with spawnedFromPlanId.
 		const next = fx.calls[createIdx + 1];
 		assert.equal(next?.kind, "updateGoal",
-			`Lesson 4.1 violated: call after createGoal was ${next?.kind}, expected updateGoal. ` +
+			`stamp-immediately invariant violated: call after createGoal was ${next?.kind}, expected updateGoal. ` +
 			`Full sequence: ${fx.calls.map(c => c.kind).join(" → ")}`,
 		);
 		assert.ok(next.kind === "updateGoal");
@@ -146,7 +146,7 @@ describe("runSubgoalStep — Lesson 4.1: stamp spawnedFromPlanId immediately aft
 	});
 
 	it("re-running the step after spawn is idempotent — does NOT re-create the child", async () => {
-		// Lesson 4.1 + 4.19: tier-1 lookup finds the live child by spawnedFromPlanId
+		// stamp-immediately + tier-1 lookup: tier-1 lookup finds the live child by spawnedFromPlanId
 		// and reuses it; no duplicate spawn.
 		const fx = await buildFixture();
 		after(() => fx.cleanup());

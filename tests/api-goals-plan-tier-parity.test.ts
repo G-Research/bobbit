@@ -5,7 +5,7 @@
  * The route used to inline a 4-tier copy of the resolver; this regression
  * test pins that the route now delegates to
  * `verificationHarness.resolvePlanStepChild` so the renderer / server /
- * harness three-way agreement (Lesson 4.22) has exactly one source.
+ * harness three-way agreement (Plan-tab nested rendering — three-way agreement) has exactly one source.
  *
  * We exercise the resolver across the same fixture shapes that
  * `runSubgoalStep-tier-resolution.test.ts` uses (live-active,

@@ -1,5 +1,5 @@
 /**
- * Lesson 4.11C — Zombie-reviewer sweep error guard.
+ * zombie-reviewer sweep — Zombie-reviewer sweep error guard.
  *
  * `resubscribeTeamEvents` defensively unregisters reviewer agents whose
  * underlying session no longer exists in the session manager. The
@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-describe("Lesson 4.11C — source-grep guard for zombie-reviewer try/catch", () => {
+describe("zombie-reviewer sweep — source-grep guard", () => {
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "team-manager.ts");
 	const text = fs.readFileSync(SOURCE, "utf-8");
 
@@ -61,7 +61,7 @@ describe("Lesson 4.11C — source-grep guard for zombie-reviewer try/catch", () 
 	});
 });
 
-describe("Lesson 4.11C — behavioural smoke (no rethrow on simulated failure)", () => {
+describe("zombie-reviewer sweep — behavioural smoke (no rethrow on simulated failure)", () => {
 	it("a try/catch around unregisterReviewerSession swallows synchronous throws", () => {
 		// Mirror of the production shape: a sweep that iterates entries and
 		// continues on per-entry failure. We re-implement it inline so the test

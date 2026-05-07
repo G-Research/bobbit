@@ -79,7 +79,7 @@ export class ProjectContext {
     // workflow store reads workflows from project.yaml. WorkflowStore
     // must be constructed before GoalManager so the manager can resolve
     // workflow snapshots without callers having to thread the store
-    // through every createGoal call (Lesson 4.3 — see
+    // through every createGoal call (WorkflowStore-required invariant — see
     // docs/_phase-1-notes.md).
     this.roleStore = new RoleStore(this.configDir);
     this.projectConfigStore = new ProjectConfigStore(this.configDir);
@@ -87,7 +87,7 @@ export class ProjectContext {
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
 
-    // GoalManager depends on workflowStore (Lesson 4.3). Constructed
+    // GoalManager depends on workflowStore (GoalManager requires WorkflowStore — fail-loud). Constructed
     // after the config stores above so the project's WorkflowStore is
     // available for workflow-id resolution at goal creation time.
     this.goalManager = new GoalManager(this.goalStore, this.workflowStore);

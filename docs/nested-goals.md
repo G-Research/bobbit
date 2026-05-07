@@ -91,7 +91,7 @@ parallel throughput, and a single PR for review at the top.
   with idempotency. ONE handler in the dispatcher for type === "subgoal":
     1. Lookup existing child by (parentGoalId, planId)         ← idempotent
     2. If not found, GoalManager.createGoal(parentGoalId, ...) ← reuse
-    3. Stamp spawnedFromPlanId IMMEDIATELY after createGoal    ← critical (Lesson 4.1)
+    3. Stamp spawnedFromPlanId IMMEDIATELY after createGoal    ← critical (no awaits between)
     4. Wait for child.ready-to-merge to pass                   ← reuse harness poll
     5. mergeChildBranchLocal(parent.branch, child.branch)      ← new tiny helper
     6. archiveGoalAfterMerge(child.id)                         ← reuse archive flow
@@ -221,17 +221,16 @@ classifier (overrides any `fix-up` it would otherwise be), so the
 divergence-policy decision matrix requires the goal to be paused first.
 
 `runSubgoalStep` reads as follows. Each step encodes a hard-won lesson
-from PR #409 (see Lesson references in
-[debugging.md](debugging.md#lesson-41--spawn-then-stamp-planid-race) and
-adjacent entries):
+from PR #409 (see
+[debugging.md](debugging.md) for diagnostic checklists):
 
 ```
 1. Resolve descriptor       (planId / title / spec / workflowId? / suggestedRole?)
-2. Tier-based child lookup  → resolvePlanStepChild  (Lesson 4.19)
-3. Stale archived non-complete invalidation         (Lesson 4.2)
+2. Tier-based child lookup  → resolvePlanStepChild  (tier preference, see below)
+3. Stale archived non-complete invalidation         (cached pointer is dead)
 4. Success terminal short-circuit                   (archived && state === "complete")
-5. Workflow-less complete-child recovery            (Lesson 4.4)
-6. Spawn → IMMEDIATELY stamp spawnedFromPlanId      (Lesson 4.1)
+5. Workflow-less complete-child recovery            (legacy records pre-dating WorkflowStore-required)
+6. Spawn → IMMEDIATELY stamp spawnedFromPlanId      (no awaits between createGoal and stamp)
    then fire setupWorktreeAndStartTeam asynchronously
 7. Wait for child.ready-to-merge to pass (or external archive, or cancellation)
 8. mergeChild → on merged|alreadyMerged: teardownTeam + archiveAfterMerge
@@ -241,14 +240,14 @@ adjacent entries):
    released in finally
 ```
 
-**Tier preference** (Lesson 4.19) — when multiple children share a `planId`
+**Tier preference** — when multiple children share a `planId`
 (zombie sibling + the actual merged-and-archived original), the tiers
 break the tie:
 
 | Tier | Predicate | Notes |
 |---|---|---|
 | 1   | live in-progress, `spawnedFromPlanId === planId` | most recent createdAt wins |
-| 1.5 | cached `active.steps[i].subgoal.childGoalId` | wiped if stale (Lesson 4.2) |
+| 1.5 | cached `active.steps[i].subgoal.childGoalId` | wiped if stale (archived non-complete) |
 | 2   | archived + `state === "complete"` | success terminal short-circuit |
 | 3   | live other (todo / paused / awaiting setup) | |
 | 4   | archived + `state !== "complete"` | shelved dupe — invalidate, fall through to spawn |
@@ -369,34 +368,34 @@ The feature ships with the following invariants (see
 [debugging.md](debugging.md) for the full diagnostic checklists):
 
 - **Restart-interrupted verifications mark the gate `pending`, not
-  `failed`** (Lesson 4.6). The conjunctive predicate
+  `failed`**. The conjunctive predicate
   `shouldSuppressRestartInterrupt` in
   `src/server/agent/verification-logic.ts` requires every failed step to
   match a `RESTART_INTERRUPT_MARKERS` entry; real failures still fail
   the gate.
-- **Boot respawns sessionless in-progress goals** (Lesson 4.12).
+- **Boot respawns sessionless in-progress goals.**
   `TeamManager._bootRespawnSessionlessGoals` runs at the end of
   `resubscribeTeamEvents` and walks every non-archived
   `state: in-progress, setupStatus: ready, team: true` goal with no
   team entry, calling `startTeam` to spin up a fresh team-lead.
 - **Crash-loop guard** caps automatic restarts at 5 quick crashes within
-  10s of launch (Lesson 4.11). After the threshold the harness logs
+  10s of launch. After the threshold the harness logs
   `Run "npm run restart-server" to resume after fixing the root cause`
   and stops auto-restarting. A manual restart trigger clears the
   counter.
-- **Auto-revive dead RPC bridges** (Lesson 4.9). Two new-prompt sites in
+- **Auto-revive dead RPC bridges.** Two new-prompt sites in
   `enqueuePrompt` route through
   `SessionManager._dispatchPromptWithReviveOnDeadBridge`, which checks
   `rpcClient.running`, calls `restartAgent` if dead, and re-resolves
   the SessionInfo before dispatching.
-- **Auto-archive zombie sessions** (Lesson 4.10). A row with neither an
+- **Auto-archive zombie sessions.** A row with neither an
   `agentSessionFile` nor a `role` is unrecoverable; `restartAgent`
   archives it and throws `code: "SESSION_UNRECOVERABLE_ARCHIVED"`.
 - **Resumed reviewers wait for `agent_start` before racing waitForIdle**
-  (Lesson 4.15). All four reminder sites in `verification-harness.ts`
+  (`waitForStreaming` semantics). All four reminder sites in `verification-harness.ts`
   await `SessionManager.waitForStreaming(sessionId, 10_000)` before the
   existing `waitForIdle` race.
-- **Reviewer kind persisted** (Lesson 4.16). `TeamAgent` and
+- **Reviewer kind persisted.** `TeamAgent` and
   `PersistedTeamEntry.agents[].kind: "worker" | "reviewer"`;
   `resubscribeTeamEvents` skips reviewers on restart and `notifyTeamLead`
   has the same defensive guard.
@@ -543,7 +542,7 @@ parent's `TeamStore` entry's `teamLeadSessionId`; (2) `SessionStore`
 fallback — sessions with `role === "team-lead"` and
 `teamGoalId === parentGoalId` (or `goalId === parentGoalId`); a single
 match wins, multiple matches are ambiguous and skipped. Idempotent
-(only writes when the field is absent), per-goal try/catch (Lesson 4.11
+(only writes when the field is absent), per-goal try/catch (endless-restart guard
 endless-restart guard). Wired in `src/server/server.ts` immediately
 after `restoreTeams`, alongside `backfillCompleteState`. Logs
 `[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal
@@ -760,7 +759,7 @@ E2E coverage: `tests/e2e/ui/plan-tab-archived-children.spec.ts` archives
 a child via REST, reloads the parent dashboard, opens the Plan tab, and
 asserts the archived child renders with `data-archived="true"`.
 
-The Plan tab DAG SVG renders nested sub-trees inline (Lesson 4.22). Each
+The Plan tab DAG SVG renders nested sub-trees inline. Each
 plan node card has a chevron disclosure; clicking expands and renders
 the child's plan inline (recursive). Render depth is capped at 3 in the
 SVG (deeper trees collapse with "Show N more…" — sidebar's depth-5 cap
@@ -778,13 +777,13 @@ each event with a 250ms trailing-edge throttle to avoid layout thrash.
   manual-recovery directive in the output; the team-lead must resolve
   the conflict by hand. The child is **NOT auto-archived** — its work
   is preserved for a retry once the conflict is resolved.
-- **Workflow-less complete child** (Lesson 4.4). Pre-fix children
+- **Workflow-less complete child.** Pre-fix children
   created without a workflow get stuck at `state=complete, archived=null,
   workflow=null`. `runSubgoalStep` includes a recovery branch with the
   conjunctive predicate `state === "complete" && !archived && !workflow`:
   it tries `mergeChild` directly, on success runs `teardownTeam +
   archiveGoalAfterMerge`, on conflict fails the step.
-- **Stale archived non-complete pointer** (Lesson 4.2). A cached
+- **Stale archived non-complete pointer.** A cached
   `active.steps[i].subgoal.childGoalId` pointing at an
   `archived && state !== "complete"` record is invalidated; the cached
   pointer is wiped on both `active` and the persisted gate step's
@@ -860,15 +859,15 @@ A user must be able to:
     onto the goal and resolves before the project/server/builtin
     cascade.
 13. **Cost rollup**: a parent goal's dashboard shows the sum of all
-    descendants' costs (Lesson 4.21).
+    descendants' costs (tree-cost rollup).
 14. **Plan tab shows nested sub-trees inline** — grandchildren visible
-    without clicking into a child (Lesson 4.22).
+    without clicking into a child (Plan-tab nested rendering).
 15. **The system survives a gateway restart mid-verification** —
     subgoal steps that were running are recovered (no false-negative
     gate failures). Sessionless in-progress goals get fresh team-leads
     on boot. Crash-loops are bounded at 5 quick crashes.
 16. **Unit tests pass** (`npm run test:unit`), zero flakes. Tests cover
-    every Lesson 4.x.
+    every nested-goals invariant.
 17. **`npm run test:e2e` passes** — at least 4 browser E2E tests cover
     sidebar nesting, plan tab, child spawn, recursive merge.
 
@@ -883,14 +882,14 @@ These are the foot-guns that PR #409 hit. Don't reinvent them:
 3. **Don't mutate `goal.workflow` after creation.** The snapshot is
    frozen at goal creation.
 4. **Don't skip the spawn-time `spawnedFromPlanId` stamp.** Every
-   dupe-spawn bug starts here (Lesson 4.1).
+   dupe-spawn bug starts here (stamp-immediately invariant).
 5. **Don't trust `status: idle` to mean stuck.** Read the JSONL.
 6. **Don't write `spawn("node", ...)`.** Always `process.execPath`
-   (Lesson 4.5).
+   (`process.execPath` invariant for server-side node spawns).
 7. **Don't auto-resolve merge conflicts.** Escalate to user.
 8. **Don't auto-archive on conflict.** Preserve work for retry.
 9. **Don't add `gate_signal` to contributor role policies.** Team-lead
-   only (Lesson 4.17).
+   only (every contributor declares them as `never`).
 10. **Don't paraphrase acceptance criteria in subgoal specs.** Quote
     them verbatim under `## Covers`.
 11. **Don't push to `master` from a child goal.** Only the root goal's

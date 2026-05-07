@@ -161,7 +161,7 @@ let dashboardWsIntentionalClose = false;
 /** Current dashboard tab */
 let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children" = "gates";
 
-/** Tree-cost rollup (Lesson 4.21). Fetched lazily when the per-goal cost row is rendered. */
+/** Tree-cost rollup (tree-cost rollup). Fetched lazily when the per-goal cost row is rendered. */
 interface TreeCostBreakdown {
 	goalId: string;
 	depth: number;
@@ -192,7 +192,7 @@ let dashboardDescendants: Goal[] = [];
 let dashboardDescendantsInFlight = false;
 let dashboardDescendantsLastFetchAt = 0;
 
-/** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned (Lesson 4.22). */
+/** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned (Plan-tab nested rendering — three-way agreement). */
 let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
 const PLAN_RERENDER_THROTTLE_MS = 250;
 
@@ -474,7 +474,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		startCostPolling(goalId);
 		startGitStatusPolling(goalId);
 
-		// Fetch tree-cost rollup (Lesson 4.21). Best-effort; the panel
+		// Fetch tree-cost rollup (tree-cost rollup). Best-effort; the panel
 		// short-circuits when the response hasn't landed yet.
 		void fetchTreeCost(goalId);
 
@@ -2073,7 +2073,7 @@ function renderChildCard(s: ChildCardSummary): TemplateResult {
 	// Resolution order matters: archived must short-circuit BEFORE state-string
 	// fallback, otherwise an archived in-progress goal renders as "Running"
 	// because g.state stayed "in-progress" through the soft-delete (the data
-	// layer never rewrites state on archive — Lesson 4.2 success terminal is
+	// layer never rewrites state on archive — stale-pointer invalidation success terminal is
 	// the ONLY case where state moves to "complete" alongside archive).
 	const stateClass: "complete" | "paused" | "failed" | "archived" | "in-progress" | "todo" | "shelved" =
 		g.archived && g.state === "complete"
@@ -2144,7 +2144,7 @@ function renderChildrenTab(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: PLAN TAB (Phase 5b — DAG SVG, Lessons 4.20 / 4.22)
+// RENDER: PLAN TAB (Phase 5b — DAG SVG with nested-rendering depth cap)
 // ============================================================================
 
 /**

@@ -1,7 +1,7 @@
 /**
  * Phase 2 — `GoalManager.archiveGoalAfterMerge`
  *
- * Order is load-bearing per Lesson 4.2: state=complete must be persisted
+ * Order is load-bearing per stale-pointer invalidation: state=complete must be persisted
  * BEFORE the archive flag flips. The harness short-circuits on
  * `archived && state === "complete"` to mark a subgoal step success
  * terminal — without the stamp it falls through to the rescue path and
@@ -53,7 +53,7 @@ function makeManager(): { gm: GoalManager; store: GoalStore } {
 }
 
 describe("GoalManager.archiveGoalAfterMerge", () => {
-	it("stamps state=complete BEFORE archive flips (Lesson 4.2 ordering)", async () => {
+	it("stamps state=complete BEFORE archive flips (stale-pointer invalidation ordering)", async () => {
 		const { gm, store } = makeManager();
 		const child = await gm.createGoal("Child", tmpRoot, { workflowId: "general" });
 		assert.equal(child.state, "todo");
@@ -111,7 +111,7 @@ describe("GoalManager.archiveGoalAfterMerge", () => {
 	});
 
 	it("goal already complete + archived (e.g. from an earlier code path) is a no-op", async () => {
-		// Lesson 4.4 / pre-fix records: if a row is already in the success
+		// workflow-less complete-child recovery / pre-fix records: if a row is already in the success
 		// terminal state, leaving it alone is correct.
 		const { gm, store } = makeManager();
 		const child = await gm.createGoal("Child", tmpRoot, { workflowId: "general" });

@@ -1,5 +1,5 @@
 /**
- * Lesson 4.16 — Reviewer kind field, restart-resubscribe skip.
+ * reviewer kind field — Reviewer kind field, restart-resubscribe skip.
  *
  * `TeamAgent.kind` and `PersistedTeamEntry.agents[].kind` carry one of
  * `"worker" | "reviewer"`. `registerReviewerSession` writes `"reviewer"`;
@@ -18,7 +18,7 @@ import path from "node:path";
 const SOURCE_TM = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "team-manager.ts");
 const SOURCE_TS = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "team-store.ts");
 
-describe("Lesson 4.16 — kind field declared on persisted shape", () => {
+describe("kind field declared on persisted shape", () => {
 	const teamStore = fs.readFileSync(SOURCE_TS, "utf-8");
 
 	it("PersistedTeamEntry.agents[].kind is declared as `worker | reviewer`", () => {
@@ -30,7 +30,7 @@ describe("Lesson 4.16 — kind field declared on persisted shape", () => {
 	});
 });
 
-describe("Lesson 4.16 — TeamManager wiring", () => {
+describe("reviewer kind field — TeamManager wiring", () => {
 	const tm = fs.readFileSync(SOURCE_TM, "utf-8");
 
 	it("TeamAgent in-memory shape carries `kind: \"worker\" | \"reviewer\"`", () => {
@@ -76,7 +76,7 @@ describe("Lesson 4.16 — TeamManager wiring", () => {
 	});
 });
 
-describe("Lesson 4.16 — defensive guard pattern", () => {
+describe("reviewer kind field — defensive guard pattern", () => {
 	const tm = fs.readFileSync(SOURCE_TM, "utf-8");
 
 	it("the kind === reviewer skip predicate has a `role === reviewer` fallback for pre-kind records", () => {
@@ -91,7 +91,7 @@ describe("Lesson 4.16 — defensive guard pattern", () => {
 	});
 });
 
-describe("Lesson 4.16 — predicate logic mirror", () => {
+describe("reviewer kind field — predicate logic mirror", () => {
 	type Agent = { sessionId: string; role: string; kind?: "worker" | "reviewer" };
 
 	function shouldSkipReattach(agent: Agent): boolean {

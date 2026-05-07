@@ -13,7 +13,7 @@ detail_docs: >-
 
   Pause the current goal so the harness suspends scheduling new work
   against it. A paused child does NOT count as in-flight for the
-  parent's nudge-suppression heuristic (Lesson 4.13) — the parent (or
+  parent's nudge-suppression heuristic (paused children must NOT count as in-flight — paused != failed) — the parent (or
   user) must act to unpause / fix / archive before progress resumes.
 
 

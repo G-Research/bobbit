@@ -18,7 +18,7 @@ export interface SystemNotificationMessage {
 }
 
 /**
- * Pending plan-mutation card (Phase 5b, Lesson 4.20-fixup classifier).
+ * Pending plan-mutation card (Phase 5b, fix-up classifier path).
  * Emitted on a `mutation_pending` WS event for goals whose `goal-plan` has
  * been frozen and a re-plan went into the approval queue.
  */

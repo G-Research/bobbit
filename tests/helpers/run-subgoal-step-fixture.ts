@@ -10,7 +10,7 @@
  *   - goalStore   — direct access to the persisted-goals layer
  *   - gateStore   — for stubbing ready-to-merge state
  *   - calls       — recorded createGoal / updateGoal / mergeChild / etc. call list
- *                   in order (used by Lesson 4.1 invariant test)
+ *                   in order (used by stamp-immediately invariant test)
  *   - mockTeamManager — captures teardownTeam calls
  *
  * The harness's `_subgoalHooks` are wired by default to a stubbed
@@ -185,7 +185,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 	}
 
 	// Install wrappers AFTER the parent has been created — otherwise the
-	// parent's createGoal would pollute the call sequence used by Lesson 4.1.
+	// parent's createGoal would pollute the call sequence used by stamp-immediately invariant.
 	installWrappers();
 
 	return {

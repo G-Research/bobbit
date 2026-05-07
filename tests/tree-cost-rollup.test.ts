@@ -1,5 +1,5 @@
 /**
- * Phase 6 — Lesson 4.21: tree cost rollup for nested-goal trees.
+ * Phase 6 — tree-cost rollup for nested-goal trees.
  *
  * Tests `computeTreeCost(rootGoalId, allGoals, costTracker, sessionIdsForGoal)`:
  *  - Single goal (no children) → totalCostUsd === goal's own cost

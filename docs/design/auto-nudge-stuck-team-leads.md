@@ -74,8 +74,8 @@ excludes reviewer role agents.
 **(3) Unlikely — team-lead was archived/restarted between coder start and
 finish.** `df3d8b33` was an active subgoal at the time of the stall; if its
 team-lead had been archived the goal would have been in `setupStatus !==
-ready` or had no `teamLeadSessionId`. The Lesson 4.12 boot-respawn at
-`_bootRespawnSessionlessGoals` (line 463) would have re-spawned a fresh
+ready` or had no `teamLeadSessionId`. The boot-respawn for sessionless
+in-progress goals at `_bootRespawnSessionlessGoals` (line 463) would have re-spawned a fresh
 team-lead, which we'd see in the session list. Neither was reported.
 
 ### Diagnostic instrumentation
@@ -285,7 +285,7 @@ Restated verbatim from the goal spec, each with a one-line note.
   `SessionInfo`; if neither exists, fall back to tracking a per-goal
   `leadIdleSince` map updated from `subscribeTeamLeadEvents`'s
   `agent_end` handler. Pure-helper test will pin whichever shape we use.
-- **Interaction with `_bootRespawnSessionlessGoals` (Lesson 4.12).** A
+- **Interaction with `_bootRespawnSessionlessGoals` (boot-respawn for sessionless in-progress goals).** A
   freshly-respawned team-lead has `idleSince` near `now`, so the watchdog
   won't fire for 5 minutes — correct behaviour. No change needed.
 - **Sweep cost on a large project.** `O(teams)` per minute, each tick is a

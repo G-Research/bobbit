@@ -1,5 +1,5 @@
 /**
- * Lesson 4.10 — `restartAgent` auto-archives unrecoverable zombie sessions.
+ * zombie-archive on restart — `restartAgent` auto-archives unrecoverable zombie sessions.
  *
  * A persisted session row with neither an `agentSessionFile` nor a `role` is
  * an unrecoverable zombie — `restoreSession` would throw partway through
@@ -58,7 +58,7 @@ function freshStore(): InstanceType<typeof SessionStore> {
 	return new SessionStore(stateDir);
 }
 
-describe("Lesson 4.10 — restartAgent zombie-archive predicate", () => {
+describe("restartAgent zombie-archive predicate", () => {
 	it("archives the row and throws SESSION_UNRECOVERABLE_ARCHIVED when both fields are missing", () => {
 		const store = freshStore();
 		const ps: PersistedSession = {
@@ -115,7 +115,7 @@ describe("Lesson 4.10 — restartAgent zombie-archive predicate", () => {
 	});
 });
 
-describe("Lesson 4.10 — source-grep guard", async () => {
+describe("zombie-archive on restart — source-grep guard", async () => {
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "session-manager.ts");
 	const text = fs.readFileSync(SOURCE, "utf-8");
 

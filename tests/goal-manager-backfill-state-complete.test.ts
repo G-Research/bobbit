@@ -1,7 +1,7 @@
 /**
  * Phase 2 — `GoalManager.backfillCompleteState`
  *
- * Boot-time migration that closes the Lesson 4.2 gap on records produced
+ * Boot-time migration that closes the stale-pointer invalidation gap on records produced
  * before `archiveGoalAfterMerge` was wired up: archived goals whose
  * `ready-to-merge` gate is `passed` must have `state="complete"` so the
  * harness short-circuits cleanly. Cases:
@@ -16,7 +16,7 @@
  *      doesn't have one; not our problem).
  *   5. Idempotency: re-running the backfill a second time is a no-op.
  *   6. Per-goal try/catch — a corrupt record shouldn't abort the loop
- *      (Lesson 4.11 endless-restart guard).
+ *      (endless-restart guard endless-restart guard).
  */
 
 import { describe, it, beforeEach } from "node:test";

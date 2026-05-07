@@ -1,5 +1,5 @@
 /**
- * Phase 6 — Lesson 4.18: actionable verification-failure notifications.
+ * Phase 6 — actionable verification-failure notifications.
  *
  * Tests for `buildVerificationFailureMessage`:
  *  - Single failed step → message includes step name + truncated output

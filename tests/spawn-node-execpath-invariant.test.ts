@@ -1,5 +1,5 @@
 /**
- * Lesson 4.5 invariant — every node-process spawn site under `src/server/`
+ * `process.execPath` invariant invariant — every node-process spawn site under `src/server/`
  * must use `process.execPath`, never the bare string `"node"`.
  *
  * Bare `spawn("node", ...)` fails under sanitised PATH (e.g. when the
@@ -9,7 +9,7 @@
  *
  * If this test fails, replace `spawn("node", [...])` with
  * `spawn(process.execPath, [...])` at the offending site. See the
- * "Lesson 4.5" entry in `docs/design/subgoals-retro-audit.md` §4.2.
+ * "`process.execPath` invariant" entry in `docs/design/subgoals-retro-audit.md` §4.2.
  */
 import fs from "node:fs";
 import path from "node:path";

@@ -1,5 +1,5 @@
 /**
- * Lesson 4.7 — Resumed reviewer context-loss must trigger
+ * resumed-reviewer transient pattern — Resumed reviewer context-loss must trigger
  * `_rerunLlmReviewStep` rather than failing.
  *
  * Symptom: after a gateway restart, a resumed reviewer agent is a fresh
@@ -16,11 +16,11 @@ import { strict as assert } from "node:assert";
 import test, { describe } from "node:test";
 import { TRANSIENT_ERROR_PATTERNS, isTransientReviewError } from "../src/server/agent/verification-logic.js";
 
-describe("Lesson 4.7 — resumed-reviewer context-loss transient pattern", () => {
+describe("resumed-reviewer context-loss transient pattern", () => {
 	test("TRANSIENT_ERROR_PATTERNS contains the new restart-context-loss marker", () => {
 		assert.ok(
 			TRANSIENT_ERROR_PATTERNS.includes("Agent did not call verification_result after server restart and reminder"),
-			"Lesson 4.7 requires this exact substring to be classified as transient",
+			"resumed-reviewer transient pattern requires this exact substring to be classified as transient",
 		);
 	});
 

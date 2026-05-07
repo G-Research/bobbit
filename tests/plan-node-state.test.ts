@@ -1,7 +1,7 @@
 /**
- * Unit tests for plan-node-state (Phase 5a, Lesson 4.19).
+ * Unit tests for plan-node-state (Phase 5a, tier-based child resolution).
  *
- * Lesson 4.19 — tier preference for resolving a Plan-tab node when multiple
+ * tier-based child resolution — tier preference for resolving a Plan-tab node when multiple
  * children share a planId. Tier order:
  *   1. Live in-progress (non-paused)
  *   2. Archived + state=complete (success terminal)
@@ -28,7 +28,7 @@ function c(over: Partial<PlanNodeChild> & { id: string; createdAt: number }): Pl
 	};
 }
 
-describe("plan-node-state — tier preference (Lesson 4.19)", () => {
+describe("plan-node-state — tier preference", () => {
 	it("Tier 1 (live in-progress) wins over Tier 2 (archived+complete)", () => {
 		const r = resolvePlanNodeChild("p1", [
 			c({ id: "tier2", state: "complete", archived: true, createdAt: 200 }),
@@ -109,7 +109,7 @@ describe("plan-node-state — derived state", () => {
 	});
 
 	it("sole live in-progress+paused → paused (Tier 3, not Tier 1)", () => {
-		// Lesson 4.19: paused excludes from Tier 1; Tier 3 derives "paused".
+		// tier-based child resolution: paused excludes from Tier 1; Tier 3 derives "paused".
 		const r = resolvePlanNodeChild("p1", [
 			c({ id: "x", state: "in-progress", archived: false, paused: true, createdAt: 1 }),
 		]);

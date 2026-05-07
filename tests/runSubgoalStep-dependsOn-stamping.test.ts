@@ -1,7 +1,7 @@
 /**
  * Phase 5 — `runSubgoalStep` stamps `dependsOnPlanIds` on the spawned child
  * from the verify-step's `subgoal.dependsOn`. Stamped in the same atomic
- * `updateGoal` call that carries `spawnedFromPlanId` (Lesson 4.1).
+ * `updateGoal` call that carries `spawnedFromPlanId` (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between).
  */
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";

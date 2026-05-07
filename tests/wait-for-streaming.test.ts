@@ -1,5 +1,5 @@
 /**
- * Lesson 4.15 — `SessionManager.waitForStreaming` is a sibling of
+ * waitForStreaming semantics — `SessionManager.waitForStreaming` is a sibling of
  * `waitForIdle`. It resolves on the session's next `agent_start` event.
  * Used by the verification harness to ensure a just-resumed reviewer
  * actually enters its new turn before we race verification_result against
@@ -75,7 +75,7 @@ function waitForStreaming(session: MockSession, timeoutMs = 10_000): Promise<voi
 	});
 }
 
-describe("Lesson 4.15 — waitForStreaming behaviour", () => {
+describe("waitForStreaming behaviour", () => {
 	it("resolves immediately when the session is already streaming", async () => {
 		const session = makeSession("streaming");
 		await waitForStreaming(session, 100);
@@ -127,7 +127,7 @@ describe("Lesson 4.15 — waitForStreaming behaviour", () => {
 	});
 });
 
-describe("Lesson 4.15 — source-grep guard", () => {
+describe("waitForStreaming source-grep guard", () => {
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "session-manager.ts");
 	const text = fs.readFileSync(SOURCE, "utf-8");
 

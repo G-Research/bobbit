@@ -1,5 +1,5 @@
 /**
- * Lesson 4.13 — Paused children must NOT suppress the parent's idle nudge.
+ * paused-children-not-in-flight rule — Paused children must NOT suppress the parent's idle nudge.
  *
  * `anyInFlightChild(parentGoalId, goals)` returns true iff any child of
  * `parentGoalId` is non-archived, state=in-progress, AND not paused. The
@@ -23,7 +23,7 @@ function makeGoal(overrides: Partial<PersistedGoal> & { id: string }): Persisted
 	};
 }
 
-describe("anyInFlightChild — Lesson 4.13", () => {
+describe("anyInFlightChild — paused-children-not-in-flight rule", () => {
 	it("returns false when there are no children at all", () => {
 		const goals = [makeGoal({ id: "parent-1" })];
 		assert.equal(anyInFlightChild("parent-1", goals), false);

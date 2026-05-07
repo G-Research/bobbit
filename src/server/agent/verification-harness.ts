@@ -142,7 +142,7 @@ export const VERIFICATION_RESULT_REMINDER =
 	"This is REQUIRED — the verification system only receives results through this tool.";
 
 /**
- * Lesson 4.8 — Build a context-rich reminder for live (not resumed) reviewers
+ * Build a context-rich reminder for live (not resumed) reviewers
  * who emit their verdict as chat-text and end the turn instead of calling
  * `verification_result`.
  *
@@ -234,8 +234,8 @@ export interface ActiveVerification {
 		sessionId?: string;
 		/**
 		 * Subgoal-step cache — populated by `runSubgoalStep` after the child is
-		 * spawned (Lesson 4.1). Tier-1.5 lookup reads `childGoalId` to short-
-		 * circuit tier resolution; staleness invalidation wipes it (Lesson 4.2).
+		 * spawned (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between). Tier-1.5 lookup reads `childGoalId` to short-
+		 * circuit tier resolution; staleness invalidation wipes it (stale archived non-complete cached pointer must be wiped).
 		 */
 		subgoal?: {
 			childGoalId?: string;
@@ -431,7 +431,7 @@ export class VerificationHarness {
 	 * Per-rootGoalId concurrency caps for `runSubgoalStep`. Lazily created on
 	 * first acquire; capacity is resolved via
 	 * `goalManager.resolveRootMaxConcurrentChildren(rootGoalId)` at creation
-	 * time. See SUBGOALS-SPEC §3.5 and Lesson 4.21 (single semaphore shared by
+	 * time. See SUBGOALS-SPEC §3.5 (single semaphore shared by
 	 * the whole tree).
 	 */
 	private rootSubgoalSemaphores = new Map<string, Semaphore>();
@@ -700,7 +700,7 @@ export class VerificationHarness {
 		// Compute overall result
 		const allPassed = resolvedSteps.every(r => r.passed);
 
-		// Lesson 4.6 — Restart-interrupt suppression. If every failed step is a
+		// restart-interrupt suppression — Restart-interrupt suppression. If every failed step is a
 		// restart-interrupt (per RESTART_INTERRUPT_MARKERS or empty-output
 		// review/QA), don't mark the gate failed — the work being verified
 		// hasn't actually been judged. Persist the verification record honestly
@@ -1624,7 +1624,7 @@ export class VerificationHarness {
 							}
 						} else if (step.type === "subgoal") {
 							// Phase 3 nested goals — see SUBGOALS-SPEC §2 / §5,
-							// docs/_phase-3-notes.md, and Lessons 4.1, 4.2, 4.4, 4.19.
+							// docs/_phase-3-notes.md (stamp-immediately, stale-pointer invalidation, workflow-less recovery, tier resolution).
 							active.steps[index].startedAt = Date.now();
 							this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_started",
@@ -2048,7 +2048,7 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the context-rich reminder (Lesson 4.8). The legacy
+			// fall back to the context-rich reminder for live reviewers. The legacy
 			// terse reminder did not elicit a tool call when the agent had emitted
 			// its verdict as chat-text and ended turn — re-attaching the kickoff
 			// puts the spec back in context so the agent has something to call
@@ -2371,7 +2371,7 @@ export class VerificationHarness {
 
 			// Agent went idle without calling the tool — if the last turn hit a
 			// JSON/arg-validation glitch, send a targeted retry prompt; otherwise
-			// fall back to the context-rich reminder (Lesson 4.8). Re-attaching
+			// fall back to the context-rich reminder for live reviewers. Re-attaching
 			// the kickoff in the reminder restores the QA test plan to context
 			// so the agent has the spec back when it tries again.
 			const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
@@ -2799,9 +2799,11 @@ export class VerificationHarness {
 	// ── Phase 3 — Nested goals (subgoal verify-step) ──────────────────────
 	//
 	// SUBGOALS-SPEC §2 / §5. The 7-step skeleton in `runSubgoalStep` is the
-	// single integration point for the feature. Lessons 4.1, 4.2, 4.4, 4.13,
-	// 4.19 are encoded inline; do not collapse the structure without re-
-	// reading those lessons in docs/_phase-3-notes.md.
+	// single integration point for the feature. The stamp-immediately
+	// invariant, stale-pointer invalidation, workflow-less recovery,
+	// paused != failed, and tier resolution are all encoded inline;
+	// do not collapse the structure without re-reading
+	// docs/_phase-3-notes.md.
 
 	/**
 	 * Acquire (or lazily create) the concurrency-cap semaphore for this tree.
@@ -2820,7 +2822,7 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Tier-based plan-step child resolution (Lesson 4.19, SUBGOALS-SPEC §4.19).
+	 * Tier-based plan-step child resolution (SUBGOALS-SPEC §4.19).
 	 *
 	 * Returns the most relevant child for `(parentGoalId, planId)` along with
 	 * the tier source so callers can short-circuit the success terminal vs.
@@ -2831,12 +2833,12 @@ export class VerificationHarness {
 	 *   1.  Live in-progress
 	 *   1.5 Cached pointer on `active.steps[stepIndex].subgoal.childGoalId`
 	 *       (tier-1 / tier-2 verified). Stale archived-non-complete pointer
-	 *       INVALIDATES (Lesson 4.2).
+	 *       INVALIDATES (stale archived non-complete cached pointer must be wiped).
 	 *   2.  Archived + state=complete (success terminal)
 	 *   3.  Live other (todo / paused / awaiting setup)
 	 *   4.  Archived + non-complete (shelved dupe)
 	 *   5.  Rescue: parentGoalId+title match where spawnedFromPlanId is unset
-	 *       (Lesson 4.1 defensive path). On hit, planId is back-filled.
+	 *       (stamp-immediately invariant defensive path). On hit, planId is back-filled.
 	 *
 	 * The cached pointer is wiped from `active` AND persisted via
 	 * `_persistActive` whenever the resolved child is archived-non-complete or
@@ -2888,7 +2890,7 @@ export class VerificationHarness {
 		if (tier1) return { child: tier1, source: "live-active" };
 
 		// Tier 1.5: cached pointer on the active step. Verify it still points at
-		// a healthy candidate; otherwise invalidate (Lesson 4.2).
+		// a healthy candidate; otherwise invalidate (stale archived non-complete cached pointer must be wiped).
 		const cachedId = opts?.active && opts?.stepIndex !== undefined
 			? opts.active.steps[opts.stepIndex]?.subgoal?.childGoalId
 			: undefined;
@@ -2945,11 +2947,11 @@ export class VerificationHarness {
 	 *
 	 * SUBGOALS-SPEC §2 / §5. Each numbered block encodes one or more lessons:
 	 *  1. Resolve descriptor.
-	 *  2. Tier-based child lookup (Lesson 4.19).
-	 *  3. Stale archived non-complete invalidation (Lesson 4.2).
+	 *  2. Tier-based child lookup (tier preference: live in-progress > archived complete > live other > archived non-complete).
+	 *  3. Stale archived non-complete invalidation (stale archived non-complete cached pointer must be wiped).
 	 *  4. Success terminal short-circuit.
-	 *  5. Workflow-less complete-child recovery (Lesson 4.4).
-	 *  6. Spawn (Lesson 4.1: stamp planId IMMEDIATELY) + worktree/team start.
+	 *  5. Workflow-less complete-child recovery (workflow-less complete-child recovery — legacy records).
+	 *  6. Spawn (stamp-immediately invariant: stamp planId IMMEDIATELY) + worktree/team start.
 	 *  7. Wait for ready-to-merge.
 	 *  8. mergeChild + archive + teardown.
 	 *  9. Concurrency cap (§3.5).
@@ -3004,7 +3006,7 @@ export class VerificationHarness {
 			stepIndex,
 		});
 
-		// Lesson 4.2: an archived non-complete child is a dead pointer; wipe and
+		// stale-pointer invalidation: an archived non-complete child is a dead pointer; wipe and
 		// fall through to spawn. resolvePlanStepChild already handled tier-1.5
 		// pointer wipe; this guard handles the case where the resolved child
 		// itself is archived-non-complete (tier-4 hit).
@@ -3018,7 +3020,7 @@ export class VerificationHarness {
 			return { passed: true, output: `Subgoal already complete + archived (${resolved.source}): ${resolved.child.id}` };
 		}
 
-		// ── 5. Workflow-less complete-child recovery (Lesson 4.4) ─────
+		// ── 5. Workflow-less complete-child recovery (workflow-less complete-child recovery — legacy records) ─────
 		// Predicate is conjunctive AND narrow: state=complete + !archived + !workflow.
 		if (
 			resolved.child &&
@@ -3060,7 +3062,7 @@ export class VerificationHarness {
 					this._persistActive();
 				}
 			} else {
-				// Spawn a fresh child. Lesson 4.1: stamp spawnedFromPlanId
+				// Spawn a fresh child. stamp-immediately invariant: stamp spawnedFromPlanId
 				// IMMEDIATELY after createGoal — no other awaits or calls in
 				// between. The very next line MUST be the updateGoal call.
 				//
@@ -3133,7 +3135,7 @@ export class VerificationHarness {
 					// + draw the right edges. Empty/missing → parallel sibling.
 					...(sg.dependsOn !== undefined ? { dependsOnPlanIds: sg.dependsOn } : {}),
 				});
-				// END Lesson 4.1 critical sequence.
+				// END stamp-immediately invariant critical sequence.
 
 				// R-001 — initialise the child's gate state. Mirrors the
 				// `initGatesForGoal` call in POST /api/goals/:id/spawn-child.
@@ -3219,7 +3221,7 @@ export class VerificationHarness {
 	 *   - child.archived && state !== "complete" → "archived-other"
 	 *   - ready-to-merge gate state === "passed" → "passed"
 	 *
-	 * Paused children continue waiting (Lesson 4.13 — paused != failed).
+	 * Paused children continue waiting (paused-children-not-in-flight rule — paused != failed).
 	 */
 	private async _waitForChildReadyToMerge(
 		_parentGoalId: string,

@@ -23,5 +23,5 @@ detail_docs: >-
   frozen: boolean, replanCount: number }` where each `PlanStep` is `{
   planId, title, spec, phase?, workflowId?, suggestedRole?, childGoalId?,
   childState?, childArchived? }`. `childGoalId` is resolved via the same
-  tier-based preference the harness uses (Lesson 4.19) — live > archived
+  tier-based preference the harness uses (tier preference: live in-progress > archived complete > live other > archived non-complete) — live > archived
   + complete > live other > archived non-complete.

@@ -14,7 +14,7 @@
  *      src/server/agent/spawn-child-spawnedby.ts.
  *   4. `body.suggestedRole` → persisted on the child goal (commit
  *      7491041c reinstated this after it had been `void`'d).
- *   5. `spawnedFromPlanId` is stamped (existing Lesson 4.1 invariant —
+ *   5. `spawnedFromPlanId` is stamped (existing stamp-immediately invariant —
  *      atomic with `createGoal`, no awaits between).
  *   6. Child goal's `cwd` is derived from `parent.repoPath` (NOT
  *      `parent.cwd`) so children don't inherit the parent's worktree
@@ -221,14 +221,14 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 		}
 	});
 
-	test("spawnedFromPlanId is stamped atomically with createGoal (Lesson 4.1)", async () => {
+	test("spawnedFromPlanId is stamped atomically with createGoal (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between)", async () => {
 		const parent = await createParentGoal();
 		try {
 			const { status, body } = await spawnChildRaw({
 				parentId: parent.id,
 				body: {
 					planId: "plan-lesson-4-1",
-					title: "Lesson 4.1 child",
+					title: "stamp-immediately invariant child",
 					spec: "lesson 4.1 spec",
 				},
 			});
@@ -248,7 +248,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				parentId: parent.id,
 				body: {
 					planId: "plan-lesson-4-1",
-					title: "Lesson 4.1 child",
+					title: "stamp-immediately invariant child",
 					spec: "lesson 4.1 spec",
 				},
 			});

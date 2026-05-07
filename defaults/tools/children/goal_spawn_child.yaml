@@ -24,7 +24,7 @@ detail_docs: >-
   Idempotent on `planId` — re-calling with the same `planId` under the
   same parent returns the existing child id with no side effects.
   Re-spawn is suppressed at every layer (verification harness, REST
-  handler, this tool). Lesson 4.1 — `spawnedFromPlanId` is stamped
+  handler, this tool). stamp-immediately invariant — `spawnedFromPlanId` is stamped
   immediately after `createGoal` so a crash in between cannot strand the
   child in a state where the next call sees no match and spawns a
   duplicate.

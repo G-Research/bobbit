@@ -1343,7 +1343,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Lesson 4.9 — Auto-revive a dead RPC bridge before dispatching a brand-new
+	 * dead-bridge auto-revive — Auto-revive a dead RPC bridge before dispatching a brand-new
 	 * prompt. Used ONLY at the two new-prompt sites in `enqueuePrompt` (the
 	 * error-recovery branch and the idle+empty branch) — NOT in steady-state
 	 * retry/drain paths, which should fail loudly so a real bridge death
@@ -1480,8 +1480,13 @@ export class SessionManager {
 			session.lastPromptImages = opts?.images;
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+<<<<<<< HEAD
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 			// Lesson 4.9 — auto-revive a dead bridge before new-prompt dispatch.
+=======
+			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
+			// dead-bridge auto-revive — auto-revive a dead bridge before new-prompt dispatch.
+>>>>>>> 3baf9584 (Trim AGENTS.md and replace Lesson N.M jargon with plain language)
 			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, prefixedDispatch, opts?.images);
 			return;
 		}
@@ -1491,7 +1496,7 @@ export class SessionManager {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			session.lastPromptText = dispatchText;
 			session.lastPromptImages = opts?.images;
-			// Lesson 4.9 — auto-revive a dead bridge before new-prompt dispatch.
+			// dead-bridge auto-revive — auto-revive a dead bridge before new-prompt dispatch.
 			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, dispatchText, opts?.images);
 			return;
 		}
@@ -2293,7 +2298,7 @@ export class SessionManager {
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
 
-		// Lesson 4.10 — Detect unrecoverable zombie records BEFORE attempting
+		// zombie-archive on restart — Detect unrecoverable zombie records BEFORE attempting
 		// `restoreSession`. A row with neither an agent session file nor a role
 		// has nothing for `restoreSession` to bootstrap from — it would throw
 		// partway through and leave the row dangling forever (sidebar shows

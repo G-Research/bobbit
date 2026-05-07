@@ -1285,9 +1285,9 @@ export function createGateway(config: GatewayConfig) {
 
 			// Phase 3 nested goals — boot-time backfill of state=complete on
 			// archived goals whose ready-to-merge gate already passed. Closes
-			// the Lesson 4.2 gap on records produced by code paths predating
+			// the stale-pointer invalidation gap on records produced by code paths predating
 			// archiveGoalAfterMerge. Wrapped in try/catch — backfill failure
-			// must not block boot (Lesson 4.11 — endless-restart guard).
+			// must not block boot (endless-restart guard).
 			for (const ctx of projectContextManager.all()) {
 				try {
 					const result = ctx.goalManager.backfillCompleteState(ctx.gateStore);
@@ -3662,7 +3662,7 @@ async function handleApiRoute(
 				parentGoalId: parentId,
 				inlineRoles: mergedInlineRoles,
 			});
-			// Lesson 4.1: stamp spawnedFromPlanId IMMEDIATELY — no awaits between.
+			// stamp-immediately invariant: stamp spawnedFromPlanId IMMEDIATELY — no awaits between.
 			// Also persist suggestedRole + spawnedBySessionId in the same atomic
 			// updateGoal so the sidebar can nest the child under its spawning
 			// team-lead session (collapse-with-the-team-lead behaviour).
@@ -3918,7 +3918,7 @@ async function handleApiRoute(
 				const sg = v.subgoal!;
 				// R-004: route the tier resolution through the harness's
 				// canonical implementation so the renderer / server / harness
-				// three-way agreement required by Lesson 4.22 has exactly one
+				// three-way agreement required by Plan-tab nested rendering rule has exactly one
 				// authoritative source. The harness's resolvePlanStepChild
 				// covers tiers 1, 1.5, 2, 3, 4 and 5 — the inline 4-tier copy
 				// this replaced was already drifting (no Tier 1.5 / 5).
@@ -8110,7 +8110,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/goals/:goalId/tree-cost — sum of cost across the descendant goal tree (Lesson 4.21)
+	// GET /api/goals/:goalId/tree-cost — sum of cost across the descendant goal tree
 	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
 	if (goalTreeCostMatch && req.method === "GET") {
 		if (!requireSubgoalsEnabled()) return;

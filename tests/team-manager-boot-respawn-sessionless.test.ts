@@ -1,5 +1,5 @@
 /**
- * Lesson 4.12 — Boot-respawn for sessionless in-progress goals.
+ * boot-respawn for sessionless in-progress goals — Boot-respawn for sessionless in-progress goals.
  *
  * `resubscribeTeamEvents` now ends with `_bootRespawnSessionlessGoals`,
  * which walks every non-archived goal in `state: "in-progress",
@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-describe("Lesson 4.12 — source-grep guard for boot-respawn predicate", () => {
+describe("boot-respawn for sessionless in-progress goals — source-grep guard", () => {
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "team-manager.ts");
 	const text = fs.readFileSync(SOURCE, "utf-8");
 
@@ -58,7 +58,7 @@ describe("Lesson 4.12 — source-grep guard for boot-respawn predicate", () => {
 	});
 });
 
-describe("Lesson 4.12 — predicate iteration logic (mirror)", () => {
+describe("boot-respawn for sessionless in-progress goals — predicate iteration logic (mirror)", () => {
 	type Goal = {
 		id: string;
 		title: string;

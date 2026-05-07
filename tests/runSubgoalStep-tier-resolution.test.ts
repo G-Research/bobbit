@@ -1,5 +1,5 @@
 /**
- * Phase 3 / Lesson 4.19 — `resolvePlanStepChild` tier preference.
+ * Phase 3 / tier-based child resolution — `resolvePlanStepChild` tier preference.
  *
  * SUBGOALS-SPEC §4.19: success-aware tier preference.
  *   1. Live in-progress
@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 import { buildFixture, buildActive, buildSubgoalStep } from "./helpers/run-subgoal-step-fixture.ts";
 
-describe("resolvePlanStepChild — tier preference (Lesson 4.19)", () => {
+describe("resolvePlanStepChild — tier preference", () => {
 	it("Tier 1: live in-progress wins over archived complete and live todo", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
@@ -93,7 +93,7 @@ describe("resolvePlanStepChild — tier preference (Lesson 4.19)", () => {
 		assert.equal(r.child?.id, "todo-live");
 	});
 
-	it("Tier 4: archived non-complete invalidates → spawn fresh (Lesson 4.2)", async () => {
+	it("Tier 4: archived non-complete invalidates → spawn fresh (stale archived non-complete cached pointer must be wiped)", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
 

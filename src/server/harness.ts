@@ -72,7 +72,7 @@ const PORT_POLL_INTERVAL_MS = 250;
 const BUILD_TIMEOUT_MS = 30_000;
 
 /**
- * Lesson 4.11A — Crash-loop guard.
+ * Crash-loop guard.
  *
  * If the gateway child crashes within HEALTHY_UPTIME_MS of launch, count it
  * as a "quick" crash. After CRASH_LOOP_THRESHOLD consecutive quick crashes,
@@ -231,7 +231,7 @@ async function restart(): Promise<void> {
 	}
 	restarting = true;
 
-	// Lesson 4.11A — Manual restart via the sentinel file is the explicit
+	// Manual restart via the sentinel file is the explicit
 	// "I have fixed the underlying problem, please try again" signal. Reset
 	// the crash-loop counter and clear the halt flag so launchServer() runs.
 	if (consecutiveQuickCrashes > 0 || crashLoopHalted) {

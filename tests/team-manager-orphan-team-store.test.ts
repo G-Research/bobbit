@@ -1,5 +1,5 @@
 /**
- * Lesson 4.11B — Boot-time orphan team-store cleanup.
+ * orphan team-store cleanup — Boot-time orphan team-store cleanup.
  *
  * `restoreTeams` must walk every persisted team entry and drop any whose
  * `goalId` is not present in the owning project's goal store BEFORE the
@@ -83,7 +83,7 @@ function makeStubSessionManager() {
 
 const STATE_DIR = path.join(TEST_DIR, "state");
 
-describe("Lesson 4.11B — orphan team-store cleanup on boot", () => {
+describe("orphan team-store cleanup on boot", () => {
 	beforeEach(() => {
 		// Clean state files between tests.
 		try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch { /* ignore */ }

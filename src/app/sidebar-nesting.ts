@@ -22,7 +22,7 @@
  * Render-depth cap (`maxDepth`, default 5): when a node's depth + 1 would
  * exceed `maxDepth`, recursion stops and `truncatedChildrenCount` is set to
  * the number of children that would have been included. The cap matches the
- * sidebar's documented depth-5 cap (Phase 5 spec, Lesson 4.22).
+ * sidebar's documented depth-5 cap (Phase 5 spec, Plan-tab nested rendering rule).
  *
  * **Subgoals (Experimental) feature gate**: when the system-scope flag is
  * off, the forest collapses to a flat list of top-level goals (every input

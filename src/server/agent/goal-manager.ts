@@ -292,7 +292,7 @@ export class GoalManager {
 			goal.workflowId = workflowId;
 			goal.workflow = structuredClone(wf);
 		} else if (workflowId) {
-			// Lesson 4.3: workflowId given but neither resolvedWorkflow nor a
+			// WorkflowStore-required invariant: workflowId given but neither resolvedWorkflow nor a
 			// workflowStore is available — this is the silent-fail path that
 			// produced workflow-less child goals on PR #409. Fail loudly
 			// instead of producing a gateless goal whose `ready-to-merge`
@@ -300,7 +300,7 @@ export class GoalManager {
 			// workflow undefined" path below is preserved for assistant
 			// sessions and test fixtures.
 			throw new Error(
-				`GoalManager.createGoal: workflowId="${workflowId}" given but neither resolvedWorkflow nor workflowStore was provided. This is Lesson 4.3 — see docs/_phase-1-notes.md.`,
+				`GoalManager.createGoal: workflowId="${workflowId}" given but neither resolvedWorkflow nor workflowStore was provided. This is WorkflowStore-required invariant — see docs/_phase-1-notes.md.`,
 			);
 		} else if (!workflowId && workflowStore) {
 			// Default to "general" workflow when none specified.
@@ -601,7 +601,7 @@ export class GoalManager {
 	/**
 	 * Archive a child goal after its branch has been merged into its parent.
 	 *
-	 * Order is load-bearing (Lesson 4.2 rescue path):
+	 * Order is load-bearing (stale-pointer invalidation rescue path):
 	 *   1. Stamp `state: "complete"` on the live record FIRST so the
 	 *      archived snapshot has state=complete on disk. The harness
 	 *      short-circuits on `archived && state === "complete"` and
@@ -639,12 +639,12 @@ export class GoalManager {
 	/**
 	 * Boot-time migration: backfill `state: "complete"` on archived goals
 	 * whose `ready-to-merge` gate is in the `passed` state. Closes the
-	 * Lesson 4.2 gap on records produced by code paths that pre-date
+	 * stale-pointer invalidation gap on records produced by code paths that pre-date
 	 * `archiveGoalAfterMerge`.
 	 *
 	 * Idempotent — only writes when the record is missing the stamp.
 	 * Wrapped in per-goal try/catch so one corrupt record cannot crash
-	 * boot (Lesson 4.11 — "endless restart" guard).
+	 * boot (endless-restart guard).
 	 */
 	backfillCompleteState(gateStore: GateStore): { backfilled: number; skipped: number } {
 		let backfilled = 0;
@@ -684,7 +684,7 @@ export class GoalManager {
 	 * field being stamped.
 	 *
 	 * Idempotent — only writes when the field is absent. Per-goal try/catch
-	 * keeps boot resilient (Lesson 4.11 — endless-restart guard).
+	 * keeps boot resilient (endless-restart guard).
 	 */
 	backfillSpawnedBySessionId(teamStore: TeamStore, sessionStore?: SessionStore): { backfilled: number; skipped: number } {
 		let backfilled = 0;
@@ -788,7 +788,7 @@ export class GoalManager {
 		reattemptOf?: string;
 		projectId?: string;
 		autoStartTeam?: boolean;
-		// Phase 3 nested-goals fields (Lesson 4.1 — must be settable
+		// Phase 3 nested-goals fields (must be settable
 		// immediately after createGoal in runSubgoalStep).
 		spawnedFromPlanId?: string;
 		paused?: boolean;

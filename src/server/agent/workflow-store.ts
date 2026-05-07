@@ -27,7 +27,7 @@ import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineV
  * gate before merging the child branch into the parent.
  */
 export interface VerifyStepSubgoal {
-	/** Stable id for this plan node — used as the spawnedFromPlanId on the child goal (Lesson 4.1). */
+	/** Stable id for this plan node — used as the spawnedFromPlanId on the child goal (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between). */
 	planId: string;
 	/** Title of the subgoal — becomes the child goal's title. */
 	title: string;

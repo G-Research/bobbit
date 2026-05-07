@@ -1,6 +1,6 @@
 /**
  * Unit tests for goal-dashboard tab-visibility predicates (Phase 5a).
- * Lesson 4.20 anchor: the Plan tab is visible when EITHER a formal
+ * Plan-tab visibility rule anchor: the Plan tab is visible when EITHER a formal
  * `goal-plan` gate exists OR live children synthesise a living plan.
  */
 import { describe, it, before, after } from "node:test";

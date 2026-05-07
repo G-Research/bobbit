@@ -1,5 +1,5 @@
 /**
- * Lesson 4.18 — verification failure notifications must be actionable.
+ * actionable failure notifications — verification failure notifications must be actionable.
  *
  * Pure builder for the message string passed to the team-lead when a
  * verification fails. Includes:
@@ -40,7 +40,7 @@ export function buildVerificationFailureMessage(
 	const failed = steps.filter((s) => !s.passed);
 
 	// No detail available → fall back to the legacy single-line message
-	// (same wording as pre-Lesson-4.18 behavior, so existing tests still pass).
+	// (same wording as pre-actionable-notification behavior, so existing tests still pass).
 	if (failed.length === 0) {
 		return `Gate verification FAILED: "${gateId}". Check the verification output, fix the issues, and re-signal the gate.`;
 	}

@@ -390,7 +390,7 @@ export class TeamManager {
 	 * Event subscriptions are deferred to resubscribeTeamEvents().
 	 */
 	private restoreTeams(): void {
-		// Lesson 4.11B — Boot-time orphan cleanup. Walk every persisted team
+		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
 		// entry FIRST and drop entries whose `goalId` is not present in the
 		// owning project's goal store. This prevents the zombie-reviewer sweep
 		// in `resubscribeTeamEvents` from blowing up later (it ultimately calls
@@ -481,7 +481,7 @@ export class TeamManager {
 	 * because it needs live session objects to attach event listeners.
 	 */
 	resubscribeTeamEvents(): void {
-		// Lesson 4.11C — Zombie-reviewer sweep. After a server restart, reviewer
+		// zombie-reviewer sweep — Zombie-reviewer sweep. After a server restart, reviewer
 		// sessions belonging to a verification that was running mid-flight are
 		// torn down by the harness's resume logic. The persisted `team-state.json`
 		// can still carry a stale agent entry pointing at the dead session; if
@@ -492,7 +492,7 @@ export class TeamManager {
 		//
 		// `unregisterReviewerSession` is wrapped in try/catch so one bad reviewer
 		// entry can't take down the whole boot path — the symptom would be
-		// indistinguishable from Lesson 4.11B (endless restart loop) but
+		// indistinguishable from orphan team-store cleanup (endless restart loop) but
 		// triggered later in the boot sequence.
 		for (const [goalId, entry] of this.teams) {
 			const reviewers = entry.agents.filter((a) => a.kind === "reviewer" || a.role === "reviewer");
@@ -548,14 +548,14 @@ export class TeamManager {
 				agent.unsubscribeEvent = unsubscribe;
 			}
 		}
-		// Lesson 4.12 — Boot-respawn for sessionless in-progress goals.
+		// boot-respawn for sessionless in-progress goals — Boot-respawn for sessionless in-progress goals.
 		this._bootRespawnSessionlessGoals();
 
 		console.log(`[team-manager] Re-subscribed to events for ${this.teams.size} team(s)`);
 	}
 
 	/**
-	 * Lesson 4.12 — Walk every non-archived goal that is in-progress, has
+	 * boot-respawn for sessionless in-progress goals — Walk every non-archived goal that is in-progress, has
 	 * setupStatus=ready, and is a team goal but has no live team entry. Spin
 	 * up a fresh team-lead for each so the goal is not stranded.
 	 *
@@ -640,7 +640,7 @@ export class TeamManager {
 		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
 		// Don't nudge a parent whose subgoals are still actively making progress
 		// — they'll wake the parent via the parent-notification path when each
-		// subgoal reaches ready-to-merge / fails / pauses. Lesson 4.13's
+		// subgoal reaches ready-to-merge / fails / pauses. paused-children-not-in-flight rule's
 		// `anyInFlightChild` excludes paused children (a paused subgoal can't
 		// progress without the parent's intervention, so the nudge is wanted
 		// in that case). Without this, the user reported (image #48) the

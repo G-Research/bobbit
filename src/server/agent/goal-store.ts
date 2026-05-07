@@ -68,7 +68,7 @@ export interface PersistedGoal {
 	maxConcurrentChildren?: number;
 	/** Acceptance criteria parsed from spec, used by criteria-coverage check. */
 	acceptanceCriteria?: string[];
-	/** Subgoal idempotency key — set immediately after createGoal in runSubgoalStep (Lesson 4.1). */
+	/** Subgoal idempotency key — set immediately after createGoal in runSubgoalStep (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between). */
 	spawnedFromPlanId?: string;
 	/**
 	 * Sibling planIds this child depends on (Phase 5 — explicit DAG). Empty
@@ -78,10 +78,16 @@ export interface PersistedGoal {
 	 */
 	dependsOnPlanIds?: string[];
 	/**
+<<<<<<< HEAD
 	 * Paused flag — user can pause a goal mid-flight (children may inherit via cascade).
 	 * Paused children do NOT count as in-flight for `anyInFlightChild`/parent nudge
 	 * suppression — the parent (or user) must act before the child can resume.
 	 * (Lesson 4.13)
+=======
+	 * Whether this goal is paused. Paused children do NOT count as in-flight
+	 * for `anyInFlightChild`/parent nudge suppression — the parent (or user)
+	 * must act before the child can resume. (paused children must NOT count as in-flight — paused != failed)
+>>>>>>> 3baf9584 (Trim AGENTS.md and replace Lesson N.M jargon with plain language)
 	 */
 	paused?: boolean;
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */

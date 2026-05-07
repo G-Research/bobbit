@@ -8,7 +8,7 @@
 import type { PersistedGoal } from "./goal-store.js";
 
 /**
- * Lesson 4.13 — Paused children must NOT count as in-flight.
+ * paused-children-not-in-flight rule — Paused children must NOT count as in-flight.
  *
  * `anyInFlightChild(parentGoalId, allGoals)` returns true iff any non-archived
  * child goal of `parentGoalId` is actively making progress (or could without

@@ -1,5 +1,5 @@
 /**
- * Lesson 4.11A — Harness crash-loop guard.
+ * crash-loop guard — Harness crash-loop guard.
  *
  * The harness wraps the gateway as a child process and auto-restarts on
  * unexpected exit. Without a guard, a gateway that crashes during boot would
@@ -55,7 +55,7 @@ function onManualRestart(state: HarnessState): void {
 	state.crashLoopHalted = false;
 }
 
-describe("Lesson 4.11A — crash-loop guard decision logic", () => {
+describe("crash-loop guard decision logic", () => {
 	it("a single quick crash does NOT halt auto-restart", () => {
 		const s = fresh();
 		const r = onChildExit(s, 100);
@@ -118,7 +118,7 @@ describe("Lesson 4.11A — crash-loop guard decision logic", () => {
 	});
 });
 
-describe("Lesson 4.11A — source-grep guard", () => {
+describe("crash-loop guard — source-grep guard", () => {
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "harness.ts");
 	const text = fs.readFileSync(SOURCE, "utf-8");
 

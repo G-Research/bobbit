@@ -1,7 +1,7 @@
 /**
- * Phase 3 / Lesson 4.4 — Workflow-less complete child recovery.
+ * Phase 3 / workflow-less complete-child recovery — Workflow-less complete child recovery.
  *
- * SUBGOALS-SPEC §5: pre-fix children created without a workflow (Lesson 4.3
+ * SUBGOALS-SPEC §5: pre-fix children created without a workflow (WorkflowStore-required invariant
  * defect) end up stuck — state=complete, archived=null, workflow=null. They
  * never naturally reach ready-to-merge. The harness recovers them by trying
  * mergeChild directly + archiveAfterMerge.
@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 import { buildFixture, buildActive, buildSubgoalStep } from "./helpers/run-subgoal-step-fixture.ts";
 
-describe("runSubgoalStep — Lesson 4.4: workflow-less complete child recovery", () => {
+describe("runSubgoalStep — workflow-less complete-child recovery", () => {
 	it("on workflow-less complete child → mergeChild + teardownTeam + archiveAfterMerge are invoked", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
