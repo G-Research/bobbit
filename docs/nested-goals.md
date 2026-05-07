@@ -439,6 +439,52 @@ explicit confirmation. Wired into the dashboard's `handleEndTeam`.
 
 ## Sub-goal sidebar placement
 
+### Cascade resolution at spawn time
+
+`spawnedBySessionId` is the field the sidebar uses to nest a sub-goal
+under its spawning team-lead. If it's missing, the sidebar would
+historically misattribute the orphan child under whichever sibling
+team-lead happened to look closest — visually wrong and confusing
+when collapsed. The fix is to populate the field reliably at the
+source (every spawn path) AND to fall back strictly on the
+render side as defence in depth.
+
+Resolution at `POST /api/goals/:id/spawn-child` and inside
+`verification-harness.runSubgoalStep` runs through the single pure
+helper `resolveSpawnedBySessionId` (`src/server/agent/spawn-child-spawnedby.ts`)
+so a future tweak lands in one place. Tier order, highest precedence first:
+
+1. `body.spawnedBySessionId` — explicit caller claim.
+2. `x-bobbit-spawning-session` header — set by the children-tools
+   extension (`defaults/tools/children/extension.ts`).
+3. `x-bobbit-session-id` header — defence in depth for raw cURL or
+   scripted callers issued from inside an agent (every other tool
+   extension already sends this header).
+4. Parent goal's live team-lead via
+   `teamManager.getTeamState(parentGoalId)?.teamLeadSessionId` —
+   matches what `runSubgoalStep` derives natively. "This child was
+   spawned in the parent's team-lead context."
+5. Fallback: leave `spawnedBySessionId` undefined, log a single
+   `console.warn` at the spawn-child handler so it's diagnosable, and
+   trust the sidebar's strict-parent attribution to render correctly.
+
+The helper is silent — it only returns `{ value, tier }`. The caller
+decides whether to log. Empty-after-trim values at any tier fall
+through to the next tier; array-valued headers coerce to the first
+element. See the AGENTS.md recipe entry
+*`spawnedBySessionId` cascade at `POST /spawn-child`* for the
+one-line summary.
+
+The render-side companion lives in `selectSpawnedChildren`
+(`src/app/sidebar-spawned-children.ts`): when a sub-goal has
+`spawnedBySessionId === undefined`, it only attaches to its parent's
+OWN team-lead (the optional `parentLeadId` argument) — never a
+sibling's. Render call sites in `src/app/render-helpers.ts` pass
+`parentLeadId` only when the iterated lead actually belongs to the
+parent goal, so an unstamped orphan can never get pulled under an
+unrelated sibling team-lead. Both the live `renderTeamGroup` branch
+and the archived `renderLeadWithMembers` branch follow the same rule.
+
 ### `spawnedBySessionId` semantics (R-045)
 
 `spawnedBySessionId` captures the session id of the team-lead **at the

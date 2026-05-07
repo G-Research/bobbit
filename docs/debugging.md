@@ -398,10 +398,31 @@ Diagnostic chain:
 
 1. **Check the persisted field on disk.** Inspect the goal's record in `.bobbit/state/<projectId>/goals.json` (or the per-project equivalent). If `spawnedBySessionId` is `undefined`, the boot-time backfill couldn't find a unique team-lead candidate — either the parent has multiple team-lead sessions (ambiguous, intentionally skipped to avoid misattribution), or no team-lead session at all. Multi-team-lead parents render their sub-goals at parent-forest level by design.
 2. **Confirm the boot backfill ran.** `[goal-manager] Backfilled spawnedBySessionId=<sid> for legacy sub-goal <gid>` should appear in the gateway boot logs once per stamped sub-goal. If you see `[goal-manager] backfillSpawnedBySessionId failed for project <id>` or no log line at all for a goal you expected to be stamped, the backfill is wired in `src/server/server.ts` after `restoreTeams` — verify both `teamStore` and `sessionStore` are passed (`backfillSpawnedBySessionId(teamStore, sessionStore)`); without the second arg, archived team-leads of an archived parent are unreachable.
-3. **For new spawns, confirm the header is being sent.** `defaults/tools/children/extension.ts` must include `"X-Bobbit-Spawning-Session": sessionId` in the `api()` helper's headers. Server reads the header in `POST /api/goals/:id/spawn-child` and falls back to `body.spawnedBySessionId`; header wins. If the field is `undefined` on a freshly-spawned child, either the extension regressed or the call went through a path other than the children-tools extension (e.g. a manual `curl` without the header).
+3. **For new spawns, confirm the four-tier cascade.** Resolution at `POST /api/goals/:id/spawn-child` runs through `resolveSpawnedBySessionId` (`src/server/agent/spawn-child-spawnedby.ts`): (1) `body.spawnedBySessionId`, (2) `x-bobbit-spawning-session` header from the children-tools extension, (3) `x-bobbit-session-id` header (defence in depth for raw cURL issued from inside an agent), (4) parent's live team-lead via `teamManager.getTeamState(parentGoalId)?.teamLeadSessionId`. If all four miss, the handler logs `[spawn-child] spawnedBySessionId could not be derived for goal=<id> parent=<id>` and the field stays `undefined` — grep for that warn line. If you see it, the spawn was a true orphan (no body field, no headers, parent has no live team-lead). The sidebar's strict-parent fallback still renders it correctly nested under the parent goal.
 4. **Render-side**: confirm the rendered row has `data-testid="sidebar-spawned-child-row"` with a `data-spawned-by` attribute matching the team-lead session id. Live team-leads route through `renderTeamGroup`; archived team-leads of a live parent route through `renderLeadWithMembers` (`src/app/render-helpers.ts`). The forest-exclusion set in `src/app/sidebar.ts::forestInput` MUST include the team-lead's session id — the set covers live team-leads and (when `state.showArchived` is on) archived team-leads. If `showArchived` is off and the spawning lead is archived, the sub-goal correctly falls back to parent-forest level — that's the "spawning session is fully gone" branch, not a bug.
 
 See [docs/internals.md — Sub-goal sidebar placement](internals.md#sub-goal-sidebar-placement) and [docs/nested-goals.md — Sub-goal sidebar placement](nested-goals.md#sub-goal-sidebar-placement).
+
+<a id="sidebar-nests-goal-under-wrong-team-lead-unstamped-child-shows-under-a-sibling"></a>
+
+## Sidebar nests goal under wrong team-lead / unstamped child shows under a sibling
+
+Symptom: a sub-goal that should belong to team-lead A renders inside team-lead B's expanded block (a sibling). Collapsing B hides the orphan; collapsing A doesn't. Originally observed during dogfooding when sub-goals spawned via raw `POST /api/goals/:id/spawn-child` curl — with no `spawnedBySessionId` body field and no `x-bobbit-spawning-session` header — were misattributed under a sibling team-lead.
+
+Cause: `spawnedBySessionId` was `undefined` on creation (cascade tier 5 hit — see [docs/nested-goals.md — Cascade resolution at spawn time](nested-goals.md#cascade-resolution-at-spawn-time)) AND the render-side fallback wasn't strict about `parentGoalId`. Two layers fix it:
+
+1. **Source fix (primary):** `resolveSpawnedBySessionId` (`src/server/agent/spawn-child-spawnedby.ts`) drives both `POST /spawn-child` and `verification-harness.runSubgoalStep`. Tiers 1–4 cover every realistic spawn path; tier 5 logs `[spawn-child] spawnedBySessionId could not be derived for goal=<id> parent=<id>`. If you see this warning, the spawning context was truly missing — grepping logs is the fastest way to spot regressions in tier 1–4.
+2. **Render-side defence in depth:** `selectSpawnedChildren` (`src/app/sidebar-spawned-children.ts`) accepts an optional `parentLeadId`. When a child has `spawnedBySessionId === undefined`, it only attaches to the lead passed as `parentLeadId` — never a sibling's. Call sites in `src/app/render-helpers.ts` (both the live `renderTeamGroup` branch and the archived `renderLeadWithMembers` branch) pass `parentLeadId === leadId` only when the iterated lead actually belongs to the parent goal being rendered, so an unstamped orphan cannot get pulled under an unrelated team-lead.
+
+Fix locations to inspect when this regresses:
+
+- `src/server/agent/spawn-child-spawnedby.ts` — the cascade itself; treat as the single source of truth for resolution order.
+- `POST /api/goals/:id/spawn-child` handler in `src/server/server.ts` — must call `resolveSpawnedBySessionId` and emit the warn log on tier-5 fall-through.
+- `verification-harness.runSubgoalStep` — must call the same helper for the in-process path.
+- `selectSpawnedChildren` — the optional `parentLeadId` argument is the strict-attribution invariant; if a regression drops it, unstamped orphans float across siblings again.
+- `goal-manager.backfillSpawnedBySessionId` — boot-time stamping of legacy records.
+
+For the related-but-distinct symptom "sub-goal renders at parent-forest level instead of nested at all" — the spawning session was archived AND `state.showArchived` is off — see [Sub-goal renders at parent-forest level instead of nested under its team-lead](#sub-goal-renders-at-parent-forest-level-instead-of-nested-under-its-team-lead) above.
 
 ## Paginated archives
 
