@@ -127,4 +127,97 @@ test.describe("Session status — canonical-status recovery", () => {
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
 		}
 	});
+
+	test("no duplicate user message after stuck-flag recovery (AC#3)", async ({ page }) => {
+		// Regression for the duplicate-message bug described in the goal spec.
+		//
+		// Pre-fix, `_state.isStreaming` could be stuck `true` while the server
+		// was actually idle. The optimistic-prompt branch in
+		// `RemoteAgent.prompt()` (`!this._state.isStreaming`) would then skip
+		// rendering, the prompt would be enqueued server-side, and the eventual
+		// echo (or a retyped second prompt) produced two visible user messages.
+		//
+		// Post-fix, `isStreaming` is a derived getter over the canonical
+		// `_state.status`. We simulate the legacy stuck-flag condition by
+		// hand-writing `_state.status = "streaming"` *and* rewinding
+		// `_lastStatusVersion` so the heartbeat (or an explicit resync) heals
+		// the client back to idle, then send a prompt and assert exactly one
+		// user message renders — no ghost, no duplicate.
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		try {
+			await openApp(page);
+			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await page.waitForFunction(
+				() => !!(window as any).__bobbitState?.remoteAgent?.connected,
+				undefined,
+				{ timeout: 15_000 },
+			);
+
+			// Drive the client into the legacy stuck-streaming condition.
+			await page.evaluate(() => {
+				const a = (window as any).__bobbitState.remoteAgent;
+				a._state.status = "streaming";
+				a._lastStatusVersion = -1;
+			});
+			expect(
+				await page.evaluate(() => (window as any).__bobbitState.remoteAgent.state.isStreaming),
+			).toBe(true);
+
+			// Heartbeat / explicit resync heals it. We trigger an immediate
+			// resync rather than wait the full 15s heartbeat interval — the
+			// heal path is identical (server replies with current
+			// `session_status`, client applies).
+			await page.evaluate(() => {
+				(window as any).__bobbitState.remoteAgent.send({ type: "status_resync" });
+			});
+			await expect.poll(
+				async () => page.evaluate(() => (window as any).__bobbitState.remoteAgent.state.isStreaming),
+				{ timeout: 10_000, intervals: [100, 250, 500] },
+			).toBe(false);
+
+			const marker1 = `dup-check-${Date.now()}-A`;
+			const marker2 = `dup-check-${Date.now()}-B`;
+
+			// Send prompt #1. Optimistic-prompt branch should fire (status is
+			// idle), then the server echo arrives — only one rendered message.
+			const textarea = page.locator("textarea").first();
+			await textarea.fill(marker1);
+			await textarea.press("Enter");
+			await expect(
+				page.locator("user-message").filter({ hasText: marker1 }).first(),
+			).toBeVisible({ timeout: 15_000 });
+
+			// Wait for the mock-agent turn to fully settle (idle again) before
+			// the second send so we exercise the optimistic branch a second time.
+			await page.waitForFunction(
+				() => (window as any).__bobbitState.remoteAgent.state.status === "idle",
+				undefined,
+				{ timeout: 15_000 },
+			);
+
+			await textarea.fill(marker2);
+			await textarea.press("Enter");
+			await expect(
+				page.locator("user-message").filter({ hasText: marker2 }).first(),
+			).toBeVisible({ timeout: 15_000 });
+
+			// Allow any late server echo to arrive that *would* have produced
+			// the duplicate under the legacy bug.
+			await page.waitForTimeout(1500);
+
+			// Exactly one rendered user-message per marker — no ghost, no
+			// duplicate. This is the AC#3 regression assertion.
+			expect(
+				await page.locator("user-message").filter({ hasText: marker1 }).count(),
+			).toBe(1);
+			expect(
+				await page.locator("user-message").filter({ hasText: marker2 }).count(),
+			).toBe(1);
+		} finally {
+			await deleteSession(sessionId).catch(() => { /* best-effort */ });
+		}
+	});
 });
