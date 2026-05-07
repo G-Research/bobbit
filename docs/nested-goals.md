@@ -126,6 +126,24 @@ container. The post-commit hook in `ProjectSandbox._installPostCommitHook`
 pushes parent commits to origin so siblings spawned in different
 container sessions see the latest tip via `origin/<parent-branch>`.
 
+**Child `ready-to-merge` auto-targets the parent.** The shipped
+`feature` / `general` / `bug-fix` workflows hard-code their
+`ready-to-merge` gate at "Master merged into branch" + "PR raised".
+Those checks are correct for a root goal but wrong for a child —
+children merge LOCALLY into the parent's branch (no `origin/master`
+merge) and only the root raises a PR. The pure helper
+`adaptReadyToMergeForChild` in `src/server/agent/child-ready-to-merge.ts`
+rewrites those two verify steps with `echo` no-ops when
+`goal.mergeTarget === "parent"` and the parent's branch is resolvable;
+"Branch pushed to remote" is left intact, and step count is preserved
+so the harness's cached step indexing stays aligned. The rewrite is
+applied at **two layers**: spawn-time inside `runSubgoalStep` (so the
+workflow snapshot persisted on the child's goal record is already
+child-aware) AND as a runtime safety net inside `verifyGateSignal` (so
+in-flight children whose snapshots predate the fix don't need
+migration). The helper is idempotent — verify steps already starting
+with the echo marker are left alone.
+
 ## The `subgoal` verify-step type
 
 Add a `type: "subgoal"` entry to a workflow gate's `verify[]`:
