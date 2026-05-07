@@ -665,15 +665,54 @@ signal.
 The Plan tab is visible if **either**:
 
 1. The goal's workflow has a `goal-plan` gate (formal plan), OR
-2. The goal has any non-archived children (living plan — synthesise from
-   live children, layered topologically by explicit `dependsOnPlanIds`).
-   Children with no declared deps render as parallel siblings at column 0
-   with no edges; see [Declaring dependencies](#declaring-dependencies).
+2. The goal has any children — live OR archived — (living plan —
+   synthesise from the full child history, layered topologically by
+   explicit `dependsOnPlanIds`). Children with no declared deps render
+   as parallel siblings at column 0 with no edges; see [Declaring
+   dependencies](#declaring-dependencies).
 
 Synthesis (`src/app/plan-synthesis.ts::buildPlanSteps`) recomputes from
-the live goal tree on every render, so the Plan tab is a living
-document. Goals with formal plans + ad-hoc children get the formal plan
-plus orphans appended past the formal max phase.
+the full goal tree (including archived descendants) on every render, so
+the Plan tab is a living document of the goal's complete child history.
+Goals with formal plans + ad-hoc children get the formal plan plus
+orphans appended past the formal max phase.
+
+### Data source: `dashboardGoalPool()` and `/descendants`
+
+The Plan tab reads from a **dashboard-local goal pool**, not from the
+sidebar's live `state.goals` list. `state.goals` excludes archived goals
+when the sidebar's "See Archived" toggle is off, which used to silently
+drop archived siblings from the Plan-tab DAG. The fix:
+
+- `GET /api/goals/:id/descendants` returns full `PersistedGoal` records
+  for every descendant of the goal (live + archived), via the pure
+  `collectDescendants(rootId, allGoals)` BFS helper in
+  `src/server/agent/goal-descendants.ts` (depth cap 32). The route is
+  intentionally NOT gated by `requireSubgoalsEnabled()` — Plan tab is
+  core dashboard functionality, not subgoals-experimental.
+- `dashboardGoalPool()` in `src/app/goal-dashboard.ts` merges
+  `state.goals` (live, freshest) with the locally cached
+  `dashboardDescendants` slice and dedupes by id.
+- `shouldShowPlanTab`, `computePlanStepsForGoal`, and `renderPlanTab` all
+  read from this merged pool. The Plan tab is therefore decoupled from
+  the sidebar's archived-visibility filter — toggling "See Archived"
+  does NOT change Plan-tab content.
+- The descendants slice is refetched on dashboard load and on
+  `schedulePlanRerender` (5s debounce, mirroring tree-cost), and reset
+  on goal-change.
+
+### Visual distinction for archived nodes
+
+Archived plan-DAG nodes are marked `data-archived="true"` on the SVG
+`<g data-testid="plan-node">`, rendered with `opacity:0.55`, a dashed
+stroke, and a small inline "archived" pill (testid
+`plan-node-archived-pill`) so users can tell archived from live at a
+glance without hovering. Live and archived children are visually
+distinguishable in the same DAG.
+
+E2E coverage: `tests/e2e/ui/plan-tab-archived-children.spec.ts` archives
+a child via REST, reloads the parent dashboard, opens the Plan tab, and
+asserts the archived child renders with `data-archived="true"`.
 
 The Plan tab DAG SVG renders nested sub-trees inline (Lesson 4.22). Each
 plan node card has a chevron disclosure; clicking expands and renders
