@@ -204,9 +204,14 @@ test.describe("Session status — canonical-status recovery", () => {
 				page.locator("user-message").filter({ hasText: marker2 }).first(),
 			).toBeVisible({ timeout: 15_000 });
 
-			// Allow any late server echo to arrive that *would* have produced
-			// the duplicate under the legacy bug.
-			await page.waitForTimeout(1500);
+			// Wait for the second turn to fully settle (status back to idle
+			// after server echo + agent_end). Any late server-side duplicate
+			// echo would have rendered before idle was reached.
+			await page.waitForFunction(
+				() => (window as any).__bobbitState.remoteAgent.state.status === "idle",
+				undefined,
+				{ timeout: 15_000 },
+			);
 
 			// Exactly one rendered user-message per marker — no ghost, no
 			// duplicate. This is the AC#3 regression assertion.
