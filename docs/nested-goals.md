@@ -180,15 +180,24 @@ break the tie:
 | 4   | archived + `state !== "complete"` | shelved dupe — invalidate, fall through to spawn |
 | 5   | rescue: `spawnedFromPlanId === undefined` matched by `(parentGoalId, title)` | back-fills `spawnedFromPlanId` |
 
-Both server-side (`resolvePlanStepChild` in
-`src/server/agent/verification-harness.ts`) and client-side
-(`resolvePlanNodeChild` in `src/app/plan-node-state.ts`) implement the
-same tier preference; they MUST agree on the displayed state for a given
-input.
+Three-way agreement is mandatory: server-harness
+(`resolvePlanStepChild` in `src/server/agent/verification-harness.ts`),
+server-REST (`GET /api/goals/:id/plan` delegates to the harness's
+method — single source of truth, no inline copy), and client
+(`resolvePlanNodeChild` in `src/app/plan-node-state.ts`) all implement
+the same preference. Divergence between any two means a tier-resolver
+copy crept back in. Pinned by `tests/api-goals-plan-tier-parity.test.ts`.
 
 ## Mutation classifier
 
-Once `goal-plan` is signalled, `execution.verify[]` is **frozen**. Further
+Once `goal-plan` is signalled, `execution.verify[]` is **frozen** by
+`computePlanFreezeUpdate()` in
+`src/server/agent/parent-workflow-freeze.ts` — a pure helper called
+directly from the `gate_signal` route handler when the goal's workflow
+is a parent meta-workflow and an `execution` gate exists. The frozen
+snapshot is what subsequent reads (`GET /api/goals/:id/plan`) and the
+harness scheduler use as the canonical plan. Tests:
+`tests/parent-workflow-freeze.test.ts`. After freeze, further
 mutations go through the classifier in
 `src/server/agent/plan-mutation.ts`:
 
@@ -215,12 +224,21 @@ classifier reports the most severe structural kind. After the structural
 pass, the criteria-coverage check OVERRIDES the kind to `criteria-drop`
 if any root acceptance criterion is uncovered.
 
-**Criteria-coverage check** is **whitespace-normalised, case-insensitive
-substring match** over the union of `{rootSpec, every remaining subgoal
-step's spec}`. Hashes don't work — they fail the moment the team-lead
-paraphrases. Therefore team-leads MUST quote acceptance criteria
-**verbatim** in subgoal specs. The convention is a `## Covers` heading
-listing the criteria the subgoal addresses.
+**Criteria-coverage check** is **whitespace-normalised, locale-pinned
+(`toLocaleLowerCase("en")`) substring match** over the union of
+`{rootSpec, every remaining subgoal step's spec}`. Hashes don't work —
+they fail the moment the team-lead paraphrases. Therefore team-leads
+MUST quote acceptance criteria **verbatim** in subgoal specs. The
+convention is a `## Covers` heading listing the criteria the subgoal
+addresses. The locale is pinned to `"en"` so Turkish and Lithuanian
+locales running Bobbit don't see false `criteria-drop` errors on
+dotless-i criteria (R-023 remediation).
+
+**Step-shape validation**: `PATCH /api/goals/:id/plan` validates each
+`proposedSteps[]` entry before classifying — missing `planId` or `title`,
+or missing both `spec` and `subgoal.spec`, returns 400
+`INVALID_PLAN_STEP {index}` instead of silently classifying the
+malformed step as a `restructure`.
 
 `replanCount` ticks up on every successful post-freeze mutation. At
 `> 5`, the goal is auto-paused so a human can review the plan churn
@@ -229,7 +247,9 @@ before more replans land. Resume via
 
 Pending mutation requests live in
 `<stateDir>/plan-mutations/<goalId>.json` with a 24-hour TTL and survive
-restart. Clients re-emit `mutation_pending` events on WS attach.
+restart. Clients re-emit `mutation_pending` events on WS attach. A
+daily `unref()`'d sweep calls `pruneExpired` so completed/abandoned
+requests don't accumulate indefinitely (R-035 remediation).
 
 ## Concurrency
 
@@ -246,10 +266,27 @@ Capacity is resolved once on first use via
 
 The semaphore IS the scheduler. There is no background poll loop; each
 `runSubgoalStep` invocation acquires a permit before spawn and holds it
-until the child's `ready-to-merge` resolves. `maxConcurrentChildren` is
-configured on the **root goal only** via `goal_set_policy` /
+until the child's `ready-to-merge` resolves (or until the 24h
+`MAX_WAIT_MS` ceiling fires — see Recovery patterns). `maxConcurrentChildren`
+is configured on the **root goal only** via `goal_set_policy` /
 `PATCH /api/goals/:id/policy`; sub-goal values are stored for
 forward-compat but inert.
+
+## Divergence policy
+
+`divergencePolicy` controls how the mutation classifier handles plan
+changes after `goal-plan` is signalled. Values: `"strict"`,
+`"balanced"` (default), `"autonomous"` — see the
+[Mutation classifier](#mutation-classifier) decision matrix for what
+each implies. The field is **root-goal-only** and is consulted by the
+harness at runtime. Sub-goal values can be persisted but are inert.
+
+**No dashboard UI yet.** The policy is settable via the team-lead-only
+`goal_set_policy` tool and the underlying
+`PATCH /api/goals/:id/policy` REST endpoint (which broadcasts the new
+values inline on `goal_state_changed`). Until a dashboard surface
+lands, the user-visible signal of policy state is the auto-pause that
+kicks in past `replanCount > 5`.
 
 ## Restart resilience
 
@@ -292,10 +329,11 @@ The feature ships with the following invariants (see
 
 ## Cascade UX
 
-Pause / resume / archive on a parent goal with descendants requires an
-explicit `cascade: boolean` parameter on the REST call — server returns
-**422 `{code: "CASCADE_REQUIRED"}`** when omitted. The UI is the
-cascade-policy authority:
+Pause / resume / archive / team-teardown on a parent goal with
+descendants requires an explicit `cascade: boolean` parameter (or
+`?cascade=` query) on the REST call — server returns
+**422 `{code: "CASCADE_REQUIRED"}`** when omitted, uniformly across
+every cascade-affecting route. The UI is the cascade-policy authority:
 
 - `showArchiveGoalDialog` — when descendants exist, sends `cascade=true`
   unconditionally; the "Archive descendants too" checkbox stays checked
@@ -420,8 +458,11 @@ the pure helper `resolveRole(goal, name, roleStore)` in
 reviewer pickup, `agent-qa` qa-tester pickup). Any new role-lookup site
 MUST go through `resolveRole`.
 
-**Inheritance** — when `goal_spawn_child` spawns a child, both the
-roles AND the workflow are inherited from the parent:
+**Inheritance** — when `goal_spawn_child` spawns a child OR a `subgoal`
+verify-step runs through `runSubgoalStep`, both the roles AND the
+workflow are inherited from the parent (the harness path was previously
+an asymmetric special-case; R-001/R-002/R-003 remediation aligns it
+with the REST path):
 
 - `inlineRoles`: server merges `parent.inlineRoles` with
   `body.inlineRoles` (`{...parent, ...body}`). Child entries with the
@@ -442,7 +483,25 @@ roles AND the workflow are inherited from the parent:
 
 **`stripSubgoalStepsForChildInheritance`** (in `src/server/agent/workflow-store.ts`)
 runs on every inherited meta-workflow snapshot (`isParentMetaWorkflow`
-= id === "parent" OR execution gate contains subgoal verify-steps):
+= id === "parent" OR execution gate contains subgoal verify-steps).
+The four-tier child-workflow cascade (highest precedence first) is
+encoded in the pure helper `resolveChildWorkflow` in
+`src/server/agent/spawn-child-workflow.ts`:
+
+1. `body.workflow` — explicit inline workflow object on the spawn call.
+2. `body.workflowId` / `sg.workflowId` — registered workflow looked up
+   in the project's `workflowStore`.
+3. `parent.workflow` — deep-cloned via `structuredClone` and routed
+   through `stripSubgoalStepsForChildInheritance` (this section).
+4. `"feature"` from the workflow store, falling back to the first
+   non-hidden workflow if `"feature"` is missing.
+
+Used today by `runSubgoalStep`; the REST `POST /spawn-child` handler
+still has its own inline cascade (a TODO in the helper notes the
+follow-up to consolidate). Tests:
+`tests/spawn-child-workflow-resolution.test.ts` (12 cases).
+
+The strip itself does the following:
 
 1. Strips `type: "subgoal"` entries from `execution.verify[]` — the
    parent's plan items don't belong on the child.
@@ -573,13 +632,13 @@ each event with a 250ms trailing-edge throttle to avoid layout thrash.
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
 | POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole? }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 (cycle / missing field), 404 (parent missing). Stamps `spawnedFromPlanId` immediately after createGoal. |
-| PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
+| PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
-| POST | `/api/goals/:id/integrate-child/:childId` | `{}` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 400 `PARENT_MISMATCH`. |
-| POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. |
+| POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
+| POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Cancels in-flight verifications; does NOT halt streaming team-lead/worker sessions today (`showPauseGoalDialog` text surfaces this partial-pause limitation). |
 | POST | `/api/goals/:id/resume` | `{ cascade: boolean }` | Same 422 contract as pause. |
 | POST | `/api/goals/:id/mutation/:requestId/decision` | `{ decision: "approve" \| "reject" }` | 404 `REQUEST_NOT_FOUND`. Bumps `replanCount`; auto-pauses past 5. |
-| PATCH | `/api/goals/:id/policy` | `{ divergencePolicy?, maxConcurrentChildren? }` | Root-only fields. |
+| PATCH | `/api/goals/:id/policy` | `{ divergencePolicy?, maxConcurrentChildren? }` | Root-only fields. The `goal_state_changed` broadcast carries the new values inline so clients don't need to re-fetch. |
 | DELETE | `/api/goals/:id?cascade=true\|false` | (query) | 422 `CASCADE_REQUIRED`, 409 `HAS_DESCENDANTS` when `cascade=false`. |
 | POST | `/api/goals/:id/team/teardown?cascade=true\|false` | (query) | 409 `HAS_DESCENDANT_TEAMS` when `cascade=false` and descendants have live teams; `cascade=true` walks descendants depth-first and tears down each team. Best-effort per-goal: returns `{ok, toreDown, errors[]}`. |
 | GET | `/api/goals/:id/tree-cost` | — | BFS rollup; cache keyed by `(rootGoalId, costGeneration)`. |

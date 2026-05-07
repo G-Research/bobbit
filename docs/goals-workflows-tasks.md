@@ -41,7 +41,12 @@ Goals can nest. A nested goal IS a goal — same record shape, same store, same 
 
 **Security**: `parentGoalId` is set only at creation (never updated). `rootGoalId` and `mergeTarget` are server-derived only — never accept these from a client. Cycle prevention's depth cap of 64 guards against DoS via a self-referential or arbitrarily deep parent chain. `acceptanceCriteria` is plain text extracted from markdown and must not be rendered as HTML.
 
-**Criteria-coverage check** (full implementation Phase 4): walks the union of {root spec, remaining subgoal step specs} for each acceptance criterion using a whitespace-normalised, case-insensitive substring match. Hashes don't work — they fail the moment the team-lead paraphrases. Team-leads MUST quote criteria verbatim in subgoal specs (a `## Covers` heading is the convention).
+**Criteria-coverage check** (full implementation Phase 4): walks the union of {root spec, remaining subgoal step specs} for each acceptance criterion using a whitespace-normalised, locale-pinned (`toLocaleLowerCase("en")`) substring match. Hashes don't work — they fail the moment the team-lead paraphrases. Team-leads MUST quote criteria verbatim in subgoal specs (a `## Covers` heading is the convention). The locale pin (R-023 remediation) prevents Turkish/Lithuanian dotless-i false negatives.
+
+**Other root-snapshotted fields not in the table above:**
+
+- `inlineRoles?: Record<roleName, Role>` — ephemeral roles snapshotted onto the goal at creation time. Resolved BEFORE the project/server/builtin role cascade by `resolveRole(goal, name, roleStore)` in `src/server/agent/resolve-role.ts`. Inherited by `goal_spawn_child` (server merges parent + child). Lazy-migration in `goal-store.load()` drops malformed values (non-object / array) with a `console.warn`. See [nested-goals.md — Ephemeral roles & workflows](nested-goals.md#ephemeral-roles--workflows-goal-scoped).
+- `workflow?: Workflow` — the goal's frozen workflow snapshot. Either built from `workflowId` lookup at creation, supplied inline as `body.workflow`, or inherited from `parent.workflow` via `stripSubgoalStepsForChildInheritance` for child goals.
 
 The verbatim list of fields, types, and validation rules is the source of truth for `src/server/agent/goal-store.ts::PersistedGoal`. The pure helper that parses the criteria from spec markdown lives at `src/shared/parse-acceptance-criteria.ts`.
 
