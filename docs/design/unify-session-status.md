@@ -629,3 +629,20 @@ That brings the net to roughly break-even or slightly negative. Implementer's ca
 
 - **Sidebar real-time status (Option 3 from the goal spec).** REST polling (`/api/sessions` every 5s) for sprite states of *other* sessions stays. If the contrast post-merge is jarring, file `goal-sidebar-realtime-status` to push status frames over a global subscription channel.
 - **Persistence of `statusVersion` across server restarts.** Not needed today — clients re-attach and adopt the fresh version. If we ever introduce mobile-client state sync across restarts (offline → online), revisit.
+
+---
+
+## 12. Implementation notes
+
+**Status: implemented at `76eb423b` on `goal/unify-sess-d3fd6b8d`.**
+
+The landing diff matches the design above. A few small deviations from the as-designed prose, recorded for future spelunkers (the body sections 1–11 are left intact for historical context):
+
+- **`broadcastStatus()` lives in its own file.** Section §3.2 placed the helper inside `session-manager.ts`. It actually landed at `src/server/agent/session-status.ts` so unit tests (`tests/session-manager-status.test.ts`) can exercise the helper without dragging in the rest of the SessionManager dependency graph (search, flexstore, sandbox, mcp). `session-manager.ts` re-exports it for the existing import sites. The signature, `extras` shape, and contract are unchanged.
+- **Helper accepts a `BroadcastableSession` structural subset.** Rather than typing the helper against the full `SessionInfo`, it's parameterised over the four fields it actually touches (`status`, `statusVersion`, `clients`, `streamingStartedAt?`). This keeps the test fixture trivial.
+- **`case "error"` retained no status-related side effects.** Per §4.5 the error frame stopped writing `isStreaming`; only `turnStartTime` cleanup remained. Confirmed in the implementation — the matching `session_status: idle` from the server is the sole status writer for the termination path.
+- **Derived getters chosen via `Object.defineProperty`** (the simpler alternative flagged in §2.1), not the Proxy variant. `isStreaming`, `isArchived`, and `isPreparing` are all installed once in the `RemoteAgent` constructor. The Proxy alternative was unnecessary because no reader iterates `state` keys.
+- **E2E test resilience.** The recovery spec at `tests/e2e/ui/session-status-recovery.spec.ts` initially used `waitForTimeout`; this was replaced with an event-driven idle wait (commit `76eb423b`) to keep the duplicate-message regression test deterministic against scheduler jitter.
+- **`_isAborting` mirror retained.** Section §8's optional further deletion (collapse `_isAborting` into a getter) was deferred — the field is updated in lock-step with `_state.status` inside the single `session_status` writer, so it cannot drift, and keeping it avoids touching every `isAborting` reader in this PR.
+
+The four client writers of `_state.isStreaming` collapsed to a single canonical-status writer, and the ~14 server transition sites collapsed to `broadcastStatus()` calls. Acceptance criteria 1–4 are covered by `tests/remote-agent-status.spec.ts`, `tests/session-manager-status.test.ts`, and `tests/e2e/ui/session-status-recovery.spec.ts`. AC #5 ("net code reduction") landed as the writer-count reduction described in §8 — raw LOC is roughly neutral once the heartbeat, gap-detection branch, and JSDoc are accounted for.
