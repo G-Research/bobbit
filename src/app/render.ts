@@ -545,8 +545,7 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 
 let _sandboxStatusFetching = false;
 
-/** Cached `repoCount` per project for the goal-creation multi-repo indicator.
- *  Phase 4b. Counts distinct `repo` values across configured components. */
+/** Cached `repoCount` per project (multi-repo indicator). Counts distinct `repo` values across components. */
 const _projectComponentsCache = new Map<string, { repoCount: number; componentCount: number; multiRepo: boolean }>();
 const _projectComponentsFetching = new Set<string>();
 function ensureProjectComponentsLoaded(projectId: string): void {
@@ -761,14 +760,10 @@ interface GoalFormConfig {
 	 */
 	commentable?: boolean;
 
-	// Phase 5b: inline workflow YAML (acceptance criterion §8.12)
+	// Inline workflow / inline roles YAML editors (parallel to body.workflow / inlineRoles).
 	inlineWorkflowYaml?: string;
 	inlineWorkflowYamlError?: string;
 	onInlineWorkflowYamlChange?: (e: Event) => void;
-	// Inline-roles editor — mirrors the inline-workflow textarea pattern
-	// exactly: a single collapsible "Advanced: paste inline roles YAML"
-	// section with a textarea bound to a module-level cache. No row preview,
-	// for consistency with inline-workflow.
 	inlineRolesYaml?: string;
 	inlineRolesYamlError?: string;
 	onInlineRolesYamlChange?: (e: Event) => void;
@@ -2408,7 +2403,7 @@ let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
-/** Phase 5b — inline workflow YAML for the goal proposal panel. */
+/** Inline workflow YAML for the goal proposal panel. */
 let _proposalInlineWorkflowYaml = "";
 let _proposalInlineWorkflowYamlError = "";
 let _proposalInlineWorkflowParsed: unknown | undefined;
@@ -2432,9 +2427,8 @@ function _validateInlineWorkflowYaml(yamlText: string): { parsed?: unknown; erro
 	}
 }
 
-// Module-level caches for the inline-roles textarea — mirror the inline-workflow
-// pattern. The textarea-driven cache wins at accept time; otherwise
-// handleCreateGoal falls back to state.activeProposals.goal.fields.inlineRoles.
+// Inline-roles textarea caches — mirror inline-workflow. Textarea-driven cache
+// wins at accept time; else falls back to fields.inlineRoles.
 let _proposalInlineRolesYaml = "";
 let _proposalInlineRolesYamlError = "";
 let _proposalInlineRolesParsed: Record<string, unknown> | undefined;

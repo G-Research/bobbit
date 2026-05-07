@@ -1695,28 +1695,18 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 }
 
 // ============================================================================
-// CASCADE CONFIRMATION DIALOGS — Phase 5b
+// CASCADE CONFIRMATION DIALOGS
 //
-// These mirror the existing `confirmAction` pattern but show explicit
-// per-cascade choices (`Archive descendants too`, `Pause/Resume descendants`)
-// instead of a single boolean confirm. The server-side endpoints require
-// `cascade=true|false` (422 otherwise), so the UI is the policy authority.
+// Per-cascade confirm dialogs (Archive / Pause / Resume). Server endpoints
+// require explicit `cascade=true|false` (422 otherwise) — UI is the policy
+// authority. See AGENTS.md "Cascade confirmation dialogs".
 // ============================================================================
 
 interface CascadeArchiveResult { archived: number }
 
 /**
- * Archive a goal with cascade UX. Emits `DELETE /api/goals/:id?cascade=...`.
- * Returns the count of goals archived (0 = cancelled).
- *
- * Flow:
- *  1. Pre-flight `DELETE /api/goals/:id?cascade=false`. If 200 → archived
- *     immediately (no descendants); resolve with `{archived: 1}`.
- *  2. If 409 `HAS_DESCENDANTS` → open the cascade dialog. The "Archive
- *     descendants too" checkbox is checked + read-only (you cannot orphan
- *     children); the user can cancel or confirm. On confirm, send
- *     `cascade=true`.
- *  3. Any other failure → reject (caller decides — typically just refresh).
+ * Archive a goal with cascade UX. Returns count of goals archived (0=cancelled).
+ * See docs/nested-goals.md and AGENTS.md "Cascade confirmation dialogs".
  */
 export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveResult> {
 	// R-027: this dialog is only invoked from `deleteGoal()` (api.ts) after
@@ -1846,12 +1836,8 @@ export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveR
 interface CascadePauseResult { paused: number }
 
 /**
- * Pause a goal with optional cascade. Emits `POST /api/goals/:id/pause`
- * with body `{ cascade: boolean }`. Cascade defaults to ON when descendants
- * exist (the typical user intent). Returns count of goals paused.
- *
- * If the goal has zero descendants, sends `cascade: false` directly without
- * showing a dialog.
+ * Pause a goal with optional cascade. Cascade defaults ON when descendants
+ * exist. Skips the dialog when descendantCount === 0.
  */
 /**
  * Cascade-stop confirmation. Returns:
@@ -2052,11 +2038,7 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 
 interface CascadeResumeResult { resumed: number }
 
-/**
- * Resume a goal with optional cascade. Symmetric to pause; checkbox
- * defaults OFF (the typical user intent is to resume only the focused
- * goal). Sends `POST /api/goals/:id/resume` with `{ cascade: boolean }`.
- */
+/** Resume a goal with optional cascade. Checkbox defaults OFF (resume target only). */
 export async function showResumeGoalDialog(goal: Goal, descendantCount: number): Promise<CascadeResumeResult> {
 	if (descendantCount === 0) {
 		const res = await gatewayFetch(`/api/goals/${goal.id}/resume`, {

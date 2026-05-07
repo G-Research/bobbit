@@ -1,34 +1,15 @@
 /**
- * Pure helper for recursive child-goal rendering in the sidebar (Phase 5a).
+ * Pure builder for the sidebar's nested child-goal forest. No DOM, no Lit.
  *
- * Builds a structured `NestedGoalNode` forest from a flat list of goals using
- * the `parentGoalId` relation. Returned nodes carry `depth`, `descendantCount`
- * and an optional `truncatedChildrenCount` populated when the render-depth cap
- * is hit. The Phase 5b consumer (sidebar Lit components) walks the forest;
- * this module never touches the DOM and never imports from `lit`.
+ * Invariants:
+ * - Top-level roots: `parentGoalId` undefined OR points at an absent goal
+ *   (orphan promotion covers archived / cross-project parents).
+ * - Children sorted by `createdAt` ASC, ties broken by id.
+ * - Archived excluded unless `includeArchived` is set.
+ * - `maxDepth` default 5 — beyond cap, `truncatedChildrenCount` is stamped.
+ * - Feature-flag-off: forest collapses to a flat list (see below).
  *
- * Top-level membership rule: a goal is a top-level root if its `parentGoalId`
- * is undefined OR points at a goal that does not exist in the input list
- * (orphan promotion — covers archived/cross-project parents).
- *
- * Sort: children at every level are ordered with non-archived first, then
- * archived, then by `createdAt` ASC so the sidebar renders active items
- * before archived ones. Top-level roots are returned in their original
- * input order — the caller decides how to sort the forest itself.
- *
- * Filtering: archived goals are excluded by default. Set `includeArchived`
- * to keep them. The exclusion is structural — if a parent is archived but
- * its children aren't, the children are promoted as orphans.
- *
- * Render-depth cap (`maxDepth`, default 5): when a node's depth + 1 would
- * exceed `maxDepth`, recursion stops and `truncatedChildrenCount` is set to
- * the number of children that would have been included. The cap matches the
- * sidebar's documented depth-5 cap (Phase 5 spec, Plan-tab nested rendering rule).
- *
- * **Subgoals (Experimental) feature gate**: when the system-scope flag is
- * off, the forest collapses to a flat list of top-level goals (every input
- * goal becomes its own root with no children). See
- * docs/design/subgoals-experimental-toggle.md.
+ * See docs/nested-goals.md and docs/design/subgoals-experimental-toggle.md.
  */
 import { isSubgoalsEnabled } from "./subgoals-flag.js";
 
@@ -92,9 +73,7 @@ function indexGoals(goals: NestableGoal[], opts: ResolvedOpts): BuildIndex {
 	const byId = new Map<string, NestableGoal>();
 	for (const g of visible) byId.set(g.id, g);
 	const childrenByParent = new Map<string | undefined, NestableGoal[]>();
-	// R-042: dedupe via byId rather than a parallel `enqueued` Set. The byId
-	// Map.set semantics already collapse same-id entries, and we iterate
-	// `byId.values()` here so each unique id is visited exactly once.
+	// Dedupe via byId.values() — Map.set collapses same-id entries.
 	for (const g of byId.values()) {
 		// Promote orphans (parent not in visible set) to top-level.
 		const effectiveParent = g.parentGoalId !== undefined && byId.has(g.parentGoalId)
@@ -104,15 +83,8 @@ function indexGoals(goals: NestableGoal[], opts: ResolvedOpts): BuildIndex {
 		if (list) list.push(g);
 		else childrenByParent.set(effectiveParent, [g]);
 	}
-	// Sort children: non-archived first, then archived, then by createdAt
-	// ASC, ties broken by id ASC. The non-archived-first split puts active
-	// children above completed/archived ones in the sidebar so users find
-	// in-progress work without scrolling past finished siblings. The id
-	// tiebreak makes order stable across renders when two goals share a
-	// createdAt timestamp (e.g. two same-titled siblings created back-to-back
-	// within the same millisecond, or two distinct goals with intentionally
-	// matching createdAt). Without it the user saw same-titled "duplicate"
-	// audits shuffle order between renders.
+	// Sort children by createdAt ASC, id ASC tiebreak — stable across renders
+	// when two siblings share a createdAt timestamp.
 	for (const list of childrenByParent.values()) {
 		list.sort((a, b) => {
 			const aa = (a.archived ? 1 : 0) - (b.archived ? 1 : 0);
@@ -131,10 +103,7 @@ function buildNode(
 	opts: ResolvedOpts,
 	visited: Set<string>,
 ): NestedGoalNode {
-	// Cycle guard — defensive against any data anomaly that would leave
-	// goal X reachable as its own descendant via the parentGoalId chain.
-	// `createGoal`'s cycle prevention should make this unreachable, but
-	// the tree builder must not loop indefinitely on malformed inputs.
+	// Cycle guard — defensive; createGoal already prevents cycles.
 	visited.add(goal.id);
 
 	const directChildren = idx.childrenByParent.get(goal.id) ?? [];
@@ -154,13 +123,8 @@ function buildNode(
 		return node;
 	}
 
-	// Detect title-collisions among the (about-to-render) sibling set so
-	// we can stamp a short id suffix on each colliding node. Without this
-	// the user sees "AUDIT: CLAUDE CODE" twice with no way to tell them
-	// apart at a glance. The suffix is the first 6 hex chars of the goal id
-	// — short enough to keep the row compact, long enough to be unique in
-	// any realistic sibling set. Same-id duplicates are already deduped at
-	// the index layer, so this only fires for genuine distinct-id sibs.
+	// Title-collision suffix: stamp a 6-hex-char id suffix on siblings that
+	// share a title so the user can tell duplicate-titled goals apart.
 	const titleCounts = new Map<string, number>();
 	for (const child of directChildren) {
 		titleCounts.set(child.title, (titleCounts.get(child.title) ?? 0) + 1);
@@ -169,9 +133,8 @@ function buildNode(
 	let descendants = 0;
 	for (const child of directChildren) {
 		if (visited.has(child.id)) {
-			// Cycle detected — render this child as a stub leaf with no
-			// further recursion. truncatedChildrenCount marks that we
-			// stopped here so the caller can show a placeholder.
+			// Cycle detected — render as stub leaf; truncatedChildrenCount=0
+			// marks the cut so the caller can show a placeholder.
 			const stub: NestedGoalNode = {
 				goal: child,
 				depth: depth + 1,
@@ -218,9 +181,8 @@ export function buildNestedGoalForest(
 	const resolved = resolveOpts(opts);
 	const idx = indexGoals(goals, resolved);
 	const visible = resolved.includeArchived ? goals : goals.filter(g => !g.archived);
-	// Collect top-level roots first so we can stamp title-collision
-	// suffixes on them too (sibling-rule applies at the forest root layer
-	// just as it does inside any node's children).
+	// Collect roots first so title-collision suffixes apply at the forest
+	// root layer too (same sibling-rule as nested children).
 	const rootSeen = new Set<string>();
 	const tops: NestableGoal[] = [];
 	for (const g of visible) {

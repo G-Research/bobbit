@@ -101,7 +101,7 @@ interface GoalGitStatus {
 	unpushed?: boolean;
 	status?: Array<{ file: string; status: string }>;
 	summary?: string;
-	/** Multi-repo per-repo envelope (Phase 4). Single-repo: { ".": <self> }. */
+	/** Multi-repo per-repo envelope. Single-repo: { ".": <self> }. */
 	repos?: Record<string, GoalRepoEntry>;
 }
 let gitStatus: GoalGitStatus | null = null;
@@ -161,7 +161,7 @@ let dashboardWsIntentionalClose = false;
 /** Current dashboard tab */
 let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children" = "gates";
 
-/** Tree-cost rollup (tree-cost rollup). Fetched lazily when the per-goal cost row is rendered. */
+/** Tree-cost rollup. Fetched lazily when the per-goal cost row is rendered. */
 interface TreeCostBreakdown {
 	goalId: string;
 	depth: number;
@@ -182,17 +182,12 @@ let treeCostExpanded = false;
 let treeCostInFlight = false;
 let treeCostLastFetchAt = 0;
 
-/**
- * Per-dashboard descendant slice (live + archived). Fetched from
- * `GET /api/goals/:id/descendants` so the Plan tab can resolve archived
- * children without depending on the sidebar's "See Archived" toggle.
- * Reset on dashboard navigation / clear.
- */
+/** Per-dashboard descendant slice (live + archived). See docs/nested-goals.md#plan-tab. */
 let dashboardDescendants: Goal[] = [];
 let dashboardDescendantsInFlight = false;
 let dashboardDescendantsLastFetchAt = 0;
 
-/** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned (Plan-tab nested rendering — three-way agreement). */
+/** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned. */
 let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
 const PLAN_RERENDER_THROTTLE_MS = 250;
 
@@ -210,12 +205,7 @@ function schedulePlanRerender(): void {
 	}, PLAN_RERENDER_THROTTLE_MS);
 }
 
-/**
- * Called by remote-agent on a `goal_spec_changed` WS event. Records the
- * timestamp so the dashboard header renders a transient "Spec edited
- * <relative-time>" pill for SPEC_PILL_WINDOW_MS, then schedules a
- * re-render to clear it.
- */
+/** Records `goal_spec_changed` ts so the header renders the transient pill for SPEC_PILL_WINDOW_MS. */
 export function notifyGoalSpecEditedForDashboard(goalId: string, ts: number): void {
 	recentSpecEdits.set(goalId, ts);
 	if (_specPillTimer != null) clearTimeout(_specPillTimer);
@@ -250,11 +240,7 @@ export function notifyGoalEventForDashboard(): void {
 	}
 }
 
-/**
- * Fetch the dashboard's descendant goal list (live + archived) so the Plan
- * tab can render archived children. Mirrors `fetchTreeCost`'s shape:
- * in-flight guard + currentGoalId staleness check.
- */
+/** Fetch live+archived descendants for the Plan tab. In-flight guard + staleness check. */
 async function fetchDashboardDescendants(goalId: string): Promise<void> {
 	if (dashboardDescendantsInFlight) return;
 	dashboardDescendantsInFlight = true;
@@ -1763,7 +1749,7 @@ function renderTabBar(): TemplateResult {
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
-	// Phase 5b: Plan and Children tabs (visibility from Phase 5a predicates).
+	// Plan and Children tabs (visibility predicates in goal-dashboard-tab-visibility.ts).
 	if (currentGoal) {
 		const childCount = state.goals.filter(g => g.parentGoalId === currentGoal!.id).length;
 		const archivedChildCount = state.goals.filter(g => g.parentGoalId === currentGoal!.id && g.archived).length;
@@ -2035,7 +2021,7 @@ function renderSpecTab(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: CHILDREN TAB (Phase 5b)
+// RENDER: CHILDREN TAB
 // ============================================================================
 
 interface ChildCardSummary {
@@ -2056,11 +2042,8 @@ function buildChildSummaries(parentGoalId: string, includeArchived: boolean): Ch
 		// otherwise we leave 0 (the user already sees a "Tree cost" rollup).
 		const breakdown = treeCost?.breakdown.find(b => b.goalId === g.id);
 		const cost = breakdown ? breakdown.costUsd : 0;
-		// gatesPassed: best-effort — full gate list not fetched per child here;
-		// the child's own dashboard shows the precise count. We approximate
-		// from the workflow snapshot's `metadata.passed === "true"` pattern
-		// when the Phase 6 server stamps it. For now, report 0 unless the
-		// goal is archived+complete (success terminal → all gates passed).
+		// gatesPassed: best-effort — only stamped on archived+complete (success terminal).
+		// The child's own dashboard shows the precise running count.
 		const gatesPassed = g.archived && g.state === "complete" ? gatesTotal : 0;
 		out.push({ goal: g, gatesPassed, gatesTotal, cost });
 	}
@@ -2144,7 +2127,7 @@ function renderChildrenTab(): TemplateResult {
 }
 
 // ============================================================================
-// RENDER: PLAN TAB (Phase 5b — DAG SVG with nested-rendering depth cap)
+// RENDER: PLAN TAB — DAG SVG with nested-rendering depth cap
 // ============================================================================
 
 /**
@@ -2243,9 +2226,8 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 		const colH = stepsInPhase.length * (PLAN_NODE_H + PLAN_NODE_GAP_Y);
 		if (colH > maxColH) maxColH = colH;
 	}
-	// Edges: explicit dependsOn references only — no bipartite full-connect.
-	// Phase 5 — if a step.dependsOn entry doesn't resolve to a known node we
-	// silently skip it (defence in depth; the API rejects unknown refs upstream).
+	// Edges: explicit dependsOn references only. Unknown refs silently skipped
+	// (defence in depth; the API rejects them upstream).
 	const edges: PlanEdge[] = [];
 	for (const s of steps) {
 		const toId = nodeIdByPlanId.get(s.planId);

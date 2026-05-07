@@ -937,7 +937,7 @@ export async function deleteGoal(id: string): Promise<void> {
 	const goalTitle = goal.title || "this goal";
 	const sessionsUnderGoal = state.gatewaySessions.filter((s) => s.goalId === id);
 
-	// Detect active team for this goal (mirror of heuristic in render-helpers.ts).
+	// Detect active team (mirror of render-helpers heuristic).
 	const isTeamGoal = !!(goal as any)?.team;
 	const teamActive = isTeamGoal && state.gatewaySessions.some(
 		(s) => (s.goalId === id || s.teamGoalId === id)
@@ -945,24 +945,18 @@ export async function deleteGoal(id: string): Promise<void> {
 			&& s.status !== "terminated",
 	);
 
-	// Count non-archived descendants client-side; if > 0, route through the
-	// cascade-confirmation dialog (Phase 5b). Otherwise fall through to the
-	// legacy single-goal flow (which also handles team-active teardown).
+	// descendants > 0 routes through cascade-confirm dialog; else single-goal confirm.
 	const { countDescendants, showArchiveGoalDialog, confirmAction } = await import("./dialogs.js");
 	const descendants = countDescendants(id);
 
 	if (descendants > 0) {
-		// Cascade flow — pre-flight + dialog. The dialog handles all REST calls.
 		if (teamActive) {
 			const ok = await teardownTeam(id);
 			if (!ok) return;
 		}
 		const result = await showArchiveGoalDialog(goal);
 		if (result.archived > 0) {
-			// Eagerly mark every archived goal in client state so the sidebar
-			// updates immediately. Without this, there's a window between the
-			// dialog's resolve and refreshSessions completing where the UI
-			// still shows the (now-server-archived) goals as live.
+			// Eager local archive flip avoids a flash-of-live-goals.
 			const allIds = collectGoalIdsFor(id);
 			eagerMarkArchived(allIds);
 			setHashRoute("landing");
@@ -971,7 +965,7 @@ export async function deleteGoal(id: string): Promise<void> {
 		return;
 	}
 
-	// Legacy single-goal path.
+	// Single-goal path — wording adapts to active-team state.
 	const title = teamActive ? "Stop team and archive goal?" : "Archive Goal";
 	let body = teamActive
 		? `The team will be stopped and "${goalTitle}" will be archived.`
@@ -980,7 +974,6 @@ export async function deleteGoal(id: string): Promise<void> {
 		body += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
 	}
 	const confirmLabel = teamActive ? "Stop & Archive" : "Archive";
-
 	const confirmed = await confirmAction(title, body, confirmLabel, teamActive);
 	if (!confirmed) return;
 
@@ -1035,7 +1028,7 @@ function eagerMarkArchived(ids: string[]): void {
 	}
 }
 
-/** Pause a goal with cascade UX (Phase 5b). */
+/** Pause a goal with cascade-confirm UX. */
 export async function pauseGoalWithDialog(id: string): Promise<void> {
 	const goal = state.goals.find((g) => g.id === id);
 	if (!goal) return;
@@ -1047,7 +1040,7 @@ export async function pauseGoalWithDialog(id: string): Promise<void> {
 	}
 }
 
-/** Resume a goal with cascade UX (Phase 5b). */
+/** Resume a goal with cascade-confirm UX. */
 export async function resumeGoalWithDialog(id: string): Promise<void> {
 	const goal = state.goals.find((g) => g.id === id);
 	if (!goal) return;
@@ -1149,11 +1142,8 @@ export async function teardownTeam(goalId: string, cascade = false): Promise<boo
  */
 export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
 	try {
-		// R-008: explicit `cascade=false` on the probe so we honour the
-		// AGENTS.md "every cascade-affecting REST call requires explicit
-		// cascade" contract. The server now returns 422 CASCADE_REQUIRED
-		// when the param is omitted, so the explicit value also future-
-		// proofs us against silent default flips.
+		// Explicit cascade=false on the probe — server returns 422
+		// CASCADE_REQUIRED otherwise. See AGENTS.md.
 		const probe = await gatewayFetch(`/api/goals/${goalId}/team/teardown?cascade=false`, { method: "POST" });
 		if (probe.ok) {
 			await refreshSessions();
