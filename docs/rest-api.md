@@ -117,15 +117,29 @@ Per-session review annotations are stored server-side so they survive browser cl
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List all goals. `?archived=true` returns archived goals with an `archivedSessions` field. Supports `?since=N` generation counter for conditional fetch |
-| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
+| `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf?, parentGoalId?, divergencePolicy?, maxConcurrentChildren?, inlineRoles?, workflow? }`). When the project has zero workflows AND the cascade is empty, lazy-seeds the built-in `general`/`feature`/`bug-fix`/`parent` workflows once (see [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold)). |
 | `GET` | `/api/goals/:id` | Get a goal |
-| `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
-| `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
+| `PUT` | `/api/goals/:id` | Update a goal. Updatable fields: `title`, `cwd`, `state`, `spec`, `team`, `repoPath`, `branch`, `reattemptOf`, `divergencePolicy`, `maxConcurrentChildren`, `paused`, `replanCount`, `acceptanceCriteria`, plus the parent/child relationship fields (`parentGoalId`, `rootGoalId`, `mergeTarget`, `spawnedFromPlanId`, `spawnedBySessionId`). |
+| `DELETE` | `/api/goals/:id` | Archive a goal (soft-delete). **Cascade contract**: requires explicit `?cascade=true\|false` — omitted returns 422 `{code:"CASCADE_REQUIRED"}`. With `?cascade=false`, returns 409 `{code:"HAS_DESCENDANTS", count}` if the goal has any non-archived descendants. With `?cascade=true`, walks descendants depth-first and archives each. |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
+| `GET` | `/api/goals/:id/tree-cost` | BFS tree-cost rollup across the goal and all non-archived descendants. Returns `{ rootGoalId, totalCost, perGoal: [{goalId, cost}, ...] }`. Cached on `(rootGoalId, costGeneration)` — invalidated when any descendant's cost mutates. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+#### Nested goals (the 9 `Children` operations + plan/policy)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/goals/:id/spawn-child` | Create or return an existing child goal under the parent, keyed by `planId`. Body: `{ planId, title, spec, workflowId?, workflow?, suggestedRole?, inlineRoles? }`. Idempotent on `planId` (re-call returns the existing child id, 200, instead of 201). The child's branch is created off the parent's branch HEAD; child's `ready-to-merge` will merge LOCALLY into the parent (no remote PR raised). Cycle prevention: cannot spawn a child whose id is in the parent's ancestor chain. |
+| `POST` | `/api/goals/:id/integrate-child/:childId` | Merge a child's branch locally into the parent and auto-archive the child on success. **RTM gate guard**: returns 409 `{code:"RTM_NOT_PASSED"}` unless the child's `ready-to-merge` gate has passed; pass `{force:true}` in the body to override (recovery only). On clean merge: child auto-archived, team torn down. On merge conflict: 409 `{conflict:true, output}` and the child stays live for manual resolution. |
+| `POST` | `/api/goals/:id/pause` | Cascade-required (`{cascade:boolean}`). Pauses the goal (and descendants if cascade), cancels in-flight gate verifications, and aborts any streaming team-lead session for each paused goal. |
+| `POST` | `/api/goals/:id/resume` | Cascade-required (`{cascade:boolean}`). Reverse of pause. |
+| `PATCH` | `/api/goals/:id/plan` | Submit a plan or replan against the goal's frozen `execution.verify[]`. Body: `{proposedSteps: ClassifierPlanStep[]}`. Each step must have non-empty `planId`, `title`, and either top-level `spec` or `subgoal.spec` (R-015 — 400 `{code:"INVALID_PLAN_STEP", index}` otherwise). Returns the classifier verdict (`noop \| fix-up \| expansion \| restructure \| criteria-drop`) and applies the divergence-policy decision matrix (SUBGOALS-SPEC §3.6): criteria-drop → 409 `CRITERIA_DROP`; restructure on a non-paused goal → 409 `RESTRUCTURE_REQUIRES_PAUSE`; expansion → always queued (`{requiresApproval, requestId}`); fix-up under strict → queued, under balanced/autonomous → applied; `replanCount > 5` → auto-pause for human review. |
+| `GET` | `/api/goals/:id/plan` | Read the goal's frozen plan with each child's resolved state. Returns `{steps, gateState, frozen, replanCount}` where each step includes `childGoalId` resolved via `verificationHarness.resolvePlanStepChild()` (5-tier: live in-progress → cached pointer → archived complete → live other → archived non-complete → rescue by title). |
+| `POST` | `/api/goals/:id/mutation/:requestId/decision` | Resolve a queued mutation request from `PATCH /plan`. Body: `{decision: "approve" \| "reject"}`. Approve replaces `execution.verify[]` with the proposed steps and increments `replanCount` (auto-pauses at >5). RequestId is implicitly scoped to goalId — the store key is `(goalId, requestId)` so cross-goal access naturally 404s. |
+| `PATCH` | `/api/goals/:id/policy` | Update `divergencePolicy` (`strict \| balanced \| autonomous`) and/or `maxConcurrentChildren` (1–8). Broadcasts `goal_state_changed` with the new policy values inline so clients don't refetch. `maxConcurrentChildren` is only consulted on root goals; children store the value but the harness reads the root's. |
 
 ### Goal Tasks
 
@@ -159,7 +173,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead) |
-| `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead). Cascade mirrors pause/archive: without `?cascade=true`, returns 409 `{code:"HAS_DESCENDANT_TEAMS", count, descendants:[{id,title}]}` if any non-archived descendant has a live team; with `?cascade=true`, walks descendants depth-first and tears down each team (best-effort per-goal), returning `{ok, toreDown, errors[]}`. |
+| `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead). **Cascade-required**: omitted `?cascade=` returns 422 `{code:"CASCADE_REQUIRED"}`. With `?cascade=false`, returns 409 `{code:"HAS_DESCENDANT_TEAMS", count, descendants:[{id,title}]}` if any non-archived descendant has a live team; with `?cascade=true`, walks descendants depth-first and tears down each team (best-effort per-goal), returning `{ok, toreDown, errors[]}`. |
 
 ### Tasks
 

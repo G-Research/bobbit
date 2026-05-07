@@ -266,7 +266,11 @@ Consequences:
 
 #### No default workflow scaffold
 
-Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback** - there is no path that silently seeds a canonical workflow set into a project. The previous fallback produced generic gates targeting a synthetic default component - gates that didn't match the project's real commands and which the assistant would have to redesign anyway, so the fallback hid rather than helped the design step. A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill, no error banner from this layer).
+Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback at project-creation time** — there is no path that silently seeds a canonical workflow set into a fresh project's `workflows[]`. The previous project-creation fallback produced generic gates targeting a synthetic default component (gates that didn't match the project's real commands and which the assistant would have to redesign anyway), so the fallback hid rather than helped the design step.
+
+**Exception — first-goal-creation lazy seed.** `POST /api/goals` checks whether *both* the config cascade AND the project's workflow store are empty for the requested `workflowId`; if so, it lazy-seeds the built-in `general` / `feature` / `bug-fix` / `parent` workflows into the project's store and re-resolves. This is a UX safety net so a user who creates a project via the simple New Project flow and immediately tries a goal doesn't hit `NO_WORKFLOWS_MSG`. The seed happens once, is logged (`[api] Auto-seeded N default workflows for project "<name>" on first goal creation`), and the project assistant is still expected to design the real workflows afterwards. The seed is **not** a project-creation behaviour and does not run when the project already has any workflow defined.
+
+A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill at project-creation time, no error banner from this layer).
 
 **Removed seed sites** (all three previously seeded `general` / `feature` / `bug-fix` / `quick-fix` targeting a synthetic default component):
 
