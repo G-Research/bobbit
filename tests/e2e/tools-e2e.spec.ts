@@ -297,7 +297,8 @@ test.describe("Goals API", () => {
 			body: JSON.stringify({ title: "Archive test", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
-		const resp = await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
+		// Server requires explicit cascade query param (422 CASCADE_REQUIRED otherwise).
+		const resp = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 		expect(resp.status).toBe(200);
 		// Goal still exists but is archived
 		const getResp = await apiFetch(`/api/goals/${goalId}`);

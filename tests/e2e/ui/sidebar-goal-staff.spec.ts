@@ -131,8 +131,9 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		// Verify the goal appears in the live section
 		await expect(page.getByText("SB23 Archive Test").first()).toBeVisible({ timeout: 10_000 });
 
-		// Archive via API
-		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		// Archive via API. Server requires explicit cascade query param now
+		// (422 CASCADE_REQUIRED otherwise).
+		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 
 		// Reload to get fresh state
 		await page.reload();

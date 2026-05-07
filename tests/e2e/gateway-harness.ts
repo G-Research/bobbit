@@ -115,7 +115,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
-		const bobbitDir = join(
+		let bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-browser-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
 		);
@@ -123,6 +123,16 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Canonicalize bobbitDir so callers downstream (process.env.BOBBIT_DIR,
+		// bobbitDir() helper, project rootPaths derived from it) see the real
+		// path. On macOS, /var/folders is a symlink to /private/var/folders,
+		// which causes POST /api/projects to 400 with code:"symlink_root"
+		// unless acceptCanonical:true is set. Canonicalizing once at the
+		// boundary eliminates the entire class of failure for derived paths.
+		try {
+			const { realpathSync } = await import("node:fs");
+			bobbitDir = realpathSync(bobbitDir);
+		} catch { /* not all platforms / first-call edge cases — fall back */ }
 		// Pre-create subdirectories that the server writes into. Under heavy
 		// parallel load on Windows, concurrent first-use of these dirs races
 		// with scaffolding and produces spurious ENOENT — creating them up
