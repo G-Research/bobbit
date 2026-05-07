@@ -37,7 +37,8 @@ export type ClientMessage =
 	| { type: "deny_tool_permission"; toolName: string }
 	| { type: "reorder_queue"; messageIds: string[] }
 	| { type: "restart_agent" }
-	| { type: "resume"; fromSeq: number };
+	| { type: "resume"; fromSeq: number }
+	| { type: "status_resync" };
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
@@ -50,7 +51,17 @@ export type ServerMessage =
 	| { type: "client_joined"; clientId: string }
 	| { type: "client_left"; clientId: string }
 	| { type: "error"; message: string; code: string }
-	| { type: "session_status"; status: string; streamingStartedAt?: number; archivedAt?: number; /* status includes "aborting" */ }
+	| {
+		type: "session_status";
+		status: "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";
+		/** Monotonic version of `session.status`. Bumped on every transition.
+		 *  Heartbeat frames re-broadcast the current value WITHOUT bumping so the
+		 *  client can treat them as idempotent (`<= lastStatusVersion` ⇒ ignore).
+		 *  See docs/design/unify-session-status.md. */
+		statusVersion: number;
+		streamingStartedAt?: number;
+		archivedAt?: number;
+	}
 	| { type: "session_archived"; sessionId: string; archivedAt: number }
 	/** Sent to ALL authenticated clients (not just the session's own clients)
 	 * when a session is terminated/archived/purged. Lets sidebars and dashboards

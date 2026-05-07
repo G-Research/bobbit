@@ -115,6 +115,11 @@ export interface SessionInfo {
 	title: string;
 	cwd: string;
 	status: SessionStatus;
+	/** Monotonic version of `session.status`. Bumped on every status transition
+	 *  (via `broadcastStatus`). Heartbeats re-broadcast WITHOUT bumping so the
+	 *  client can treat them as idempotent. In-memory only — not persisted.
+	 *  See docs/design/unify-session-status.md. */
+	statusVersion: number;
 	createdAt: number;
 	lastActivity: number;
 	clients: Set<WebSocket>;
@@ -342,6 +347,12 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	}
 }
 
+// `broadcastStatus()` lives in `./session-status.ts` so unit tests can import
+// the pure helper without dragging in the full SessionManager dependency
+// graph. Re-exported here for backward compat with existing call sites.
+export { broadcastStatus } from "./session-status.js";
+import { broadcastStatus } from "./session-status.js";
+
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
@@ -437,6 +448,12 @@ export class SessionManager {
 	/** @internal Non-PCM test path only. */
 	private _testTaskManager: TaskManager | null = null;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
+	/** Heartbeat timer: re-broadcasts the current `session_status` for every
+	 *  active session every STATUS_HEARTBEAT_INTERVAL_MS, WITHOUT bumping
+	 *  `statusVersion`. Self-heals any client that missed a transition frame.
+	 *  See docs/design/unify-session-status.md §3.4. */
+	private _statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -540,8 +557,7 @@ export class SessionManager {
 					if (!worktreeOk) {
 						console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
 						try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
-						session.status = "terminated";
-						broadcast(session.clients, { type: "session_status", status: "terminated" });
+						broadcastStatus(session, "terminated");
 						continue;
 					}
 				}
@@ -573,22 +589,39 @@ export class SessionManager {
 						for (const ws of savedClients) {
 							if ((ws as any).readyState === 1) restored.clients.add(ws);
 						}
-						broadcast(restored.clients, { type: "session_status", status: "idle" });
+						broadcastStatus(restored, "idle");
 					}
 					console.log(`[session-manager] Session ${session.id} recovered successfully`);
 				} catch (err) {
 					console.warn(`[session-manager] Failed to restore session ${session.id} after container recreation:`, err);
 					// Put it back as terminated so user can still see it
-					session.status = "terminated";
 					this.sessions.set(session.id, session);
 					for (const ws of savedClients) {
 						if ((ws as any).readyState === 1) session.clients.add(ws);
 					}
-					broadcast(session.clients, { type: "session_status", status: "terminated" });
+					broadcastStatus(session, "terminated");
 				}
 			} catch (err) {
 				console.error(`[session-manager] Error recovering session ${session.id}:`, err);
 			}
+		}
+	}
+
+	/**
+	 * Re-broadcast the current `session_status` for every session that has
+	 * connected clients, WITHOUT bumping `statusVersion`. Heartbeat. Idempotent
+	 * on the client (they ignore frames whose version <= lastStatusVersion).
+	 */
+	private _emitStatusHeartbeat(): void {
+		for (const session of this.sessions.values()) {
+			if (session.clients.size === 0) continue;
+			if (session.status === "terminated") continue;
+			broadcast(session.clients, {
+				type: "session_status",
+				status: session.status,
+				statusVersion: session.statusVersion ?? 0,
+				...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
+			});
 		}
 	}
 
@@ -614,6 +647,14 @@ export class SessionManager {
 			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
 		}
+
+		// Start the status heartbeat. Runs for the lifetime of this manager;
+		// `unref()` so unit tests don't hang on process exit.
+		this._statusHeartbeatTimer = setInterval(
+			() => this._emitStatusHeartbeat(),
+			SessionManager.STATUS_HEARTBEAT_INTERVAL_MS,
+		);
+		(this._statusHeartbeatTimer as any).unref?.();
 	}
 
 	/** Resolve goal tools extension path via toolManager cascade (with fallback). */
@@ -1358,10 +1399,9 @@ export class SessionManager {
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
 			session.lastPromptText = prefixedDispatch;
 			session.lastPromptImages = opts?.images;
-			session.status = "streaming";
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
+			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 			await session.rpcClient.prompt(prefixedDispatch, opts?.images);
 			return;
 		}
@@ -1614,10 +1654,9 @@ export class SessionManager {
 		session.lastPromptImages = next.images;
 
 		// Optimistic status update to prevent double-dispatch race
-		session.status = "streaming";
 		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-		broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
+		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -1637,8 +1676,7 @@ export class SessionManager {
 					isSteered: r.isSteered,
 				});
 			}
-			session.status = "idle";
-			broadcast(session.clients, { type: "session_status", status: "idle" });
+			broadcastStatus(session, "idle");
 			this.broadcastQueue(session);
 			// Schedule a follow-up drain on the next tick so the rows we just
 			// re-enqueued get another chance once the bridge has finished its
@@ -1725,13 +1763,12 @@ export class SessionManager {
 		}
 
 		if (event.type === "agent_start") {
-			session.status = "streaming";
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.turnHadToolCalls = false;
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
+			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 		} else if (event.type === "agent_end") {
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
@@ -1774,11 +1811,10 @@ export class SessionManager {
 				session.consecutiveErrorTurns = 0;
 			}
 
-			session.status = "idle";
 			session.streamingStartedAt = undefined;
 			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
-			broadcast(session.clients, { type: "session_status", status: "idle" });
+			broadcastStatus(session, "idle");
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
@@ -1808,16 +1844,12 @@ export class SessionManager {
 			session.isCompacting = false;
 			if (!event.aborted) this.refreshAfterCompaction(session);
 		} else if (event.type === "process_exit") {
-			session.status = "terminated";
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: false,
 				streamingStartedAt: undefined,
 			});
-			broadcast(session.clients, {
-				type: "session_status",
-				status: "terminated",
-			});
+			broadcastStatus(session, "terminated");
 		}
 
 		// Index completed messages for search (user + assistant). The
@@ -2149,7 +2181,7 @@ export class SessionManager {
 			// Restore in-memory grant state that restoreSession doesn't know about
 			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			broadcast(restored.clients, { type: "session_status", status: "idle" });
+			broadcastStatus(restored, "idle");
 		}
 	}
 
@@ -2194,7 +2226,7 @@ export class SessionManager {
 			}
 			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			broadcast(restored.clients, { type: "session_status", status: "idle" });
+			broadcastStatus(restored, "idle");
 		} else {
 			throw new Error("Failed to restore session after restart");
 		}
@@ -2417,6 +2449,7 @@ export class SessionManager {
 			title: ps.title,
 			cwd: ps.cwd,
 			status: "terminated",
+			statusVersion: 0,
 			restoreError,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
@@ -2623,6 +2656,7 @@ export class SessionManager {
 			title: ps.title,
 			cwd: ps.cwd,
 			status: "starting",
+			statusVersion: 0,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
@@ -2701,7 +2735,7 @@ export class SessionManager {
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
 
-		session.status = "idle";
+		broadcastStatus(session, "idle");
 
 		// For sandbox sessions, resolve the container ID so git-status and other
 		// host-side operations can run commands inside the container via docker exec.
@@ -2770,6 +2804,7 @@ export class SessionManager {
 				title: "New session",
 				cwd, // temporary — will be updated when worktree is ready
 				status: "preparing",
+				statusVersion: 0,
 				createdAt: now,
 				lastActivity: now,
 				clients: new Set(),
@@ -3455,6 +3490,7 @@ export class SessionManager {
 			title: opts.title,
 			cwd: opts.cwd,
 			status: "idle",
+			statusVersion: 0,
 			createdAt: now,
 			lastActivity: now,
 			clients: new Set(),
@@ -3517,7 +3553,7 @@ export class SessionManager {
 
 		return () => {
 			unsub();
-			session.status = "terminated";
+			broadcastStatus(session, "terminated");
 			for (const client of session.clients) {
 				client.close(1000, "Session terminated");
 			}
@@ -3841,14 +3877,13 @@ export class SessionManager {
 		// Swap in the new bridge and update metadata
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
-		session.status = "idle";
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowed;
 
 		roleStore.update(id, { role: role.name, accessory: role.accessory });
 
-		broadcast(session.clients, { type: "session_status", status: "idle" } as any);
+		broadcastStatus(session, "idle");
 
 		// Refresh messages and state for connected clients
 		try {
@@ -4092,7 +4127,7 @@ export class SessionManager {
 
 		session.unsubscribe();
 		await session.rpcClient.stop();
-		session.status = "terminated";
+		broadcastStatus(session, "terminated");
 
 		// Clean up background processes (abort any in-flight waits first so
 		// hanging HTTP handlers resolve cleanly, then kill the bg processes).
@@ -4700,8 +4735,7 @@ export class SessionManager {
 		if (session.status !== "streaming") return;
 
 		// Broadcast aborting status so UI shows feedback during grace period
-		session.status = "aborting";
-		broadcast(session.clients, { type: "session_status", status: "aborting" });
+		broadcastStatus(session, "aborting");
 
 		// CRITICAL: register the agent_end listener BEFORE calling abort().
 		// The pi-agent-core SDK can emit agent_end synchronously inside the
@@ -4762,9 +4796,8 @@ export class SessionManager {
 		this._reconcileAfterAbort(session);
 
 		// Emit agent_end so clients know streaming stopped
-		session.status = "idle";
 		broadcast(session.clients, { type: "event", data: { type: "agent_end", messages: [] } });
-		broadcast(session.clients, { type: "session_status", status: "idle" });
+		broadcastStatus(session, "idle");
 
 		// Restart the agent process
 		try {
@@ -4856,16 +4889,14 @@ export class SessionManager {
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
 
-			session.status = "idle";
-			broadcast(session.clients, { type: "session_status", status: "idle" });
+			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
 			// Drain any queued messages (steered first, then normal)
 			this.drainQueue(session);
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
-			session.status = "terminated";
-			broadcast(session.clients, { type: "session_status", status: "terminated" });
+			broadcastStatus(session, "terminated");
 		}
 	}
 
@@ -4873,6 +4904,10 @@ export class SessionManager {
 		if (this.purgeInterval) {
 			clearInterval(this.purgeInterval);
 			this.purgeInterval = null;
+		}
+		if (this._statusHeartbeatTimer) {
+			clearInterval(this._statusHeartbeatTimer);
+			this._statusHeartbeatTimer = null;
 		}
 
 		// Don't remove from store on shutdown — sessions should survive restart.
@@ -4891,6 +4926,8 @@ export class SessionManager {
 
 			session.unsubscribe();
 			await session.rpcClient.stop();
+			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
+			// Status mutation here is the documented exception to the broadcastStatus rule.
 			session.status = "terminated";
 
 			for (const client of session.clients) {

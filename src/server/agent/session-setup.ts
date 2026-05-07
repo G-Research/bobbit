@@ -14,7 +14,7 @@ import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -772,10 +772,8 @@ export async function executeWorktreeAsync(
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }
 	}
 
-	session.status = "idle";
-
-	// Notify connected clients that the session is ready
-	ctx.broadcast(session.clients, { type: "session_status", status: "idle" });
+	// Notify connected clients that the session is ready (single writer + version bump).
+	broadcastStatus(session, "idle");
 
 	// Fire model + thinking level immediately (non-blocking)
 	postSpawnFireAndForget(session, plan, ctx);
@@ -806,6 +804,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			: plan.title),
 		cwd: effectiveCwd,
 		status: "starting",
+		statusVersion: 0,
 		createdAt: now,
 		lastActivity: now,
 		clients: new Set(),
@@ -981,8 +980,8 @@ export function handleSetupFailure(
 	// 2. Archive in store (preserves evidence)
 	ctx.store.archive(session.id);
 
-	// 3. Notify connected clients
-	ctx.broadcast(session.clients, { type: "session_status", status: "terminated" });
+	// 3. Notify connected clients (single writer + version bump).
+	broadcastStatus(session, "terminated");
 
 	// 4. Background worktree cleanup (slow, non-blocking)
 	if (plan.worktreePath && plan.repoPath && plan.branch) {

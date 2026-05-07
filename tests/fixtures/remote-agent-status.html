@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head><title>RemoteAgent canonical status tests</title></head>
+<body>
+<script>
+/**
+ * Mirrors the canonical-status logic in `src/app/remote-agent.ts`:
+ *   - `_state.status` (single canonical field, set ONLY by `case "session_status"`
+ *     and `case "state"`)
+ *   - `isStreaming` getter ≡ `status === "streaming"`
+ *   - `_lastStatusVersion` tracker; idempotent on `<=`, gap-resync on `>+1`
+ *   - `agent_start` / `agent_end` / `error` are signals only — they MUST NOT
+ *     write `_state.status`.
+ *
+ * Each test asserts the divergence-impossibility invariant:
+ *   stopButtonVisible (`agent.isStreaming`) ≡ spriteBusy (`agent.state.status === "streaming"`)
+ * after every frame. See docs/design/unify-session-status.md §6.1.
+ */
+class FakeRemoteAgent {
+	constructor() {
+		this._state = { status: "idle", turnStartTime: null, error: undefined };
+		Object.defineProperty(this._state, "isStreaming", {
+			get: () => this._state.status === "streaming",
+			enumerable: true,
+		});
+		this._lastStatusVersion = 0;
+		this._isAborting = false;
+		this._sent = [];
+		this._statusChanges = [];
+		this.onStatusChange = (s) => this._statusChanges.push(s);
+		this._taskStartTime = null;
+		this._beepCount = 0;
+		this._faviconBadgeCount = 0;
+	}
+
+	get isStreaming() { return this._state.status === "streaming"; }
+	get state() { return this._state; }
+
+	send(msg) { this._sent.push(msg); }
+
+	// Mirrors `case "session_status"` in src/app/remote-agent.ts.
+	handleSessionStatus(msg) {
+		const v = typeof msg.statusVersion === "number" ? msg.statusVersion : undefined;
+		if (v !== undefined && v <= this._lastStatusVersion) {
+			this.onStatusChange?.(msg.status);
+			return;
+		}
+		if (v !== undefined && v > this._lastStatusVersion + 1) {
+			this.send({ type: "status_resync" });
+		}
+		if (v !== undefined) this._lastStatusVersion = v;
+		this._state.status = msg.status;
+		this._state.turnStartTime =
+			msg.status === "streaming"
+				? (msg.streamingStartedAt ?? this._state.turnStartTime ?? Date.now())
+				: null;
+		this._isAborting = msg.status === "aborting";
+		this.onStatusChange?.(msg.status);
+	}
+
+	// Mirrors `case "state"` in src/app/remote-agent.ts.
+	handleState(data) {
+		if (typeof data?.status === "string") {
+			this._state.status = data.status;
+			if (typeof data.statusVersion === "number") {
+				this._lastStatusVersion = data.statusVersion;
+			}
+		} else if (data?.isStreaming !== undefined) {
+			this._state.status = data.isStreaming ? "streaming" : "idle";
+		}
+	}
+
+	// Mirrors agent_start / agent_end / error — signals only, NO status write.
+	handleAgentEvent(ev) {
+		if (ev.type === "agent_start") {
+			this._state.error = undefined;
+			this._taskStartTime = Date.now();
+			this._state.turnStartTime = this._taskStartTime;
+		} else if (ev.type === "agent_end") {
+			this._beepCount++;
+			this._faviconBadgeCount++;
+			this._taskStartTime = null;
+			this._state.turnStartTime = null;
+		}
+	}
+
+	handleError(_msg) {
+		this._state.turnStartTime = null;
+		this._state.error = "fail";
+		// CRITICAL: must NOT mutate _state.status.
+	}
+
+	// Sprite predicate. In production this lives on `gatewaySessions[i].status`;
+	// here we model it as the same canonical status (which is the goal — they
+	// were divergent before this work).
+	get spriteBusy() { return this._state.status === "streaming"; }
+	get stopVisible() { return this.isStreaming; }
+}
+
+const results = [];
+function t(name, fn) {
+	try { fn(); results.push({ name, passed: true }); }
+	catch (e) { results.push({ name, passed: false, error: String(e && e.message || e) }); }
+}
+function assertEq(a, b, msg) {
+	const ja = JSON.stringify(a), jb = JSON.stringify(b);
+	if (ja !== jb) throw new Error((msg || "assertEq") + `: expected ${jb}, got ${ja}`);
+}
+function assertInvariant(a, label) {
+	if (a.stopVisible !== a.spriteBusy) {
+		throw new Error(`divergence (${label}): stopVisible=${a.stopVisible} spriteBusy=${a.spriteBusy} status=${a._state.status}`);
+	}
+}
+
+// 1. Happy path: idle → streaming → idle. Invariant holds after every frame.
+t("happy path — full lifecycle", () => {
+	const a = new FakeRemoteAgent();
+	a.handleSessionStatus({ status: "idle", statusVersion: 1 });
+	assertInvariant(a, "after v1 idle");
+	a.handleAgentEvent({ type: "agent_start" });
+	assertInvariant(a, "after agent_start (no status write)");
+	a.handleSessionStatus({ status: "streaming", statusVersion: 2 });
+	assertInvariant(a, "after v2 streaming");
+	a.handleAgentEvent({ type: "agent_end" });
+	assertInvariant(a, "after agent_end (no status write)");
+	a.handleSessionStatus({ status: "idle", statusVersion: 3 });
+	assertInvariant(a, "after v3 idle");
+	assertEq(a._state.status, "idle");
+	assertEq(a._lastStatusVersion, 3);
+	assertEq(a.isStreaming, false);
+	assertEq(a._beepCount, 1, "agent_end fired beep exactly once");
+});
+
+// 2. Missed agent_end: server still sends session_status{idle, v:3}.
+//    Status should converge regardless.
+t("missed agent_end — status_status drives convergence", () => {
+	const a = new FakeRemoteAgent();
+	a.handleSessionStatus({ status: "idle", statusVersion: 1 });
+	a.handleSessionStatus({ status: "streaming", statusVersion: 2 });
+	// agent_end DROPPED.
+	a.handleSessionStatus({ status: "idle", statusVersion: 3 });
+	assertEq(a.isStreaming, false, "status converged to idle");
+	assertEq(a._beepCount, 0, "no beep — no agent_end fired");
+	assertInvariant(a, "post-recovery");
+});
+
+// 3. Gap detection: lastVersion=2, frame v=4 arrives. Apply + send status_resync.
+t("statusVersion gap triggers status_resync request", () => {
+	const a = new FakeRemoteAgent();
+	a.handleSessionStatus({ status: "idle", statusVersion: 1 });
+	a.handleSessionStatus({ status: "streaming", statusVersion: 2 });
+	a._sent = [];
+	// v=3 dropped. v=4 arrives.
+	a.handleSessionStatus({ status: "idle", statusVersion: 4 });
+	assertEq(a._sent[0], { type: "status_resync" }, "resync requested");
+	assertEq(a._lastStatusVersion, 4, "version advanced after gap");
+	assertEq(a._state.status, "idle", "frame still applied");
+	assertInvariant(a, "after gap recovery");
+});
+
+// 4. Stale frame (v <= last): ignored. status unchanged. Side effects still fire.
+t("stale frame is dropped (idempotent on <=)", () => {
+	const a = new FakeRemoteAgent();
+	a.handleSessionStatus({ status: "streaming", statusVersion: 5 });
+	a.handleSessionStatus({ status: "streaming", statusVersion: 10 });
+	const beforeStatus = a._state.status;
+	a._statusChanges = [];
+	// Stale frame from a network reorder.
+	a.handleSessionStatus({ status: "idle", statusVersion: 7 });
+	assertEq(a._state.status, beforeStatus, "stale frame ignored");
+	assertEq(a._lastStatusVersion, 10, "version unchanged");
+	assertEq(a._statusChanges, ["idle"], "side effect (onStatusChange) still fires");
+	assertInvariant(a, "post-stale");
+});
+
+// 5. Heartbeat (== lastVersion): idempotent — no extra status write.
+t("heartbeat (same version) is idempotent", () => {
+	const a = new FakeRemoteAgent();
+	a.handleSessionStatus({ status: "streaming", statusVersion: 5 });
+	a._statusChanges = [];
+	a.handleSessionStatus({ status: "streaming", statusVersion: 5 });
+	a.handleSessionStatus({ status: "streaming", statusVersion: 5 });
+	assertEq(a._lastStatusVersion, 5, "version not bumped");
+	assertEq(a._state.status, "streaming");
+	assertEq(a._statusChanges, ["streaming", "streaming"], "onStatusChange fired per heartbeat (UI cue)");
+	assertInvariant(a, "during heartbeat run");
+});
+
+// 6. Snapshot priming via case "state": status + statusVersion seeded; subsequent
+//    live frame at v+1 applies normally; v <= primed value is dropped.
+t("case 'state' snapshot primes _lastStatusVersion", () => {
+	const a = new FakeRemoteAgent();
+	a.handleState({ status: "streaming", statusVersion: 42 });
+	assertEq(a._lastStatusVersion, 42);
+	assertEq(a._state.status, "streaming");
+	a.handleSessionStatus({ status: "streaming", statusVersion: 41 }); // stale
+	assertEq(a._lastStatusVersion, 42, "stale post-snapshot frame ignored");
+	a.handleSessionStatus({ status: "idle", statusVersion: 43 });
+	assertEq(a._state.status, "idle");
+	assertInvariant(a, "post-snapshot");
+});
+
+// 7. case "error": MUST NOT mutate status. The matching session_status from
+//    the server is what flips canonical state.
+t("case 'error' is signal-only — no status mutation", () => {
+	const a = new FakeRemoteAgent();
+	a.handleSessionStatus({ status: "streaming", statusVersion: 1 });
+	a.handleError({ message: "fail" });
+	assertEq(a._state.status, "streaming", "status unchanged by error frame");
+	assertEq(a.isStreaming, true);
+	// Server's matching session_status arrives next:
+	a.handleSessionStatus({ status: "idle", statusVersion: 2 });
+	assertEq(a.isStreaming, false);
+	assertInvariant(a, "post-error-recovery");
+});
+
+// 8. Stuck-flag scenario (the production duplicate-message bug): client lands
+//    in status=streaming with no live frames; heartbeat from server
+//    (same version, current status="idle") arrives. Stale heartbeat (v <
+//    last) does NOT heal; gap heartbeat (v > last+1) DOES via gap path.
+t("heartbeat-driven recovery from stuck-streaming", () => {
+	const a = new FakeRemoteAgent();
+	// Drive into stuck state via a frame.
+	a.handleSessionStatus({ status: "streaming", statusVersion: 5 });
+	assertEq(a.isStreaming, true);
+	// Server has actually transitioned to idle and is now sending heartbeats
+	// at v=7 (it bumped to 6 on the unseen idle transition; heartbeat reuses 7).
+	a.handleSessionStatus({ status: "idle", statusVersion: 7 });
+	assertEq(a._sent.find(m => m.type === "status_resync") !== undefined, true, "resync requested");
+	assertEq(a._state.status, "idle", "client healed to idle");
+	assertEq(a.isStreaming, false);
+	assertInvariant(a, "after heartbeat-driven recovery (acceptance criterion 2)");
+});
+
+window.__TEST_RESULTS = results;
+</script>
+</body>
+</html>

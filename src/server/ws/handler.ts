@@ -139,6 +139,8 @@ function buildArchivedStateData(
 		archived: true,
 		archivedAt: archived.archivedAt,
 		title: archived.title,
+		status: "archived",
+		statusVersion: 0,
 	};
 	if (archived.modelProvider && archived.modelId) {
 		const meta = inferMeta(archived.modelId);
@@ -259,7 +261,7 @@ export function handleWebSocketConnection(
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
 					send(ws, { type: "auth_ok" });
-					send(ws, { type: "session_status", status: "archived", archivedAt: archived.archivedAt });
+					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
 					// Push persisted model + image model immediately. Without this, the
 					// client renders its hardcoded default model (claude-opus-4-6) in
@@ -293,7 +295,10 @@ export function handleWebSocketConnection(
 			if (session.status !== "preparing" && session.eventBuffer.size > 0) {
 				session.rpcClient.getState().then((stateResponse) => {
 					if (stateResponse.success) {
-						send(ws, { type: "state", data: stateResponse.data });
+						// Splice canonical session status + version so the client's `case "state"`
+						// can prime `_lastStatusVersion` from the snapshot.
+						const spliced = { ...(stateResponse.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
+						send(ws, { type: "state", data: spliced });
 						sendImageModelState(ws, sessionManager, sessionId);
 						// If agent state lacks model info, supplement with persisted data
 						const data = stateResponse.data as Record<string, unknown> | undefined;
@@ -320,7 +325,7 @@ export function handleWebSocketConnection(
 				}
 			}
 
-			send(ws, { type: "session_status", status: session.status, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
+			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
 
@@ -571,7 +576,11 @@ export function handleWebSocketConnection(
 					try {
 						const stateResp = await session.rpcClient.getState();
 						if (stateResp.success) {
-							send(ws, { type: "state", data: stateResp.data });
+							// Splice canonical session status + version into the snapshot so
+							// the client's `case "state"` can prime `_lastStatusVersion` from
+							// the snapshot path (e.g. on reconnect via get_state).
+							const spliced = { ...(stateResp.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
+							send(ws, { type: "state", data: spliced });
 							sendImageModelState(ws, sessionManager, sessionId);
 							// If agent state lacks model info, supplement with persisted data
 							const data = stateResp.data as Record<string, unknown> | undefined;
@@ -584,6 +593,18 @@ export function handleWebSocketConnection(
 					} catch {
 						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
+					break;
+				}
+				case "status_resync": {
+					// Client detected a gap (statusVersion jumped). Send a fresh
+					// `session_status` frame carrying the current status + version.
+					// Indistinguishable from a heartbeat; client treats it idempotently.
+					send(ws, {
+						type: "session_status",
+						status: session.status,
+						statusVersion: session.statusVersion ?? 0,
+						...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
+					});
 					break;
 				}
 				case "get_messages": {
