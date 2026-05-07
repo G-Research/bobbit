@@ -50,6 +50,12 @@ const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
  */
 export type ConnectionStatus = "connected" | "reconnecting" | "disconnected";
 
+/** Canonical client-side session status. Mirrors the server's `SessionStatus`
+ *  union (`src/server/agent/session-manager.ts`). The legacy boolean readers
+ *  `isStreaming` / `isArchived` / `isPreparing` are now getters derived from
+ *  this single field. See docs/design/unify-session-status.md. */
+export type ClientSessionStatus = "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";
+
 /** A message waiting in the server-side prompt queue (mirrors server QueuedMessage) */
 export interface QueuedMessage {
 	id: string;
@@ -131,8 +137,13 @@ export class RemoteAgent {
 	/** True while we've asked for a snapshot refresh due to a seq gap / fallback. */
 	private _inResumeFallback = false;
 
+	/** Monotonic statusVersion of the last applied `session_status` frame.
+	 *  Used to drop heartbeats / duplicates (`<=` lastApplied), apply normal
+	 *  increments (`==` last+1), and request a `status_resync` on gaps (`>` last+1).
+	 *  Reset to 0 on `reset()`. See docs/design/unify-session-status.md §4.2. */
+	private _lastStatusVersion = 0;
+
 	// Auto-reconnect state
-	private _stateRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _reconnectAttempt = 0;
 	private _intentionalDisconnect = false;
@@ -180,11 +191,11 @@ export class RemoteAgent {
 			const now = Date.now();
 			if (now - this._lastVisibilityResync < 2000) return;
 			this._lastVisibilityResync = now;
-			// Skip resync while a turn is streaming — the server is actively
-			// pushing events and a wholesale message replacement can interleave
-			// with live message_end deltas. Reconnects after real disconnects
-			// still resync (that path doesn't go through here).
-			if (this._state.isStreaming) return;
+			// (Removed the skip-while-streaming branch — the server-side status
+			//  heartbeat is now responsible for keeping `status` honest after a
+			//  visibility-driven wake. Skipping here was the bug magnet that left
+			//  Stop stuck on tab-suspend miss.
+			//  See docs/design/unify-session-status.md §4.8.)
 			// Skip the message resync when the WS has stayed connected since
 			// the last snapshot AND we already have messages: the cached state
 			// is correct and re-snapshotting on every visibilitychange tick is
@@ -310,10 +321,8 @@ export class RemoteAgent {
 			imageGenerationModel: null as any,
 			tools: [],
 			messages: [] as OrderedMessage[],
-			isStreaming: false,
+			status: "idle" as ClientSessionStatus,
 			isCompacting: false,
-			isArchived: false,
-			isPreparing: false,
 			archivedAt: null as number | null,
 			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } | null,
 			streamingMessage: null as any,
@@ -321,6 +330,26 @@ export class RemoteAgent {
 			error: undefined as string | undefined,
 			turnStartTime: null as number | null,
 		};
+		// Single source of truth: status drives every legacy boolean. Defining
+		// these as getters on the underlying object means every existing reader
+		// (state.isStreaming, state.isArchived, state.isPreparing, agent.isStreaming)
+		// continues to compile unchanged — they're just derived now.
+		// See docs/design/unify-session-status.md §4.1.
+		Object.defineProperty(this._state, "isStreaming", {
+			get: () => this._state.status === "streaming",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(this._state, "isArchived", {
+			get: () => this._state.status === "archived",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(this._state, "isPreparing", {
+			get: () => this._state.status === "preparing",
+			enumerable: true,
+			configurable: true,
+		});
 	}
 
 	get state() {
@@ -481,14 +510,10 @@ export class RemoteAgent {
 							try { this.onReconnect?.(); } catch (err) {
 								console.warn("[RemoteAgent] onReconnect handler threw:", err);
 							}
-							// Retry get_state after 3s if we still don't have real model info
-							if (this._stateRetryTimer) clearTimeout(this._stateRetryTimer);
-							this._stateRetryTimer = setTimeout(() => {
-								this._stateRetryTimer = null;
-								if (!this._state.model?.contextWindow || this._state.model.contextWindow === 0) {
-									this.send({ type: "get_state" });
-								}
-							}, 3000);
+							// (Removed the 3s _stateRetryTimer fallback — the server-side
+							//  session_status heartbeat plus snapshot splice now keeps both
+							//  status and model honest after reconnect.
+							//  See docs/design/unify-session-status.md §4.9.)
 						}
 					} else if (msg.type === "auth_failed") {
 						settled = true;
@@ -568,10 +593,6 @@ export class RemoteAgent {
 
 	disconnect(): void {
 		this._intentionalDisconnect = true;
-		if (this._stateRetryTimer) {
-			clearTimeout(this._stateRetryTimer);
-			this._stateRetryTimer = null;
-		}
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
@@ -743,7 +764,7 @@ export class RemoteAgent {
 	async continue(): Promise<void> {}
 
 	async waitForIdle(): Promise<void> {
-		if (!this._state.isStreaming) return;
+		if (this._state.status !== "streaming") return;
 		return new Promise<void>((resolve) => {
 			const unsub = this.subscribe((ev) => {
 				if (ev.type === "agent_end") {
@@ -759,7 +780,9 @@ export class RemoteAgent {
 		this._state.messages = this.reducerState.messages;
 		this._state.streamingMessage = null;
 		this.streamingMessageId = undefined;
-		this._state.isStreaming = false;
+		this._state.status = "idle";
+		this._lastStatusVersion = 0;
+		this._isAborting = false;
 		this._state.pendingToolCalls = new Set();
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
@@ -815,6 +838,23 @@ export class RemoteAgent {
 
 	/** Pending prompt text to replay after a tool permission grant restarts the session */
 	private _pendingGrantReplay?: string;
+
+	/**
+	 * After a tool permission grant, the server restarts the session. When it
+	 * becomes idle, replay the original prompt so the tool call succeeds. Fired
+	 * from `case "session_status"` on every frame (live, idempotent, and gap)
+	 * so a missed transition + heartbeat-driven recovery still triggers replay.
+	 */
+	private _maybeReplayGrant(status: string): void {
+		if (status === "idle" && this._pendingGrantReplay) {
+			const replayText = this._pendingGrantReplay;
+			this._pendingGrantReplay = undefined;
+			// Small delay to ensure the session is fully ready
+			setTimeout(() => {
+				this.send({ type: "prompt", text: replayText });
+			}, 200);
+		}
+	}
 
 	grantToolPermission(toolName: string, scope: "tool" | "group", group?: string, lastPromptText?: string, mode?: "persistent" | "session-only" | "one-time"): void {
 		// Save the prompt to replay after the session restarts with the new tool
@@ -913,21 +953,29 @@ export class RemoteAgent {
 	private async handleServerMessage(msg: any) {
 		switch (msg.type) {
 			case "state":
-				if (msg.data?.isStreaming !== undefined) {
-					this._state.isStreaming = msg.data.isStreaming;
+				// Canonical-status path (new server). When the server splices
+				// `status` + `statusVersion` into the snapshot, prime our tracker
+				// so subsequent live frames are version-checked correctly.
+				if (typeof msg.data?.status === "string") {
+					this._state.status = msg.data.status;
+					if (typeof msg.data.statusVersion === "number") {
+						this._lastStatusVersion = msg.data.statusVersion;
+					}
+				} else if (msg.data?.isStreaming !== undefined) {
+					// Back-compat: older server still emits `isStreaming` only.
+					// Map onto canonical status; live `session_status` frames
+					// (sent right after auth_ok) carry the version we'll then track.
+					this._state.status = msg.data.isStreaming ? "streaming" : "idle";
 				}
 				if (msg.data?.archived) {
-					this._state.isArchived = true;
 					this._state.archivedAt = msg.data.archivedAt;
+					// Status will already be "archived" via the branch above; if not
+					// (legacy server payload), force it so the derived getter agrees.
+					if (this._state.status !== "archived") this._state.status = "archived";
 				}
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
-					// Clear retry timer — we got real model info
-					if (this._stateRetryTimer) {
-						clearTimeout(this._stateRetryTimer);
-						this._stateRetryTimer = null;
-					}
 				}
 				if (msg.data?.thinkingLevel) {
 					this._state.thinkingLevel = msg.data.thinkingLevel;
@@ -1063,46 +1111,51 @@ export class RemoteAgent {
 				break;
 			}
 
-			case "session_status":
-				console.log(`[RemoteAgent] session_status: ${msg.status}, isStreaming was: ${this._state.isStreaming}`);
-				if (msg.status === "archived") {
-					this._state.isStreaming = false;
-					this._state.isArchived = true;
-					this._state.isPreparing = false;
-					if (msg.archivedAt) this._state.archivedAt = msg.archivedAt;
-					this._state.turnStartTime = null;
-				} else if (msg.status === "preparing") {
-					this._state.isPreparing = true;
-					this._state.isStreaming = false;
-					this._state.isArchived = false;
-					this._state.turnStartTime = null;
-				} else {
-					this._state.isStreaming = msg.status === "streaming";
-					this._state.isArchived = false;
-					this._state.isPreparing = false;
-					if (msg.status === "streaming") {
-						this._state.turnStartTime = msg.streamingStartedAt ?? this._state.turnStartTime ?? Date.now();
-					} else {
-						this._state.turnStartTime = null;
-					}
+			case "session_status": {
+				// Single-writer rule: this is the SOLE writer of `_state.status`
+				// for live transitions. `agent_start` / `agent_end` / `error` no
+				// longer mutate status — they only fire side effects.
+				// See docs/design/unify-session-status.md §4.3.
+				const v = typeof (msg as any).statusVersion === "number" ? (msg as any).statusVersion : undefined;
+
+				// Idempotent: heartbeat or duplicate. Side effects (grant replay,
+				// onStatusChange) still fire so consumers don't miss a refresh,
+				// but we drop the actual status mutation.
+				if (v !== undefined && v <= this._lastStatusVersion) {
+					this._maybeReplayGrant(msg.status);
+					this.onStatusChange?.(msg.status);
+					break;
 				}
-				if (msg.status === "aborting") {
-					this._isAborting = true;
-				} else if (msg.status !== "streaming") {
-					this._isAborting = false;
+
+				// Gap: apply this frame, then ask the server for a fresh baseline.
+				// Heartbeat will close any further drift within ~15s anyway.
+				if (v !== undefined && v > this._lastStatusVersion + 1) {
+					console.warn(`[RemoteAgent] session_status gap (${this._lastStatusVersion} → ${v}); requesting resync`);
+					this.send({ type: "status_resync" });
+					// fall through and apply this frame
 				}
-				// After a tool permission grant, the server restarts the session.
-				// When it becomes idle, replay the original prompt so the tool call succeeds.
-				if (msg.status === "idle" && this._pendingGrantReplay) {
-					const replayText = this._pendingGrantReplay;
-					this._pendingGrantReplay = undefined;
-					// Small delay to ensure the session is fully ready
-					setTimeout(() => {
-						this.send({ type: "prompt", text: replayText });
-					}, 200);
+
+				if (v !== undefined) this._lastStatusVersion = v;
+
+				// Sole writer of _state.status.
+				this._state.status = msg.status as ClientSessionStatus;
+
+				if (msg.status === "archived" && (msg as any).archivedAt) {
+					this._state.archivedAt = (msg as any).archivedAt;
 				}
+				this._state.turnStartTime =
+					msg.status === "streaming"
+						? ((msg as any).streamingStartedAt ?? this._state.turnStartTime ?? Date.now())
+						: null;
+
+				// `_isAborting` mirror is kept for the existing `get isAborting()`
+				// reader; it's now derived from canonical status.
+				this._isAborting = msg.status === "aborting";
+
+				this._maybeReplayGrant(msg.status);
 				this.onStatusChange?.(msg.status);
 				break;
+			}
 
 			case "session_title":
 				this._title = msg.title;
@@ -1266,10 +1319,9 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
-				// If we were streaming, stop. If there's a pending prompt that
-				// failed, the user message was already cleared from the editor
-				// but never echoed back — surface the error so the user knows.
-				this._state.isStreaming = false;
+				// Status mutation is the server's job — it broadcasts a matching
+				// `session_status` frame in the same termination path. We only
+				// clear local-only fields here.
 				this._state.turnStartTime = null;
 				this._state.error = msg.message || "Unknown server error";
 				this._pendingAttachments = null;
@@ -1579,7 +1631,8 @@ export class RemoteAgent {
 		// Update local state BEFORE emitting (UI reads state in event handlers)
 		switch (event.type) {
 			case "agent_start":
-				this._state.isStreaming = true;
+				// Status is owned by `session_status` (server). agent_start is a
+				// signal: clear local error + capture timing.
 				this._state.error = undefined;
 				this._taskStartTime = Date.now();
 				this._state.turnStartTime = this._taskStartTime;
@@ -1587,8 +1640,8 @@ export class RemoteAgent {
 
 			case "agent_end": {
 				this.streamingMessageId = undefined;
-				this._state.isStreaming = false;
-				this._isAborting = false;
+				// Status is owned by `session_status` (server). agent_end is a
+				// signal: streaming-message cleanup + per-tag flag clear + beep + badge.
 				this._state.streamingMessage = null;
 				this._state.pendingToolCalls = new Set();
 				// Bulk-clear any stuck per-tag streaming flags (safety net for
