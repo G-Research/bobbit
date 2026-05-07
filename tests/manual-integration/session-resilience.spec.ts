@@ -844,12 +844,12 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 
 		// 7. Verify sidebar grouping via browser
 		await page.goto(appUrl(gw));
-		await page.waitForSelector("button", { timeout: 15_000 });
-		// Wait for sessions to load in the sidebar
-		await page.waitForTimeout(3_000);
+		await page.waitForSelector('[data-testid="sidebar-expanded"]', { timeout: 15_000 });
+		// Wait for the project header to actually render in the sidebar
+		await page.locator('[data-testid="sidebar-expanded"]').getByText("Second Project").first().waitFor({ timeout: 10_000 });
 
 		// The sidebar should show "Second Project" as a separate project group
-		const sidebarText = await page.locator('[class*="sidebar"], nav').first().textContent() || "";
+		const sidebarText = await page.locator('[data-testid="sidebar-expanded"]').textContent() || "";
 		expect(sidebarText).toContain("Second Project");
 		console.log(`  Sidebar contains "Second Project" ✓`);
 		await takeScreenshot(page, "multi-project-sidebar.png");
@@ -1330,9 +1330,9 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 
 		// Verify sidebar still shows both projects
 		await page.goto(appUrl(gw));
-		await page.waitForSelector("button", { timeout: 15_000 });
-		await page.waitForTimeout(3_000);
-		const sidebarText = await page.locator('[class*="sidebar"], nav').first().textContent() || "";
+		await page.waitForSelector('[data-testid="sidebar-expanded"]', { timeout: 15_000 });
+		await page.locator('[data-testid="sidebar-expanded"]').getByText("Second Project").first().waitFor({ timeout: 10_000 });
+		const sidebarText = await page.locator('[data-testid="sidebar-expanded"]').textContent() || "";
 		expect(sidebarText).toContain("Second Project");
 		await takeScreenshot(page, "multi-project-sidebar-after-restart.png");
 		console.log(`  Sidebar still shows "Second Project" after restart ✓`);
