@@ -347,33 +347,11 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	}
 }
 
-/**
- * Mutate `session.status`, bump `statusVersion`, and broadcast the new status
- * to every connected client. **Single source of truth for status transitions —
- * never write `session.status = …` directly.** The only legitimate non-helper
- * writers are session-creation init (`status: "…", statusVersion: 0`) and the
- * `shutdown()` final cleanup (where clients are already being closed).
- *
- * `extras` lets transition sites attach `streamingStartedAt` (only on the
- * "streaming" branch) and `archivedAt` (only on the "archived" branch).
- *
- * See docs/design/unify-session-status.md §3.2.
- */
-export function broadcastStatus(
-	session: SessionInfo,
-	status: SessionStatus,
-	extras?: { streamingStartedAt?: number; archivedAt?: number },
-): void {
-	session.status = status;
-	session.statusVersion = (session.statusVersion ?? 0) + 1;
-	broadcast(session.clients, {
-		type: "session_status",
-		status,
-		statusVersion: session.statusVersion,
-		...(extras?.streamingStartedAt ? { streamingStartedAt: extras.streamingStartedAt } : {}),
-		...(extras?.archivedAt ? { archivedAt: extras.archivedAt } : {}),
-	});
-}
+// `broadcastStatus()` lives in `./session-status.ts` so unit tests can import
+// the pure helper without dragging in the full SessionManager dependency
+// graph. Re-exported here for backward compat with existing call sites.
+export { broadcastStatus } from "./session-status.js";
+import { broadcastStatus } from "./session-status.js";
 
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
