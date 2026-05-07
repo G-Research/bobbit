@@ -2548,7 +2548,7 @@ Only truly global state lives in the server's central state directory.
 | `preferences.json` | `PreferencesStore` | Key-value prefs |
 | `session-prompts/` | `system-prompt.ts` | Per-session prompts |
 | `tls/` | `tls.ts` | TLS certs |
-| `gateway-url` | `cli.ts` | Gateway base URL |
+| `gateway-url` | `cli.ts` | Gateway base URL used by same-host tool extensions for callbacks. Wildcard binds (`--host 0.0.0.0` / `--host ::`) are normalised to a loopback peer (`127.0.0.1` / `[::1]`) by `loopbackForBind` in `src/server/cli-loopback.ts` before the file is written — wildcards are valid listen addresses but not valid connect peers, and the agent's `apiCall` helper (`defaults/tools/_shared/gateway.ts`) reads this file. The human-readable `Listening:` console line keeps the literal bind host. |
 | `gateway-restart` | `harness.ts` | Dev restart sentinel |
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |

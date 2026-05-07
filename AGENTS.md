@@ -179,7 +179,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Tier 2.5 report missing / ffmpeg failed** — set `FFMPEG_PATH` or install ffmpeg; only when `RECORDSCREEN=1`.
 
 ### Misc
-- **Agent `fetch failed` against gateway when started with `--host 0.0.0.0`** — gateway-url file is loopback-normalised in `src/server/cli.ts::loopbackForBind` so same-host agents can reach the listener.
+- **Agent `fetch failed` against gateway when started with `--host 0.0.0.0`** — gateway-url file is loopback-normalised via `loopbackForBind` (`src/server/cli-loopback.ts`); the `Listening:` log keeps the literal bind host. See [debugging.md#agent-fetch-failed-against-gateway-when-started-with---host-0000](docs/debugging.md#agent-fetch-failed-against-gateway-when-started-with---host-0000).
 - **OAuth callback never completes** — poll `GET /api/oauth/flow-status?flowId=&provider=`.
 - **Continue-Archived button missing** — needs archived + no `goalId` + no `delegateOf` + project still registered.
 - **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; 600 kB main / 500 kB per-chunk.
