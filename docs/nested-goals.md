@@ -507,7 +507,10 @@ right now. The two diverge when:
 
 Render code never assumes the spawning session is live. The archived
 render path folds sub-goals whose spawning session is gone back to the
-parent-goal level (`src/app/sidebar.ts::teamLeadIdsAttributable`).
+parent-goal level via the deterministic `computeSpawnedClaim` set in
+`src/app/sidebar-spawned-children.ts` (Path A claims, Path B excludes —
+used by both desktop `renderProjectContent` and mobile
+`renderMobileLanding`).
 
 Sub-goals stamped with `spawnedBySessionId` render INSIDE the spawning
 team-lead's expanded block in the sidebar — collapsing that team-lead
@@ -527,12 +530,18 @@ Render sites (in `src/app/render-helpers.ts`):
   archived sub-goals via `renderSpawnedChildGoalRow`. The chevron shows
   whenever there's any content (members OR sub-goals).
 
-The parent-level forest in `src/app/sidebar.ts` excludes goals that are
-already being rendered under an attributable team-lead session — its
-`teamLeadIdsAttributable` set covers BOTH live team-leads and archived
-team-leads (the latter only when `state.showArchived` is on). Sub-goals
-fall back to parent-forest level only when the spawning session is fully
-gone (terminated AND not in archived view) — never unreachable.
+The parent-level forest in `src/app/sidebar.ts::renderProjectContent`
+(and the mirror filter in `src/app/render.ts::renderMobileLanding`)
+excludes goals already rendered under a team-lead via the deterministic
+`computeSpawnedClaim` helper in `src/app/sidebar-spawned-children.ts`.
+The helper covers ANY-status live team-leads plus archived team-leads
+when `state.showArchived` is on, and unions the result of
+`selectSpawnedChildren` for every (parent, lead) tuple — so stamped,
+unstamped (parent-lead fallback), and grandchild cases all line up.
+Sub-goals fall back to parent-forest level only when no team-lead
+session exists at all for the parent — never unreachable. See AGENTS.md
+"Goal rendered twice in sidebar (live, mid-flight)" and
+`tests/sidebar-no-double-render.test.ts`.
 
 **Boot-time backfill** for legacy records:
 `GoalManager.backfillSpawnedBySessionId(teamStore, sessionStore?)` walks

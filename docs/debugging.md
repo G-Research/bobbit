@@ -403,6 +403,52 @@ Diagnostic chain:
 
 See [docs/internals.md — Sub-goal sidebar placement](internals.md#sub-goal-sidebar-placement) and [docs/nested-goals.md — Sub-goal sidebar placement](nested-goals.md#sub-goal-sidebar-placement).
 
+<a id="goal-rendered-twice-in-sidebar-live-mid-flight"></a>
+
+## Goal rendered twice in sidebar (live, mid-flight)
+
+Symptom: a single live goal appears in two sidebar locations simultaneously — once nested under its team-lead's expanded block (correct) and once at the project root or under its parent goal in the forest (wrong). Originally observed during dogfooding with goal `c761f4df` ("Trim source diff before merge") rendering both under team-lead Justin Time AND at the project root while still in-progress (`archived: false`, `state: "in-progress"`) — explicitly NOT an archive-flip race.
+
+### Architecture
+
+Two render paths emit goal rows:
+
+- **Path A — spawned-children block.** `renderGoalGroup` → `renderTeamGroup` (`src/app/render-helpers.ts`) calls `selectSpawnedChildren(goals, parentId, leadId, showArchived, leadId)` (`src/app/sidebar-spawned-children.ts`) for every team-lead it iterates. Lookup is status-agnostic — `goalSessions.find(s => s.role === "team-lead")` accepts any status, and the parent-lead fallback claims goals where `spawnedBySessionId === undefined` for the iterated parent.
+- **Path B — forest.** `buildNestedGoalForest` (`src/app/sidebar-nesting.ts`) consumes a forest input and lays out top-level / nested rows. Called from `sidebar.ts::renderProjectContent` (desktop) and `render.ts::renderMobileLanding` (mobile).
+
+### Contract: claim → exclude
+
+`computeSpawnedClaim` (`src/app/sidebar-spawned-children.ts`) computes the deterministic Set of goal ids that Path A will render. Both Path B call sites filter their forest input by `!claimed.has(g.id)`. The helper signature is `(goals, liveSessions, archivedSessions, showArchived) → Set<string>`. It mirrors `renderTeamGroup`'s lookup exactly:
+
+1. For each parent goal P in `goals`, find every team-lead session in `liveSessions` matching `role === "team-lead" && (goalId === P.id || teamGoalId === P.id)` — ANY status, NOT filtered on `terminated`.
+2. When `showArchived`, also include every team-lead in `archivedSessions` matching `role === "team-lead" && teamGoalId === P.id`.
+3. For each (P, leadId) tuple, run `selectSpawnedChildren(goals, P.id, leadId, showArchived, leadId)` and add every result id to the output Set.
+
+The upper-bound invariant: `selectSpawnedChildren(goals, P.id, lead.id, showArchived, lead.id) ⊆ computeSpawnedClaim(goals, ..., showArchived)` for every (P, lead). Pinned by `tests/sidebar-no-double-render.test.ts`.
+
+### Why the old heuristic failed
+
+The previous `teamLeadIdsAttributable` filter (in `sidebar.ts`) leaked three real cases:
+
+- **Status mismatch.** Path A is status-agnostic; the heuristic excluded `status === "terminated"`. A stale-but-still-listed team-lead (the user's Justin Time repro) claimed its children in Path A but Path B didn't know, leaking them into the forest.
+- **Unstamped children.** `selectSpawnedChildren`'s parent-lead fallback claims goals with `spawnedBySessionId === undefined`. The heuristic only checked `g.spawnedBySessionId` — undefined short-circuited to "render in forest", double-rendering.
+- **Mobile.** `renderMobileLanding` had no dedup at all. Every spawned child rendered top-level AND under its team-lead.
+
+### Diagnostic chain
+
+1. **Confirm both paths emit the goal.** Inspect the rendered sidebar DOM for two rows with the same `data-goal-id`. One should carry `data-testid="sidebar-spawned-child-row"` (Path A); the duplicate is plain `data-testid="sidebar-goal-row"` or appears at the forest top-level.
+2. **Read the helper's return value.** Hot-patch `console.log([...claimed])` inside `renderProjectContent` (or `renderMobileLanding`) and compare against the duplicated id. If the id is in the Set but still rendering twice, the filter wiring is wrong (check `forestInput = ... .filter(g => !claimed.has(g.id))`). If the id is NOT in the Set, the helper missed it — walk the cases above.
+3. **Both layouts must call it.** Verify both `sidebar.ts::renderProjectContent` AND `render.ts::renderMobileLanding` invoke `computeSpawnedClaim` with `(goals, state.gatewaySessions, state.archivedSessions, state.showArchived)`. The mobile path was the original miss.
+4. **Status-agnostic lookup.** The helper must NOT filter on `status !== "terminated"`. `renderTeamGroup` is status-agnostic; mirror that or the dedup desyncs.
+
+### Files to inspect when this regresses
+
+- `src/app/sidebar-spawned-children.ts` — `computeSpawnedClaim` (helper) and `selectSpawnedChildren` (Path A's actual claim logic). They must agree.
+- `src/app/sidebar.ts::renderProjectContent` — desktop wire-up.
+- `src/app/render.ts::renderMobileLanding` — mobile wire-up. Easy to forget when refactoring sidebar code.
+- `src/app/render-helpers.ts::renderTeamGroup` — Path A's actual render. If its session-lookup shape changes (e.g. new role filter, new status gate), `computeSpawnedClaim` must be updated to mirror it.
+- `tests/sidebar-no-double-render.test.ts` — 11 unit tests pinning the contract; covers stamped, unstamped, archived (showArchived on/off), terminated lead, grandchild, no-team-lead parent, and the upper-bound regression.
+
 <a id="sidebar-nests-goal-under-wrong-team-lead-unstamped-child-shows-under-a-sibling"></a>
 
 ## Sidebar nests goal under wrong team-lead / unstamped child shows under a sibling
