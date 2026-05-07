@@ -846,3 +846,45 @@ Should not happen post-fix. `ProjectRegistry.findByCwd()` canonicalises both the
   `0.0.0.0` or `::`. If it does, the server is on a pre-fix build, or a new
   CLI codepath is writing the file directly without routing through
   `loopbackForBind`. Tests: `tests/cli-loopback-for-bind.test.ts`.
+
+## `defaults/tools/_shared/gateway.ts` shared helpers
+
+Single source of truth for tool extensions that talk back to the Bobbit
+gateway:
+
+- `readGatewayCreds(): { token, baseUrl } | { error: string }` — soft-fail
+  credential resolution. **Disk-first, env-fallback** (1-second TTL cache):
+  the on-disk `<state>/token` + `<state>/gateway-url` files are rewritten by
+  every gateway start, so a session that survives a `./run` restart picks up
+  the new token + URL on the next tool call. `BOBBIT_TOKEN` /
+  `BOBBIT_GATEWAY_URL` env vars are stale by definition once the gateway has
+  restarted and are now consulted only when disk reads fail. Returns a
+  structured `{ error }` when neither source has credentials so callers can
+  early-return instead of throwing. Used by `team/extension.ts` and
+  `children/extension.ts` so tests, sandboxes, and missing-token startups
+  don't crash.
+- `apiCall(creds, method, path, body?, opts?)` — thin HTTP wrapper around the
+  same creds. Accepts `extraHeaders` for the children-tools-only
+  `X-Bobbit-Spawning-Session` header. **Resilience contract**: transient TCP
+  errors (`ECONNRESET` / `ECONNREFUSED` / `EPIPE` / `socket hang up` /
+  `UND_ERR_SOCKET` / opaque `fetch failed`) are retried up to `opts.retries`
+  times (default 3 = 4 total attempts) with 250 / 500 / 1000 ms exponential
+  back-off. HTTP 401 triggers a single creds-cache-clear + disk re-read +
+  retry, consuming zero transient-retry slots and guarded against
+  infinite-looping by a per-call `didCredsRefresh` flag. Non-401 4xx/5xx are
+  NOT retried — they are real outcomes the caller needs to see. Persistent
+  transient failure throws a structured error including method, URL,
+  last-error, cached gateway-url, and on-disk path so the user can manually
+  inspect. Tests: `tests/tool-extension-gateway-creds.test.ts`,
+  `tests/tool-extension-api-retry.test.ts`,
+  `tests/tool-extension-401-refresh.test.ts`.
+- `getGatewayUrl()` / `getGatewayToken()` — strict, throw-on-missing
+  variants used by image-generation, MCP discovery, and other extensions
+  that should fail loudly when miswired. Same disk-first / env-fallback
+  precedence as `readGatewayCreds()`.
+
+If you're adding a new tool extension that calls back into the gateway,
+import from this module rather than re-implementing the disk→env credential
+resolution dance — retry, back-off, 401 refresh, and structured error
+wrapping are all centralised here and propagate to every consumer.
+
