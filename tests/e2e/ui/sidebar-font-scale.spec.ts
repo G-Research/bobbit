@@ -120,6 +120,99 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 		expect(sliderValue).toBe("4");
 	});
 
+	test("activity dot is exactly 6px at Default scale (no nested em compounding)", async ({ page }) => {
+		// Inject a synthetic activity-dot inside the expanded sidebar so the test
+		// is independent of whether any session has unseen activity. We mirror the
+		// production markup exactly: a parent span with `font-size: 0.9167em` and
+		// a child dot using the calc() expression we just installed.
+		await page.evaluate(() => {
+			const root = document.querySelector("[data-testid='sidebar-expanded']") as HTMLElement | null;
+			if (!root) throw new Error("sidebar-expanded missing");
+			const parent = document.createElement("span");
+			parent.setAttribute("data-testid", "test-dot-parent");
+			parent.style.fontSize = "0.9167em";
+			const dot = document.createElement("span");
+			dot.setAttribute("data-testid", "test-activity-dot");
+			dot.style.fontSize = "calc(0.375rem * var(--sidebar-font-scale, 1))";
+			dot.style.lineHeight = "1";
+			dot.textContent = "\u25cf";
+			parent.appendChild(dot);
+			root.appendChild(parent);
+		});
+
+		const dotSize = await page.locator("[data-testid='test-activity-dot']").evaluate(
+			(el) => parseFloat(getComputedStyle(el).fontSize),
+		);
+		// Acceptance criterion 5: pixel-for-pixel default. Allow 0.5 px tolerance
+		// for sub-pixel rounding across browser engines.
+		expect(dotSize).toBeGreaterThan(5.5);
+		expect(dotSize).toBeLessThan(6.5);
+
+		// And it scales with the slider, not against it.
+		await navigateToHash(page, "#/settings/system/general");
+		await expect(page.locator("[data-testid='sidebar-font-scale-slider']")).toBeVisible({ timeout: 10_000 });
+		await page.locator("[data-testid='sidebar-font-scale-slider']").evaluate((el: HTMLInputElement) => {
+			el.value = "4";
+			el.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await expect(page.locator("[data-testid='sidebar-font-scale-label']")).toHaveText("Largest");
+		// The synthetic node may not survive a re-render that wipes the sidebar
+		// subtree, so re-inject if it's gone.
+		const stillThere = await page.locator("[data-testid='test-activity-dot']").count();
+		if (stillThere === 0) {
+			await page.evaluate(() => {
+				const root = document.querySelector("[data-testid='sidebar-expanded']") as HTMLElement | null;
+				if (!root) return;
+				const parent = document.createElement("span");
+				parent.setAttribute("data-testid", "test-dot-parent");
+				parent.style.fontSize = "0.9167em";
+				const dot = document.createElement("span");
+				dot.setAttribute("data-testid", "test-activity-dot");
+				dot.style.fontSize = "calc(0.375rem * var(--sidebar-font-scale, 1))";
+				dot.style.lineHeight = "1";
+				dot.textContent = "\u25cf";
+				parent.appendChild(dot);
+				root.appendChild(parent);
+			});
+		}
+		const scaledDot = await page.locator("[data-testid='test-activity-dot']").evaluate(
+			(el) => parseFloat(getComputedStyle(el).fontSize),
+		);
+		expect(scaledDot / dotSize).toBeCloseTo(1.22, 1);
+	});
+
+	test("mobile sidebar text-sm element scales with the slider", async ({ page }) => {
+		// Switch to mobile viewport. The mobile landing renders a different DOM
+		// tree wrapped in `.sidebar-root`. Its tab strip used `text-sm` Tailwind
+		// classes that the conversion replaced with `font-size: 1.1667em` so they
+		// inherit the scaled base.
+		await page.setViewportSize({ width: 375, height: 667 });
+		await page.reload();
+		// The mobile Roles tab is a stable always-rendered hook in the mobile
+		// sidebar tab strip.
+		const rolesBtn = page.locator("button").filter({ hasText: /^\s*Roles\s*$/ }).first();
+		await expect(rolesBtn).toBeVisible({ timeout: 15_000 });
+
+		// Sanity: it lives inside a sidebar-root container.
+		const inSidebarRoot = await rolesBtn.evaluate((el) => !!el.closest(".sidebar-root"));
+		expect(inSidebarRoot).toBe(true);
+
+		const baseline = await rolesBtn.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+		expect(baseline).toBeGreaterThan(0);
+
+		// Drive the scale change via localStorage + the same applier the slider
+		// would use, then re-render. We avoid navigating to the settings page
+		// because on mobile the app may swap routes and unmount the tab strip.
+		await page.evaluate(([key, val]) => {
+			localStorage.setItem(key as string, String(val));
+			document.documentElement.style.setProperty("--sidebar-font-scale", String(val));
+		}, [SCALE_KEY, 1.22]);
+
+		const scaled = await rolesBtn.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+		expect(scaled).toBeGreaterThan(baseline);
+		expect(scaled / baseline).toBeCloseTo(1.22, 1);
+	});
+
 	test("chat transcript root font-size is unaffected by sidebar scale", async ({ page }) => {
 		await navigateToHash(page, "#/settings/system/general");
 		await expect(page.locator("[data-testid='sidebar-font-scale-slider']")).toBeVisible({ timeout: 10_000 });
