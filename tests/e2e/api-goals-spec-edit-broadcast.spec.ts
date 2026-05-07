@@ -9,6 +9,11 @@
  *
  * The event is broadcast via `broadcastToAll`, so any authenticated WS
  * client receives it (we listen on a goal-bound session for convenience).
+ *
+ * Negative cases use the "barrier-event" technique to avoid hardcoded
+ * sleeps (see no-new-sleeps.mjs): we send a no-op PUT followed by a
+ * known-change PUT and assert exactly ONE `goal_spec_changed` event
+ * arrives. If the no-op had erroneously emitted, we'd see two.
  */
 import { test, expect } from "./in-process-harness.js";
 import {
@@ -44,7 +49,7 @@ test.describe("PUT /api/goals/:id spec edit broadcasts goal_spec_changed", () =>
 	test("emits goal_spec_changed with correct payload when spec changes", async () => {
 		const newSpec = "# updated spec\nfoo bar baz qux";
 
-		const before = ws.messages.length;
+		const before = ws.messageCount();
 		const tBefore = Date.now();
 
 		const resp = await apiFetch(`/api/goals/${goalId}`, {
@@ -53,7 +58,8 @@ test.describe("PUT /api/goals/:id spec edit broadcasts goal_spec_changed", () =>
 		});
 		expect(resp.ok).toBe(true);
 
-		const msg = await ws.waitFor(
+		const msg = await ws.waitForFrom(
+			before,
 			(m) => m.type === "goal_spec_changed" && m.goalId === goalId,
 			5000,
 		);
@@ -69,46 +75,54 @@ test.describe("PUT /api/goals/:id spec edit broadcasts goal_spec_changed", () =>
 		expect(msg.newLen).toBe(newSpec.length);
 		expect(typeof msg.ts).toBe("number");
 		expect(msg.ts).toBeGreaterThanOrEqual(tBefore);
-
-		// Sanity: only ONE goal_spec_changed event was emitted (no duplicate).
-		const matches = ws.messages
-			.slice(before)
-			.filter((m) => m.type === "goal_spec_changed" && m.goalId === goalId);
-		expect(matches).toHaveLength(1);
 	});
 
-	test("is a no-op when the body contains an identical spec", async () => {
-		// Read current spec to PUT the same value back.
+	test("no-op PUTs (identical spec, missing field) do not broadcast", async () => {
+		// Read current spec
 		const cur = await apiFetch(`/api/goals/${goalId}`).then((r) => r.json());
 		const sameSpec: string = cur.spec;
 
-		const before = ws.messages.length;
-		const resp = await apiFetch(`/api/goals/${goalId}`, {
+		const before = ws.messageCount();
+
+		// 1. Identical spec — should NOT broadcast.
+		await apiFetch(`/api/goals/${goalId}`, {
 			method: "PUT",
 			body: JSON.stringify({ spec: sameSpec }),
-		});
-		expect(resp.ok).toBe(true);
+		}).then((r) => expect(r.ok).toBe(true));
 
-		// Wait a beat to give any erroneous broadcast a chance to arrive.
-		await new Promise((r) => setTimeout(r, 250));
-		const matches = ws.messages
-			.slice(before)
-			.filter((m) => m.type === "goal_spec_changed" && m.goalId === goalId);
-		expect(matches).toHaveLength(0);
-	});
-
-	test("is a no-op when the body omits the spec field", async () => {
-		const before = ws.messages.length;
-		const resp = await apiFetch(`/api/goals/${goalId}`, {
+		// 2. No spec field — should NOT broadcast.
+		await apiFetch(`/api/goals/${goalId}`, {
 			method: "PUT",
 			body: JSON.stringify({ title: "Spec-edit broadcast test (renamed)" }),
-		});
-		expect(resp.ok).toBe(true);
+		}).then((r) => expect(r.ok).toBe(true));
 
-		await new Promise((r) => setTimeout(r, 250));
-		const matches = ws.messages
+		// 3. BARRIER: a real spec change — DOES broadcast. We use this as the
+		//    deterministic event barrier. If either of (1) or (2) had emitted,
+		//    `waitForFrom` would have returned that match instead of the
+		//    barrier — and we'd see >1 goal_spec_changed events between
+		//    `before` and now. Single match = the negative cases were silent.
+		const realChange = sameSpec + "\n# barrier change";
+		await apiFetch(`/api/goals/${goalId}`, {
+			method: "PUT",
+			body: JSON.stringify({ spec: realChange }),
+		}).then((r) => expect(r.ok).toBe(true));
+
+		const barrier = await ws.waitForFrom(
+			before,
+			(m) =>
+				m.type === "goal_spec_changed" &&
+				m.goalId === goalId &&
+				m.newLen === realChange.length,
+			5000,
+		);
+		expect(barrier).toBeDefined();
+
+		// Now scan everything received since `before` — only ONE event
+		// total (the barrier). The two earlier no-op PUTs must be silent.
+		const allEvents = ws.messages
 			.slice(before)
 			.filter((m) => m.type === "goal_spec_changed" && m.goalId === goalId);
-		expect(matches).toHaveLength(0);
+		expect(allEvents).toHaveLength(1);
+		expect(allEvents[0]).toBe(barrier);
 	});
 });
