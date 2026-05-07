@@ -140,43 +140,34 @@ export class TeamManager {
 	private localStore: TeamStore | null;
 	/** Local GoalManager — used only in the non-PCM (test) path. */
 	private _localGoalManager: GoalManager | null = null;
-	/** Timers for the idle-nudge mechanism (goalId → timer). One-shot setTimeouts that reschedule with exponential backoff. */
+	/** goalId → idle-nudge timer (one-shot, exponential reschedule). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	/** Count of consecutive workers-nudges sent for a goal (goalId → count). Reset on agent_start. */
+	/** goalId → consecutive workers-nudge count (reset on agent_start). */
 	private idleNudgeCount = new Map<string, number>();
-	/** Separate timer for nudging when no workers remain (goalId → timer). */
+	/** goalId → no-workers nudge timer. */
 	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
-	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
+	/** goalId → true while an auto-nudge is pending. */
 	private nudgePending = new Map<string, boolean>();
-<<<<<<< HEAD
-	/** Last spec-edit nudge timestamp per goal (ms epoch). Throttles `notifyTeamLeadOfSpecChange` to one per SPEC_NUDGE_THROTTLE_MS. */
+	/** goalId → last spec-edit nudge ms (throttle). */
 	private lastSpecNudgeTs = new Map<string, number>();
-	/** Throttle window for spec-edit nudges (ms). A flurry of edits within the window collapses to one nudge. */
+	/** Spec-edit nudge throttle window. */
 	private static readonly SPEC_NUDGE_THROTTLE_MS = 30_000;
-=======
-	/** Tracks when each goal's team-lead transitioned to idle. Set on agent_end / resubscribe (when status==idle), cleared on agent_start. */
+	/** goalId → ms when team-lead became idle. */
 	private leadIdleSinceByGoal = new Map<string, number>();
-	/** Last time a stuck-team watchdog nudge fired for a goal. Enforces a 5-min floor between successive stuck-nudges. */
+	/** goalId → last stuck-nudge ms (5-min floor). */
 	private lastNudgeAtPerGoal = new Map<string, number>();
-	/** Periodic 60s sweep that detects fully-idle teams and fires a recovery nudge. */
+	/** Periodic 60s sweep that detects fully-idle teams. */
 	private stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
 >>>>>>> 5723bf02 (feat(team-manager): stuck-team watchdog + child-RTM regression test)
 	private verificationHarness?: VerificationHarness;
-	/** Base delay before nudging the idle team lead when workers are active (ms). Successive nudges back off exponentially up to MAX_IDLE_NUDGE_DELAY_MS. */
+	/** Base workers-active idle nudge delay (ms); exponential up to MAX. */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
-	/** Maximum delay between workers-nudges (ms). Caps the exponential backoff. */
 	private static readonly MAX_IDLE_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
-	/** Delay before nudging the idle team lead when no workers remain (ms). */
 	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
-	/**
-	 * If any team member is actively streaming, suppress the workers-nudge unless at
-	 * least one has been streaming longer than this threshold. Prevents nagging the
-	 * team lead while workers are making real progress.
-	 */
+	/** Suppress workers-nudge unless someone has streamed > threshold. */
 	private static readonly LONG_STREAMING_THRESHOLD_MS = 30 * 60 * 1000; // 30m
-	/** Stuck-team watchdog sweep interval (60s). */
 	private static readonly STUCK_SWEEP_INTERVAL_MS = 60_000;
-	/** Quiet threshold before the watchdog fires (5min). Reused as the inter-nudge floor. */
+	/** Quiet threshold before watchdog fires; reused as inter-nudge floor. */
 	private static readonly STUCK_QUIET_THRESHOLD_MS = 5 * 60_000;
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
@@ -204,18 +195,12 @@ export class TeamManager {
 		this.startStuckSweep();
 	}
 
-	/**
-	 * Stop watchdog timers and release per-team listeners. Tests call this to
-	 * let the process exit cleanly. Idempotent.
-	 */
+	/** Stop watchdog timers (idempotent). */
 	dispose(): void {
 		this.stopStuckSweep();
 	}
 
-	/**
-	 * Start the periodic stuck-team watchdog sweep. Idempotent — second call
-	 * is a no-op while the timer is already running.
-	 */
+	/** Start the periodic stuck-team watchdog (idempotent). */
 	startStuckSweep(): void {
 		if (this.stuckSweepTimer) return;
 		const t = setInterval(() => {
@@ -237,16 +222,10 @@ export class TeamManager {
 	}
 
 	/**
-	 * One tick of the stuck-team watchdog. Walks every active team and fires a
-	 * recovery nudge when ALL of:
-	 *   - team-lead status === "idle"
-	 *   - workers.length > 0
-	 *   - every worker is idle
-	 *   - lead has been idle >= STUCK_QUIET_THRESHOLD_MS
-	 *   - last stuck-nudge for this goal was >= STUCK_QUIET_THRESHOLD_MS ago
-	 *   - !shouldSkipNudge(goalId) — covers paused / archived / in-flight / nudgePending / in-flight subgoals
-	 *
-	 * `now` is injectable for testing. Defaults to Date.now().
+	 * Stuck-team watchdog tick. Fires a recovery nudge when lead is idle,
+	 * workers > 0 are all idle, lead-idle and last-nudge are both older than
+	 * STUCK_QUIET_THRESHOLD_MS, and !shouldSkipNudge.
+	 * See docs/design/auto-nudge-stuck-team-leads.md.
 	 */
 	_stuckSweepTick(now: number = Date.now()): void {
 		for (const [goalId, entry] of this.teams) {
@@ -381,13 +360,8 @@ export class TeamManager {
 	}
 
 	/**
-	 * Restore teams from disk persistence.
-	 * Reconstructs the in-memory Maps from the persisted store.
-	 */
-	/**
-	 * Phase 1: Restore team data structures and reverse lookups from disk.
-	 * Called from the constructor (before sessions are restored).
-	 * Event subscriptions are deferred to resubscribeTeamEvents().
+	 * Restore teams from disk. Called from the constructor (before sessions
+	 * are restored). Event subscriptions deferred to resubscribeTeamEvents().
 	 */
 	private restoreTeams(): void {
 		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
@@ -476,9 +450,8 @@ export class TeamManager {
 	}
 
 	/**
-	 * Phase 2: Re-subscribe to team lead and worker agent events.
-	 * Must be called AFTER sessions have been restored (restoreSessions()),
-	 * because it needs live session objects to attach event listeners.
+	 * Re-subscribe to team-lead and worker agent events. Must run AFTER
+	 * restoreSessions() — needs live session objects.
 	 */
 	resubscribeTeamEvents(): void {
 		// zombie-reviewer sweep — Zombie-reviewer sweep. After a server restart, reviewer
@@ -602,9 +575,7 @@ export class TeamManager {
 		}
 	}
 
-	/**
-	 * Clear and remove all idle-nudge timers for a goal.
-	 */
+	/** Clear and remove all idle-nudge timers for a goal. */
 	private clearIdleNudgeTimer(goalId: string): void {
 		const timer = this.idleNudgeTimers.get(goalId);
 		if (timer) {
@@ -620,14 +591,11 @@ export class TeamManager {
 		this.nudgePending.delete(goalId);
 	}
 
-	/**
-	 * Format elapsed time since a timestamp.
-	 */
 	private formatElapsed(sinceMs: number): string {
 		return formatElapsed(sinceMs);
 	}
 
-	/** Common pre-checks for nudge timer ticks. Returns true if the nudge should be skipped. */
+	/** Common pre-checks for nudge timer ticks. True → skip the nudge. */
 	private shouldSkipNudge(goalId: string): boolean {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return true;
@@ -638,16 +606,10 @@ export class TeamManager {
 		// Don't nudge a team lead whose goal has already finished (complete/shelved/archived).
 		const goal = this.resolveGoal(goalId);
 		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
-		// Don't nudge a parent whose subgoals are still actively making progress
-		// — they'll wake the parent via the parent-notification path when each
-		// subgoal reaches ready-to-merge / fails / pauses. paused-children-not-in-flight rule's
-		// `anyInFlightChild` excludes paused children (a paused subgoal can't
-		// progress without the parent's intervention, so the nudge is wanted
-		// in that case). Without this, the user reported (image #48) the
-		// parent getting "[AUTO-NUDGE] no active team agents" while 19 of
-		// its subgoals were running in their own workspaces. Defensive
-		// against test mocks lacking listLiveGoals — those paths have no
-		// children anyway so the suppression is a no-op there.
+		// Skip if any subgoal is in-flight — the parent-notification path
+		// will wake the parent on RTM/fail/pause. paused children DO count
+		// as in-flight=false (a paused child can't progress without parent
+		// intervention, so the nudge IS wanted then).
 		try {
 			const gm = this.resolveGoalManager(goalId);
 			const allGoals = typeof gm.listLiveGoals === "function" ? gm.listLiveGoals() : [];
@@ -668,15 +630,8 @@ export class TeamManager {
 	}
 
 	/**
-	 * Start both idle-nudge timers when the team lead goes idle.
-	 *
-	 * Two independent repeating timers run in parallel:
-	 * - **No-workers timer** (5 min): fires when the team lead is idle with zero
-	 *   active workers — one-shot nudge then self-clears.
-	 * - **Workers timer** (10 min): fires when the team lead is idle while workers
-	 *   are still active — repeats every 10 min.
-	 *
-	 * Each timer checks conditions on every tick and returns early if they don't apply.
+	 * Start both idle-nudge timers (no-workers 5min one-shot + workers 10min
+	 * exponential). See docs/design/auto-nudge-stuck-team-leads.md.
 	 */
 	private startIdleNudgeTimer(goalId: string): void {
 		this.clearIdleNudgeTimer(goalId);

@@ -1283,11 +1283,7 @@ export function createGateway(config: GatewayConfig) {
 				});
 			}
 
-			// Phase 3 nested goals — boot-time backfill of state=complete on
-			// archived goals whose ready-to-merge gate already passed. Closes
-			// the stale-pointer invalidation gap on records produced by code paths predating
-			// archiveGoalAfterMerge. Wrapped in try/catch — backfill failure
-			// must not block boot (endless-restart guard).
+			// Boot-time backfills — see goal-manager.ts. try/catch is non-fatal.
 			for (const ctx of projectContextManager.all()) {
 				try {
 					const result = ctx.goalManager.backfillCompleteState(ctx.gateStore);
@@ -1298,10 +1294,6 @@ export function createGateway(config: GatewayConfig) {
 					console.warn(`[goal-manager] backfillCompleteState failed for project ${ctx.project.id} (non-fatal):`, err);
 				}
 
-				// Backfill `spawnedBySessionId` on legacy sub-goals created
-				// before the spawn-child handler started stamping the field
-				// (commit 00d6805f). Reads `teamLeadSessionId` from the
-				// parent's persisted team entry. Idempotent.
 				try {
 					const result = ctx.goalManager.backfillSpawnedBySessionId(ctx.teamStore, ctx.sessionStore);
 					if (result.backfilled > 0) {
@@ -1542,11 +1534,7 @@ async function handleApiRoute(
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
 
-	/**
-	 * System-scope feature gate for the nested-goals (Subgoals) surface.
-	 * Returns true when enabled; otherwise writes a 403 SUBGOALS_DISABLED
-	 * response and returns false. See docs/design/subgoals-experimental-toggle.md.
-	 */
+	/** Subgoals feature gate. 403 SUBGOALS_DISABLED when off. */
 	function requireSubgoalsEnabled(): boolean {
 		if (preferencesStore.get("subgoalsEnabled") === true) return true;
 		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
@@ -1895,8 +1883,7 @@ async function handleApiRoute(
 	}
 
 	// POST /api/projects/scan?path=...  → run repo-scan on a folder.
-	// Returns { repos: DetectedRepo[] }. Used by the Add-Project flow and
-	// Settings → "Re-scan repos". Phase 4b — see docs/design/multi-repo-components.md §8.1.
+	// Returns { repos: DetectedRepo[] }. Used by Add-Project + Re-scan repos.
 	if (url.pathname === "/api/projects/scan" && req.method === "POST") {
 		const body = await readBody(req).catch(() => ({}));
 		const rawPath = url.searchParams.get("path") ?? (body && typeof body.path === "string" ? body.path : "");
@@ -1916,9 +1903,7 @@ async function handleApiRoute(
 	}
 
 	// GET /api/projects/:id/structured  → returns { components, workflows,
-	// worktree_root } in their structured (non-string) shape. Used by the
-	// Settings → Components tab so the UI doesn't have to parse YAML.
-	// Phase 4b.
+	// worktree_root } in structured shape (Settings → Components).
 	const projectStructuredMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/structured$/);
 	if (projectStructuredMatch && req.method === "GET") {
 		const ctx = projectContextManager.getOrCreate(projectStructuredMatch[1]);
@@ -1931,8 +1916,7 @@ async function handleApiRoute(
 	}
 
 	// POST /api/projects/:id/rescan-repos  → re-run repo-scan on the
-	// project's rootPath; returns the same shape as /api/projects/scan.
-	// Settings "Re-scan repos" button. Phase 4b.
+	// project's rootPath; same shape as /api/projects/scan.
 	const projectRescanMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/rescan-repos$/);
 	if (projectRescanMatch && req.method === "POST") {
 		const project = projectRegistry.get(projectRescanMatch[1]);
@@ -2152,7 +2136,7 @@ async function handleApiRoute(
 					}
 				} catch { /* best-effort */ }
 			}
-			// Wire the goal-manager pool resolver for the new project (Phase 3 — goals via pool).
+			// Wire the goal-manager pool resolver for the new project.
 			if (newCtx) {
 				newCtx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(project.id));
 				newCtx.goalManager.setComponentsResolver((pid: string) => {
@@ -3243,30 +3227,17 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Resolve workflow:
-			//   1. Inline workflow snapshot in body.workflow (Phase 5b inline-YAML
-			//      flow) — caller owns the full definition; bypass cascade.
-			//   2. Config cascade (builtin → server → project) by workflowId.
-			//   3. Built-in defaults — auto-seeded when the project has zero
-			//      workflows so the user can create a goal without first running
-			//      project setup. Falls back to "general" from buildDefaultWorkflows.
+			// Cascade: body.workflow → workflowId lookup → auto-seed → first match.
+			// See AGENTS.md "Add a project — Auto-seed fallback".
 			let resolvedWorkflow: Workflow | undefined;
 			let resolvedWorkflowId = workflowId;
 			const inlineWorkflow = body?.workflow;
 			if (inlineWorkflow && typeof inlineWorkflow === "object") {
-				// Inline path — Phase 5b new-goal dialog "Advanced: paste inline
-				// workflow YAML". The client has already parsed and validated
-				// the YAML. Snapshot it directly onto the goal, no cascade.
 				resolvedWorkflow = inlineWorkflow as Workflow;
 				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
 			} else {
 				const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
 				resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-				// Auto-seed defaults if cascade + project store are both empty.
-				// The project assistant normally seeds workflows, but a user who
-				// creates a project via the simple New Project flow + immediately
-				// tries a goal would otherwise hit NO_WORKFLOWS_MSG. Seed once,
-				// preserve the user's flow, log so it's diagnosable.
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
@@ -3279,11 +3250,7 @@ async function handleApiRoute(
 					resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 				}
 			}
-			// Optional inline-roles snapshot (parallel to body.workflow). When
-			// present, these roles are stamped onto the goal record and resolved
-			// FIRST by the verification harness + team-spawn before the project/
-			// server/builtin role-store cascade. See resolveRole() and the
-			// PersistedGoal.inlineRoles field doc for the precedence rule.
+			// Optional inline-roles snapshot. See resolveRole() for precedence.
 			const inlineRolesBody = (body as { inlineRoles?: unknown }).inlineRoles;
 			let inlineRoles: Record<string, import("./agent/role-store.js").Role> | undefined;
 			if (inlineRolesBody && typeof inlineRolesBody === "object" && !Array.isArray(inlineRolesBody)) {
@@ -3382,12 +3349,10 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Phase 4: Nested-goal endpoints ───────────────────────────────
-	// SUBGOALS-SPEC §5 / docs/_phase-4-notes.md. Each route below is the
-	// REST surface for one of the team-lead-only `goal_*` tools shipped in
-	// `defaults/tools/children/`. Cascade-affecting routes require an
-	// explicit `cascade` parameter — the server is policy-agnostic and the
-	// UI is the cascade-policy authority. Omitting `cascade` returns 422.
+	// ── Nested-goal endpoints ─────────────────────────────────────
+	// REST surface for the team-lead-only `goal_*` tools in
+	// `defaults/tools/children/`. Cascade-affecting routes require explicit
+	// `cascade` (422 otherwise). UI is the cascade-policy authority.
 
 	// Helpers shared by the routes below.
 
@@ -3525,7 +3490,7 @@ async function handleApiRoute(
 		if (!planId) { json({ error: "planId is required" }, 400); return; }
 		if (!title) { json({ error: "title is required" }, 400); return; }
 		if (!spec) { json({ error: "spec is required" }, 400); return; }
-		// Phase 5 — optional explicit dependsOn (sibling planIds this child depends on).
+		// Optional explicit dependsOn (sibling planIds this child depends on).
 		let dependsOn: string[] | undefined;
 		if (Array.isArray((body as { dependsOn?: unknown }).dependsOn)) {
 			dependsOn = ((body as { dependsOn: unknown[] }).dependsOn)
@@ -3566,7 +3531,7 @@ async function handleApiRoute(
 			return;
 		}
 
-		// Phase 5 — validate dependsOn against existing siblings' planIds.
+		// Validate dependsOn against existing siblings' planIds.
 		// Cross-call cycle (A depends on B, then B depends on A) is caught here
 		// because at the moment B is being spawned, A already lists B in its deps,
 		// so the spawning step's `knownPlanIds` includes A but A's own deps
@@ -3596,11 +3561,10 @@ async function handleApiRoute(
 		}
 
 		try {
-			// Children inherit the ROOT REPO path, not the parent's cwd
-			// (which is the parent's worktree). Otherwise getRepoRoot resolves
-			// to the parent's worktree and child worktrees get nested under
-			// `<parent-worktree>-wt/`, which collapses Phase 2's branch
-			// topology and stalls setup. Preserve any monorepo subdir offset.
+			// Children inherit the ROOT REPO path, not the parent's cwd: a
+			// parent-worktree cwd would nest child worktrees under
+			// `<parent-worktree>-wt/` and collapse the branching topology.
+			// Preserve any monorepo subdir offset.
 			let childCwd = parent.cwd;
 			if (parent.repoPath) {
 				const offset = parent.worktreePath
@@ -3788,7 +3752,7 @@ async function handleApiRoute(
 		}
 		const proposedSteps = body.proposedSteps as ClassifierPlanStep[];
 
-		// Phase 5 — validate explicit dependsOn references on the proposed plan.
+		// Validate explicit dependsOn references on the proposed plan.
 		// Self-deps, unknown planId refs, and cycles are all rejected with 400.
 		const depsValidation = validatePlanDependsOn(
 			proposedSteps.map(s => ({
@@ -3825,7 +3789,7 @@ async function handleApiRoute(
 
 		const policy = goal.divergencePolicy ?? "balanced";
 
-		// Decision matrix from SUBGOALS-SPEC §3.6.
+		// Decision matrix — see docs/nested-goals.md#mutation-classifier.
 		// criteria-drop is the only kind that's always 409.
 		if (verdict.kind === "criteria-drop") {
 			json({
@@ -4180,8 +4144,8 @@ async function handleApiRoute(
 		return;
 	}
 
-	// END Phase 4 endpoints. The legacy DELETE handler below is extended
-	// in-place to support `?cascade=true|false` (422 if missing).
+	// The legacy DELETE handler below is extended in-place to support
+	// `?cascade=true|false` (422 if missing).
 
 	// Routes with goal :id parameter
 	const goalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)$/);
@@ -4236,7 +4200,7 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			// Phase 4: explicit `cascade` query parameter is required. The UI is
+			// Explicit `cascade` query parameter is required. The UI is
 			// the cascade-policy authority; the server is policy-agnostic.
 			// Missing `cascade` → 422. `cascade=false` with descendants → 409
 			// `{ code: "HAS_DESCENDANTS", count }` so the UI can show a
@@ -5752,11 +5716,9 @@ async function handleApiRoute(
 			gateStore.updateGateMetadata(goalId, gateId, body.metadata);
 		}
 
-		// Phase 3 nested goals — freeze the parent workflow's execution.verify[]
-		// when the team-lead signals the goal-plan gate. After this point any
-		// changes to execution.verify[] route through the mutation classifier
-		// (Phase 4). See SUBGOALS-SPEC §3.6 / docs/_phase-3-notes.md and
-		// src/server/agent/parent-workflow-freeze.ts for the pure helper.
+		// On goal-plan signal, freeze parent workflow's execution.verify[].
+		// Subsequent changes route through the mutation classifier.
+		// See docs/nested-goals.md#mutation-classifier.
 		const freezeUpdate = computePlanFreezeUpdate(goal, gateId);
 		if (freezeUpdate.freeze && freezeUpdate.workflow) {
 			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeUpdate.workflow });

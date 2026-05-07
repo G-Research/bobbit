@@ -42,14 +42,9 @@ import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 
 /**
- * Compute the absolute working directory for a component, given a per-branch
- * container root. For single-repo projects, components have `repo: "."` and
- * (typically) no `relativePath`, collapsing to `branchContainer`. For
- * multi-repo / monorepo cases, this is `<branchContainer>/<repo>/<relativePath>`.
- *
- * Phase 2 only exercises the single-repo collapse; multi-repo plumbing lives
- * in Phase 4. The helper is written for both so verification doesn't need to
- * change again when Phase 4 lands.
+ * Resolve a component's cwd within `branchContainer`. Multi-repo:
+ * `<branchContainer>/<repo>/<relativePath>`. Single-repo collapses to
+ * `branchContainer`.
  */
 function componentRoot(c: Component, branchContainer: string): string {
 	let p = branchContainer;
@@ -428,11 +423,8 @@ export class VerificationHarness {
 	private commandSemaphore = new Semaphore(4);
 
 	/**
-	 * Per-rootGoalId concurrency caps for `runSubgoalStep`. Lazily created on
-	 * first acquire; capacity is resolved via
-	 * `goalManager.resolveRootMaxConcurrentChildren(rootGoalId)` at creation
-	 * time. See SUBGOALS-SPEC §3.5 (single semaphore shared by
-	 * the whole tree).
+	 * Per-rootGoalId concurrency caps for `runSubgoalStep` (one semaphore
+	 * per tree, lazy-created via `resolveRootMaxConcurrentChildren`).
 	 */
 	private rootSubgoalSemaphores = new Map<string, Semaphore>();
 
@@ -1623,8 +1615,6 @@ export class VerificationHarness {
 							}
 							}
 						} else if (step.type === "subgoal") {
-							// Phase 3 nested goals — see SUBGOALS-SPEC §2 / §5,
-							// docs/_phase-3-notes.md (stamp-immediately, stale-pointer invalidation, workflow-less recovery, tier resolution).
 							active.steps[index].startedAt = Date.now();
 							this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_started",
@@ -2796,19 +2786,14 @@ export class VerificationHarness {
 		});
 	}
 
-	// ── Phase 3 — Nested goals (subgoal verify-step) ──────────────────────
-	//
-	// SUBGOALS-SPEC §2 / §5. The 7-step skeleton in `runSubgoalStep` is the
-	// single integration point for the feature. The stamp-immediately
-	// invariant, stale-pointer invalidation, workflow-less recovery,
-	// paused != failed, and tier resolution are all encoded inline;
-	// do not collapse the structure without re-reading
-	// docs/_phase-3-notes.md.
+	// ── Nested goals (subgoal verify-step) ───────────────────────────────
+	// `runSubgoalStep` is the single integration point. Stamp-immediately,
+	// stale-pointer invalidation, workflow-less recovery, paused != failed,
+	// tier resolution — all encoded inline. See docs/nested-goals.md.
 
 	/**
-	 * Acquire (or lazily create) the concurrency-cap semaphore for this tree.
-	 * SUBGOALS-SPEC §3.5: single shared semaphore keyed by rootGoalId, default
-	 * 3, hard max 8. See `goalManager.resolveRootMaxConcurrentChildren`.
+	 * Acquire/create the per-tree concurrency semaphore (default 3, max 8).
+	 * Keyed by rootGoalId. See `goalManager.resolveRootMaxConcurrentChildren`.
 	 */
 	private _acquireRootSubgoalSemaphore(rootGoalId: string, goalId: string): Semaphore {
 		let sem = this.rootSubgoalSemaphores.get(rootGoalId);
@@ -2822,7 +2807,7 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Tier-based plan-step child resolution (SUBGOALS-SPEC §4.19).
+	 * Tier-based plan-step child resolution. See docs/nested-goals.md.
 	 *
 	 * Returns the most relevant child for `(parentGoalId, planId)` along with
 	 * the tier source so callers can short-circuit the success terminal vs.
@@ -2945,7 +2930,7 @@ export class VerificationHarness {
 	/**
 	 * Subgoal verify-step handler — the entire feature in one method.
 	 *
-	 * SUBGOALS-SPEC §2 / §5. Each numbered block encodes one or more lessons:
+	 * Each numbered block encodes one or more lessons:
 	 *  1. Resolve descriptor.
 	 *  2. Tier-based child lookup (tier preference: live in-progress > archived complete > live other > archived non-complete).
 	 *  3. Stale archived non-complete invalidation (stale archived non-complete cached pointer must be wiped).
@@ -2956,9 +2941,8 @@ export class VerificationHarness {
 	 *  8. mergeChild + archive + teardown.
 	 *  9. Concurrency cap (§3.5).
 	 *
-	 * Test budget: ~12-15 unit tests (one per lesson + happy paths). The
-	 * complexity here is irreducible — every numbered block is a real bug
-	 * we already shipped once on PR #409 and don't intend to ship again.
+	 * Test budget: ~12-15 unit tests (one per lesson + happy paths). Each
+	 * numbered block encodes a previously-shipped regression. Do not collapse.
 	 */
 	async runSubgoalStep(
 		step: VerifyStep,
@@ -3130,7 +3114,7 @@ export class VerificationHarness {
 				await goalManager.updateGoal(child.id, {
 					spawnedFromPlanId: planId,
 					...(parentTeamLeadSessionId ? { spawnedBySessionId: parentTeamLeadSessionId } : {}),
-					// Phase 5 — stamp explicit dependsOn from the verify-step's subgoal
+					// Stamp explicit dependsOn from the verify-step's subgoal
 					// payload so the Plan tab synthesis can compute topological depth
 					// + draw the right edges. Empty/missing → parallel sibling.
 					...(sg.dependsOn !== undefined ? { dependsOnPlanIds: sg.dependsOn } : {}),

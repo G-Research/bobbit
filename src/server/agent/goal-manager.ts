@@ -13,10 +13,7 @@ import type { SessionStore } from "./session-store.js";
 
 const pExecFile = promisify(execFileCb);
 
-/**
- * Sanitize a goal title into a valid git branch name.
- * Lowercase, replace non-alphanumeric with hyphens, trim, truncate.
- */
+/** Sanitize a goal title into a valid git branch name. */
 function toBranchName(title: string): string {
 	return title
 		.toLowerCase()
@@ -28,11 +25,7 @@ function toBranchName(title: string): string {
 /** Defensive cap on parent-chain walks. See deriveNestingFields(). */
 export const NESTING_WALK_DEPTH_CAP = 64;
 
-/**
- * Outcome of `GoalManager.mergeChild`. Extends the underlying
- * `MergeChildResult` with push status — the push is best-effort and never
- * fails the merge.
- */
+/** Outcome of mergeChild — push is best-effort and never fails the merge. */
 export interface MergeChildOutcome extends MergeChildResult {
 	/** True when `git push origin <parent.branch>` succeeded (or push was skipped via `shouldSkipRemotePush`). */
 	pushed: boolean;
@@ -41,16 +34,9 @@ export interface MergeChildOutcome extends MergeChildResult {
 }
 
 /**
- * Pure helper for the nested-goals lineage derivation. Given a new goal's id
- * and its (optional) parentGoalId, walk the parent chain via the lookup
- * function and:
- *   - throw if the new id appears in the chain (cycle)
- *   - cap the walk at NESTING_WALK_DEPTH_CAP to prevent infinite loops on
- *     pathological / corrupted store state
- *   - derive rootGoalId (== id for root, == parent.rootGoalId ?? parent.id
- *     otherwise) and mergeTarget ("master" for root, "parent" for child)
- *
- * Exported for unit-testing the cycle-prevention branch deterministically.
+ * Derive nested-goal lineage. Walks the parent chain via `lookup`,
+ * throws on cycle, caps at NESTING_WALK_DEPTH_CAP. Root: rootGoalId===id,
+ * mergeTarget==="master". Child: parent's rootGoalId, mergeTarget==="parent".
  */
 export function deriveNestingFields(
 	newId: string,
@@ -173,12 +159,8 @@ export class GoalManager {
 		const now = Date.now();
 		const id = randomUUID();
 
-		// ── Nested-goal derivation (Phase 1) ─────────────────────────────
-		// Auto-derive rootGoalId, mergeTarget, and prevent cycles by walking
-		// the parent chain. divergencePolicy / maxConcurrentChildren are NOT
-		// inherited — they are root-only semantics; the harness consults the
-		// root's value at runtime. Sub-goals can store their own value but it
-		// is inert (forward-compat).
+		// Derive rootGoalId / mergeTarget; prevent cycles. divergencePolicy /
+		// maxConcurrentChildren are root-only (not inherited).
 		const nesting = deriveNestingFields(id, parentGoalId, (gid) => this.store.get(gid));
 
 		let worktreePath: string | undefined;
@@ -226,11 +208,7 @@ export class GoalManager {
 			sandboxed,
 		};
 
-		// Persist the project association on the goal record. Previously this
-		// was stamped post-hoc by `POST /api/goals`, which left subgoals
-		// (created via `goal_spawn_child`) without a projectId on disk and
-		// forced the sidebar to walk the parentGoalId chain to bucket them.
-		// Stamping it here closes that gap server-side.
+		// Stamp projectId so subgoals don't need a parentGoalId-chain walk.
 		if (projectId) {
 			goal.projectId = projectId;
 		}
@@ -239,44 +217,27 @@ export class GoalManager {
 			goal.enabledOptionalSteps = enabledOptionalSteps;
 		}
 
-		// Snapshot inline roles onto the goal — same freeze-at-creation pattern
-		// as `goal.workflow`. Subsequent edits to the project's role store
-		// don't affect this goal; verification gates and team-spawns will
-		// resolve role names from this snapshot first via resolveRole().
-		// Deep-clone so a caller mutating the source object can't poison
-		// the goal's frozen copy.
+		// Snapshot inline roles onto the goal (freeze-at-creation, deep-clone).
+		// resolveRole() reads this snapshot first.
 		if (inlineRoles && Object.keys(inlineRoles).length > 0) {
 			goal.inlineRoles = structuredClone(inlineRoles);
 		}
 
-		// Stamp nested-goal lineage. Always set on every newly created goal
-		// (root or child) — root goals get rootGoalId === id, mergeTarget
-		// === "master"; children get parent's rootGoalId chain and
-		// mergeTarget === "parent".
+		// Stamp nested-goal lineage. Root: rootGoalId===id, mergeTarget==="master".
+		// Child: inherits parent's rootGoalId, mergeTarget==="parent".
 		if (nesting.parentGoalId !== undefined) {
 			goal.parentGoalId = nesting.parentGoalId;
 		}
 		goal.rootGoalId = nesting.rootGoalId;
 		goal.mergeTarget = nesting.mergeTarget;
 
-		// Snapshot workflow onto goal. Resolution order:
-		//   1. Caller passed `resolvedWorkflow` (from config cascade) — use it.
-		//   2. Caller passed `workflowId` only — read from the inline workflow store.
-		//   3. Neither — fall back to "general".
-		// If we can't resolve a workflow at all, throw a clear error so
-		// `POST /api/goals` surfaces a 400 instead of silently creating a
-		// gateless goal. See docs/design/multi-repo-components.md §3.4.
+		// Snapshot workflow onto goal. resolvedWorkflow → workflowStore lookup
+		// → throw. normalizeWorkflow() converts snake_case inline workflows to
+		// runtime camelCase — critical for gate_signal (see AGENTS.md
+		// "gateDef.dependsOn is not iterable").
 		const NO_WORKFLOWS_MSG =
 			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
-			// Use pre-resolved workflow (from config cascade or inline body).
-			// Run through normalizeWorkflow so a snake_case-only inline workflow
-			// (`depends_on`, `inject_downstream`) is converted to the runtime
-			// camelCase shape. Without this, inline workflows passed via
-			// `body.workflow` on POST /api/goals and goal_spawn_child bypassed
-			// the normalizer and stored gates with undefined `dependsOn`,
-			// which broke gate_signal and the goals dashboard with
-			// "gateDef.dependsOn is not iterable".
 			const normalized = normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
 			goal.workflowId = workflowId;
 			goal.workflow = structuredClone(normalized);
@@ -292,13 +253,10 @@ export class GoalManager {
 			goal.workflowId = workflowId;
 			goal.workflow = structuredClone(wf);
 		} else if (workflowId) {
-			// WorkflowStore-required invariant: workflowId given but neither resolvedWorkflow nor a
-			// workflowStore is available — this is the silent-fail path that
-			// produced workflow-less child goals on PR #409. Fail loudly
-			// instead of producing a gateless goal whose `ready-to-merge`
-			// can never pass. The legacy "no workflowId, no workflowStore →
-			// workflow undefined" path below is preserved for assistant
-			// sessions and test fixtures.
+			// workflowId given but no resolvedWorkflow or workflowStore: fail
+			// loudly instead of producing a gateless goal. The "no workflowId,
+			// no workflowStore → workflow undefined" path below is preserved
+			// for assistant sessions and test fixtures.
 			throw new Error(
 				`GoalManager.createGoal: workflowId="${workflowId}" given but neither resolvedWorkflow nor workflowStore was provided. This is WorkflowStore-required invariant — see docs/_phase-1-notes.md.`,
 			);
@@ -341,12 +299,11 @@ export class GoalManager {
 	}
 
 	/**
-	 * Phase 2 — resolve the start point for a child goal's worktree branch.
-	 * Returns `parent.branch` when the goal is a child (parentGoalId set
-	 * AND the parent has a branch). Returns undefined for top-level goals,
-	 * for orphan rows where the parent is missing, and for parents without
-	 * a branch (no-worktree assistant goals etc.) — falling back to the
-	 * existing default-of-origin/master behaviour.
+	 * Resolve the start-point branch for a child goal. Returns
+	 * `parent.branch` for children with a branched parent; undefined for
+	 * top-level goals, orphan rows, or branchless parents (assistant
+	 * goals) — the warn-and-fallback for the latter is the bug-prevention
+	 * path; do not collapse.
 	 */
 	private _resolveChildBaseBranch(goal: PersistedGoal): string | undefined {
 		if (!goal.parentGoalId) return undefined;
@@ -365,21 +322,12 @@ export class GoalManager {
 		// worktreePath (repo root level) and goal.cwd (which may include offset).
 		const preliminaryOffset = goal.worktreePath ? path.relative(goal.worktreePath, goal.cwd) : "";
 
-		// Phase 2 (nested goals): when this goal has a parent, the child's
-		// branch MUST be created off the parent's branch HEAD so siblings
-		// spawned later see prior siblings' commits. The pool pre-builds off
-		// master/primary, so we skip the pool entirely for children — a
-		// claim from the pool would yield a worktree without the parent's
-		// commits. See SUBGOALS-SPEC §3.2 + the user-reversed §3.4 (sandbox
-		// MUST work). The same baseBranch flows into both the host
-		// `createWorktree` path AND any future ProjectSandbox.createWorktree
-		// path; sandbox createWorktree already accepts a `baseBranch` arg.
+		// Child goals branch off the parent's HEAD so siblings see prior
+		// siblings' commits. The pool pre-builds off master, so we skip the
+		// pool for children (a pool claim would lack the parent's commits).
 		const childBaseBranch = this._resolveChildBaseBranch(goal);
 
-		// Pool-first (Phase 3): claim a pre-built worktree if one is available.
-		// On success this is observably as fast as session start (~tens of ms).
-		// On failure or empty pool we fall through to the legacy createWorktree path.
-		// SKIPPED for child goals — see comment above.
+		// Pool-first: claim a pre-built worktree (skipped for children).
 		const pool = childBaseBranch ? null : this.poolResolver?.();
 		if (pool) {
 			try {
@@ -503,19 +451,13 @@ export class GoalManager {
 		throw lastError;
 	}
 
-	/**
-	 * Setup worktree then start team. Used when autoStartTeam is enabled.
-	 * Uses a callback to avoid circular dependency with TeamManager.
-	 */
+	/** Setup worktree then start team (callback avoids TeamManager cycle). */
 	async setupWorktreeAndStartTeam(goalId: string, startTeamFn: () => Promise<any>): Promise<void> {
 		await this.setupWorktree(goalId);
 		await startTeamFn();
 	}
 
-	/**
-	 * Retry setup for a goal in error state.
-	 * Returns true if retry was initiated, false if goal not found or not in error state.
-	 */
+	/** Retry setup for a goal in error state. */
 	retrySetup(goalId: string): boolean {
 		const goal = this.store.get(goalId);
 		if (!goal || goal.setupStatus !== "error") {
@@ -529,22 +471,12 @@ export class GoalManager {
 	}
 
 	/**
-	 * Locally merge a child goal's branch into its parent's branch and
-	 * (best-effort) push the parent branch to origin so siblings spawned
-	 * later see the latest tip and CI picks up the merge.
+	 * Locally merge a child's branch into its parent's branch (child goals
+	 * merge LOCALLY into parent branch — no PR). Best-effort push of the
+	 * parent branch so siblings see the new tip.
 	 *
-	 * Phase 2 of nested goals. Wraps `mergeChildBranchLocal` from
-	 * `skills/git.ts`. Caller (Phase 3 `runSubgoalStep`) is responsible for
-	 * archiving + tearing down the child afterwards via
-	 * `archiveGoalAfterMerge`.
-	 *
-	 * Security invariant: `child.parentGoalId === parentGoalId` MUST hold.
-	 * Mismatch throws — prevents cross-tree merges (e.g. spec drift, cycle
-	 * leakage, or a UI bug pointing at the wrong child).
-	 *
-	 * Push failure is non-fatal: the parent branch tip is still updated
-	 * locally so the next agent that fetches will pick it up. We surface
-	 * `pushError` so callers can log it.
+	 * Security invariant: `child.parentGoalId === parentGoalId` MUST hold;
+	 * mismatch throws PARENT_MISMATCH (prevents cross-tree merges).
 	 */
 	async mergeChild(parentGoalId: string, childGoalId: string): Promise<MergeChildOutcome> {
 		const parent = this.store.get(parentGoalId);
@@ -569,9 +501,8 @@ export class GoalManager {
 			);
 		}
 
-		// Resolve parentCwd: prefer the primary repo's worktree path. In
-		// multi-repo mode, repoWorktrees["."] is the canonical "primary"
-		// repo path; in single-repo mode worktreePath is authoritative.
+		// repoWorktrees["."] is canonical primary in multi-repo; worktreePath
+		// is authoritative in single-repo.
 		const parentCwd = parent.repoWorktrees?.["."] ?? parent.worktreePath;
 		if (!parentCwd) {
 			throw new Error(`mergeChild: parent ${parentGoalId} has no worktreePath`);
@@ -581,10 +512,8 @@ export class GoalManager {
 
 		const outcome: MergeChildOutcome = { ...result, pushed: false };
 
-		// Push parent branch to origin so siblings spawned later see the
-		// merge tip. Push is best-effort and gated by shouldSkipRemotePush
-		// (BOBBIT_TEST_NO_PUSH=1 in test mode). Skip on conflict — there's
-		// nothing new to push and we want the worktree to stay diagnostic.
+		// Best-effort push so siblings see the merge tip. Skip on conflict
+		// (worktree stays diagnostic).
 		if (!result.conflict && (result.merged || result.alreadyMerged) && !shouldSkipRemotePush()) {
 			try {
 				await pExecFile("git", ["push", "origin", parent.branch], { cwd: parentCwd, timeout: 30_000 });
@@ -637,14 +566,8 @@ export class GoalManager {
 	}
 
 	/**
-	 * Boot-time migration: backfill `state: "complete"` on archived goals
-	 * whose `ready-to-merge` gate is in the `passed` state. Closes the
-	 * stale-pointer invalidation gap on records produced by code paths that pre-date
-	 * `archiveGoalAfterMerge`.
-	 *
-	 * Idempotent — only writes when the record is missing the stamp.
-	 * Wrapped in per-goal try/catch so one corrupt record cannot crash
-	 * boot (endless-restart guard).
+	 * Boot-time backfill: stamp state="complete" on archived goals whose
+	 * `ready-to-merge` gate already passed. Idempotent; per-goal try/catch.
 	 */
 	backfillCompleteState(gateStore: GateStore): { backfilled: number; skipped: number } {
 		let backfilled = 0;
@@ -667,24 +590,10 @@ export class GoalManager {
 	}
 
 	/**
-	 * Boot-time migration: backfill `spawnedBySessionId` on sub-goals that
-	 * were created before the spawn-child handler started stamping the
-	 * field (commit 00d6805f). Without this, legacy sub-goals don't nest
-	 * under their spawning team-lead in the sidebar.
-	 *
-	 * Lookup precedence: (1) parent's persisted team entry's
-	 * `teamLeadSessionId` — works for live teams; (2) session store fallback
-	 * — find sessions with `role === "team-lead"` and `teamGoalId` matching
-	 * the parent goal; if exactly one exists (live OR archived), stamp it.
-	 * Multi-team-lead parents stay ambiguous and are skipped — sub-goals
-	 * fall back to the parent-forest level rather than misattribute.
-	 *
-	 * Archived sub-goals are processed too: the visual nesting under an
-	 * archived team-lead in the "Archived" sidebar block depends on this
-	 * field being stamped.
-	 *
-	 * Idempotent — only writes when the field is absent. Per-goal try/catch
-	 * keeps boot resilient (endless-restart guard).
+	 * Boot-time backfill: stamp `spawnedBySessionId` on legacy sub-goals.
+	 * Lookup: (1) parent team's `teamLeadSessionId`; (2) sessionStore
+	 * fallback (single team-lead match only — ambiguous parents skipped).
+	 * Idempotent; per-goal try/catch.
 	 */
 	backfillSpawnedBySessionId(teamStore: TeamStore, sessionStore?: SessionStore): { backfilled: number; skipped: number } {
 		let backfilled = 0;
@@ -719,10 +628,8 @@ export class GoalManager {
 		const goal = this.store.get(id);
 		if (!goal) return false;
 		const archived = this.store.archive(id);
-		// Phase 4a multi-repo cleanup: best-effort, fire-and-forget per-repo
-		// worktree removal + remote branch deletion in parallel. Single-repo
-		// goal cleanup remains owned by session purge (worktree shared with the
-		// team-lead session) so we only fan out when repoWorktrees is set.
+		// Multi-repo cleanup: best-effort per-repo worktree + remote-branch
+		// removal. Single-repo cleanup remains owned by session purge.
 		if (archived && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
 			const { cleanupWorktree } = await import("../skills/git.js");
 			const entries = Object.entries(goal.repoWorktrees);
@@ -751,7 +658,7 @@ export class GoalManager {
 		return this.store.getGeneration();
 	}
 
-	/** Expose the underlying store for cross-cutting concerns (e.g. gate status bumping generation). */
+	/** Expose the underlying store. */
 	getGoalStore(): GoalStore {
 		return this.store;
 	}
@@ -761,14 +668,8 @@ export class GoalManager {
 	}
 
 	/**
-	 * Resolve the per-tree concurrency cap consulted by `runSubgoalStep` when
-	 * acquiring a semaphore slot before spawning a child. Reads
-	 * `maxConcurrentChildren` off the root goal record.
-	 *
-	 * Defaults: unset / unknown root → 3. Hard max: 8 (defensive cap on user
-	 * input). Floor: 1 (never zero — would deadlock the harness).
-	 *
-	 * See SUBGOALS-SPEC §3.5.
+	 * Per-tree concurrency cap for `runSubgoalStep`. Reads root's
+	 * `maxConcurrentChildren`. Defaults: 3, clamped to [1, 8].
 	 */
 	resolveRootMaxConcurrentChildren(rootGoalId: string): number {
 		const root = this.store.get(rootGoalId);
@@ -788,8 +689,8 @@ export class GoalManager {
 		reattemptOf?: string;
 		projectId?: string;
 		autoStartTeam?: boolean;
-		// Phase 3 nested-goals fields (must be settable
-		// immediately after createGoal in runSubgoalStep).
+		// Nested-goals fields. spawnedFromPlanId MUST be settable immediately
+		// after createGoal (no awaits between) — see runSubgoalStep.
 		spawnedFromPlanId?: string;
 		paused?: boolean;
 		replanCount?: number;
@@ -829,10 +730,7 @@ export class GoalManager {
 		const goal = this.store.get(id);
 		if (!goal) return false;
 
-		// Worktrees are preserved for 7-day archive — do NOT clean them up here.
-		// The team teardown (called by server.ts before deleteGoal) archives all
-		// sessions via terminateSession/dismissRole, which preserves worktree paths
-		// in the archived session metadata. The periodic purge cleans them up later.
+		// Worktrees preserved for 7-day archive (cleaned by periodic purge).
 		if (goal?.team) {
 			console.log(`[goal-manager] Deleting team goal "${goal.title}" — worktrees preserved for archived session review`);
 		}

@@ -1,42 +1,23 @@
 /**
- * Plan-mutation classifier — Phase 4 of nested goals.
+ * Plan-mutation classifier. Pure module — no I/O.
  *
- * Once the team-lead signals the `goal-plan` gate, the parent goal's
- * `execution.verify[]` array is frozen. Subsequent mutations submitted via
- * `PATCH /api/goals/:id/plan` are routed through this classifier, which
- * reports a single `MutationKind`. The REST handler then applies the
- * binding decision matrix from SUBGOALS-SPEC §3.6 against the goal's
- * `divergencePolicy` to allow/prompt/reject.
+ * After `goal-plan` signal, parent's `execution.verify[]` is frozen;
+ * `PATCH /api/goals/:id/plan` routes through here. Reports the most severe
+ * structural change, with criteria-drop overriding any structural kind
+ * (criteria-drop is rejected by every policy).
  *
- * Pure module — no DOM, no node-only APIs, no I/O. Importable from the
- * server REST routes and unit tests directly.
- *
- * The classifier reports kind as the **most severe** structural change and
- * THEN overrides to `criteria-drop` if any root acceptance criterion would
- * become uncovered. The override is intentional: a criterion drop trumps
- * any structural classification because the decision matrix rejects
- * criteria-drop on every policy.
- *
- * Severity order (lowest → highest):
- *   noop < fix-up < expansion < restructure (criteria-drop overrides any).
+ * Severity: noop < fix-up < expansion < restructure (criteria-drop overrides).
+ * See docs/nested-goals.md#mutation-classifier.
  */
 
 export type MutationKind = "noop" | "fix-up" | "expansion" | "restructure" | "criteria-drop";
 
 /**
- * Subgoal-typed plan step shape consumed by the classifier. Mirrors the
- * subset of `VerifyStep` we care about — kept structural-only so the
- * classifier is decoupled from `workflow-store.ts` evolution.
+ * Subgoal-typed plan step shape consumed by the classifier.
  *
- * Field precedence: `effectiveTitle()`, `effectiveSpec()` and the workflow /
- * suggested-role accessors prefer the **top-level** field over the nested
- * `subgoal` field. Both are accepted so callers can hand us the raw verify-
- * step (which carries the subgoal payload) or a normalised step (with the
- * subgoal fields hoisted to the top). When BOTH are set with conflicting
- * values, the top-level wins and a one-line `console.warn` is emitted from
- * `effectiveTitle()` to surface the inconsistency at classification time.
- * Tightening the type to forbid this would break legacy plan-step shapes;
- * the precedence + warn path is the documented contract.
+ * Field precedence: top-level wins over nested `subgoal.*`. Both shapes
+ * accepted (raw verify-step or normalised). Conflicting values: top-level
+ * wins; one-shot `console.warn` from `effectiveTitle()`.
  */
 export interface ClassifierPlanStep {
 	planId: string;

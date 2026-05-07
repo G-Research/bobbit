@@ -18,13 +18,10 @@ import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineV
 // ── Public types (kept compatible with the old WorkflowStore shape) ──
 
 /**
- * Subgoal verify-step descriptor (only meaningful when `VerifyStep.type === "subgoal"`).
- *
- * Phase 3 of nested goals — see docs/_phase-3-notes.md and SUBGOALS-SPEC §2.
- *
- * The verification harness's `runSubgoalStep` handler reads these fields to
- * spawn / resolve a child goal and waits for the child's `ready-to-merge`
- * gate before merging the child branch into the parent.
+ * Subgoal verify-step descriptor (used when `VerifyStep.type === "subgoal"`).
+ * The harness's `runSubgoalStep` spawns/resolves a child via these fields
+ * and waits for the child's `ready-to-merge` before local-merging.
+ * See docs/nested-goals.md.
  */
 export interface VerifyStepSubgoal {
 	/** Stable id for this plan node — used as the spawnedFromPlanId on the child goal (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between). */
@@ -38,11 +35,9 @@ export interface VerifyStepSubgoal {
 	/** Suggested team-lead role for the child. */
 	suggestedRole?: string;
 	/**
-	 * Sibling planIds this step depends on (Phase 5 — explicit DAG).
-	 * Empty/undefined means parallel sibling at column 0. Used by the
-	 * Plan-tab synthesis layer to compute topological depth + which edges
-	 * to draw between plan nodes. Validated by
-	 * `depends-on-validation.ts::validatePlanDependsOn` at PATCH /plan time.
+	 * Sibling planIds this step depends on (explicit DAG). Empty/undefined
+	 * → parallel sibling at column 0. Validated by
+	 * `depends-on-validation.ts::validatePlanDependsOn`.
 	 */
 	dependsOn?: string[];
 }
@@ -59,9 +54,9 @@ export interface VerifyStep {
 	label?: string;
 	role?: string;
 	description?: string;
-	/** Structural reference: which component to run from (Phase 2). */
+	/** Structural reference: which component to run from. */
 	component?: string;
-	/** Structural reference: which command on that component to invoke (Phase 2). */
+	/** Structural reference: which command on that component to invoke. */
 	command?: string;
 	/** Subgoal step descriptor (only when type === "subgoal"). */
 	subgoal?: VerifyStepSubgoal;
