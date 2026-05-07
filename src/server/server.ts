@@ -1,6 +1,6 @@
 import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -3310,6 +3310,7 @@ async function handleApiRoute(
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const prevSpec = putGoal?.spec ?? "";
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -3322,6 +3323,24 @@ async function handleApiRoute(
 				reattemptOf: body.reattemptOf,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
+			// Spec-edit notification: emit a dedicated `goal_spec_changed` WS
+			// event AND nudge the team lead so a running agent learns the spec
+			// they read at startup has changed. No-op skip when the spec field
+			// is absent or identical (mirrors goal-store.update() R-007 behaviour).
+			if (typeof body.spec === "string" && body.spec !== prevSpec) {
+				const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
+				broadcastToAll({
+					type: "goal_spec_changed",
+					goalId: id,
+					prevSpecHash: hash(prevSpec),
+					newSpecHash: hash(body.spec),
+					prevLen: prevSpec.length,
+					newLen: body.spec.length,
+					ts: Date.now(),
+				});
+				try { teamManager.notifyTeamLeadOfSpecChange(id, prevSpec.length, body.spec.length); }
+				catch (err) { console.error(`[api] notifyTeamLeadOfSpecChange failed for ${id}:`, err); }
+			}
 			json({ ok: true });
 			return;
 		}

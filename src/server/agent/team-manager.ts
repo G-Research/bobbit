@@ -146,6 +146,10 @@ export class TeamManager {
 	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
 	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
 	private nudgePending = new Map<string, boolean>();
+	/** Last spec-edit nudge timestamp per goal (ms epoch). Throttles `notifyTeamLeadOfSpecChange` to one per SPEC_NUDGE_THROTTLE_MS. */
+	private lastSpecNudgeTs = new Map<string, number>();
+	/** Throttle window for spec-edit nudges (ms). A flurry of edits within the window collapses to one nudge. */
+	private static readonly SPEC_NUDGE_THROTTLE_MS = 30_000;
 	private verificationHarness?: VerificationHarness;
 	/** Base delay before nudging the idle team lead when workers are active (ms). Successive nudges back off exponentially up to MAX_IDLE_NUDGE_DELAY_MS. */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
@@ -1214,6 +1218,44 @@ export class TeamManager {
 	 * Called from the task transition REST endpoint so the team lead wakes up
 	 * even if the worker continues with another task without going idle.
 	 */
+	/**
+	 * Notify the team lead that the goal's spec has been edited mid-flight.
+	 * The agent read the spec once at session startup; this nudge tells it to
+	 * re-read via `view_goal_spec` and decide whether the change affects the
+	 * plan. Throttled to one nudge per SPEC_NUDGE_THROTTLE_MS so a flurry of
+	 * edits doesn't spam the agent.
+	 */
+	notifyTeamLeadOfSpecChange(goalId: string, prevLen: number, newLen: number): void {
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return;
+
+		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
+		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
+
+		const now = Date.now();
+		const last = this.lastSpecNudgeTs.get(goalId) ?? 0;
+		if (now - last < TeamManager.SPEC_NUDGE_THROTTLE_MS) {
+			console.log(`[team-manager] Skipping spec-edit nudge for goal ${goalId} (throttled, last ${now - last}ms ago)`);
+			return;
+		}
+		this.lastSpecNudgeTs.set(goalId, now);
+
+		const message =
+			`**Your goal's spec has been edited** (length changed from ${prevLen} to ${newLen} chars). ` +
+			`The change has NOT been re-injected into your system prompt — re-read the latest spec via ` +
+			`\`view_goal_spec\` (or \`GET /api/goals/${goalId}\`) to see what changed, then decide whether the new ` +
+			`content changes your plan, requires new tasks, or invalidates an upstream gate signal.`;
+
+		if (teamLeadSession.status === "streaming") {
+			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message).catch((err: any) => {
+				console.error(`[team-manager] Failed to steer team lead on spec change for goal ${goalId}:`, err);
+			});
+		} else {
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
+		}
+		console.log(`[team-manager] Notified team lead of spec change for goal ${goalId} (${prevLen} → ${newLen} chars)`);
+	}
+
 	notifyTeamLeadOfTaskCompletion(goalId: string, taskTitle: string, taskState: string): void {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return;

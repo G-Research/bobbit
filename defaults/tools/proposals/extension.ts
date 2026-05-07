@@ -298,5 +298,59 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log("[proposal-tools] Registered 8 proposal tools");
+	// ── view_goal_spec ───────────────────────────────────
+	// Returns the live `goal.spec` content for the agent's current goal (or
+	// any goal id passed explicitly). Used by team-leads who receive a
+	// `goal_spec_changed` nudge: re-read the spec, decide whether the change
+	// affects the plan, then act.
+	pi.registerTool({
+		name: "view_goal_spec",
+		label: "View Goal Spec",
+		description:
+			"Read the current `goal.spec` content for a goal (defaults to the agent's current goal via BOBBIT_GOAL_ID). " +
+			"Use after a `goal_spec_changed` notification to learn what the spec now says — the version injected into your " +
+			"system prompt at startup is NOT updated when the user / parent agent edits the spec mid-flight.",
+		promptSnippet: "View the current goal.spec content (the spec injected at startup may be stale).",
+		parameters: Type.Object({
+			goal_id: Type.Optional(Type.String({ description: "Goal id. Defaults to the current session's goal (BOBBIT_GOAL_ID)." })),
+		}),
+		async execute(_id, args) {
+			const { goal_id } = args as { goal_id?: string };
+			const id = goal_id || process.env.BOBBIT_GOAL_ID;
+			if (!id) {
+				return {
+					content: [{ type: "text" as const, text: `view_goal_spec failed: no goal_id provided and BOBBIT_GOAL_ID is not set (this session is not bound to a goal).` }],
+					isError: true,
+				} as any;
+			}
+			try {
+				const { status, bodyText, bodyJson } = await callGateway(`/api/goals/${encodeURIComponent(id)}`, "GET");
+				if (status === 404) {
+					return {
+						content: [{ type: "text" as const, text: `view_goal_spec failed: goal ${id} not found.` }],
+						isError: true,
+					} as any;
+				}
+				if (status < 200 || status >= 300) {
+					return {
+						content: [{ type: "text" as const, text: `view_goal_spec failed (HTTP ${status}): ${bodyText.slice(0, 500)}` }],
+						isError: true,
+					} as any;
+				}
+				const goal = bodyJson as { id?: string; title?: string; spec?: string; updatedAt?: number } | undefined;
+				const spec = (goal && typeof goal.spec === "string") ? goal.spec : "";
+				const header = `# Goal: ${goal?.title ?? id}\n# id: ${goal?.id ?? id}\n# updatedAt: ${goal?.updatedAt ? new Date(goal.updatedAt).toISOString() : "unknown"}\n# spec length: ${spec.length} chars\n\n`;
+				return {
+					content: [{ type: "text" as const, text: header + spec }],
+				};
+			} catch (err) {
+				return {
+					content: [{ type: "text" as const, text: `view_goal_spec failed: ${(err as Error)?.message ?? err}` }],
+					isError: true,
+				} as any;
+			}
+		},
+	});
+
+	console.log("[proposal-tools] Registered 9 proposal tools");
 }
