@@ -257,7 +257,11 @@ export class MockAgentCore {
 			};
 		}
 
-		if (lower.includes("project_proposal") || lower.includes("project proposal")) {
+		// Trigger ONLY on the underscore form so the post-accept SYSTEM
+		// notify message ("The user accepted your project proposal...")
+		// doesn't retrigger and re-emit, which would re-open the panel
+		// after the user dismissed/accepted.
+		if (lower.includes("project_proposal")) {
 			return {
 				tool: "propose_project",
 				input: {

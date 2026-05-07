@@ -45,10 +45,9 @@ test.describe("Phase 5b — cascade archive", () => {
 		await expect(summary).toBeVisible({ timeout: 5_000 });
 		await expect(summary).toContainText("3 descendant goals");
 
-		// The cascade checkbox is read-only/checked.
-		const cascadeCheckbox = page.locator('[data-testid="cascade-archive-checkbox-cascade"]').first();
-		await expect(cascadeCheckbox).toBeChecked();
-		await expect(cascadeCheckbox).toBeDisabled();
+		// fe259879 removed the read-only cascade checkbox; cascade is mandatory
+		// and surfaced in the summary copy + button label. Just assert the
+		// summary states cascade is required.
 
 		// Confirm — button label includes the count.
 		const confirmBtn = page.locator('button').filter({ hasText: /Archive parent \+ 3 descendants/ }).first();

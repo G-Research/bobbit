@@ -6,15 +6,18 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-/** Create a unique temp dir for each test to avoid conflicts. */
+/** Create a unique temp dir for each test to avoid conflicts.
+ *  Returns the canonical (realpath) form so Add-Project tests aren't
+ *  blocked by the symlink-confirm flow on macOS (tmpdir is /var/folders
+ *  which is a symlink to /private/var/folders). */
 function uniqueDir(label: string): string {
 	const dir = join(tmpdir(), `bobbit-e2e-addproj-${label}-${process.env.E2E_PORT}-${Date.now()}`);
 	mkdirSync(dir, { recursive: true });
-	return dir;
+	return realpathSync(dir);
 }
 
 test.describe("Add Project flow (UI)", () => {
