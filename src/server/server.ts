@@ -6335,10 +6335,23 @@ async function handleApiRoute(
 			json({ error: "Missing sessionId or message" }, 400);
 			return;
 		}
-		// Validate target is a team agent
+		// Validate target is a team agent OR a direct-child team-lead
 		const agents = teamManager.listAgents(goalId);
-		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			json({ error: "Session is not a member of this team" }, 403);
+		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
+		if (!allowed) {
+			const targetSession = sessionManager.getSession(body.sessionId);
+			if (targetSession?.role === "team-lead" && targetSession.goalId) {
+				const targetGoal = getGoalAcrossProjects(targetSession.goalId);
+				if (targetGoal?.parentGoalId === goalId) {
+					allowed = true;
+				}
+			}
+		}
+		if (!allowed) {
+			json({
+				error: "Session is not a member of this team and is not a direct-child team-lead",
+				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
+			}, 403);
 			return;
 		}
 		const session = sessionManager.getSession(body.sessionId);

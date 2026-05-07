@@ -1,7 +1,12 @@
 name: team_prompt
+<<<<<<< HEAD
 description: "Queued or immediate follow-up message to existing agent"
 summary: "Send prompt to a team agent"
 params: [session_id, message, workflowGateId?, inputGateIds?]
+=======
+description: "Send a prompt to a team agent (queued or immediate). The target session must either be in your own team OR be the team-lead of a direct child goal of your own goal. For sessions outside this scope, use `goal_pause` / `goal_archive_child` instead."
+summary: "Send a prompt to a team agent, queued or immediate."
+>>>>>>> 93ffa741 (feat(team-prompt): allow parent team-lead to prompt direct-child team-leads)
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -64,6 +69,22 @@ detail_docs: >-
 
   - **Agent should be terminated** — use `team_dismiss` to remove agents you no
   longer need.
+
+
+  ## Direct-child team-leads
+
+
+  In addition to your own team's sessions, `team_prompt` accepts the team-lead
+  session of a **direct child goal** of your own goal. This lets a parent
+  team-lead send a queued message to a subgoal's team-lead without falling back
+  to raw `/api/sessions/:id/notify`.
+
+
+  Scope is **direct children only** — grandchildren and arbitrary descendants
+  return 403 `NOT_TEAM_MEMBER_OR_DIRECT_CHILD`. The asymmetry with `team_steer`
+  / `team_abort` / `team_dismiss` (still caller-team-only) is intentional:
+  destructive operations on a subgoal go through `goal_pause` /
+  `goal_archive_child`, not direct session manipulation.
 
 
   ## Examples
