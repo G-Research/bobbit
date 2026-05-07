@@ -256,15 +256,19 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_archive_child",
 		label: "Archive Child Goal",
-		description: "Archive a child goal. Cascade=false → 409 if it has descendants (UI prompts for confirmation). Cascade=true → walks descendants deepest-first, archives each. Required cascade param.",
+		description: "Archive a child goal. Cascade=false → 409 if it has descendants (UI prompts for confirmation). Cascade=true → walks descendants deepest-first, archives each. Required cascade param. Pass mergedManually=true if you already merged the child's branch outside the auto-merge path — the archived record's state is reconciled to 'complete' so the Plan-tab DAG renders it green instead of red.",
 		promptSnippet: "Archive a child goal (cascade required).",
 		parameters: Type.Object({
 			childGoalId: Type.String({ description: "Id of the child to archive." }),
 			cascade: Type.Boolean({ description: "Required. true = also archive descendants; false → 409 if descendants exist." }),
+			mergedManually: Type.Optional(Type.Boolean({
+				description: "Set true if you already merged the child's branch manually (git merge + push). Marks the archived record as state='complete' so the Plan DAG renders it green instead of red. When omitted/false, the existing state (typically 'failed') is preserved.",
+			})),
 		}),
 		async execute(_id, params) {
 			try {
-				const q = `?cascade=${params.cascade ? "true" : "false"}`;
+				let q = `?cascade=${params.cascade ? "true" : "false"}`;
+				if (params.mergedManually === true) q += "&mergedManually=true";
 				return ok(await api("DELETE", `/api/goals/${params.childGoalId}${q}`));
 			} catch (e: any) { return err(e.message); }
 		},

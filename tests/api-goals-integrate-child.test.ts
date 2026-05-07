@@ -96,6 +96,47 @@ describe("integrate-child REST primitives", () => {
 	// child's ready-to-merge gate before invoking mergeChild. Direct
 	// HTTP coverage is in the e2e harness; here we pin the source-level
 	// contract so a regression that drops the guard fails CI.
+	// AC#1 regression guard — the auto-merge path archives the child via
+	// `archiveGoalAfterMerge`, which stamps `state: "complete"` BEFORE
+	// flipping `archived`. Pinned here as a regression guard so a future
+	// refactor that swaps `archiveGoalAfterMerge` for a plain
+	// `archiveGoal` call in the auto-merge route fails CI.
+	it("AC#1: archiveGoalAfterMerge stamps state=complete on the child (regression guard)", async () => {
+		const { gm, store } = makeManager();
+		const parent = await gm.createGoal("Parent", tmpRoot, { workflowId: "feature" });
+		const child = await gm.createGoal("Child", tmpRoot, {
+			workflowId: "feature", parentGoalId: parent.id,
+		});
+		// Simulate the harness having pushed the child into in-progress.
+		store.update(child.id, { state: "in-progress" });
+
+		await gm.archiveGoalAfterMerge(child.id);
+
+		const archived = store.get(child.id);
+		assert.ok(archived, "child record present");
+		assert.equal(archived.archived, true, "archived");
+		assert.equal(
+			archived.state,
+			"complete",
+			"auto-merge path must reconcile state to complete (AC#1)",
+		);
+	});
+
+	// Pin the source-level invariant that the integrate-child route
+	// invokes the state-stamping `archiveGoalAfterMerge` rather than a
+	// plain `archiveGoal`. Mirrors the R-005 source-level pin below.
+	it("AC#1: integrate-child route uses archiveGoalAfterMerge (state-stamping path)", () => {
+		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		assert.ok(
+			/integrate-child/.test(src),
+			"integrate-child route must exist",
+		);
+		assert.ok(
+			/archiveGoalAfterMerge\(\s*childId\s*\)/.test(src),
+			"integrate-child route must call archiveGoalAfterMerge so the archived child has state='complete'",
+		);
+	});
+
 	it("R-005: route refuses merge unless ready-to-merge gate has passed (or body.force=true)", () => {
 		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
 		assert.ok(

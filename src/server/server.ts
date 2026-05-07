@@ -4247,8 +4247,20 @@ async function handleApiRoute(
 				return;
 			}
 			const cascade = cascadeParam === "true";
+			// Optional `?mergedManually=true` — the team-lead has already merged
+			// the child's branch outside the auto-merge path. Stamp the target
+			// goal's `state` to "complete" BEFORE archiving (mirrors
+			// `archiveGoalAfterMerge` ordering) so the archived snapshot has
+			// state="complete" on disk and the Plan-tab DAG renders the node
+			// green instead of red. Applies only to the target — cascaded
+			// descendants may have failed for unrelated reasons.
+			const mergedManually = url.searchParams.get("mergedManually") === "true";
 			const targetGoal = getGoalAcrossProjects(id);
 			if (!targetGoal) { json({ error: "Goal not found" }, 404); return; }
+			if (mergedManually && targetGoal.state !== "complete") {
+				const targetCtx = projectContextManager.getContextForGoal(id);
+				targetCtx?.goalStore.update(id, { state: "complete" });
+			}
 			// Live descendants (archived ones don't block cascade=false — they're
 			// already archived, no work to do for them). Mirrors the client's
 			// countDescendants which only counts non-archived. If client and
