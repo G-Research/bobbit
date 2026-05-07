@@ -1122,7 +1122,11 @@ export async function completeTeam(goalId: string): Promise<boolean> {
  */
 export async function teardownTeam(goalId: string, cascade = false): Promise<boolean> {
 	try {
-		const url = `/api/goals/${goalId}/team/teardown${cascade ? "?cascade=true" : ""}`;
+		// Server requires explicit `cascade` (returns 422 CASCADE_REQUIRED when
+		// omitted). Always send the value, even when false, to honour the
+		// AGENTS.md "every cascade-affecting REST call requires explicit cascade"
+		// contract.
+		const url = `/api/goals/${goalId}/team/teardown?cascade=${cascade ? "true" : "false"}`;
 		const res = await gatewayFetch(url, { method: "POST" });
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		await refreshSessions();

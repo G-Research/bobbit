@@ -11,6 +11,7 @@
  * The nested goals have `parentGoalId` / `rootGoalId` set directly via the
  * lazy-migration tolerant Goal record — Phase 1's `createGoal` accepts them.
  */
+import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
@@ -19,6 +20,24 @@ async function deleteGoalQuiet(id: string): Promise<void> {
 	try {
 		await apiFetch(`/api/goals/${id}?cascade=true`, { method: "DELETE" });
 	} catch { /* best-effort */ }
+}
+
+/**
+ * Pre-populate the `bobbit-expanded-goals` localStorage key with the given
+ * goal IDs and reload — required because the sidebar nested-row renderer
+ * hides child rows when the ancestor's chevron is collapsed (default).
+ * Mirrors the production toggle written by `saveExpandedGoals()`.
+ */
+async function expandGoalsAndReload(page: Page, goalIds: string[]): Promise<void> {
+	await page.evaluate((ids: string[]) => {
+		try {
+			localStorage.setItem("bobbit-expanded-goals", JSON.stringify(ids));
+		} catch {}
+	}, goalIds);
+	await page.reload();
+	await expect(
+		page.locator("button").filter({ hasText: "Settings" }).first(),
+	).toBeVisible({ timeout: 20_000 });
 }
 
 test.describe("Phase 5b — sidebar nested goals", () => {
@@ -62,6 +81,9 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 
 	test("renders nested rows with correct indentation and descendant badge", async ({ page }) => {
 		await openApp(page);
+		// Parent goals are collapsed by default — expand the parent and child1
+		// (the grandchild's ancestor) before asserting nested-row visibility.
+		await expandGoalsAndReload(page, [parentId, child1Id]);
 
 		// All four goals should be in the sidebar after refresh.
 		const parentRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"]`).first();
@@ -88,6 +110,7 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 
 	test("child row dashboard button is reachable + navigates", async ({ page }) => {
 		await openApp(page);
+		await expandGoalsAndReload(page, [parentId]);
 		const child1Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first();
 		await expect(child1Row).toBeVisible({ timeout: 15_000 });
 
@@ -103,6 +126,10 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 
 	test("nested view persists across reload", async ({ page }) => {
 		await openApp(page);
+		// Seed the parent + child1 as expanded so the grandchild row renders.
+		// Persistence is the property under test: reload should preserve the
+		// localStorage-backed expansion state.
+		await expandGoalsAndReload(page, [parentId, child1Id]);
 		const grandchildRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"]`).first();
 		await expect(grandchildRow).toBeVisible({ timeout: 15_000 });
 		await expect(grandchildRow).toHaveAttribute("data-depth", "2");
