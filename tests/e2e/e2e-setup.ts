@@ -513,9 +513,9 @@ export async function createGoal(opts: {
 	return resp.json();
 }
 
-/** Delete a goal (best-effort, for cleanup). */
-export async function deleteGoal(id: string): Promise<void> {
-	await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+/** Delete a goal (best-effort, for cleanup). Server requires explicit `cascade` query param (returns 422 CASCADE_REQUIRED when omitted). Cleanup paths default to cascade=true so descendants are archived together. */
+export async function deleteGoal(id: string, cascade = true): Promise<void> {
+	await apiFetch(`/api/goals/${id}?cascade=${cascade ? "true" : "false"}`, { method: "DELETE" }).catch(() => {});
 }
 
 /** Start a team for a goal, returns the team lead session ID. */
@@ -528,9 +528,9 @@ export async function startTeam(goalId: string): Promise<string> {
 	return data.sessionId;
 }
 
-/** Teardown a team (best-effort, for cleanup). */
-export async function teardownTeam(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}/team/teardown`, { method: "POST" }).catch(() => {});
+/** Teardown a team (best-effort, for cleanup). Server returns 422 CASCADE_REQUIRED when `cascade` is omitted, so cleanup paths must always send it. */
+export async function teardownTeam(goalId: string, cascade = true): Promise<void> {
+	await apiFetch(`/api/goals/${goalId}/team/teardown?cascade=${cascade ? "true" : "false"}`, { method: "POST" }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
