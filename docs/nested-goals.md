@@ -644,7 +644,9 @@ The Plan tab is visible if **either**:
 
 1. The goal's workflow has a `goal-plan` gate (formal plan), OR
 2. The goal has any non-archived children (living plan — synthesise from
-   live children, clustering by `createdAt` timestamp gap).
+   live children, layered topologically by explicit `dependsOnPlanIds`).
+   Children with no declared deps render as parallel siblings at column 0
+   with no edges; see [Declaring dependencies](#declaring-dependencies).
 
 Synthesis (`src/app/plan-synthesis.ts::buildPlanSteps`) recomputes from
 the live goal tree on every render, so the Plan tab is a living
