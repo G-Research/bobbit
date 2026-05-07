@@ -138,13 +138,13 @@ workflows:
               3. Implemented behavior that contradicts the specification
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
@@ -767,13 +767,13 @@ workflows:
               3. Implemented behavior that contradicts the specification
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
@@ -1188,13 +1188,13 @@ workflows:
               analysis?
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
@@ -1600,13 +1600,13 @@ workflows:
               4. Any unrelated or unnecessary changes
 
 
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs during
-              the implementation phase, BEFORE the documentation gate. Do NOT
-              flag missing or outdated documentation, README updates, design-doc
-              updates, code comments, or other docs-only artifacts as gaps —
-              those are addressed by the dedicated documentation gate later in
-              the workflow. Focus exclusively on code/behavior gaps relative to
-              the spec and design.
+              IMPORTANT: Ignore documentation gaps. This gap analysis runs
+              during the implementation phase, BEFORE the documentation gate. Do
+              NOT flag missing or outdated documentation, README updates,
+              design-doc updates, code comments, or other docs-only artifacts as
+              gaps — those are addressed by the dedicated documentation gate
+              later in the workflow. Focus exclusively on code/behavior gaps
+              relative to the spec and design.
           - name: Code quality review
             type: llm-review
             role: code-reviewer
