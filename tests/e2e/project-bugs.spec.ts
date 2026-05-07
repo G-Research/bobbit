@@ -11,7 +11,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, apiFetch, nonGitCwd } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -35,9 +35,12 @@ test.describe("Bug 3: Project registration upsert (idempotent)", () => {
 	let projectRootPath: string;
 
 	test.beforeAll(() => {
-		// Create a real directory to use as project root
+		// Create a real directory to use as project root.
+		// Canonicalize via realpathSync so POST /api/projects doesn't reject
+		// the symlinked /var/folders path on macOS with code:"symlink_root".
 		projectRootPath = join(tmpdir(), `bobbit-e2e-project-${Date.now()}`);
 		mkdirSync(projectRootPath, { recursive: true });
+		projectRootPath = realpathSync(projectRootPath);
 	});
 
 	test("registering the same rootPath twice with upsert returns existing project", async () => {
@@ -74,6 +77,7 @@ test.describe("Bug 3b: Config write atomicity", () => {
 	test.beforeAll(async () => {
 		projectRootPath = join(tmpdir(), `bobbit-e2e-config-${Date.now()}`);
 		mkdirSync(projectRootPath, { recursive: true });
+		projectRootPath = realpathSync(projectRootPath);
 
 		const resp = await apiFetch("/api/projects", {
 			method: "POST",

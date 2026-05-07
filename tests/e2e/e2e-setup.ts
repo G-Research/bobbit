@@ -235,10 +235,13 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 	// POST /api/projects: auto-inject acceptCanonical:true so tests using
 	// tmpdir()-derived rootPaths (which on macOS are symlinks /var/folders ->
 	// /private/var/folders) don't 400 with code:"symlink_root". Tests can opt
-	// out by setting acceptCanonical:false explicitly in their body.
-	// NOTE: this only affects test-side `apiFetch` calls. Browser-driven
-	// POSTs (e.g. the Add-Project UI confirm flow in add-project-symlink.spec.ts)
-	// are unaffected and still exercise the symlink-confirm dialog.
+	// out by setting acceptCanonical:false explicitly in their body, or by
+	// using rawApiFetch() / fetch() directly when they need to exercise the
+	// rejection path.
+	// NOTE: this only affects test-side `apiFetch` calls. Tests that POST via
+	// raw fetch() (e.g. projects-no-default-workflows.spec.ts, multi-repo-
+	// project.spec.ts) bypass this entirely and must canonicalize the path
+	// themselves — see mkCanonTmp() helpers in those specs.
 	if (method === "POST" && path === "/api/projects" && typeof opts.body === "string") {
 		try {
 			const parsed = JSON.parse(opts.body) as Record<string, unknown>;

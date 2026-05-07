@@ -17,6 +17,13 @@ const headers = () => ({
 	"Content-Type": "application/json",
 });
 
+/** mkdtempSync + realpathSync — yields a canonical (non-symlink) tmp path so
+ *  POST /api/projects doesn't 400 with code:"symlink_root" on macOS where
+ *  /var/folders -> /private/var/folders. */
+function mkCanonTmp(prefix: string): string {
+	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
 function gitInit(dir: string): void {
 	fs.mkdirSync(dir, { recursive: true });
 	execFileSync("git", ["init", "--quiet"], { cwd: dir });
@@ -30,7 +37,7 @@ function gitInit(dir: string): void {
 test.beforeAll(() => { token = readE2EToken(); });
 
 test("multi-repo: POST /api/projects with components + workflows persists structured fields", async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-"));
+	const root = mkCanonTmp("bobbit-mr-");
 	gitInit(path.join(root, "api"));
 	gitInit(path.join(root, "web"));
 	fs.mkdirSync(path.join(root, "shared"));  // data-only
@@ -69,7 +76,7 @@ test("multi-repo: POST /api/projects with components + workflows persists struct
 });
 
 test("single-repo POST without components fills default [{name, repo: '.'}]", async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sr-"));
+	const root = mkCanonTmp("bobbit-sr-");
 	gitInit(root);
 
 	const projName = `sr-${Date.now()}`;
@@ -94,7 +101,7 @@ test("single-repo POST without components fills default [{name, repo: '.'}]", as
 });
 
 test("PUT /api/projects/:id/config with bad workflow step → 400", async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-bad-"));
+	const root = mkCanonTmp("bobbit-mr-bad-");
 	gitInit(path.join(root, "api"));
 
 	const createRes = await fetch(`${base()}/api/projects`, {
@@ -130,7 +137,7 @@ test("PUT /api/projects/:id/config with bad workflow step → 400", async () => 
 });
 
 test("PUT /api/projects/:id/config adds a new component", async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-upd-"));
+	const root = mkCanonTmp("bobbit-mr-upd-");
 	gitInit(path.join(root, "api"));
 	gitInit(path.join(root, "web"));
 
