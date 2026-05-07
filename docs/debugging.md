@@ -731,6 +731,47 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 Symptom: team-lead receives many `team_agent_finished` steers in quick succession. Cause: missing dedup. The `nudgePending` guard in `TeamManager` coalesces concurrent nudges into one delivery; if a regression removes it, a flood returns. Reviewer / QA sub-sessions are additionally filtered by `kind: "reviewer"` in `resubscribeTeamEvents()` and `notifyTeamLead()` — they must never nudge the team lead.
 
+## Team-lead idle while coder is idle / workflow stalled
+
+Symptom: a team-lead session and one or more of its workers are all idle for many minutes; no auto-nudge fires; the goal silently makes no progress until a human manually `/notify`-pings the lead. Original repro (the bug that motivated the watchdog): subgoal `df3d8b33` ("Plan tab shows archived children") sat idle for **7+ minutes** — coder `85e8eda2` had finished pushing its branch, team-lead `f60e32d6` was idle, and only a manual ping resolved it.
+
+Three failure modes can produce this stall (ranked by likelihood, per the [auto-nudge design doc](design/auto-nudge-stuck-team-leads.md) Section 1):
+
+1. **Most likely — immediate notification fired but the lead acted on it weakly or not at all.** The `notifyTeamLead` text is informational ("Agent X has finished. Tasks: ..."); a lead can rationalise "task is in-progress, the worker will continue" and do nothing. The manual `/notify` ping resolved the original stall instantly with *no new information*, which is the fingerprint of this mode.
+2. **Plausible — the worker's `agent_end` event was dropped.** If the gateway restarted between the worker's `agent_start` and `agent_end`, the RPC event itself is ephemeral and not replayed. `resubscribeTeamEvents()` re-installs the listener for any *future* `agent_end`, but a finish-mid-restart is lost.
+3. **Unlikely — the team-lead session was archived or restarted between the worker's start and finish.** Would normally be visible as a respawned team-lead session in the sidebar.
+
+### Diagnose
+
+1. Confirm the symptom: `lead.status === "idle"`, every worker in the team's `entry.agents` has `status === "idle"`, and minutes have passed since either side last did anything.
+2. Grep the server log for the three nudge-path markers —
+   - `[team-manager] notifyTeamLead deferred ...` — the immediate path was reached but the per-worker 30s `lastNotifyTime` debounce swallowed a duplicate. Healthy.
+   - `[team-manager] Sent ...` — the immediate `notifyTeamLead` enqueued a steer. The lead should have acted within seconds.
+   - `[team-manager] Stuck-team watchdog fired for goal <id> after Nm idle` — the 60-second sweep recovered the stall. If you see this without a prior `[team-manager] Sent`, mode (2) above is the cause; if you see both, mode (1).
+3. Inspect the team store: `entry.teamLeadSessionId` must be set; `getActiveWorkers(goalId)` (the same predicate the watchdog uses) must return a non-empty list. If `leadIdleSinceByGoal[goalId]` is unset, the lead's `agent_end` handler in `subscribeTeamLeadEvents` never fired — likely the lead session is missing or the resubscribe path didn't seed it.
+4. Check `shouldSkipNudge(goalId)` doesn't unconditionally short-circuit: the goal is not paused, archived, complete, or shelved; no in-flight verifications; `nudgePending` is false; `anyInFlightChild` returns false (a parent whose subgoals are still progressing intentionally suppresses the nudge — the child-RTM cross-tree path will wake it).
+
+### The three safety-net layers
+
+All three live in `src/server/agent/team-manager.ts` and funnel through the single `shouldSkipNudge(goalId)` gate:
+
+- **Immediate `notifyTeamLead`** — fires within ~5 seconds of a worker's `agent_end`. Per-worker 30s debounce (`lastNotifyTime`); reviewer/QA sub-sessions filtered by `kind: "reviewer"`.
+- **60-second stuck-team watchdog (the new layer)** — `startStuckSweep()` registers a single `setInterval` at `STUCK_SWEEP_INTERVAL_MS = 60_000`, unref'd so it never blocks process exit. `_stuckSweepTick(now)` walks every `TeamEntry` and fires `_fireStuckNudge` when **all** of: lead is idle, `getActiveWorkers(goalId).length > 0`, every worker is idle, `now - leadIdleSince >= STUCK_QUIET_THRESHOLD_MS` (5min), `now - lastNudgeAtPerGoal[goalId] >= STUCK_QUIET_THRESHOLD_MS`, and `!shouldSkipNudge(goalId)`. The `lastNudgeAtPerGoal` map enforces a 5-minute floor between consecutive stuck-nudges — one nudge per stuck *episode*, not per sweep tick. `leadIdleSinceByGoal` is the source of truth for "how long has the lead been idle": written from the lead's `agent_end` handler in `subscribeTeamLeadEvents`, cleared on `agent_start`, and seeded on resubscribe when the lead is already idle so a server restart doesn't reset the clock.
+- **Long-tail workers idle-nudge** — `IDLE_NUDGE_DELAY_MS = 600_000` (10min) base with exponential backoff up to 12h, gated on at least one worker streaming for longer than `LONG_STREAMING_THRESHOLD_MS = 30 * 60 * 1000` (30min). This is the legitimate-long-running-task safety net; the 60s watchdog covers the gap below it.
+
+### Why "all workers idle" rather than "any worker idle"
+
+The watchdog predicate requires **every** active worker to be idle, not just one. The looser "any worker idle for 5+ minutes" variant would nag whenever one worker has finished and another is legitimately streaming — a common shape in parallel team-lead workflows. The stricter predicate matches the observed `df3d8b33` stall (lead idle + all workers idle) without producing false positives. Section 6 of the design doc records this as a deferred risk; loosen only if a real stall demonstrates it's needed.
+
+### Tests pinning the contract
+
+- `tests/team-manager-stuck-watchdog.test.ts` — 11 cases covering the 5-minute boundary, all-vs-some workers idle, the `lastNudgeAtPerGoal` floor, paused/archived/in-flight skips, restart resubscribe seeding `leadIdleSinceByGoal`, and the `nudgePending` ack path.
+- `tests/team-manager-child-rtm-notifies-parent.test.ts` — 6 cases for the cross-tree child-RTM path through `buildParentReadyNotification` → `notifyTeamLeadFn`.
+- `tests/idle-nudge-timer.spec.ts` — the existing 10-minute long-tail timer.
+- `tests/notify-team-lead-child-passed.test.ts` — the pure-helper coverage for the cross-tree notification text.
+
+Key symbols: `startStuckSweep`, `_stuckSweepTick`, `_fireStuckNudge`, `STUCK_SWEEP_INTERVAL_MS`, `STUCK_QUIET_THRESHOLD_MS`, `lastNudgeAtPerGoal`, `leadIdleSinceByGoal`, `shouldSkipNudge`, `getActiveWorkers` — all in `src/server/agent/team-manager.ts`. Cross-tree path: `src/server/agent/notify-team-lead-child-passed.ts` (`buildParentReadyNotification`) and `src/server/agent/verification-harness.ts` (`notifyTeamLeadFn`). See [docs/design/auto-nudge-stuck-team-leads.md](design/auto-nudge-stuck-team-leads.md).
+
 ## `bash_bg wait` not interrupted by steer
 
 A steer should abort any in-flight `bash_bg wait` within ~100 ms. The bg process itself is **not** killed; only the wait call resolves with `{ aborted: true }`. Diagnose:
