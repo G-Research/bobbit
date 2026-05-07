@@ -1188,6 +1188,17 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "goal_spec_changed": {
+				const payload = msg as { goalId: string; ts: number };
+				import("./goal-dashboard.js")
+					.then(m => m.notifyGoalSpecEditedForDashboard?.(payload.goalId, payload.ts))
+					.catch(() => {});
+				// Also bump the regular goal-event path so the goal list re-fetches
+				// (spec is part of the goal record).
+				import("./api.js").then(m => m.refreshSessions()).catch(() => {});
+				break;
+			}
+
 			case "mutation_pending": {
 				// Phase 5b: synthesise a chat-bubble card asking the user to
 				// approve / reject the pending plan mutation. The UI surfaces it

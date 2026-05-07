@@ -196,6 +196,11 @@ let dashboardDescendantsLastFetchAt = 0;
 let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
 const PLAN_RERENDER_THROTTLE_MS = 250;
 
+/** Recent `goal_spec_changed` event timestamps per goal. The header pill renders for SPEC_PILL_WINDOW_MS after the last edit. */
+const recentSpecEdits = new Map<string, number>();
+const SPEC_PILL_WINDOW_MS = 60_000;
+let _specPillTimer: ReturnType<typeof setTimeout> | null = null;
+
 /** Bridge for state.goals → dashboard re-render coalescing. */
 function schedulePlanRerender(): void {
 	if (_planRerenderTimer != null) return;
@@ -203,6 +208,30 @@ function schedulePlanRerender(): void {
 		_planRerenderTimer = null;
 		renderApp();
 	}, PLAN_RERENDER_THROTTLE_MS);
+}
+
+/**
+ * Called by remote-agent on a `goal_spec_changed` WS event. Records the
+ * timestamp so the dashboard header renders a transient "Spec edited
+ * <relative-time>" pill for SPEC_PILL_WINDOW_MS, then schedules a
+ * re-render to clear it.
+ */
+export function notifyGoalSpecEditedForDashboard(goalId: string, ts: number): void {
+	recentSpecEdits.set(goalId, ts);
+	if (_specPillTimer != null) clearTimeout(_specPillTimer);
+	_specPillTimer = setTimeout(() => {
+		_specPillTimer = null;
+		renderApp();
+	}, SPEC_PILL_WINDOW_MS + 500);
+	renderApp();
+}
+
+/** Internal: pure helper exposed for the header render block. */
+function recentSpecEditTs(goalId: string): number | undefined {
+	const ts = recentSpecEdits.get(goalId);
+	if (ts === undefined) return undefined;
+	if (Date.now() - ts > SPEC_PILL_WINDOW_MS) return undefined;
+	return ts;
 }
 
 /** Public: external code (remote-agent) can poke the dashboard on goal events. */
@@ -1347,6 +1376,19 @@ function renderNavBar(goal: Goal): TemplateResult {
 				</button>
 				<span class="nav-title">${goal.title}</span>
 				${goal.workflow ? html`<span class="nav-workflow-badge" title="Uses workflow: ${goal.workflow.name}">${goal.workflow.name}</span>` : nothing}
+				${(() => {
+					const editedTs = recentSpecEditTs(goal.id);
+					if (editedTs === undefined) return nothing;
+					const secondsAgo = Math.max(0, Math.floor((Date.now() - editedTs) / 1000));
+					const rel = secondsAgo < 60 ? `${secondsAgo}s ago` : `${Math.floor(secondsAgo / 60)}m ago`;
+					return html`<button
+						class="nav-spec-edited-pill"
+						data-testid="spec-edited-pill"
+						style="margin-left:8px;font-size:0.75em;padding:2px 8px;border-radius:9999px;background:var(--info, var(--primary));color:var(--primary-foreground, white);border:0;cursor:pointer;"
+						title="Goal spec was edited ${rel}. Click to view the spec."
+						@click=${() => { dashboardTab = "spec"; renderApp(); }}
+					>Spec edited ${rel}</button>`;
+				})()}
 				${goal.reattemptOf ? (() => {
 					const orig = state.goals.find(g => g.id === goal.reattemptOf);
 					return html`<span class="text-xs text-muted-foreground" style="margin-left:8px;">Re-attempt of: <a href="#/goal-dashboard/${goal.reattemptOf}" class="underline">${orig?.title ?? goal.reattemptOf.slice(0, 8)}</a></span>`;
