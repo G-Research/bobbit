@@ -1,15 +1,19 @@
 /**
  * E2E: Active-before-archived sidebar ordering.
  *
- * Setup: register a fresh project with 2 live goals + 2 archived goals at
- * the project root. Force "See Archived" on via localStorage so the test is
- * deterministic.
+ * Setup: register a fresh project with one live PARENT goal that has two
+ * live children + two archived children. Top-level archived goals are
+ * routed to the bottom "Archived" collapsible (unchanged by this goal); the
+ * divider applies WITHIN a group that mixes active + archived. Nested
+ * children of a live parent are exactly that group.
+ *
+ * Force "See Archived" on via localStorage so the test is deterministic.
  *
  * Asserts:
- *  - All live goal rows appear before any archived goal row in DOM order.
- *  - Exactly one `[data-testid="sidebar-archived-divider"]` is rendered
- *    inside this project's content area, positioned between the last live
- *    row and the first archived row.
+ *  - All live child rows appear before any archived child row under the
+ *    parent in DOM order.
+ *  - At least one `[data-testid="sidebar-archived-divider"]` sits between
+ *    the last live child row and the first archived child row.
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal, nonGitCwd, waitForHealth } from "../e2e-setup.js";
@@ -50,8 +54,27 @@ function suffix(): string {
 	return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+async function createLiveChild(parentId: string, title: string, planId: string): Promise<string> {
+	// Children are created via POST /api/goals/:id/spawn-child — the
+	// top-level POST /api/goals endpoint doesn't honour parentGoalId.
+	const resp = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
+		method: "POST",
+		body: JSON.stringify({ planId, title, spec: "placeholder", autoStartTeam: false }),
+	});
+	expect(resp.status).toBe(201);
+	const data = await resp.json();
+	return data.id;
+}
+
+async function createArchivedChild(parentId: string, title: string, planId: string): Promise<string> {
+	const id = await createLiveChild(parentId, title, planId);
+	await apiFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
+	return id;
+}
+
 test.describe("Active-before-archived sidebar ordering", () => {
 	let project: { id: string; rootPath: string } | undefined;
+	let parentTitle = "";
 	let liveTitles: string[] = [];
 	let archivedTitles: string[] = [];
 	const goalIds: string[] = [];
@@ -62,14 +85,22 @@ test.describe("Active-before-archived sidebar ordering", () => {
 		goalIds.length = 0;
 		const s = suffix();
 		project = await registerProject(`proj-aba-${s}`);
-		// Live first to get small createdAt, then archived. The bucket sort
-		// in buildNestedGoalForest should still place live above archived
-		// regardless, but we use this order to confirm the rule beats raw
-		// createdAt order from the data layer.
-		liveTitles = [`LiveAlpha-${s}`, `LiveBravo-${s}`];
-		archivedTitles = [`ArchivedAlpha-${s}`, `ArchivedBravo-${s}`];
-		for (const t of liveTitles) goalIds.push(await createLiveGoal(project.id, t));
-		for (const t of archivedTitles) goalIds.push(await createArchivedGoal(project.id, t));
+		// Enable subgoals (Experimental) so the nested forest renders.
+		await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ subgoalsEnabled: true }),
+		}).catch(() => {});
+		parentTitle = `Parent-${s}`;
+		const parentId = await createLiveGoal(project.id, parentTitle);
+		goalIds.push(parentId);
+		// Live children first (smaller createdAt), then archived. The bucket
+		// sort in buildNestedGoalForest must still place live above archived
+		// regardless of createdAt — the divider sits at the boundary.
+		liveTitles = [`LiveChildAlpha-${s}`, `LiveChildBravo-${s}`];
+		archivedTitles = [`ArchivedChildAlpha-${s}`, `ArchivedChildBravo-${s}`];
+		let pi = 0;
+		for (const t of liveTitles) goalIds.push(await createLiveChild(parentId, t, `plan-${s}-${pi++}`));
+		for (const t of archivedTitles) goalIds.push(await createArchivedChild(parentId, t, `plan-${s}-${pi++}`));
 	});
 
 	test.afterEach(async () => {
@@ -77,20 +108,34 @@ test.describe("Active-before-archived sidebar ordering", () => {
 		if (project) await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("live goals render before archived; one Archived divider sits between them", async ({ page }) => {
+	test("live children render before archived; Archived divider sits between them", async ({ page }) => {
 		await openApp(page);
-		// Force See Archived ON deterministically; clear collapse state.
+		// Clear collapse state. Archived load is triggered via the toggle
+		// click below — setting `bobbit-show-archived` directly only flips the
+		// initial flag and does NOT fire `fetchArchivedGoalsPaginated`, so
+		// archived child goals never enter `state.goals`. The toggle click
+		// fires the fetch.
 		await page.evaluate(() => {
 			try {
 				localStorage.removeItem("bobbit-archived-collapsed-projects");
 				localStorage.removeItem("bobbit-expanded-projects");
-				localStorage.setItem("bobbit-show-archived", "true");
+				localStorage.setItem("bobbit-show-archived", "false");
 			} catch {}
 		});
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 
-		// Wait for both live and archived goal titles to appear in the sidebar.
+		// Click the See Archived toggle so archived goals are fetched into
+		// state.goals and folded into the live forest.
+		await page.locator("button").filter({ hasText: "See Archived" }).first().click();
+		await page.waitForTimeout(500);
+
+		// Expand the parent goal so its children render.
+		const parentRow = page.getByText(parentTitle, { exact: false }).first();
+		await expect(parentRow).toBeVisible({ timeout: 15_000 });
+		await parentRow.click();
+
+		// Wait for both live and archived child titles to appear in the sidebar.
 		for (const t of liveTitles) {
 			await expect(page.getByText(t, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 		}
