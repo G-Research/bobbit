@@ -131,6 +131,25 @@ describe("plan-edge-paths — computeEdgePaths", () => {
 		assert.equal(paths[0].d, "M 100 230 L 150 230 L 150 30 L 200 30");
 	});
 
+	it("explicit-deps wiring: edges only drawn for declared deps", () => {
+		// Phase 5 — the layout layer no longer auto-bipartites adjacent phases.
+		// Three nodes A, B, C in different columns; only B → C is declared.
+		// computeEdgePaths only acts on edges it is given, so the assertion is
+		// downstream of layoutPlanLevel: only edges built from explicit deps
+		// reach this helper. Verify it produces exactly one path for one edge.
+		const a = node("a", 0, 0);
+		const b = node("b", 200, 0);
+		const c = node("c", 400, 0);
+		const paths = computeEdgePaths(
+			[a, b, c],
+			[{ fromNodeId: "b", toNodeId: "c" }], // only B → C
+			{},
+		);
+		assert.equal(paths.length, 1);
+		assert.equal(paths[0].fromNodeId, "b");
+		assert.equal(paths[0].toNodeId, "c");
+	});
+
 	it("default routing: vertical segment never overlaps source-phase nodes", () => {
 		// 3 sources stacked + 1 destination — assert every edge's midX
 		// sits in the empty inter-phase band (source.right < midX < dest.left).

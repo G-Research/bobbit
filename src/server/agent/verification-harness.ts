@@ -3121,6 +3121,10 @@ export class VerificationHarness {
 				await goalManager.updateGoal(child.id, {
 					spawnedFromPlanId: planId,
 					...(parentTeamLeadSessionId ? { spawnedBySessionId: parentTeamLeadSessionId } : {}),
+					// Phase 5 — stamp explicit dependsOn from the verify-step's subgoal
+					// payload so the Plan tab synthesis can compute topological depth
+					// + draw the right edges. Empty/missing → parallel sibling.
+					...(sg.dependsOn !== undefined ? { dependsOnPlanIds: sg.dependsOn } : {}),
 				});
 				// END Lesson 4.1 critical sequence.
 

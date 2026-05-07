@@ -43,12 +43,22 @@ export interface ClassifierPlanStep {
 	phase?: number;
 	spec?: string;
 	title?: string;
+	/**
+	 * Sibling planIds this step depends on (Phase 5 — explicit DAG).
+	 * Hoisted top-level alongside `subgoal.dependsOn`; the classifier prefers
+	 * the top-level field when both are present (mirrors title/spec).
+	 * Diff: a change in the dep set on an existing planId bumps severity to
+	 * `restructure` (overrides any `fix-up` classification it would otherwise
+	 * receive).
+	 */
+	dependsOn?: string[];
 	subgoal?: {
 		planId: string;
 		title: string;
 		spec: string;
 		workflowId?: string;
 		suggestedRole?: string;
+		dependsOn?: string[];
 	};
 }
 
@@ -125,6 +135,17 @@ function effectiveRole(s: ClassifierPlanStep): string | undefined {
 	return s.subgoal?.suggestedRole;
 }
 
+function effectiveDependsOn(s: ClassifierPlanStep): string[] {
+	return s.dependsOn ?? s.subgoal?.dependsOn ?? [];
+}
+
+function sameSet(a: string[], b: string[]): boolean {
+	if (a.length !== b.length) return false;
+	const sa = new Set(a);
+	for (const x of b) if (!sa.has(x)) return false;
+	return true;
+}
+
 function maxPhase(steps: ClassifierPlanStep[]): number {
 	let m = 0;
 	for (const s of steps) {
@@ -164,6 +185,7 @@ export function classifyMutation(input: ClassifyMutationInput): ClassifyMutation
 			removed.push(s.planId);
 		}
 	}
+	const dependsOnChanges = new Set<string>();
 	for (const s of proposed) {
 		const c = currentByPlanId.get(s.planId);
 		if (!c) continue;
@@ -172,11 +194,15 @@ export function classifyMutation(input: ClassifyMutationInput): ClassifyMutation
 		const wfChanged = effectiveWorkflowId(c) !== effectiveWorkflowId(s);
 		const roleChanged = effectiveRole(c) !== effectiveRole(s);
 		const phaseChanged = (c.phase ?? 0) !== (s.phase ?? 0);
-		if (titleChanged || specChanged || wfChanged || roleChanged || phaseChanged) {
+		const depsChanged = !sameSet(effectiveDependsOn(c), effectiveDependsOn(s));
+		if (titleChanged || specChanged || wfChanged || roleChanged || phaseChanged || depsChanged) {
 			modified.push(s.planId);
 		}
 		if (phaseChanged) {
 			phaseChanges.push(s.planId);
+		}
+		if (depsChanged) {
+			dependsOnChanges.add(s.planId);
 		}
 	}
 
@@ -245,6 +271,14 @@ export function classifyMutation(input: ClassifyMutationInput): ClassifyMutation
 				kind = "fix-up";
 			}
 		}
+	}
+
+	// `dependsOn` change on an existing step changes execution shape — always
+	// `restructure` (overrides any `fix-up` it would otherwise be classified as).
+	// New steps with new deps fall under `expansion`/`restructure` rules above;
+	// only modifications to an EXISTING step's dep set trigger this bump.
+	if (dependsOnChanges.size > 0 && (kind === "fix-up" || kind === "noop")) {
+		kind = "restructure";
 	}
 
 	// ── Criteria-coverage override ───────────────────────────────────

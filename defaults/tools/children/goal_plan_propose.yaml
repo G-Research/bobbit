@@ -6,7 +6,7 @@ provider:
   extension: extension.ts
 group: Children
 docs: |-
-  Required: `steps` — array of subgoal-typed plan steps. Each step: `{ planId, title, spec, workflowId?, suggestedRole?, phase? }`. The classifier compares the proposed steps against the goal's frozen `execution.verify[]` and returns one of `noop`, `fix-up`, `expansion`, `restructure`, or `criteria-drop`. The decision matrix in SUBGOALS-SPEC §3.6 then applies the divergence policy: criteria-drop → 409, restructure on a non-paused goal → 409, expansion → always requires approval, fix-up under strict → requires approval, fix-up under balanced/autonomous → applied immediately, noop → applied (no-op).
+  Required: `steps` — array of subgoal-typed plan steps. Each step: `{ planId, title, spec, workflowId?, suggestedRole?, phase?, dependsOn? }`. `dependsOn` is an optional array of sibling planIds (empty/omitted = parallel sibling, draws no edge). Self-deps / unknown refs / cycles return 400 with a structured code. Changing `dependsOn` on an existing step is classified as `restructure` by the mutation classifier. The classifier compares the proposed steps against the goal's frozen `execution.verify[]` and returns one of `noop`, `fix-up`, `expansion`, `restructure`, or `criteria-drop`. The decision matrix in SUBGOALS-SPEC §3.6 then applies the divergence policy: criteria-drop → 409, restructure on a non-paused goal → 409, expansion → always requires approval, fix-up under strict → requires approval, fix-up under balanced/autonomous → applied immediately, noop → applied (no-op).
 detail_docs: >-
   ## Purpose
 

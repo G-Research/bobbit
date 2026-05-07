@@ -37,6 +37,14 @@ export interface VerifyStepSubgoal {
 	workflowId?: string;
 	/** Suggested team-lead role for the child. */
 	suggestedRole?: string;
+	/**
+	 * Sibling planIds this step depends on (Phase 5 — explicit DAG).
+	 * Empty/undefined means parallel sibling at column 0. Used by the
+	 * Plan-tab synthesis layer to compute topological depth + which edges
+	 * to draw between plan nodes. Validated by
+	 * `depends-on-validation.ts::validatePlanDependsOn` at PATCH /plan time.
+	 */
+	dependsOn?: string[];
 }
 
 export interface VerifyStep {
@@ -118,9 +126,15 @@ function normalizeStep(raw: unknown): VerifyStep {
 			: typeof sg.workflow_id === "string" ? sg.workflow_id : undefined;
 		const suggestedRole = typeof sg.suggestedRole === "string" ? sg.suggestedRole
 			: typeof sg.suggested_role === "string" ? sg.suggested_role : undefined;
+		const dependsOnRaw = Array.isArray(sg.dependsOn) ? sg.dependsOn
+			: Array.isArray(sg.depends_on) ? sg.depends_on : undefined;
+		const dependsOn = dependsOnRaw
+			? dependsOnRaw.filter((d): d is string => typeof d === "string")
+			: undefined;
 		const subgoal: VerifyStepSubgoal = { planId, title, spec };
 		if (workflowId !== undefined) subgoal.workflowId = workflowId;
 		if (suggestedRole !== undefined) subgoal.suggestedRole = suggestedRole;
+		if (dependsOn !== undefined) subgoal.dependsOn = dependsOn;
 		step.subgoal = subgoal;
 	}
 	return step;
@@ -322,6 +336,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 		};
 		if (s.subgoal.workflowId !== undefined) sg.workflowId = s.subgoal.workflowId;
 		if (s.subgoal.suggestedRole !== undefined) sg.suggestedRole = s.subgoal.suggestedRole;
+		if (s.subgoal.dependsOn !== undefined) sg.dependsOn = s.subgoal.dependsOn;
 		out.subgoal = sg;
 	}
 	return out;

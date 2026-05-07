@@ -70,7 +70,19 @@ export interface PersistedGoal {
 	acceptanceCriteria?: string[];
 	/** Subgoal idempotency key — set immediately after createGoal in runSubgoalStep (Lesson 4.1). */
 	spawnedFromPlanId?: string;
-	/** Paused flag — user can pause a goal mid-flight (children may inherit via cascade). */
+	/**
+	 * Sibling planIds this child depends on (Phase 5 — explicit DAG). Empty
+	 * or undefined → the child is a parallel sibling at column 0. Stamped
+	 * at spawn-time alongside `spawnedFromPlanId`. Validated upstream by
+	 * `depends-on-validation.ts` (no self-deps, no unknown refs, no cycles).
+	 */
+	dependsOnPlanIds?: string[];
+	/**
+	 * Paused flag — user can pause a goal mid-flight (children may inherit via cascade).
+	 * Paused children do NOT count as in-flight for `anyInFlightChild`/parent nudge
+	 * suppression — the parent (or user) must act before the child can resume.
+	 * (Lesson 4.13)
+	 */
 	paused?: boolean;
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
 	replanCount?: number;

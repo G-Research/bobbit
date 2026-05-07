@@ -238,7 +238,7 @@ export function buildActive(parentId: string, planId = "p1"): {
 /**
  * Build a default subgoal step.
  */
-export function buildSubgoalStep(over: Partial<{ planId: string; title: string; spec: string; workflowId: string; suggestedRole: string }> = {}): any {
+export function buildSubgoalStep(over: Partial<{ planId: string; title: string; spec: string; workflowId: string; suggestedRole: string; dependsOn: string[] }> = {}): any {
 	return {
 		name: "Subgoal: build feature X",
 		type: "subgoal",
@@ -248,6 +248,7 @@ export function buildSubgoalStep(over: Partial<{ planId: string; title: string; 
 			spec: over.spec ?? "## Acceptance criteria\n- foo",
 			...(over.workflowId !== undefined ? { workflowId: over.workflowId } : {}),
 			...(over.suggestedRole !== undefined ? { suggestedRole: over.suggestedRole } : {}),
+			...(over.dependsOn !== undefined ? { dependsOn: over.dependsOn } : {}),
 		},
 	};
 }

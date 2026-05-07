@@ -318,4 +318,66 @@ describe("classifyMutation", () => {
 		assert.equal(r.kind, "expansion");
 		assert.equal(r.uncoveredCriteria, undefined);
 	});
+
+	// ── Phase 5 — explicit dependsOn classification ────────────────────
+
+	it("dependsOn change on existing step → restructure (overrides fix-up)", () => {
+		// Same planIds, no phase change, no other field change — only deps.
+		// Without the deps-change rule this would classify as `noop`. With it,
+		// any change to the dep set on an existing step is `restructure`.
+		const current = [
+			step("a", { phase: 0 }),
+			step("b", { phase: 0, subgoal: { planId: "b", title: "Title b", spec: "spec for b", dependsOn: [] } }),
+		];
+		const proposed = [
+			step("a", { phase: 0 }),
+			step("b", { phase: 0, subgoal: { planId: "b", title: "Title b", spec: "spec for b", dependsOn: ["a"] } }),
+		];
+		const r = classifyMutation({
+			current,
+			proposed,
+			rootAcceptanceCriteria: [],
+			rootSpec: "",
+		});
+		assert.equal(r.kind, "restructure");
+		assert.ok(r.diff.modified.includes("b"));
+	});
+
+	it("dependsOn order swap is treated as same set (set equality)", () => {
+		const current = [
+			step("a"),
+			step("b"),
+			step("c", { subgoal: { planId: "c", title: "Title c", spec: "spec for c", dependsOn: ["a", "b"] } }),
+		];
+		const proposed = [
+			step("a"),
+			step("b"),
+			step("c", { subgoal: { planId: "c", title: "Title c", spec: "spec for c", dependsOn: ["b", "a"] } }),
+		];
+		const r = classifyMutation({
+			current,
+			proposed,
+			rootAcceptanceCriteria: [],
+			rootSpec: "",
+		});
+		assert.equal(r.kind, "noop");
+	});
+
+	it("dependsOn change is detected via top-level field too", () => {
+		const current = [
+			step("a"),
+			{ planId: "b", title: "Title b", spec: "spec for b", dependsOn: [], subgoal: { planId: "b", title: "Title b", spec: "spec for b" } } as ClassifierPlanStep,
+		];
+		const proposed = [
+			step("a"),
+			{ planId: "b", title: "Title b", spec: "spec for b", dependsOn: ["a"], subgoal: { planId: "b", title: "Title b", spec: "spec for b" } } as ClassifierPlanStep,
+		];
+		const r = classifyMutation({
+			current,
+			proposed,
+			rootAcceptanceCriteria: [],
+			rootSpec: "",
+		});
+		assert.equal(r.kind, "restructure");
+	});
 });

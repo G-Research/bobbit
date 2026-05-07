@@ -162,7 +162,50 @@ verify:
         - "Basic CLI works end-to-end"   # Quote root acceptance criteria verbatim
       workflowId: "feature"        # Optional — child's workflow id
       suggestedRole: "team-lead"   # Optional — hint for child's lead
+      dependsOn: ["v0.0"]          # Optional — sibling planIds this step depends on (Phase 5)
 ```
+
+### Declaring dependencies
+
+The optional `dependsOn: string[]` field on a subgoal verify-step (and on
+`goal_spawn_child` / `goal_plan_propose` calls) names sibling `planId`s
+this step waits on. Empty / omitted = parallel sibling — the Plan-tab DAG
+renders the node at column 0 with no incoming edge.
+
+```yaml
+verify:
+  - name: "Build foundation"
+    type: subgoal
+    subgoal:
+      planId: "foundation"
+      title: "Foundation"
+      spec: "..."
+  - name: "Build feature on top"
+    type: subgoal
+    subgoal:
+      planId: "feature"
+      title: "Feature"
+      spec: "..."
+      dependsOn: ["foundation"]   # only spawned/edged after foundation
+```
+
+Validation (server-side, `src/server/agent/depends-on-validation.ts`):
+
+- **`SELF_DEPENDENCY`** — a step's `dependsOn` includes its own `planId`. 400.
+- **`UNKNOWN_PLAN_ID`** — `dependsOn` references a `planId` that doesn't exist among siblings (for `goal_spawn_child`) or among the proposed plan (for `goal_plan_propose`). 400 with `missing: string[]`.
+- **`DEPENDS_ON_CYCLE`** — the implied DAG would cycle. Detected via Kahn's algorithm. 400 with `path: string[]`.
+
+The Plan-tab DAG layout is purely topological: column = `max(deps.column) + 1`.
+Edges are drawn ONLY where `dependsOn` is explicit — there is no
+`createdAt` clustering or bipartite phase auto-connect. Two children
+spawned without declared deps render as parallel siblings, no edge
+between them. (Earlier versions inferred dependencies from spawn timing;
+that heuristic is gone because it routinely chained unrelated children.)
+
+**Mutation classifier interaction**: changing `dependsOn` on an existing
+step in a frozen plan is classified as `restructure` by the mutation
+classifier (overrides any `fix-up` it would otherwise be), so the
+divergence-policy decision matrix requires the goal to be paused first.
 
 `runSubgoalStep` reads as follows. Each step encodes a hard-won lesson
 from PR #409 (see Lesson references in

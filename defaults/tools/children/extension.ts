@@ -83,6 +83,7 @@ export default function (pi: ExtensionAPI) {
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
 			}, { description: "Optional inline workflow snapshot for the child. REPLACES the inherited parent workflow entirely — pass this only when the child needs a fundamentally different gate sequence (and only for THIS child). For workflows useful across many goals → propose_project with the workflow inside `workflows:` (permanent). Mutually exclusive with workflowId — if both are given, the inline workflow wins. The inline workflow's `verify[]` steps may reference roles defined in `inlineRoles` above." })),
+			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child depends on. Empty / omitted = parallel sibling at column 0 in the Plan tab. Validated server-side: self-deps, unknown refs, and cycles return 400 with a structured error code (SELF_DEPENDENCY / UNKNOWN_PLAN_ID / DEPENDS_ON_CYCLE). Use this to draw an A→B edge when B genuinely waits on A." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -91,6 +92,7 @@ export default function (pi: ExtensionAPI) {
 				if (params.suggestedRole !== undefined) body.suggestedRole = params.suggestedRole;
 				if (params.inlineRoles !== undefined) body.inlineRoles = params.inlineRoles;
 				if (params.inlineWorkflow !== undefined) body.workflow = params.inlineWorkflow;
+				if (params.dependsOn !== undefined) body.dependsOn = params.dependsOn;
 				return ok(await api("POST", `/api/goals/${goalId}/spawn-child`, body));
 			} catch (e: any) { return err(e.message); }
 		},
@@ -117,12 +119,25 @@ export default function (pi: ExtensionAPI) {
 				workflowId: Type.Optional(Type.String()),
 				suggestedRole: Type.Optional(Type.String()),
 				phase: Type.Optional(Type.Number()),
+				dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this step depends on. Empty / omitted = parallel sibling. Validated server-side (self-dep / unknown / cycle → 400). Changing dependsOn on an existing step is classified as `restructure` by the mutation classifier." })),
 			}), { description: "Array of subgoal-typed plan steps." }),
 			fallback: Type.Optional(Type.Literal("spawn-children-direct", { description: "Opt-in to the spawn-children-direct fallback when this goal's workflow has no `execution` gate to hold a frozen plan. Without this opt-in, the classifier/freeze flow is required and a 400 NO_EXECUTION_GATE is surfaced as-is. Pass when you intentionally chose a non-parent workflow but still want a list of subgoals spawned." })),
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("PATCH", `/api/goals/${goalId}/plan`, { proposedSteps: params.steps }));
+				const proposedSteps = params.steps.map(s => {
+					const out: Record<string, unknown> = {
+						planId: s.planId,
+						title: s.title,
+						spec: s.spec,
+					};
+					if (s.workflowId !== undefined) out.workflowId = s.workflowId;
+					if (s.suggestedRole !== undefined) out.suggestedRole = s.suggestedRole;
+					if (s.phase !== undefined) out.phase = s.phase;
+					if (s.dependsOn !== undefined) out.dependsOn = s.dependsOn;
+					return out;
+				});
+				return ok(await api("PATCH", `/api/goals/${goalId}/plan`, { proposedSteps }));
 			} catch (e: any) {
 				// Auto-fallback (opt-in only): when the goal's workflow has no
 				// execution gate the classifier/freeze flow doesn't apply.
@@ -151,6 +166,7 @@ export default function (pi: ExtensionAPI) {
 								spec: step.spec,
 								workflowId: step.workflowId,
 								suggestedRole: step.suggestedRole,
+								...(step.dependsOn !== undefined ? { dependsOn: step.dependsOn } : {}),
 							}) as { id?: string; alreadyExists?: boolean; suggestedRole?: string };
 							spawned.push({
 								planId: step.planId,

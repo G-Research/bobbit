@@ -2104,19 +2104,21 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 			createdAt: g.createdAt,
 		}));
 	const nodes: PlanLayoutNode[] = [];
-	const colNodesByPhase = new Map<number, PlanLayoutNode[]>();
+	// step.phase now means topological depth (column index) — the keyed-by-
+	// number map still works, just reinterpreted.
 	let maxColH = 0;
+	const nodeIdByPlanId = new Map<string, string>();
 	for (let pi = 0; pi < phases.length; pi++) {
 		const phase = phases[pi];
 		const x = PLAN_PADDING + pi * (PLAN_NODE_W + PLAN_PHASE_GAP);
 		const stepsInPhase = phaseMap.get(phase)!;
-		const colNodes: PlanLayoutNode[] = [];
 		stepsInPhase.forEach((s, i) => {
 			const y = yOffset + PLAN_PADDING + i * (PLAN_NODE_H + PLAN_NODE_GAP_Y);
 			const resolution = resolvePlanNodeChild(s.planId, candidates);
 			const childGoal = resolution.child ? allGoals.find(g => g.id === resolution.child!.id) : undefined;
+			const nodeId = `${s.planId}::${pi}::${i}`;
 			const node: PlanLayoutNode = {
-				id: `${s.planId}::${pi}::${i}`,
+				id: nodeId,
 				step: s,
 				state: resolution.state,
 				childGoal,
@@ -2126,21 +2128,22 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 				height: PLAN_NODE_H,
 			};
 			nodes.push(node);
-			colNodes.push(node);
+			nodeIdByPlanId.set(s.planId, nodeId);
 		});
-		colNodesByPhase.set(phase, colNodes);
 		const colH = stepsInPhase.length * (PLAN_NODE_H + PLAN_NODE_GAP_Y);
 		if (colH > maxColH) maxColH = colH;
 	}
-	// Edges: bipartite phase N → phase N+1 fully connected.
+	// Edges: explicit dependsOn references only — no bipartite full-connect.
+	// Phase 5 — if a step.dependsOn entry doesn't resolve to a known node we
+	// silently skip it (defence in depth; the API rejects unknown refs upstream).
 	const edges: PlanEdge[] = [];
-	for (let pi = 0; pi < phases.length - 1; pi++) {
-		const fromCol = colNodesByPhase.get(phases[pi]) ?? [];
-		const toCol = colNodesByPhase.get(phases[pi + 1]) ?? [];
-		for (const f of fromCol) {
-			for (const t of toCol) {
-				edges.push({ fromNodeId: f.id, toNodeId: t.id });
-			}
+	for (const s of steps) {
+		const toId = nodeIdByPlanId.get(s.planId);
+		if (!toId) continue;
+		for (const dep of s.dependsOn ?? []) {
+			const fromId = nodeIdByPlanId.get(dep);
+			if (!fromId) continue;
+			edges.push({ fromNodeId: fromId, toNodeId: toId });
 		}
 	}
 	const width = phases.length * PLAN_NODE_W + (phases.length - 1) * PLAN_PHASE_GAP + 2 * PLAN_PADDING;
@@ -2251,6 +2254,7 @@ function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { isNested
 			title: v.subgoal.title,
 			spec: v.subgoal.spec,
 			phase: typeof v.phase === "number" ? v.phase : idx,
+			dependsOn: Array.isArray(v.subgoal.dependsOn) ? v.subgoal.dependsOn : undefined,
 		}));
 	const childSynthesis: SynthesisGoal[] = allGoals
 		.filter(g => g.parentGoalId === goal.id)
@@ -2263,6 +2267,7 @@ function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { isNested
 			archived: !!g.archived,
 			title: g.title,
 			workflowId: g.workflowId,
+			dependsOnPlanIds: g.dependsOnPlanIds,
 		}));
 	// Guard against inherited parent-workflow snapshots rendering phantom
 	// plan steps. When a child goal inherited its parent's `parent`

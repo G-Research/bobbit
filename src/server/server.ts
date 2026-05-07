@@ -22,6 +22,7 @@ import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { classifyMutation, type ClassifierPlanStep } from "./agent/plan-mutation.js";
+import { validateDependsOn, validatePlanDependsOn } from "./agent/depends-on-validation.js";
 import { DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "./agent/plan-mutation-store.js";
 import { parseAcceptanceCriteria } from "../shared/parse-acceptance-criteria.js";
 import { stripSubgoalStepsForChildInheritance, type Workflow } from "./agent/workflow-store.js";
@@ -3435,18 +3436,24 @@ async function handleApiRoute(
 		if (!executionGate) {
 			throw new Error("applyPlanSteps: workflow missing execution gate");
 		}
-		const newVerify = proposedSteps.map((s, idx) => ({
-			name: s.title ?? s.subgoal?.title ?? `step-${idx}`,
-			type: "subgoal" as const,
-			phase: s.phase,
-			subgoal: {
-				planId: s.planId,
-				title: s.title ?? s.subgoal?.title ?? "",
-				spec: s.spec ?? s.subgoal?.spec ?? "",
-				...(s.subgoal?.workflowId !== undefined ? { workflowId: s.subgoal.workflowId } : {}),
-				...(s.subgoal?.suggestedRole !== undefined ? { suggestedRole: s.subgoal.suggestedRole } : {}),
-			},
-		}));
+		const newVerify = proposedSteps.map((s, idx) => {
+			const depsTopLevel = s.dependsOn;
+			const depsSubgoal = s.subgoal?.dependsOn;
+			const deps = depsTopLevel ?? depsSubgoal;
+			return {
+				name: s.title ?? s.subgoal?.title ?? `step-${idx}`,
+				type: "subgoal" as const,
+				phase: s.phase,
+				subgoal: {
+					planId: s.planId,
+					title: s.title ?? s.subgoal?.title ?? "",
+					spec: s.spec ?? s.subgoal?.spec ?? "",
+					...(s.subgoal?.workflowId !== undefined ? { workflowId: s.subgoal.workflowId } : {}),
+					...(s.subgoal?.suggestedRole !== undefined ? { suggestedRole: s.subgoal.suggestedRole } : {}),
+					...(deps !== undefined ? { dependsOn: deps } : {}),
+				},
+			};
+		});
 		const updatedGate = { ...executionGate, verify: newVerify };
 		const workflow: Workflow = {
 			...goal.workflow,
@@ -3474,12 +3481,14 @@ async function handleApiRoute(
 				title: v.subgoal!.title,
 				spec: v.subgoal!.spec,
 				phase: v.phase,
+				...(v.subgoal!.dependsOn !== undefined ? { dependsOn: v.subgoal!.dependsOn } : {}),
 				subgoal: {
 					planId: v.subgoal!.planId,
 					title: v.subgoal!.title,
 					spec: v.subgoal!.spec,
 					...(v.subgoal!.workflowId !== undefined ? { workflowId: v.subgoal!.workflowId } : {}),
 					...(v.subgoal!.suggestedRole !== undefined ? { suggestedRole: v.subgoal!.suggestedRole } : {}),
+					...(v.subgoal!.dependsOn !== undefined ? { dependsOn: v.subgoal!.dependsOn } : {}),
 				},
 			}));
 	}
@@ -3498,6 +3507,12 @@ async function handleApiRoute(
 		if (!planId) { json({ error: "planId is required" }, 400); return; }
 		if (!title) { json({ error: "title is required" }, 400); return; }
 		if (!spec) { json({ error: "spec is required" }, 400); return; }
+		// Phase 5 — optional explicit dependsOn (sibling planIds this child depends on).
+		let dependsOn: string[] | undefined;
+		if (Array.isArray((body as { dependsOn?: unknown }).dependsOn)) {
+			dependsOn = ((body as { dependsOn: unknown[] }).dependsOn)
+				.filter((d): d is string => typeof d === "string");
+		}
 		// QA-1: workflowId vs workflow.id alignment. We resolve the inline
 		// workflow snapshot for the child below (`resolvedWorkflowForChild`).
 		// When the snapshot is set, its `.id` is the authoritative workflow
@@ -3523,12 +3538,40 @@ async function handleApiRoute(
 		const goalManager = ctx.goalManager;
 
 		// Idempotency: search for an existing child with this (parentId, planId).
-		const existing = ctx.goalStore.getAll().find(g =>
-			g.parentGoalId === parentId && g.spawnedFromPlanId === planId,
-		);
+		const siblings = ctx.goalStore.getAll().filter(g => g.parentGoalId === parentId);
+		const existing = siblings.find(g => g.spawnedFromPlanId === planId);
 		if (existing) {
 			json({ id: existing.id, alreadyExists: true });
 			return;
+		}
+
+		// Phase 5 — validate dependsOn against existing siblings' planIds.
+		// Cross-call cycle (A depends on B, then B depends on A) is caught here
+		// because at the moment B is being spawned, A already lists B in its deps,
+		// so the spawning step's `knownPlanIds` includes A but A's own deps
+		// reference B which isn't yet spawned. We catch the structural cycle
+		// proactively: if any known sibling's deps would close a loop with the
+		// new step, reject as DEPENDS_ON_CYCLE.
+		if (dependsOn !== undefined) {
+			const knownPlanIds = siblings
+				.map(g => g.spawnedFromPlanId)
+				.filter((p): p is string => typeof p === "string");
+			const v = validateDependsOn({ planId, dependsOn, knownPlanIds });
+			if (!v.ok) {
+				json({ error: `dependsOn validation failed: ${v.code}`, code: v.code, ...(v.code === "SELF_DEPENDENCY" ? { planId: v.planId } : {}), ...(v.code === "UNKNOWN_PLAN_ID" ? { missing: v.missing } : {}) }, 400);
+				return;
+			}
+			// Cross-call cycle detection: build the full implied DAG (all siblings
+			// + this proposed step) and run validatePlanDependsOn.
+			const graph: { planId: string; dependsOn?: string[] }[] = siblings
+				.filter(g => typeof g.spawnedFromPlanId === "string")
+				.map(g => ({ planId: g.spawnedFromPlanId!, dependsOn: g.dependsOnPlanIds }));
+			graph.push({ planId, dependsOn });
+			const cycle = validatePlanDependsOn(graph);
+			if (!cycle.ok && cycle.code === "DEPENDS_ON_CYCLE") {
+				json({ error: `dependsOn validation failed: DEPENDS_ON_CYCLE`, code: "DEPENDS_ON_CYCLE", path: cycle.path }, 400);
+				return;
+			}
 		}
 
 		try {
@@ -3606,6 +3649,7 @@ async function handleApiRoute(
 				spawnedFromPlanId: planId,
 				...(suggestedRole ? { suggestedRole } : {}),
 				...(spawnedBySessionId ? { spawnedBySessionId } : {}),
+				...(dependsOn !== undefined ? { dependsOnPlanIds: dependsOn } : {}),
 			});
 			// Initialize gate states for the child's workflow gates. Mirrors the
 			// initGatesForGoal() call in POST /api/goals (~L3148). Without this,
@@ -3713,6 +3757,24 @@ async function handleApiRoute(
 			}
 		}
 		const proposedSteps = body.proposedSteps as ClassifierPlanStep[];
+
+		// Phase 5 — validate explicit dependsOn references on the proposed plan.
+		// Self-deps, unknown planId refs, and cycles are all rejected with 400.
+		const depsValidation = validatePlanDependsOn(
+			proposedSteps.map(s => ({
+				planId: s.planId,
+				dependsOn: s.dependsOn ?? s.subgoal?.dependsOn,
+			})),
+		);
+		if (!depsValidation.ok) {
+			const code = depsValidation.code;
+			const payload: Record<string, unknown> = { error: `dependsOn validation failed: ${code}`, code };
+			if (code === "SELF_DEPENDENCY") payload.planId = depsValidation.planId;
+			if (code === "UNKNOWN_PLAN_ID") payload.missing = depsValidation.missing;
+			if (code === "DEPENDS_ON_CYCLE") payload.path = depsValidation.path;
+			json(payload, 400);
+			return;
+		}
 
 		const ctx = resolved.ctx;
 		const planMutationStore = ctx.planMutationStore;
