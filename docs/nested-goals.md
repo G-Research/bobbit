@@ -651,6 +651,15 @@ every cost mutation, so cache invalidation is free. The dashboard
 renders `Tree cost: $X.XX` above the per-goal cost; click expands a
 per-child breakdown table.
 
+Row visibility is data-driven — gated on `treeCost.breakdown.length > 1`
+or `currentGoal.parentGoalId`, not on the client's `state.goals` list.
+This matters because `state.goals` excludes archived goals when "See
+Archived" is off; using it as the gate would hide the row after every
+child was archived (e.g. after `goal_merge_child` auto-archives them),
+even though the rollup still reflects real cost. The server-side
+breakdown already counts archived descendants, so it's the canonical
+signal.
+
 ## Plan tab
 
 The Plan tab is visible if **either**:
