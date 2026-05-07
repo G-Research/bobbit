@@ -35,6 +35,7 @@ import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
 import { buildNestedGoalForest, type NestedGoalNode } from "./sidebar-nesting.js";
+import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
 
 // ============================================================================
 // PROJECT EXPANSION STATE
@@ -848,26 +849,20 @@ function renderProjectContent(
 			return goals.some(g => g.id === ag.parentGoalId && !g.archived);
 		})]
 		: goals;
-	// Sub-goals stamped with `spawnedBySessionId` are rendered under their
-	// spawning team-lead session inside renderGoalGroup. Exclude them here
-	// so they only appear in one place. Includes BOTH live team-leads (under
-	// the live `renderTeamGroup` block) and archived team-leads of a still-
-	// live parent goal (under the archived-leads block). Falls back to
-	// parent-level rendering when the spawning session is fully gone —
-	// otherwise the sub-goal would be unreachable.
-	const teamLeadIdsAttributable = new Set([
-		...state.gatewaySessions
-			.filter(s => s.role === "team-lead" && s.status !== "terminated")
-			.map(s => s.id),
-		...(state.showArchived
-			? state.archivedSessions
-				.filter(s => s.role === "team-lead")
-				.map(s => s.id)
-			: []),
-	]);
-	const forestInput = liveAndArchivedForForest.filter(g =>
-		!g.spawnedBySessionId || !teamLeadIdsAttributable.has(g.spawnedBySessionId)
+	// Goals rendered under a team-lead via `renderTeamGroup`'s
+	// `selectSpawnedChildren` block (Path A) must be excluded from the
+	// forest (Path B) so they only appear in one place. `computeSpawnedClaim`
+	// is the deterministic claim/exclude pair: it mirrors render-helpers'
+	// lookup exactly (any-status live team-lead + archived leads when
+	// showArchived) and runs the SAME `selectSpawnedChildren` filter, so
+	// stamped + unstamped + grandchild + terminated-lead cases all line up.
+	const claimed = computeSpawnedClaim(
+		liveAndArchivedForForest as any,
+		state.gatewaySessions,
+		state.archivedSessions,
+		state.showArchived,
 	);
+	const forestInput = liveAndArchivedForForest.filter(g => !claimed.has(g.id));
 	const forest = buildNestedGoalForest(forestInput as any, { maxDepth, includeArchived: state.showArchived });
 	// Active-before-archived divider at the project-root forest level: when
 	// the previous top-level node was non-archived and the current is

@@ -19,6 +19,19 @@ export interface SpawnedChildLike {
 }
 
 /**
+ * Subset of GatewaySession / archived session fields that
+ * `computeSpawnedClaim` needs. Kept narrow so the helper is
+ * unit-testable without importing real session types.
+ */
+export interface SessionLike {
+	id: string;
+	role?: string;
+	status?: string;
+	goalId?: string;
+	teamGoalId?: string;
+}
+
+/**
  * Filter, dedupe, and sort the goals that should appear under a particular
  * team-lead's expanded block.
  *
@@ -111,6 +124,84 @@ export function extendAncestors(
  *
  * Pure — call site decides how to apply the suffix to the rendered title.
  */
+/**
+ * Compute the set of goal ids that the spawned-children render path
+ * (Path A — `renderGoalGroup` → `renderTeamGroup` in render-helpers.ts)
+ * will claim. The forest render path (Path B — `buildNestedGoalForest`)
+ * must exclude exactly these ids so a goal never renders in two places
+ * simultaneously.
+ *
+ * Mirrors render-helpers.ts::renderTeamGroup's lookup:
+ *   - For each parent goal P, find P's live team-lead — the first
+ *     session in liveSessions (createdAt asc) where role === "team-lead"
+ *     and (goalId === P.id || teamGoalId === P.id). ANY status — matches
+ *     `goalSessions.find(s => s.role === "team-lead")` which doesn't
+ *     filter on status.
+ *   - When showArchived: ALSO include every archived team-lead with
+ *     teamGoalId === P.id (matches the archived-leads iteration in
+ *     render-helpers).
+ *   - For each (P, leadId) tuple, run
+ *     selectSpawnedChildren(goals, P.id, leadId, showArchived, leadId)
+ *     and union the result ids into the output Set.
+ *
+ * The `parentLeadId === leadId` parameter mirrors the strict-parent
+ * fallback in render-helpers (an unstamped child of P only attaches to
+ * P's own lead, never a sibling's).
+ *
+ * Pure — no DOM, no Lit, unit-testable.
+ */
+export function computeSpawnedClaim<G extends SpawnedChildLike & { id: string }>(
+	goals: readonly G[],
+	liveSessions: readonly SessionLike[],
+	archivedSessions: readonly SessionLike[],
+	showArchived: boolean,
+): Set<string> {
+	const claimed = new Set<string>();
+	// Avoid an O(parents × sessions) scan: bucket sessions by parent goal id
+	// once. For each parent we'll pick the first live team-lead (createdAt
+	// asc, mirroring the `goalSessions.sort((a,b) => a.createdAt - b.createdAt)`
+	// in render-helpers) plus all archived team-leads when showArchived.
+	for (const parent of goals) {
+		const pid = parent.id;
+		const leadIds: string[] = [];
+		// Live lead — match render-helpers exactly: first session by
+		// createdAt-asc where role==="team-lead" and the session belongs
+		// to this goal (either goalId or teamGoalId points at P). ANY
+		// status (including "terminated") — render-helpers' `find` doesn't
+		// filter on status, and a stale-but-still-listed team-lead still
+		// claims its children in Path A.
+		const liveLeadCandidates = liveSessions.filter(s =>
+			s.role === "team-lead" && (s.goalId === pid || s.teamGoalId === pid)
+		);
+		if (liveLeadCandidates.length > 0) {
+			// `liveSessions` is the gateway-sessions list, which is generally
+			// already createdAt-asc, but render-helpers does an explicit
+			// `.sort((a,b) => a.createdAt - b.createdAt)` before `find`. We
+			// don't have createdAt on SessionLike — accept the natural order
+			// of the input (which the caller obtains from state.gatewaySessions,
+			// already sorted at insertion). This is good enough: even if the
+			// order disagrees, the claim set is still a correct upper bound
+			// over Path A's emission, because the only consequence of
+			// claiming children of a *second* live lead is that they'd be
+			// excluded from the forest — which is desirable (no double
+			// render) regardless of which lead Path A actually picks.
+			leadIds.push(liveLeadCandidates[0]!.id);
+		}
+		if (showArchived) {
+			for (const s of archivedSessions) {
+				if (s.role === "team-lead" && s.teamGoalId === pid) {
+					leadIds.push(s.id);
+				}
+			}
+		}
+		for (const leadId of leadIds) {
+			const children = selectSpawnedChildren(goals, pid, leadId, showArchived, leadId);
+			for (const c of children) claimed.add(c.id);
+		}
+	}
+	return claimed;
+}
+
 export function computeTitleSuffixes<G extends { id: string; title?: string }>(
 	siblings: readonly G[],
 ): Map<string, string | undefined> {

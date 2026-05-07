@@ -32,6 +32,7 @@ import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
+import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -416,12 +417,24 @@ function renderMobileLanding() {
 														</button>
 													</div>
 												</div>
-												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-													${data.goals.map((goal, gi) => html`
+												${expanded ? (() => {
+													// Apply the same claim/exclude dedup as the desktop sidebar so spawned
+													// children render under their team-lead (Path A) and NOT also at the
+													// project root. Without this filter, mobile double-renders every
+													// spawned child deterministically.
+													const mobileClaimed = computeSpawnedClaim(
+														data.goals as any,
+														state.gatewaySessions,
+														state.archivedSessions,
+														state.showArchived,
+													);
+													const forestGoalsMobile = data.goals.filter(g => !mobileClaimed.has(g.id));
+													return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+													${forestGoalsMobile.map((goal, gi) => html`
 														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
 													`)}
-													${data.goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+													${forestGoalsMobile.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
 														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
@@ -454,7 +467,8 @@ function renderMobileLanding() {
 														if (!ab) return "";
 														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");
 													})()}
-												</div>` : ""}
+												</div>`;
+											})() : ""}
 											`;
 										})}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
