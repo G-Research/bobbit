@@ -106,11 +106,15 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await expect(page.locator('input[placeholder="/path/to/project"]')).not.toBeVisible({ timeout: 10_000 });
 
 		// Verify via API: project stored under the canonical path.
+		// macOS tmpdir returns /var/folders/... which itself symlinks to
+		// /private/var/folders/... — server canonicalises through that, so
+		// we compare against realpathSync(canonical) here too.
+		const canonicalReal = realpathSync(canonical);
 		await expect(async () => {
 			const res = await apiFetch("/api/projects");
 			const data = await res.json();
 			const projects = data.projects || data || [];
-			const stored = projects.find((p: any) => p.rootPath === canonical);
+			const stored = projects.find((p: any) => p.rootPath === canonicalReal);
 			expect(stored).toBeTruthy();
 			// And no row stored under the symlink path.
 			const linkRow = projects.find((p: any) => p.rootPath === link);
@@ -123,7 +127,7 @@ test.describe("Add Project — symlink confirm flow", () => {
 		const res2 = await apiFetch("/api/projects");
 		const data2 = await res2.json();
 		const projects2 = data2.projects || data2 || [];
-		const stored2 = projects2.find((p: any) => p.rootPath === canonical);
+		const stored2 = projects2.find((p: any) => p.rootPath === canonicalReal);
 		expect(stored2).toBeTruthy();
 	});
 
