@@ -53,6 +53,7 @@ parallel throughput, and a single PR for review at the top.
                   │   + maxConcurrentChildren?: number │
                   │   + acceptanceCriteria?: string[]  │
                   │   + spawnedFromPlanId?: string     │
+                  │   + dependsOnPlanIds?: string[]    │
                   │   + suggestedRole?: string         │
                   │   + spawnedBySessionId?: string    │
                   │   + paused?: boolean               │
@@ -71,6 +72,7 @@ parallel throughput, and a single PR for review at the top.
                   │     spec: string                   │
                   │     workflowId?: string            │
                   │     suggestedRole?: string         │
+                  │     dependsOn?: string[]           │
                   │   }                                │
                   └────────────────────────────────────┘
 
@@ -694,8 +696,8 @@ each event with a 250ms trailing-edge throttle to avoid layout thrash.
 
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
-| POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole? }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 (cycle / missing field), 404 (parent missing). Stamps `spawnedFromPlanId` immediately after createGoal. |
-| PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
+| POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole?, dependsOn?: string[] }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (depends-on validation, see [Declaring dependencies](#declaring-dependencies)), 400 (parent-cycle / missing field), 404 (parent missing). Stamps `spawnedFromPlanId` AND `dependsOnPlanIds` immediately after createGoal. |
+| PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
 | POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
 | POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Cancels in-flight verifications; does NOT halt streaming team-lead/worker sessions today (`showPauseGoalDialog` text surfaces this partial-pause limitation). |

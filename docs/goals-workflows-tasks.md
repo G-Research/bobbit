@@ -25,6 +25,7 @@ Goals can nest. A nested goal IS a goal — same record shape, same store, same 
 | `maxConcurrentChildren` | `number?`                                     | REST (root only)                                                                           | Max parallel children across the tree. Default 3, hard max 8. Inert on sub-goals.                                                                                    |
 | `acceptanceCriteria`    | `string[]?`                                   | Auto-populated from `## Acceptance criteria` in the spec markdown                          | Used by the criteria-coverage check (Phase 4) to gate `criteria-drop` mutations.                                                                                     |
 | `spawnedFromPlanId`     | `string?`                                     | Stamped by the harness immediately after `createGoal` in `runSubgoalStep` (Lesson 4.1)     | Subgoal idempotency key. Lookup by `(parentGoalId, planId)` rescues children stranded by mid-spawn restart.                                                          |
+| `dependsOnPlanIds`      | `string[]?`                                   | Stamped by `POST /api/goals/:id/spawn-child` and by `runSubgoalStep` immediately after `createGoal`, alongside `spawnedFromPlanId`. Sourced from `body.dependsOn` (REST) or `step.subgoal.dependsOn` (harness). | Sibling `planId`s this child waits on. Drives the Plan-tab DAG topological-depth layout (column = `max(deps.column) + 1`) and the explicit edge set. Empty / undefined = parallel sibling, no incoming edge. Validated at the API layer (`SELF_DEPENDENCY`, `UNKNOWN_PLAN_ID`, `DEPENDS_ON_CYCLE`). See [nested-goals.md — Declaring dependencies](nested-goals.md#declaring-dependencies). |
 | `paused`                | `boolean?`                                    | REST (any goal)                                                                            | User can pause a goal mid-flight. Children may inherit via cascade. A paused child does NOT suppress the parent's idle nudge (Lesson 4.13).                          |
 | `replanCount`           | `number?`                                     | Bumped by REST classifier on every successful post-freeze mutation                         | Auto-pause trigger when `> 5` (human review required).                                                                                                               |
 | `suggestedRole`         | `string?`                                     | Stamped by `POST /api/goals/:id/spawn-child` in the same atomic `updateGoal` as `spawnedFromPlanId` | Optional role hint from the parent — read by the child team-lead's system prompt to bias the first delegation. Not enforced; the lead may pick a different role if the work demands it. |
@@ -85,7 +86,7 @@ interface VerifyStep {
   label?: string;     // Human-readable label for the toggle in goal creation UI.
   description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
   // For type: "subgoal":
-  subgoal?: { planId: string; title: string; spec: string; workflowId?: string; suggestedRole?: string };
+  subgoal?: { planId: string; title: string; spec: string; workflowId?: string; suggestedRole?: string; dependsOn?: string[] };
 }
 
 interface WorkflowGate {
@@ -357,6 +358,9 @@ verify:
         - "Basic CLI works end-to-end"   # Quote root acceptance criteria verbatim here
       workflowId: "feature"        # Optional — child's workflow id (defaults to parent's workflow if omitted)
       suggestedRole: "team-lead"   # Optional — hint for the child's lead role
+      dependsOn: ["v0.0"]          # Optional — sibling planIds this step depends on; drives the
+                                   #   Plan-tab DAG layout. Empty/omitted = parallel sibling.
+                                   #   See nested-goals.md#declaring-dependencies.
 ```
 
 **What it does** (in `runSubgoalStep`, `src/server/agent/verification-harness.ts`):
