@@ -4,6 +4,8 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
 	SIDEBAR_FONT_SCALE_DEFAULT,
 	SIDEBAR_FONT_SCALE_KEY,
@@ -98,6 +100,23 @@ describe("nearestStop", () => {
 		for (const s of SIDEBAR_FONT_SCALE_STOPS) {
 			assert.equal(nearestStop(s.value).id, s.id);
 		}
+	});
+});
+
+describe("sidebar.ts source: no duplicate style= attributes", () => {
+	it("src/app/sidebar.ts has no element carrying two `style=` attributes (regression: Add Project button)", () => {
+		const path = fileURLToPath(new URL("../src/app/sidebar.ts", import.meta.url));
+		const src = readFileSync(path, "utf8");
+		// Two `style="..."` separated only by whitespace on the same element.
+		// We allow `"..." style=` (close-quote + space + new attr) but flag it
+		// only when the attr is itself `style=`. Cheap, conservative line scan.
+		const lines = src.split(/\r?\n/);
+		const offenders: { line: number; text: string }[] = [];
+		for (let i = 0; i < lines.length; i++) {
+			const l = lines[i];
+			if (/style="[^"]*"\s+style="/.test(l)) offenders.push({ line: i + 1, text: l.trim() });
+		}
+		assert.equal(offenders.length, 0, `Duplicate style= attributes on same element:\n${offenders.map(o => `  L${o.line}: ${o.text}`).join("\n")}`);
 	});
 });
 

@@ -281,7 +281,7 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 		class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
 		style="vertical-align:middle;font-size: 0.9167em;"
 		title="${formatSessionAge(session.lastActivity)}"
-	>${time}${unseen ? html`<span class="unseen-dot text-primary" style="font-size:0.5em;line-height:1;">●</span>` : ""}</span>`;
+	>${time}${unseen ? html`<span class="unseen-dot text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
 }
 
 /**

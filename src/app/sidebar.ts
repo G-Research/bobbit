@@ -616,7 +616,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 							const time = terseRelativeTime(session.lastActivity);
 							if (!time) return "";
 							const unseen = hasUnseenActivity(session);
-							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:0.5em;line-height:1;">●</span>` : ""}</span>`;
+							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
 						})() : ""}</div>
 					${mobile
 						? editBtn
@@ -625,7 +625,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
-								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size:0.5em;line-height:1;">●</span>` : ""}</span>`;
+								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
 							})() : ""}</span>
 							<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 								${editBtn}
@@ -989,8 +989,7 @@ export function renderSidebar() {
 				` : html`
 					<div class="border-t border-border/30 my-1 mx-2"></div>
 					<button
-						class="flex items-center gap-1 px-1 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full" style="font-size: 0.8333em;"
-						style="padding-left:${HEADER_CHEVRON_W}px;"
+						class="flex items-center gap-1 px-1 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors w-full" style="font-size: 0.8333em; padding-left:${HEADER_CHEVRON_W}px;"
 						@click=${() => showProjectDialog()}
 						title="Register another project"
 					>
