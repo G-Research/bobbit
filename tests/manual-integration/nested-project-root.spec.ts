@@ -54,12 +54,6 @@ async function startGW(dir: string, port: number): Promise<GW> {
 			BOBBIT_DIR: join(dir, ".bobbit"),
 			BOBBIT_TEST_NO_PUSH: "1",
 			BOBBIT_LLM_REVIEW_SKIP: "1",
-			// Disable the worktree pool: it's keyed off project.rootPath (the
-			// nested dir), and a prefilled entry would land the goal worktree
-			// under <nested>-wt/ instead of <repo>-wt/. The goal-manager's
-			// non-pool path uses goal.repoPath (the git root) which is what
-			// this test pins.
-			BOBBIT_SKIP_WORKTREE_POOL: "1",
 			NODE_ENV: "test",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
