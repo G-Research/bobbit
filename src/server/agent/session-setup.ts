@@ -35,7 +35,7 @@ import type { PrStatusStore } from "./pr-status-store.js";
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -87,7 +87,7 @@ export interface SessionSetupPlan {
 
 	// Computed during planning
 	bridgeOptions: RpcBridgeOptions;
-	effectiveAllowedTools?: string[];
+	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
 
 	// Options passed through from caller
@@ -271,7 +271,7 @@ export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void
 	return profile("resolveTools", () => _resolveTools(plan, ctx));
 }
 function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	let effectiveAllowedTools = plan.effectiveAllowedTools;
+	let effectiveAllowedTools: EffectiveTool[] | undefined = plan.effectiveAllowedTools;
 
 	// Fall back to general role's allowed tools
 	if ((!effectiveAllowedTools || effectiveAllowedTools.length === 0) && ctx.roleManager) {
@@ -347,7 +347,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			goalSpec: assistantGoalSpec,
 			goalTitle: assistantDef.promptTitle,
 			goalState: "active",
-			allowedTools: plan.effectiveAllowedTools,
+			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
@@ -408,7 +408,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			taskType,
 			taskSpec,
 			taskDependsOn,
-			allowedTools: plan.effectiveAllowedTools,
+			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
 		});
@@ -442,8 +442,9 @@ export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 }
 function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const mcpExtPaths = ctx.mcpManager
-		? writeMcpProxyExtensions(ctx.mcpManager, plan.effectiveAllowedTools, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
+		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
@@ -721,7 +722,7 @@ export async function executeWorktreeAsync(
 	// Create real RpcBridge (replacing placeholder)
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
-	session.allowedTools = plan.effectiveAllowedTools;
+	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	if (plan.bridgeOptions.initialModel) session.spawnPinnedModel = plan.bridgeOptions.initialModel;
 	if (plan.bridgeOptions.initialThinkingLevel) session.spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 
@@ -857,7 +858,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
 		delegateOf: plan.delegateOf,
-		allowedTools: plan.effectiveAllowedTools,
+		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		role: plan.role,
 		accessory: plan.accessory,
 		promptQueue: new PromptQueue(),
