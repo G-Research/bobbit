@@ -1319,7 +1319,7 @@ When Bobbit talks to an on-prem model through the AI Gateway, the gateway's toke
 
 ### Where it's emitted
 
-`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `~/.bobbit/agent/models.json`. The `aigw` provider entry now carries a provider-level `headers` block:
+`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `<globalAgentDir>/models.json` (default `<server-cwd>/.bobbit/state/agent/models.json`; see [Disk state](#disk-state)). The `aigw` provider entry now carries a provider-level `headers` block:
 
 - Key: `x-opencode-session`.
 - Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
@@ -1328,7 +1328,7 @@ Provider-level (not per-model) is deliberate - it covers every `openai-completio
 
 ### Startup refresh of `models.json`
 
-On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `~/.bobbit/agent/models.json` doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` - which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
+On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `models.json` (under `globalAgentDir()`) doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` - which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
 
 If the gateway is unreachable at startup (network error / HTTP failure / timeout), the function logs `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json` and leaves the file untouched - staleness is preferred to wiping a working file with a stub. The `BOBBIT_SKIP_AIGW_DISCOVERY=1` test/CI escape hatch skips only the network call: when aigw is already configured, the Bedrock env vars are still applied and the existing `models.json` is kept as-is. The not-configured branch (auto-probing for a local gateway) is unchanged.
 
@@ -2555,8 +2555,17 @@ Only truly global state lives in the server's central state directory.
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
 | `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
 
-### Global
+### Agent CLI state — `<server-cwd>/.bobbit/state/agent/`
 
-| File | Purpose |
+Resolved by `globalAgentDir()` in `src/server/bobbit-dir.ts`. Holds the per-server agent CLI installation: session transcripts (`sessions/`), `auth.json`, `models.json`, and the agent CLI binary (`bin/`). Override with the `BOBBIT_AGENT_DIR` env var (or legacy `PI_CODING_AGENT_DIR`); a leading `~/` is expanded.
+
+| File / Directory | Purpose |
 |---|---|
-| `~/.bobbit/agent/auth.json` | API auth credentials |
+| `sessions/` | Per-cwd agent session transcripts (`.jsonl`) |
+| `auth.json` | API auth credentials |
+| `models.json` | aigw / model discovery cache (see [aigw](#aigw)) |
+| `bin/` | Installed agent CLI binary |
+
+**Why this is server-scoped, not `$HOME`-scoped.** Earlier versions defaulted to `~/.bobbit/agent/`, which surprised anyone running multiple bobbit servers from different cwds — transcripts and auth bled across servers, and "everything for this server lives under one dir" wasn't true. Sessions, auth, binary, and `models.json` now all live under the server's own `.bobbit/state/`, matching the rest of per-server state. Per-machine sharing is still possible via `BOBBIT_AGENT_DIR`.
+
+**One-shot legacy migration.** On startup, `migrateLegacyHomeAgentDir()` (same file) moves a pre-existing `~/.bobbit/agent/` to the new location. It writes a `~/.bobbit/agent.pre-relocate/` marker so the move is idempotent. If both directories exist, only non-conflicting session subdirs are merged and the legacy dir is renamed to the marker. Migration is skipped entirely when `BOBBIT_AGENT_DIR` or `PI_CODING_AGENT_DIR` is set (treated as an explicit user opt-out). Re-authentication on first run after upgrade is acceptable — `auth.json` is server-scoped state, not user-machine state.

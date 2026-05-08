@@ -573,9 +573,9 @@ Full design + bug archaeology in [docs/design/orphan-remote-branch-cleanup.md](d
 
 ## `models.json` stale / missing `x-opencode-session` header after gateway upgrade
 
-Symptom: a new aigw-side model isn't selectable, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the `x-opencode-session` feature.
+Symptom: a new aigw-side model isn't selectable, or per-session header partitioning isn't happening for users whose `models.json` (under `globalAgentDir()`; see [internals.md — Disk state](internals.md#disk-state)) predates the `x-opencode-session` feature.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `models.json` (under `globalAgentDir()`) on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
 
 `BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
 
@@ -814,6 +814,18 @@ The `isUserVisibleActivity` filter in `src/server/agent/session-manager.ts` deci
 ## Symlinked project root rejected with `code: symlink_root`
 
 `POST /api/projects` returns HTTP 400 `{ error, code: "symlink_root", rootPath, canonical }` when the supplied `rootPath` differs from `realpathSync(rootPath)`. The add-project dialog handles this transparently: it catches `SymlinkRootError` from `src/app/api.ts`, shows a confirm modal (`data-testid="symlink-confirm"`), and re-submits with `body.acceptCanonical: true` on accept. CLI/scripted callers must either pre-resolve the path themselves or include `acceptCanonical: true` in the body. The throw originates in `detectSymlinkRoot()` / `SymlinkProjectRootError` in `src/server/agent/project-registry.ts`. `registerProvisional()` and `registerSystemProject()` auto-accept canonical and never surface this error. See [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling).
+
+## Agent transcripts not under `<server-cwd>/.bobbit/state/agent/sessions/` after upgrade
+
+`globalAgentDir()` in `src/server/bobbit-dir.ts` now defaults to `<server-cwd>/.bobbit/state/agent/`. New transcripts (`.jsonl`), `auth.json`, `models.json`, and the agent CLI `bin/` all land there. Existing archived sessions persist their transcript path per-row, so they keep loading from wherever they were originally written.
+
+If transcripts aren't appearing in the new location after upgrade, check in order:
+
+1. **`BOBBIT_AGENT_DIR` (or legacy `PI_CODING_AGENT_DIR`) is set.** Either env var wins over the default and disables the home-dir migration entirely. `echo $BOBBIT_AGENT_DIR` — unset it (or accept the explicit override) and restart.
+2. **Marker `~/.bobbit/agent.pre-relocate/` exists.** Migration already ran and is now a no-op. The legacy contents were moved into the new location (or, if both already existed, non-conflicting sessions were merged and the rest left in place under the marker name). Inspect the marker dir for anything that wasn't moved; merge by hand if needed.
+3. **Both `~/.bobbit/agent/` and the new dir existed at first startup.** `migrateLegacyHomeAgentDir()` only merges session subdirs; `auth.json`, `models.json`, and `bin/` stay in legacy and you may need to re-auth in the new location. A `[migration] ... both exist — leaving legacy in place` warning appears in the gateway log.
+
+The migration is one-shot and idempotent — deleting the marker re-arms it, but only do that if the legacy dir genuinely still has un-migrated content.
 
 ## `findByCwd` returns undefined for a symlinked cwd
 
