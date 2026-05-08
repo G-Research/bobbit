@@ -8,5 +8,6 @@
 	"pool-flow.spec.ts": 4,
 	"thinking-level.spec.ts": 1,
 	"ui/multi-repo-flow.spec.ts": 2,
+	"ui/repro-h3-snapshot-live-interleave.spec.ts": 5,
 	"ui/review-annotations-persistence.spec.ts": 1
 }
