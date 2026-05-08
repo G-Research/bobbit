@@ -75,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "task_list",
 		label: "List Tasks",
-		description: "List all tasks for the current goal with their state, type, assignment, and dependencies. Returns a slim summary — use task detail for full spec or result.",
+		description: "List all tasks for the current goal as a slim summary.",
 		promptSnippet: "List all tasks for the goal.",
 		parameters: Type.Object({}),
 		async execute() {
@@ -88,16 +88,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "task_create",
 		label: "Create Task",
-		description: [
-			"Create a new task for the goal.",
-			"Types: implementation, code-review, testing, bug-fix, refactor, custom.",
-		].join(" "),
+		description: "Create a new task. Types: implementation, code-review, testing, bug-fix, refactor, custom.",
 		promptSnippet: "Create a task with title, type, optional spec, and dependencies.",
 		parameters: Type.Object({
-			title: Type.String({ description: "Short task title" }),
-			type: Type.String({ description: "Task type: implementation, code-review, testing, bug-fix, refactor, or custom" }),
-			spec: Type.Optional(Type.String({ description: "Detailed specification for the task" })),
-			depends_on: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on" })),
+			title: Type.String(),
+			type: Type.String({ description: "implementation, code-review, testing, bug-fix, refactor, or custom." }),
+			spec: Type.Optional(Type.String()),
+			depends_on: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -112,21 +109,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "task_update",
 		label: "Update Task",
-		description: [
-			"Update a task's fields, assignment, and/or state in a single call.",
-			"Provide any combination: field updates (title, spec, result_summary, head_sha),",
-			"assignment (assigned_to session ID), and/or state transition (state).",
-			"States: todo, in-progress, blocked, complete, skipped.",
-		].join(" "),
+		description: "Update task fields, assignment, and/or state. States: todo, in-progress, blocked, complete, skipped.",
 		promptSnippet: "Update task fields, assign to a session, and/or transition state.",
 		parameters: Type.Object({
-			task_id: Type.String({ description: "Task ID" }),
-			title: Type.Optional(Type.String({ description: "New title" })),
-			spec: Type.Optional(Type.String({ description: "New spec" })),
-			result_summary: Type.Optional(Type.String({ description: "Summary of results" })),
-			head_sha: Type.Optional(Type.String({ description: "HEAD commit SHA of your finished work" })),
-			assigned_to: Type.Optional(Type.String({ description: "Session ID to assign task to" })),
-			state: Type.Optional(Type.String({ description: "Transition to: todo, in-progress, blocked, complete, skipped" })),
+			task_id: Type.String(),
+			title: Type.Optional(Type.String()),
+			spec: Type.Optional(Type.String()),
+			result_summary: Type.Optional(Type.String()),
+			head_sha: Type.Optional(Type.String({ description: "HEAD commit SHA of finished work." })),
+			assigned_to: Type.Optional(Type.String({ description: "Session ID to assign to." })),
+			state: Type.Optional(Type.String({ description: "todo, in-progress, blocked, complete, or skipped." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -155,7 +147,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_list",
 		label: "List Gates",
-		description: "List all gates for the current goal — status, dependencies, signal count, and failed step names. Slim summary with no content bodies.",
+		description: "List all gates for the current goal as a slim summary.",
 		promptSnippet: "List all gates for the goal with status.",
 		parameters: Type.Object({}),
 		async execute() {
@@ -168,10 +160,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_status",
 		label: "Gate Status",
-		description: "Get latest signal details for a specific gate — verdict, truncated failed-step output, and metadata. Use gate_inspect for full content or history.",
+		description: "Get latest signal details for a gate. Use gate_inspect for full content or history.",
 		promptSnippet: "Get gate status, latest verification results, and metadata.",
 		parameters: Type.Object({
-			gate_id: Type.String({ description: "Gate ID (e.g. 'issue-analysis', 'implementation')" }),
+			gate_id: Type.String(),
 		}),
 		async execute(_id, params) {
 			try {
@@ -183,17 +175,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_signal",
 		label: "Signal Gate",
-		description: [
-			"Signal that a gate is ready for verification.",
-			"For content gates, provide markdown content.",
-			"For metadata gates, provide key-value metadata.",
-			"Triggers async verification. Returns signal info.",
-		].join(" "),
+		description: "Signal a gate ready for verification. Triggers async verification.",
 		promptSnippet: "Signal a gate for verification with optional content and metadata.",
 		parameters: Type.Object({
-			gate_id: Type.String({ description: "Gate ID to signal (e.g. 'issue-analysis', 'reproducing-test')" }),
-			content: Type.Optional(Type.String({ description: "Markdown content for content gates" })),
-			metadata: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Key-value metadata (e.g. { test_command: 'npm test' })" })),
+			gate_id: Type.String(),
+			content: Type.Optional(Type.String({ description: "Markdown for content gates." })),
+			metadata: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Key-value metadata for metadata gates." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -208,21 +195,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_inspect",
 		label: "Inspect Gate",
-		description: [
-			"Read gate content, verification output, or signal history.",
-			"section='content': returns the markdown content from a signal.",
-			"section='verification': returns full verification step output.",
-			"section='signals': returns summary list of all signals (no content bodies).",
-		].join(" "),
+		description: "Read gate content, verification output, or signal history.",
 		promptSnippet: "Read detailed gate data: content, verification output, or signal history.",
 		parameters: Type.Object({
-			gate_id: Type.String({ description: "Gate ID" }),
+			gate_id: Type.String(),
 			section: Type.Union([
 				Type.Literal("content"),
 				Type.Literal("verification"),
 				Type.Literal("signals"),
-			], { description: "What to read: 'content', 'verification', or 'signals'" }),
-			signal_index: Type.Optional(Type.Number({ description: "Which signal (0-based, negative from end, default: -1 = latest)" })),
+			]),
+			signal_index: Type.Optional(Type.Number({ description: "0-based, negative from end. Default -1 (latest)." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -237,13 +219,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "verification_result",
 		label: "Verification Result",
-		description: "Submit your verification result when your review or QA testing is complete. The verification system receives your results through this tool.",
+		description: "Submit verification result when review or QA testing is complete.",
 		promptSnippet: "Submit verification verdict, summary, and optional HTML report.",
 		parameters: Type.Object({
-			verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], { description: "Whether verification passed or failed" }),
-			summary: Type.String({ description: "Detailed markdown summary of findings — what was reviewed, specific issues found (with file:line references), and verdict rationale" }),
-			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report with embedded screenshots (for QA agents). For large reports, use report_html_file instead. Cannot be combined with report_html_file." })),
-			report_html_file: Type.Optional(Type.String({ description: "Absolute path to an HTML report file on disk. The server reads it directly — use this for large reports with embedded base64 screenshots that exceed tool output limits. Cannot be combined with report_html." })),
+			verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")]),
+			summary: Type.String({ description: "Markdown findings: what was reviewed, issues with file:line, rationale." }),
+			report_html: Type.Optional(Type.String({ description: "Self-contained HTML report. Mutually exclusive with report_html_file." })),
+			report_html_file: Type.Optional(Type.String({ description: "Absolute path to HTML report file. Use for large reports." })),
 		}),
 		async execute(_id, params) {
 			if (params.report_html && params.report_html_file) {

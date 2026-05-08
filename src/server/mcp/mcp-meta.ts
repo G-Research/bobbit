@@ -13,8 +13,8 @@ export const MCP_META_PREFIX = "mcp_";
 /** Anthropic API tool-name max length. */
 const MAX_TOOL_NAME_LEN = 64;
 
-/** Cap meta-tool description size to keep per-server context overhead tiny. */
-const MAX_DESCRIPTION_LEN = 400;
+/** Hard cap on meta-tool description length (single short line). */
+const MAX_DESCRIPTION_LEN = 150;
 
 /** Sentinel op name surfaced when a server has no usable operations. */
 const UNAVAILABLE_OP = "__unavailable__";
@@ -168,9 +168,10 @@ export function buildMetaToolInputSchema(ops: McpToolDef[]): Record<string, unkn
 }
 
 /**
- * Build the ~80-token meta-tool description: server label, comma-separated op
- * names, plus a pointer at the auto-generated docs file. Capped at ~400 chars;
- * overflow trims the op list and appends `... (N more)`.
+ * Build the meta-tool description: a single short line with the server name,
+ * operation count, and a pointer at the auto-generated docs file. Op names
+ * are NOT inlined — per-op detail lives in the off-wire docs file fetched
+ * via `mcp_describe`. Hard-capped at 150 chars.
  */
 export function buildMetaToolDescription(
 	serverName: string,
@@ -178,26 +179,12 @@ export function buildMetaToolDescription(
 	docsRelPath: string,
 ): string {
 	const valid = (ops ?? []).filter(isValidOperationSchema);
-	const head = `${serverName} MCP server. Operations: `;
-	const tail = `. See ${docsRelPath} for full schemas.`;
-	const opNames = valid.map(op => op.name);
-
-	if (opNames.length === 0) {
-		return `${serverName} MCP server. No operations available.${tail}`.slice(0, MAX_DESCRIPTION_LEN);
-	}
-
-	// Try the full list first.
-	const full = `${head}${opNames.join(", ")}${tail}`;
-	if (full.length <= MAX_DESCRIPTION_LEN) return full;
-
-	// Trim from the end — find the largest N such that head + first-N + ", ... (M more)" + tail fits.
-	for (let n = opNames.length - 1; n >= 1; n--) {
-		const more = opNames.length - n;
-		const candidate = `${head}${opNames.slice(0, n).join(", ")}, ... (${more} more)${tail}`;
-		if (candidate.length <= MAX_DESCRIPTION_LEN) return candidate;
-	}
-
-	// Fallback: even one op blows the budget — emit minimum and hard-truncate.
-	const minimum = `${head}... (${opNames.length} more)${tail}`;
-	return minimum.length <= MAX_DESCRIPTION_LEN ? minimum : minimum.slice(0, MAX_DESCRIPTION_LEN);
+	const n = valid.length;
+	const docsRef = docsRelPath ? ` See ${docsRelPath}.` : "";
+	const body =
+		n === 0 ? "No operations available."
+		: n === 1 ? "1 operation."
+		: `${n} operations.`;
+	const out = `${serverName} MCP server. ${body}${docsRef}`;
+	return out.length <= MAX_DESCRIPTION_LEN ? out : out.slice(0, MAX_DESCRIPTION_LEN);
 }

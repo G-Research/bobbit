@@ -128,9 +128,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_navigate",
 		label: "Browser Navigate",
-		description: "Navigate the browser to a URL. Launches a headless browser if needed.",
+		description: "Navigate the browser to a URL. Launches headless browser lazily.",
 		parameters: Type.Object({
-			url: Type.String({ description: "URL to navigate to" }),
+			url: Type.String(),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -147,16 +147,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_screenshot",
 		label: "Browser Screenshot",
-		description:
-			"Take a screenshot of the current browser page (or a specific element). " +
-			"Returns the image so you can see it. Optionally saves to a file.",
+		description: "Screenshot the page or an element; optionally save to a file.",
 		parameters: Type.Object({
-			selector: Type.Optional(Type.String({ description: "CSS selector to screenshot a specific element. Omit for full page." })),
-			savePath: Type.Optional(Type.String({ description: "File path to save the screenshot to (png/jpg). Optional." })),
-			fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page. Default false." })),
-			includeBase64: Type.Optional(Type.Boolean({ description: "Spill the screenshot to <cwd>/.bobbit-qa/screenshots/<uuid>.png and return a [screenshot_file]<path>[/screenshot_file] text block. Reference via <img src=\"file:///<path>\"> in HTML reports. Default false." })),
-			format: Type.Optional(Type.Union([Type.Literal("png"), Type.Literal("jpeg")], { description: "Image format. Default 'png'. 'jpeg' is ~5x smaller at quality 75." })),
-			quality: Type.Optional(Type.Number({ description: "JPEG quality (1-100). Only applies to format='jpeg'. Default 80." })),
+			selector: Type.Optional(Type.String({ description: "CSS selector for an element; omit for full page." })),
+			savePath: Type.Optional(Type.String({ description: "File path to save the screenshot." })),
+			fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page." })),
+			includeBase64: Type.Optional(Type.Boolean({ description: "Spill to .bobbit-qa/screenshots/ and emit [screenshot_file] block." })),
+			format: Type.Optional(Type.Union([Type.Literal("png"), Type.Literal("jpeg")], { description: "Image format. Default png." })),
+			quality: Type.Optional(Type.Number({ description: "JPEG quality 1-100. Default 80." })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const p = await withAbort(ensurePage(), signal);
@@ -232,9 +230,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_click",
 		label: "Browser Click",
-		description: "Click an element on the page by CSS selector.",
+		description: "Click an element by CSS selector.",
 		parameters: Type.Object({
-			selector: Type.String({ description: "CSS selector of the element to click" }),
+			selector: Type.String(),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -250,11 +248,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_type",
 		label: "Browser Type",
-		description: "Type text into an input element identified by CSS selector.",
+		description: "Type text into an input by CSS selector.",
 		parameters: Type.Object({
-			selector: Type.String({ description: "CSS selector of the input element" }),
-			text: Type.String({ description: "Text to type" }),
-			clear: Type.Optional(Type.Boolean({ description: "Clear the field before typing. Default true." })),
+			selector: Type.String(),
+			text: Type.String(),
+			clear: Type.Optional(Type.Boolean({ description: "Clear field before typing. Default true." })),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -275,9 +273,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_eval",
 		label: "Browser Evaluate",
-		description: "Execute JavaScript in the browser page and return the result.",
+		description: "Evaluate a JavaScript expression in the page and return the result.",
 		parameters: Type.Object({
-			expression: Type.String({ description: "JavaScript expression to evaluate in the page context" }),
+			expression: Type.String(),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -294,10 +292,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_wait",
 		label: "Browser Wait",
-		description: "Wait for an element matching the selector to appear on the page.",
+		description: "Wait for an element matching the selector to become visible.",
 		parameters: Type.Object({
-			selector: Type.String({ description: "CSS selector to wait for" }),
-			timeout: Type.Optional(Type.Number({ description: "Max wait time in milliseconds. Default 10000." })),
+			selector: Type.String(),
+			timeout: Type.Optional(Type.Number({ description: "Max wait in ms. Default 10000." })),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -319,7 +317,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_snapshot",
 		label: "Browser Snapshot",
-		description: "Capture accessibility snapshot of the current page. Returns the ARIA accessibility tree as structured YAML text.",
+		description: "Capture the page's ARIA accessibility tree as YAML text.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -335,10 +333,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_console_messages",
 		label: "Browser Console Messages",
-		description: "Returns console messages (errors, warnings, info, logs) captured from the current page.",
+		description: "Return console messages captured from the current page.",
 		parameters: Type.Object({
-			level: Type.Optional(Type.String({ description: 'Filter by message level: "log", "error", "warning", "info", "debug", "trace"' })),
-			clear: Type.Optional(Type.Boolean({ description: "Clear the message buffer after returning. Default false." })),
+			level: Type.Optional(Type.String({ description: "Filter by level: log, error, warning, info, debug, trace." })),
+			clear: Type.Optional(Type.Boolean({ description: "Clear buffer after returning." })),
 		}),
 		async execute(_toolCallId, params, _signal) {
 			// Ensure page exists so listener is attached, but don't need the page ref
@@ -361,9 +359,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_press_key",
 		label: "Browser Press Key",
-		description: "Press a key on the keyboard.",
+		description: "Press a keyboard key (e.g. Enter, Tab, Control+A).",
 		parameters: Type.Object({
-			key: Type.String({ description: 'Key to press, e.g. "Enter", "Tab", "Escape", "Control+A"' }),
+			key: Type.String(),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -379,9 +377,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_hover",
 		label: "Browser Hover",
-		description: "Hover over an element on the page by CSS selector.",
+		description: "Hover an element by CSS selector.",
 		parameters: Type.Object({
-			selector: Type.String({ description: "CSS selector of the element to hover over" }),
+			selector: Type.String(),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -397,10 +395,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "browser_select_option",
 		label: "Browser Select Option",
-		description: "Select an option in a <select> dropdown by value.",
+		description: "Select option(s) in a <select> dropdown by value.",
 		parameters: Type.Object({
-			selector: Type.String({ description: "CSS selector of the <select> element" }),
-			values: Type.Array(Type.String(), { description: "Option values to select" }),
+			selector: Type.String(),
+			values: Type.Array(Type.String()),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);
@@ -421,8 +419,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Browser Resize",
 		description: "Resize the browser viewport.",
 		parameters: Type.Object({
-			width: Type.Number({ description: "Viewport width in pixels" }),
-			height: Type.Number({ description: "Viewport height in pixels" }),
+			width: Type.Number(),
+			height: Type.Number(),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const p = await withAbort(ensurePage(), signal);

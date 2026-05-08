@@ -153,11 +153,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bash",
 		label: "Bash",
-		description: "Execute a bash command. Returns stdout+stderr. Output truncated to last 2000 lines / 50KB.",
+		description: "Run a bash command. Output truncated to last 2000 lines / 50KB.",
 		parameters: Type.Object({
-			command: Type.String({ description: "The bash command to execute" }),
-			timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
-			description: Type.Optional(Type.String({ description: "Short human-readable label (3–6 words) for the command. Strongly recommended for multi-line commands, heredocs, and non-obvious one-liners. Example: 'sum agent-qa costs from session-costs.json'." })),
+			command: Type.String(),
+			timeout: Type.Optional(Type.Number({ description: "Seconds. Default 300." })),
+			description: Type.Optional(Type.String({ description: "Short label (3-6 words); recommended for multi-line or non-obvious commands." })),
 		}),
 		async execute(_toolCallId, { command, timeout }, abortSignal, onUpdate) {
 			return new Promise((resolve) => {
@@ -276,7 +276,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bash_bg",
 		label: "Background Process",
-		description: "Manage background shell processes. Actions: create, logs, grep, head, slice, kill, list.",
+		description: "Manage background shell processes: create, logs, grep, head, slice, kill, list, wait.",
 		parameters: Type.Object({
 			action: Type.Union([
 				Type.Literal("create"),
@@ -287,18 +287,18 @@ export default function (pi: ExtensionAPI) {
 				Type.Literal("kill"),
 				Type.Literal("list"),
 				Type.Literal("wait"),
-			], { description: "Action to perform" }),
-			command: Type.Optional(Type.String({ description: "Shell command to run (for 'create')" })),
-			name: Type.Optional(Type.String({ description: "Short name for the process (max 3 words, required for 'create'). Example: 'dev server', 'color echo loop', 'test runner'" })),
-			id: Type.Optional(Type.String({ description: "Background process ID (for 'logs', 'grep', 'head', 'slice', 'kill', 'wait')" })),
-			timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default: 300, for 'wait')" })),
-			tail: Type.Optional(Type.Number({ description: "Number of log lines to return from end (default: 200, for 'logs')" })),
-			pattern: Type.Optional(Type.String({ description: "Search pattern — string or regex (for 'grep')" })),
-			context: Type.Optional(Type.Number({ description: "Lines of context around each match (default: 0, for 'grep')" })),
-			max_results: Type.Optional(Type.Number({ description: "Max matches to return (default: 50, for 'grep')" })),
-			lines: Type.Optional(Type.Number({ description: "Number of lines (default: 50, for 'head')" })),
-			from: Type.Optional(Type.Number({ description: "Start line, 1-indexed (for 'slice')" })),
-			to: Type.Optional(Type.Number({ description: "End line, inclusive (for 'slice')" })),
+			]),
+			command: Type.Optional(Type.String({ description: "Shell command (create)." })),
+			name: Type.Optional(Type.String({ description: "Short process name, max 3 words (create)." })),
+			id: Type.Optional(Type.String({ description: "Background process ID." })),
+			timeout: Type.Optional(Type.Number({ description: "Max seconds to wait. Default 300 (wait)." })),
+			tail: Type.Optional(Type.Number({ description: "Lines from end. Default 200 (logs)." })),
+			pattern: Type.Optional(Type.String({ description: "Search pattern, string or regex (grep)." })),
+			context: Type.Optional(Type.Number({ description: "Lines of context around match. Default 0 (grep)." })),
+			max_results: Type.Optional(Type.Number({ description: "Max matches. Default 50 (grep)." })),
+			lines: Type.Optional(Type.Number({ description: "Number of lines. Default 50 (head)." })),
+			from: Type.Optional(Type.Number({ description: "Start line, 1-indexed (slice)." })),
+			to: Type.Optional(Type.Number({ description: "End line, inclusive (slice)." })),
 		}),
 		async execute(_toolCallId, { action, command, name, id, tail, timeout, pattern, context, max_results, lines, from, to }) {
 			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });

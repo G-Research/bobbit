@@ -75,13 +75,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_spawn",
 		label: "Spawn Team Agent",
-		description: "Spawn a new role agent with its own git worktree. Returns the new session ID and worktree path. Returns 409 if workflowGateId is provided and its upstream dependency gates have not all passed.",
+		description: "Spawn a role agent in its own worktree. Returns session ID and worktree path.",
 		promptSnippet: "Spawn a coder, reviewer, or tester agent with a task description.",
 		parameters: Type.Object({
-			role: Type.String({ description: "Agent role: 'coder', 'reviewer', or 'tester'" }),
-			task: Type.String({ description: "Task description sent as the agent's first prompt" }),
-			workflowGateId: Type.Optional(Type.String({ description: "Gate ID this agent is working toward. If inputGateIds is not set, content from upstream passed gates is auto-injected as context." })),
-			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Gate IDs whose passed content should be injected into the agent's context. Overrides automatic DAG resolution." })),
+			role: Type.String({ description: "'coder', 'reviewer', or 'tester'." }),
+			task: Type.String(),
+			workflowGateId: Type.Optional(Type.String({ description: "Gate the agent works toward; auto-injects upstream gate content." })),
+			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Override DAG: gate IDs whose content to inject as context." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_list",
 		label: "List Team Agents",
-		description: "List all active agents in the team with their role, status, worktree path, and task.",
+		description: "List active team agents with role, status, worktree, and task.",
 		promptSnippet: "List all agents in the team with their status.",
 		parameters: Type.Object({}),
 		async execute() {
@@ -109,10 +109,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_dismiss",
 		label: "Dismiss Team Agent",
-		description: "Terminate a role agent and clean up its git worktree.",
+		description: "Terminate a role agent and clean up its worktree.",
 		promptSnippet: "Dismiss (terminate) a team agent by session ID.",
 		parameters: Type.Object({
-			session_id: Type.String({ description: "Session ID of the agent to dismiss" }),
+			session_id: Type.String(),
 		}),
 		async execute(_id, params) {
 			try {
@@ -124,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_complete",
 		label: "Complete Team",
-		description: "Dismiss all role agents and mark the goal as complete. The team lead stays active to present a report.",
+		description: "Dismiss all role agents and mark the goal complete; team lead stays active.",
 		promptSnippet: "Complete the team: dismiss all agents, keep team lead active.",
 		parameters: Type.Object({}),
 		async execute() {
@@ -137,11 +137,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_steer",
 		label: "Steer Team Agent",
-		description: "Send an urgent mid-turn redirect to a running agent. Only works when the agent is actively streaming (between tool calls). Use this for course corrections, clarifications, or priority changes that can't wait until the agent finishes. Fails if the agent is idle — use team_prompt instead.",
+		description: "Send an urgent mid-turn redirect to a streaming agent. Fails if idle; use team_prompt.",
 		promptSnippet: "Steer a running team agent with an urgent message (mid-turn only).",
 		parameters: Type.Object({
-			session_id: Type.String({ description: "Session ID of the agent to steer" }),
-			message: Type.String({ description: "Steering message — the agent sees this between tool calls" }),
+			session_id: Type.String(),
+			message: Type.String(),
 		}),
 		async execute(_id, params) {
 			try {
@@ -153,10 +153,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_abort",
 		label: "Abort Team Agent",
-		description: "Force-abort a stuck team agent that won't respond to steering. Use this when an agent is stuck in a long-running tool call and team_steer has no effect. The agent's process will be killed and restarted, and it will be ready for new prompts.",
+		description: "Force-abort a stuck team agent; kills and restarts its process.",
 		promptSnippet: "Force-abort a stuck team agent by session ID.",
 		parameters: Type.Object({
-			session_id: Type.String({ description: "The session ID of the agent to abort" }),
+			session_id: Type.String(),
 		}),
 		async execute(_id, params) {
 			try {
@@ -168,13 +168,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_prompt",
 		label: "Prompt Team Agent",
-		description: "Send a prompt to a team agent. If the agent is idle, it starts working immediately. If the agent is busy, the message is queued and dispatched when the current turn ends. Use this to assign follow-up work, nudge idle agents, or queue instructions. Returns 409 if workflowGateId is provided and its upstream dependency gates have not all passed.",
+		description: "Prompt a team agent. Runs immediately if idle, else queues for next turn.",
 		promptSnippet: "Send a prompt to a team agent (immediate if idle, queued if busy).",
 		parameters: Type.Object({
-			session_id: Type.String({ description: "Session ID of the agent to prompt" }),
-			message: Type.String({ description: "Prompt message for the agent" }),
-			workflowGateId: Type.Optional(Type.String({ description: "Gate ID this agent is working toward. If inputGateIds is not set, content from upstream passed gates is auto-injected as context." })),
-			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Gate IDs whose passed content should be injected into the agent's context. Overrides automatic DAG resolution." })),
+			session_id: Type.String(),
+			message: Type.String(),
+			workflowGateId: Type.Optional(Type.String({ description: "Gate the agent works toward; auto-injects upstream gate content." })),
+			inputGateIds: Type.Optional(Type.Array(Type.String(), { description: "Override DAG: gate IDs whose content to inject as context." })),
 		}),
 		async execute(_id, params) {
 			try {
