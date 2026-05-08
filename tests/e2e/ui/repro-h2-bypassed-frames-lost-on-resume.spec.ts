@@ -123,8 +123,17 @@ test.describe("H2 — bypassed lifecycle frames lost on resume", () => {
 			a.compact();
 		});
 
-		// Tiny yield so compaction_start has at least a chance to be queued.
-		await page.waitForTimeout(50);
+		// Wait until the client has observed compaction_start (it sets
+		// `_isCompacting=true` on receipt). On the bug pre-fix that flag may
+		// never flip — fall through after the timeout and drop anyway so the
+		// outcome assertions below still run.
+		await page
+			.waitForFunction(
+				() => !!(window as any).__bobbitState?.remoteAgent?._isCompacting,
+				undefined,
+				{ timeout: 2_000 },
+			)
+			.catch(() => {});
 		await dropWs(page);
 
 		// Wait for reconnect.
@@ -176,9 +185,16 @@ test.describe("H2 — bypassed lifecycle frames lost on resume", () => {
 			(window as any).__bobbitState.remoteAgent.send({ type: "restart_agent" });
 		});
 
-		// Drop WS in the gap. Even a tiny drop here should suffice to land
-		// the resume request after the bypassed agent_end was broadcast.
-		await page.waitForTimeout(20);
+		// Drop WS in the gap. Wait for the server to process restart_agent
+		// (status flips out of `streaming`) — bounded so we drop even if it
+		// doesn't, exercising the resume path either way.
+		await page
+			.waitForFunction(
+				() => (window as any).__bobbitState?.remoteAgent?._state?.status !== "streaming",
+				undefined,
+				{ timeout: 5_000 },
+			)
+			.catch(() => {});
 		await dropWs(page);
 		await waitReconnected(page);
 
@@ -228,8 +244,17 @@ test.describe("H2 — bypassed lifecycle frames lost on resume", () => {
 
 		// Drop mid-stream once — enough to exercise the resume-from-seq path
 		// without overlapping with a bypassed frame (bash_bg events ARE
-		// buffered; this checks the pure-protocol baseline).
-		await page.waitForTimeout(800);
+		// buffered; this checks the pure-protocol baseline). Wait until the
+		// burst has produced several messages so we drop genuinely
+		// mid-stream rather than at the very start.
+		const burstBaseline = await page.evaluate(
+			() => ((window as any).__bobbitState?.messages?.length ?? 0) as number,
+		);
+		await page.waitForFunction(
+			(b) => ((window as any).__bobbitState?.messages?.length ?? 0) > (b as number) + 3,
+			burstBaseline,
+			{ timeout: 15_000 },
+		).catch(() => {});
 		await dropWs(page);
 		await waitReconnected(page);
 
@@ -288,10 +313,20 @@ test.describe("H2 — bypassed lifecycle frames lost on resume", () => {
 
 		await page.evaluate(() => (window as any).__bobbitState.remoteAgent.compact());
 
-		// Allow compact to start + finish (mock has no real LLM, so the
-		// `compact` RPC will likely error out — but compaction_start is
-		// emitted before the RPC even resolves).
-		await page.waitForTimeout(2_000);
+		// Wait for both compaction_start and compaction_end to land in the
+		// sniffer buffer (the mock has no real LLM, so the `compact` RPC
+		// errors out quickly — both frames should arrive within seconds).
+		await page.waitForFunction(
+			() => {
+				const frames = ((window as any).__h2_frames ?? []) as Array<{ innerType: string }>;
+				return (
+					frames.some((f) => f.innerType === "compaction_start") &&
+					frames.some((f) => f.innerType === "compaction_end")
+				);
+			},
+			undefined,
+			{ timeout: 10_000 },
+		).catch(() => {});
 
 		const frames = await page.evaluate(() => (window as any).__h2_frames);
 		console.log("[H2-d] event frames received:", JSON.stringify(frames, null, 2));
