@@ -56,7 +56,15 @@ function slugifyCwd(cwd: string): string {
 
 function globalAgentSessionsDir(): string {
 	const env = process.env.BOBBIT_AGENT_DIR || process.env.PI_CODING_AGENT_DIR;
-	const base = env ?? join(homedir(), ".bobbit", "agent");
+	let base: string;
+	if (env) {
+		base = env;
+	} else if (process.env.BOBBIT_DIR) {
+		// Default is now <BOBBIT_DIR>/state/agent (per goal: relocate agent dir under server cwd).
+		base = join(process.env.BOBBIT_DIR, "state", "agent");
+	} else {
+		base = join(homedir(), ".bobbit", "agent");
+	}
 	return join(base, "sessions");
 }
 

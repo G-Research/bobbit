@@ -54,7 +54,13 @@ function getModelsJsonPath(): string {
 		else if (envDir.startsWith("~/")) agentDir = homedir() + envDir.slice(1);
 		else agentDir = envDir;
 	} else {
-		agentDir = join(homedir(), ".bobbit", "agent");
+		// Default is now <BOBBIT_DIR>/state/agent (per goal: relocate agent dir under server cwd).
+		const bobbitDir = process.env.BOBBIT_DIR;
+		if (bobbitDir) {
+			agentDir = join(bobbitDir, "state", "agent");
+		} else {
+			agentDir = join(homedir(), ".bobbit", "agent");
+		}
 	}
 	return join(agentDir, "models.json");
 }
