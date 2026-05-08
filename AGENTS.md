@@ -67,6 +67,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Re-attempt a goal** → `POST /api/sessions { reattemptGoalId }` → `buildReattemptContext()`.
 - **Server-side read/unread state** → `lastReadAt` on `PersistedSession`; `POST /api/sessions/:id/mark-read`.
 - **Read another session's transcript (`read_session` tool)** → parser `src/server/agent/transcript-reader.ts`; `GET /api/sessions/:id/transcript`; same-project auth via `x-bobbit-session-id` header.
+- **Initialise / read client-side session status on a fresh attach** → `_lastStatusVersion` starts at `-1` in `src/app/remote-agent.ts`; first `session_status` frame is always applied. Both `case "state"` and `case "session_status"` may write `_state.status`. UI re-renders for `preparing`/`starting`/`aborting`/`idle` via explicit `requestUpdate()` in `src/app/session-manager.ts::onStatusChange`.
 
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
@@ -138,6 +139,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Stale draft resurrection** — `SessionStore.setDraft()` rejects older `gen`.
+- **"Setting up worktree…" banner missing for first session / preparing UX absent** — `_lastStatusVersion` must initialise to `-1` so the first `session_status` frame (server uses `statusVersion: 0`) is applied; `case "session_status"` only writes `_state.status`, but `RemoteAgent.onStatusChange` must also call `agentInterface.requestUpdate()` for `"preparing"`/`"starting"` (Lit reference-equality misses same-object mutations). See `src/app/remote-agent.ts`, `src/app/session-manager.ts`.
 
 ### Worktree / sandbox / projects
 - **Worktree setup not running** — single source of truth `runComponentSetups()` in `src/server/skills/worktree-setup.ts`.
@@ -148,6 +150,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Monorepo subprojects not detected** — `src/server/agent/monorepo-scan.ts`; cap 30 candidates.
 - **Legacy JSON-string `project.yaml` field rejected (HTTP 400)** — send structured arrays.
 - **400 "projectId required"** — splash buttons gated on `state.projects.length`; system tool-assistants pass `projectId: "system"`.
+- **Slow first-session worktree creation on cold boot** — `runBootBackgroundTasks` in `src/server/server.ts` runs sweeper and pool init concurrently (`Promise.all`); they operate on disjoint branch sets (sweeper skips `isPoolBranch`; `WorktreePool.reclaimOrphaned` only touches pool branches). Boot timing logs prefixed `[boot]`. `BOBBIT_SKIP_WORKTREE_POOL=1` still bypasses pool entirely.
 
 ### MCP
 - **MCP server unavailable / partial outage** — stub meta extension at `<stateDir>/mcp-extensions/…`.
