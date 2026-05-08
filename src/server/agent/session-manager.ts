@@ -249,7 +249,24 @@ export interface SessionInfo {
 	 * neither path is silently dropped.
 	 */
 	inFlightSteerTexts?: string[];
+	/**
+	 * Latest in-flight `message_update` payload. Set on every `message_update`
+	 * event with a non-empty `event.message`; cleared on `message_end`,
+	 * `agent_end`, and `process_exit`. Used to splice the in-flight row into
+	 * `getMessages` snapshot responses so a snapshot taken while an assistant
+	 * message is mid-stream still represents the row — the agent flushes to
+	 * `.jsonl` only on `message_end`, so without this the snapshot drops the
+	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
+	 */
+	latestMessageUpdate?: { id?: string; message: any };
 }
+
+// `spliceInFlightMessage` lives in its own module so unit tests can import
+// it without dragging in the full session-manager module graph (which
+// transitively pulls flexsearch, pi-coding-agent, etc.). Re-exported here
+// for backwards compat with existing call sites.
+export { spliceInFlightMessage } from "./splice-inflight-message.js";
+import { spliceInFlightMessage } from "./splice-inflight-message.js";
 
 /** Helper: extract the text body of a user message (string or block array). */
 function extractUserMessageText(message: any): string {
@@ -1709,6 +1726,21 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		// H3 fix: track the latest in-flight `message_update` so snapshot reads
+		// (`getMessages`) can splice it into the response. Cleared on terminal
+		// lifecycle events below. The agent flushes to `.jsonl` only on
+		// `message_end`, so without this a snapshot taken mid-stream drops the
+		// row entirely — the H3-D convergent-loss case.
+		if (event.type === "message_update" && event.message) {
+			session.latestMessageUpdate = { id: event.message.id, message: event.message };
+		} else if (
+			event.type === "message_end" ||
+			event.type === "agent_end" ||
+			event.type === "process_exit"
+		) {
+			session.latestMessageUpdate = undefined;
+		}
+
 		// Track tool execution during this turn
 		if (event.type === "tool_execution_start") {
 			session.turnHadToolCalls = true;
@@ -3110,10 +3142,12 @@ export class SessionManager {
 				const raw: any = msgs.data;
 				let data: any = raw;
 				if (Array.isArray(raw)) {
-					data = truncateLargeToolContentInMessages(raw);
+					const spliced = spliceInFlightMessage(raw, session.latestMessageUpdate);
+					data = truncateLargeToolContentInMessages(spliced);
 				} else if (raw && Array.isArray(raw.messages)) {
-					const truncated = truncateLargeToolContentInMessages(raw.messages);
-					data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					const truncated = truncateLargeToolContentInMessages(spliced);
+					data = spliced === raw.messages && truncated === raw.messages ? raw : { ...raw, messages: truncated };
 				}
 				broadcast(session.clients, { type: "messages", data });
 			}
@@ -3888,7 +3922,17 @@ export class SessionManager {
 		// Refresh messages and state for connected clients
 		try {
 			const msgs = await rpcClient.getMessages();
-			if (msgs.success) broadcast(session.clients, { type: "messages", data: msgs.data });
+			if (msgs.success) {
+				const raw: any = msgs.data;
+				let data: any = raw;
+				if (Array.isArray(raw)) {
+					data = spliceInFlightMessage(raw, session.latestMessageUpdate);
+				} else if (raw && Array.isArray(raw.messages)) {
+					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					data = spliced === raw.messages ? raw : { ...raw, messages: spliced };
+				}
+				broadcast(session.clients, { type: "messages", data });
+			}
 			const st = await rpcClient.getState();
 			if (st.success) broadcast(session.clients, { type: "state", data: st.data });
 		} catch { /* best-effort */ }
@@ -3942,8 +3986,9 @@ export class SessionManager {
 		if (live && live.status !== "terminated") {
 			const msgsResp = await live.rpcClient.getMessages();
 			if (!msgsResp.success) return null;
-			const messages = msgsResp.data?.messages || msgsResp.data;
-			if (!Array.isArray(messages) || messages.length === 0) return null;
+			const rawMessages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return null;
+			const messages = spliceInFlightMessage(rawMessages, live.latestMessageUpdate);
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (!title) return null;
 			live.title = title;
@@ -3984,8 +4029,9 @@ export class SessionManager {
 			const msgsResp = await session.rpcClient.getMessages();
 			if (!msgsResp.success) return;
 
-			const messages = msgsResp.data?.messages || msgsResp.data;
-			if (!Array.isArray(messages) || messages.length === 0) return;
+			const rawMessages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return;
+			const messages = spliceInFlightMessage(rawMessages, session.latestMessageUpdate);
 
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (title) {
