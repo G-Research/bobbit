@@ -1,7 +1,7 @@
 name: bash
-description: "Execute shell commands"
-summary: "Execute shell commands. Returns stdout/stderr, truncated to 2000 lines
-  or 50KB."
+description: "Run command; returns stdout/stderr (truncated)"
+summary: "Execute a shell command"
+params: [command, description?, timeout?]
 provider:
   type: builtin
   tool: bash

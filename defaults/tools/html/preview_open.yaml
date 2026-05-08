@@ -1,6 +1,7 @@
 name: preview_open
-description: "Open the live preview panel with HTML content"
-summary: "Open or update the live preview side-panel with HTML content. The panel auto-refreshes on subsequent calls."
+description: "Open/update side-panel; auto-refresh on subsequent calls"
+summary: "Open or update HTML preview panel"
+params: [html?, file?, assets?, manifest?]
 provider:
   type: bobbit-extension
   extension: extension.ts

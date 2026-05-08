@@ -1,6 +1,7 @@
 name: ask_user_choices
-description: "Post 1–5 multiple-choice questions to the user as an inline widget. Non-blocking: the tool returns immediately; the user's answers arrive later as a separate user message. Calling this tool ends your current turn."
-summary: "Post multiple-choice questions to the user as an inline widget (non-blocking; ends your turn)."
+description: "Post 1–5 multiple-choice questions; non-blocking, ends turn"
+summary: "Post multiple-choice questions; non-blocking"
+params: [questions]
 provider:
   type: bobbit-extension
   extension: extension.ts

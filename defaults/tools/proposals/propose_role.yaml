@@ -1,6 +1,7 @@
 name: propose_role
-description: "Submit a role proposal for user review"
-summary: "Propose a custom agent role with name, label, prompt, and optional fields."
+description: "Submit role proposal with name, label, prompt"
+summary: "Propose a custom agent role"
+params: [name, label, prompt, tools?, accessory?]
 provider:
   type: bobbit-extension
   extension: extension.ts

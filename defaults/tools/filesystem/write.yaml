@@ -1,6 +1,7 @@
 name: write
-description: "Create or overwrite a file"
-summary: "Create or overwrite a file. Automatically creates parent directories."
+description: "Write file fully; creates parent dirs; overwrites entirely"
+summary: "Create or overwrite a file"
+params: [path, content]
 provider:
   type: builtin
   tool: write

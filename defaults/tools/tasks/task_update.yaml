@@ -1,7 +1,7 @@
 name: task_update
-description: "Update task fields, assignment, or state"
-summary: "Update task fields, assignment, or state (todo, in-progress, complete,
-  blocked)."
+description: "Transition state or update task fields"
+summary: "Update task fields, assignment, or state"
+params: [task_id, state?, title?, spec?, assigned_to?, head_sha?, result_summary?]
 provider:
   type: bobbit-extension
   extension: extension.ts

@@ -1,6 +1,6 @@
 name: browser_snapshot
-description: "Capture accessibility snapshot of the current page"
-summary: "Return the ARIA accessibility tree of the current browser page as structured text."
+description: "Return ARIA accessibility tree as structured YAML"
+summary: "Capture ARIA accessibility tree"
 provider:
   type: bobbit-extension
   extension: extension.ts
