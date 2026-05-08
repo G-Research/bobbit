@@ -1,7 +1,7 @@
 name: team_prompt
 description: "Queued or immediate follow-up message to existing agent"
 summary: "Send prompt to a team agent"
-params: [agent_id, prompt, workflowGateId?, inputGateIds?]
+params: [session_id, message, workflowGateId?, inputGateIds?]
 provider:
   type: bobbit-extension
   extension: extension.ts

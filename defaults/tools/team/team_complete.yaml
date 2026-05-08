@@ -1,7 +1,6 @@
 name: team_complete
 description: "Complete goal after review gate passes; cleans up worktrees"
 summary: "Dismiss all agents; mark goal complete"
-params: [summary?]
 provider:
   type: bobbit-extension
   extension: extension.ts

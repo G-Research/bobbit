@@ -1,6 +1,7 @@
 name: team_abort
 description: "Goal-level abort; cleans up all agent worktrees"
 summary: "Terminate goal; kill all agents"
+params: [session_id]
 provider:
   type: bobbit-extension
   extension: extension.ts

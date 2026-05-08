@@ -1,7 +1,7 @@
 name: team_steer
 description: "Inject a user message into agent's current turn"
 summary: "Mid-turn redirect to a running agent"
-params: [agent_id, prompt]
+params: [session_id, message]
 provider:
   type: bobbit-extension
   extension: extension.ts

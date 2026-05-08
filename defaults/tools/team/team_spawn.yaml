@@ -1,7 +1,7 @@
 name: team_spawn
 description: "Spawn coder, reviewer, or tester with isolated git worktree"
 summary: "Spawn a role agent with its own worktree"
-params: [role, prompt?, workflowGateId?, inputGateIds?, taskId?]
+params: [role, task, workflowGateId?, inputGateIds?]
 provider:
   type: bobbit-extension
   extension: extension.ts
