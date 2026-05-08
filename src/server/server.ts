@@ -1669,7 +1669,7 @@ async function handleApiRoute(
 			const content = fs.readFileSync(userPath, "utf-8");
 			json({ path: userPath, created, content });
 		} catch (err: any) {
-			json({ error: String(err?.message ?? err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -3745,7 +3745,7 @@ async function handleApiRoute(
 			const models = await getAvailableModels(preferencesStore);
 			json(models);
 		} catch (err: any) {
-			json({ error: `Failed to load models: ${err.message}` }, 500);
+			jsonError(500, err, { error: `Failed to load models: ${err.message}` });
 		}
 		return;
 	}
@@ -3755,7 +3755,7 @@ async function handleApiRoute(
 		try {
 			json(getAvailableImageModels(preferencesStore));
 		} catch (err: any) {
-			json({ error: `Failed to load image models: ${err.message}` }, 500);
+			jsonError(500, err, { error: `Failed to load image models: ${err.message}` });
 		}
 		return;
 	}
@@ -3973,7 +3973,7 @@ async function handleApiRoute(
 			broadcastPreferencesChanged();
 			json({ ok: true, models });
 		} catch (err: any) {
-			json({ error: `Failed to configure AI Gateway: ${err.message}` }, 502);
+			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
 		}
 		return;
 	}
@@ -5055,7 +5055,7 @@ async function handleApiRoute(
 			json(result, 201);
 		} catch (err) {
 			if (err instanceof GateDependencyError) {
-				json({ error: String(err.message) }, 409);
+				jsonError(409, err);
 			} else {
 				jsonError(400, err);
 			}
@@ -5166,7 +5166,7 @@ async function handleApiRoute(
 				json({ ...result, aggregate: result, repos: { ".": result } });
 			}
 		} catch (err: any) {
-			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
+			jsonError(500, err, { error: err.stderr?.trim() || err.message || "git status failed" });
 		}
 		return;
 	}
@@ -5652,7 +5652,7 @@ async function handleApiRoute(
 				return;
 			}
 			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
-			json({ error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` }, 500);
+			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
 
@@ -5692,7 +5692,7 @@ async function handleApiRoute(
 			);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
-			json({ error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` }, 500);
+			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
 
@@ -6355,7 +6355,7 @@ async function handleApiRoute(
 				const status = err.code === "transcript_unavailable" ? 404 : 400;
 				json({ error: err.code, detail: err.message }, status);
 			} else {
-				json({ error: "internal_error", detail: String(err) }, 500);
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
 			}
 		}
 		return;
@@ -7077,7 +7077,7 @@ async function handleApiRoute(
 					try {
 						manifestParsed = JSON.parse(fs.readFileSync(manifestAbs, "utf-8"));
 					} catch (err: any) {
-						json({ error: `Manifest JSON parse error: ${err?.message ?? err}` }, 400);
+						jsonError(400, err, { error: `Manifest JSON parse error: ${err?.message ?? err}` });
 						return;
 					}
 					if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
