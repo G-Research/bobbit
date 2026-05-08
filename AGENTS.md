@@ -96,6 +96,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 
 ### MCP
 - **MCP meta-tool aggregation (server → sub-namespace → op)** → `parseMcpToolName()` in `src/server/mcp/mcp-meta.ts`; aggregation in `tool-activation.ts` keyed by `(server, sub)`; `mcpPolicyKeys(name) → {group, tool}` (tool-key wins). See [mcp-meta-tools.md](docs/mcp-meta-tools.md).
+- **MCP meta-tool kind tagging** → `computeEffectiveAllowedTools()` returns `EffectiveTool[]` = `{kind:"yaml"|"mcp", name}[]`; `kind:"yaml"` resolves via `ToolManager.getToolProviders()`, `kind:"mcp"` via `mcpExtensionPaths` (proxy extensions). `computeToolActivationArgs` dispatches on `kind`; never re-flatten to `string[]`. `tagAllowedTool()` lifts legacy strings at boundaries.
 
 ### Goals, workflows, gates
 - **Inter-agent git handoff** → tasks carry `baseSha`, `headSha`, `branch`. See [goals-workflows-tasks.md#git-handoff-fields](docs/goals-workflows-tasks.md#git-handoff-fields).
@@ -154,6 +155,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **MCP server unavailable / partial outage** — stub meta extension at `<stateDir>/mcp-extensions/…`.
 - **MCP per-op `never` policy not enforced** — two layers: `mcpPolicyKeys` (Layer A) + `resolveGrantPolicy` (Layer B, `/api/internal/mcp-call`).
 - **MCP gateway server collapses sub-namespaces into one tool** — callsite parsing names with own `indexOf("__", …)` instead of `parseMcpToolName()`. Check `(server, sub)` aggregation in `tool-activation.ts`.
+- **Spurious `[tool-activation] Tool "mcp_…" has no provider … skipping` warns on session start** — regression that re-flattens `EffectiveTool[]` to `string[]` between `computeEffectiveAllowedTools` and `computeToolActivationArgs`. Producer tags `kind:"mcp"` at source; consumer must skip them in YAML provider-lookup. Pin: `tests/tool-activation-mcp-warn.test.ts`.
 - **MCP server dropdown reads "Allow (default)" but agent denied** — historical bug from `mcp__playwright`/`mcp__nano-banana` builtin denials; removed in policy parity.
 - **Tools page "MCP" section missing/empty** — `GET /api/mcp-servers`; `renderMcpSection()`.
 - **Tool / parameter description budget regressed** — `tests/tool-description-budget.test.ts` pins ≤150 char tool descriptions, ≤80 char param descriptions, ≤150 char MCP meta-tool descriptions (`buildMetaToolDescription` in `src/server/mcp/mcp-meta.ts`, no comma-joined op enumeration); on-wire bytes paid in `tools[]` JSON every uncached LLM turn. Detail belongs in YAML `docs` / `detail_docs` (off-wire).
