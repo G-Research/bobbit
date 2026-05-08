@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import YAML from "yaml";
 import { parseCustomDirectories as parseCustomDirsFromConfig } from "../agent/config-directories.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -51,35 +52,39 @@ interface FrontMatter {
 	"argument-hint"?: string;
 	"disable-model-invocation"?: boolean;
 	"user-invocable"?: boolean;
-	"allowed-tools"?: string;
+	"allowed-tools"?: string | string[];
+	allowed_tools?: string | string[];
 	context?: string;
 	agent?: string;
 }
 
+/** Normalize the allowed-tools / allowed_tools field into a string[] (or undefined). */
+function normalizeAllowedTools(fm: FrontMatter): string[] | undefined {
+	const raw = fm["allowed-tools"] ?? fm.allowed_tools;
+	if (raw == null) return undefined;
+	if (Array.isArray(raw)) return raw.map((s) => String(s).trim()).filter(Boolean);
+	if (typeof raw === "string") return raw.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
+	return undefined;
+}
+
 /** Parse YAML frontmatter from a SKILL.md or command .md file. */
-function parseFrontmatter(raw: string): { frontmatter: FrontMatter; content: string } {
+export function parseFrontmatter(raw: string): { frontmatter: FrontMatter; content: string } {
 	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
 	if (!match) return { frontmatter: {}, content: raw };
 
 	const yamlBlock = match[1];
 	const content = match[2];
-	const fm: FrontMatter = {};
 
-	// Simple YAML parser for flat key: value pairs
-	for (const line of yamlBlock.split(/\r?\n/)) {
-		const kv = line.match(/^(\S[\w-]*)\s*:\s*(.*)$/);
-		if (!kv) continue;
-		const key = kv[1].trim();
-		let value: string | boolean = kv[2].trim();
-
-		// Handle boolean values
-		if (value === "true") value = true;
-		else if (value === "false") value = false;
-
-		(fm as any)[key] = value;
+	try {
+		const parsed = YAML.parse(yamlBlock);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return { frontmatter: parsed as FrontMatter, content };
+		}
+		return { frontmatter: {}, content };
+	} catch (err) {
+		console.warn(`[slash-skills] Failed to parse YAML frontmatter:`, err);
+		return { frontmatter: {}, content: raw };
 	}
-
-	return { frontmatter: fm, content };
 }
 
 /** Apply $ARGUMENTS, $ARGUMENTS[N], and $N substitutions. */
@@ -135,9 +140,7 @@ function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 				content,
 				source,
 				filePath: skillFile,
-				allowedTools: frontmatter["allowed-tools"]
-					? frontmatter["allowed-tools"].split(/,\s*/)
-					: undefined,
+				allowedTools: normalizeAllowedTools(frontmatter),
 				context: frontmatter.context,
 				agent: frontmatter.agent,
 			});
@@ -186,9 +189,7 @@ function scanCommandsDir(dir: string): SlashSkill[] {
 				content,
 				source: "legacy",
 				filePath,
-				allowedTools: frontmatter["allowed-tools"]
-					? frontmatter["allowed-tools"].split(/,\s*/)
-					: undefined,
+				allowedTools: normalizeAllowedTools(frontmatter),
 				context: frontmatter.context,
 				agent: frontmatter.agent,
 			});
