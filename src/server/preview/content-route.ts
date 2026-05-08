@@ -22,6 +22,7 @@ import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { injectBaseAndScripts, PREVIEW_BRIDGE_SCRIPTS } from "../../shared/preview-bridge-scripts.js";
+import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
@@ -164,7 +165,12 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "File not found" }));
 			return true;
 		}
-		const baseTag = `<base href="/preview/${sid}/">`;
+		// `<base>` + inline theme-token snapshot. Both land inside <head> via
+		// injectBaseAndScripts; the snapshot defines `:root`/`.dark` defaults so
+		// standalone-tab opens (where the runtime parent-pull bridge no-ops) still
+		// resolve `var(--background)` etc. The runtime bridge continues to flow
+		// live theme toggles into embedded iframes where `parent !== window`.
+		const baseTag = `<base href="/preview/${sid}/">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(body, baseTag, PREVIEW_BRIDGE_SCRIPTS);
 		res.writeHead(200, {
 			"Content-Type": contentType,

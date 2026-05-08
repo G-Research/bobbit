@@ -15,6 +15,12 @@
 export const PREVIEW_THEME_BRIDGE = `<script>
 (function() {
 	try {
+		/* Standalone tab (Open-in-new-tab): parent === window, so there is no
+		   host-app document to mirror. The server-injected inline <style data-bobbit-preview-theme>
+		   snapshot defines :root/.dark defaults — early return and let it govern.
+		   Embedded iframes (parent !== window) continue past this guard so live
+		   theme toggles in the host app flow through. */
+		if (parent === window) return;
 		var root = document.documentElement;
 		var parentRoot = parent.document.documentElement;
 		var parentStyles = parent.getComputedStyle(parentRoot);

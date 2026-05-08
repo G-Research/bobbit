@@ -217,6 +217,20 @@ describe("handlePreviewRequest — bridge injection", () => {
 		assert.match(txt, /preview-swipe-start|MutationObserver|preview-swipe-move/);
 	});
 
+	it("injects inline theme snapshot inside <head> on text/html", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html` }), res as any, `/preview/${SID}/index.html`, o);
+		const txt = bodyText(res);
+		// The snapshot lands inside the <head> (alongside <base>).
+		const headMatch = txt.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i);
+		assert.ok(headMatch, "expected a <head> block in served HTML");
+		const headInner = headMatch![1]!;
+		assert.match(headInner, /data-bobbit-preview-theme="snapshot"/);
+		assert.match(headInner, /--background:/);
+		assert.match(headInner, /\.dark\s*\{/);
+	});
+
 	it("does NOT inject bridge into non-html (css)", async () => {
 		const o = makeOpts(true);
 		const res = fakeRes();
