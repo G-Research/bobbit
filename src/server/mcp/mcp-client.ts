@@ -324,6 +324,8 @@ export class McpClient {
     const url = this._config!.url!;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      // Streamable HTTP transport spec: client MUST advertise both response shapes.
+      Accept: 'application/json, text/event-stream',
       ...this._config!.headers,
     };
 
@@ -378,6 +380,7 @@ export class McpClient {
     const url = this._config!.url!;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
       ...this._config!.headers,
     };
 
