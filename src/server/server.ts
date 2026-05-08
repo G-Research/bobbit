@@ -1151,56 +1151,68 @@ export function createGateway(config: GatewayConfig) {
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
-			// Ordering invariant preserved: the sweeper still runs before
-			// `initWorktreePoolForProject`, so the pool's `reclaimOrphaned`
-			// can't race against the sweeper. Requests that arrive during this
-			// window fall through the non-pool session path (the same path used
-			// before the pool ever fills).
+			// Concurrency note: the sweeper and the pool init operate on DISJOINT
+			// branch sets — `worktree-sweeper.ts` explicitly skips pool branches
+			// (`isPoolBranch`), and `WorktreePool.reclaimOrphaned` only inspects
+			// pool branches. So the two phases are run concurrently via
+			// `Promise.all`, and project-level pool init is also parallelised
+			// across projects (each project's pool is independent). This avoids
+			// the previous serial chain that left the pool empty for minutes on
+			// installs with many stale worktrees, forcing every new session
+			// through the cold path (full createWorktree + npm ci).
 			const runBootBackgroundTasks = async (): Promise<void> => {
-				try {
-					const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-					const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
-					const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-					const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-					const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
-					for (const ctx of projectContextManager.all()) {
-						const repoNames = ctx.projectConfigStore.repoNames();
-						sweepProjects.push({
-							id: ctx.project.id,
-							rootPath: ctx.project.rootPath,
-							repos: repoNames.length > 0 ? repoNames : undefined,
-						});
-						for (const g of ctx.goalStore.getAll()) {
-							sweepGoals.push({
-								id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
-								repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
-							});
-						}
-						for (const s of ctx.sessionStore.getAll()) {
-							sweepSessions.push({
-								id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
-								repoWorktrees: s.repoWorktrees,
-							});
-						}
-						for (const st of ctx.staffStore.getAll()) {
-							sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
-						}
-					}
-					const result = await sweepOrphanedWorktrees({
-						projects: sweepProjects,
-						goals: sweepGoals,
-						sessions: sweepSessions,
-						staff: sweepStaff,
-					});
-					if (result.reclaimed || result.cleaned || result.repaired) {
-						console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
-					}
-				} catch (err) {
-					console.warn("[server] Worktree sweeper failed (non-fatal):", err);
-				}
+				const t0 = Date.now();
 
-				if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
-					for (const ctx of projectContextManager.all()) {
+				const sweeperTask = (async () => {
+					const tStart = Date.now();
+					try {
+						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+						for (const ctx of projectContextManager.all()) {
+							const repoNames = ctx.projectConfigStore.repoNames();
+							sweepProjects.push({
+								id: ctx.project.id,
+								rootPath: ctx.project.rootPath,
+								repos: repoNames.length > 0 ? repoNames : undefined,
+							});
+							for (const g of ctx.goalStore.getAll()) {
+								sweepGoals.push({
+									id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+									repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+								});
+							}
+							for (const s of ctx.sessionStore.getAll()) {
+								sweepSessions.push({
+									id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+									repoWorktrees: s.repoWorktrees,
+								});
+							}
+							for (const st of ctx.staffStore.getAll()) {
+								sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+							}
+						}
+						console.log(`[boot] sweeper start (${sweepProjects.length} projects)`);
+						const result = await sweepOrphanedWorktrees({
+							projects: sweepProjects,
+							goals: sweepGoals,
+							sessions: sweepSessions,
+							staff: sweepStaff,
+						});
+						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
+					} catch (err) {
+						console.warn(`[boot] sweeper failed in ${Date.now() - tStart}ms (non-fatal):`, err);
+					}
+				})();
+
+				const poolInitTask = (async () => {
+					if (process.env.BOBBIT_SKIP_WORKTREE_POOL) return;
+					const contexts = Array.from(projectContextManager.all());
+					console.log(`[boot] pool init start (${contexts.length} projects)`);
+					await Promise.all(contexts.map(async (ctx) => {
+						const tStart = Date.now();
 						try {
 							const repoPath = ctx.project.rootPath;
 							const components = ctx.projectConfigStore.getComponents();
@@ -1225,10 +1237,18 @@ export function createGateway(config: GatewayConfig) {
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot);
+								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
+							} else {
+								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							}
-						} catch { /* best-effort */ }
-					}
-				}
+						} catch (err) {
+							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
+						}
+					}));
+				})();
+
+				await Promise.all([sweeperTask, poolInitTask]);
+				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
