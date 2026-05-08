@@ -579,6 +579,18 @@ export async function executeWorktreeAsync(
 	ctx: PipelineContext,
 	preBuiltWorktreePath?: string,
 ): Promise<void> {
+	// Test-only knob: deterministically extend the "preparing" window so the
+	// preparing-UX banner is observable to the client. Status is already set to
+	// "preparing" by SessionManager.createSession before this fn is invoked, so
+	// sleeping here keeps the session visibly preparing without changing
+	// production behaviour (gated on the env var being set).
+	if (process.env.BOBBIT_TEST_PREPARING_DELAY_MS) {
+		const delayMs = Number(process.env.BOBBIT_TEST_PREPARING_DELAY_MS);
+		if (Number.isFinite(delayMs) && delayMs > 0) {
+			await new Promise(resolve => setTimeout(resolve, delayMs));
+		}
+	}
+
 	// Use pre-built worktree from pool, or create one from scratch
 	let worktreeCwd: string;
 	if (preBuiltWorktreePath) {
