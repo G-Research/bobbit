@@ -2861,19 +2861,11 @@ async function handleApiRoute(
 		// ── Worktree support ──
 		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
 		// Goal sessions have their own worktree logic via goalManager.setupWorktreeAndStartTeam().
+		// Resolution of `worktreeOpts` is deferred until after `resolvedProjectId` is
+		// finalised below — multi-repo (poly-repo) projects need the project's container
+		// rootPath as repoPath, not `getRepoRoot(cwd)` (which fails for non-git containers).
 		let worktreeOpts: { repoPath: string } | undefined;
-		// shouldCreateWorktree handles the want/assistant/goal logic; git repo check is async so done separately
 		const wantWorktree = shouldCreateWorktree({ worktree: body?.worktree, assistantType, goalId }, true);
-		if (wantWorktree) {
-			try {
-				if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
-				}
-			} catch {
-				// Not a git repo or git not available — silently ignore
-			}
-		}
 
 		// ── Re-attempt support ──
 		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
@@ -2963,6 +2955,28 @@ async function handleApiRoute(
 			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
 			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
 			resolvedProjectId = resolved.projectId;
+		}
+
+		// Now that `resolvedProjectId` is known, resolve `worktreeOpts`.
+		// Multi-repo (poly-repo) short-circuit mirrors goal-manager.ts::createGoal:
+		// if any component has repo !== ".", the project's rootPath IS the repoPath
+		// even though it isn't itself a git repo. Without this, the `isGitRepo(cwd)`
+		// check below returns false for the container directory and sessions would
+		// run with no worktree at all.
+		if (wantWorktree) {
+			try {
+				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
+				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
+				const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
+				if (isMulti && proj?.rootPath) {
+					worktreeOpts = { repoPath: proj.rootPath };
+				} else if (await isGitRepo(cwd)) {
+					const repoPath = await getRepoRoot(cwd);
+					worktreeOpts = { repoPath };
+				}
+			} catch {
+				// Not a git repo or git not available — silently ignore
+			}
 		}
 
 		// ── Sandbox auto-branch ──

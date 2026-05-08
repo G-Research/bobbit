@@ -582,19 +582,38 @@ export async function executeWorktreeAsync(
 		worktreeCwd = preBuiltWorktreePath;
 		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
 	} else {
-		// Multi-repo session creation goes through the worktree pool / sandbox
-		// path; this fallback handles the single-repo non-sandboxed path.
-		worktreeCwd = await withRetry(
-			async () => {
-				const result = await createWorktree(plan.repoPath!, plan.branch!);
-				return result.worktreePath;
-			},
-			{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
-		);
+		// Cold-path worktree creation. Multi-repo (poly-repo) projects need
+		// `createWorktreeSet` so each component repo gets its own sibling
+		// worktree under the branch container. Single-repo collapses to the
+		// existing `createWorktree` call.
+		const components = ctx.projectConfigStore?.getComponents() ?? [];
+		const isMulti = components.some(c => c.repo !== ".");
+		if (isMulti) {
+			const { createWorktreeSet } = await import("../skills/git.js");
+			const worktreeRoot = ctx.projectConfigStore?.get("worktree_root") || undefined;
+			const result = await withRetry(
+				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, { worktreeRoot }),
+				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
+			);
+			worktreeCwd = result.container;
+			// Mirror the pool-claim path: record per-repo worktrees for archive cleanup.
+			session.repoWorktrees = result.worktrees.map(w => ({
+				repo: w.repo,
+				repoPath: w.repoPath,
+				worktreePath: w.worktreePath,
+			}));
+		} else {
+			worktreeCwd = await withRetry(
+				async () => {
+					const result = await createWorktree(plan.repoPath!, plan.branch!);
+					return result.worktreePath;
+				},
+				{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },
+			);
+		}
 
 		// Per-component setup — non-fatal on failure. Routes through the canonical
 		// resolver so component.relativePath is honored.
-		const components = ctx.projectConfigStore?.getComponents() ?? [];
 		if (components.length > 0) {
 			try {
 				const { runComponentSetups } = await import("../skills/worktree-setup.js");
@@ -633,7 +652,13 @@ export async function executeWorktreeAsync(
 	session.cwd = offsetCwd;
 	session.worktreePath = worktreeCwd;
 	plan.cwd = offsetCwd;
-	ctx.store.update(session.id, { cwd: offsetCwd, worktreePath: worktreeCwd });
+	const persistFields: Record<string, unknown> = { cwd: offsetCwd, worktreePath: worktreeCwd };
+	if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+		persistFields.repoWorktrees = Object.fromEntries(
+			session.repoWorktrees.map(w => [w.repo, w.worktreePath]),
+		);
+	}
+	ctx.store.update(session.id, persistFields);
 	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 
 	// Run remaining pipeline steps on the worktree CWD
