@@ -201,6 +201,11 @@ export const state = {
 		}
 	>>,
 	activeProjectId: null as string | null,
+	/** Per-session flag set when the user accepts a registered-mode project
+	 *  proposal. The proposal panel uses this to render a "Changes Saved" view
+	 *  + Terminate button instead of the "Waiting for project analysis…" empty
+	 *  state, until the next proposal arrives or the session terminates. */
+	projectProposalAcceptedBySessionId: {} as Record<string, boolean>,
 	/** Server generation counter for sessions — used to skip redundant refreshes */
 	sessionsGeneration: -1,
 	/** Server generation counter for goals — used to skip redundant refreshes */
