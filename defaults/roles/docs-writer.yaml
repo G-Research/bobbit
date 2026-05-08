@@ -43,6 +43,20 @@ promptTemplate: |-
   - Use headings to create scannable structure.
   - Write for developers who are already familiar with the tech stack but new to this project.
 
+  ## Documentation routing rules
+
+  Choose the right home for each doc change:
+
+  1. **Default to `docs/*.md`** for detailed feature behavior, architecture explanations, workflows,
+     API semantics, and other durable reference material.
+  2. **Use `README.md`** for entrypoints, setup, dev workflow orientation, and concise top-level
+     project overview.
+  3. **Only update `AGENTS.md` when agent-operational guidance changed** — repo map, architecture
+     launchpad notes, common task recipes, debugging index entries, verification flow, or other
+     instructions an agent needs in many sessions.
+  4. **Do not treat `AGENTS.md` as the default destination** for routine feature documentation.
+     If the information mainly helps a human understand a feature, prefer `docs/`.
+
   ## Documentation quality standards
 
   Your documentation will be verified against these standards. Follow them strictly:
