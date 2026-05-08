@@ -54,6 +54,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Add/modify session creation** → `session-setup.ts`, wrappers in `session-manager.ts`. See [docs/internals.md — Session worktrees](docs/internals.md#session-worktrees).
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, REST in `server.ts`, assistant in `goal-assistant.ts`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`. Await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
+- **Return errors from a server handler** → use `jsonError(status, err, extra?)` in `src/server/server.ts` for any caught exception so `stack` flows to the client modal. Validation responses with literal strings stay as `json({ error: "..." }, ...)`. See [docs/rest-api.md — Error response shape](docs/rest-api.md#error-response-shape).
 
 ### Sessions, status, steer
 - **Mutate session status** → `broadcastStatus()` in `src/server/agent/session-status.ts` is the **single writer** for `session.status`. Client: `_state.status` on `RemoteAgent` is canonical; `isStreaming`/`isArchived`/`isPreparing` are derived getters. `case "session_status"` is the sole writer (plus `case "state"` on attach, `reset()` on navigate). `agent_start`/`agent_end`/`error` are signals only. See [docs/design/unify-session-status.md](docs/design/unify-session-status.md).
@@ -66,6 +67,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
 - **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts`.
+- **Show a server error in a modal** → `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack. API wrappers in `src/app/api.ts` parse `await res.json()`, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })` in `src/app/dialogs.ts`. The polling site at `api.ts:124` is intentionally silent.
 - **Add a route-level page (lazy-loaded)** → add a `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
 - **Add a heavy tool renderer (lazy)** → `registerLazyToolRenderer()` in `src/ui/tools/index.ts`; placeholder + `TOOL_RENDERER_LOADED_EVENT` swap.
 - **Defer a heavy library (lazy load)** → `src/ui/lazy/markdown-block.ts::ensureMarkdownBlock()` pattern; or `await import()` for value imports.
@@ -181,6 +183,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Preview Refresh button does nothing / SSE bumps don't reload** — iframe cache-buster must be `?mtime=` (query string, triggers reload), not `#mtime=` (hash, same-document). See `htmlPreviewContent()` in `src/app/render.ts`.
 
 ### Misc
+- **Modal shows only "Failed: 400"** — caller dropped the structured body. Check the `src/app/api.ts` wrapper parses `await res.json()` and forwards `code`/`stack` to `showConnectionError`. Server side: confirm the handler uses `jsonError(...)` not literal `json({ error: String(err) })`.
 - **OAuth callback never completes** — poll `GET /api/oauth/flow-status?flowId=&provider=`.
 - **Continue-Archived button missing** — needs archived + no `goalId` + no `delegateOf` + project still registered.
 - **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; 600 kB main / 500 kB per-chunk.

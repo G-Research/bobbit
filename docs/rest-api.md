@@ -2,6 +2,21 @@
 
 All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
 
+### Error response shape
+
+Non-2xx JSON responses follow:
+
+```
+{ error: string, stack?: string, code?: string, ...extra }
+```
+
+- `error` — human-readable message; always present.
+- `stack` — server stack trace. Caught-exception responses (handlers using the `jsonError(status, err, extra?)` helper in `src/server/server.ts`) always include it; validation 4xx responses with literal strings (e.g. `"Missing title"`) omit it.
+- `code` — optional machine-readable code (e.g. `"symlink_root"`).
+- Additional fields may be merged via `extra` (e.g. `canonical` for symlink rejection).
+
+Client API wrappers in `src/app/api.ts` parse this body, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })`, which renders via the `<error-details>` component (`src/ui/components/ErrorDetails.ts`).
+
 ### Health & Info
 
 | Method | Path | Description |
