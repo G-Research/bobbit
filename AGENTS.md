@@ -67,7 +67,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
 - **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts`.
-- **Show a server error in a modal** → `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack. API wrappers in `src/app/api.ts` parse `await res.json()`, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })` in `src/app/dialogs.ts`. The polling site at `api.ts:124` is intentionally silent.
+- **Show a server error in a modal** → `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack. API wrappers in `src/app/api.ts` parse `await res.json()`, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })` in `src/app/dialogs.ts`. The background polling site in `refreshSessions()` (`src/app/api.ts`) is intentionally silent.
 - **Add a route-level page (lazy-loaded)** → add a `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
 - **Add a heavy tool renderer (lazy)** → `registerLazyToolRenderer()` in `src/ui/tools/index.ts`; placeholder + `TOOL_RENDERER_LOADED_EVENT` swap.
 - **Defer a heavy library (lazy load)** → `src/ui/lazy/markdown-block.ts::ensureMarkdownBlock()` pattern; or `await import()` for value imports.
