@@ -57,7 +57,7 @@ interface FrontMatter {
 }
 
 /** Parse YAML frontmatter from a SKILL.md or command .md file. */
-function parseFrontmatter(raw: string): { frontmatter: FrontMatter; content: string } {
+export function parseFrontmatter(raw: string): { frontmatter: FrontMatter; content: string } {
 	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
 	if (!match) return { frontmatter: {}, content: raw };
 
