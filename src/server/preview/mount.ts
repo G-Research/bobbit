@@ -26,6 +26,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
 /** Same shape as `VALID_SESSION_ID` in `server.ts` (UUID v4-style). */
@@ -217,13 +218,21 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
  * Mount the entry HTML file plus a caller-declared list of assets.
  *
  * Behaviour:
- *   - Wipes the mount directory.
+ *   - Stages the entry + resolved assets into a sibling tmp directory first,
+ *     reading ALL source data before touching `destRoot`. This is what makes
+ *     re-opening a path that lives inside the existing mount safe (Bug 4):
+ *     sources are captured before the wipe runs.
+ *   - Then wipes `destRoot`'s contents (preserving its inode so any active
+ *     `watchMount()` handle stays valid) and renames each staged entry into
+ *     place.
  *   - Copies only `srcFile` plus the resolved `assets` (literals + globs).
  *   - Globs may use `*` and `?` in a single path segment; `**`/`[...]`/`{a,b}`
  *     are rejected.
  *   - Symlink escape: any resolved asset whose realpath is not contained in
  *     the entry's source dir is rejected with 403.
  *   - Unmatched literal asset → 404.
+ *   - On any staging error, the tmp dir is deleted and `destRoot` is left
+ *     untouched (previous mount preserved).
  *
  * No size cap — the agent is responsible for declaring only what it needs.
  */
@@ -262,9 +271,12 @@ export function mountFile(
 	validateEntry(entry);
 
 	const destRoot = mountDir(sessionId);
-	wipeContents(destRoot);
 
-	// Copy the entry file.
+	const list = Array.isArray(assets) ? assets : [];
+	// Pre-validate all asset specs first so we fail fast before any extra work.
+	const specs = list.map(validateAssetSpec);
+
+	// Resolve the entry's realpath up-front so we can detect symlink escape.
 	const entryReal = (() => {
 		try { return fs.realpathSync(srcFile); } catch { return srcFile; }
 	})();
@@ -272,72 +284,97 @@ export function mountFile(
 		// Entry's realpath escapes its declared dir (symlink escape on the entry).
 		throw new PreviewMountError(403, "Entry symlink escapes source tree");
 	}
-	const entryDst = path.join(destRoot, entry);
-	copyOneFile(entryReal, entryDst);
+
+	// ── Stage into a sibling tmp dir ─────────────────────────────────────
+	// Sibling of `destRoot` so the swap is same-filesystem. The randomised
+	// suffix avoids collisions between concurrent mountFile() calls for the
+	// same sid (we accept last-writer-wins; no cross-call locking).
+	const tmpName = `.${sessionId}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
+	const tmpRoot = path.join(previewRoot(), tmpName);
+	fs.mkdirSync(tmpRoot, { recursive: true });
 
 	const resolvedAssets: Set<string> = new Set();
-	const list = Array.isArray(assets) ? assets : [];
 
-	// Pre-validate all asset specs first so we fail fast before any extra work.
-	const specs = list.map(validateAssetSpec);
+	try {
+		// Copy entry into tmp. Reading from `entryReal` BEFORE we touch
+		// destRoot is what makes "srcFile inside destRoot" safe.
+		copyOneFile(entryReal, path.join(tmpRoot, entry));
 
-	for (const spec of specs) {
-		if (isGlob(spec)) {
-			const matches = expandGlob(srcRoot, spec);
-			// A glob that matches nothing is OK (agent may speculatively list
-			// `img/*.png` even when none exist yet). It's not a hard error —
-			// matches the design doc which only specifies 404 for *literal*
-			// missing assets.
-			for (const rel of matches) {
-				const abs = path.join(srcRoot, rel);
+		for (const spec of specs) {
+			if (isGlob(spec)) {
+				const matches = expandGlob(srcRoot, spec);
+				// A glob that matches nothing is OK (agent may speculatively list
+				// `img/*.png` even when none exist yet). It's not a hard error —
+				// matches the design doc which only specifies 404 for *literal*
+				// missing assets.
+				for (const rel of matches) {
+					const abs = path.join(srcRoot, rel);
+					let real: string;
+					try { real = fs.realpathSync(abs); } catch { continue; }
+					if (!isContained(real, srcRoot)) {
+						throw new PreviewMountError(403, `Asset escapes source tree: ${rel}`);
+					}
+					let st: fs.Stats;
+					try { st = fs.statSync(real); } catch { continue; }
+					if (!st.isFile()) continue;
+					const dst = path.join(tmpRoot, rel);
+					fs.mkdirSync(path.dirname(dst), { recursive: true });
+					copyOneFile(real, dst);
+					resolvedAssets.add(rel.split(path.sep).join("/"));
+				}
+			} else {
+				// Literal — must exist.
+				const rel = spec; // already forward-slash, no `..`, not absolute
+				const abs = path.resolve(srcRoot, rel);
+				// Containment check against the unresolved path first (file may
+				// not exist as a symlink yet).
+				if (!isContained(abs, srcRoot)) {
+					throw new PreviewMountError(400, `Asset escapes source tree: ${rel}`);
+				}
 				let real: string;
-				try { real = fs.realpathSync(abs); } catch { continue; }
+				try {
+					real = fs.realpathSync(abs);
+				} catch {
+					throw new PreviewMountError(404, `Asset '${rel}' not found`);
+				}
 				if (!isContained(real, srcRoot)) {
-					throw new PreviewMountError(403, `Asset escapes source tree: ${rel}`);
+					throw new PreviewMountError(403, `Asset symlink escapes source tree: ${rel}`);
 				}
 				let st: fs.Stats;
-				try { st = fs.statSync(real); } catch { continue; }
-				if (!st.isFile()) continue;
-				const dst = path.join(destRoot, rel);
+				try { st = fs.statSync(real); } catch {
+					throw new PreviewMountError(404, `Asset '${rel}' not found`);
+				}
+				if (!st.isFile()) {
+					throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
+				}
+				const dst = path.join(tmpRoot, rel);
 				fs.mkdirSync(path.dirname(dst), { recursive: true });
 				copyOneFile(real, dst);
-				resolvedAssets.add(rel.split(path.sep).join("/"));
+				resolvedAssets.add(rel);
 			}
-		} else {
-			// Literal — must exist.
-			const rel = spec; // already forward-slash, no `..`, not absolute
-			const abs = path.resolve(srcRoot, rel);
-			// Containment check against the unresolved path first (file may
-			// not exist as a symlink yet).
-			if (!isContained(abs, srcRoot)) {
-				throw new PreviewMountError(400, `Asset escapes source tree: ${rel}`);
-			}
-			let real: string;
-			try {
-				real = fs.realpathSync(abs);
-			} catch {
-				throw new PreviewMountError(404, `Asset '${rel}' not found`);
-			}
-			if (!isContained(real, srcRoot)) {
-				throw new PreviewMountError(403, `Asset symlink escapes source tree: ${rel}`);
-			}
-			let st: fs.Stats;
-			try { st = fs.statSync(real); } catch {
-				throw new PreviewMountError(404, `Asset '${rel}' not found`);
-			}
-			if (!st.isFile()) {
-				throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
-			}
-			const dst = path.join(destRoot, rel);
-			fs.mkdirSync(path.dirname(dst), { recursive: true });
-			copyOneFile(real, dst);
-			resolvedAssets.add(rel);
 		}
+
+		// ── Atomic swap ─────────────────────────────────────────────────
+		// All sources are now captured under tmpRoot. Wipe destRoot's
+		// contents (preserving its inode so the existing fs.watch handle in
+		// `watchMount()` stays valid) and rename each staged entry into
+		// place. This also fixes the half-wiped-mount race a concurrent GET
+		// could otherwise hit between wipe and copy.
+		wipeContents(destRoot);
+		moveContents(tmpRoot, destRoot);
+	} catch (err) {
+		// Staging failed — destRoot is untouched if we hadn't reached the
+		// swap yet. Either way, drop the tmp dir.
+		try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+		throw err;
 	}
+
+	// Clean up the now-empty tmp dir.
+	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 
 	const target = path.join(destRoot, entry);
 	if (!fs.existsSync(target)) {
-		throw new PreviewMountError(404, "Entry file missing after copy");
+		throw new PreviewMountError(500, "Entry file missing after swap");
 	}
 
 	return {
@@ -347,6 +384,37 @@ export function mountFile(
 		mtime: Math.floor(fs.statSync(target).mtimeMs),
 		assets: Array.from(resolvedAssets).sort(),
 	};
+}
+
+/**
+ * Move every entry from `srcDir` into `dstDir` via `fs.renameSync`. Recurses
+ * into directories so we preserve `dstDir`'s inode (renaming the staged
+ * subdirectories into place rather than replacing the parent).
+ *
+ * Falls back to copy+unlink if rename fails (cross-device — shouldn't happen
+ * for sibling tmp/dest, but be defensive).
+ */
+function moveContents(srcDir: string, dstDir: string): void {
+	let entries: fs.Dirent[];
+	try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+	for (const ent of entries) {
+		const from = path.join(srcDir, ent.name);
+		const to = path.join(dstDir, ent.name);
+		try {
+			fs.renameSync(from, to);
+		} catch {
+			// Cross-device or destination clash — copy then remove source.
+			try { fs.rmSync(to, { recursive: true, force: true }); } catch { /* ignore */ }
+			if (ent.isDirectory()) {
+				fs.mkdirSync(to, { recursive: true });
+				moveContents(from, to);
+				try { fs.rmdirSync(from); } catch { /* ignore */ }
+			} else {
+				copyOneFile(from, to);
+				try { fs.unlinkSync(from); } catch { /* ignore */ }
+			}
+		}
+	}
 }
 
 export function removeMount(sessionId: string): void {

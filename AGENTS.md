@@ -115,7 +115,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Pool worktree placed under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** → `WorktreePool` constructor in `src/server/agent/worktree-pool.ts` resolves `opts.repoPath` to git toplevel; both `initWorktreePoolForProject` sites in `src/server/server.ts` also resolve. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
 
 ### Preview / HTML / images
-- **Preview HTML with sibling assets** → `preview_open({ html | file, assets?, manifest? })`. **Explicit opt-in**: bare `file` copies only the entry HTML; siblings declared via `assets: [...]` or a `manifest` JSON. Snapshot marker: `__preview_snapshot_v3__`. See [docs/preview-architecture.md](docs/preview-architecture.md).
+- **Preview HTML with sibling assets** → `preview_open({ html | file, assets?, manifest? })`. **Explicit opt-in**: bare `file` copies only the entry HTML; siblings declared via `assets: [...]` or a `manifest` JSON. Snapshot marker: `__preview_snapshot_v3__`. Re-opening the same `file` (including paths that resolve inside the mount itself) is safe — `mountFile()` stages into a sibling tmp dir and atomically swaps. See [docs/preview-architecture.md](docs/preview-architecture.md).
 - **Author HTML output** → [`defaults/docs/html-rendering.md`](defaults/docs/html-rendering.md). One artefact, one surface. Use theme tokens (`--background`, `--card`, `--chart-1..6`, `--positive`/`--negative`/`--warning`/`--info`).
 - **Generate an image** → `generate_image` → `POST /api/image-generation/generate`.
 - **Edit a goal's spec mid-flight (notification flow)** → `PUT /api/goals/:id` broadcasts a `goal_spec_changed` WS event and calls `teamManager.notifyTeamLeadOfSpecChange(...)`, throttled per goal (`SPEC_NUDGE_THROTTLE_MS`). The agent's canonical re-read tool is `view_goal_spec`. Worker / reviewer / QA sessions are intentionally NOT notified. UI pill (`spec-edited-pill`) clears after `SPEC_PILL_WINDOW_MS`. Mirror this pattern for any future tool that mutates goal state out-of-band of the team-lead's awareness. See [docs/design/goal-spec-edit-notification.md](docs/design/goal-spec-edit-notification.md).
@@ -188,6 +188,8 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 ### QA / preview / tier-2.5
 - **QA screenshot token bloat** — extension must emit `[screenshot_file]` not `[screenshot_base64]`.
 - **Tier 2.5 report missing / ffmpeg failed** — set `FFMPEG_PATH` or install ffmpeg; only when `RECORDSCREEN=1`.
+- **Preview standalone tab unstyled / `--background` empty** — inline `<style data-bobbit-preview-theme="snapshot">` injected by `src/server/preview/content-route.ts` from `src/server/preview/theme-snapshot.ts`; `PREVIEW_THEME_BRIDGE` early-returns when `parent === window`. See [docs/preview-architecture.md](docs/preview-architecture.md#theme-token-snapshot-for-standalone-tabs).
+- **Preview Refresh button does nothing / SSE bumps don't reload** — iframe cache-buster must be `?mtime=` (query string, triggers reload), not `#mtime=` (hash, same-document). See `htmlPreviewContent()` in `src/app/render.ts`.
 
 ### Misc
 - **Agent `fetch failed` against gateway when started with `--host 0.0.0.0`** — gateway-url file is loopback-normalised via `loopbackForBind` (`src/server/cli-loopback.ts`); the `Listening:` log keeps the literal bind host. See [debugging.md#agent-fetch-failed-against-gateway-when-started-with---host-0000](docs/debugging.md#agent-fetch-failed-against-gateway-when-started-with---host-0000).

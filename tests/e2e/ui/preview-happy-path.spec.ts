@@ -75,7 +75,7 @@ test.describe("Preview panel iframe URL (WP-E)", () => {
 		expect(src).not.toBeNull();
 		expect(src).toContain(`/preview/${encodeURIComponent(sessionId)}/`);
 		expect(src).toContain("report.html");
-		expect(src).toMatch(/#mtime=\d+$/);
+		expect(src).toMatch(/\?mtime=\d+$/);
 		expect(src).not.toContain("/api/preview/render");
 
 		// Open-in-new-tab anchor renders with matching href.
@@ -96,6 +96,6 @@ test.describe("Preview panel iframe URL (WP-E)", () => {
 		}).not.toEqual(src);
 		const src2 = await iframe.getAttribute("src");
 		expect(src2).not.toBeNull();
-		expect(src2).toMatch(/#mtime=\d+$/);
+		expect(src2).toMatch(/\?mtime=\d+$/);
 	});
 });
