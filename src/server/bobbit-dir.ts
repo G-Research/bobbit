@@ -2,42 +2,42 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-let _projectRoot: string | undefined;
+let _serverCwd: string | undefined;
 
-/** Set the project root directory. Called once from cli.ts at startup. */
-export function setProjectRoot(root: string): void {
-  _projectRoot = root;
+/** Set the server's startup cwd. Called once from cli.ts at startup. */
+export function setServerCwd(cwd: string): void {
+  _serverCwd = cwd;
 }
 
-/** Get the project root directory. Falls back to process.cwd(). */
-export function getProjectRoot(): string {
-  return _projectRoot || process.cwd();
+/** Get the server's startup cwd. Falls back to process.cwd(). */
+export function getServerCwd(): string {
+  return _serverCwd || process.cwd();
 }
 
 /**
  * Returns the .bobbit directory path.
- * Priority: BOBBIT_DIR env > BOBBIT_PI_DIR env (legacy) > <projectRoot>/.bobbit
+ * Priority: BOBBIT_DIR env > BOBBIT_PI_DIR env (legacy) > <serverCwd>/.bobbit
  */
-export function bobbitDir(projectRoot?: string): string {
+export function bobbitDir(serverCwd?: string): string {
   if (process.env.BOBBIT_DIR) return process.env.BOBBIT_DIR;
   if (process.env.BOBBIT_PI_DIR) return process.env.BOBBIT_PI_DIR;
-  const root = projectRoot || getProjectRoot();
+  const root = serverCwd || getServerCwd();
   return path.join(root, ".bobbit");
 }
 
 /** Returns .bobbit/config */
-export function bobbitConfigDir(projectRoot?: string): string {
-  return path.join(bobbitDir(projectRoot), "config");
+export function bobbitConfigDir(serverCwd?: string): string {
+  return path.join(bobbitDir(serverCwd), "config");
 }
 
 /** Returns .bobbit/state */
-export function bobbitStateDir(projectRoot?: string): string {
-  return path.join(bobbitDir(projectRoot), "state");
+export function bobbitStateDir(serverCwd?: string): string {
+  return path.join(bobbitDir(serverCwd), "state");
 }
 
 /**
  * Returns the global agent directory.
- * Priority: BOBBIT_AGENT_DIR env > PI_CODING_AGENT_DIR env > ~/.bobbit/agent/
+ * Priority: BOBBIT_AGENT_DIR env > PI_CODING_AGENT_DIR env > <serverCwd>/.bobbit/state/agent
  */
 export function globalAgentDir(): string {
   const bobbitEnv = process.env.BOBBIT_AGENT_DIR;
@@ -52,7 +52,7 @@ export function globalAgentDir(): string {
     if (piEnv.startsWith("~/")) return os.homedir() + piEnv.slice(1);
     return piEnv;
   }
-  return path.join(os.homedir(), ".bobbit", "agent");
+  return path.join(bobbitStateDir(), "agent");
 }
 
 /**
@@ -122,6 +122,59 @@ export function migrateFromLegacyPiDir(): void {
     }
   } catch (err) {
     console.warn(`[migration] Failed to migrate ~/.pi/agent/: ${err}`);
+  }
+}
+
+/**
+ * Migrate ~/.bobbit/agent/ to <serverCwd>/.bobbit/state/agent/ at startup.
+ * - Skipped entirely when BOBBIT_AGENT_DIR or PI_CODING_AGENT_DIR is set (user opt-out).
+ * - If ~/.bobbit/agent/ doesn't exist or marker ~/.bobbit/agent.pre-relocate/ exists, no-op.
+ * - If target doesn't exist, rename legacy → target.
+ * - If both exist, merge non-conflicting sessions; if there are no movable sessions,
+ *   leave legacy in place with a warning. Either way, drop the marker if we touched it.
+ * Idempotent and safe.
+ */
+export function migrateLegacyHomeAgentDir(): void {
+  if (process.env.BOBBIT_AGENT_DIR || process.env.PI_CODING_AGENT_DIR) return;
+  const legacy = path.join(os.homedir(), ".bobbit", "agent");
+  const marker = path.join(os.homedir(), ".bobbit", "agent.pre-relocate");
+  const target = globalAgentDir(); // resolves to <serverCwd>/.bobbit/state/agent
+  if (!fs.existsSync(legacy) || fs.existsSync(marker)) return;
+  if (path.resolve(legacy) === path.resolve(target)) return; // safety: home == server cwd
+  try {
+    if (!fs.existsSync(target)) {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(legacy, target);
+      console.log(`[migration] Moved ~/.bobbit/agent/ → ${target}`);
+    } else {
+      // Merge sessions only; leave auth.json/models.json/bin in legacy.
+      const legacySessions = path.join(legacy, "sessions");
+      const newSessions = path.join(target, "sessions");
+      if (fs.existsSync(legacySessions)) {
+        fs.mkdirSync(newSessions, { recursive: true });
+        let moved = 0;
+        for (const e of fs.readdirSync(legacySessions)) {
+          const src = path.join(legacySessions, e);
+          const dst = path.join(newSessions, e);
+          if (!fs.existsSync(dst)) {
+            try {
+              fs.renameSync(src, dst);
+              moved++;
+            } catch {
+              // Cross-device or permission error — skip
+            }
+          }
+        }
+        if (moved > 0) {
+          console.log(`[migration] Moved ${moved} agent session dirs into ${newSessions}`);
+        } else {
+          console.warn(`[migration] ~/.bobbit/agent/ and ${target} both exist — leaving legacy in place`);
+        }
+      }
+      fs.renameSync(legacy, marker);
+    }
+  } catch (err) {
+    console.warn(`[migration] Failed to relocate ~/.bobbit/agent/: ${err}`);
   }
 }
 

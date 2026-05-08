@@ -3,7 +3,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { setProjectRoot, bobbitConfigDir } from "../src/server/bobbit-dir.js";
+import { setServerCwd, bobbitConfigDir } from "../src/server/bobbit-dir.js";
 import { resolveSystemPromptPath } from "../src/server/agent/system-prompt.js";
 
 describe("resolveSystemPromptPath", () => {
@@ -12,13 +12,13 @@ describe("resolveSystemPromptPath", () => {
 	let prevPiDir: string | undefined;
 
 	before(() => {
-		// Don't let env vars short-circuit setProjectRoot.
+		// Don't let env vars short-circuit setServerCwd.
 		prevBobbitDir = process.env.BOBBIT_DIR;
 		prevPiDir = process.env.BOBBIT_PI_DIR;
 		delete process.env.BOBBIT_DIR;
 		delete process.env.BOBBIT_PI_DIR;
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sp-resolver-"));
-		setProjectRoot(tmpDir);
+		setServerCwd(tmpDir);
 	});
 
 	after(() => {
@@ -60,13 +60,13 @@ describe("resolveSystemPromptPath", () => {
 	});
 
 	it("returns undefined when neither user override nor default exists", () => {
-		// Point setProjectRoot at a fresh tmpdir with no .bobbit/config and verify the
+		// Point setServerCwd at a fresh tmpdir with no .bobbit/config and verify the
 		// user branch is skipped. The defaults branch is governed by build state and
 		// covered by the previous test; we only assert no throw and a string|undefined
 		// result here.
 		const fresh = fs.mkdtempSync(path.join(os.tmpdir(), "sp-resolver-empty-"));
 		try {
-			setProjectRoot(fresh);
+			setServerCwd(fresh);
 			const resolved = resolveSystemPromptPath();
 			assert.ok(resolved === undefined || typeof resolved === "string");
 			if (typeof resolved === "string") {
@@ -76,7 +76,7 @@ describe("resolveSystemPromptPath", () => {
 				assert.notStrictEqual(resolved, userPath);
 			}
 		} finally {
-			setProjectRoot(tmpDir);
+			setServerCwd(tmpDir);
 			fs.rmSync(fresh, { recursive: true, force: true });
 		}
 	});

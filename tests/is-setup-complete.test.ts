@@ -3,7 +3,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { setProjectRoot, bobbitConfigDir, bobbitStateDir } from "../src/server/bobbit-dir.js";
+import { setServerCwd, bobbitConfigDir, bobbitStateDir } from "../src/server/bobbit-dir.js";
 import { isSetupComplete } from "../src/server/setup-status.js";
 
 describe("isSetupComplete", () => {
@@ -17,7 +17,7 @@ describe("isSetupComplete", () => {
 		delete process.env.BOBBIT_DIR;
 		delete process.env.BOBBIT_PI_DIR;
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "is-setup-complete-"));
-		setProjectRoot(tmpDir);
+		setServerCwd(tmpDir);
 	});
 
 	after(() => {

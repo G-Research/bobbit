@@ -117,7 +117,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// with scaffolding and produces spurious ENOENT.
 		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+		const { setServerCwd } = await import("../../dist/server/bobbit-dir.js");
 		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 		const { createGateway } = await import("../../dist/server/server.js");
@@ -132,7 +132,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 			return null;
 		});
 
-		setProjectRoot(bobbitDir);
+		setServerCwd(bobbitDir);
 		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();
 

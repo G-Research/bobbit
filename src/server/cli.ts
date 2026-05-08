@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir } from "./bobbit-dir.js";
+import { setServerCwd, bobbitStateDir, migrateFromLegacyPiDir, migrateLegacyHomeAgentDir } from "./bobbit-dir.js";
 import { scaffoldBobbitDir } from "./scaffold.js";
 import { resolveSystemPromptPath } from "./agent/system-prompt.js";
 import { loadOrCreateToken, readToken } from "./auth/token.js";
@@ -140,11 +140,14 @@ async function main() {
 		args.host = "localhost";
 	}
 
-	// Set project root early — all stores resolve paths from this
-	setProjectRoot(args.cwd);
+	// Set server cwd early — all stores resolve paths from this
+	setServerCwd(args.cwd);
 
 	// Migrate legacy ~/.pi/agent/ to ~/.bobbit/agent/ if needed
 	migrateFromLegacyPiDir();
+
+	// Relocate ~/.bobbit/agent/ into <serverCwd>/.bobbit/state/agent/ if needed
+	migrateLegacyHomeAgentDir();
 
 	// Scaffold .bobbit/ on first run (creates config, extensions, state dirs)
 	scaffoldBobbitDir(args.cwd);
