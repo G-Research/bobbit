@@ -1878,7 +1878,13 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({} as any));
+			const err = new Error((data && data.error) || `Session creation failed: ${res.status}`);
+			(err as any).code = data?.code;
+			(err as any).stack = data?.stack || (err as any).stack;
+			throw err;
+		}
 		const { id } = await res.json();
 		// Clear creatingSession before connecting — connectToSession handles its
 		// own loading state via connectingSessionId, and we want the user to see
@@ -1888,7 +1894,9 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		await connectToSession(id, false);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to create session", msg);
+		const code = err && typeof err === "object" ? (err as any).code : undefined;
+		const stack = err instanceof Error ? err.stack : undefined;
+		showConnectionError("Failed to create session", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		state.creatingSessionForGoalId = null;
@@ -2017,6 +2025,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
+					{ code: data?.code, stack: data?.stack },
 				);
 				return;
 			}
@@ -2123,6 +2132,7 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
+					{ code: data?.code, stack: data?.stack },
 				);
 				return;
 			}
@@ -2479,7 +2489,13 @@ export async function startReattempt(goalId: string): Promise<void> {
 				reattemptGoalId: goalId,
 			}),
 		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({} as any));
+			const err = new Error((data && data.error) || `Session creation failed: ${res.status}`);
+			(err as any).code = data?.code;
+			(err as any).stack = data?.stack || (err as any).stack;
+			throw err;
+		}
 		const { id } = await res.json();
 		// Clear creatingSession before connecting — connectToSession handles its
 		// own loading state via connectingSessionId, and we want the user to see
@@ -2488,7 +2504,9 @@ export async function startReattempt(goalId: string): Promise<void> {
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to re-attempt goal", msg);
+		const code = err && typeof err === "object" ? (err as any).code : undefined;
+		const stack = err instanceof Error ? err.stack : undefined;
+		showConnectionError("Failed to re-attempt goal", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();
