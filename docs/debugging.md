@@ -149,6 +149,23 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
   3. Team-lead nudges to an errored worker: no longer suppressed in `team-manager.ts` (the old `if (teamLeadSession.lastTurnErrored) return;` guard was removed). SessionManager is now the single source of truth for error-state policy.
 - **Related**: previous mitigation was pattern-matching on error text via `TRANSIENT_ERROR_PATTERNS` + bounded auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`). That path still exists for quick in-band recovery; the implicit-unstick path is the structural fallback when the whitelist doesn't match.
 
+## "Setting up worktree…" banner missing on a brand-new session / preparing UX absent
+
+- **Symptom**: user creates a new session before the worktree pool has filled (typical on cold boot). The chat panel mounts but no "Setting up worktree…" banner appears, the message editor stays enabled, the user types and clicks send, and the message lands silently in the prompt queue. The system-prompt viewer shows the project root as `cwd`, not a worktree path — confirming the session is still preparing while the UI claims it's ready.
+- **Why this happens (two compounding bugs)**:
+  1. **Version-gate dropped the first frame.** The server creates new sessions with `statusVersion: 0` and immediately broadcasts `session_status: "preparing"`. The client tracks `_lastStatusVersion` on `RemoteAgent` and ignores any frame whose version is `<= _lastStatusVersion`. Pre-fix `_lastStatusVersion` initialised to `0`, so the very first frame failed the `0 <= 0` gate and `_state.status` was never written. The server-stamped baseline from `case "state"` *did* set the status correctly on attach, but only on the next reload — not on the live new-session path where `state` arrives with the same `statusVersion: 0` it raced.
+  2. **`requestUpdate()` was too narrow.** Even when `_state.status` flipped correctly, the UI didn't repaint. `RemoteAgent.onStatusChange` (in `src/app/session-manager.ts`) only called `agentInterface.requestUpdate()` for `"aborting"` and `"idle"`; `"preparing"` and `"starting"` fell through to the global `renderApp()` debounce. Lit's reference-equality short-circuit then refused to re-render the freshly-mounted `<agent-interface>` because `state` was the same object — the status mutation lived inside it. Net effect: even with bug 1 fixed, the banner wouldn't show on the new session.
+- **Fix invariants** (do not regress):
+  - `_lastStatusVersion` initialises to `-1` (uninitialised sentinel). The version-gate semantics for subsequent frames are unchanged — only the bootstrap is loosened.
+  - `RemoteAgent.onStatusChange` calls `agentInterface.requestUpdate()` for `preparing` / `starting` / `aborting` / `idle`. Do not narrow this list back to aborting/idle. The Lit reference-equality issue applies to *every* status change because `_state` is the same object.
+  - `case "session_status"` remains the sole client writer of `_state.status` (plus `case "state"` on attach and `reset()` on navigate, per [unify-session-status.md](design/unify-session-status.md)). The fix did not introduce a new writer.
+- **How to diagnose if it regresses**:
+  1. In DevTools → Network → WS, watch the inbound frames after creating a new session. There should be exactly one `session_status` frame with `status: "preparing"` and `statusVersion: 0`, followed later by another with `idle`.
+  2. Add a `console.log` at the top of `case "session_status"` in `src/app/remote-agent.ts`. If the preparing frame arrives but the log fires only once (for `idle`), the version gate is wrong — inspect `_lastStatusVersion` initial value.
+  3. If the log fires twice but the banner never paints, the `onStatusChange` re-render branch is the culprit. Confirm `agentInterface` is non-null at the call site (the new chat panel may finish its first paint *after* the frame; the `requestUpdate` call is a no-op then, but the next render pass picks up `state.isPreparing` correctly — no race in practice).
+  4. Reload during preparing. The server replays current status on `auth_ok` (`src/server/ws/handler.ts`). If the banner still appears, the live-path bug is the regression; if it doesn't, the replay path also broke — inspect the `auth_ok` write path.
+- **Regression test**: `tests/e2e/ui/preparing-ux.spec.ts` (browser E2E). It artificially extends the preparing window so the banner is observable, asserts visibility + editor disabled, then asserts both clear once the session goes idle.
+
 ## Compaction
 
 - Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is now a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
@@ -511,6 +528,24 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - Quick check: open the QA session's transcript and inspect a `browser_screenshot` tool result. Post-fix results contain `[screenshot_file]<absolute-path>[/screenshot_file]`. If you still see `[screenshot_base64]data:image/...[/screenshot_base64]`, the browser tool extension is stale — rebuild and restart the server.
 - Spilled files live under `<session-cwd>/.bobbit-qa/screenshots/`. The directory is gitignored and deleted on session shutdown. If stale dirs remain after a crash, they are safe to `rm -rf`.
 - Reports referencing screenshots via `<img src="file://...">` are inlined to base64 by the server when the agent submits via `report_html_file` (20 MB cumulative cap, session-cwd-scoped). See [qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
+
+## Slow first-session preparing window on cold boot
+
+- **Symptom**: the first session created after `npm run dev:harness` (or any fresh server start) sits in `preparing` for tens of seconds to minutes; subsequent sessions in the same server lifetime are fast. Server stdout shows `[worktree-setup] bobbit: ok` only after a long delay; until that line, every new session falls through to the cold-path `createWorktree` + per-component `runComponentSetups()` (e.g. `npm ci`).
+- **Why this happens (pre-fix)**: `runBootBackgroundTasks()` in `src/server/server.ts` awaited the orphan-worktree sweeper across **all** registered projects sequentially before starting **any** pool init. With even a handful of stale session worktrees on disk the sweeper invoked multiple `git worktree list` / `git worktree repair` calls per repo, each with 10–15 s timeouts (especially slow on Windows). Pool init for project N didn't begin until projects 1…N−1 had finished sweeping, so the pool was empty for the entire window — every new session paid the full cold-path cost.
+- **What changed**: sweeper and pool init now run concurrently via `Promise.all`. Per-project pool init is also parallelised across projects. Boot timing is logged with the `[boot]` prefix:
+  - `[boot] sweeper start`
+  - `[boot] sweeper done in Xms`
+  - `[boot] pool ready: project=Y in Zms`
+  - `[boot] background tasks complete in Wms`
+  Reading these lines lets you attribute the wait empirically (sweeper vs per-project pool fill vs `npm ci`).
+- **Why parallelising sweeper + pool init is safe**: the two operate on disjoint branch sets. The sweeper explicitly skips pool branches (`isPoolBranch` filter in `src/server/agent/worktree-sweeper.ts`), and `WorktreePool.reclaimOrphaned` only inspects pool branches. The historical comment in `server.ts` claiming a strict ordering invariant between sweeper and pool was over-stated — there is no shared mutation point. If you reintroduce a sequential await for some unrelated reason, verify the disjoint-set invariant still holds first.
+- **How to diagnose**:
+  1. Read the `[boot]` lines in server stdout (or `.bobbit/state/server.log` if redirected). Sweeper time and per-project pool time are reported separately. If `[boot] sweeper done` is the dominant cost, the sweeper itself needs follow-up work (per-project parallelism inside it; parallel per-repo `git worktree list`). If `[boot] pool ready: project=X in Yms` dominates, the cost is in the pool fill (`createWorktree` + setup hook).
+  2. Confirm pool fill actually started before the sweeper finished by comparing timestamps on `[boot] sweeper start` vs the first `[worktree-pool] _fill` log line.
+  3. If the dev server is being smoke-tested against a clean checkout and you want to skip the pool entirely (e.g. CI), set `BOBBIT_SKIP_WORKTREE_POOL=1`. Sessions then always take the cold path — useful as a baseline measurement.
+- **Mitigations not yet applied (follow-up candidates)**: per-project parallelism *inside* the sweeper itself; parallel per-repo `git worktree list` invocations; pre-warming `node_modules` outside the per-session window so the cold path is cheap.
+- **Test-only knob**: a deterministic preparing-window extension hook exists in `src/server/agent/session-setup.ts` for the regression E2E (`tests/e2e/ui/preparing-ux.spec.ts`). It is intentionally undocumented in user-facing material; do not surface it as a tuning option.
 
 ## Worktree setup hook not running
 
