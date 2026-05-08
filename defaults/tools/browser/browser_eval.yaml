@@ -1,7 +1,7 @@
 name: browser_eval
-description: "Execute JavaScript in the page"
-summary: "Execute JavaScript in the headless browser page context and return the
-  result."
+description: "Execute JavaScript in page context; returns result"
+summary: "Run JavaScript in the browser page"
+params: [expression]
 provider:
   type: bobbit-extension
   extension: extension.ts

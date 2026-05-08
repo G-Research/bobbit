@@ -1,6 +1,7 @@
 name: browser_resize
-description: "Resize the browser viewport"
-summary: "Resize the browser viewport to specified width and height in pixels."
+description: "Resize viewport to width × height pixels"
+summary: "Resize browser viewport"
+params: [width, height]
 provider:
   type: bobbit-extension
   extension: extension.ts

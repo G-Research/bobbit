@@ -1,6 +1,7 @@
 name: verification_result
-description: "Submit verification result — verdict, summary, and optional HTML report"
-summary: "Submit your verification result when review or QA testing is complete."
+description: "Submit verdict, summary, and optional HTML report"
+summary: "Submit verification verdict and summary"
+params: [verdict, summary, report_html?, report_html_file?]
 provider:
   type: bobbit-extension
   extension: extension.ts

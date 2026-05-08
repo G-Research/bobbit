@@ -1,6 +1,7 @@
 name: review_close
-description: "Close a review document tab or all review tabs"
-summary: "Close review document tab(s) in the review pane."
+description: "Close one tab by title or all tabs"
+summary: "Close review document tabs"
+params: [title?]
 provider:
   type: bobbit-extension
   extension: extension.ts

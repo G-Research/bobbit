@@ -1,6 +1,7 @@
 name: propose_project
-description: "Submit a project proposal for user review. Works both for new/provisional projects (from the project assistant) and mid-session for the currently registered project — in the latter case, the user sees a diff of the proposed fields against the current project.yaml and accepting writes the changes via PUT /api/projects/:id/config without ending the session."
-summary: "Propose a project with name, root_path, components (each with optional commands and config), and workflows."
+description: "Submit project proposal; works for new or mid-session edits"
+summary: "Propose a project with components and workflows"
+params: [name, root_path, build_command?, test_command?, typecheck_command?, test_unit_command?, test_e2e_command?, components?, workflows?, sandbox?, sandbox_tokens?, config_directories?, worktree_root?, worktree_setup_command?, naming_model?, review_model?, session_model?]
 provider:
   type: bobbit-extension
   extension: extension.ts

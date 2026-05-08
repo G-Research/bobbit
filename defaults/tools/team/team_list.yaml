@@ -1,6 +1,6 @@
 name: team_list
-description: "List all agents in the team"
-summary: "List all team agents with role, status, and current task."
+description: "Return all agents with role, status, current task"
+summary: "List all team agents"
 provider:
   type: bobbit-extension
   extension: extension.ts

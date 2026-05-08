@@ -27,6 +27,8 @@ interface BaseToolInfo {
 	provider?: ToolProvider;
 	/** Grant policy loaded from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
+	/** Optional positional parameter names (trailing `?` marks optional). Drives compact `(args)` rendering. */
+	params?: string[];
 	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
 	groupDir: string;
 	/** Absolute path to the YAML file on disk. */
@@ -45,6 +47,17 @@ export interface ToolInfo {
 	rendererFile?: string;
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
+	/** Optional positional parameter names (trailing `?` marks optional). */
+	params?: string[];
+}
+
+function parseParamsField(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const out: string[] = [];
+	for (const v of value) {
+		if (typeof v === "string" && v.trim().length > 0) out.push(v.trim());
+	}
+	return out.length > 0 ? out : undefined;
 }
 
 import { bobbitConfigDir } from "../bobbit-dir.js";
@@ -95,6 +108,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 								detail_docs: data.detail_docs,
 								provider: data.provider,
 								grantPolicy: data.grantPolicy,
+								params: parseParamsField(data.params),
 								groupDir,
 								filePath,
 								baseDir,
@@ -127,6 +141,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 						detail_docs: data.detail_docs,
 						provider: data.provider,
 						grantPolicy: data.grantPolicy,
+						params: parseParamsField(data.params),
 						groupDir: "",
 						filePath,
 						baseDir,
@@ -350,6 +365,7 @@ export class ToolManager {
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
 			grantPolicy: tool.grantPolicy,
+			params: tool.params,
 		}));
 	}
 
@@ -365,6 +381,7 @@ export class ToolManager {
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
 			grantPolicy: tool.grantPolicy,
+			params: tool.params,
 		}));
 		for (const ext of this.externalTools.values()) {
 			result.push({
@@ -376,6 +393,7 @@ export class ToolManager {
 				hasRenderer: false,
 				rendererFile: undefined,
 				grantPolicy: undefined,
+				params: undefined,
 			});
 		}
 		return result;
@@ -402,6 +420,7 @@ export class ToolManager {
 			hasRenderer: !!base.renderer,
 			rendererFile: base.renderer,
 			grantPolicy: base.grantPolicy,
+			params: base.params,
 		};
 	}
 
@@ -417,22 +436,22 @@ export class ToolManager {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 
 		// Group tools by groupDir
-		const grouped = new Map<string, Array<{ name: string; detail_docs?: string; description: string }>>();
+		const grouped = new Map<string, Array<{ name: string; docs?: string; detail_docs?: string; description: string }>>();
 		for (const tool of tools) {
 			if (!tool.groupDir) continue;
 			if (!grouped.has(tool.groupDir)) grouped.set(tool.groupDir, []);
-			grouped.get(tool.groupDir)!.push({ name: tool.name, detail_docs: tool.detail_docs, description: tool.description });
+			grouped.get(tool.groupDir)!.push({ name: tool.name, docs: tool.docs, detail_docs: tool.detail_docs, description: tool.description });
 		}
 
 		for (const [groupDir, tools] of grouped) {
 			const parts: string[] = [`# ${groupDir} — Tool Reference\n`];
 			for (const tool of tools) {
 				parts.push(`## ${tool.name}\n`);
-				if (tool.detail_docs?.trim()) {
-					parts.push(tool.detail_docs.trim() + '\n');
-				} else {
-					parts.push(tool.description + '\n');
-				}
+				const docs = tool.docs?.trim();
+				const detail = tool.detail_docs?.trim();
+				if (docs) parts.push(docs + '\n');
+				if (detail) parts.push(detail + '\n');
+				if (!docs && !detail) parts.push(tool.description + '\n');
 			}
 			fs.writeFileSync(path.join(dir, `${groupDir}.md`), parts.join('\n'));
 		}
@@ -448,68 +467,66 @@ export class ToolManager {
 	getToolDocsForPrompt(toolNames?: string[], stateDir?: string): string {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 
-		// Build grouped data: group → { groupDir, entries }
-		const grouped = new Map<string, { groupDir: string; entries: Array<{ name: string; summary: string; docs?: string }> }>();
+		type Entry = { name: string; summary: string; params?: string[] };
+		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();
 
 		for (const tool of tools) {
 			if (toolNames && !toolNames.includes(tool.name)) continue;
 			const group = tool.group;
 			const summary = tool.summary ?? tool.description;
-			const docs = tool.docs?.trim();
-
 			if (!grouped.has(group)) grouped.set(group, { groupDir: tool.groupDir, entries: [] });
-			grouped.get(group)!.entries.push({ name: tool.name, summary, docs });
+			grouped.get(group)!.entries.push({ name: tool.name, summary, params: tool.params });
 		}
 
-		// Include external tools (e.g. MCP)
+		// Include external tools (e.g. MCP) — no params, no inlined docs.
 		for (const ext of this.externalTools.values()) {
 			if (toolNames && !toolNames.includes(ext.name)) continue;
 			const group = ext.group;
 			const summary = ext.summary ?? ext.description;
-			const docs = ext.docs?.trim();
 			if (!grouped.has(group)) grouped.set(group, { groupDir: '', entries: [] });
-			grouped.get(group)!.entries.push({ name: ext.name, summary, docs });
+			grouped.get(group)!.entries.push({ name: ext.name, summary });
 		}
 
 		if (grouped.size === 0) return "";
 
-		const sections: string[] = ["# Tools"];
+		const sections: string[] = ["# Tools", ""];
 
 		for (const [group, { groupDir, entries }] of grouped) {
 			const isMcp = group.startsWith('MCP: ');
-			sections.push(`\n## ${group}\n`);
 
-			if (isMcp) {
-				// MCP tools: compact bullet list, param names inline
-				for (const entry of entries) {
-					if (entry.docs) {
-						sections.push(`- **${entry.name}**: ${entry.summary}. ${entry.docs}`);
-					} else {
-						sections.push(`- **${entry.name}**: ${entry.summary}`);
-					}
-				}
-			} else {
-				// Built-in tools: one ### block per tool, summary + docs merged
-				for (const entry of entries) {
-					const body = entry.docs
-						? `${entry.summary} ${entry.docs}`
-						: entry.summary;
-					sections.push(`### ${entry.name}\n\n${body}\n`);
-				}
-			}
-
-			// Per-group footer link to detail docs
+			// Compute pointer path on the same line as the group header.
+			let pointer = "";
 			if (isMcp) {
 				const serverName = group.slice(5); // strip "MCP: "
 				const docPath = stateDir
 					? path.join(stateDir, 'mcp-tool-docs', `${serverName}.md`)
 					: `.bobbit/state/mcp-tool-docs/${serverName}.md`;
-				sections.push(`\n_For detailed ${serverName} tool docs (parameters, usage), read \`${docPath}\`_\n`);
-			} else if (groupDir && stateDir) {
-				const docPath = path.join(stateDir, 'tool-docs', `${groupDir}.md`);
-				sections.push(`\n_For detailed ${group} tool docs (examples, edge cases, full parameters), read \`${docPath}\`_\n`);
+				pointer = ` — see ${docPath}`;
+			} else if (groupDir) {
+				const docPath = stateDir
+					? path.join(stateDir, 'tool-docs', `${groupDir}.md`)
+					: `.bobbit/state/tool-docs/${groupDir}.md`;
+				pointer = ` — see ${docPath}`;
 			}
+
+			sections.push(`## ${group}${pointer}`);
+
+			for (const entry of entries) {
+				const summary = entry.summary.replace(/\s+/g, " ").trim();
+				let head: string;
+				if (entry.params && entry.params.length > 0) {
+					head = `${entry.name}(${entry.params.join(", ")})`;
+				} else {
+					head = entry.name;
+				}
+				sections.push(summary ? `- ${head} — ${summary}` : `- ${head}`);
+			}
+
+			sections.push("");
 		}
+
+		// Trim trailing blank.
+		while (sections.length > 0 && sections[sections.length - 1] === "") sections.pop();
 
 		return sections.join("\n");
 	}

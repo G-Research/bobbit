@@ -1,7 +1,7 @@
 name: delegate
-description: "Run a task in a separate agent process"
-summary: "Run a task in a separate agent process with full tool access but
-  isolated context."
+description: "Run task in separate agent process; full tools, no context"
+summary: "Spawn an isolated agent subprocess with isolated context"
+params: [instructions, parallel?, context?, timeout_minutes?]
 provider:
   type: bobbit-extension
   extension: extension.ts
