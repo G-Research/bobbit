@@ -311,6 +311,79 @@ in both `snapshot.ts` and `PreviewRenderer.ts`. Reopen flows for v1/v2 in
 WP-G's deletion of `/api/preview/render` and `/api/preview/asset` doesn't
 break old archived sessions.
 
+## Theme-token snapshot for standalone tabs
+
+Single source of truth: `src/server/preview/theme-snapshot.ts`.
+
+Every preview HTML response carries an inline `<style>` block of the host
+app's theme tokens, injected into `<head>` alongside the `<base>` tag by
+`injectBaseAndScripts()` in `content-route.ts` (the pure-string contract is
+preserved — no HTML parser).
+
+**Why.** The runtime theme bridge in `src/shared/preview-bridge-scripts.ts`
+(`PREVIEW_THEME_BRIDGE`) reads CSS custom properties from
+`parent.document.documentElement`. Inside the embedded panel iframe that
+works; in a standalone tab opened via "Open in new tab", `parent === window`
+and the preview document has no theme vars of its own, so every
+`var(--background)` / `var(--chart-N)` resolved to empty and the page
+rendered unstyled.
+
+**How.** At server startup `theme-snapshot.ts` parses the `:root` and `.dark`
+blocks of `src/ui/app.css` once, extracts every `--*` declaration, and caches
+a ready-to-emit `<style data-bobbit-preview-theme="snapshot">…</style>`
+string. `content-route.ts` injects this snapshot for every served HTML
+response — the `data-bobbit-preview-theme="snapshot"` marker is the debugging
+handle (open devtools → Elements → search the `<head>`).
+
+**Two semantics, one mechanism:**
+
+| Surface | Behaviour |
+|---|---|
+| Standalone tab (`parent === window`) | `PREVIEW_THEME_BRIDGE` early-returns. The inline snapshot governs — colours and fonts are fixed at the moment the request was served. Live host-app theme toggles do **not** propagate. This is an explicit, accepted trade: standalone tabs are snapshots. |
+| Embedded panel iframe (`parent !== window`) | Snapshot supplies defaults; the bridge runs and live-mirrors the host-app's `documentElement` custom properties on every theme toggle. |
+
+No per-request CSS parsing in the hot path — the snapshot string is built
+once and reused for every response.
+
+## Atomic-swap mount lifecycle
+
+Single source of truth: `mountFile()` in `src/server/preview/mount.ts`.
+
+**Why.** The previous flow was wipe-then-copy: `wipeContents(destRoot)` ran
+before the entry copy. Any source path whose realpath resolved inside
+`destRoot` (e.g. an agent re-opening a file the previous `preview_open`
+call had materialised into the mount) was deleted before being read —
+`fs.copyFileSync` then ENOENT'd, or the OS short-circuited same-inode
+operations and threw "cannot copy a file onto itself". Wipe-then-copy also
+left a half-empty mount visible to any `/preview/<sid>/<entry>` GET that
+hit during the window between wipe and final copy.
+
+**How.** Stage everything into a sibling tmp directory under
+`previewRoot()` first, then atomically swap:
+
+1. Create `<previewRoot>/.<sid>.tmp-<pid>-<ms>-<rand6>/`.
+2. Resolve and copy the entry plus all declared `assets[]` (literals and
+   single-segment globs) into the tmp dir. **All source data is read
+   before `destRoot` is touched** — the same-mount-source race is gone.
+3. On staging error: `rmSync(tmp, { recursive: true, force: true })` and
+   leave `destRoot` untouched.
+4. On success: `wipeContents(destRoot)` (see inode note below) followed
+   by per-entry `renameSync` from tmp into `destRoot`. The tmp dir is
+   removed once empty.
+
+**Inode preservation.** The wipe step deliberately uses `wipeContents`
+(remove the contents of `destRoot`) rather than `rmSync(destRoot)`
+(remove the directory itself). The directory's inode survives, so the
+long-lived `fs.watch` handle held by `watchMount()` keeps firing for SSE
+consumers across mount swaps.
+
+**`writeInline()` is unaffected.** It already writes the single entry to
+a sibling tmp file and `renameSync`s into place — atomic by construction.
+
+**SSE.** `broadcastPreviewChanged()` still fires on every successful
+mount, including identical re-opens, so the iframe reload path (`?mtime=`
+cache-buster) sees every call.
+
 ## Sandbox integration
 
 Single source of truth: `src/server/agent/docker-args.ts`.
