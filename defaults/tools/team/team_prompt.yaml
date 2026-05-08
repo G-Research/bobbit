@@ -1,6 +1,7 @@
 name: team_prompt
-description: "Send a prompt to a team agent (queued or immediate)"
-summary: "Send a prompt to a team agent, queued or immediate."
+description: "Queued or immediate follow-up message to existing agent"
+summary: "Send prompt to a team agent"
+params: [agent_id, prompt, workflowGateId?, inputGateIds?]
 provider:
   type: bobbit-extension
   extension: extension.ts

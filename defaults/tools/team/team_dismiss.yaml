@@ -1,6 +1,7 @@
 name: team_dismiss
-description: "Terminate an agent and clean up"
-summary: "Terminate a team agent and clean up its worktree."
+description: "Dismiss one agent and clean up its worktree"
+summary: "Terminate one team agent"
+params: [agent_id]
 provider:
   type: bobbit-extension
   extension: extension.ts

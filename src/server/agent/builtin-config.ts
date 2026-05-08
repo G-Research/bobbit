@@ -160,6 +160,7 @@ export class BuiltinConfigProvider {
 					hasRenderer: !!data.renderer,
 					rendererFile: data.renderer,
 					grantPolicy: data.grantPolicy,
+					params: Array.isArray(data.params) ? data.params.filter((p: unknown): p is string => typeof p === "string") : undefined,
 				});
 			} catch (err) {
 				console.error(`[builtin-config] Failed to parse tool ${entry.name}:`, err);

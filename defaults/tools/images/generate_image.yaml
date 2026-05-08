@@ -1,6 +1,7 @@
 name: generate_image
-description: "Generate images using the configured image generation model"
-summary: "Generate one or more images with GPT Image 2, DALL-E, Nano Banana/Gemini, or another configured image model. Uses the session image model selected in the bottom bar unless `model` is provided."
+description: "Generate images via configured provider; uses session image model"
+summary: "Generate images via GPT Image, DALL-E, Gemini, etc."
+params: [prompt, model?, n?, size?, imageSize?, aspectRatio?, quality?, format?, background?, outputPath?]
 provider:
   type: bobbit-extension
   extension: extension.ts

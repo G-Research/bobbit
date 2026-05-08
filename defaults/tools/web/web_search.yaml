@@ -1,6 +1,7 @@
 name: web_search
-description: "Search the web via DuckDuckGo"
-summary: "Search the web via DuckDuckGo. Returns titles, URLs, and snippets."
+description: "Return titles, URLs, snippets; no API key"
+summary: "Search the web via DuckDuckGo"
+params: [query, maxResults?]
 provider:
   type: bobbit-extension
   extension: extension.ts

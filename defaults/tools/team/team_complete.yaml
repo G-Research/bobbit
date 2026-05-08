@@ -1,6 +1,7 @@
 name: team_complete
-description: "Dismiss all agents and complete goal"
-summary: "Dismiss all team agents and mark the goal as complete."
+description: "Complete goal after review gate passes; cleans up worktrees"
+summary: "Dismiss all agents; mark goal complete"
+params: [summary?]
 provider:
   type: bobbit-extension
   extension: extension.ts

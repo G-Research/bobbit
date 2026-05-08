@@ -1,6 +1,7 @@
 name: browser_type
-description: "Type text into an input element"
-summary: "Type text into an input element by CSS selector. Clears the field first."
+description: "Type into input/textarea/contenteditable; clears by default"
+summary: "Type text into an input"
+params: [selector, text, clear?]
 provider:
   type: bobbit-extension
   extension: extension.ts

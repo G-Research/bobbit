@@ -1,6 +1,7 @@
 name: gate_inspect
-description: "Read gate content, verification output, or signal history"
-summary: "Read detailed gate data by section: content, verification output, or signal history."
+description: "Fetch one section: content, verification, or signals"
+summary: "Read gate content, verification, or signals"
+params: [gate_id, section, signal_index?]
 provider:
   type: bobbit-extension
   extension: extension.ts

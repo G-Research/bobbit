@@ -1,6 +1,7 @@
 name: team_steer
-description: "Send a mid-turn redirect to a running agent"
-summary: "Send a mid-turn redirect to a running agent to change its direction."
+description: "Inject a user message into agent's current turn"
+summary: "Mid-turn redirect to a running agent"
+params: [agent_id, prompt]
 provider:
   type: bobbit-extension
   extension: extension.ts

@@ -1,6 +1,7 @@
 name: activate_skill
-description: "Activate a discovered skill by name. Returns the skill's instructions as the tool result; follow them as if the user had typed `/<name> <args>`. Skills with `disable-model-invocation: true` are not callable via this tool."
-summary: "Activate a slash skill autonomously. Returns its expanded instructions."
+description: "Return resolved skill instructions; 403 if invocation disabled"
+summary: "Activate a slash skill autonomously"
+params: [name, args?]
 provider:
   type: bobbit-extension
   extension: extension.ts
