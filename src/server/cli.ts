@@ -232,8 +232,13 @@ async function main() {
 	console.log(`  Keep it secret. Regenerate with --new-token.`);
 	console.log();
 
-	// Auto-open browser when serving the UI, passing token so the UI auto-connects
-	if (args.staticDir && !process.env.BOBBIT_NO_OPEN) {
+	// Auto-open browser when serving the UI, passing token so the UI auto-connects.
+	// Skipped when:
+	//   - BOBBIT_NO_OPEN is set (explicit opt-out)
+	//   - NODE_ENV === "test" (manual integration tests + any test harness; prevents
+	//     browser tab spam from per-test gateway spawns)
+	const suppressOpen = process.env.BOBBIT_NO_OPEN || process.env.NODE_ENV === "test";
+	if (args.staticDir && !suppressOpen) {
 		const cmd =
 			process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
 		import("node:child_process").then(({ exec }) => exec(`${cmd} ${fullUrl}`));
