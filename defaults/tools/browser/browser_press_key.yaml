@@ -1,6 +1,7 @@
 name: browser_press_key
-description: "Press a keyboard key"
-summary: "Press a keyboard key (Enter, Tab, Escape, etc.) in the current browser page."
+description: "Press a key (Enter, Tab, Control+A, etc.)"
+summary: "Press a keyboard key"
+params: [key]
 provider:
   type: bobbit-extension
   extension: extension.ts

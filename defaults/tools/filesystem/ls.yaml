@@ -1,6 +1,7 @@
 name: ls
-description: "List directory contents"
-summary: "List directory contents with entries sorted alphabetically."
+description: "List entries alphabetically; '/' suffix for dirs"
+summary: "List directory contents"
+params: [path?, limit?]
 provider:
   type: builtin
   tool: ls

@@ -1,6 +1,7 @@
 name: browser_screenshot
-description: "Take a screenshot of the page"
-summary: "Take a screenshot of the current page or a specific CSS selector."
+description: "Capture viewport, full page, or specific element"
+summary: "Screenshot page or selector"
+params: [selector?, fullPage?, savePath?, format?, quality?, includeBase64?]
 provider:
   type: bobbit-extension
   extension: extension.ts

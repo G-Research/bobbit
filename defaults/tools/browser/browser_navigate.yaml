@@ -1,6 +1,7 @@
 name: browser_navigate
-description: "Navigate to a URL in headless browser"
-summary: "Navigate to a URL in a headless browser. Launches browser if needed."
+description: "Navigate headless browser to URL; launches if needed"
+summary: "Navigate browser to a URL"
+params: [url]
 provider:
   type: bobbit-extension
   extension: extension.ts

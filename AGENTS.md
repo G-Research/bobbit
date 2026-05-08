@@ -47,7 +47,11 @@ One-liner task → entry point. Follow links for walkthroughs.
 ### Server / API
 - **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [docs/rest-api.md](docs/rest-api.md).
 - **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, add `RpcBridge` method.
-- **Add a tool** → builtin: `defaults/tools/<group>/`. Project override: `.bobbit/config/tools/<group>/`. MCP auto-discovered from `.mcp.json`.
+- **Add a tool** → builtin: `defaults/tools/<group>/`. Project override: `.bobbit/config/tools/<group>/`. MCP auto-discovered from `.mcp.json`. YAML fields driving the per-turn `# Tools` section in the system prompt:
+  - `params: [name, name?, ...]` (optional) — renders as `name(params) — summary`. Trailing `?` marks an optional parameter. Omit the field to render as `name — summary` with no parens.
+  - `summary` — ≤ 10 words, sentence-fragment OK; this is the only prose shown per-turn.
+  - `description` (function-schema field) — ≤ 15 words; what the model sees alongside the JSON-schema params.
+  - `docs` and `detail_docs` are **not** inlined into the prompt. They are folded (in that order) into `<stateDir>/tool-docs/<group>.md` by `generateDetailDocs()`, and the prompt's per-group header points at that file (`## <Group> — see <path>`). Put any prose, examples, anti-patterns there. See [docs/internals.md — MCP tool documentation](docs/internals.md#mcp-tool-documentation) for the full prompt layout.
 - **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/` with YAML frontmatter. See [docs/design/skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
 - **Add a blocking tool** → harness parks Promise keyed by `(sessionId, toolUseId)`. See [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — see [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
 - **Modify a store constructor** → stores take `stateDir`/`configDir` params; never module-level globals. All resolution via `ProjectContextManager` (`src/server/agent/project-context-manager.ts`).

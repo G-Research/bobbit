@@ -1,7 +1,7 @@
 name: gate_signal
-description: "Signal a workflow gate with content/metadata"
-summary: "Signal a workflow gate — triggers verification. Accepts content and/or
-  metadata."
+description: "Signal gate with content/metadata; verification runs async"
+summary: "Signal a workflow gate; triggers verification"
+params: [gate_id, content?, metadata?]
 provider:
   type: bobbit-extension
   extension: extension.ts

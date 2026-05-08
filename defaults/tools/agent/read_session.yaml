@@ -1,6 +1,7 @@
 name: read_session
-description: "Read the conversation transcript of another Bobbit session — peer agent, delegate, or archived session."
-summary: "Paginated, regex-filterable read of a session transcript."
+description: "Paginated, regex-filterable transcript read of another session"
+summary: "Read another session's transcript, paginated"
+params: [session_id, offset?, limit?, pattern?, context?, verbose?]
 provider:
   type: bobbit-extension
   extension: extension.ts

@@ -1,6 +1,7 @@
 name: gate_status
-description: "Get latest signal details for a specific gate — verdict, truncated failed-step output, and metadata. Use gate_inspect for full content or history."
-summary: "Get latest signal details for a specific gate — verdict, truncated failed-step output, and metadata. Use gate_inspect for full content or history."
+description: "Return verdict, truncated failed output, and metadata"
+summary: "Get latest signal details for a gate"
+params: [gate_id]
 provider:
   type: bobbit-extension
   extension: extension.ts

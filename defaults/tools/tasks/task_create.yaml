@@ -1,6 +1,7 @@
 name: task_create
-description: "Create a new task with type and dependencies"
-summary: "Create a new task with type, spec, and dependency tracking."
+description: "Create task with type, spec, and dependencies"
+summary: "Create a new task"
+params: [title, type, spec?, depends_on?]
 provider:
   type: bobbit-extension
   extension: extension.ts
