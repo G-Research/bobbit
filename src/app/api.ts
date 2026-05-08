@@ -4,12 +4,16 @@ import {
 	setProjects,
 	expandedGoals,
 	saveExpandedGoals,
-	GW_URL_KEY,
-	GW_TOKEN_KEY,
 	type GatewaySession,
 	type Goal,
 	type Project,
 } from "./state.js";
+// Re-export for back-compat: many call sites import `gatewayFetch` from
+// `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
+// dependency-free) so utility modules like `fetch-tool-content.ts` can
+// import it without pulling the entire app-shell graph.
+import { gatewayFetch } from "./gateway-fetch.js";
+export { gatewayFetch };
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -46,23 +50,6 @@ export class SymlinkRootError extends Error {
 		super(`rootPath ${rootPath} is a symlink to ${canonical}`);
 		this.name = "SymlinkRootError";
 	}
-}
-
-// ============================================================================
-// GATEWAY FETCH
-// ============================================================================
-
-export function gatewayFetch(path: string, options: RequestInit = {}): Promise<Response> {
-	const url = localStorage.getItem(GW_URL_KEY) || window.location.origin;
-	const token = localStorage.getItem(GW_TOKEN_KEY) || "";
-	return fetch(`${url}${path}`, {
-		...options,
-		headers: {
-			Authorization: `Bearer ${token}`,
-			"Content-Type": "application/json",
-			...options.headers,
-		},
-	});
 }
 
 // ============================================================================

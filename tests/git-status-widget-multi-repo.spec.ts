@@ -6,9 +6,8 @@
  * (`docs/design/multi-repo-components.md` §8.4) prescribes.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/git-status-widget-states.html");
 const BUNDLE = path.resolve("tests/fixtures/git-status-widget-states-bundle.js");
@@ -16,21 +15,10 @@ const ENTRY = path.resolve("tests/fixtures/git-status-widget-states-entry.ts");
 const WIDGET_SRC = path.resolve("src/ui/components/GitStatusWidget.ts");
 
 test.beforeAll(() => {
-	// Always rebuild the bundle to avoid stale-mtime issues across worktree
-	// switches (e.g. CI checks out the branch with bundle older than source
-	// but newer than entry). esbuild is fast (~200ms), so the cost is
-	// negligible compared to the flakes a stale bundle causes.
-	execSync(
-		[
-			`npx esbuild ${ENTRY}`,
-			"--bundle --format=iife --target=es2022",
-			`--outfile=${BUNDLE}`,
-			"--tsconfig=tsconfig.web.json",
-			"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-			"--define:import.meta.url='\"http://localhost/\"'",
-		].join(" "),
-		{ stdio: "pipe" },
-	);
+	// Atomic mtime-gated rebuild via shared helper. Bundle path is shared with
+	// `git-status-widget-states.spec.ts` so parallel workers must not observe
+	// half-written output — `buildBundle` writes to a tmp file then renames.
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, WIDGET_SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;
