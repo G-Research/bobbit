@@ -1,7 +1,7 @@
 name: edit
 description: "Exact-text replace in a file. First match only."
 summary: "Replace exact text in a file"
-params: [path, edits]
+params: [path, oldText, newText]
 provider:
   type: builtin
   tool: edit
