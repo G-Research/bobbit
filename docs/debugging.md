@@ -935,7 +935,7 @@ Two related Lesson 4.x fixes in `src/server/agent/verification-harness.ts` + `sr
 
 Wired into both the LLM-review reminder path and the agent-QA reminder path in `verification-harness.ts`. The resume path (`_tryResumeFromSession`) keeps the legacy terse reminder because it doesn't have access to rebuild the kickoff.
 
-Tests: `tests/restart-interrupt-suppression.test.ts`, `tests/transient-error-restart-context-loss.test.ts`, `tests/context-rich-reminder.test.ts`.
+Tests: `tests/restart-interrupt-suppression.test.ts`, `tests/transient-error-restart-context-loss.test.ts`, `tests/build-context-rich-reminder.test.ts`.
 
 ## Auto-revive dead RPC bridges + auto-archive zombie sessions
 

@@ -13,9 +13,8 @@ docs: >-
   Optional parameters: cwd (project path the goal runs against — defaults to
   the registered project for this session), workflow (workflow id to use; see
   GET /api/workflows?projectId=... for available workflows; if omitted, the
-  user picks one in the proposal panel), options (object: parentGoalId for
-  nested goals, suggestedRole for hint to the team-lead, maxConcurrentChildren
-  for parent goals, divergencePolicy, etc.).
+  user picks one in the proposal panel), options (object: e.g. suggestedRole
+  to hint a team-lead role).
 
   Custom workflows: this tool only references existing workflows by id. To
   CREATE or update a workflow before proposing a goal that uses it, use
