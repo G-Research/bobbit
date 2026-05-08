@@ -70,7 +70,7 @@ function readGroupPolicies(gp?: GroupPolicyProvider): Record<string, GrantPolicy
 }
 
 /** Cached output of `computeEffectiveAllowedTools`. Keyed by a content hash of role/policy/tool inputs. */
-const allowedToolsCache = new Map<string, string[]>();
+const allowedToolsCache = new Map<string, EffectiveTool[]>();
 /** Cached output of `computeToolPolicies`. */
 const policiesCache = new Map<string, Record<string, ToolPolicyEntry>>();
 /** Cached result of `writeMcpProxyExtensions` — value must be validated via fs.existsSync before return. */
@@ -264,25 +264,78 @@ export function mcpPolicyPrefix(toolName: string): string | undefined {
 }
 
 /**
+ * Tagged tool name. The activation pipeline must distinguish between two
+ * fundamentally different kinds of tools that look identical at the string
+ * level:
+ *
+ *   - `yaml`: a builtin or bobbit-extension tool with a YAML provider
+ *     definition under `defaults/tools/<group>/*.yaml`. Resolvable through
+ *     `ToolManager.getToolProviders()`. Includes `mcp_describe` (which is
+ *     a builtin discovery tool with its own YAML).
+ *   - `mcp`:  an MCP meta-tool name (`mcp_<server>` or
+ *     `mcp_<server>__<sub>`) — NOT registered in the YAML provider registry.
+ *     Served externally via `writeMcpProxyExtensions()` whose generated
+ *     extension files are passed to `computeToolActivationArgs()` as the
+ *     `mcpExtensionPaths` argument and emitted as `--extension <path>` flags.
+ *
+ * Each consumer must dispatch on `kind`. Yaml entries flow through the
+ * provider registry; mcp entries are no-ops there. The `EffectiveTool[]`
+ * shape removes the implicit name-shape detection that previously caused
+ * `computeToolActivationArgs` to log spurious `"has no provider"` warnings
+ * for every MCP meta-tool on every session spawn.
+ */
+export type EffectiveTool =
+	| { kind: "yaml"; name: string }
+	| { kind: "mcp"; name: string };
+
+/**
+ * Tag a flat tool name into an `EffectiveTool` at the boundary where a
+ * caller has only a `string[]` (e.g. session restoration, where
+ * `session.allowedTools` is persisted as plain strings, or grant flows where
+ * the user grants a tool by name). Centralised so the kind-detection logic
+ * lives in exactly one place.
+ *
+ * Resolution order:
+ *   1. If `toolManager` knows a provider for `name` → `yaml` (covers
+ *      builtin/extension tools AND `mcp_describe`).
+ *   2. Otherwise, if `name` parses as an MCP meta-tool shape → `mcp`.
+ *   3. Otherwise → `yaml` (so unknown-tool typos still surface through the
+ *      provider-lookup `"has no provider"` warn in `computeToolActivationArgs`).
+ */
+export function tagAllowedTool(name: string, toolManager?: ToolManager): EffectiveTool {
+	if (toolManager) {
+		try {
+			if (toolManager.getToolProviders().has(name)) return { kind: "yaml", name };
+		} catch { /* providers unavailable; fall through */ }
+	}
+	if (mcpPolicyKeys(name)) return { kind: "mcp", name };
+	return { kind: "yaml", name };
+}
+
+/**
  * Compute the effective allowed tools for a role by running every known tool
  * through the full resolveGrantPolicy cascade. Tools whose resolved policy
  * is `allow` OR `ask` are returned (both need to be registered — the guard
  * controls access for `ask` tools).
  *
  * Only `never` tools are excluded.
+ *
+ * Returns `EffectiveTool[]` — each entry is tagged at the producer with the
+ * kind that determines downstream resolution (`yaml` via provider registry,
+ * `mcp` via `mcpExtensionPaths`). See `EffectiveTool` for the contract.
  */
 export function computeEffectiveAllowedTools(
 	toolManager: ToolManager,
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	mcpManager?: { getToolInfos(): Array<{ name: string; group: string; serverName: string }> },
-): string[] {
+): EffectiveTool[] {
 	const availableTools = toolManager.getAvailableTools();
 	const mcpInfos = mcpManager?.getToolInfos() ?? [];
 
 	// Content-based fingerprint: same inputs → same cache key → same output.
 	const cacheKey = hashKey({
-		kind: 'effectiveAllowedTools_v2',
+		kind: 'effectiveAllowedTools_v3',
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		tools: availableTools.map(t => [t.name, t.group, t.grantPolicy ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
@@ -291,16 +344,16 @@ export function computeEffectiveAllowedTools(
 	const cached = allowedToolsCache.get(cacheKey);
 	if (cached) return cached.slice();
 
-	const result: string[] = [];
+	const result: EffectiveTool[] = [];
 	const seen = new Set<string>();
 
-	// Builtin + bobbit-extension tools
+	// Builtin + bobbit-extension tools — always `kind: "yaml"` (have providers).
 	for (const tool of availableTools) {
 		if (seen.has(tool.name.toLowerCase())) continue;
 		seen.add(tool.name.toLowerCase());
 		const policy = resolveGrantPolicy(tool.name, tool.group, role, toolManager, groupPolicyStore);
 		// Include tools with allow OR ask policy (not never)
-		if (!isNeverPolicy(policy)) result.push(tool.name);
+		if (!isNeverPolicy(policy)) result.push({ kind: "yaml", name: tool.name });
 	}
 
 	// MCP tools — collapse per-op entries into one meta-tool per (server, sub-namespace).
@@ -325,13 +378,14 @@ export function computeEffectiveAllowedTools(
 		const metaName = makeMetaToolName(server, sub);
 		if (seen.has(metaName.toLowerCase())) continue;
 		seen.add(metaName.toLowerCase());
-		result.push(metaName);
+		result.push({ kind: "mcp", name: metaName });
 	}
 	// Always include the discovery tool when any MCP server is registered,
 	// unless policy denies it (role override or group policy on `mcp_describe`).
+	// `mcp_describe` is a YAML-backed builtin discovery tool, NOT an MCP meta-tool.
 	if (mcpInfos.length > 0 && !seen.has('mcp_describe')) {
 		const policy = resolveGrantPolicy('mcp_describe', 'MCP', role, toolManager, groupPolicyStore);
-		if (!isNeverPolicy(policy)) result.push('mcp_describe');
+		if (!isNeverPolicy(policy)) result.push({ kind: "yaml", name: 'mcp_describe' });
 	}
 
 	allowedToolsCache.set(cacheKey, result.slice());
@@ -910,7 +964,7 @@ export function writeMcpProxyExtensions(
  *
  * No leaked tool detection — the tool_call guard extension handles access control.
  */
-export function computeToolActivationArgs(allowedTools?: string[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[]): ToolActivationResult {
+export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[]): ToolActivationResult {
 	const args: string[] = [];
 
 	if (!toolManager) {
@@ -971,14 +1025,21 @@ export function computeToolActivationArgs(allowedTools?: string[], toolManager?:
 		return { args };
 	}
 
-	// Restricted set — resolve each allowed tool via its provider
+	// Restricted set — resolve each allowed tool via its provider.
+	// `kind:"mcp"` entries are satisfied externally via `mcpExtensionPaths` and
+	// MUST NOT be looked up in the YAML provider registry — doing so would
+	// trigger a spurious `"has no provider"` warn for every MCP meta-tool on
+	// every session spawn. The `"has no provider"` branch below now fires only
+	// for genuinely unknown YAML tool names (typos in role allowedTools, etc.).
 	const activeBaseTools: string[] = [];
 	const neededExtensions = new Set<string>();
 
-	for (const toolName of allowedTools) {
+	for (const entry of allowedTools) {
+		if (entry.kind === "mcp") continue; // served via mcpExtensionPaths below
+		const toolName = entry.name;
 		const provider = providers.get(toolName);
 		if (!provider) {
-			// Unknown tool — log warning and skip
+			// Unknown YAML tool — log warning and skip
 			console.warn(`[tool-activation] Tool "${toolName}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
 			continue;
 		}

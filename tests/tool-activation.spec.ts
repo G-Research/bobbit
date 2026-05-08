@@ -1,6 +1,11 @@
 import { test, expect } from "@playwright/test";
-import { computeToolActivationArgs } from "../src/server/agent/tool-activation.ts";
+import { computeToolActivationArgs, type EffectiveTool } from "../src/server/agent/tool-activation.ts";
 import type { ToolProvider } from "../src/server/agent/tool-manager.ts";
+
+/** Tag flat names as `kind: "yaml"` — these tests don't exercise MCP meta-tools. */
+function yamlTools(...names: string[]): EffectiveTool[] {
+	return names.map(name => ({ kind: "yaml" as const, name }));
+}
 
 /**
  * Unit tests for computeToolActivationArgs — the logic that maps role tool
@@ -93,13 +98,13 @@ test.describe("computeToolActivationArgs", () => {
 	test("empty allowedTools array — same as undefined (all tools)", () => {
 		const tm = mockToolManager(standardProviders());
 		const withUndefined = computeToolActivationArgs(undefined, tm);
-		const withEmpty = computeToolActivationArgs([], tm);
+		const withEmpty = computeToolActivationArgs([] as EffectiveTool[], tm);
 		expect(withEmpty.args).toEqual(withUndefined.args);
 	});
 
 	test("restricted to builtins only — no extension flags", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["read", "write", "edit"], tm);
+		const result = computeToolActivationArgs(yamlTools("read", "write", "edit"), tm);
 
 		const toolsIdx = result.args.indexOf("--tools");
 		expect(toolsIdx).toBeGreaterThanOrEqual(0);
@@ -113,7 +118,7 @@ test.describe("computeToolActivationArgs", () => {
 
 	test("restricted to bobbit extensions only — uses --no-tools", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["web_search", "delegate"], tm);
+		const result = computeToolActivationArgs(yamlTools("web_search", "delegate"), tm);
 
 		// No builtins requested → --no-tools
 		expect(result.args).toContain("--no-tools");
@@ -130,7 +135,7 @@ test.describe("computeToolActivationArgs", () => {
 
 	test("mixed builtins + bobbit extensions", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["read", "bash", "web_fetch", "browser_navigate"], tm);
+		const result = computeToolActivationArgs(yamlTools("read", "bash", "web_fetch", "browser_navigate"), tm);
 
 		const toolsIdx = result.args.indexOf("--tools");
 		expect(toolsIdx).toBeGreaterThanOrEqual(0);
@@ -147,7 +152,7 @@ test.describe("computeToolActivationArgs", () => {
 
 	test("deduplicates extension paths — web_search + web_fetch share web/extension.ts", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["web_search", "web_fetch"], tm);
+		const result = computeToolActivationArgs(yamlTools("web_search", "web_fetch"), tm);
 
 		const extPaths = result.args
 			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
@@ -158,7 +163,7 @@ test.describe("computeToolActivationArgs", () => {
 
 	test("unknown tools are skipped", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["read", "nonexistent_tool"], tm);
+		const result = computeToolActivationArgs(yamlTools("read", "nonexistent_tool"), tm);
 
 		const toolsIdx = result.args.indexOf("--tools");
 		const toolsCsv = result.args[toolsIdx + 1];
@@ -169,7 +174,7 @@ test.describe("computeToolActivationArgs", () => {
 
 	test("bobbit-extension tools are included as --extension flags", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["read", "task_create", "team_spawn"], tm);
+		const result = computeToolActivationArgs(yamlTools("read", "task_create", "team_spawn"), tm);
 
 		const toolsIdx = result.args.indexOf("--tools");
 		const toolsCsv = result.args[toolsIdx + 1];
@@ -185,7 +190,7 @@ test.describe("computeToolActivationArgs", () => {
 	test("shared extensions register all their tools — bash_bg includes bash via shell/extension.ts", () => {
 		const tm = mockToolManager(standardProviders());
 		// Allow bash_bg — both bash and bash_bg share shell/extension.ts
-		const result = computeToolActivationArgs(["read", "bash_bg"], tm);
+		const result = computeToolActivationArgs(yamlTools("read", "bash_bg"), tm);
 
 		// Guard extension handles access control, no leaked tool detection needed
 		const extPaths = result.args
@@ -197,7 +202,7 @@ test.describe("computeToolActivationArgs", () => {
 	test("shared extensions register all their tools — web_search includes web_fetch", () => {
 		const tm = mockToolManager(standardProviders());
 		// Allow web_search — both share web/extension.ts
-		const result = computeToolActivationArgs(["read", "web_search"], tm);
+		const result = computeToolActivationArgs(yamlTools("read", "web_search"), tm);
 
 		const extPaths = result.args
 			.filter((_a: string, i: number) => i > 0 && result.args[i - 1] === "--extension")
@@ -207,7 +212,7 @@ test.describe("computeToolActivationArgs", () => {
 
 	test("bash-only role — bash excluded from --tools, gets --no-tools", () => {
 		const tm = mockToolManager(standardProviders());
-		const result = computeToolActivationArgs(["bash"], tm);
+		const result = computeToolActivationArgs(yamlTools("bash"), tm);
 
 		// bash is excluded (loaded by rpc-bridge), no other builtins → --no-tools
 		expect(result.args).toContain("--no-tools");
