@@ -129,9 +129,11 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`.
 - **`bash_bg wait` not interrupted by steer** — `BgProcessManager.waits` registry; `abortAllWaits()` from `deliverLiveSteer`.
 - **Streaming dedup/reorder** — `seq`+`ts` envelope, `{type:"resume", fromSeq}` on reconnect.
+- **Bypass class for the seq envelope** — see "Compaction frames or synthetic agent_end lost on reconnect" below; only `{type:"event"}` frames go through `EventBuffer.push()`.
 - **WS overflow guard** — `decideOverflowAction` in `src/server/ws/ws-overflow-guard.ts`.
 - **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`.
 - **Stale messages / dups / out-of-order widgets on session navigate** — reducer in `src/app/message-reducer.ts`.
+- **Compaction frames or synthetic agent_end lost on reconnect** — every `{type:"event"}` frame must route through `emitSessionEvent` (not the bare `broadcast()` in `src/server/ws/handler.ts`); only event frames are seq-stamped via `EventBuffer.push()`. Non-event frames (`task_changed`, `state`, `client_joined`) intentionally bypass.
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Stale draft resurrection** — `SessionStore.setDraft()` rejects older `gen`.
