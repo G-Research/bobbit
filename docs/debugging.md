@@ -741,6 +741,16 @@ Check the WS `proposal_update` frame fired by the `edit_proposal` handler and th
 
 `POST /api/image-generation/generate` returns `400` for malformed input and `500 { error }` for provider-side failures. It must never return `502` or `503` — those indicate a regression in the route handler.
 
+## Goal `prUrl` removed
+
+**Symptom:** an agent or external script PUTs `{prUrl: "..."}` to `/api/goals/:id` and the field doesn't appear on the next `GET`.
+
+**Resolution:** that's expected — `Goal.prUrl` was removed; `PrStatusStore` (`src/server/agent/pr-status-store.ts`) is the single source of truth for goal PR URLs. `PUT /api/goals/:id` silently ignores any `prUrl` field. Read the URL via `GET /api/goals/:id/pr-status` (cached entry populated by `getCachedPrStatus()` running `gh pr list --head <branch>`).
+
+**Re-attempt context missing PR URL:** `buildReattemptContext(goal, prStatusStore)` in `src/server/agent/goal-assistant.ts` reads `prStatusStore.get(goal.id)?.url`. If the `**PR URL:**` line is absent from a re-attempt prompt, check that the cache file (`<stateDir>/pr-status-cache.json`) has an entry for the original goal id. The store is sticky — once a PR is found by branch name it persists across restarts, so an archived/merged goal's last-known URL still surfaces.
+
+The team-lead role no longer PUTs `prUrl` after `gh pr create` (the curl-PUT step was removed from `defaults/roles/team-lead.yaml`). All user-visible PR surfaces (sidebar badge, dashboard widget, `GitStatusWidget` link, merge button, session-footer status) already read from `PrStatusStore` / its client mirror, so behaviour is unchanged.
+
 ## Header toast vs proposal toast testid collision
 
 The session-header toast (e.g. "Link copied" from the Copy-link button) uses `showHeaderToast()` and `data-testid="header-toast"`. The proposal-panel toast uses `showProposalToast()` and `data-testid="proposal-toast"`. Two separate state slots and two separate `<div class="review-toast">` instances in `src/app/render.ts` — do NOT collapse them onto a shared testid; E2E selectors in `tests/e2e/ui/copy-session-link.spec.ts` and `tests/e2e/ui/proposal-inline-comments.spec.ts` would alias.
@@ -808,3 +818,18 @@ The `isUserVisibleActivity` filter in `src/server/agent/session-manager.ts` deci
 ## `findByCwd` returns undefined for a symlinked cwd
 
 Should not happen post-fix. `ProjectRegistry.findByCwd()` canonicalises both the registered `rootPath` and the incoming `cwd` via `realpathSync` (with a try/catch fallback to the textual path on EPERM/ENOENT — Windows raises EPERM on some junctions) before the prefix comparison. If a project is registered at the canonical path and a session whose `cwd` reaches the server through a symlink fails to resolve, verify the canonicalisation block in `src/server/agent/project-registry.ts::findByCwd` is still in place and the fallback isn't swallowing real errors. Note `getByPath()` is intentionally NOT canonicalised — that's the duplicate-path guard at registration, a different concern from runtime cwd resolution.
+
+## Modal shows only "Failed: 400" with no description
+
+Symptom: triggering an action (e.g. create goal) produces a modal whose body is just "Failed: 400" or "Failed to create goal: 400" — no description, no code, no stack.
+
+Diagnosis: the API wrapper in `src/app/api.ts` (or `src/app/session-manager.ts`) is dropping the structured server error body. The reference pattern is the throw side parsing `await res.json().catch(() => ({}))` and attaching `data.code` and `data.stack` to the thrown `Error`, plus the catch side reading both back off the error object and forwarding them to `showConnectionError(title, msg, { code, stack })` in `src/app/dialogs.ts`. Both halves must be applied together — fixing only one half drops the structured info.
+
+Server side: confirm the handler whose response surfaced is using `jsonError(status, err, extra?)` (defined in `src/server/server.ts`) for caught exceptions, not literal `json({ error: String(err) }, ...)` or `json({ error: err.message }, ...)`. Validation responses with literal strings (e.g. `"Missing title"`) intentionally stay as `json({ error: "..." }, ...)` — they have no useful stack.
+
+Fix path:
+
+- `src/app/api.ts` wrapper: replace `throw new Error(\`Failed: ${res.status}\`)` with the parse-and-attach pattern; update the catch block to read `code`/`stack` off the error and pass them to `showConnectionError`.
+- `src/server/server.ts` handler: convert `catch (err) { json({ error: String(err) }, status); }` to `catch (err) { jsonError(status, err); }`.
+- `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders the message + optional code + collapsible stack disclosure when both halves are wired correctly.
+- The background polling site in `refreshSessions()` is intentionally silent and does NOT surface a modal — failures there are dropped on purpose.

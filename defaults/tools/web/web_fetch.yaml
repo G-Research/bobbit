@@ -1,6 +1,7 @@
 name: web_fetch
-description: "Fetch a URL and extract text"
-summary: "Fetch a URL and extract readable text via curl."
+description: "Curl-based fetch; readable text only; no JS"
+summary: "Fetch a URL and extract text"
+params: [url, maxLength?]
 provider:
   type: bobbit-extension
   extension: extension.ts

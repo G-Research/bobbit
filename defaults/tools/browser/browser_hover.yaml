@@ -1,6 +1,7 @@
 name: browser_hover
-description: "Hover over an element by CSS selector"
-summary: "Hover the mouse over an element identified by CSS selector."
+description: "Hover mouse over first matching element"
+summary: "Hover an element by CSS selector"
+params: [selector]
 provider:
   type: bobbit-extension
   extension: extension.ts

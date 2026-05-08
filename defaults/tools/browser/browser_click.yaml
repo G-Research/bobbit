@@ -1,6 +1,7 @@
 name: browser_click
-description: "Click an element by CSS selector"
-summary: "Click an element in the headless browser by CSS selector."
+description: "Click first matching visible element in headless browser"
+summary: "Click an element by CSS selector"
+params: [selector]
 provider:
   type: bobbit-extension
   extension: extension.ts

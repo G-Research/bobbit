@@ -1,6 +1,7 @@
 name: review_open
-description: "Open a markdown document in the review pane for inline commenting and annotation"
-summary: "Open markdown in the review pane for text annotation and commenting."
+description: "Open inline or file markdown for annotation/comments"
+summary: "Open markdown in the review pane"
+params: [markdown?, file?, title?, replace?]
 provider:
   type: bobbit-extension
   extension: extension.ts

@@ -391,7 +391,7 @@ workflows:
         name: Documentation
         depends_on: [implementation]
         verify:
-          - { name: "Documentation coverage", type: llm-review, prompt: "Confirm every user-facing change is documented in AGENTS.md / docs/." }
+          - { name: "Documentation coverage", type: llm-review, prompt: "Confirm every user-facing change is documented. Prefer docs/ for detailed behavior and architecture, README.md for top-level orientation, and AGENTS.md only for agent-operational guidance such as repo navigation, recipes, debugging, and verification flow." }
 
       - id: ready-to-merge
         name: Ready to Merge

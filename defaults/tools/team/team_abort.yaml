@@ -1,6 +1,7 @@
 name: team_abort
-description: "Force-abort a stuck agent that won't respond to steering"
-summary: "Terminate the entire goal — kills all agents and cleans up worktrees."
+description: "Goal-level abort; cleans up all agent worktrees"
+summary: "Terminate goal; kill all agents"
+params: [session_id]
 provider:
   type: bobbit-extension
   extension: extension.ts

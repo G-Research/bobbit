@@ -1980,6 +1980,37 @@ function projectProposalPanel() {
 	});
 
 	if (!proposal) {
+		const sessId = activeSessionId();
+		const accepted = sessId ? state.projectProposalAcceptedBySessionId[sessId] : false;
+		if (accepted && sessId) {
+			const handleTerminate = async () => {
+				const { confirmAction } = await import("./dialogs.js");
+				const ok = await confirmAction(
+					"Terminate Project Assistant",
+					"End this assistant session and return to the dashboard?",
+					"Terminate",
+					true,
+				);
+				if (!ok) return;
+				const { terminateProjectAssistantSession } = await import("./session-manager.js");
+				await terminateProjectAssistantSession(sessId);
+			};
+			return html`
+				<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-state="accepted">
+					<div class="flex-1 flex items-center justify-center p-5">
+						<div class="flex flex-col items-center gap-3 text-center max-w-sm">
+							<div class="text-base font-medium" data-testid="project-changes-saved-heading">Changes Saved</div>
+							<p class="text-sm text-muted-foreground">Your project configuration has been updated.</p>
+							${Button({
+								variant: "default",
+								onClick: handleTerminate,
+								children: "Terminate Project Assistant",
+							})}
+						</div>
+					</div>
+				</div>
+			`;
+		}
 		return html`
 			<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
@@ -2818,7 +2849,7 @@ export function doRenderApp(): void {
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts allow-same-origin"
-					src=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}#mtime=${v}`}
+					src=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`}
 				></iframe>
 			</div>
 		`;
@@ -2872,6 +2903,24 @@ export function doRenderApp(): void {
 			></review-pane>
 		</div>
 	`;
+
+	const previewControlButtons = () => {
+		const sid = activeSessionId() || "";
+		const entry = state.previewPanelEntry || "";
+		return html`
+			<a
+				href=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`}
+				target="_blank"
+				rel="noopener noreferrer"
+				class="text-muted-foreground hover:text-foreground"
+				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
+				title="Open preview in new tab"
+			>${icon(ExternalLink, "sm")}</a>
+			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Refresh preview">
+				${icon(RotateCw, "sm")}
+			</button>
+		`;
+	};
 
 	const unifiedPreviewPanel = () => {
 		// Auto-correct tab if the active tab's content is no longer available
@@ -2927,18 +2976,7 @@ export function doRenderApp(): void {
 						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
-						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? html`
-						<a
-							href=${`/preview/${encodeURIComponent(activeSessionId() || "")}/${encodeURIComponent(state.previewPanelEntry)}`}
-							target="_blank"
-							rel="noopener noreferrer"
-							class="text-muted-foreground hover:text-foreground"
-							style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
-							title="Open preview in new tab"
-						>${icon(ExternalLink, "sm")}</a>
-						<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Refresh preview">
-							${icon(RotateCw, "sm")}
-						</button>` : ""}
+						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
 							${icon(Maximize2, "sm")}
@@ -3061,9 +3099,12 @@ export function doRenderApp(): void {
 						<!-- Fullscreen preview header -->
 						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
 							<span class="text-xs font-medium text-muted-foreground">Preview</span>
-							<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Exit fullscreen (Esc)">
-								${icon(Minimize2, "sm")}
-							</button>
+							<div class="flex items-center gap-0.5">
+								${state.previewPanelEntry ? previewControlButtons() : ""}
+								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Exit fullscreen (Esc)">
+									${icon(Minimize2, "sm")}
+								</button>
+							</div>
 						</div>
 						<!-- Preview iframe fills available space -->
 						${htmlPreviewContent()}

@@ -1,6 +1,7 @@
 name: propose_tool
-description: "Submit a tool proposal for user review"
-summary: "Propose a custom tool with tool name, action, and content."
+description: "Submit tool proposal with tool name, action, content"
+summary: "Propose a custom tool"
+params: [tool, action, content]
 provider:
   type: bobbit-extension
   extension: extension.ts

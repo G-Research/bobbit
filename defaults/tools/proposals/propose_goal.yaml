@@ -1,6 +1,7 @@
 name: propose_goal
-description: "Submit a goal proposal for user review"
-summary: "Propose a goal with title, spec, workflow, and optional fields."
+description: "Submit goal proposal with title, spec, workflow"
+summary: "Propose a goal for user review"
+params: [title, spec, cwd?, workflow?, options?]
 provider:
   type: bobbit-extension
   extension: extension.ts

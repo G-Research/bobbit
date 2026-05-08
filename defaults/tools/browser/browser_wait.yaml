@@ -1,6 +1,7 @@
 name: browser_wait
-description: "Wait for an element to appear"
-summary: "Wait for an element matching a CSS selector to appear (default 10s timeout)."
+description: "Wait for selector to become visible (default 10s)"
+summary: "Wait for an element to appear"
+params: [selector, timeout?]
 provider:
   type: bobbit-extension
   extension: extension.ts

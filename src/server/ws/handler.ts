@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
+import { emitSessionEvent } from "../agent/session-manager.js";
 import { spliceInFlightMessage } from "../agent/splice-inflight-message.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
@@ -549,7 +550,7 @@ export function handleWebSocketConnection(
 					// Fire-and-forget: don't block the WS message loop.
 					// The async IIFE handles the full lifecycle.
 					session.isCompacting = true;
-					broadcast(session.clients, { type: "event", data: { type: "compaction_start" } });
+					emitSessionEvent(session, { type: "compaction_start" });
 					(async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
@@ -561,13 +562,13 @@ export function handleWebSocketConnection(
 							// the placeholder when processing the refreshed messages.
 							// Include tokensBefore so the UI can show how much was saved.
 							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
-							broadcast(session.clients, { type: "event", data: { type: "compaction_end", success: true, tokensBefore } });
+							emitSessionEvent(session, { type: "compaction_end", success: true, tokensBefore });
 							// Refresh messages and state (updated context tokens)
 							await sessionManager.refreshAfterCompaction(session);
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							session.isCompacting = false;
-							broadcast(session.clients, { type: "event", data: { type: "compaction_end", success: false, error: err.message } });
+							emitSessionEvent(session, { type: "compaction_end", success: false, error: err.message });
 						}
 					})().catch((err) => {
 						console.error(`[ws-handler] Unexpected compact error for session ${sessionId}:`, err);

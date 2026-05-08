@@ -44,6 +44,7 @@ import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
+import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
@@ -433,6 +434,8 @@ export interface SessionManagerOptions {
 	projectContextManager?: ProjectContextManager;
 	/** Config cascade for three-layer resolution (builtin → server → project) */
 	configCascade?: import("./config-cascade.js").ConfigCascade;
+	/** PR status store — single source of truth for goal PR URLs. */
+	prStatusStore?: PrStatusStore;
 }
 
 export class SessionManager {
@@ -452,6 +455,7 @@ export class SessionManager {
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
 	private projectConfigStore?: import("./project-config-store.js").ProjectConfigStore;
 	private projectContextManager: ProjectContextManager | null = null;
+	private prStatusStore: PrStatusStore | null = null;
 	private mcpManager: McpManager | null = null;
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
@@ -652,6 +656,7 @@ export class SessionManager {
 		this.preferencesStore = options?.preferencesStore;
 		this.projectConfigStore = options?.projectConfigStore;
 		this.projectContextManager = options?.projectContextManager ?? null;
+		this.prStatusStore = options?.prStatusStore ?? null;
 		if (this.projectContextManager) {
 			// All store resolution goes through PCM — no default fields needed.
 		} else {
@@ -663,6 +668,10 @@ export class SessionManager {
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
 			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
 			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
+			// Empty-but-real PR status store for in-process E2E harnesses that
+			// construct SessionManager without a full ProjectContextManager but
+			// may still hit re-attempt code paths.
+			if (!this.prStatusStore) this.prStatusStore = new PrStatusStore(stateDir);
 		}
 
 		// Start the status heartbeat. Runs for the lifetime of this manager;
@@ -874,6 +883,7 @@ export class SessionManager {
 			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
 			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
+			prStatusStore: this.prStatusStore!,
 		};
 	}
 
@@ -1266,7 +1276,7 @@ export class SessionManager {
 				if (reattemptId) {
 					const origGoal = this.resolveGoal(reattemptId);
 					if (origGoal) {
-						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, this.prStatusStore!);
 					}
 				}
 			}
@@ -2620,7 +2630,7 @@ export class SessionManager {
 				if (ps.reattemptGoalId) {
 					const origGoal = this.resolveGoal(ps.reattemptGoalId);
 					if (origGoal) {
-						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+						assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, this.prStatusStore!);
 					}
 				}
 			}
@@ -4842,7 +4852,7 @@ export class SessionManager {
 		this._reconcileAfterAbort(session);
 
 		// Emit agent_end so clients know streaming stopped
-		broadcast(session.clients, { type: "event", data: { type: "agent_end", messages: [] } });
+		emitSessionEvent(session, { type: "agent_end", messages: [] });
 		broadcastStatus(session, "idle");
 
 		// Restart the agent process
