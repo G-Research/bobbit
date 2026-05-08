@@ -20,7 +20,7 @@ import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import type { Workflow } from "./agent/workflow-store.js";
-import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
+import { buildDefaultWorkflows } from "./state-migration/seed-default-workflows.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -3194,7 +3194,6 @@ async function handleApiRoute(
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
-					seeds.parent = buildParentWorkflow();
 					for (const wf of Object.values(seeds)) {
 						targetCtx.workflowStore.put(wf as unknown as Workflow);
 					}
