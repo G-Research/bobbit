@@ -1980,6 +1980,37 @@ function projectProposalPanel() {
 	});
 
 	if (!proposal) {
+		const sessId = activeSessionId();
+		const accepted = sessId ? state.projectProposalAcceptedBySessionId[sessId] : false;
+		if (accepted && sessId) {
+			const handleTerminate = async () => {
+				const { confirmAction } = await import("./dialogs.js");
+				const ok = await confirmAction(
+					"Terminate Project Assistant",
+					"End this assistant session and return to the dashboard?",
+					"Terminate",
+					true,
+				);
+				if (!ok) return;
+				const { terminateProjectAssistantSession } = await import("./session-manager.js");
+				await terminateProjectAssistantSession(sessId);
+			};
+			return html`
+				<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-state="accepted">
+					<div class="flex-1 flex items-center justify-center p-5">
+						<div class="flex flex-col items-center gap-3 text-center max-w-sm">
+							<div class="text-base font-medium" data-testid="project-changes-saved-heading">Changes Saved</div>
+							<p class="text-sm text-muted-foreground">Your project configuration has been updated.</p>
+							${Button({
+								variant: "default",
+								onClick: handleTerminate,
+								children: "Terminate Project Assistant",
+							})}
+						</div>
+					</div>
+				</div>
+			`;
+		}
 		return html`
 			<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">

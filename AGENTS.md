@@ -110,6 +110,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Edit a proposal mid-session** → `view_proposal(type)` / `edit_proposal(type, old, new)`. Per-rev snapshots under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/`. See [docs/design/editable-proposals.md](docs/design/editable-proposals.md).
 - **Dismiss/restore invariant for proposal panels** → `goalDraft.restore`/`roleDraft.restore`/`projectDraft.restore` in `src/app/session-manager.ts` gate rehydration on `isProposalDismissedTyped`. Dismiss does NOT delete the on-disk draft. Only `goal`/`role`/`project` persist drafts; `staff`/`tool`/`workflow` are transient.
 - **Header toast vs proposal toast testid collision** → `header-toast` vs `proposal-toast`; two slots in `src/app/render.ts`.
+- **Project-proposal "Changes Saved" state after Apply Changes (registered mode)** → `state.projectProposalAcceptedBySessionId` flag, set in `acceptRegisteredProjectProposal()`, persisted via `projectDraft.serialize/restore`, cleared in the unified `onProposal` callback and all `activeProposals.project` cleanup sites. Terminate button shares `terminateProjectAssistantSession()` with the provisional path. See [docs/design/project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
 
 ### Worktree (operational)
 - **Pool worktree placed under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** → `WorktreePool` constructor in `src/server/agent/worktree-pool.ts` resolves `opts.repoPath` to git toplevel; both `initWorktreePoolForProject` sites in `src/server/server.ts` also resolve. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
@@ -178,6 +179,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Proposal panel empty after reload** — `_bufferedProposalEvents` in `src/app/remote-agent.ts`.
 - **Goal `prUrl` field gone** — `PrStatusStore` (`src/server/agent/pr-status-store.ts`) is single source of truth. `buildReattemptContext(goal, prStatusStore)` reads `prStatusStore.get(goal.id)?.url`. `PUT /api/goals/:id` ignores any `prUrl`.
 - **Stale project-proposal panel** — shallow-merge in `onProjectProposal`.
+- **"Changes Saved" view doesn't appear after Apply Changes / disappears on reload** — `state.projectProposalAcceptedBySessionId[sessionId]` must be set by `acceptRegisteredProjectProposal()` *and* `saveProjectDraft(sessionId)` called (not `deleteProjectDraft`), so `projectDraft.restore` re-hydrates the flag. See [docs/design/project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
 - **Dismissed proposal reappears after reload** — `goalDraft.restore` / `roleDraft.restore` must consult `isProposalDismissedTyped`.
 - **"No project selected for this goal" toast in re-attempt assistant** — `goalProposalPanel()` / `goalPreviewPanel()` in `src/app/render.ts`.
 - **Page chunk fails to load on first navigation** — `lazyPage()` in `src/app/render.ts`.
