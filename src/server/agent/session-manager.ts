@@ -4806,7 +4806,7 @@ export class SessionManager {
 		this._reconcileAfterAbort(session);
 
 		// Emit agent_end so clients know streaming stopped
-		broadcast(session.clients, { type: "event", data: { type: "agent_end", messages: [] } });
+		emitSessionEvent(session, { type: "agent_end", messages: [] });
 		broadcastStatus(session, "idle");
 
 		// Restart the agent process
