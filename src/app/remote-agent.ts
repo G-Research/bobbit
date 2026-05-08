@@ -140,8 +140,13 @@ export class RemoteAgent {
 	/** Monotonic statusVersion of the last applied `session_status` frame.
 	 *  Used to drop heartbeats / duplicates (`<=` lastApplied), apply normal
 	 *  increments (`==` last+1), and request a `status_resync` on gaps (`>` last+1).
-	 *  Reset to 0 on `reset()`. See docs/design/unify-session-status.md §4.2. */
-	private _lastStatusVersion = 0;
+	 *  Initialised to -1 (and reset to -1 on `reset()`) so the FIRST frame on a
+	 *  fresh connection is always applied — the server creates worktree-backed
+	 *  sessions with `statusVersion: 0`, and treating `0 <= 0` as a duplicate
+	 *  would leave `_state.status` stuck at the constructor default "idle",
+	 *  preventing the preparing-UX banner from ever rendering.
+	 *  See docs/design/unify-session-status.md §4.2. */
+	private _lastStatusVersion = -1;
 
 	// Auto-reconnect state
 	private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -781,7 +786,7 @@ export class RemoteAgent {
 		this._state.streamingMessage = null;
 		this.streamingMessageId = undefined;
 		this._state.status = "idle";
-		this._lastStatusVersion = 0;
+		this._lastStatusVersion = -1;
 		this._isAborting = false;
 		this._state.pendingToolCalls = new Set();
 		this._state.error = undefined;

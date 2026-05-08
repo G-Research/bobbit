@@ -1037,7 +1037,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				}
 				// Trigger Lit re-render for aborting indicator — isAborting is read
 				// from the session object (same reference), so Lit won't detect the change.
-				if ((status === "aborting" || status === "idle") && state.chatPanel?.agentInterface) {
+				if (
+					(status === "aborting" ||
+						status === "idle" ||
+						status === "preparing" ||
+						status === "starting") &&
+					state.chatPanel?.agentInterface
+				) {
 					state.chatPanel.agentInterface.requestUpdate();
 				}
 			}

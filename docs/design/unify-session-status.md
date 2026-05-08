@@ -646,3 +646,10 @@ The landing diff matches the design above. A few small deviations from the as-de
 - **`_isAborting` mirror retained.** Section §8's optional further deletion (collapse `_isAborting` into a getter) was deferred — the field is updated in lock-step with `_state.status` inside the single `session_status` writer, so it cannot drift, and keeping it avoids touching every `isAborting` reader in this PR.
 
 The four client writers of `_state.isStreaming` collapsed to a single canonical-status writer, and the ~14 server transition sites collapsed to `broadcastStatus()` calls. Acceptance criteria 1–4 are covered by `tests/remote-agent-status.spec.ts`, `tests/session-manager-status.test.ts`, and `tests/e2e/ui/session-status-recovery.spec.ts`. AC #5 ("net code reduction") landed as the writer-count reduction described in §8 — raw LOC is roughly neutral once the heartbeat, gap-detection branch, and JSDoc are accounted for.
+
+### Follow-up: preparing-UX bootstrap fix (`goal/fix-prepar-0d718a5c`)
+
+The original implementation initialised `_lastStatusVersion` to `0`, which silently dropped the very first `session_status` frame on a brand-new session (server creates sessions with `statusVersion: 0`, so the version gate `n <= _lastStatusVersion` rejected `0 <= 0` as a duplicate). Two small adjustments were made; the unify-session-status invariants (single server writer `broadcastStatus()`; sole client writers `case "session_status"`, `case "state"`, `reset()`) are unchanged.
+
+- **`_lastStatusVersion` initialises to `-1`** (uninitialised sentinel) so the first frame is always applied. The version-gate semantics for subsequent frames are unchanged.
+- **`RemoteAgent.onStatusChange` triggers `requestUpdate()` for `preparing` / `starting` / `aborting` / `idle`.** The Lit reference-equality issue applies to all status changes that don't change object identity — `state` is the same object across mutations, so the global `renderApp()` debounce can short-circuit and refuse to repaint a freshly-mounted `<agent-interface>`. Explicit `requestUpdate()` on every meaningful status edge sidesteps this.
