@@ -185,7 +185,13 @@ promptTemplate: |
 
   - Spawn a **docs-writer** agent with `workflowGateId="documentation"` to handle this gate.
   - The docs-writer will receive upstream gate content (design doc, implementation) automatically.
-  - The docs-writer should update AGENTS.md, README.md, and/or files in docs/ as needed.
+  - Tell the docs-writer to **prefer `docs/*.md` for detailed feature/behavior documentation** and
+    use `README.md` for entrypoints, setup, and high-level developer orientation.
+  - **Only update `AGENTS.md` when the change affects agent-operational guidance**: repo navigation,
+    architecture launchpad notes, recipes, debugging index entries, verification flow, or other
+    instructions an agent needs in nearly every session.
+  - Do NOT ask for an `AGENTS.md` update for routine feature documentation when `docs/` or
+    `README.md` is the better home.
   - Do NOT skip this gate or try to write docs yourself — delegate to a docs-writer.
   - After the docs-writer finishes and you merge its branch, signal the documentation gate.
 

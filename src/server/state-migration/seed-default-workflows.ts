@@ -74,15 +74,28 @@ Read the key documentation files: AGENTS.md, README.md, and files in docs/.
 The goal spec is:
 {{goal_spec}}
 
+**Documentation location rules:**
+- Detailed feature behavior, architecture explanations, workflows, and durable reference material should usually live in \`docs/*.md\`.
+- \`README.md\` should cover entrypoints, setup, and concise high-level project orientation.
+- \`AGENTS.md\` should only change when agent-operational guidance changed: repo navigation, architecture launchpad notes, common task recipes, debugging index entries, verification flow, or other instructions an agent needs in many sessions.
+- Do NOT require an \`AGENTS.md\` update for routine product or feature documentation when \`docs/\` or \`README.md\` is the better home.
+
 **Check 1 — Every feature is documented:**
 - Every new user-facing feature, API endpoint, config option, or behavioral change introduced in this branch must be documented somewhere.
-- If a feature is only described in code comments, that is NOT sufficient — it must appear in a .md file (AGENTS.md, README.md, or a file in docs/).
+- If a feature is only described in code comments, that is NOT sufficient — it must appear in a .md file.
 - List any undocumented features.
+- Also flag documentation placed in the wrong home when that placement creates pressure to grow \`AGENTS.md\` unnecessarily.
 
 **Check 2 — Existing documentation is updated:**
 - If the changes modify behavior that is already documented, the documentation must be updated to reflect the new behavior.
 - Check for stale references: old API signatures, removed config options, renamed files, changed defaults, altered workflows.
 - List any stale documentation that was not updated.
+
+**Check 3 — Documentation placement is appropriate:**
+- Prefer \`docs/\` for detailed explanations.
+- Prefer \`README.md\` for top-level orientation.
+- Only require \`AGENTS.md\` changes for agent-facing operational guidance.
+- Flag branches that add routine feature detail to \`AGENTS.md\` instead of the better destination.
 
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
