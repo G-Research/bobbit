@@ -259,10 +259,7 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "read_session",
 		label: "Read Session",
-		description:
-			"Read the conversation transcript of another Bobbit session (peer agent, delegate, or archived). " +
-			"Paginated and regex-filterable. Returns compact summaries by default; use `verbose: true` for full content blocks. " +
-			"Negative `offset` indexes from end (Python-style). `pattern` + `context` filters to matches with ±N neighbours.",
+		description: "Read another session's transcript. Paginated, regex-filterable.",
 		promptSnippet:
 			"read_session - Read another session's transcript with pagination and regex filtering.",
 		promptGuidelines: [
@@ -272,13 +269,13 @@ const extension: ExtensionFactory = (pi) => {
 			"Use context:1..5 to expand each pattern match by ±N neighbours",
 		],
 		parameters: Type.Object({
-			session_id: Type.String({ description: "Target session ID." }),
-			offset: Type.Optional(Type.Number({ description: "Starting index. Default 0. Negative indexes from the end." })),
-			limit: Type.Optional(Type.Number({ description: "Max messages to return. Default 20, clamped to [1, 200]." })),
-			pattern: Type.Optional(Type.String({ description: "Regex filter applied to message text + tool blocks." })),
-			case_sensitive: Type.Optional(Type.Boolean({ description: "Default false." })),
-			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5). Only with `pattern`." })),
-			verbose: Type.Optional(Type.Boolean({ description: "Return full content blocks instead of compact summaries." })),
+			session_id: Type.String(),
+			offset: Type.Optional(Type.Number({ description: "Default 0. Negative indexes from end." })),
+			limit: Type.Optional(Type.Number({ description: "Default 20, clamped to [1, 200]." })),
+			pattern: Type.Optional(Type.String({ description: "Regex filter on message text and tool blocks." })),
+			case_sensitive: Type.Optional(Type.Boolean()),
+			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5)." })),
+			verbose: Type.Optional(Type.Boolean({ description: "Return full content blocks instead of summaries." })),
 		}),
 
 		async execute(_toolCallId, params) {
@@ -324,11 +321,7 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
-		description:
-			"Run a task in a separate agent process. The delegate agent has full tool access (bash, read, write, edit) " +
-			"but receives only the instructions you provide — it does not see this conversation. " +
-			"Use this when you need isolated execution, parallel work, or an independent perspective. " +
-			"The tool blocks until the delegate finishes and returns its output.",
+		description: "Run a task in an isolated agent subprocess. Blocks until it returns output.",
 		promptSnippet:
 			"delegate - Run a task in a separate agent process with isolated context. Blocks until complete.",
 		promptGuidelines: [
@@ -338,16 +331,16 @@ const extension: ExtensionFactory = (pi) => {
 			"Use the 'parallel' parameter to run multiple delegates concurrently",
 		],
 		parameters: Type.Object({
-			instructions: Type.Optional(Type.String({ description: "Task instructions for the delegate agent. Be specific and self-contained. Required for single delegate, optional when using parallel." })),
+			instructions: Type.Optional(Type.String({ description: "Required for single delegate; optional with parallel." })),
 			parallel: Type.Optional(Type.Array(
 				Type.Object({
-					instructions: Type.String({ description: "Instructions for this parallel delegate" }),
-					context: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Additional context key-values" })),
+					instructions: Type.String(),
+					context: Type.Optional(Type.Record(Type.String(), Type.String())),
 				}),
-				{ description: "Run multiple delegates in parallel instead. Each gets its own instructions." },
+				{ description: "Run multiple delegates concurrently." },
 			)),
-			context: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Additional context key-values passed to the delegate" })),
-			timeout_minutes: Type.Optional(Type.Number({ description: "Timeout in minutes (default: 10)" })),
+			context: Type.Optional(Type.Record(Type.String(), Type.String())),
+			timeout_minutes: Type.Optional(Type.Number({ description: "Default 10." })),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

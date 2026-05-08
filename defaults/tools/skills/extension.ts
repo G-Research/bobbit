@@ -45,11 +45,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "activate_skill",
 		label: "Activate Skill",
-		description: "Activate a discovered skill by name. Returns the skill's instructions as the tool result; follow them as if the user had typed /<name> <args>.",
+		description: "Activate a discovered slash skill by name. Returns its instructions.",
 		promptSnippet: "Activate a discovered slash skill autonomously.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Skill name (without leading slash)" }),
-			args: Type.Optional(Type.String({ description: "Optional argument string passed to the skill" })),
+			name: Type.String({ description: "Skill name without leading slash." }),
+			args: Type.Optional(Type.String()),
 		}),
 		async execute(input: { name: string; args?: string }) {
 			try {

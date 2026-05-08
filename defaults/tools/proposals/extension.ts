@@ -84,7 +84,7 @@ const PROPOSAL_TYPE_ENUM = Type.Union([
 	Type.Literal("role"),
 	Type.Literal("tool"),
 	Type.Literal("staff"),
-], { description: "Proposal type" });
+]);
 
 export default function (pi: ExtensionAPI) {
 	function ack(rev?: number) {
@@ -100,14 +100,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_goal",
 		label: "Propose Goal",
-		description: "Submit a goal proposal for user review. Call this when you have gathered enough information to propose a goal.",
+		description: "Submit a goal proposal for user review.",
 		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields.",
 		parameters: Type.Object({
-			title: Type.String({ description: "Short 2-5 word title (must be under 29 characters)" }),
-			spec: Type.String({ description: "Markdown spec content. Include: brief description, key requirements, constraints, technical approach" }),
-			cwd: Type.Optional(Type.String({ description: "Working directory override path" })),
-			workflow: Type.Optional(Type.String({ description: "Workflow ID (e.g. \"general\", \"feature\", \"bug-fix\")" })),
-			options: Type.Optional(Type.String({ description: "Comma-separated step names for optional steps (e.g. \"QA testing\")" })),
+			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
+			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
+			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
+			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
+			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 		}),
 		async execute(_id, args) { const rev = await seedProposal("goal", args); return ack(rev); },
 	});
@@ -116,14 +116,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_role",
 		label: "Propose Role",
-		description: "Submit a role proposal for user review. Call this when you have designed a custom agent role.",
+		description: "Submit a custom agent role proposal for user review.",
 		promptSnippet: "Propose a role with name, label, prompt, and optional fields.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Role identifier (lowercase, hyphens)" }),
-			label: Type.String({ description: "Human-readable display name" }),
-			prompt: Type.String({ description: "System prompt for the role" }),
-			tools: Type.Optional(Type.String({ description: "Comma-separated list of allowed tools" })),
-			accessory: Type.Optional(Type.String({ description: "Accessory configuration" })),
+			name: Type.String({ description: "Role identifier, lowercase with hyphens." }),
+			label: Type.String({ description: "Human-readable display name." }),
+			prompt: Type.String(),
+			tools: Type.Optional(Type.String({ description: "Comma-separated allowed tools." })),
+			accessory: Type.Optional(Type.String()),
 		}),
 		async execute(_id, args) { const rev = await seedProposal("role", args); return ack(rev); },
 	});
@@ -132,12 +132,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_tool",
 		label: "Propose Tool",
-		description: "Submit a tool proposal for user review. Call this when you have designed a custom tool.",
+		description: "Submit a custom tool proposal for user review.",
 		promptSnippet: "Propose a tool with tool name, action, and content.",
 		parameters: Type.Object({
-			tool: Type.String({ description: "Tool name" }),
-			action: Type.String({ description: "Action type (e.g. \"create\", \"update\")" }),
-			content: Type.String({ description: "Tool definition content (YAML)" }),
+			tool: Type.String(),
+			action: Type.String({ description: "e.g. create, update." }),
+			content: Type.String({ description: "Tool definition YAML." }),
 		}),
 		async execute(_id, args) { const rev = await seedProposal("tool", args); return ack(rev); },
 	});
@@ -146,14 +146,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_staff",
 		label: "Propose Staff",
-		description: "Submit a staff member proposal for user review. Call this when you have designed a custom staff configuration.",
+		description: "Submit a staff member proposal for user review.",
 		promptSnippet: "Propose a staff member with name, prompt, and optional fields.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Staff member name" }),
-			description: Type.Optional(Type.String({ description: "Short description of the staff member" })),
-			prompt: Type.String({ description: "System prompt for the staff member" }),
-			triggers: Type.Optional(Type.String({ description: "Trigger conditions" })),
-			cwd: Type.Optional(Type.String({ description: "Working directory" })),
+			name: Type.String(),
+			description: Type.Optional(Type.String()),
+			prompt: Type.String(),
+			triggers: Type.Optional(Type.String()),
+			cwd: Type.Optional(Type.String()),
 		}),
 		async execute(_id, args) { const rev = await seedProposal("staff", args); return ack(rev); },
 	});
@@ -162,40 +162,40 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_project",
 		label: "Propose Project",
-		description: "Submit a project proposal for user review. Call this when you have detected or configured a project.",
+		description: "Submit a project proposal for user review.",
 		promptSnippet: "Propose a project with name, root_path, and optional command fields.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Project name" }),
-			root_path: Type.String({ description: "Root path of the project directory" }),
-			build_command: Type.Optional(Type.String({ description: "Build command" })),
-			test_command: Type.Optional(Type.String({ description: "Test command" })),
-			typecheck_command: Type.Optional(Type.String({ description: "Type-check command" })),
-			test_unit_command: Type.Optional(Type.String({ description: "Unit test command" })),
-			test_e2e_command: Type.Optional(Type.String({ description: "E2E test command" })),
-			worktree_setup_command: Type.Optional(Type.String({ description: "Worktree setup command" })),
-			sandbox: Type.Optional(Type.String({ description: "Sandbox mode (e.g. 'docker')" })),
-			session_model: Type.Optional(Type.String({ description: "Default session model (provider/model-id)" })),
-			review_model: Type.Optional(Type.String({ description: "Reviewer model (provider/model-id)" })),
-			naming_model: Type.Optional(Type.String({ description: "Naming model (provider/model-id)" })),
-			worktree_root: Type.Optional(Type.String({ description: "Custom parent dir for worktrees (absolute or relative to root_path). Default: <rootPath>-wt/" })),
+			name: Type.String(),
+			root_path: Type.String({ description: "Project root directory." }),
+			build_command: Type.Optional(Type.String()),
+			test_command: Type.Optional(Type.String()),
+			typecheck_command: Type.Optional(Type.String()),
+			test_unit_command: Type.Optional(Type.String()),
+			test_e2e_command: Type.Optional(Type.String()),
+			worktree_setup_command: Type.Optional(Type.String()),
+			sandbox: Type.Optional(Type.String({ description: "e.g. 'docker'." })),
+			session_model: Type.Optional(Type.String({ description: "provider/model-id." })),
+			review_model: Type.Optional(Type.String({ description: "provider/model-id." })),
+			naming_model: Type.Optional(Type.String({ description: "provider/model-id." })),
+			worktree_root: Type.Optional(Type.String({ description: "Worktree parent dir. Default <rootPath>-wt/." })),
 			components: Type.Optional(Type.Array(Type.Object({
-				name: Type.String({ description: "Component name (unique within project)" }),
-				repo: Type.String({ description: "\".\" for single-repo, else a subfolder of rootPath" }),
-				relative_path: Type.Optional(Type.String({ description: "Optional sub-path inside the repo" })),
-				worktree_setup_command: Type.Optional(Type.String({ description: "Per-component setup hook" })),
-				commands: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Flat name → shell. Absent ⇒ data-only." })),
-				config: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Per-component opaque key→string config (max 100 entries; consumed by skills like /qa-test, e.g. qa_start_command, qa_health_check, qa_browser_entry, qa_max_duration_minutes, qa_max_scenarios)." })),
-			}), { description: "Project components. Single-repo: one component with repo='.'." })),
-			workflows: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Inline workflows keyed by id; structurally validated server-side." })),
+				name: Type.String({ description: "Unique within project." }),
+				repo: Type.String({ description: "'.' for single-repo, else subfolder of rootPath." }),
+				relative_path: Type.Optional(Type.String({ description: "Sub-path inside the repo." })),
+				worktree_setup_command: Type.Optional(Type.String()),
+				commands: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "name → shell. Absent ⇒ data-only." })),
+				config: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Opaque key→string config, max 100 entries." })),
+			}), { description: "Single-repo: one component with repo='.'." })),
+			workflows: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Inline workflows keyed by id." })),
 			config_directories: Type.Optional(Type.Array(Type.Object({
 				path: Type.String(),
 				types: Type.Array(Type.String()),
-			}), { description: "Custom config directories scanned for skills/mcp/tools/agents." })),
+			}), { description: "Dirs scanned for skills/mcp/tools/agents." })),
 			sandbox_tokens: Type.Optional(Type.Array(Type.Object({
 				key: Type.String(),
 				enabled: Type.Boolean(),
 				value: Type.Optional(Type.String()),
-			}), { description: "Sandbox token list. Server strips `value` to SecretsStore on PUT." })),
+			}), { description: "Server strips value to SecretsStore on PUT." })),
 		}),
 		async execute(_id, args) { const rev = await seedProposal("project", args); return ack(rev); },
 	});
@@ -204,7 +204,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "view_proposal",
 		label: "View Proposal",
-		description: "Read the current draft of a proposal file for the active session.",
+		description: "Read the current proposal draft for the active session.",
 		promptSnippet: "View the current proposal draft (markdown for goal, YAML for the rest).",
 		parameters: Type.Object({
 			type: PROPOSAL_TYPE_ENUM,
@@ -255,12 +255,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "edit_proposal",
 		label: "Edit Proposal",
-		description: "Surgically edit the current proposal draft via exact-string replacement. Same semantics as the builtin edit tool.",
+		description: "Edit the current proposal draft via exact-string replacement.",
 		promptSnippet: "Edit a proposal draft by replacing old_text with new_text (exact, unique match).",
 		parameters: Type.Object({
 			type: PROPOSAL_TYPE_ENUM,
-			old_text: Type.String({ description: "Exact text to find in the draft. Must match uniquely." }),
-			new_text: Type.String({ description: "Replacement text. Empty string deletes the matched span." }),
+			old_text: Type.String({ description: "Must match uniquely in the draft." }),
+			new_text: Type.String({ description: "Empty string deletes the matched span." }),
 		}),
 		async execute(_id, args) {
 			const { type, old_text, new_text } = args as { type: ProposalType; old_text: string; new_text: string };

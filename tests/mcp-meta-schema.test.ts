@@ -121,41 +121,53 @@ describe("buildMetaToolInputSchema", () => {
 });
 
 describe("buildMetaToolDescription", () => {
-	it("formats server, operations, and docs path under 400 chars", () => {
+	it("emits single short line with server, op count, and docs path", () => {
 		const ops = [validOp("get-direct-reports"), validOp("list-employees"), validOp("get-entity-by-ref")];
 		const desc = buildMetaToolDescription("gr-halo", ops, "tool-docs/mcp-gr-halo.md");
-		assert.ok(desc.length < 400);
+		assert.ok(desc.length <= 150, `length was ${desc.length}: ${desc}`);
 		assert.ok(desc.includes("gr-halo"));
-		assert.ok(desc.includes("get-direct-reports"));
-		assert.ok(desc.includes("list-employees"));
+		assert.ok(desc.includes("3 operations"));
 		assert.ok(desc.includes("tool-docs/mcp-gr-halo.md"));
+		// Op names must NOT be inlined.
+		assert.ok(!desc.includes("get-direct-reports"));
+		assert.ok(!desc.includes("list-employees"));
 	});
 
-	it("trims to '... (N more)' when full op list overflows 400 chars", () => {
+	it("stays under 150 chars even with 100 ops, no op-name enumeration", () => {
 		const ops = Array.from({ length: 100 }, (_, i) => validOp(`operation_with_a_long_name_${i}`));
 		const desc = buildMetaToolDescription("big-server", ops, "tool-docs/mcp-big-server.md");
-		assert.ok(desc.length <= 400, `length was ${desc.length}: ${desc}`);
+		assert.ok(desc.length <= 150, `length was ${desc.length}: ${desc}`);
 		assert.ok(desc.includes("big-server"));
-		assert.ok(/\.\.\. \(\d+ more\)/.test(desc), `missing "... (N more)" in: ${desc}`);
-		assert.ok(desc.includes("tool-docs/mcp-big-server.md"));
+		assert.ok(desc.includes("100 operations"));
+		assert.ok(!/\.\.\. \(\d+ more\)/.test(desc), `should not contain "... (N more)": ${desc}`);
+		assert.ok(!desc.includes("operation_with_a_long_name_0"));
 	});
 
 	it("handles zero valid ops gracefully", () => {
 		const desc = buildMetaToolDescription("empty", [], "tool-docs/mcp-empty.md");
-		assert.ok(desc.length <= 400);
+		assert.ok(desc.length <= 150);
 		assert.ok(desc.includes("empty"));
+		assert.ok(desc.includes("No operations available"));
 		assert.ok(desc.includes("tool-docs/mcp-empty.md"));
 	});
 
-	it("filters invalid ops out of the listed names", () => {
+	it("uses singular form for exactly one op", () => {
+		const desc = buildMetaToolDescription("solo", [validOp("only")], "tool-docs/mcp-solo.md");
+		assert.ok(desc.includes("1 operation."));
+		assert.ok(!desc.includes("1 operations"));
+		assert.ok(!desc.includes("only"), "op name must not be inlined");
+	});
+
+	it("counts only valid ops (filters invalid)", () => {
 		const ops: McpToolDef[] = [
 			validOp("alpha"),
 			{ name: "bogus", inputSchema: { type: "string" } },
 			validOp("beta"),
 		];
 		const desc = buildMetaToolDescription("srv", ops, "tool-docs/mcp-srv.md");
-		assert.ok(desc.includes("alpha"));
-		assert.ok(desc.includes("beta"));
+		assert.ok(desc.includes("2 operations"));
+		assert.ok(!desc.includes("alpha"));
+		assert.ok(!desc.includes("beta"));
 		assert.ok(!desc.includes("bogus"));
 	});
 });

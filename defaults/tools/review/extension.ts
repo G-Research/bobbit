@@ -17,14 +17,12 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "review_open",
 		label: "Review Open",
-		description:
-			"Open a markdown document in the review pane for inline commenting and annotation. " +
-			"Pass `markdown` for inline content or `file` to load from disk.",
+		description: "Open a markdown document in the review pane for inline commenting.",
 		parameters: Type.Object({
-			title: Type.Optional(Type.String({ description: "Tab label. Defaults to filename or \"Review\"." })),
-			markdown: Type.Optional(Type.String({ description: "Inline markdown content." })),
-			file: Type.Optional(Type.String({ description: "Path to a markdown file on disk." })),
-			replace: Type.Optional(Type.Boolean({ description: "Replace existing tab content (default: true)." })),
+			title: Type.Optional(Type.String({ description: "Tab label. Defaults to filename or 'Review'." })),
+			markdown: Type.Optional(Type.String()),
+			file: Type.Optional(Type.String()),
+			replace: Type.Optional(Type.Boolean({ description: "Replace existing tab content. Default true." })),
 		}),
 
 		async execute(_toolCallId, params) {
@@ -95,7 +93,7 @@ const extension: ExtensionFactory = (pi) => {
 		label: "Review Close",
 		description: "Close a review document tab or all review tabs.",
 		parameters: Type.Object({
-			title: Type.Optional(Type.String({ description: "Close specific tab. Omit to close all tabs." })),
+			title: Type.Optional(Type.String({ description: "Specific tab. Omit to close all." })),
 		}),
 
 		async execute(_toolCallId, params) {
