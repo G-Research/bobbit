@@ -254,13 +254,23 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 				}, 1500);
 			});
 
-			// Wait for reconnect + done marker.
+			// Wait for reconnect + this iter's done marker. The DONE marker
+			// text is identical across iters (`STREAM_BURST_DONE:1`), so any
+			// previous iter's DONE row would satisfy a `regex.test()` predicate
+			// instantly — that produced false-positive `waitForFunction` returns
+			// and made the assertion fire while THIS iter's stream was still
+			// mid-burst (and subsequent prompts were sitting in the prompt
+			// queue). Disambiguate by counting cumulative DONE rows: wait
+			// until at least `i + 1` are present. Also wait for the agent to
+			// idle so all live events have settled.
 			try {
 				await page.waitForFunction(
-					(re) => {
+					({ re, expected }: { re: string; expected: number }) => {
 						const ra = (window as any).__bobbitState?.remoteAgent;
 						if (!ra?.connected) return false;
 						const msgs = ra._state.messages as any[];
+						let n = 0;
+						const rx = new RegExp(re);
 						for (const m of msgs) {
 							if (m.role !== "assistant") continue;
 							let t = "";
@@ -271,17 +281,24 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 									.map((c: any) => c.text || "")
 									.join(" ");
 							}
-							if (new RegExp(re).test(t)) return true;
+							if (rx.test(t)) n++;
 						}
-						return false;
+						return n >= expected;
 					},
-					STREAM_DONE_RE.source,
+					{ re: STREAM_DONE_RE.source, expected: i + 1 },
 					{ timeout: 60_000 },
 				);
 			} catch (e) {
-				failures.push(`iter ${i}: post-WS-drop, STREAM_BURST_DONE never appeared (${(e as Error).message})`);
+				failures.push(`iter ${i}: post-WS-drop, this-iter STREAM_BURST_DONE never appeared (${(e as Error).message})`);
 				continue;
 			}
+
+			// Also wait for streaming to settle so all reconcile events landed.
+			await page.waitForFunction(
+				() => (window as any).__bobbitState.remoteAgent.state.isStreaming === false,
+				undefined,
+				{ timeout: 30_000 },
+			).catch(() => { /* fall through */ });
 
 			await page.evaluate(() => {
 				(window as any).__bobbitState.remoteAgent.requestMessages();
@@ -344,15 +361,23 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 				}
 			});
 
-			// Wait for both tabs to see the done marker.
+			// Wait for both tabs to see THIS iter's done marker. Same
+			// disambiguation as variation (C): the marker text is identical
+			// across iters, so a regex test alone returns instantly on a
+			// previous iter's DONE row and the assertion fires while this iter
+			// is still mid-burst (subsequent prompts queued in `promptQueue`).
+			// Count cumulative DONE rows and wait for `>= i + 1` on each tab,
+			// then wait for both to settle to idle.
 			const waitForDone = (p: import("@playwright/test").Page) =>
 				p.waitForFunction(
-					(re) => {
+					({ re, expected }: { re: string; expected: number }) => {
 						const ra = (window as any).__bobbitState?.remoteAgent;
 						if (!ra) return false;
 						const msgs = ra._state.messages as any[];
-						return msgs.some((m: any) => {
-							if (m.role !== "assistant") return false;
+						let n = 0;
+						const rx = new RegExp(re);
+						for (const m of msgs) {
+							if (m.role !== "assistant") continue;
 							let t = "";
 							if (typeof m.content === "string") t = m.content;
 							else if (Array.isArray(m.content)) {
@@ -361,19 +386,30 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 									.map((c: any) => c.text || "")
 									.join(" ");
 							}
-							return new RegExp(re).test(t);
-						});
+							if (rx.test(t)) n++;
+						}
+						return n >= expected;
 					},
-					STREAM_DONE_RE.source,
+					{ re: STREAM_DONE_RE.source, expected: i + 1 },
 					{ timeout: 60_000 },
 				);
 
 			try {
 				await Promise.all([waitForDone(page), waitForDone(page2)]);
 			} catch (e) {
-				failures.push(`iter ${i}: STREAM_BURST_DONE not seen on both tabs (${(e as Error).message})`);
+				failures.push(`iter ${i}: this-iter STREAM_BURST_DONE not seen on both tabs (${(e as Error).message})`);
 				continue;
 			}
+
+			// Wait for both tabs to settle to idle so all reconcile events
+			// (including the post-DONE session_status:idle) have landed.
+			const waitIdle = (p: import("@playwright/test").Page) =>
+				p.waitForFunction(
+					() => (window as any).__bobbitState.remoteAgent.state.isStreaming === false,
+					undefined,
+					{ timeout: 30_000 },
+				).catch(() => { /* fall through */ });
+			await Promise.all([waitIdle(page), waitIdle(page2)]);
 
 			// Force one more resync on each then compare projections.
 			await Promise.all([
@@ -386,8 +422,26 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 			// Convergence: both tabs should have the same number of rows.
 			if (t1.count !== t2.count) {
+				// Diagnostic: show the rows that are on one tab but not the other
+				// (by `(role|text)` key, multiset-aware).
+				const keyOf = (r: { role: string; text: string }) =>
+					`${r.role}|${r.text.replace(/\s+/g, " ").trim().slice(0, 50)}`;
+				const countMap = (rows: Array<{ role: string; text: string }>) => {
+					const m = new Map<string, number>();
+					for (const r of rows) m.set(keyOf(r), (m.get(keyOf(r)) ?? 0) + 1);
+					return m;
+				};
+				const c1 = countMap(t1.rows);
+				const c2 = countMap(t2.rows);
+				const all = new Set([...c1.keys(), ...c2.keys()]);
+				const diffs: string[] = [];
+				for (const k of all) {
+					const a = c1.get(k) ?? 0;
+					const b = c2.get(k) ?? 0;
+					if (a !== b) diffs.push(`  [${a} vs ${b}] ${k}`);
+				}
 				failures.push(
-					`iter ${i}: row-count divergence: tab1=${t1.count} tab2=${t2.count}`,
+					`iter ${i}: row-count divergence: tab1=${t1.count} tab2=${t2.count}\n${diffs.join("\n")}`,
 				);
 			}
 

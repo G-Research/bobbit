@@ -627,6 +627,47 @@ describe("message-reducer", () => {
 		);
 	});
 
+	it("H3: prior-snapshot artifact (id-less, _order<=0) is dropped by a fresh snapshot that doesn't represent it", () => {
+		// Reproduces the (D) two-tab divergence: when the server splices an
+		// in-flight `message_update` into snapshot N, that row lands at a
+		// negative `_order` (`SNAPSHOT_ORDER_FLOOR + i`). If the in-flight
+		// message is then ABANDONED server-side (e.g. mock-agent
+		// `_streamChunkedText` with `omitFinalEnd:true`, or a real LLM that
+		// pivots from partial text to a tool_use without emitting message_end),
+		// snapshot N+1 will NOT contain it. The previous-snapshot row must NOT
+		// survive — otherwise tab1 (which took snapshot N) and tab2 (which
+		// didn't) diverge in row count forever.
+		const idLessPartial: any = {
+			role: "assistant",
+			content: [{ type: "text", text: "PRE-WAIT-CHUNK partial" }],
+			timestamp: 0,
+		};
+		// Snapshot N: contains the in-flight partial (spliced by the server).
+		const s1 = reduce(initialState(), {
+			type: "snapshot",
+			messages: [userMsg("u1", "hello"), idLessPartial],
+		});
+		// Sanity: the partial is in the transcript with negative `_order`.
+		const partialAfterN = s1.messages.find(
+			(m: any) => m.role === "assistant" && extractText(m) === "PRE-WAIT-CHUNK partial",
+		);
+		assert.ok(partialAfterN, "partial spliced into snapshot N");
+		assert.ok(partialAfterN!._order <= 0, "partial _order is in the snapshot range");
+		// Snapshot N+1: server has moved on; the partial is NOT present.
+		const s2 = reduce(s1, {
+			type: "snapshot",
+			messages: [userMsg("u1", "hello")],
+		});
+		const partialAfterNPlus1 = s2.messages.find(
+			(m: any) => m.role === "assistant" && extractText(m) === "PRE-WAIT-CHUNK partial",
+		);
+		assert.strictEqual(
+			partialAfterNPlus1,
+			undefined,
+			"stale prior-snapshot partial must be dropped by snapshot N+1",
+		);
+	});
+
 	it("H3: backwards compat — snapshot row whose id matches a live row at lower _order still drops the live row via id-match", () => {
 		// The new guard fires only when m._order STRICTLY exceeds the snapshot
 		// max. A live row whose seq is below the snapshot floor (impossible in

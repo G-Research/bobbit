@@ -320,6 +320,19 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 						survivors.push(m);
 						continue;
 					}
+					// 4) Prior-snapshot artifacts (`_order <= 0`, server-origin)
+					// must NOT survive a fresh snapshot that doesn't represent
+					// them. Otherwise an in-flight `message_update` row spliced
+					// into snapshot N persists forever after the server clears
+					// `latestMessageUpdate` (e.g. mock-agent `_streamChunkedText`
+					// with `omitFinalEnd:true`, or a real LLM that abandons partial
+					// text to pivot to a tool_use). The new snapshot is the
+					// authoritative point-in-time read; previous-snapshot rows that
+					// fail every dedup check above are stale and must be dropped.
+					if (m._order <= 0) {
+						continue;
+					}
+					// Live row (`_order > 0`) within the snapshot's range — survive.
 					survivors.push(m);
 					continue;
 				}
