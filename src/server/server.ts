@@ -1474,6 +1474,10 @@ async function handleApiRoute(
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
 	};
+	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
+		const e = err instanceof Error ? err : new Error(String(err));
+		json({ error: e.message, stack: e.stack, ...extra }, status);
+	};
 
 	// ── Cross-project helper functions ─────────────────────────────
 
@@ -1636,7 +1640,7 @@ async function handleApiRoute(
 			fs.writeFileSync(systemPromptPath, newContent);
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -1832,7 +1836,7 @@ async function handleApiRoute(
 			const monorepo = scanMonorepo(dirPath);
 			json({ repos, monorepo });
 		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -1866,7 +1870,7 @@ async function handleApiRoute(
 			const monorepo = scanMonorepo(project.rootPath);
 			json({ repos, monorepo, rootPath: project.rootPath });
 		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -2089,7 +2093,7 @@ async function handleApiRoute(
 			}
 			json(project, 201);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2117,7 +2121,7 @@ async function handleApiRoute(
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2152,7 +2156,7 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2167,7 +2171,7 @@ async function handleApiRoute(
 			const promoted = projectRegistry.promote(projectId, { name });
 			json(promoted);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2681,7 +2685,7 @@ async function handleApiRoute(
 			const result = await sessionManager.requestToolGrant(sessionId, body.toolName, body.toolGroup);
 			json(result);
 		} catch (err: any) {
-			json({ error: err.message }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -2805,7 +2809,7 @@ async function handleApiRoute(
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
-				json({ error: String(err) }, 500);
+				jsonError(500, err);
 			}
 			return;
 		}
@@ -3160,7 +3164,7 @@ async function handleApiRoute(
 				try {
 					await sandboxManager.ensureForProject(targetProjectId);
 				} catch (err) {
-					json({ error: `Sandbox init failed: ${(err as Error).message || err}` }, 500);
+					jsonError(500, err, { error: `Sandbox init failed: ${(err as Error).message || err}` });
 					return;
 				}
 			}
@@ -3219,7 +3223,7 @@ async function handleApiRoute(
 				}
 			}
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -3818,7 +3822,7 @@ async function handleApiRoute(
 				images: result.images,
 			});
 		} catch (err: any) {
-			json({ error: err?.message || "Image generation failed" }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -3850,7 +3854,7 @@ async function handleApiRoute(
 			const models = await discoverModelsForConfig(config);
 			json({ models });
 		} catch (err: any) {
-			json({ error: err?.message || "Discovery failed" }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -3994,7 +3998,7 @@ async function handleApiRoute(
 			const models = await discoverAigwModels(body.url);
 			json({ ok: true, models });
 		} catch (err: any) {
-			json({ error: err.message }, 502);
+			jsonError(502, err);
 		}
 		return;
 	}
@@ -4012,7 +4016,7 @@ async function handleApiRoute(
 			broadcastPreferencesChanged();
 			json({ models });
 		} catch (err: any) {
-			json({ error: err.message || "Refresh failed" }, 502);
+			jsonError(502, err);
 		}
 		return;
 	}
@@ -4111,7 +4115,7 @@ async function handleApiRoute(
 				json({ ok: false, modelResolved: sendId, latencyMs, error: err?.message || "Request failed" });
 			}
 		} catch (err: any) {
-			json({ ok: false, error: err?.message || "Test failed" }, 500);
+			jsonError(500, err, { ok: false, error: err?.message || "Test failed" });
 		}
 		return;
 	}
@@ -4206,7 +4210,7 @@ async function handleApiRoute(
 				json(role, 201);
 			}
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -4436,7 +4440,7 @@ async function handleApiRoute(
 			});
 			json(task, 201);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -4921,7 +4925,7 @@ async function handleApiRoute(
 
 				json({ ok: true });
 			} catch (err: any) {
-				json({ error: err.message }, 400);
+				jsonError(400, err);
 			}
 			return;
 		}
@@ -4970,7 +4974,7 @@ async function handleApiRoute(
 
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5002,7 +5006,7 @@ async function handleApiRoute(
 
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5018,7 +5022,7 @@ async function handleApiRoute(
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5053,7 +5057,7 @@ async function handleApiRoute(
 			if (err instanceof GateDependencyError) {
 				json({ error: String(err.message) }, 409);
 			} else {
-				json({ error: String(err) }, 400);
+				jsonError(400, err);
 			}
 		}
 		return;
@@ -5071,7 +5075,7 @@ async function handleApiRoute(
 			const ok = await teamManager.dismissRole(body.sessionId);
 			json({ ok });
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5199,7 +5203,7 @@ async function handleApiRoute(
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5312,7 +5316,7 @@ async function handleApiRoute(
 			await sessionManager.deliverLiveSteer(session.id, body.message);
 			json({ ok: true, dispatched: true });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5342,7 +5346,7 @@ async function handleApiRoute(
 			const afterSession = sessionManager.getSession(body.sessionId);
 			json({ ok: true, status: afterSession?.status || "idle" });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5399,7 +5403,7 @@ async function handleApiRoute(
 			await sessionManager.enqueuePrompt(body.sessionId, message);
 			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5447,7 +5451,7 @@ async function handleApiRoute(
 			await teamManager.completeTeam(goalId);
 			json({ ok: true });
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5460,7 +5464,7 @@ async function handleApiRoute(
 			await teamManager.teardownTeam(goalId);
 			json({ ok: true });
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5778,7 +5782,7 @@ async function handleApiRoute(
 				const ok = await sessionManager.assignRole(id, role);
 				if (!ok) { json({ error: "Session not found" }, 404); return; }
 			} catch (err) {
-				json({ error: String(err) }, 400);
+				jsonError(400, err);
 				return;
 			}
 		} else if (typeof body.roleId === "string" && body.roleId === "") {
@@ -6115,7 +6119,7 @@ async function handleApiRoute(
 		try {
 			json(oauthStatus(url.searchParams.get("provider") ?? undefined));
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -6144,7 +6148,7 @@ async function handleApiRoute(
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6160,7 +6164,7 @@ async function handleApiRoute(
 			const result = await oauthComplete(body.flowId, body.code);
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6249,7 +6253,7 @@ async function handleApiRoute(
 			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
 		} catch (err: any) {
 			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
-			json({ error: err?.stderr?.trim() || err?.message || "git status failed" }, 500);
+			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
 			return;
 		}
 		if (!result) { json({ error: "Not a git repository" }, 400); return; }
@@ -6293,7 +6297,7 @@ async function handleApiRoute(
 			if (toolContent === undefined) { json({ error: "No content in block" }, 404); return; }
 			json({ content: toolContent });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6372,7 +6376,7 @@ async function handleApiRoute(
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6734,7 +6738,7 @@ async function handleApiRoute(
 			ctx.workflowStore.put(workflow);
 			json(workflow, 201);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -7109,10 +7113,10 @@ async function handleApiRoute(
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
-				json({ error: err.message }, err.statusCode);
+				jsonError(err.statusCode, err);
 				return;
 			}
-			json({ error: `preview mount failed: ${err?.message ?? String(err)}` }, 500);
+			jsonError(500, err, { error: `preview mount failed: ${err?.message ?? String(err)}` });
 			return;
 		}
 	}
@@ -7153,10 +7157,10 @@ async function handleApiRoute(
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
-				json({ error: err.message }, err.statusCode);
+				jsonError(err.statusCode, err);
 				return;
 			}
-			json({ error: `preview mount lookup failed: ${err?.message ?? String(err)}` }, 500);
+			jsonError(500, err, { error: `preview mount lookup failed: ${err?.message ?? String(err)}` });
 			return;
 		}
 	}
@@ -7580,7 +7584,7 @@ async function handleApiRoute(
 			json(staff, 201);
 		} catch (err: any) {
 			console.error("[server] Failed to create staff agent:", err);
-			json({ error: err?.message || "Failed to create staff agent" }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -7635,7 +7639,7 @@ async function handleApiRoute(
 			const sessionId = await staffManager.wake(id, body?.prompt, sessionManager);
 			json({ sessionId }, 201);
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
