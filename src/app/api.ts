@@ -40,6 +40,27 @@ async function showConnectionError(title: string, message: string, opts?: { code
 }
 
 /**
+ * Build an Error from a non-OK response, preserving the server's structured
+ * `{ error, code, stack }` body so callers can forward `code`/`stack` to the
+ * connection-error modal. Pair with `errorDetails(err)` in the matching catch.
+ */
+async function errorFromResponse(res: Response, fallback: string): Promise<Error> {
+	const data = await res.json().catch(() => ({} as any));
+	const err = new Error((data && data.error) || fallback || `Failed: ${res.status}`);
+	(err as any).code = data?.code;
+	(err as any).stack = data?.stack || (err as any).stack;
+	return err;
+}
+
+/** Extract `{ message, code, stack }` from a caught value for `showConnectionError`. */
+function errorDetails(err: unknown): { message: string; code?: string; stack?: string } {
+	const message = err instanceof Error ? err.message : String(err);
+	const code = err && typeof err === "object" ? (err as any).code : undefined;
+	const stack = err instanceof Error ? err.stack : undefined;
+	return { message, code, stack };
+}
+
+/**
  * Thrown by `registerProject()` when the server reports the supplied
  * `rootPath` resolves through a symlink to a different canonical path and
  * the caller did not pass `acceptCanonical: true`. The dialog catches this
@@ -121,6 +142,7 @@ export async function refreshSessions(): Promise<void> {
 		if (projectsResult) {
 			setProjects(projectsResult);
 		}
+		// background polling: failures are silent (caller does not show a modal)
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
 		const sessionsData = await sessionsRes.json();
 
@@ -507,11 +529,12 @@ export async function updateProject(id: string, updates: { name?: string; color?
       method: "PUT",
       body: JSON.stringify(updates),
     });
-    if (!res.ok) throw new Error(`Failed: ${res.status}`);
+    if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return await res.json();
   } catch (err) {
     const { showConnectionError } = await import("./dialogs.js");
-    showConnectionError("Failed to update project", err instanceof Error ? err.message : String(err));
+    const { message, code, stack } = errorDetails(err);
+    showConnectionError("Failed to update project", message, { code, stack });
     return null;
   }
 }
@@ -519,14 +542,12 @@ export async function updateProject(id: string, updates: { name?: string; color?
 export async function removeProject(id: string): Promise<boolean> {
   try {
     const res = await gatewayFetch(`/api/projects/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Failed: ${res.status}`);
-    }
+    if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return true;
   } catch (err) {
     const { showConnectionError } = await import("./dialogs.js");
-    showConnectionError("Failed to remove project", err instanceof Error ? err.message : String(err));
+    const { message, code, stack } = errorDetails(err);
+    showConnectionError("Failed to remove project", message, { code, stack });
     return false;
   }
 }
@@ -564,14 +585,12 @@ export async function promoteProject(id: string, name?: string): Promise<Project
       method: "POST",
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Failed: ${res.status}`);
-    }
+    if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return await res.json();
   } catch (err) {
     const { showConnectionError } = await import("./dialogs.js");
-    showConnectionError("Failed to promote project", err instanceof Error ? err.message : String(err));
+    const { message, code, stack } = errorDetails(err);
+    showConnectionError("Failed to promote project", message, { code, stack });
     return null;
   }
 }
@@ -879,14 +898,15 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) throw new Error(`Failed to create goal: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed to create goal: ${res.status}`);
 		const goal = await res.json();
 		await refreshSessions();
 		expandedGoals.add(goal.id);
 		saveExpandedGoals();
 		return goal;
 	} catch (err) {
-		showConnectionError("Failed to create goal", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create goal", message, { code, stack });
 		return null;
 	}
 }
@@ -897,11 +917,12 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
-		if (!res.ok) throw new Error(`Failed to update goal: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed to update goal: ${res.status}`);
 		await refreshSessions();
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to update goal", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update goal", message, { code, stack });
 		return false;
 	}
 }
@@ -938,11 +959,13 @@ export async function deleteGoal(id: string): Promise<void> {
 	}
 
 	try {
-		await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
+		const res = await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
-		showConnectionError("Failed to archive goal", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to archive goal", message, { code, stack });
 	}
 }
 
@@ -964,15 +987,13 @@ export async function startTeam(goalId: string): Promise<string | null> {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/start`, {
 			method: "POST",
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		const data = await res.json();
 		await refreshSessions();
 		return data.sessionId;
 	} catch (err) {
-		showConnectionError("Failed to start team", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to start team", message, { code, stack });
 		return null;
 	}
 }
@@ -992,11 +1013,12 @@ export async function completeTeam(goalId: string): Promise<boolean> {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/complete`, {
 			method: "POST",
 		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		await refreshSessions();
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to complete team", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to complete team", message, { code, stack });
 		return false;
 	}
 }
@@ -1006,11 +1028,12 @@ export async function teardownTeam(goalId: string): Promise<boolean> {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/teardown`, {
 			method: "POST",
 		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		await refreshSessions();
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to tear down team", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to tear down team", message, { code, stack });
 		return false;
 	}
 }
@@ -1097,13 +1120,11 @@ export async function createWorkflow(workflow: { id: string; name: string; descr
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return await res.json();
 	} catch (err) {
-		showConnectionError("Failed to create workflow", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create workflow", message, { code, stack });
 		return null;
 	}
 }
@@ -1115,13 +1136,11 @@ export async function updateWorkflow(id: string, updates: Partial<Workflow>, pro
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to update workflow", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update workflow", message, { code, stack });
 		return false;
 	}
 }
@@ -1132,9 +1151,11 @@ export async function deleteWorkflow(id: string, projectId?: string): Promise<bo
 		const res = await gatewayFetch(url, {
 			method: "DELETE",
 		});
-		return res.ok || res.status === 204;
+		if (!res.ok && res.status !== 204) throw await errorFromResponse(res, `Failed: ${res.status}`);
+		return true;
 	} catch (err) {
-		showConnectionError("Failed to delete workflow", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to delete workflow", message, { code, stack });
 		return false;
 	}
 }
@@ -1278,13 +1299,11 @@ export async function createStaffAgent(data: { name: string; description: string
 			method: "POST",
 			body: JSON.stringify(data),
 		});
-		if (!res.ok) {
-			const d = await res.json().catch(() => ({}));
-			throw new Error(d.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return await res.json();
 	} catch (err) {
-		showConnectionError("Failed to create staff agent", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create staff agent", message, { code, stack });
 		return null;
 	}
 }
@@ -1295,10 +1314,11 @@ export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAg
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to update staff agent", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update staff agent", message, { code, stack });
 		return false;
 	}
 }
@@ -1306,10 +1326,11 @@ export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAg
 export async function deleteStaffAgent(id: string): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/staff/${id}`, { method: "DELETE" });
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to delete staff agent", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to delete staff agent", message, { code, stack });
 		return false;
 	}
 }
@@ -1320,10 +1341,11 @@ export async function wakeStaffAgent(id: string, prompt?: string): Promise<{ ses
 			method: "POST",
 			body: JSON.stringify({ prompt }),
 		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return await res.json();
 	} catch (err) {
-		showConnectionError("Failed to wake staff agent", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to wake staff agent", message, { code, stack });
 		return null;
 	}
 }
@@ -1380,7 +1402,7 @@ export async function fetchAssistantPrompts(): Promise<AssistantPromptInfo[]> {
 export async function fetchRoles(): Promise<RoleData[]> {
 	try {
 		const res = await gatewayFetch("/api/roles");
-		if (!res.ok) throw new Error(`Failed to fetch roles: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch roles: ${res.status}`);
 		const data = await res.json();
 		const roles: RoleData[] = data.roles || data || [];
 		// Also cache into state for the role picker sidebar
@@ -1451,7 +1473,7 @@ export interface ToolInfo {
 export async function fetchTools(): Promise<ToolInfo[]> {
 	try {
 		const res = await gatewayFetch("/api/tools");
-		if (!res.ok) throw new Error(`Failed to fetch tools: ${res.status}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
 		const data = await res.json();
 		const tools = data.tools || data || [];
 		// Handle legacy string[] format
@@ -1481,13 +1503,11 @@ export async function updateTool(name: string, updates: { description?: string; 
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to update tool", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update tool", message, { code, stack });
 		return false;
 	}
 }
@@ -1535,13 +1555,11 @@ export async function createRole(role: {
 			method: "POST",
 			body: JSON.stringify(role),
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return await res.json();
 	} catch (err) {
-		showConnectionError("Failed to create role", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create role", message, { code, stack });
 		return null;
 	}
 }
@@ -1553,13 +1571,11 @@ export async function updateRole(name: string, updates: Partial<Pick<RoleData, "
 			method: "PUT",
 			body: JSON.stringify(updates),
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to update role", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update role", message, { code, stack });
 		return false;
 	}
 }
@@ -1570,13 +1586,11 @@ export async function deleteRole(name: string, projectId?: string): Promise<bool
 		const res = await gatewayFetch(url, {
 			method: "DELETE",
 		});
-		if (!res.ok) {
-			const data = await res.json().catch(() => ({}));
-			throw new Error(data.error || `Failed: ${res.status}`);
-		}
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return true;
 	} catch (err) {
-		showConnectionError("Failed to delete role", err instanceof Error ? err.message : String(err));
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to delete role", message, { code, stack });
 		return false;
 	}
 }

@@ -47,13 +47,18 @@ One-liner task → entry point. Follow links for walkthroughs.
 ### Server / API
 - **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [docs/rest-api.md](docs/rest-api.md).
 - **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, add `RpcBridge` method.
-- **Add a tool** → builtin: `defaults/tools/<group>/`. Project override: `.bobbit/config/tools/<group>/`. MCP auto-discovered from `.mcp.json`.
+- **Add a tool** → builtin: `defaults/tools/<group>/`. Project override: `.bobbit/config/tools/<group>/`. MCP auto-discovered from `.mcp.json`. YAML fields driving the per-turn `# Tools` section in the system prompt:
+  - `params: [name, name?, ...]` (optional) — renders as `name(params) — summary`. Trailing `?` marks an optional parameter. Omit the field to render as `name — summary` with no parens.
+  - `summary` — ≤ 10 words, sentence-fragment OK; this is the only prose shown per-turn.
+  - `description` (function-schema field) — ≤ 15 words; what the model sees alongside the JSON-schema params.
+  - `docs` and `detail_docs` are **not** inlined into the prompt. They are folded (in that order) into `<stateDir>/tool-docs/<group>.md` by `generateDetailDocs()`, and the prompt's per-group header points at that file (`## <Group> — see <path>`). Put any prose, examples, anti-patterns there. See [docs/internals.md — MCP tool documentation](docs/internals.md#mcp-tool-documentation) for the full prompt layout.
 - **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/` with YAML frontmatter. See [docs/design/skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
 - **Add a blocking tool** → harness parks Promise keyed by `(sessionId, toolUseId)`. See [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — see [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
 - **Modify a store constructor** → stores take `stateDir`/`configDir` params; never module-level globals. All resolution via `ProjectContextManager` (`src/server/agent/project-context-manager.ts`).
 - **Add/modify session creation** → `session-setup.ts`, wrappers in `session-manager.ts`. See [docs/internals.md — Session worktrees](docs/internals.md#session-worktrees).
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, REST in `server.ts`, assistant in `goal-assistant.ts`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`. Await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
+- **Return errors from a server handler** → use `jsonError(status, err, extra?)` in `src/server/server.ts` for any caught exception so `stack` flows to the client modal. Validation responses with literal strings stay as `json({ error: "..." }, ...)`. See [docs/rest-api.md — Error response shape](docs/rest-api.md#error-response-shape).
 
 ### Sessions, status, steer
 - **Mutate session status** → `broadcastStatus()` in `src/server/agent/session-status.ts` is the **single writer** for `session.status`. Client: `_state.status` on `RemoteAgent` is canonical; `isStreaming`/`isArchived`/`isPreparing` are derived getters. `case "session_status"` is the sole writer (plus `case "state"` on attach, `reset()` on navigate). `agent_start`/`agent_end`/`error` are signals only. See [docs/design/unify-session-status.md](docs/design/unify-session-status.md).
@@ -66,6 +71,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
 - **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts`.
+- **Show a server error in a modal** → `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack. API wrappers in `src/app/api.ts` parse `await res.json()`, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })` in `src/app/dialogs.ts`. The background polling site in `refreshSessions()` (`src/app/api.ts`) is intentionally silent.
 - **Add a route-level page (lazy-loaded)** → add a `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
 - **Add a heavy tool renderer (lazy)** → `registerLazyToolRenderer()` in `src/ui/tools/index.ts`; placeholder + `TOOL_RENDERER_LOADED_EVENT` swap.
 - **Defer a heavy library (lazy load)** → `src/ui/lazy/markdown-block.ts::ensureMarkdownBlock()` pattern; or `await import()` for value imports.
@@ -124,9 +130,11 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`.
 - **`bash_bg wait` not interrupted by steer** — `BgProcessManager.waits` registry; `abortAllWaits()` from `deliverLiveSteer`.
 - **Streaming dedup/reorder** — `seq`+`ts` envelope, `{type:"resume", fromSeq}` on reconnect.
+- **Bypass class for the seq envelope** — see "Compaction frames or synthetic agent_end lost on reconnect" below; only `{type:"event"}` frames go through `EventBuffer.push()`.
 - **WS overflow guard** — `decideOverflowAction` in `src/server/ws/ws-overflow-guard.ts`.
 - **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`.
 - **Stale messages / dups / out-of-order widgets on session navigate** — reducer in `src/app/message-reducer.ts`.
+- **Compaction frames or synthetic agent_end lost on reconnect** — every `{type:"event"}` frame must route through `emitSessionEvent` (not the bare `broadcast()` in `src/server/ws/handler.ts`); only event frames are seq-stamped via `EventBuffer.push()`. Non-event frames (`task_changed`, `state`, `client_joined`) intentionally bypass.
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Stale draft resurrection** — `SessionStore.setDraft()` rejects older `gen`.
@@ -183,6 +191,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Preview Refresh button does nothing / SSE bumps don't reload** — iframe cache-buster must be `?mtime=` (query string, triggers reload), not `#mtime=` (hash, same-document). See `htmlPreviewContent()` in `src/app/render.ts`.
 
 ### Misc
+- **Modal shows only "Failed: 400"** — caller dropped the structured body. Check the `src/app/api.ts` wrapper parses `await res.json()` and forwards `code`/`stack` to `showConnectionError`. Server side: confirm the handler uses `jsonError(...)` not literal `json({ error: String(err) })`.
 - **OAuth callback never completes** — poll `GET /api/oauth/flow-status?flowId=&provider=`.
 - **Continue-Archived button missing** — needs archived + no `goalId` + no `delegateOf` + project still registered.
 - **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; 600 kB main / 500 kB per-chunk.

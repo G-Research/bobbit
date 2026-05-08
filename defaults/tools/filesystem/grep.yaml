@@ -1,6 +1,7 @@
 name: grep
-description: "Search file contents for a pattern"
-summary: "Search file contents by regex or literal pattern. Uses ripgrep internally."
+description: "Regex/literal search via ripgrep; respects .gitignore"
+summary: "Grep file contents (ripgrep)"
+params: [pattern, path?, glob?, ignoreCase?, literal?, context?, limit?]
 provider:
   type: builtin
   tool: grep

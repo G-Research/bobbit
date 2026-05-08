@@ -1,6 +1,6 @@
 name: task_list
-description: "List all tasks for the goal"
-summary: "List all tasks for the current goal with state, type, and dependencies."
+description: "Return all tasks with state, type, dependencies"
+summary: "List all tasks for the goal"
 provider:
   type: bobbit-extension
   extension: extension.ts

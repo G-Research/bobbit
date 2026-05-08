@@ -50,6 +50,8 @@ tests/fixtures/settings-models-tab-bundle.js
 tests/fixtures/settings-models-tab-bundle.css
 tests/fixtures/preview-renderer-bundle.js
 tests/fixtures/preview-renderer-bundle.css
+tests/fixtures/api-error-forwarding-bundle.js
+tests/fixtures/api-error-forwarding-bundle.css
 tests/fixtures/review-tool-active-guard-bundle.js
 tests/fixtures/review-tool-active-guard-bundle.css
 tests/fixtures/components-editor-bundle.js

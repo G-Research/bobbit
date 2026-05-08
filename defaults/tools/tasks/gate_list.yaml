@@ -1,6 +1,6 @@
 name: gate_list
-description: "List all workflow gates with status"
-summary: "List all workflow gates for the current goal with status and definitions."
+description: "Return all gates with status and dependencies"
+summary: "List all workflow gates with status"
 provider:
   type: bobbit-extension
   extension: extension.ts

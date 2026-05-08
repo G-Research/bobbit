@@ -1,6 +1,7 @@
 name: browser_console_messages
-description: "Return console messages from the current page"
-summary: "Return buffered console messages (errors, warnings, logs) from the current browser page."
+description: "Return console.log/error/warn/info captured since page load"
+summary: "Return buffered browser console messages"
+params: [level?, clear?]
 provider:
   type: bobbit-extension
   extension: extension.ts

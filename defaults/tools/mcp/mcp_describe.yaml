@@ -1,6 +1,7 @@
 name: mcp_describe
-description: "Describe operations exposed by an MCP server — returns JSON Schemas on demand."
-summary: "Discovery tool for MCP server operations. Returns one or all operation schemas."
+description: "Return JSON Schemas for MCP server operations"
+summary: "Describe MCP server operations and schemas"
+params: [server, operation?]
 provider:
   type: bobbit-extension
   extension: extension.ts

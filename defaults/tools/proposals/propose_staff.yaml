@@ -1,6 +1,7 @@
 name: propose_staff
-description: "Submit a staff member proposal for user review"
-summary: "Propose a staff member with name, prompt, and optional fields."
+description: "Submit staff proposal with name and prompt"
+summary: "Propose a staff member"
+params: [name, prompt, description?, triggers?, cwd?]
 provider:
   type: bobbit-extension
   extension: extension.ts
