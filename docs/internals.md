@@ -2489,6 +2489,8 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 **Data:** `PersistedGoal.reattemptOf`, `PersistedSession.reattemptGoalId`. API: `POST /api/sessions` accepts `reattemptGoalId`; goals accept `reattemptOf`.
 
+**PR URL in re-attempt context:** `buildReattemptContext(goal, prStatusStore)` reads the original goal's PR URL from `PrStatusStore` (`src/server/agent/pr-status-store.ts`), the single source of truth — `Goal.prUrl` no longer exists. The store is sticky and persists across restarts, so an archived or merged goal's last-known PR URL still surfaces in the `**PR URL:**` line. `SessionManager` threads the store through `PipelineContext.prStatusStore` so both the legacy and pipeline session-creation paths agree on the same source.
+
 **Visibility:** the "Re-attempt" button is shown whenever the goal has no active team and no live (non-terminated) session - covering fresh, shelved, stopped-team, archived, and merged goals. It is hidden only while a team-lead session or any other live session is running for the goal. Sidebar predicate lives in `src/app/render-helpers.ts`; dashboard nav predicate lives in `src/app/goal-dashboard.ts::renderNavBar`.
 
 ---
