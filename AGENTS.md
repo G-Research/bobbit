@@ -77,6 +77,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Defer a heavy library (lazy load)** → `src/ui/lazy/markdown-block.ts::ensureMarkdownBlock()` pattern; or `await import()` for value imports.
 - **Change message rendering** → `src/ui/components/Messages.ts` (standard); `message-renderer-registry.ts` (custom).
 - **Modify message transcript ordering** → all transcript mutations route through `reduce(state, action)` in `src/app/message-reducer.ts`. Never push directly into `state.messages`. See [docs/design/unified-message-ordering-reducer.md](docs/design/unified-message-ordering-reducer.md).
+- **Modify snapshot ↔ live merge / `getMessages` splice** → server holds the in-flight `message_update` payload on `SessionInfo.latestMessageUpdate` (set on `message_update`, cleared on `message_end` / `agent_end` / `process_exit`) and every snapshot-return site (`get_messages`, `refreshAfterCompaction`, role-switch refresh, title generation) splices via `spliceInFlightMessage()` in `src/server/agent/splice-inflight-message.ts` — without this a snapshot taken mid-stream drops the in-flight row because the agent flushes to `.jsonl` only on `message_end`. Client survivor filter in `case "snapshot"` enforces the structural invariant: live rows with `_order > snapshotMaxOrder` survive (the H3 guard, scoped to `_order > 0`); plain-text dedup is multiset (`Map<key,count>`), not Set, so N identical-text rows aren't collapsed; prior-snapshot artifacts (`_origin: "server"` with `_order <= 0` not represented by the new snapshot) are dropped — handles abandoned-partial pivots from streaming text to `tool_use` without a closing `message_end`. See [docs/design/snapshot-live-race-fix.md](docs/design/snapshot-live-race-fix.md).
 - **Modify proposal panel streaming UX** → flag in `state.proposalStreamingByTag`; scroll preserved via `reconcileFollowTail` in `src/app/follow-tail.ts`.
 - **Large content truncation** → `truncate-large-content.ts` (>32 KB). Lazy-load via `GET /api/sessions/:id/tool-content/:mi/:bi`.
 - **Copy session link button** → header ghost icon in `src/app/render.ts`. `showHeaderToast()` (`data-testid="header-toast"`, distinct from `proposal-toast`); `CopyLinkFallbackDialog` on clipboard reject.
@@ -125,76 +126,78 @@ One-liner task → entry point. Follow links for walkthroughs.
 Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/debugging.md). All entries below: see `debugging.md` (or the named design doc) for the full checklist.
 
 ### Session / status / steer
-- **Stop button stuck visible / duplicate user message on second send** — divergence between `_state.isStreaming` and `gatewaySessions[i].status`. Check no new write to `_state.status` outside `case "session_status"`/`case "state"`/`reset()`; no server write to `session.status` outside `broadcastStatus()`. See [docs/design/unify-session-status.md](docs/design/unify-session-status.md).
-- **Live-steer lost / duplicated after Stop** — single `_dispatchSteer()` + shadow ledger `inFlightSteerTexts`; never re-add `PromptQueue.dispatched`. See [steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
-- **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`.
-- **`bash_bg wait` not interrupted by steer** — `BgProcessManager.waits` registry; `abortAllWaits()` from `deliverLiveSteer`.
-- **Streaming dedup/reorder** — `seq`+`ts` envelope, `{type:"resume", fromSeq}` on reconnect.
-- **Bypass class for the seq envelope** — see "Compaction frames or synthetic agent_end lost on reconnect" below; only `{type:"event"}` frames go through `EventBuffer.push()`.
-- **WS overflow guard** — `decideOverflowAction` in `src/server/ws/ws-overflow-guard.ts`.
-- **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`.
-- **Stale messages / dups / out-of-order widgets on session navigate** — reducer in `src/app/message-reducer.ts`.
-- **Compaction frames or synthetic agent_end lost on reconnect** — every `{type:"event"}` frame must route through `emitSessionEvent` (not the bare `broadcast()` in `src/server/ws/handler.ts`); only event frames are seq-stamped via `EventBuffer.push()`. Non-event frames (`task_changed`, `state`, `client_joined`) intentionally bypass.
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
-- **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
-- **Stale draft resurrection** — `SessionStore.setDraft()` rejects older `gen`.
-
-### Worktree / sandbox / projects
-- **Worktree setup not running** — single source of truth `runComponentSetups()` in `src/server/skills/worktree-setup.ts`.
-- **Sandbox status / project container** — `GET /api/sandbox-status`; label `bobbit-project=<projectId>`.
-- **Synthetic system project / `projectId: "system"`** — registered at startup; `hidden: true`; anchored at `<bobbitStateDir>/system-project/`.
-- **Symlinked project root rejected with `code: symlink_root`** — `POST /api/projects` returns 400; UI re-submits with `acceptCanonical: true`. CLI/scripted callers must do the same or pass canonical path.
-- **`findByCwd` returns undefined for a symlinked cwd** — should not happen post-fix; `findByCwd()` canonicalises both sides via `realpathSync`. `getByPath()` is intentionally NOT canonicalised.
-- **Monorepo subprojects not detected** — `src/server/agent/monorepo-scan.ts`; cap 30 candidates.
-- **Legacy JSON-string `project.yaml` field rejected (HTTP 400)** — send structured arrays.
-- **400 "projectId required"** — splash buttons gated on `state.projects.length`; system tool-assistants pass `projectId: "system"`.
-
-### MCP
-- **MCP server unavailable / partial outage** — stub meta extension at `<stateDir>/mcp-extensions/…`.
-- **MCP per-op `never` policy not enforced** — two layers: `mcpPolicyKeys` (Layer A) + `resolveGrantPolicy` (Layer B, `/api/internal/mcp-call`).
-- **MCP gateway server collapses sub-namespaces into one tool** — callsite parsing names with own `indexOf("__", …)` instead of `parseMcpToolName()`. Check `(server, sub)` aggregation in `tool-activation.ts`.
-- **Tools page "MCP" section missing/empty** — `GET /api/mcp-servers`; `renderMcpSection()`.
-
-### Models / AI gateway
-- **Review/naming models under AI Gateway** — `applyReviewModelOverrides`; failures throw, no silent fallback.
-- **`x-opencode-session` header / `models.json`** — `writeAigwModelsJson`, `BOBBIT_SESSION_ID` env, `startupAigwCheck`.
-
-### Gates / verification / team
-- **Stuck gate verification** — `POST /api/goals/:id/gates/:gateId/cancel-verification`.
-- **Gate verification baselines** — pre-impl gates don't diff; impl+ diff against `origin/<primary>...HEAD`.
-- **Gate/task tool bloat** — use `?view=summary`; drill via `gate_inspect`.
-- **Auto-nudge flooding** — `nudgePending` guard in `TeamManager`.
-- **Reviewer spuriously nudges team-lead** — `kind: "reviewer"` filter in `resubscribeTeamEvents` / `notifyTeamLead`.
-
-### Search / config
-- **Dead/ghost search results** — `ProjectContextManager.searchAll()` post-filters orphans.
-- **Search index location** — FlexSearch at `.bobbit/state/search.flex/`; delete to rebuild.
-- **`system-prompt.md` customisation not taking effect** — `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts`.
-- **Tool-guard extension ParseError** — quoting slip in template-literal generator.
-- **Skill chip / autonomous activation / resource manifest** — `src/server/skills/`.
-
-### UI / scroll / proposals
-- **Scroll snaps back / tail-chat lost / false-positive Jump** — `AgentInterface` ports `use-stick-to-bottom`; two-flag `_isAtBottom`/`_escapedFromLock`; never re-add `_programmaticEchoes`/`_settleWindow*`/`_suppressJumpUntilTs`. See [docs/design/tail-chat-redesign.md](docs/design/tail-chat-redesign.md#outcome-of-the-use-stick-to-bottom-port).
-- **Proposal panel button enabled mid-stream** — `state.proposalStreamingByTag` flag.
-- **Proposal panel empty after reload** — `_bufferedProposalEvents` in `src/app/remote-agent.ts`.
-- **Goal `prUrl` field gone** — `PrStatusStore` (`src/server/agent/pr-status-store.ts`) is single source of truth. `buildReattemptContext(goal, prStatusStore)` reads `prStatusStore.get(goal.id)?.url`. `PUT /api/goals/:id` ignores any `prUrl`.
-- **Stale project-proposal panel** — shallow-merge in `onProjectProposal`.
-- **"Changes Saved" view doesn't appear after Apply Changes / disappears on reload** — `state.projectProposalAcceptedBySessionId[sessionId]` must be set by `acceptRegisteredProjectProposal()` *and* `saveProjectDraft(sessionId)` called (not `deleteProjectDraft`), so `projectDraft.restore` re-hydrates the flag. See [docs/design/project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
-- **Dismissed proposal reappears after reload** — `goalDraft.restore` / `roleDraft.restore` must consult `isProposalDismissedTyped`.
-- **"No project selected for this goal" toast in re-attempt assistant** — `goalProposalPanel()` / `goalPreviewPanel()` in `src/app/render.ts`.
-- **Page chunk fails to load on first navigation** — `lazyPage()` in `src/app/render.ts`.
-
-### QA / preview / tier-2.5
-- **QA screenshot token bloat** — extension must emit `[screenshot_file]` not `[screenshot_base64]`.
-- **Tier 2.5 report missing / ffmpeg failed** — set `FFMPEG_PATH` or install ffmpeg; only when `RECORDSCREEN=1`.
-- **Preview standalone tab unstyled / `--background` empty** — inline `<style data-bobbit-preview-theme="snapshot">` injected by `src/server/preview/content-route.ts` from `src/server/preview/theme-snapshot.ts`; `PREVIEW_THEME_BRIDGE` early-returns when `parent === window`. See [docs/preview-architecture.md](docs/preview-architecture.md#theme-token-snapshot-for-standalone-tabs).
-- **Preview Refresh button does nothing / SSE bumps don't reload** — iframe cache-buster must be `?mtime=` (query string, triggers reload), not `#mtime=` (hash, same-document). See `htmlPreviewContent()` in `src/app/render.ts`.
-
-### Misc
-- **Modal shows only "Failed: 400"** — caller dropped the structured body. Check the `src/app/api.ts` wrapper parses `await res.json()` and forwards `code`/`stack` to `showConnectionError`. Server side: confirm the handler uses `jsonError(...)` not literal `json({ error: String(err) })`.
+- **`system-prompt.md` customisation not taking effect** — `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts`. See [debugging.md#system-promptmd-not-customised](docs/debugging.md#system-promptmd-not-customised).
+- **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`. See [debugging.md#lastactivity-reads-just-now-after-restart](docs/debugging.md#lastactivity-reads-just-now-after-restart).
+- **Sandbox status / project container** — `GET /api/sandbox-status`; label `bobbit-project=<projectId>`. See [debugging.md#sandbox-sessions](docs/debugging.md#sandbox-sessions).
+- **Stop button stuck visible while sprite is idle / duplicate user message on second send** — symptom of the legacy two-flag divergence between `_state.isStreaming` and `gatewaySessions[i].status`. Fixed by the canonical-status refactor: divergence is now structurally impossible because `isStreaming` is a derived getter over `_state.status`, and `_state.status` is healed within ≤15s by the server-side heartbeat (`broadcastStatus`-shaped frame re-emitted WITHOUT bumping `statusVersion`). If you see this regression, check that no new code path writes `_state.status` outside `case "session_status"` / `case "state"` / `reset()` on the client, and that no server site writes `session.status` outside `broadcastStatus()` in `src/server/agent/session-status.ts`. See [docs/design/unify-session-status.md](docs/design/unify-session-status.md) and `tests/e2e/ui/session-status-recovery.spec.ts`.
+- **Stuck gate verification** — `POST /api/goals/:id/gates/:gateId/cancel-verification`. See [debugging.md#gates](docs/debugging.md#gates).
+- **Worktree setup not running** — single source of truth `runComponentSetups()` in `src/server/skills/worktree-setup.ts`. See [debugging.md#worktree-setup-hook-not-running](docs/debugging.md#worktree-setup-hook-not-running).
+- **Pool worktree placed under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** — symptom of the nested-rootPath bug fixed in `WorktreePool` constructor. If you see this regression, check that `resolveRepoToplevel` in `src/server/agent/worktree-pool.ts` is intact and that both `initWorktreePoolForProject` call sites in `server.ts` still resolve via `getRepoRoot()` on the single-repo branch. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
+- **Gate verification baselines** — pre-impl gates don't diff; impl+ diff against `origin/<primary>...HEAD`. See [debugging.md#gate-verification-baselines](docs/debugging.md#gate-verification-baselines).
+- **Gate/task tool bloat** — use `?view=summary`; drill via `gate_inspect`. See [debugging.md#gate--task-tool-bloat](docs/debugging.md#gate--task-tool-bloat).
+- **Dead/ghost search results** — `ProjectContextManager.searchAll()` post-filters orphans. See [debugging.md#search-index](docs/debugging.md#search-index).
+- **Search index location** — FlexSearch at `.bobbit/state/search.flex/`; delete to rebuild. See [debugging.md#search-index-location](docs/debugging.md#search-index-location).
+- **Sidebar child loading** — server BFS enrichment; archived-goals `archivedSessions`. See [debugging.md#sidebar-child-loading](docs/debugging.md#sidebar-child-loading).
+- **QA screenshot token bloat** — extension must emit `[screenshot_file]` not `[screenshot_base64]`. See [debugging.md#qa-screenshot-token-bloat](docs/debugging.md#qa-screenshot-token-bloat).
+- **Stale project-proposal panel** — shallow-merge in `onProjectProposal`. See [debugging.md#stale-project-proposal-panel-after-propose_project](docs/debugging.md#stale-project-proposal-panel-after-propose_project).
+- **Monorepo subprojects not detected** — `src/server/agent/monorepo-scan.ts`; cap 30 candidates. See [debugging.md#monorepo-subprojects-not-detected](docs/debugging.md#monorepo-subprojects-not-detected).
+- **Legacy JSON-string `project.yaml` field rejected (HTTP 400)** — send structured arrays. See [debugging.md#legacy-json-string-projectyaml-field-rejected](docs/debugging.md#legacy-json-string-projectyaml-field-rejected).
+- **Skill chip / autonomous activation / resource manifest** — `src/server/skills/`. See [debugging.md#skill-chip--autonomous-activation--resource-manifest](docs/debugging.md#skill-chip--autonomous-activation--resource-manifest).
+- **Tool-guard extension ParseError** — quoting slip in template-literal generator. See [debugging.md#tool-guard-extension-parseerror-new-sessions-crash](docs/debugging.md#tool-guard-extension-parseerror-new-sessions-crash).
+- **MCP server unavailable / partial outage** — stub meta extension at `<stateDir>/mcp-extensions/…`. See [debugging.md#mcp-server-unavailable--partial-outage](docs/debugging.md#mcp-server-unavailable--partial-outage).
+- **MCP per-op `never` policy not enforced** — two layers: `mcpPolicyKeys` (returns `{group, tool}`, used at Layer A) + server-side `resolveGrantPolicy` (Layer B, `/api/internal/mcp-call`). `mcpPolicyPrefix` is the legacy group-only wrapper. See [debugging.md#mcp-per-op-never-policy-not-enforced](docs/debugging.md#mcp-per-op-never-policy-not-enforced).
+- **MCP server dropdown reads "Allow (default)" but agent is denied** — historical bug from `mcp__playwright`/`mcp__nano-banana` builtin denials; removed in MCP policy parity. See [debugging.md#mcp-server-dropdown-reads-allow-default-but-agent-is-denied](docs/debugging.md#mcp-server-dropdown-reads-allow-default-but-agent-is-denied).
+- **Tools page "MCP" section missing/empty** — `GET /api/mcp-servers`; `renderMcpSection()`. See [debugging.md#tools-page-mcp-section-missing-or-empty](docs/debugging.md#tools-page-mcp-section-missing-or-empty).
+- **MCP gateway server collapses sub-namespaces into one tool** — a gateway emitting `mcp__gr__ai-adoption__list-articles` etc. should surface as ONE server row + one tool row per sub-namespace on the Tools page; the agent should see one meta-tool per sub-namespace (`mcp_gr__ai-adoption`, `mcp_gr__jira`). Single source of truth is `parseMcpToolName()` in `src/server/mcp/mcp-meta.ts` — a callsite parsing the name with its own `indexOf("__", …)` instead of routing through this helper breaks sub-namespace grouping at that callsite. Symptom: one giant `mcp_gr` meta-tool with a flat enum like `ai-adoption__list-articles, jira__get-queue, …`. Check the `(server, sub)` aggregation in `tool-activation.ts` and the two ad-hoc parse sites in `server.ts` (must call `parseMcpToolName`).
+- **Auto-nudge flooding** — `nudgePending` guard in `TeamManager`. See [debugging.md#auto-nudge-flooding](docs/debugging.md#auto-nudge-flooding).
+- **Reviewer spuriously nudges team-lead** — `kind: "reviewer"` filter in `resubscribeTeamEvents` / `notifyTeamLead`. See [debugging.md#reviewer-session-triggers-spurious-agent-finished-team-lead-nudge-after-restart](docs/debugging.md#reviewer-session-triggers-spurious-agent-finished-team-lead-nudge-after-restart).
+- **Duplicate `model_change` event at session startup** — spawn site must route through `resolveBridgeOptions`. See [debugging.md#duplicate-model_change-event-at-session-startup](docs/debugging.md#duplicate-model_change-event-at-session-startup).
+- **Archived session footer shows placeholder model** — `buildArchivedStateData` must run after `session_title`. See [debugging.md#archived-session-footer-shows-placeholder-model](docs/debugging.md#archived-session-footer-shows-placeholder-model).
+- **Resumed reviewer terminated ~46ms after restart** — await `waitForStreaming` before `waitForIdle`. See [debugging.md#resumed-reviewer-terminated-46ms-after-server-restart-before-reminder-is-acted-on](docs/debugging.md#resumed-reviewer-terminated-46ms-after-server-restart-before-reminder-is-acted-on).
+- **`x-opencode-session` header / `models.json`** — `writeAigwModelsJson`, `BOBBIT_SESSION_ID` env, `startupAigwCheck`. See [debugging.md#x-opencode-session-header--modelsjson](docs/debugging.md#x-opencode-session-header--modelsjson).
+- **Review/naming models under AI Gateway** — `applyReviewModelOverrides`; failures throw, no silent fallback. See [debugging.md#reviewnaming-model-mismatch-under-ai-gateway](docs/debugging.md#reviewnaming-model-mismatch-under-ai-gateway).
+- **Live-steer lost / duplicated after Stop** — single `_dispatchSteer()` + shadow ledger `inFlightSteerTexts`; never re-add `PromptQueue.dispatched`. See [debugging.md#abort-steer--queue](docs/debugging.md#abort-steer--queue).
+- **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`. See [debugging.md#session-wedged-after-errored-turn](docs/debugging.md#session-wedged-after-errored-turn).
+- **`bash_bg wait` not interrupted by steer** — `BgProcessManager.waits` registry; `abortAllWaits()` from `deliverLiveSteer`. See [debugging.md#bash_bg-wait-not-interrupted-by-steer](docs/debugging.md#bash_bg-wait-not-interrupted-by-steer).
+- **Large file writes freezing** — `truncateLargeToolContent()` at >32 KB; check `.jsonl` exists. See [debugging.md#large-file-writes-agent-writes-32kb](docs/debugging.md#large-file-writes-agent-writes-32kb).
+- **Preview Open button broken / v1/v2 markers** — `tool_result` must carry `__preview_snapshot_v3__`. See [preview-architecture.md#snapshot-v3-marker](docs/preview-architecture.md#snapshot-v3-marker).
+- **Preview iframe shows broken images / 404 on assets** — first check: did the agent declare the asset in `preview_open`'s `assets[]` or `manifest`? Bare `file` copies *only* the entry HTML; undeclared siblings are not in the mount and will 404. Then check cookie auth, MIME, path-guard. See [preview-architecture.md#explicit-asset-opt-in-file-form](docs/preview-architecture.md#explicit-asset-opt-in-file-form) and [preview-architecture.md#content-origin-previewsidrel-path](docs/preview-architecture.md#content-origin-previewsidrel-path).
+- **`/preview/<sid>/...` returns 401 in a new tab** — `bobbit_session` cookie missing/scoped wrong. See [preview-architecture.md#cookie-auth](docs/preview-architecture.md#cookie-auth).
+- **Preview iframe shows 'No preview yet' indefinitely** — SSE event must carry `entry`. See [preview-architecture.md#sse--get-apisessionssidpreview-events](docs/preview-architecture.md#sse--get-apisessionssidpreview-events).
+- **Streaming dedup/reorder** — `seq`+`ts` envelope, `{type:"resume", fromSeq}` on reconnect. See [debugging.md#streaming-dedup--reorder](docs/debugging.md#streaming-dedup--reorder).
+- **WS overflow guard** — `decideOverflowAction` in `src/server/ws/ws-overflow-guard.ts`. See [debugging.md#ws-overflow-guard](docs/debugging.md#ws-overflow-guard).
+- **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`. See [debugging.md#verification-log-duplicated-nx-multi-listener](docs/debugging.md#verification-log-duplicated-nx-multi-listener).
+- **Scroll snaps back / tail-chat lost / false-positive Jump** — `AgentInterface` ports `use-stick-to-bottom`; two-flag `_isAtBottom`/`_escapedFromLock`; never re-add `_programmaticEchoes`/`_settleWindow*`/`_suppressJumpUntilTs`. See [design/tail-chat-redesign.md](docs/design/tail-chat-redesign.md#outcome-of-the-use-stick-to-bottom-port).
+- **Proposal panel button enabled mid-stream** — `state.proposalStreamingByTag` flag. See [debugging.md#proposal-panel-button-enabled-mid-stream--scroll-resets-on-delta](docs/debugging.md#proposal-panel-button-enabled-mid-stream--scroll-resets-on-delta).
+- **Inline-comment annotations on proposals missing** — ephemeral `proposalBackend` in `src/ui/components/review/proposal-annotations.ts`. See [debugging.md#inline-comment-annotations-on-goalrolestaff-proposals](docs/debugging.md#inline-comment-annotations-on-goalrolestaff-proposals).
+- **"Send feedback" button missing on a proposal panel** — gated on annotation count > 0 AND not streaming. See [debugging.md#send-feedback-button-missing-on-a-proposal-panel](docs/debugging.md#send-feedback-button-missing-on-a-proposal-panel).
+- **"Open proposal" on old card destroys later edits** — check `__proposal_rev_v1__:<n>` marker. See [debugging.md#open-proposal-on-old-card-destroys-later-edits](docs/debugging.md#open-proposal-on-old-card-destroys-later-edits).
+- **Proposal panel doesn't update after `edit_proposal`** — check WS `proposal_update` frame + structured error code. See [debugging.md#proposal-panel-doesnt-update-after-edit_proposal](docs/debugging.md#proposal-panel-doesnt-update-after-edit_proposal).
+- **"No project selected for this goal" toast in re-attempt assistant** — `goalProposalPanel()` / `goalPreviewPanel()` in `src/app/render.ts`. See [debugging.md#re-attempt-project-binding](docs/debugging.md#re-attempt-project-binding).
+- **Dismissed proposal reappears after reload** — `goalDraft.restore` / `roleDraft.restore` must consult `isProposalDismissedTyped`. See [debugging.md#dismissed-proposal-restored-on-reload](docs/debugging.md#dismissed-proposal-restored-on-reload).
+- **Stale messages / dups / out-of-order widgets on session navigate** — reducer in `src/app/message-reducer.ts`.
+- **Messages disappear from chat transcript and reappear after sending another prompt** — H3 snapshot/live race. Symptom most reliable on WS drop+reconnect mid-stream and on two-tab visibility resync (both tabs converge on the same missing rows — diagnostic that the snapshot itself is missing data, not a per-client display glitch). Root cause: agent flushes to `.jsonl` only on `message_end`, so `getMessages` snapshots taken mid-turn don't represent in-flight rows; client survivor filter previously stripped them. Fixed by server-side `spliceInFlightMessage()` + reducer `_order > snapshotMaxOrder` guard + multiset plain-text dedup + `_order <= 0` prior-artifact drop. Regression test: `tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts`. See [docs/design/snapshot-live-race-fix.md](docs/design/snapshot-live-race-fix.md).
+- **Continue-Archived button missing** — only when archived AND no `goalId` AND no `delegateOf` AND project still registered. See [debugging.md#continue-archived-button-missing](docs/debugging.md#continue-archived-button-missing).
+- **Continued session missing earlier transcript** — confirm cloned `.jsonl` at `agentSessionFile` path. See [debugging.md#continued-session-missing-earlier-transcript](docs/debugging.md#continued-session-missing-earlier-transcript).
+- **Archived session footer shows wrong model** — archived `auth_ok` must push `state` via `buildArchivedStateData()`. See [debugging.md#archived-session-footer-shows-placeholder-model](docs/debugging.md#archived-session-footer-shows-placeholder-model).
+- **Stale draft resurrection** — `SessionStore.setDraft()` rejects older `gen`. See [debugging.md#stale-draft-resurrection](docs/debugging.md#stale-draft-resurrection).
+- **400 "projectId required"** — splash buttons gated on `state.projects.length`; system tool-assistants pass `projectId: "system"`. See [debugging.md#multi-project--per-project-state](docs/debugging.md#multi-project--per-project-state).
+- **Synthetic system project / `projectId: "system"`** — registered at startup; `hidden: true`; anchored at `<bobbitStateDir>/system-project/`. See [internals.md#synthetic-system-project](docs/internals.md#synthetic-system-project).
+- **Symlinked project root rejected with `code: symlink_root`** — `POST /api/projects` returns 400 `{ code: "symlink_root", rootPath, canonical }` when `rootPath` is a symlink. UI auto-prompts and re-submits with `acceptCanonical: true`; CLI/scripted callers must do the same or pass the canonical path directly. See `detectSymlinkRoot()` in `src/server/agent/project-registry.ts` and [debugging.md#symlinked-project-root-rejected-with-code-symlink_root](docs/debugging.md#symlinked-project-root-rejected-with-code-symlink_root).
+- **`findByCwd` returns undefined for a symlinked cwd** — should not happen post-fix; `findByCwd()` canonicalises both sides via `realpathSync` with a try/catch fallback (Windows EPERM falls back to the textual path). If you see this regression, verify the canonicalisation block in `src/server/agent/project-registry.ts::findByCwd` is intact and that `getByPath()` is still NOT canonicalised (it's the duplicate-path guard). See [debugging.md#findbycwd-returns-undefined-for-a-symlinked-cwd](docs/debugging.md#findbycwd-returns-undefined-for-a-symlinked-cwd).
+- **Orphan remote branches** — `deleteRemoteGoalBranches` (goals); `session-eager-branch-delete.ts` (sessions). See [design/orphan-remote-branch-cleanup.md](docs/design/orphan-remote-branch-cleanup.md).
+- **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; budget 600 kB main / 500 kB per-chunk. See [debugging.md#bundle-size-assertion-fails](docs/debugging.md#bundle-size-assertion-fails).
+- **Markdown not rendering in chat / proposal panel** — call `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts`. See [debugging.md#markdown-not-rendering-in-chat--proposal-panel](docs/debugging.md#markdown-not-rendering-in-chat--proposal-panel).
+- **Page chunk fails to load on first navigation** — `lazyPage()` in `src/app/render.ts`. See [debugging.md#page-chunk-fails-to-load-on-first-navigation](docs/debugging.md#page-chunk-fails-to-load-on-first-navigation).
+- **Lazy tool renderer placeholder sticks / Open button never appears** — `TOOL_RENDERER_LOADED_EVENT` in `src/ui/tools/renderer-registry.ts`; listener in `<tool-message>` / `<tool-group>`. See [debugging.md#lazy-tool-renderer-placeholder-sticks](docs/debugging.md#lazy-tool-renderer-placeholder-sticks).
+- **Proposal panel empty after reload** — `_bufferedProposalEvents` in `src/app/remote-agent.ts`. See [debugging.md#proposal-panel-empty-after-reload](docs/debugging.md#proposal-panel-empty-after-reload).
+- **Image generation failure** — `400` malformed input, `500 { error }` provider-side; never `502`/`503`. See [debugging.md#image-generation-failure](docs/debugging.md#image-generation-failure).
+- **Header toast vs proposal toast testid collision** — `header-toast` vs `proposal-toast`; two slots in `src/app/render.ts`. See [debugging.md#header-toast-vs-proposal-toast-testid-collision](docs/debugging.md#header-toast-vs-proposal-toast-testid-collision).
+- **`read_session` returns `permission_denied`** — cross-project read; check `x-bobbit-session-id` header. See [debugging.md#read_session-returns-permission_denied](docs/debugging.md#read_session-returns-permission_denied).
+- **Mobile annotation popover doesn't open** — `_onMobileAddComment` must set `_popoverReferenceRect` before mount. See [debugging.md#mobile-annotation-popover-doesnt-open-after-tapping-add-comment](docs/debugging.md#mobile-annotation-popover-doesnt-open-after-tapping-add-comment).
+- **Tier 2.5 report missing / ffmpeg failed** — set `FFMPEG_PATH` or install ffmpeg; only when `RECORDSCREEN=1`. See [debugging.md#tier-25-report-missing--ffmpeg-failed](docs/debugging.md#tier-25-report-missing--ffmpeg-failed).
 - **OAuth callback never completes** — poll `GET /api/oauth/flow-status?flowId=&provider=`.
-- **Continue-Archived button missing** — needs archived + no `goalId` + no `delegateOf` + project still registered.
-- **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; 600 kB main / 500 kB per-chunk.
 
 ## Git conventions
 
@@ -226,4 +229,4 @@ components:
 
 ## Reference docs
 
-[docs/internals.md](docs/internals.md) (tool policies, search, MCP, sandbox, config, disk state, goals, multi-project) · [docs/debugging.md](docs/debugging.md) (full diagnostics) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/blocking-tools.md](docs/blocking-tools.md) · [docs/non-blocking-ask.md](docs/non-blocking-ask.md) · [docs/design/unified-message-ordering-reducer.md](docs/design/unified-message-ordering-reducer.md) · [docs/design/steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md) · [docs/design/unify-session-status.md](docs/design/unify-session-status.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md)
+[docs/internals.md](docs/internals.md) (tool policies, search, MCP, sandbox, config, disk state, goals, multi-project) · [docs/debugging.md](docs/debugging.md) (full diagnostics) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/blocking-tools.md](docs/blocking-tools.md) · [docs/non-blocking-ask.md](docs/non-blocking-ask.md) · [docs/design/unified-message-ordering-reducer.md](docs/design/unified-message-ordering-reducer.md) · [docs/design/snapshot-live-race-fix.md](docs/design/snapshot-live-race-fix.md) · [docs/design/steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md) · [docs/design/unify-session-status.md](docs/design/unify-session-status.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md)

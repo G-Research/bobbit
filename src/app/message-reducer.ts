@@ -235,13 +235,25 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// regenerated ids. Without this, a visibilitychange-triggered
 			// resync (new-tab in same browser) duplicates each plain-text
 			// assistant reply on every snapshot tick.
-			const serverPlainTextKeys = new Set<string>();
+			// Multiset text-match: count how many snapshot rows carry each
+			// `(role|text)` key, and decrement one per matched live row in the
+			// survivor loop. The earlier Set-based variant collapsed N
+			// identical-text live rows (e.g. "STREAM_BURST_DONE:1" repeated
+			// across iterations) onto a single snapshot key, dropping all but
+			// one of them. The multiset preserves cardinality: drop only the
+			// number of live rows the snapshot legitimately represents; any
+			// surplus falls through to the H3 `_order` guard. See the H3 design
+			// doc on the goal.
+			const serverPlainTextCounts = new Map<string, number>();
 			for (const m of snapshotRows) {
 				if (!isPlainTextRow(m)) continue;
 				const t = normaliseText(extractText(m));
 				if (t.length === 0) continue;
-				serverPlainTextKeys.add(`${m.role}|${t}`);
+				const key = `${m.role}|${t}`;
+				serverPlainTextCounts.set(key, (serverPlainTextCounts.get(key) ?? 0) + 1);
 			}
+
+
 			const serverHasCompactionMarker = snapshotRows.some((m) => {
 				if (m.role !== "assistant") return false;
 				const t = extractText(m);
@@ -256,10 +268,11 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const survivors: OrderedMessage[] = [];
 			for (const m of state.messages) {
 				if (m._origin === "server") {
+					// 1) Identity-based drops (structural, correct).
 					// Live-event server rows: drop if snapshot has matching id.
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
-					// Defence in depth: also drop id-less (or synthetic-id'd) live
-					// rows whose toolCallId-equivalent is represented in the snapshot.
+					// Drop id-less (or synthetic-id'd) live rows whose
+					// toolCallId-equivalent is represented in the snapshot.
 					// Server snapshot is authoritative for any toolCall it contains.
 					if (m.role === "toolResult") {
 						const tcid = (m as any).toolCallId;
@@ -273,14 +286,53 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 						);
 						if (hasMatchingToolCall) continue;
 					}
-					// Plain-text fallback dedup: drop id-less / id-mismatched
-					// live plain-text rows whose (role, normalisedText) matches
-					// a snapshot row. Skipped for toolCall/toolResult rows
-					// (handled above) so we never weaken existing toolCall dedup.
+					// 2) Multiset plain-text dedup — drop id-less / id-mismatched
+					// live rows up to the count the snapshot carries for each
+					// `(role|text)` key. Surplus live rows (count exhausted) fall
+					// through to the H3 guard below. The earlier Set-based variant
+					// collapsed N identical-text live rows (e.g.
+					// `STREAM_BURST_DONE:1` repeated across iterations) onto a
+					// single snapshot key, dropping all but one of them — the
+					// multiset preserves cardinality. Skipped for
+					// toolCall/toolResult rows handled above.
 					if (isPlainTextRow(m)) {
 						const t = normaliseText(extractText(m));
-						if (t.length > 0 && serverPlainTextKeys.has(`${m.role}|${t}`)) continue;
+						if (t.length > 0) {
+							const key = `${m.role}|${t}`;
+							const remaining = serverPlainTextCounts.get(key) ?? 0;
+							if (remaining > 0) {
+								serverPlainTextCounts.set(key, remaining - 1);
+								continue;
+							}
+						}
 					}
+					// 3) Structural invariant (H3 fix). A LIVE server row (positive
+					// `_order` = monotonic server seq) stamped after the snapshot
+					// was taken is by definition newer than the snapshot. When
+					// the snapshot does NOT represent the live row (no id-match,
+					// no toolCall-equivalence match, no remaining text-match
+					// budget), the live row MUST survive. Without this guard a
+					// stale `.jsonl`-backed snapshot strips it (the core H3 race).
+					// Scoped to `_order > 0` so the guard does NOT fire for
+					// prior-snapshot rows that also carry `_origin: "server"` but
+					// live in the negative-order range. See the H3 design doc.
+					if (m._order > 0 && m._order > serverMaxOrder) {
+						survivors.push(m);
+						continue;
+					}
+					// 4) Prior-snapshot artifacts (`_order <= 0`, server-origin)
+					// must NOT survive a fresh snapshot that doesn't represent
+					// them. Otherwise an in-flight `message_update` row spliced
+					// into snapshot N persists forever after the server clears
+					// `latestMessageUpdate` (e.g. mock-agent `_streamChunkedText`
+					// with `omitFinalEnd:true`, or a real LLM that abandons partial
+					// text to pivot to a tool_use). The new snapshot is the
+					// authoritative point-in-time read; previous-snapshot rows that
+					// fail every dedup check above are stale and must be dropped.
+					if (m._order <= 0) {
+						continue;
+					}
+					// Live row (`_order > 0`) within the snapshot's range — survive.
 					survivors.push(m);
 					continue;
 				}
