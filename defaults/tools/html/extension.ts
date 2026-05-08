@@ -68,14 +68,12 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "preview_open",
 		label: "Preview Open",
-		description:
-			"Open an HTML preview panel in the Bobbit UI. Provide raw HTML content or a path to an HTML file. " +
-			"The preview panel appears alongside the chat and auto-updates when you call this tool again.",
+		description: "Open or update the HTML preview panel. Auto-refreshes on re-call.",
 		parameters: Type.Object({
-			html: Type.Optional(Type.String({ description: "Raw HTML content to preview. Takes priority over 'file' if both are provided." })),
-			file: Type.Optional(Type.String({ description: "Path to an HTML file to load and preview. Only the entry file is copied unless `assets`/`manifest` declare siblings." })),
-			assets: Type.Optional(Type.Array(Type.String(), { description: "Optional list of sibling asset paths (relative to the entry file's directory) to copy into the preview mount. Supports literal paths and single-segment globs (e.g. 'styles.css', 'img/*.png'). '**' is not supported." })),
-			manifest: Type.Optional(Type.String({ description: "Optional path (relative to the entry file's directory) to a JSON manifest of the form { \"assets\": [...] }. Concatenated with inline `assets`." })),
+			html: Type.Optional(Type.String({ description: "Raw HTML. Takes priority over `file`." })),
+			file: Type.Optional(Type.String({ description: "Path to an HTML entry file." })),
+			assets: Type.Optional(Type.Array(Type.String(), { description: "Sibling asset paths relative to entry. Supports single-segment globs." })),
+			manifest: Type.Optional(Type.String({ description: "Path to JSON manifest { assets: [...] } relative to entry." })),
 		}),
 
 		async execute(_toolCallId, params) {

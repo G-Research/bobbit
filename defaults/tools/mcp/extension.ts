@@ -104,11 +104,7 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "mcp_describe",
 		label: "MCP Describe",
-		description:
-			"Return the JSON Schema for an MCP server's operations. " +
-			"If `operation` is omitted, lists all operations on the server with their descriptions and input schemas. " +
-			"If `operation` is provided, returns just that one operation's schema. " +
-			"Use this to discover argument shapes before calling `mcp_<server>(operation, args)`.",
+		description: "Return JSON Schema for MCP server operations. Omit `operation` to list all.",
 		promptSnippet:
 			"mcp_describe(server, operation?) - Fetch operation schemas for an MCP server on demand.",
 		promptGuidelines: [
@@ -117,8 +113,8 @@ const extension: ExtensionFactory = (pi) => {
 			"After describing, invoke the operation via the `mcp_<server>` meta-tool.",
 		],
 		parameters: Type.Object({
-			server: Type.String({ description: "MCP server name (the `<server>` part of `mcp__<server>__<op>`)." }),
-			operation: Type.Optional(Type.String({ description: "If provided, return just this operation's schema. If omitted, list all operations on the server." })),
+			server: Type.String(),
+			operation: Type.Optional(Type.String()),
 		}),
 
 		async execute(_toolCallId, params) {
