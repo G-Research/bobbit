@@ -132,9 +132,17 @@ test.describe("Project Assistant Saved State", () => {
 		await expect(termBtn).toBeVisible();
 		await expect(page.locator('[data-panel="project-proposal"][data-state="accepted"]')).toBeVisible();
 
-		// 2. Reload → state restored from on-disk project draft. Wait for the
-		// 300 ms debounced saveProjectDraft to flush before reloading.
-		await page.waitForTimeout(800);
+		// 2. Reload → state restored from on-disk project draft. Poll the
+		// server for the persisted draft so we observe the 300 ms debounced
+		// saveProjectDraft flush as a real outcome rather than sleeping. The
+		// `accepted: true` flag in the serialized draft is what powers the
+		// post-reload "Changes Saved" view.
+		await expect.poll(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}/draft?type=project`);
+			if (!resp.ok) return false;
+			const data = await resp.json().catch(() => ({}));
+			return data?.data?.accepted === true;
+		}, { timeout: 5_000 }).toBe(true);
 		await page.reload();
 		await openSession(page, sessionId);
 		await expect(page.locator('[data-testid="project-changes-saved-heading"]')).toBeVisible({ timeout: 15_000 });
