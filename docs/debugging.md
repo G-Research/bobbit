@@ -830,3 +830,18 @@ The migration is one-shot and idempotent — deleting the marker re-arms it, but
 ## `findByCwd` returns undefined for a symlinked cwd
 
 Should not happen post-fix. `ProjectRegistry.findByCwd()` canonicalises both the registered `rootPath` and the incoming `cwd` via `realpathSync` (with a try/catch fallback to the textual path on EPERM/ENOENT — Windows raises EPERM on some junctions) before the prefix comparison. If a project is registered at the canonical path and a session whose `cwd` reaches the server through a symlink fails to resolve, verify the canonicalisation block in `src/server/agent/project-registry.ts::findByCwd` is still in place and the fallback isn't swallowing real errors. Note `getByPath()` is intentionally NOT canonicalised — that's the duplicate-path guard at registration, a different concern from runtime cwd resolution.
+
+## Modal shows only "Failed: 400" with no description
+
+Symptom: triggering an action (e.g. create goal) produces a modal whose body is just "Failed: 400" or "Failed to create goal: 400" — no description, no code, no stack.
+
+Diagnosis: the API wrapper in `src/app/api.ts` (or `src/app/session-manager.ts`) is dropping the structured server error body. The reference pattern is the throw side parsing `await res.json().catch(() => ({}))` and attaching `data.code` and `data.stack` to the thrown `Error`, plus the catch side reading both back off the error object and forwarding them to `showConnectionError(title, msg, { code, stack })` in `src/app/dialogs.ts`. Both halves must be applied together — fixing only one half drops the structured info.
+
+Server side: confirm the handler whose response surfaced is using `jsonError(status, err, extra?)` (defined in `src/server/server.ts`) for caught exceptions, not literal `json({ error: String(err) }, ...)` or `json({ error: err.message }, ...)`. Validation responses with literal strings (e.g. `"Missing title"`) intentionally stay as `json({ error: "..." }, ...)` — they have no useful stack.
+
+Fix path:
+
+- `src/app/api.ts` wrapper: replace `throw new Error(\`Failed: ${res.status}\`)` with the parse-and-attach pattern; update the catch block to read `code`/`stack` off the error and pass them to `showConnectionError`.
+- `src/server/server.ts` handler: convert `catch (err) { json({ error: String(err) }, status); }` to `catch (err) { jsonError(status, err); }`.
+- `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders the message + optional code + collapsible stack disclosure when both halves are wired correctly.
+- The background polling site in `refreshSessions()` is intentionally silent and does NOT surface a modal — failures there are dropped on purpose.

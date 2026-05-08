@@ -58,6 +58,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Add/modify session creation** → `session-setup.ts`, wrappers in `session-manager.ts`. See [docs/internals.md — Session worktrees](docs/internals.md#session-worktrees).
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, REST in `server.ts`, assistant in `goal-assistant.ts`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`. Await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
+- **Return errors from a server handler** → use `jsonError(status, err, extra?)` in `src/server/server.ts` for any caught exception so `stack` flows to the client modal. Validation responses with literal strings stay as `json({ error: "..." }, ...)`. See [docs/rest-api.md — Error response shape](docs/rest-api.md#error-response-shape).
 
 ### Sessions, status, steer
 - **Mutate session status** → `broadcastStatus()` in `src/server/agent/session-status.ts` is the **single writer** for `session.status`. Client: `_state.status` on `RemoteAgent` is canonical; `isStreaming`/`isArchived`/`isPreparing` are derived getters. `case "session_status"` is the sole writer (plus `case "state"` on attach, `reset()` on navigate). `agent_start`/`agent_end`/`error` are signals only. See [docs/design/unify-session-status.md](docs/design/unify-session-status.md).
@@ -70,6 +71,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
 - **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts`.
+- **Show a server error in a modal** → `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack. API wrappers in `src/app/api.ts` parse `await res.json()`, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })` in `src/app/dialogs.ts`. The background polling site in `refreshSessions()` (`src/app/api.ts`) is intentionally silent.
 - **Add a route-level page (lazy-loaded)** → add a `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
 - **Add a heavy tool renderer (lazy)** → `registerLazyToolRenderer()` in `src/ui/tools/index.ts`; placeholder + `TOOL_RENDERER_LOADED_EVENT` swap.
 - **Defer a heavy library (lazy load)** → `src/ui/lazy/markdown-block.ts::ensureMarkdownBlock()` pattern; or `await import()` for value imports.
@@ -108,6 +110,7 @@ One-liner task → entry point. Follow links for walkthroughs.
 - **Edit a proposal mid-session** → `view_proposal(type)` / `edit_proposal(type, old, new)`. Per-rev snapshots under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/`. See [docs/design/editable-proposals.md](docs/design/editable-proposals.md).
 - **Dismiss/restore invariant for proposal panels** → `goalDraft.restore`/`roleDraft.restore`/`projectDraft.restore` in `src/app/session-manager.ts` gate rehydration on `isProposalDismissedTyped`. Dismiss does NOT delete the on-disk draft. Only `goal`/`role`/`project` persist drafts; `staff`/`tool`/`workflow` are transient.
 - **Header toast vs proposal toast testid collision** → `header-toast` vs `proposal-toast`; two slots in `src/app/render.ts`.
+- **Project-proposal "Changes Saved" state after Apply Changes (registered mode)** → `state.projectProposalAcceptedBySessionId` flag, set in `acceptRegisteredProjectProposal()`, persisted via `projectDraft.serialize/restore`, cleared in the unified `onProposal` callback and all `activeProposals.project` cleanup sites. Terminate button shares `terminateProjectAssistantSession()` with the provisional path. See [docs/design/project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
 
 ### Worktree (operational)
 - **Pool worktree placed under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** → `WorktreePool` constructor in `src/server/agent/worktree-pool.ts` resolves `opts.repoPath` to git toplevel; both `initWorktreePoolForProject` sites in `src/server/server.ts` also resolve. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
@@ -127,9 +130,11 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`.
 - **`bash_bg wait` not interrupted by steer** — `BgProcessManager.waits` registry; `abortAllWaits()` from `deliverLiveSteer`.
 - **Streaming dedup/reorder** — `seq`+`ts` envelope, `{type:"resume", fromSeq}` on reconnect.
+- **Bypass class for the seq envelope** — see "Compaction frames or synthetic agent_end lost on reconnect" below; only `{type:"event"}` frames go through `EventBuffer.push()`.
 - **WS overflow guard** — `decideOverflowAction` in `src/server/ws/ws-overflow-guard.ts`.
 - **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`.
 - **Stale messages / dups / out-of-order widgets on session navigate** — reducer in `src/app/message-reducer.ts`.
+- **Compaction frames or synthetic agent_end lost on reconnect** — every `{type:"event"}` frame must route through `emitSessionEvent` (not the bare `broadcast()` in `src/server/ws/handler.ts`); only event frames are seq-stamped via `EventBuffer.push()`. Non-event frames (`task_changed`, `state`, `client_joined`) intentionally bypass.
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Stale draft resurrection** — `SessionStore.setDraft()` rejects older `gen`.
@@ -174,6 +179,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Proposal panel empty after reload** — `_bufferedProposalEvents` in `src/app/remote-agent.ts`.
 - **Goal `prUrl` field gone** — `PrStatusStore` (`src/server/agent/pr-status-store.ts`) is single source of truth. `buildReattemptContext(goal, prStatusStore)` reads `prStatusStore.get(goal.id)?.url`. `PUT /api/goals/:id` ignores any `prUrl`.
 - **Stale project-proposal panel** — shallow-merge in `onProjectProposal`.
+- **"Changes Saved" view doesn't appear after Apply Changes / disappears on reload** — `state.projectProposalAcceptedBySessionId[sessionId]` must be set by `acceptRegisteredProjectProposal()` *and* `saveProjectDraft(sessionId)` called (not `deleteProjectDraft`), so `projectDraft.restore` re-hydrates the flag. See [docs/design/project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
 - **Dismissed proposal reappears after reload** — `goalDraft.restore` / `roleDraft.restore` must consult `isProposalDismissedTyped`.
 - **"No project selected for this goal" toast in re-attempt assistant** — `goalProposalPanel()` / `goalPreviewPanel()` in `src/app/render.ts`.
 - **Page chunk fails to load on first navigation** — `lazyPage()` in `src/app/render.ts`.
@@ -185,6 +191,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Preview Refresh button does nothing / SSE bumps don't reload** — iframe cache-buster must be `?mtime=` (query string, triggers reload), not `#mtime=` (hash, same-document). See `htmlPreviewContent()` in `src/app/render.ts`.
 
 ### Misc
+- **Modal shows only "Failed: 400"** — caller dropped the structured body. Check the `src/app/api.ts` wrapper parses `await res.json()` and forwards `code`/`stack` to `showConnectionError`. Server side: confirm the handler uses `jsonError(...)` not literal `json({ error: String(err) })`.
 - **OAuth callback never completes** — poll `GET /api/oauth/flow-status?flowId=&provider=`.
 - **Continue-Archived button missing** — needs archived + no `goalId` + no `delegateOf` + project still registered.
 - **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; 600 kB main / 500 kB per-chunk.
