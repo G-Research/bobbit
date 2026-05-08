@@ -114,9 +114,7 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "web_search",
 		label: "Web Search",
-		description:
-			"Search the web using DuckDuckGo. Returns titles, URLs, and snippets. " +
-			"No API key needed. Use this when you need current information, documentation, or answers.",
+		description: "Search the web via DuckDuckGo. Returns titles, URLs, snippets.",
 		promptSnippet:
 			"web_search: Search the web (DuckDuckGo). Fast, no API key. Returns titles, URLs, snippets.",
 		promptGuidelines: [
@@ -125,10 +123,10 @@ const extension: ExtensionFactory = (pi) => {
 			"After searching, use web_fetch to read full page content of the most promising result.",
 		],
 		parameters: Type.Object({
-			query: Type.String({ description: "Search query" }),
+			query: Type.String(),
 			maxResults: Type.Optional(
 				Type.Number({
-					description: "Max results to return (default 10)",
+					description: "Max results. Default 10.",
 					minimum: 1,
 					maximum: 20,
 				}),
@@ -191,19 +189,17 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "web_fetch",
 		label: "Web Fetch",
-		description:
-			"Fetch a web page via curl and extract readable text. " +
-			"Use after web_search to read full content of a specific page.",
+		description: "Fetch a URL and extract readable text.",
 		promptSnippet: "web_fetch: Fetch a URL and extract readable text (via curl, fast).",
 		promptGuidelines: [
 			"Use web_fetch to read full page content after finding relevant URLs via web_search.",
 			"For very long pages the output is truncated. Focus on the most relevant URL.",
 		],
 		parameters: Type.Object({
-			url: Type.String({ description: "URL to fetch" }),
+			url: Type.String(),
 			maxLength: Type.Optional(
 				Type.Number({
-					description: "Max characters of extracted text to return (default 20000)",
+					description: "Max characters returned. Default 20000.",
 				}),
 			),
 		}),

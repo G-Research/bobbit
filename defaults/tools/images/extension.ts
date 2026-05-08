@@ -55,7 +55,7 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "generate_image",
 		label: "Generate Image",
-		description: "Generate images using GPT Image 2, DALL-E, Nano Banana/Gemini, or another configured image generation model.",
+		description: "Generate images via the configured image model (GPT Image, DALL-E, Gemini, etc.).",
 		promptSnippet: "generate_image: Generate raster images. Supports GPT Image 2 via model=\"openai/gpt-image-2\" and uses the configured session image model by default.",
 		promptGuidelines: [
 			"Use generate_image when the user asks for AI image generation or bitmap visual assets.",
@@ -67,11 +67,11 @@ const extension: ExtensionFactory = (pi) => {
 			"If the selected or requested model fails because of auth or provider availability, report the failure and ask before switching to another provider.",
 		],
 		parameters: Type.Object({
-			prompt: Type.String({ description: "Detailed image prompt" }),
-			outputPath: Type.Optional(Type.String({ description: "Optional path to save the generated image" })),
-			model: Type.Optional(Type.String({ description: "Optional override as provider/modelId" })),
-			size: Type.Optional(Type.String({ description: "OpenAI size, e.g. 1024x1024, 1536x1024, 1024x1536, or auto" })),
-			quality: Type.Optional(Type.String({ description: "OpenAI quality, e.g. auto, low, medium, high, standard, or hd" })),
+			prompt: Type.String(),
+			outputPath: Type.Optional(Type.String({ description: "Path to save the image." })),
+			model: Type.Optional(Type.String({ description: "Override as provider/modelId." })),
+			size: Type.Optional(Type.String({ description: "OpenAI size, e.g. 1024x1024 or auto." })),
+			quality: Type.Optional(Type.String({ description: "OpenAI quality, e.g. auto, low, high, hd." })),
 			background: Type.Optional(Type.Union([
 				Type.Literal("auto"),
 				Type.Literal("transparent"),
@@ -82,9 +82,9 @@ const extension: ExtensionFactory = (pi) => {
 				Type.Literal("jpeg"),
 				Type.Literal("webp"),
 			])),
-			aspectRatio: Type.Optional(Type.String({ description: "Gemini aspect ratio, e.g. 1:1, 16:9, 9:16" })),
-			imageSize: Type.Optional(Type.String({ description: "Provider-specific image size" })),
-			n: Type.Optional(Type.Number({ description: "Number of images to generate", minimum: 1, maximum: 4 })),
+			aspectRatio: Type.Optional(Type.String({ description: "Gemini aspect ratio, e.g. 1:1, 16:9." })),
+			imageSize: Type.Optional(Type.String({ description: "Provider-specific image size." })),
+			n: Type.Optional(Type.Number({ description: "Number of images.", minimum: 1, maximum: 4 })),
 		}),
 		async execute(_toolCallId, params) {
 			let baseUrl: string;
