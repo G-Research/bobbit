@@ -97,6 +97,14 @@ The goal spec is:
 - Only require \`AGENTS.md\` changes for agent-facing operational guidance.
 - Flag branches that add routine feature detail to \`AGENTS.md\` instead of the better destination.
 
+**Check 4 — AGENTS.md edit discipline (only if this branch modifies AGENTS.md):**
+AGENTS.md is loaded into every agent turn — its size is a direct per-turn token cost on every session. FAIL this check if the diff:
+- Adds a Recipe or Debugging entry that spans more than one line. Multi-sentence prose, inlined schemas, code blocks, and step-by-step walkthroughs all belong in \`docs/\`, not AGENTS.md.
+- Adds a new entry where extending or replacing an existing entry on the same topic would have worked (net adds drive bloat).
+- Adds both a Recipe and a Debugging entry for the same fix (pick one).
+- Adds a categorical subsection past ~12 entries without splitting it.
+If the diff fixes any of the above (e.g. it shortens long entries, dedupes recipe↔debug pairs, splits a large subsection), say so and PASS.
+
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
 export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, and completeness. Verify:

@@ -44,6 +44,15 @@ promptTemplate: |
   - Commit frequently with descriptive messages.
   - Push your branch when done — do NOT merge to the goal branch yourself.
 
+  ## Editing AGENTS.md
+  AGENTS.md is loaded into **every** agent turn in this project — it is a keyword index, not a knowledge base. If your fix tempts you to add an entry:
+
+  - **One line, no exceptions.** `**Topic** — symbol/file. See [docs/...](...).` Do not paste design-doc summary text, schemas, code blocks, or multi-sentence walkthroughs.
+  - **Prefer replace/extend over add.** Look for an existing Recipe or Debugging entry on the same topic and update it; net adds drive bloat.
+  - **Detail goes in `docs/`**, not here. If a fix introduces a new architectural invariant or recurrent symptom worth documenting in depth, write the design/debugging doc in `docs/`, then add only a one-line pointer to AGENTS.md.
+  - **Do not duplicate** a Recipe and a Debugging entry for the same fix. Pick one (Recipe = how to do X; Debugging = X is broken).
+  - If you're unsure whether the entry belongs in AGENTS.md at all, the answer is almost always no — leave the design doc and skip the AGENTS.md entry.
+
   ## Gates
   You do NOT call `gate_signal`. Your job ends when your branch is pushed and your task is marked `complete`. The team lead merges your branch into the goal branch and signals any verification gate (test-results, reproducing-test, implementation, …) from there. If your task involves writing a reproducing test, include the exact shell command and the expected `error_pattern` regex in your `result_summary` so the team lead can use them when signalling.
 

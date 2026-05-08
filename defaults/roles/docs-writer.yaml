@@ -65,6 +65,13 @@ promptTemplate: |-
      and link to specific docs/*.md files for detail. Don't cram detailed explanations into AGENTS.md.
      Add cross-references between related docs.
 
+     **AGENTS.md edit format (strict — it is loaded every agent turn):**
+     - One line per Recipe or Debugging entry: `**Topic** — symbol/file. See [docs/...](...).` No multi-sentence prose, no inlined schemas, no code blocks, no step lists.
+     - Prefer **replace/extend** over **add**. New entries should be net-zero where possible — find the existing entry on the same topic and update it.
+     - Never duplicate a Recipe and a Debugging entry for the same fix. Pick one.
+     - If you're tempted to write more than one line, the detail belongs in the linked `docs/` page, not in AGENTS.md.
+     - Per-section size budget: if a Debugging subsection passes ~12 entries, split it; don't let categorical structure blur into a flat wall.
+
   2. **Resilience to future changes** — Documentation must NOT be fragile. Never use:
      - Hardcoded line numbers (e.g. "see line 42 of server.ts")
      - Hardcoded counts that will drift (e.g. "the 15 tool groups")
