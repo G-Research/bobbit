@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/preview-renderer.html");
 const BUNDLE = path.resolve("tests/fixtures/preview-renderer-bundle.js");
@@ -9,31 +8,14 @@ const ENTRY = path.resolve("tests/fixtures/preview-renderer-entry.ts");
 const RENDERER_SRC = path.resolve("src/ui/tools/renderers/PreviewRenderer.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(fs.statSync(ENTRY).mtimeMs, fs.statSync(RENDERER_SRC).mtimeMs);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				'--alias:pdfjs-dist=./tests/fixtures/empty-shim',
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, RENDERER_SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;
 
 async function gotoAndWait(page: any) {
 	await page.goto(PAGE);
-	// 30s timeout: under suite contention the IIFE bundle (with lit + state.js dynamic
-	// imports) can take longer than 10s to evaluate before the entry sets __ready.
-	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 30_000 });
+	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
 }
 
 const MARKER = "__preview_snapshot_v1__\n";

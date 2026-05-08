@@ -573,8 +573,10 @@ export function activeSessionId(): string | undefined {
 // CONSTANTS
 // ============================================================================
 
-export const GW_URL_KEY = "gateway.url";
-export const GW_TOKEN_KEY = "gateway.token";
+// Re-exported from gateway-fetch.js (the tiny, dependency-free module that
+// `fetch-tool-content.ts` imports). Keep these as the canonical names for
+// the rest of the app via this module.
+export { GW_URL_KEY, GW_TOKEN_KEY } from "./gateway-fetch.js";
 export const GW_SESSION_KEY = "gateway.sessionId";
 
 export const GOAL_STATE_LABELS: Record<GoalState, string> = {

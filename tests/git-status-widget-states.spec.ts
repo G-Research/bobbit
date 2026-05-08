@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/git-status-widget-states.html");
 const BUNDLE = path.resolve("tests/fixtures/git-status-widget-states-bundle.js");
@@ -9,25 +8,10 @@ const ENTRY = path.resolve("tests/fixtures/git-status-widget-states-entry.ts");
 const WIDGET_SRC = path.resolve("src/ui/components/GitStatusWidget.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(WIDGET_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	// Atomic mtime-gated rebuild via shared helper. Bundle path is shared with
+	// `git-status-widget-multi-repo.spec.ts` so parallel workers must not observe
+	// half-written output — `buildBundle` writes to a tmp file then renames.
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, WIDGET_SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;

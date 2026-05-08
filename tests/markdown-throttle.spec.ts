@@ -1,32 +1,14 @@
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/markdown-throttle.html");
 const BUNDLE = path.resolve("tests/fixtures/markdown-throttle-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/markdown-throttle-entry.ts");
+const SRC = path.resolve("src/ui/components/Messages.ts");
 
 test.beforeAll(() => {
-	// Build the test bundle — bundles AssistantMessage + MarkdownBlock for file:// use
-	const srcDir = path.resolve("src/ui/components/Messages.ts");
-	const entryMtime = Math.max(fs.statSync(ENTRY).mtimeMs, fs.statSync(srcDir).mtimeMs);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				'--alias:pdfjs-dist=./tests/fixtures/empty-shim',
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, SRC] });
 });
 
 const TEST_PAGE = `file://${FIXTURE}`;

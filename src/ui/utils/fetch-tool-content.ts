@@ -1,4 +1,9 @@
-import { gatewayFetch } from "../../app/api.js";
+// Import from `gateway-fetch.js` (tiny, dependency-free) rather than `api.js`
+// (which transitively pulls render.ts/session-manager.ts/dialogs.ts/recogito
+// — ~9 MB of unrelated app shell). Keeps fixture bundles that include
+// `Messages.ts` lean and avoids `__ready` flakes under parallel-worker
+// contention.
+import { gatewayFetch } from "../../app/gateway-fetch.js";
 
 /**
  * Fetch full tool input content from the server on demand.
