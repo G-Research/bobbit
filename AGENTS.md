@@ -47,7 +47,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 ### Server / API
 - **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [rest-api.md](docs/rest-api.md).
 - **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, `RpcBridge` method.
-- **Add a tool** → `defaults/tools/<group>/` (or project override `.bobbit/config/tools/<group>/`); MCP auto-discovered from `.mcp.json`. See [internals.md#mcp-tool-documentation](docs/internals.md#mcp-tool-documentation).
+- **Add a tool** → `defaults/tools/<group>/` (or project override `.bobbit/config/tools/<group>/`); MCP auto-discovered from `.mcp.json`. **On-wire budget** — `pi.registerTool({ description })` ≤ 150 chars / ≤ 15 words (no examples, no anti-patterns); per-parameter `description` inside `Type.Object({...})` ≤ 80 chars sentence fragment, drop entirely when the name is self-explanatory. Detail belongs in **off-wire** YAML `docs` / `detail_docs`. Pinned by `tests/tool-description-budget.test.ts`. See [internals.md#mcp-tool-documentation](docs/internals.md#mcp-tool-documentation).
 - **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/`. See [skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
 - **Add a blocking tool** → [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
 - **Modify a store constructor** → stores take `stateDir`/`configDir` params; resolve via `ProjectContextManager`.
@@ -156,6 +156,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **MCP gateway server collapses sub-namespaces into one tool** — callsite parsing names with own `indexOf("__", …)` instead of `parseMcpToolName()`. Check `(server, sub)` aggregation in `tool-activation.ts`.
 - **MCP server dropdown reads "Allow (default)" but agent denied** — historical bug from `mcp__playwright`/`mcp__nano-banana` builtin denials; removed in policy parity.
 - **Tools page "MCP" section missing/empty** — `GET /api/mcp-servers`; `renderMcpSection()`.
+- **Tool / parameter description budget regressed** — `tests/tool-description-budget.test.ts` pins ≤150 char tool descriptions, ≤80 char param descriptions, ≤150 char MCP meta-tool descriptions (`buildMetaToolDescription` in `src/server/mcp/mcp-meta.ts`, no comma-joined op enumeration); on-wire bytes paid in `tools[]` JSON every uncached LLM turn. Detail belongs in YAML `docs` / `detail_docs` (off-wire).
 
 ### Models / AI gateway
 - **Review/naming models under AI Gateway** — `applyReviewModelOverrides`; failures throw, no silent fallback.
