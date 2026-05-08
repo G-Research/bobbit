@@ -39,82 +39,80 @@ See [docs/testing-strategy.md](docs/testing-strategy.md), [docs/testing-coverage
 One-liner task → entry point. Follow links for walkthroughs. **Keep entries to one line each — detail belongs in the linked doc.**
 
 ### Tests
-- **Add an API E2E test** → `tests/e2e/`, import `./in-process-harness.js`. See `gates-api.spec.ts`.
-- **Add a UI E2E test** → `tests/e2e/ui/`, import `../gateway-harness.js`. See `session-interactions.spec.ts`.
+- **Add an API E2E test** → `tests/e2e/`, import `./in-process-harness.js`; see `gates-api.spec.ts`.
+- **Add a UI E2E test** → `tests/e2e/ui/`, import `../gateway-harness.js`; see `session-interactions.spec.ts`.
 - **Add a Tier 2.5 video-capturing E2E test** → [docs/testing-tier-2-5.md](docs/testing-tier-2-5.md).
-- **Assert tail-chat / scroll-pin in an E2E test** → helpers in `tests/e2e/ui/tail-chat-helpers.ts`. Outcome-only — never assert on `_stickToBottom` / private fields. See [docs/design/tail-chat-redesign.md](docs/design/tail-chat-redesign.md#outcome-of-the-use-stick-to-bottom-port).
+- **Assert tail-chat / scroll-pin** → helpers in `tests/e2e/ui/tail-chat-helpers.ts`; outcome-only. See [tail-chat-redesign.md](docs/design/tail-chat-redesign.md).
 
 ### Server / API
-- **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [docs/rest-api.md](docs/rest-api.md).
-- **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, add `RpcBridge` method.
-- **Add a tool** → builtin: `defaults/tools/<group>/`. Project override: `.bobbit/config/tools/<group>/`. MCP auto-discovered from `.mcp.json`. YAML fields and prompt layout: see [docs/internals.md — MCP tool documentation](docs/internals.md#mcp-tool-documentation).
-- **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/` with YAML frontmatter. See [docs/design/skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
-- **Add a blocking tool** → harness parks Promise keyed by `(sessionId, toolUseId)`. See [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — see [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
-- **Modify a store constructor** → stores take `stateDir`/`configDir` params; never module-level globals. All resolution via `ProjectContextManager` (`src/server/agent/project-context-manager.ts`).
-- **Add/modify session creation** → `session-setup.ts`, wrappers in `session-manager.ts`. See [docs/internals.md — Session worktrees](docs/internals.md#session-worktrees).
-- **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, REST in `server.ts`, assistant in `goal-assistant.ts`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
-- **Add a verification reminder site** → `src/server/agent/verification-harness.ts`. Await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
-- **Return errors from a server handler** → use `jsonError(status, err, extra?)` in `src/server/server.ts` so `stack` flows to the client modal. Validation responses with literal strings stay as `json({ error: "..." }, ...)`. See [docs/rest-api.md — Error response shape](docs/rest-api.md#error-response-shape).
+- **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [rest-api.md](docs/rest-api.md).
+- **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, `RpcBridge` method.
+- **Add a tool** → `defaults/tools/<group>/` (or project override `.bobbit/config/tools/<group>/`); MCP auto-discovered from `.mcp.json`. See [internals.md#mcp-tool-documentation](docs/internals.md#mcp-tool-documentation).
+- **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/`. See [skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
+- **Add a blocking tool** → [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
+- **Modify a store constructor** → stores take `stateDir`/`configDir` params; resolve via `ProjectContextManager`.
+- **Add/modify session creation** → `session-setup.ts`, `session-manager.ts`. See [internals.md#session-worktrees](docs/internals.md#session-worktrees).
+- **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, `server.ts`, `goal-assistant.ts`. See [goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
+- **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
 
 ### Sessions, status, steer
-- **Mutate session status** → `broadcastStatus()` in `src/server/agent/session-status.ts` is the **single writer** for `session.status`. Client: `_state.status` on `RemoteAgent` is canonical; `isStreaming`/`isArchived`/`isPreparing` are derived getters. `case "session_status"` is the sole writer (plus `case "state"` on attach, `reset()` on navigate). See [docs/design/unify-session-status.md](docs/design/unify-session-status.md).
-- **Modify steer / queue dispatch** → single dispatch site `SessionManager._dispatchSteer()` in `src/server/agent/session-manager.ts`. Rows leave `promptQueue` *before* `rpcClient.steer()`, then enter shadow ledger `inFlightSteerTexts`. Never reintroduce `PromptQueue.dispatched`. See [docs/design/steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
-- **Continue an archived session** → `POST /api/sessions/:archivedId/continue`. See [docs/design/lossless-continue-archived.md](docs/design/lossless-continue-archived.md).
+- **Mutate session status** → single writer `broadcastStatus()` in `src/server/agent/session-status.ts`. See [unify-session-status.md](docs/design/unify-session-status.md).
+- **Modify steer / queue dispatch** → single dispatch site `SessionManager._dispatchSteer()`; never reintroduce `PromptQueue.dispatched`. See [steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
+- **Continue an archived session** → `POST /api/sessions/:archivedId/continue`. See [lossless-continue-archived.md](docs/design/lossless-continue-archived.md).
 - **Re-attempt a goal** → `POST /api/sessions { reattemptGoalId }` → `buildReattemptContext()`.
-- **Server-side read/unread state** → `lastReadAt` on `PersistedSession`; `POST /api/sessions/:id/mark-read`.
-- **Read another session's transcript** → `read_session` tool; parser `src/server/agent/transcript-reader.ts`; `GET /api/sessions/:id/transcript`; same-project auth via `x-bobbit-session-id` header.
-- **Initialise client-side status on fresh attach** → `_lastStatusVersion` starts at `-1` in `src/app/remote-agent.ts`; `RemoteAgent.onStatusChange` calls `requestUpdate()` for `preparing`/`starting`/`aborting`/`idle` (Lit reference-equality misses same-object mutations).
+- **Server-side read/unread** → `lastReadAt` on `PersistedSession`; `POST /api/sessions/:id/mark-read`.
+- **Read another session's transcript** → `read_session` tool; `transcript-reader.ts`; `x-bobbit-session-id` header for same-project auth.
 
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
-- **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`. See `ProposalRenderer.ts`.
-- **Show a server error in a modal** → `<error-details>` (`src/ui/components/ErrorDetails.ts`); API wrappers in `src/app/api.ts` parse `code`/`stack` and forward to `showConnectionError(...)` in `src/app/dialogs.ts`. Background polling in `refreshSessions()` is intentionally silent.
-- **Add a route-level page (lazy-loaded)** → add a `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
-- **Add a heavy tool renderer (lazy)** → `registerLazyToolRenderer()` in `src/ui/tools/index.ts`; placeholder + `TOOL_RENDERER_LOADED_EVENT` swap.
-- **Defer a heavy library (lazy load)** → `src/ui/lazy/markdown-block.ts::ensureMarkdownBlock()` pattern; or `await import()` for value imports.
-- **Change message rendering** → `src/ui/components/Messages.ts` (standard); `message-renderer-registry.ts` (custom).
-- **Modify message transcript ordering** → all transcript mutations route through `reduce(state, action)` in `src/app/message-reducer.ts`. Never push directly into `state.messages`. See [docs/design/unified-message-ordering-reducer.md](docs/design/unified-message-ordering-reducer.md).
-- **Modify snapshot ↔ live merge / `getMessages` splice** → server splices in-flight `message_update` via `spliceInFlightMessage()` in `src/server/agent/splice-inflight-message.ts`; client survivor filter in `case "snapshot"` enforces `_order > snapshotMaxOrder` guard + multiset plain-text dedup. See [docs/design/snapshot-live-race-fix.md](docs/design/snapshot-live-race-fix.md).
-- **Modify proposal panel streaming UX** → flag in `state.proposalStreamingByTag`; scroll preserved via `reconcileFollowTail` in `src/app/follow-tail.ts`.
-- **Large content truncation** → `truncate-large-content.ts` (>32 KB). Lazy-load via `GET /api/sessions/:id/tool-content/:mi/:bi`.
-- **Copy session link button** → header ghost icon in `src/app/render.ts`. `showHeaderToast()` (`data-testid="header-toast"`, distinct from `proposal-toast`); `CopyLinkFallbackDialog` on clipboard reject.
-- **Git-status widget** → `src/ui/components/GitStatusWidget.ts`, `src/server/skills/git-status-native.ts`. See [docs/design/git-status-widget-reliability.md](docs/design/git-status-widget-reliability.md).
+- **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`; see `ProposalRenderer.ts`.
+- **Show a server error in a modal** → `<error-details>` + `showConnectionError(...)` in `src/app/dialogs.ts`; API wrappers in `src/app/api.ts` attach `code`/`stack`.
+- **Add a route-level page (lazy)** → `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
+- **Add a heavy tool renderer (lazy)** → `registerLazyToolRenderer()`; placeholder + `TOOL_RENDERER_LOADED_EVENT` swap.
+- **Defer a heavy library** → `ensureMarkdownBlock()` pattern in `src/ui/lazy/`; or `await import()` for values.
+- **Change message rendering** → `src/ui/components/Messages.ts`; custom via `message-renderer-registry.ts`.
+- **Modify message transcript ordering** → all mutations through `reduce()` in `src/app/message-reducer.ts`; never push to `state.messages`. See [unified-message-ordering-reducer.md](docs/design/unified-message-ordering-reducer.md).
+- **Modify snapshot ↔ live merge** → server `spliceInFlightMessage()`; client `_order > snapshotMaxOrder` guard + multiset dedup. See [snapshot-live-race-fix.md](docs/design/snapshot-live-race-fix.md).
+- **Modify proposal panel streaming UX** → `state.proposalStreamingByTag`; `reconcileFollowTail` in `src/app/follow-tail.ts`.
+- **Large content truncation** → `truncate-large-content.ts` (>32 KB); lazy-load via `GET /api/sessions/:id/tool-content/:mi/:bi`.
+- **Copy session link button** → header ghost icon in `src/app/render.ts`; `showHeaderToast()` (testid `header-toast`); `CopyLinkFallbackDialog` on clipboard reject.
+- **Git-status widget** → `GitStatusWidget.ts`, `git-status-native.ts`. See [git-status-widget-reliability.md](docs/design/git-status-widget-reliability.md).
 
 ### Projects, config, sandbox
-- **Add a project** → `POST /api/projects`. Key: `src/server/agent/project-registry.ts`, `project-context-manager.ts`. Project assistant designs all workflows. See [docs/internals.md](docs/internals.md#project-assistant).
-- **Splash-screen new-session gating** → buttons in `src/app/render.ts` gated on `state.projects.length` (0 → "New Project" CTA; 1 → bound session; ≥2 → splash project picker via `state.splashProjectPickerOpen`). System-scope tool-assistants pass `projectId: "system"`. See [docs/internals.md — Synthetic system project](docs/internals.md#synthetic-system-project).
-- **Remove a project** → settings → General → Remove. `DELETE /api/projects/:id`.
-- **Symlink-aware project registration** → `detectSymlinkRoot()` in `src/server/agent/project-registry.ts`. `POST /api/projects` returns 400 `{ code: "symlink_root", canonical }`; UI re-submits with `acceptCanonical: true`. `findByCwd()` canonicalises both sides; `getByPath()` does NOT.
-- **Per-project settings** → Settings → project tab. `GET/PUT /api/projects/:id/config`. See [docs/internals.md — Per-project config](docs/internals.md#per-project-config).
-- **Mid-session project-config edits** → any agent may call `propose_project`; user accepts via `PUT /api/projects/:id/config`. See [docs/design/mid-session-project-proposals.md](docs/design/mid-session-project-proposals.md).
-- **Add a multi-repo project / components / inline workflows** → `project.yaml::components[]` and `project.yaml::workflows`. See [docs/internals.md](docs/internals.md#multi-repo--components), [`defaults/workflow-authoring-guide.md`](defaults/workflow-authoring-guide.md).
-- **Modify sandbox behavior** → `sandbox: "docker"` in `project.yaml`. Key: `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. See [docs/internals.md](docs/internals.md#docker-sandbox).
-- **Add QA testing** → `qa_start_command` etc. on the component's `config:` map in `project.yaml`. See [docs/qa-testing.md](docs/qa-testing.md).
-- **Config cascade** → builtin → server → project, for roles, tools, tool-group-policies, and `system-prompt.md` (resolves via `resolveSystemPromptPath()`; user override at `.bobbit/config/system-prompt.md` wins). Workflows are project-scoped, not cascaded. See [docs/internals.md](docs/internals.md#config-cascade).
-- **Change tool access policy** → `defaults/tool-group-policies.yaml` or `.bobbit/config/tool-group-policies.yaml`. Per-role: role YAML `toolPolicies`. Values: `allow`/`ask`/`never`. `gate_signal` is team-lead-only. MCP groups default to `allow`.
-- **Per-role model / thinking override** → role YAML `model: "<provider>/<modelId>"` and `thinkingLevel`. See [docs/design/per-role-model-overrides.md](docs/design/per-role-model-overrides.md).
-- **Pin agent model at spawn time** → `RpcBridgeOptions.initialModel`/`initialThinkingLevel` → `--model`/`--thinking` flags via `buildAgentArgs`. Resolution: role override → `default.sessionModel` (or `default.reviewModel`) → undefined.
-- **Archived session footer model** → `buildArchivedStateData()` in `src/server/ws/handler.ts` sent on archived `auth_ok`.
+- **Add / remove a project** → `POST` / `DELETE /api/projects`; key files `project-registry.ts`, `project-context-manager.ts`. See [internals.md#project-assistant](docs/internals.md#project-assistant).
+- **Splash-screen new-session gating** → buttons gated on `state.projects.length` (0/1/≥2); system tool-assistants pass `projectId: "system"`. See [internals.md#synthetic-system-project](docs/internals.md#synthetic-system-project).
+- **Symlink-aware project registration** → `detectSymlinkRoot()`; UI re-submits with `acceptCanonical: true`. `findByCwd()` canonicalises both sides; `getByPath()` does NOT.
+- **Per-project settings** → `GET/PUT /api/projects/:id/config`. See [internals.md#per-project-config](docs/internals.md#per-project-config).
+- **Mid-session project-config edits** → `propose_project` → user `PUT /api/projects/:id/config`. See [mid-session-project-proposals.md](docs/design/mid-session-project-proposals.md).
+- **Multi-repo / components / inline workflows** → `project.yaml::components[]` and `::workflows`. See [internals.md#multi-repo--components](docs/internals.md#multi-repo--components), [`workflow-authoring-guide.md`](defaults/workflow-authoring-guide.md).
+- **Sandbox behavior** → `sandbox: "docker"`; `project-sandbox.ts`, `sandbox-manager.ts`, `docker-args.ts`. See [internals.md#docker-sandbox](docs/internals.md#docker-sandbox).
+- **QA testing** → `qa_start_command` etc. in component `config:` map. See [qa-testing.md](docs/qa-testing.md).
+- **Config cascade** → builtin → server → project (roles, tools, tool-group-policies, `system-prompt.md`); workflows are project-scoped. See [internals.md#config-cascade](docs/internals.md#config-cascade).
+- **Tool access policy** → `tool-group-policies.yaml` (cascaded) or role YAML `toolPolicies`. Values `allow`/`ask`/`never`; `gate_signal` is team-lead-only.
+- **Per-role model / thinking override** → role YAML `model` + `thinkingLevel`. See [per-role-model-overrides.md](docs/design/per-role-model-overrides.md).
+- **Pin agent model at spawn** → `RpcBridgeOptions.initialModel`/`initialThinkingLevel` → `--model`/`--thinking` via `buildAgentArgs`.
+- **Archived session footer model** → `buildArchivedStateData()` on archived `auth_ok`.
 
 ### MCP
-- **MCP meta-tool aggregation (server → sub-namespace → op)** → single source of truth `parseMcpToolName()` in `src/server/mcp/mcp-meta.ts`. Aggregation in `src/server/agent/tool-activation.ts` keyed by `(server, sub)`. Policy keys via `mcpPolicyKeys(name) → {group, tool}`; tool-key beats group-key. See [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md).
+- **MCP meta-tool aggregation (server → sub-namespace → op)** → `parseMcpToolName()` in `src/server/mcp/mcp-meta.ts`; aggregation in `tool-activation.ts` keyed by `(server, sub)`; `mcpPolicyKeys(name) → {group, tool}` (tool-key wins). See [mcp-meta-tools.md](docs/mcp-meta-tools.md).
 
 ### Goals, workflows, gates
-- **Inter-agent git handoff** → tasks carry `baseSha`, `headSha`, `branch`. See [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md#git-handoff-fields).
-- **Archive a goal (UI)** → sidebar/dashboard trash funnels through `deleteGoal()` in `src/app/api.ts`; detects active team, runs `teardownTeam()` before `DELETE /api/goals/:id`.
-- **Cleanup remote branches on archive** → `deleteRemoteGoalBranches` (goals); `session-eager-branch-delete.ts` (sessions). See [docs/design/orphan-remote-branch-cleanup.md](docs/design/orphan-remote-branch-cleanup.md).
+- **Inter-agent git handoff** → tasks carry `baseSha`, `headSha`, `branch`. See [goals-workflows-tasks.md#git-handoff-fields](docs/goals-workflows-tasks.md#git-handoff-fields).
+- **Archive a goal (UI)** → `deleteGoal()` in `src/app/api.ts`; runs `teardownTeam()` before `DELETE /api/goals/:id`.
+- **Cleanup remote branches on archive** → `deleteRemoteGoalBranches`; `session-eager-branch-delete.ts`. See [orphan-remote-branch-cleanup.md](docs/design/orphan-remote-branch-cleanup.md).
 
 ### Proposals
-- **Edit a proposal mid-session** → `view_proposal(type)` / `edit_proposal(type, old, new)`. Per-rev snapshots under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/`. See [docs/design/editable-proposals.md](docs/design/editable-proposals.md).
-- **Dismiss/restore invariant for proposal panels** → `goalDraft.restore`/`roleDraft.restore`/`projectDraft.restore` in `src/app/session-manager.ts` gate rehydration on `isProposalDismissedTyped`. Dismiss does NOT delete the on-disk draft. Only `goal`/`role`/`project` persist drafts; `staff`/`tool`/`workflow` are transient.
-- **Project-proposal "Changes Saved" state (registered mode)** → `state.projectProposalAcceptedBySessionId` flag, set in `acceptRegisteredProjectProposal()`, persisted via `projectDraft.serialize/restore`. See [docs/design/project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
+- **Edit a proposal mid-session** → `view_proposal` / `edit_proposal`; per-rev snapshots under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/`. See [editable-proposals.md](docs/design/editable-proposals.md).
+- **Dismiss/restore invariant** → `{goal,role,project}Draft.restore` gate on `isProposalDismissedTyped`; dismiss does NOT delete the draft. `staff`/`tool`/`workflow` proposals are transient.
+- **Project-proposal "Changes Saved" (registered mode)** → `state.projectProposalAcceptedBySessionId`; set in `acceptRegisteredProjectProposal()`; persisted via `projectDraft`. See [project-proposal-saved-state.md](docs/design/project-proposal-saved-state.md).
 
 ### Worktree (operational)
-- **Pool worktree placed under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** → `WorktreePool` constructor in `src/server/agent/worktree-pool.ts` resolves `opts.repoPath` to git toplevel; both `initWorktreePoolForProject` sites in `src/server/server.ts` also resolve. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
+- **Pool worktree under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** → `WorktreePool` ctor must resolve `repoPath` to git toplevel; ditto both `initWorktreePoolForProject` sites. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
 
 ### Preview / HTML / images
-- **Preview HTML with sibling assets** → `preview_open({ html | file, assets?, manifest? })`. **Explicit opt-in**: bare `file` copies only the entry HTML; siblings declared via `assets: [...]` or a `manifest` JSON. Snapshot marker: `__preview_snapshot_v3__`. Re-opening the same `file` is safe (`mountFile()` stages into a sibling tmp dir and atomically swaps). See [docs/preview-architecture.md](docs/preview-architecture.md).
-- **Author HTML output** → [`defaults/docs/html-rendering.md`](defaults/docs/html-rendering.md). One artefact, one surface. Use theme tokens (`--background`, `--card`, `--chart-1..6`, `--positive`/`--negative`/`--warning`/`--info`).
+- **Preview HTML with sibling assets** → `preview_open({ html | file, assets?, manifest? })`; bare `file` copies only the entry HTML; snapshot marker `__preview_snapshot_v3__`. See [preview-architecture.md](docs/preview-architecture.md).
+- **Author HTML output** → [`defaults/docs/html-rendering.md`](defaults/docs/html-rendering.md). Use theme tokens (`--background`, `--card`, `--chart-1..6`, `--positive`/`--negative`/`--warning`/`--info`).
 - **Generate an image** → `generate_image` → `POST /api/image-generation/generate`.
 
 ## Debugging
@@ -123,7 +121,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 
 ### Session / status / steer
 - **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
-- **Stop button stuck visible / duplicate user message on second send** — divergence between `_state.isStreaming` and `gatewaySessions[i].status`. Check no write to `_state.status` outside `case "session_status"`/`case "state"`/`reset()`; no server write to `session.status` outside `broadcastStatus()`. See [docs/design/unify-session-status.md](docs/design/unify-session-status.md).
+- **Stop button stuck visible / duplicate user message on second send** — `_state.status` write outside `case "session_status"`/`"state"`/`reset()`, or server `session.status` write outside `broadcastStatus()`. See [unify-session-status.md](docs/design/unify-session-status.md).
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Live-steer lost / duplicated after Stop** — single `_dispatchSteer()` + shadow ledger `inFlightSteerTexts`; never re-add `PromptQueue.dispatched`. See [docs/design/steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
 - **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`.
@@ -145,8 +143,8 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Pool worktree placed under `<projectDir>-wt/` instead of `<repoRoot>-wt/`** — nested-rootPath bug; `WorktreePool` must resolve repo toplevel. Pinned by `tests/worktree-pool-nested-rootpath.test.ts`.
 - **Sandbox status / project container** — `GET /api/sandbox-status`; label `bobbit-project=<projectId>`.
 - **Synthetic system project / `projectId: "system"`** — registered at startup; `hidden: true`; anchored at `<bobbitStateDir>/system-project/`.
-- **Symlinked project root rejected with `code: symlink_root`** — `POST /api/projects` returns 400; UI re-submits with `acceptCanonical: true`. CLI/scripted callers must do the same or pass canonical path.
-- **`findByCwd` returns undefined for symlinked cwd** — `findByCwd()` canonicalises both sides via `realpathSync`. `getByPath()` is intentionally NOT canonicalised.
+- **Symlinked project root rejected with `code: symlink_root`** — `POST /api/projects` returns 400; re-submit with `acceptCanonical: true`.
+- **`findByCwd` returns undefined for symlinked cwd** — must canonicalise via `realpathSync`. `getByPath()` is intentionally NOT canonicalised.
 - **Monorepo subprojects not detected** — `src/server/agent/monorepo-scan.ts`; cap 30 candidates.
 - **Legacy JSON-string `project.yaml` field rejected (HTTP 400)** — send structured arrays.
 - **400 "projectId required"** — splash buttons gated on `state.projects.length`; system tool-assistants pass `projectId: "system"`.
@@ -181,7 +179,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Sidebar child loading** — server BFS enrichment; archived-goals `archivedSessions`.
 
 ### UI / scroll / proposals
-- **Scroll snaps back / tail-chat lost / false-positive Jump** — `AgentInterface` ports `use-stick-to-bottom`; two-flag `_isAtBottom`/`_escapedFromLock`; never re-add `_programmaticEchoes`/`_settleWindow*`/`_suppressJumpUntilTs`. See [docs/design/tail-chat-redesign.md](docs/design/tail-chat-redesign.md#outcome-of-the-use-stick-to-bottom-port).
+- **Scroll snaps back / tail-chat lost / false-positive Jump** — two-flag `_isAtBottom`/`_escapedFromLock` in `AgentInterface`; never re-add `_programmaticEchoes`/`_settleWindow*`/`_suppressJumpUntilTs`. See [tail-chat-redesign.md](docs/design/tail-chat-redesign.md).
 - **Proposal panel button enabled mid-stream** — `state.proposalStreamingByTag` flag.
 - **Proposal panel empty after reload** — `_bufferedProposalEvents` in `src/app/remote-agent.ts`.
 - **Proposal panel doesn't update after `edit_proposal`** — check WS `proposal_update` frame + structured error code.
@@ -200,7 +198,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 ### QA / preview / tier-2.5 / images
 - **QA screenshot token bloat** — extension must emit `[screenshot_file]` not `[screenshot_base64]`.
 - **Preview Open button broken / v1/v2 markers** — `tool_result` must carry `__preview_snapshot_v3__`.
-- **Preview iframe shows broken images / 404 on assets** — first check: did the agent declare the asset in `preview_open`'s `assets[]` or `manifest`? Bare `file` copies only the entry HTML.
+- **Preview iframe shows broken images / 404 on assets** — asset must be declared in `preview_open`'s `assets[]` / `manifest` (bare `file` copies only the entry HTML).
 - **`/preview/<sid>/...` returns 401 in a new tab** — `bobbit_session` cookie missing/scoped wrong.
 - **Preview iframe shows 'No preview yet' indefinitely** — SSE event must carry `entry`.
 - **Tier 2.5 report missing / ffmpeg failed** — set `FFMPEG_PATH` or install ffmpeg; only when `RECORDSCREEN=1`.
