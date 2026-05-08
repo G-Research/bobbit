@@ -366,6 +366,77 @@ describe("mountFile \u2014 re-open same source file (Bug 4)", () => {
 	});
 });
 
+describe("mountFile \u2014 atomic stage-then-swap (Bug 4 follow-ups)", () => {
+	it("leaves no .<sid>.tmp-* dir behind after a successful mountFile", () => {
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-cleanup-"));
+		try {
+			writeFileSync(path.join(src, "report.html"), "<h1>x</h1>");
+			writeFileSync(path.join(src, "styles.css"), "body{}");
+			mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
+			const leftovers = readdirSync(root).filter(n => n.startsWith(`.${SID_B}.tmp-`));
+			assert.deepEqual(leftovers, [], `no tmp dirs should remain, found: ${leftovers.join(", ")}`);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+			removeMount(SID_B);
+		}
+	});
+
+	it("on staging failure, prior mount contents are preserved", () => {
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-rollback-"));
+		try {
+			writeFileSync(path.join(src, "report.html"), "<h1>v1</h1>");
+			writeFileSync(path.join(src, "styles.css"), "original-css");
+			// Initial successful mount.
+			mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
+			assert.ok(existsSync(path.join(mountDir(SID_B), "report.html")));
+			assert.ok(existsSync(path.join(mountDir(SID_B), "styles.css")));
+			const priorListing = listMount(SID_B);
+
+			// Second call: missing literal asset → 404 during staging.
+			assert.throws(
+				() => mountFile(SID_B, path.join(src, "report.html"), ["missing.css"]),
+				(err: any) => err instanceof PreviewMountError && err.statusCode === 404,
+			);
+
+			// destRoot must be unchanged.
+			assert.deepEqual(listMount(SID_B), priorListing);
+			// And no tmp dirs left behind.
+			const leftovers = readdirSync(root).filter(n => n.startsWith(`.${SID_B}.tmp-`));
+			assert.deepEqual(leftovers, []);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+			removeMount(SID_B);
+		}
+	});
+
+	it("watcher fires after a re-mount (handle survives the swap)", async () => {
+		const { watchMount } = await import("../src/server/preview/mount.ts");
+		const src = mkdtempSync(path.join(tmpdir(), "bobbit-mount-watch-"));
+		let calls = 0;
+		const unsubscribe = watchMount(SID_B, () => { calls++; });
+		try {
+			writeFileSync(path.join(src, "report.html"), "<h1>v1</h1>");
+			mountFile(SID_B, path.join(src, "report.html"));
+			// Wait past the 50ms watcher debounce + filesystem propagation.
+			await new Promise(r => setTimeout(r, 200));
+			const callsAfterFirst = calls;
+
+			writeFileSync(path.join(src, "report.html"), "<h1>v2-longer</h1>");
+			mountFile(SID_B, path.join(src, "report.html"));
+			await new Promise(r => setTimeout(r, 250));
+
+			assert.ok(
+				calls > callsAfterFirst,
+				`watcher should fire after re-mount; calls=${calls} after-first=${callsAfterFirst}`,
+			);
+		} finally {
+			unsubscribe();
+			rmSync(src, { recursive: true, force: true });
+			removeMount(SID_B);
+		}
+	});
+});
+
 describe("removeMount", () => {
 	it("is idempotent", () => {
 		writeInline(SID, "x", "z.html");
