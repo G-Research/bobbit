@@ -888,3 +888,88 @@ import from this module rather than re-implementing the disk→env credential
 resolution dance — retry, back-off, 401 refresh, and structured error
 wrapping are all centralised here and propagate to every consumer.
 
+## Stuck-team watchdog
+
+A team-led goal can wedge in a state where the team-lead is idle, every worker is idle, and nothing is in flight — but no one fires the next dispatch (e.g. all workers hit the inter-nudge floor of `notifyTeamLead`, the lead missed an edge-triggered status broadcast, or the pre-`Auto-nudge flooding` `nudgePending` guard latched). Without a watchdog the goal sits dead until the user manually intervenes.
+
+`TeamManager` runs a periodic watchdog that walks every active team and fires a recovery nudge to the team-lead when ALL of:
+
+- team-lead status is `idle`,
+- there is at least one active worker,
+- every worker is idle,
+- the lead has been continuously idle for at least the quiet threshold,
+- the last stuck-nudge for this goal was at least one quiet threshold ago,
+- `shouldSkipNudge(goalId)` is false (i.e. not paused / archived / in-flight / `nudgePending` / blocked on an in-flight subgoal).
+
+Constants (`src/server/agent/team-manager.ts`):
+
+- `STUCK_SWEEP_INTERVAL_MS` — sweep cadence (currently 60 s).
+- `STUCK_QUIET_THRESHOLD_MS` — minimum lead-idle duration AND minimum gap between consecutive stuck-nudges for the same goal (currently 5 min).
+
+Per-goal state lives in two maps: `leadIdleSinceByGoal` (seeded when the lead becomes idle, cleared when it leaves idle) and `lastNudgeAtPerGoal` (set when a stuck-nudge fires).
+
+When the predicate fires, `_fireStuckNudge` enqueues an `[AUTO-NUDGE]` steered prompt to the team-lead pointing it at `task_list` / `gate_list` / `team_complete`, sets `nudgePending`, and stamps `lastNudgeAtPerGoal`.
+
+**`dispose()` semantics.** `TeamManager.dispose()` calls `stopStuckSweep()` so the timer is released. Tests must call `dispose()` (or `stopStuckSweep()` directly) in their cleanup hooks; otherwise the `setInterval` keeps the Node test process alive past its expected exit. The timer is `unref()`-d so a forgotten `dispose()` won't block the gateway from shutting down, but tests that assert on process exit should still be explicit.
+
+**Log line to grep for.** When the deduper inside `notifyTeamLead` swallows a nudge, it logs `[team-manager] notifyTeamLead deferred for <role>/<agentId> — <ms>ms ago`. When the watchdog then fires its own recovery nudge, it logs `[team-manager] Stuck-team watchdog fired for goal <id> after <m>m idle`. A goal that recovers via the watchdog will show both lines in sequence.
+
+Tests: `tests/team-manager-stuck-watchdog.test.ts` (full sweep matrix — predicate, throttle, paused/archived skip, dispose).
+
+Cross-reference: this is the second-tier safety net on top of the per-event `Auto-nudge flooding` `nudgePending` guard. The `nudgePending` guard prevents flooding when events fire correctly; the watchdog rescues the case where no event fires at all.
+
+## Restart-interrupt suppression + context-rich verification reminders
+
+Two related Lesson 4.x fixes in `src/server/agent/verification-harness.ts` + `src/server/agent/verification-logic.ts`. Both are about keeping verification gates honest when the gateway restarts mid-flight or when reviewers go off-script.
+
+**`RESTART_INTERRUPT_MARKERS` + `shouldSuppressRestartInterrupt`.** If a verification step fails and the only failures match restart-interrupt markers (`Step was interrupted by server restart`, `Session lost during server restart`, `Reviewer agent process died`, `Agent did not call verification_result after server restart`, etc.), the gate is downgraded from `failed` to `pending` and the team-lead receives a benign "interrupted by restart, please re-signal" notification instead of spending a turn re-investigating a phantom regression. Empty-output `llm-review` / `agent-qa` failures are also treated as restart-interrupts (the SIGTERM-during-review case). The predicate is **conjunctive** — a single real failure poisons the whole verification and the gate still fails. Extend `RESTART_INTERRUPT_MARKERS` (single source of truth in `verification-logic.ts`) rather than introducing a parallel list.
+
+**`TRANSIENT_ERROR_PATTERNS`.** A separate substring list of failures that warrant a retry rather than a fail-the-gate decision: `timed out`, `ECONNRESET`, `EPIPE`, `socket hang up`, `Validation failed for tool`, and the literal `Agent did not call verification_result after server restart and reminder` (Lesson 4.7 — resumed reviewers lose kickoff context after a gateway restart; promoting this to transient triggers `_rerunLlmReviewStep`, which rebuilds the kickoff from the workflow step definition and drives a fresh review session). Paired with the `TRANSIENT_ERROR_REGEXES` family for streamed-JSON glitches.
+
+**`buildContextRichReminder(originalKickoff)`.** Lesson 4.8 — live (not resumed) reviewers occasionally emit their verdict as chat-text and end the turn instead of calling `verification_result`. The legacy two-sentence `VERIFICATION_RESULT_REMINDER` consistently failed to elicit a tool call: with no kickoff context attached, the model treats the reminder as a continuation of its previous chat-text reply. The context-rich version:
+
+1. Leads with `## STOP — verification_result not called` so the agent treats it as a hard correction, not a continuation.
+2. States explicitly that any chat-text verdict is **INVISIBLE** to the gate (this is the rule reviewers must internalise — without it they assume the chat-text verdict was registered).
+3. Tells the agent to call the tool with whatever opinion it ALREADY formed — no re-investigation.
+4. Re-attaches the FULL original kickoff after a `---` separator.
+
+Wired into both the LLM-review reminder path and the agent-QA reminder path in `verification-harness.ts`. The resume path (`_tryResumeFromSession`) keeps the legacy terse reminder because it doesn't have access to rebuild the kickoff.
+
+Tests: `tests/restart-interrupt-suppression.test.ts`, `tests/transient-error-restart-context-loss.test.ts`, `tests/context-rich-reminder.test.ts`.
+
+## Auto-revive dead RPC bridges + auto-archive zombie sessions
+
+Symptom: post-restart, a session's persisted record is restored but its in-process RPC bridge is dead. The WS layer ack's a new prompt but the agent never sees it because `rpcClient.prompt()` throws "Agent process not running" — the user gets a phantom-stuck session with no recovery affordance.
+
+Fix in `SessionManager._dispatchPromptWithReviveOnDeadBridge` (`src/server/agent/session-manager.ts`). When `session.rpcClient.running === false`, the helper calls `restartAgent(sessionId)` before issuing the prompt. `restartAgent` deletes the entry and re-creates it via `restoreSession`, so the helper re-resolves `this.sessions.get(sessionId)` after the revive — callers MUST NOT hold on to the pre-revive `SessionInfo` reference. If `restartAgent` throws (e.g. `SESSION_UNRECOVERABLE_ARCHIVED`), the error propagates so the user sees something actionable instead of an opaque "Agent process not running".
+
+**Used only at new-prompt sites.** `enqueuePrompt` calls this helper on its two new-prompt branches (the implicit-unstick error-recovery branch and the idle+empty-queue dispatch branch). It is **deliberately not called** from steady-state retry / drain paths — those should fail loudly so a real bridge death surfaces in logs rather than triggering an automatic revive that masks the underlying problem. The principle: auto-revive on _user-driven_ new intent; fail loud on _system-driven_ retry.
+
+The corresponding zombie-session case (a persisted session whose worktree / project is gone) is handled by `restartAgent` itself, which throws `SESSION_UNRECOVERABLE_ARCHIVED` — letting the helper surface the error and the session record gets archived rather than perpetually phantom-stuck.
+
+Tests: `tests/dispatch-prompt-revive-dead-bridge.test.ts`.
+
+## Boot-time hardening (crash-loop, orphan team-store, zombie sweep, sessionless respawn)
+
+Four independent boot-time guards that landed together. They all protect against a different way the gateway can fail to start cleanly.
+
+**Crash-loop guard (`src/server/harness.ts`).** A child gateway that exits within `HEALTHY_UPTIME_MS` (10 s) of launch counts as a "quick" crash. After `CRASH_LOOP_THRESHOLD` (5) consecutive quick crashes, auto-restart is suppressed, `crashLoopHalted` flips on, and the harness logs an actionable directive ("Run `npm run restart-server` to resume after fixing the root cause"). A healthy uptime resets `consecutiveQuickCrashes` to 0 so a transient crash later in the day doesn't accumulate against earlier ones. Manual restart via the sentinel file resets the counter and clears `crashLoopHalted`. Without this guard, a gateway that crashes during boot relaunches every second forever — burning CPU and burying real errors.
+
+**Orphan team-store cleanup (`TeamManager.restoreTeams`).** Walks every persisted team entry across every project context FIRST and drops entries whose `goalId` is not present in the owning project's goal store. Runs **before** the zombie-reviewer sweep so the sweep can't blow up inside `resolveTeamStore` when the goal can't be resolved. The local (non-PCM) test path is intentionally a no-op because `resolveTeamStore` always returns the local store there.
+
+**Zombie-reviewer sweep error guard (`resubscribeTeamEvents`).** Defensively unregisters reviewer agents whose underlying session is gone (terminated or vanished from the session manager). The call to `unregisterReviewerSession` is wrapped in `try/catch` with `console.error` + continue-on-error semantics so one bad entry can't take down boot. The catch branch must NOT rethrow — pinned by source-grep test.
+
+**Sessionless respawn (`_bootRespawnSessionlessGoals`).** Runs at the END of `resubscribeTeamEvents`. Walks every non-archived goal in `state: in-progress, setupStatus: ready, team: true` whose `goalId` has no entry in `this.teams` and respawns a fresh team-lead via `startTeam`. Each respawn is wrapped in `try/catch` so one bad goal doesn't block the rest. This rescues the "goal stranded with zero workers and zero team-lead" pattern observed after multiple restarts — the harness's existing recovery only fired when there was an active verification with a live planId, which is itself lost in a restart.
+
+Tests: `tests/harness-crash-loop-guard.test.ts`, `tests/restart-agent-archives-zombies.test.ts`, `tests/team-manager-boot-respawn-sessionless.test.ts`, `tests/team-manager-orphan-team-store.test.ts`, `tests/team-manager-zombie-sweep-error-guard.test.ts`.
+
+## FlexSearch boot self-heal
+
+Symptom: `[search] Skipping corrupt index file 1.tag.json` warning recurred on every boot even though the index functionally recovered via re-add from the mirror-doc store (`__docs__.json`). Two root causes:
+
+1. **Import order is sensitive.** FlexSearch's tag import requires registry/document state to be loaded first. `readdirSync` order is filesystem-dependent — on some machines the `.tag` file was processed before `.reg`, dereferencing null inside flexsearch-bundle.
+2. **Failed imports were never cleaned up.** The corrupt-skip log fired on every boot for the same file because the file was never deleted after failure.
+
+Fix in `src/server/search/flex-store.ts`: sort entries by extension priority before importing (`.reg` → `.doc` → `.cfg` → `.map` → `.tag` → other, with `localeCompare` tiebreak), and `fs.rm` the offending file on import failure or null/undefined parsed payload. The mirror-doc store remains the source of truth for re-adds, so the deleted index is rebuilt lazily on the next add or by the existing re-add fallback when `importSuccesses === 0`.
+
+Quick check: a healthy boot now logs zero `Skipping corrupt index file` warnings on a previously-warning-noisy state dir.
