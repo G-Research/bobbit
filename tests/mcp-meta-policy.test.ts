@@ -134,7 +134,7 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 
 	it("returns one `mcp_<server>` per connected server plus `mcp_describe`, no per-op names", () => {
 		const tm = mockToolManager({});
-		const allowed = computeEffectiveAllowedTools(tm as any, undefined, undefined, mockMcpManager(mcpInfos) as any);
+		const allowed = computeEffectiveAllowedTools(tm as any, undefined, undefined, mockMcpManager(mcpInfos) as any).map(e => e.name);
 
 		assert.ok(allowed.includes("mcp_pw"), "mcp_pw present");
 		assert.ok(allowed.includes("mcp_halo"), "mcp_halo present");
@@ -150,10 +150,24 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 		assert.equal(metaCount, 1);
 	});
 
+	it("producer tags entries by kind (yaml vs mcp)", () => {
+		const tm = mockToolManager({
+			read: { tool: { name: "read", group: "File System" } },
+			bash_bg: { tool: { name: "bash_bg", group: "Shell" } },
+		});
+		const tagged = computeEffectiveAllowedTools(tm as any, undefined, undefined, mockMcpManager(mcpInfos) as any);
+		const byName = new Map(tagged.map(e => [e.name, e.kind]));
+		assert.equal(byName.get("read"), "yaml");
+		assert.equal(byName.get("bash_bg"), "yaml");
+		assert.equal(byName.get("mcp_pw"), "mcp");
+		assert.equal(byName.get("mcp_halo"), "mcp");
+		assert.equal(byName.get("mcp_describe"), "yaml", "mcp_describe is YAML-backed");
+	});
+
 	it("server with all-`never` ops is omitted from the model surface", () => {
 		const tm = mockToolManager({});
 		const gps = mockGroupPolicyStore({ "mcp__halo": "never" });
-		const allowed = computeEffectiveAllowedTools(tm as any, undefined, gps, mockMcpManager(mcpInfos) as any);
+		const allowed = computeEffectiveAllowedTools(tm as any, undefined, gps, mockMcpManager(mcpInfos) as any).map(e => e.name);
 
 		assert.ok(allowed.includes("mcp_pw"));
 		assert.ok(!allowed.includes("mcp_halo"));
@@ -164,13 +178,13 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 	it("role policy `mcp__playwright: ask` keeps the meta-tool listed (ask is registered, not blocked)", () => {
 		const tm = mockToolManager({});
 		const role = { toolPolicies: { mcp__pw: "ask" as const } };
-		const allowed = computeEffectiveAllowedTools(tm as any, role, undefined, mockMcpManager(mcpInfos) as any);
+		const allowed = computeEffectiveAllowedTools(tm as any, role, undefined, mockMcpManager(mcpInfos) as any).map(e => e.name);
 		assert.ok(allowed.includes("mcp_pw"));
 	});
 
 	it("no MCP servers configured → no meta-tools and no mcp_describe", () => {
 		const tm = mockToolManager({});
-		const allowed = computeEffectiveAllowedTools(tm as any, undefined, undefined, mockMcpManager([]) as any);
+		const allowed = computeEffectiveAllowedTools(tm as any, undefined, undefined, mockMcpManager([]) as any).map(e => e.name);
 		assert.ok(!allowed.includes("mcp_describe"));
 		assert.ok(!allowed.some(t => t.startsWith("mcp_")));
 	});
@@ -178,7 +192,7 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 	it("role policy `mcp_describe: never` excludes mcp_describe even when servers exist", () => {
 		const tm = mockToolManager({});
 		const role = { toolPolicies: { mcp_describe: "never" as const } };
-		const allowed = computeEffectiveAllowedTools(tm as any, role, undefined, mockMcpManager(mcpInfos) as any);
+		const allowed = computeEffectiveAllowedTools(tm as any, role, undefined, mockMcpManager(mcpInfos) as any).map(e => e.name);
 		assert.ok(!allowed.includes("mcp_describe"), "mcp_describe should be excluded when role policy is never");
 		assert.ok(allowed.includes("mcp_pw"), "per-server meta-tools still present");
 	});
@@ -186,7 +200,7 @@ describe("computeEffectiveAllowedTools — model surface", () => {
 	it("group policy `MCP: never` excludes mcp_describe", () => {
 		const tm = mockToolManager({});
 		const gps = mockGroupPolicyStore({ MCP: "never" });
-		const allowed = computeEffectiveAllowedTools(tm as any, undefined, gps, mockMcpManager(mcpInfos) as any);
+		const allowed = computeEffectiveAllowedTools(tm as any, undefined, gps, mockMcpManager(mcpInfos) as any).map(e => e.name);
 		assert.ok(!allowed.includes("mcp_describe"));
 	});
 });

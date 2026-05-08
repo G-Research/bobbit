@@ -25,7 +25,7 @@ import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { discoverSlashSkills } from "../skills/slash-skills.js";
 import { shouldSkipRemotePush, detectPrimaryBranch } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
@@ -1153,7 +1153,7 @@ export class SessionManager {
 	 * If the role has explicit allowedTools, use those.
 	 * Otherwise, compute from the full policy cascade (honouring the allow default).
 	 */
-	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): string[] {
+	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): EffectiveTool[] {
 		if (!role) return [];
 		if (this.toolManager) {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
@@ -1163,13 +1163,15 @@ export class SessionManager {
 
 	private buildToolActivationArgs(
 		sessionId: string,
-		allowedTools: string[] | undefined,
+		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 	): string[] {
+		const flatNames = allowedTools?.map(e => e.name);
+
 		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, allowedTools, role, this.toolManager, this.groupPolicyStore)
+			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
@@ -1181,8 +1183,8 @@ export class SessionManager {
 		const roleBaseTools = role && this.toolManager
 			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
 			: [];
-		const roleAllowed = new Set(roleBaseTools.map(t => t.toLowerCase()));
-		const sessionGrants = (allowedTools ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
+		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
+		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
@@ -2036,7 +2038,7 @@ export class SessionManager {
 		const role = this.roleManager.getRole(roleName);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
-		const effectiveAllowed = this.resolveEffectiveAllowedTools(role);
+		const effectiveAllowed = this.resolveEffectiveAllowedTools(role).map(e => e.name);
 		const effectiveSet = new Set(effectiveAllowed.map(t => t.toLowerCase()));
 
 		const newTools: string[] = [];
@@ -2100,7 +2102,7 @@ export class SessionManager {
 			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
 			// Re-read role and recompute effective allowed tools
 			const updatedRole = this.roleManager.getRole(role.name);
-			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role);
+			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role).map(e => e.name);
 			session.allowedTools = updatedEffective;
 			await this._restartSessionWithUpdatedRole(session);
 
@@ -2608,8 +2610,11 @@ export class SessionManager {
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType);
-		const effectiveAllowed = overrideAllowedTools ?? this.resolveEffectiveAllowedTools(restoredRole);
+		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
+			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			: this.resolveEffectiveAllowedTools(restoredRole);
 		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
+		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		const toolArgs = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
 		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
@@ -2641,7 +2646,7 @@ export class SessionManager {
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
-				allowedTools: restoredAllowedTools,
+				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -2671,7 +2676,7 @@ export class SessionManager {
 				goalSpec,
 				rolePrompt,
 				roleName,
-				allowedTools: restoredAllowedTools,
+				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -2717,7 +2722,7 @@ export class SessionManager {
 			staffId: ps.staffId,
 			accessory: ps.accessory,
 			preview: ps.preview,
-			allowedTools: restoredAllowedTools,
+			allowedTools: restoredAllowedNames,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
@@ -2812,6 +2817,9 @@ export class SessionManager {
 
 	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
+		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
+			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			: undefined;
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
@@ -2900,7 +2908,7 @@ export class SessionManager {
 				rolePrompt: opts?.rolePrompt,
 				roleName: opts?.roleName,
 				workflowContext: opts?.workflowContext,
-				effectiveAllowedTools: opts?.allowedTools,
+				effectiveAllowedTools: optsAllowedTagged,
 				projectId,
 				sandboxBranch: opts?.sandboxBranch,
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
@@ -2955,7 +2963,7 @@ export class SessionManager {
 			roleName: opts?.roleName,
 			workflowContext: opts?.workflowContext,
 			reattemptGoalId: opts?.reattemptGoalId,
-			effectiveAllowedTools: opts?.allowedTools,
+			effectiveAllowedTools: optsAllowedTagged,
 			projectId,
 			sandboxBranch: opts?.sandboxBranch,
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
@@ -3014,7 +3022,9 @@ export class SessionManager {
 
 		// Inherit tool access from parent session
 		const parentSession = this.sessions.get(parentSessionId);
-		const parentAllowedTools = parentSession?.allowedTools;
+		const parentAllowedTools: EffectiveTool[] | undefined = parentSession?.allowedTools
+			? parentSession.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			: undefined;
 
 		const plan: SessionSetupPlan = {
 			id,
@@ -3833,6 +3843,7 @@ export class SessionManager {
 		// Look up the full role (with toolPolicies) from roleManager if available
 		const fullRole = this.roleManager?.getRole(role.name);
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
+		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
@@ -3842,7 +3853,7 @@ export class SessionManager {
 			goalSpec,
 			rolePrompt: role.promptTemplate,
 			roleName: role.name,
-			allowedTools: effectiveAllowed.length > 0 ? effectiveAllowed : undefined,
+			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
 			projectConfigStore: this.projectConfigStore,
 		});
 
@@ -3923,7 +3934,7 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 		session.role = role.name;
 		session.accessory = role.accessory;
-		session.allowedTools = effectiveAllowed;
+		session.allowedTools = effectiveAllowedNames;
 
 		roleStore.update(id, { role: role.name, accessory: role.accessory });
 

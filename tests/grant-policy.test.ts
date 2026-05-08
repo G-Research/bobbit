@@ -371,11 +371,12 @@ describe("computeToolActivationArgs", () => {
 		const role = { toolPolicies: { Gates: "ask", Tasks: "ask" } };
 
 		const allowed = computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager);
-		assert.ok(allowed.includes("generate_image"));
-		assert.ok(allowed.includes("ask_user_choices"));
-		assert.ok(!allowed.includes("mcp__nano-banana__generate_image"));
+		const allowedNames = allowed.map((e: { name: string }) => e.name);
+		assert.ok(allowedNames.includes("generate_image"));
+		assert.ok(allowedNames.includes("ask_user_choices"));
+		assert.ok(!allowedNames.includes("mcp__nano-banana__generate_image"));
 
-		const mcpExtensions = writeMcpProxyExtensions(mcpManager, allowed, role, toolManager, groupPolicyStore);
+		const mcpExtensions = writeMcpProxyExtensions(mcpManager, allowedNames, role, toolManager, groupPolicyStore);
 		assert.equal(mcpExtensions.length, 0);
 
 		const activation = computeToolActivationArgs(allowed, toolManager, process.cwd(), mcpExtensions);
