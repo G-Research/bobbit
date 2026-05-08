@@ -30,6 +30,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts } from "./system-prompt.js";
+import type { PrStatusStore } from "./pr-status-store.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -164,6 +165,8 @@ export interface PipelineContext {
 	 * during the gap will lose the session, which is fine for unit tests.
 	 */
 	persistSessionMetadata?: (session: SessionInfo) => Promise<void>;
+	/** PR status store — source of truth for goal PR URLs (re-attempt context). */
+	prStatusStore: PrStatusStore;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -325,7 +328,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			if (plan.reattemptGoalId) {
 				const origGoal = ctx.goalManager.getGoal(plan.reattemptGoalId);
 				if (origGoal) {
-					assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal);
+					assistantGoalSpec += "\n\n" + buildReattemptContext(origGoal, ctx.prStatusStore);
 				}
 			}
 		}

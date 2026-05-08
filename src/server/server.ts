@@ -607,6 +607,7 @@ export function createGateway(config: GatewayConfig) {
 		projectConfigStore,
 		groupPolicyStore,
 		projectContextManager,
+		prStatusStore,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 	// Wire sessionManager into the project context manager so the search
@@ -3284,7 +3285,6 @@ async function handleApiRoute(
 				team: true, // Always-on team mode
 				repoPath: body.repoPath,
 				branch: body.branch,
-				prUrl: body.prUrl,
 				reattemptOf: body.reattemptOf,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }

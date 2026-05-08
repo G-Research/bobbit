@@ -741,6 +741,16 @@ Check the WS `proposal_update` frame fired by the `edit_proposal` handler and th
 
 `POST /api/image-generation/generate` returns `400` for malformed input and `500 { error }` for provider-side failures. It must never return `502` or `503` — those indicate a regression in the route handler.
 
+## Goal `prUrl` removed
+
+**Symptom:** an agent or external script PUTs `{prUrl: "..."}` to `/api/goals/:id` and the field doesn't appear on the next `GET`.
+
+**Resolution:** that's expected — `Goal.prUrl` was removed; `PrStatusStore` (`src/server/agent/pr-status-store.ts`) is the single source of truth for goal PR URLs. `PUT /api/goals/:id` silently ignores any `prUrl` field. Read the URL via `GET /api/goals/:id/pr-status` (cached entry populated by `getCachedPrStatus()` running `gh pr list --head <branch>`).
+
+**Re-attempt context missing PR URL:** `buildReattemptContext(goal, prStatusStore)` in `src/server/agent/goal-assistant.ts` reads `prStatusStore.get(goal.id)?.url`. If the `**PR URL:**` line is absent from a re-attempt prompt, check that the cache file (`<stateDir>/pr-status-cache.json`) has an entry for the original goal id. The store is sticky — once a PR is found by branch name it persists across restarts, so an archived/merged goal's last-known URL still surfaces.
+
+The team-lead role no longer PUTs `prUrl` after `gh pr create` (the curl-PUT step was removed from `defaults/roles/team-lead.yaml`). All user-visible PR surfaces (sidebar badge, dashboard widget, `GitStatusWidget` link, merge button, session-footer status) already read from `PrStatusStore` / its client mirror, so behaviour is unchanged.
+
 ## Header toast vs proposal toast testid collision
 
 The session-header toast (e.g. "Link copied" from the Copy-link button) uses `showHeaderToast()` and `data-testid="header-toast"`. The proposal-panel toast uses `showProposalToast()` and `data-testid="proposal-toast"`. Two separate state slots and two separate `<div class="review-toast">` instances in `src/app/render.ts` — do NOT collapse them onto a shared testid; E2E selectors in `tests/e2e/ui/copy-session-link.spec.ts` and `tests/e2e/ui/proposal-inline-comments.spec.ts` would alias.

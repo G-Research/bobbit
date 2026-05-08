@@ -3,12 +3,13 @@
  */
 
 import type { PersistedGoal } from "./goal-store.js";
+import type { PrStatusStore } from "./pr-status-store.js";
 
 /**
  * Build a prompt section for re-attempt context.
  * Appended to the goal assistant prompt when the session has a reattemptGoalId.
  */
-export function buildReattemptContext(goal: PersistedGoal): string {
+export function buildReattemptContext(goal: PersistedGoal, prStatusStore: PrStatusStore): string {
 	const lines: string[] = [
 		"## Re-attempt Context",
 		"",
@@ -17,7 +18,8 @@ export function buildReattemptContext(goal: PersistedGoal): string {
 		`**Original Goal:** ${goal.title}`,
 	];
 	if (goal.branch) lines.push(`**Branch:** ${goal.branch}`);
-	if (goal.prUrl) lines.push(`**PR URL:** ${goal.prUrl}`);
+	const pr = prStatusStore.get(goal.id);
+	if (pr?.url) lines.push(`**PR URL:** ${pr.url}`);
 	lines.push(`**Workflow:** ${goal.workflowId || "general"}`);
 	lines.push("");
 	lines.push("**Original Spec:**");
