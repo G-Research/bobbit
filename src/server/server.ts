@@ -1220,7 +1220,10 @@ export function createGateway(config: GatewayConfig) {
 								const poolSize = parseInt(ctx.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
 								const wtRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
 								const pcs = ctx.projectConfigStore;
-								sessionManager.initWorktreePoolForProject(ctx.project.id, repoPath, () => pcs.getComponents(), poolSize, wtRoot);
+								// Single-repo: resolve nested rootPath to the actual git toplevel so
+								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
+								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot);
 							}
 						} catch { /* best-effort */ }
 					}
@@ -2063,7 +2066,10 @@ async function handleApiRoute(
 						const poolSize = parseInt(newCtx?.projectConfigStore.get("worktree_pool_size") || "2", 10) || 2;
 						const wtRoot = newCtx?.projectConfigStore.get("worktree_root") || undefined;
 						const pcs = newCtx?.projectConfigStore;
-						sessionManager.initWorktreePoolForProject(project.id, body.rootPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot);
+						// Single-repo: resolve nested rootPath to the actual git toplevel so
+						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
+						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot);
 					}
 				} catch { /* best-effort */ }
 			}

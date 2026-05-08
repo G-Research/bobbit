@@ -25,7 +25,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
@@ -92,6 +92,31 @@ function branchToSlug(branch: string): string {
  * Inlined here from `skills/git.ts`: `pool.claim()` is now the sole caller
  * post-rename-removal, so this no longer needs to be a public skill export.
  */
+/**
+ * Resolve `p` to its enclosing git working-tree toplevel via
+ * `git rev-parse --show-toplevel`. Falls back to the input on any error
+ * (not a git repo, command failure, missing git binary). Logs a warn when
+ * resolution changes the path so nested-rootPath misuse is visible.
+ */
+function resolveRepoToplevel(p: string): string {
+	try {
+		const out = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+			cwd: p,
+			timeout: 5_000,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).toString().trim();
+		if (!out) return p;
+		const resolved = path.resolve(out);
+		const input = path.resolve(p);
+		if (resolved !== input) {
+			console.warn(`[worktree-pool] repoPath resolved from nested ${input} to git root ${resolved}`);
+		}
+		return resolved;
+	} catch {
+		return p;
+	}
+}
+
 async function moveWorktree(repoPath: string, oldPath: string, newPath: string): Promise<void> {
 	if (oldPath === newPath) return;
 	await execFile("git", ["worktree", "move", oldPath, newPath], {
@@ -117,8 +142,18 @@ export class WorktreePool {
 	/** Project-level worktree_root override (sibling of <rootPath>-wt by default). */
 	private worktreeRoot?: string;
 
+	/**
+	 * Construct a worktree pool.
+	 *
+	 * `opts.repoPath` SHOULD be a git toplevel. If a nested path inside a git
+	 * working tree is supplied (e.g. a project with `rootPath` pointing at a
+	 * subdirectory inside a larger repo), the constructor self-heals by
+	 * resolving to the toplevel via `git rev-parse --show-toplevel`. After
+	 * construction, `this.repoPath` is always the git root (or, when the
+	 * supplied path isn't a git working tree at all, the original input).
+	 */
 	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; worktreeRoot?: string }) {
-		this.repoPath = opts.repoPath;
+		this.repoPath = resolveRepoToplevel(opts.repoPath);
 		this.targetSize = opts.targetSize ?? 2;
 		this.componentsResolver = opts.componentsResolver;
 		this.worktreeRoot = opts.worktreeRoot;
