@@ -29,7 +29,7 @@ async function getServerModules() {
 		import("../../../dist/server/server.js"),
 	]);
 	serverModules = {
-		setProjectRoot: bd.setProjectRoot,
+		setServerCwd: bd.setServerCwd,
 		scaffoldBobbitDir: sc.scaffoldBobbitDir,
 		loadOrCreateToken: tok.loadOrCreateToken,
 		createGateway: srv.createGateway,
@@ -106,9 +106,9 @@ export async function createTestGateway(opts?: {
 	process.env.BOBBIT_NO_OPEN = "1";
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
 
-	const { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway } = await getServerModules();
+	const { setServerCwd, scaffoldBobbitDir, loadOrCreateToken, createGateway } = await getServerModules();
 
-	setProjectRoot(dir);
+	setServerCwd(dir);
 	scaffoldBobbitDir(dir);
 	const token = loadOrCreateToken();
 

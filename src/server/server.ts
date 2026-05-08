@@ -7,7 +7,7 @@ import https from "node:https";
 import path from "node:path";
 
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, getServerCwd } from "./bobbit-dir.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
@@ -518,7 +518,7 @@ export function createGateway(config: GatewayConfig) {
 	// derived stateDir (`<rootPath>/.bobbit/state`) cannot collide with any
 	// user project rooted at the install dir or with the global stateDir —
 	// otherwise the system context would load the same goals.json/sessions.json
-	// as a user project rooted at getProjectRoot() (e.g. test fixtures).
+	// as a user project rooted at getServerCwd() (e.g. test fixtures).
 	try {
 		const systemRoot = path.join(stateDir, "system-project");
 		fs.mkdirSync(systemRoot, { recursive: true });
@@ -528,7 +528,7 @@ export function createGateway(config: GatewayConfig) {
 	}
 
 	// Run one-time migration from centralized to per-project state
-	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot());
+	migrateToPerProjectState(stateDir, projectRegistry, getServerCwd());
 
 	// Recover data lost by the original migration bug (unconditional rename
 	// when central dir == default project dir). Must run before stores load.

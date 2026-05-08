@@ -8,7 +8,7 @@
  *   TEST_EXPLICIT — "true" or "false" for portExplicit
  *   MOCK_AGENT    — path to mock agent script
  */
-import { setProjectRoot, bobbitStateDir } from "../../dist/server/bobbit-dir.js";
+import { setServerCwd, bobbitStateDir } from "../../dist/server/bobbit-dir.js";
 import { scaffoldBobbitDir } from "../../dist/server/scaffold.js";
 import { createGateway } from "../../dist/server/server.js";
 import { loadOrCreateToken } from "../../dist/server/auth/token.js";
@@ -27,7 +27,7 @@ if (!bobbitDir || !port || !mode) {
 }
 
 // Set up project root and scaffold
-setProjectRoot(bobbitDir);
+setServerCwd(bobbitDir);
 scaffoldBobbitDir(bobbitDir);
 
 const authToken = loadOrCreateToken(false);
