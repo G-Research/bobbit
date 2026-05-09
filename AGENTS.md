@@ -63,6 +63,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Re-attempt a goal** → `POST /api/sessions { reattemptGoalId }` → `buildReattemptContext()`.
 - **Server-side read/unread** → `lastReadAt` on `PersistedSession`; `POST /api/sessions/:id/mark-read`.
 - **Read another session's transcript** → `read_session` tool; `transcript-reader.ts`; `x-bobbit-session-id` header for same-project auth.
+- **Modify session-metadata persistence** → atomic write + epoch in `src/server/agent/session-store.ts`; orphan-cleanup gate in `src/server/agent/orphan-cleanup.ts`. See [session-store-crash-safety.md](docs/design/session-store-crash-safety.md).
 
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
@@ -121,7 +122,8 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/debugging.md). **One line per entry.** All entries: see `debugging.md` (or named design doc) for the checklist.
 
 ### Session / status / steer
-- **Session persistence** — `.bobbit/state/sessions.json`; missing `.jsonl` skips restore.
+- **Session persistence** — atomic write + `.bak.1..5` rotation + epoch stale-guard in `SessionStore`; missing `.jsonl` may be kept dormant via `shouldKeepDespiteOrphan`. See [session-store-crash-safety.md](docs/design/session-store-crash-safety.md).
+- **Boot bulk-archives live sessions / orphaned-transcripts banner** — `shouldKeepDespiteOrphan` gate in `orphan-cleanup.ts`; `[session-store] REFUSING to save` = stale-snapshot guard tripped. See [session-store-crash-safety.md](docs/design/session-store-crash-safety.md).
 - **Stop button stuck visible / duplicate user message on second send** — `_state.status` write outside `case "session_status"`/`"state"`/`reset()`, or server `session.status` write outside `broadcastStatus()`. See [unify-session-status.md](docs/design/unify-session-status.md).
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Live-steer lost / duplicated after Stop** — single `_dispatchSteer()` + shadow ledger `inFlightSteerTexts`; never re-add `PromptQueue.dispatched`. See [docs/design/steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
