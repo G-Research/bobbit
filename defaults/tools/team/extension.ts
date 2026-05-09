@@ -94,7 +94,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_complete",
 		label: "Complete Team",
-		description: "Dismiss all role agents and mark the goal complete; team lead stays active. All spawned subgoals must first be resolved via goal_merge_child or goal_archive_child (else 409 HAS_LIVE_CHILDREN).",
+		description: "Dismiss role agents and mark goal complete. All subgoals must be resolved first (else 409).",
 		promptSnippet: "Complete the team: dismiss agents, keep team lead. Requires all subgoals merged/archived first.",
 		parameters: Type.Object({}),
 		async execute() {
@@ -138,7 +138,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_prompt",
 		label: "Prompt Team Agent",
-		description: "Prompt a team agent (own team OR direct-child goal's team-lead). Runs immediately if idle, else queues. 409 if workflowGateId's upstream gates haven't passed. Other scopes: use goal_pause / goal_archive_child.",
+		description: "Prompt a team agent or direct-child team-lead. Runs immediately if idle, else queues.",
 		promptSnippet: "Send a prompt to a team agent (immediate if idle, queued if busy).",
 		parameters: Type.Object({
 			session_id: Type.String(),

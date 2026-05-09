@@ -54,13 +54,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_spawn_child",
 		label: "Spawn Child Goal",
-		description: "Spawn a child goal under the current goal. Idempotent on planId — re-calling with the same planId returns the existing child id rather than creating a duplicate. The child branches off the parent's branch HEAD; on ready-to-merge, the child's branch merges LOCALLY into the parent (no remote PR). INHERITANCE: the child inherits the parent's `inlineRoles` snapshot and the parent's workflow (with parent-specific subgoal verify-steps stripped when the parent is a meta-workflow), so it gets the workflow's structural scaffold (gates, dependencies, synthesis / ready-to-merge) without the parent's plan items. REUSE BY DEFAULT: let the child inherit — do not pass `inlineWorkflow` / `inlineRoles` unless the user explicitly asked, or no existing workflow/role genuinely fits (e.g. a research subgoal under a build→test→docs parent — there is nothing to build or test). Don't override just because the inherited shape isn't a perfect match. IMPORTANT: `spec` is the child's ENTIRE scope — do not paste your own parent goal's spec, do not describe sibling goals, do not list the parent's acceptance criteria. The child will treat everything in `spec` as work it must complete. Write the child's spec as if the parent didn't exist.",
+		description: "Spawn a child goal under this one. Idempotent on planId. Inherits parent inlineRoles + workflow by default.",
 		promptSnippet: "Spawn a child goal idempotently (keyed by planId). Inherits parent's inlineRoles; inherits parent's workflow only for non-meta workflows. Keep spec focused on the child's own scope.",
 		parameters: Type.Object({
-			planId: Type.String({ description: "Stable id for this plan node — used as spawnedFromPlanId on the child (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between)." }),
-			title: Type.String({ description: "Child goal title — becomes the child's display title and branch slug." }),
-			spec: Type.String({ description: "Markdown spec for the child goal — what THIS child must do, and ONLY this child. Do not paste your own spec, do not describe sibling goals, do not list parent-level acceptance criteria — the child will treat whatever you write here as its entire mission." }),
-			workflowId: Type.Optional(Type.String({ description: "Workflow id to look up in the project's workflow store. When omitted AND the parent's workflow is not a `parent` meta-workflow, the child inherits `parent.workflow`; otherwise the child falls back to `feature`. Mutually exclusive with inlineWorkflow (inlineWorkflow wins if both supplied)." })),
+			planId: Type.String({ description: "Stable plan-node id; stamped on the child as spawnedFromPlanId." }),
+			title: Type.String({ description: "Child goal title (display + branch slug)." }),
+			spec: Type.String({ description: "Markdown spec — child's entire scope. Do not include parent or sibling work." }),
+			workflowId: Type.Optional(Type.String({ description: "Workflow id. Omitted: inherit parent workflow (or 'feature')." })),
 			suggestedRole: Type.Optional(Type.String({ description: "Suggested team-lead role for the child." })),
 			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
 				name: Type.String(),
@@ -75,15 +75,15 @@ export default function (pi: ExtensionAPI) {
 				model: Type.Optional(Type.String()),
 				thinkingLevel: Type.Optional(Type.String()),
 			}), {
-				description: "Per-child ephemeral roles. MERGED on top of the parent's inlineRoles snapshot — child entries with the same name override the parent's. Use this when the subgoal needs a different reviewer/QA role than the parent. Resolved BEFORE the project role cascade. For roles useful across many goals → propose_role (permanent) instead.",
+				description: "Per-child ephemeral roles, merged over the parent's inlineRoles snapshot.",
 			})),
 			inlineWorkflow: Type.Optional(Type.Object({
 				id: Type.String(),
 				name: Type.String(),
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
-			}, { description: "Optional inline workflow snapshot for the child. REPLACES the inherited parent workflow entirely — pass this only when the child needs a fundamentally different gate sequence (and only for THIS child). For workflows useful across many goals → propose_project with the workflow inside `workflows:` (permanent). Mutually exclusive with workflowId — if both are given, the inline workflow wins. The inline workflow's `verify[]` steps may reference roles defined in `inlineRoles` above." })),
-			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child depends on. Empty / omitted = parallel sibling at column 0 in the Plan tab. Validated server-side: self-deps, unknown refs, and cycles return 400 with a structured error code (SELF_DEPENDENCY / UNKNOWN_PLAN_ID / DEPENDS_ON_CYCLE). Use this to draw an A→B edge when B genuinely waits on A." })),
+			}, { description: "Inline workflow snapshot; replaces the inherited parent workflow." })),
+			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child waits on. Server validates self-dep / unknown / cycle." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -101,15 +101,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_plan_propose",
 		label: "Propose Goal Plan",
-		description: "Submit (or re-submit) a plan of subgoal-typed steps for this goal. " +
-			"On a `parent`-workflow goal: the classifier compares against the frozen baseline " +
-			"(noop / fix-up / expansion / restructure / criteria-drop), and the divergence-" +
-			"policy decision matrix (SUBGOALS-SPEC §3.6) maps the kind to allow / require-" +
-			"approval / 409. " +
-			"On any other workflow (no `execution` gate to hold a frozen plan): the steps " +
-			"are spawned directly as child goals via goal_spawn_child — same effect for the " +
-			"user, just without the freeze/replan classifier. Idempotent on planId in both " +
-			"paths. Returns either a classifier verdict or a `{ fallback: \"spawn-children-direct\", spawned: [...] }` block.",
+		description: "Submit (or re-submit) a plan of subgoal steps. Falls back to direct spawn when the workflow has no execution gate.",
 		promptSnippet: "Propose a (re-)plan for the goal. Auto-falls-back to direct child spawn when the workflow has no execution gate.",
 		parameters: Type.Object({
 			steps: Type.Array(Type.Object({
@@ -119,9 +111,9 @@ export default function (pi: ExtensionAPI) {
 				workflowId: Type.Optional(Type.String()),
 				suggestedRole: Type.Optional(Type.String()),
 				phase: Type.Optional(Type.Number()),
-				dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this step depends on. Empty / omitted = parallel sibling. Validated server-side (self-dep / unknown / cycle → 400). Changing dependsOn on an existing step is classified as `restructure` by the mutation classifier." })),
+				dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this step depends on. Server validates cycles." })),
 			}), { description: "Array of subgoal-typed plan steps." }),
-			fallback: Type.Optional(Type.Literal("spawn-children-direct", { description: "Opt-in to the spawn-children-direct fallback when this goal's workflow has no `execution` gate to hold a frozen plan. Without this opt-in, the classifier/freeze flow is required and a 400 NO_EXECUTION_GATE is surfaced as-is. Pass when you intentionally chose a non-parent workflow but still want a list of subgoals spawned." })),
+			fallback: Type.Optional(Type.Literal("spawn-children-direct", { description: "Opt-in: spawn directly when the workflow has no execution gate." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -195,7 +187,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_plan_status",
 		label: "Goal Plan Status",
-		description: "Return the current frozen plan + a per-step projection of resolved childGoalId / state / archived. Cheap; pulls directly from the persisted store.",
+		description: "Return the frozen plan plus per-step resolved childGoalId / state / archived.",
 		promptSnippet: "Read the current plan + each child's resolved state.",
 		parameters: Type.Object({
 			gateId: Type.Optional(Type.String({ description: "Gate to read steps from. Default 'execution'." })),
@@ -211,7 +203,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_merge_child",
 		label: "Merge Child Goal",
-		description: "Merge a child goal's branch locally into the parent. On clean merge: child auto-archived + team torn down. On conflict: 409 with truncated output; child stays live for manual recovery.",
+		description: "Merge a child's branch locally into the parent. Clean merge auto-archives the child; conflicts return 409.",
 		promptSnippet: "Local-merge a child's branch into the parent.",
 		parameters: Type.Object({
 			childGoalId: Type.String({ description: "Id of the child goal to merge." }),
@@ -226,7 +218,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_pause",
 		label: "Pause Goal",
-		description: "Pause the current goal. Cascade=true also pauses all descendants. The cascade param is REQUIRED — server returns 422 if omitted (UI is the cascade-policy authority).",
+		description: "Pause the current goal. cascade is required (true also pauses descendants).",
 		promptSnippet: "Pause the goal (cascade required).",
 		parameters: Type.Object({
 			cascade: Type.Boolean({ description: "Required. true = pause all descendants too." }),
@@ -241,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_resume",
 		label: "Resume Goal",
-		description: "Resume the current goal. Cascade=true also resumes all descendants. Required cascade param.",
+		description: "Resume the current goal. cascade is required (true also resumes descendants).",
 		promptSnippet: "Resume the goal (cascade required).",
 		parameters: Type.Object({
 			cascade: Type.Boolean({ description: "Required. true = resume all descendants too." }),
@@ -256,13 +248,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_archive_child",
 		label: "Archive Child Goal",
-		description: "Archive a child goal. Cascade=false → 409 if it has descendants (UI prompts for confirmation). Cascade=true → walks descendants deepest-first, archives each. Required cascade param. Pass mergedManually=true if you already merged the child's branch outside the auto-merge path — the archived record's state is reconciled to 'complete' so the Plan-tab DAG renders it green instead of red.",
+		description: "Archive a child goal. cascade required; mergedManually=true reconciles state to complete.",
 		promptSnippet: "Archive a child goal (cascade required).",
 		parameters: Type.Object({
 			childGoalId: Type.String({ description: "Id of the child to archive." }),
-			cascade: Type.Boolean({ description: "Required. true = also archive descendants; false → 409 if descendants exist." }),
+			cascade: Type.Boolean({ description: "Required. true also archives descendants; false → 409 if any exist." }),
 			mergedManually: Type.Optional(Type.Boolean({
-				description: "Set true if you already merged the child's branch manually (git merge + push). Marks the archived record as state='complete' so the Plan DAG renders it green instead of red. When omitted/false, the existing state (typically 'failed') is preserved.",
+				description: "Set true after a manual merge to reconcile state='complete'.",
 			})),
 		}),
 		async execute(_id, params) {
@@ -277,7 +269,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_decide_mutation",
 		label: "Decide Plan Mutation",
-		description: "Approve or reject a queued plan-mutation request raised by goal_plan_propose. Approve applies the proposed steps and increments replanCount (auto-pause beyond 5).",
+		description: "Approve or reject a queued plan-mutation request. Approve increments replanCount (auto-pause >5).",
 		promptSnippet: "Approve or reject a pending plan-mutation request.",
 		parameters: Type.Object({
 			requestId: Type.String({ description: "requestId returned by goal_plan_propose." }),
@@ -293,7 +285,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_set_policy",
 		label: "Set Goal Policy",
-		description: "Set the goal's divergencePolicy (strict / balanced / autonomous) and/or maxConcurrentChildren (1..8). Concurrency is read on the root only.",
+		description: "Set divergencePolicy (strict / balanced / autonomous) and/or maxConcurrentChildren (1..8).",
 		promptSnippet: "Set divergencePolicy and/or maxConcurrentChildren on the goal.",
 		parameters: Type.Object({
 			divergencePolicy: Type.Optional(Type.Union([
