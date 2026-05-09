@@ -2207,6 +2207,12 @@ export class SessionManager {
 		const clients = new Set(session.clients);
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		// CRITICAL: snapshot the streaming frame-of-reference so the client's
+		// `_highestSeq` and `_lastStatusVersion` trackers stay in sync after the
+		// in-place restart. The clients keep their WS open across the respawn,
+		// so a fresh seq-1 / version-1 frame would be silently dropped by their
+		// dedup gates. See preserveStreamingFrameOfReference() below.
+		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 
 		// Stop the current agent process
 		session.unsubscribe();
@@ -2219,6 +2225,9 @@ export class SessionManager {
 		// restoreSession normally derives allowedTools from the role YAML, but for
 		// session-only and one-time grants the in-memory list includes extra tools.
 		(ps as any)._overrideAllowedTools = savedAllowedTools;
+		// Carry the streaming frame-of-reference into the new SessionInfo built
+		// inside restoreSession. Consumed and deleted there.
+		(ps as any)._restartFrameOfReference = frameOfRef;
 
 		// Restore the session (re-launches with correct tool activation)
 		try {
@@ -2226,6 +2235,7 @@ export class SessionManager {
 		} finally {
 			// Clean up the temporary override even if restoreSession fails
 			delete (ps as any)._overrideAllowedTools;
+			delete (ps as any)._restartFrameOfReference;
 		}
 
 		// Re-attach the saved clients and carry over grant state
@@ -2244,6 +2254,29 @@ export class SessionManager {
 	}
 
 	/**
+	 * Snapshot the per-session monotonic counters that the client keeps in
+	 * lockstep with the server: the streaming-event `seq` (EventBuffer.lastSeq)
+	 * and the canonical `statusVersion`. Used by `restartAgent` /
+	 * `_restartSessionWithUpdatedRole` to seed the freshly-built EventBuffer
+	 * and SessionInfo so the client's `_highestSeq` and `_lastStatusVersion`
+	 * trackers — which never get reset because the WS stays open across the
+	 * respawn — keep applying live frames instead of silently dropping them as
+	 * "duplicates".
+	 *
+	 * The numbers we hand back are the high-water marks. The post-restart code
+	 * primes the new buffer with `seedNextSeq(lastSeq + 1)` and the new
+	 * SessionInfo with `statusVersion: lastVersion`; the very next live frame
+	 * therefore lands at seq = lastSeq + 1 / version = lastVersion + 1, which
+	 * advances both client trackers naturally.
+	 */
+	private _snapshotStreamingFrameOfReference(session: SessionInfo): { lastSeq: number; lastStatusVersion: number } {
+		return {
+			lastSeq: session.eventBuffer.lastSeq,
+			lastStatusVersion: session.statusVersion ?? 0,
+		};
+	}
+
+	/**
 	 * Restart the agent process for a session whose process has died.
 	 * Stops any remnant process, then restores from persisted state.
 	 * Re-attaches existing WS clients so the user can keep working.
@@ -2259,6 +2292,9 @@ export class SessionManager {
 		const clients = new Set(session.clients);
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		// Snapshot streaming frame-of-reference — see
+		// `_restartSessionWithUpdatedRole` for the full rationale.
+		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 
 		// Stop remnant process (may already be dead)
 		session.unsubscribe();
@@ -2268,10 +2304,12 @@ export class SessionManager {
 		this.sessions.delete(sessionId);
 
 		(ps as any)._overrideAllowedTools = savedAllowedTools;
+		(ps as any)._restartFrameOfReference = frameOfRef;
 		try {
 			await this.restoreSession(ps);
 		} finally {
 			delete (ps as any)._overrideAllowedTools;
+			delete (ps as any)._restartFrameOfReference;
 		}
 
 		// Re-attach saved clients and carry over grant state
@@ -2751,13 +2789,28 @@ export class SessionManager {
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
+		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
+		// stash the previous session's streaming frame-of-reference on `ps` so the
+		// new EventBuffer/SessionInfo continue the monotonic seq + statusVersion
+		// sequence space. Clients keep their WS open across the respawn, so a
+		// fresh seq-1 / version-1 frame would be silently dropped by their dedup
+		// gates. See _snapshotStreamingFrameOfReference().
+		const frameOfRef = (ps as any)._restartFrameOfReference as
+			| { lastSeq: number; lastStatusVersion: number }
+			| undefined;
+		if (frameOfRef && Number.isFinite(frameOfRef.lastSeq) && frameOfRef.lastSeq > 0) {
+			eventBuffer.seedNextSeq(frameOfRef.lastSeq + 1);
+		}
+		const initialStatusVersion = frameOfRef && Number.isFinite(frameOfRef.lastStatusVersion)
+			? frameOfRef.lastStatusVersion
+			: 0;
 
 		const session: SessionInfo = {
 			id: ps.id,
 			title: ps.title,
 			cwd: ps.cwd,
 			status: "starting",
-			statusVersion: 0,
+			statusVersion: initialStatusVersion,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
