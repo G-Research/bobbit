@@ -41,7 +41,7 @@ through every row downstream, resetting widget state.
 | Frame | Field added | Source | Where |
 |---|---|---|---|
 | `{type:"event"}` | `seq`, `ts` (existing) | `EventBuffer.push` | `agent/session-manager.ts::emitSessionEvent` (already lives there) |
-| `{type:"tool_permission_needed"}` | `seq`, `ts` | new helper `emitSessionFrame()` that wraps non-event broadcasts through `EventBuffer.pushFrame()` | `agent/session-manager.ts::requestToolPermission` (line ~1909), `ws/handler.ts::262` (replay-on-reconnect) |
+| `{type:"tool_permission_needed"}` | `seq`, `ts` | new helper `emitSessionFrame()` that wraps non-event broadcasts through `EventBuffer.pushFrame()` | Single allocation site: `agent/session-manager.ts::requestToolGrant`, which stashes the returned `{seq, ts}` on `pendingGrantRequest`. The on-attach replay branch in `ws/handler.ts` reuses those stashed values via `getPendingToolPermission()` and must NOT call `pushFrame()` again — doing so leaves a hole in the live-seq stream of already-attached clients. See [`perm-frame-late-joiner-seq-replay.md`](./perm-frame-late-joiner-seq-replay.md). |
 | `{type:"messages"}` snapshot | per-message `_order: number` (negative integers, see §3.2) | `getArchivedMessages` / `rpcClient.getMessages` post-processor | `ws/handler.ts:284, 316, 509, 593` |
 | `{type:"resume_gap"}` | `lastSeq` (existing) | unchanged | unchanged |
 
@@ -51,7 +51,9 @@ Two new helpers in `src/server/agent/event-buffer.ts`:
 /** Like push() but for non-`event` frames that need a seq for client ordering.
  *  Stamps but does NOT retain in the ring buffer (resume catch-up uses
  *  rebroadcastable events only — permission frames are republished via the
- *  existing handler.ts:262 fallback). */
+ *  on-attach branch in `ws/handler.ts`, which replays the original `seq`/`ts`
+ *  stashed on `pendingGrantRequest` rather than allocating a new frame —
+ *  see `perm-frame-late-joiner-seq-replay.md`). */
 pushFrame(): { seq: number; ts: number };
 
 /** Floor sentinel reserved for snapshot ordering. All snapshot `_order`
@@ -444,7 +446,7 @@ This design satisfies all eight acceptance bullets in the goal spec:
 
 1. Single `reduce()` in `src/app/message-reducer.ts`, `RemoteAgent` shrinks to dispatcher (§4, §9).
 2. All eight mechanisms deleted (§8).
-3. Server stamps `_order` on snapshot and `seq` on `tool_permission_needed`; old client / old server compat verified (§3).
+3. Server stamps `_order` on snapshot and `seq` on `tool_permission_needed` (single `pushFrame()` site in `requestToolGrant`; on-attach replay reuses the stashed `seq`/`ts` — see [`perm-frame-late-joiner-seq-replay.md`](./perm-frame-late-joiner-seq-replay.md)); old client / old server compat verified (§3).
 4. 12 unit tests + 3 E2E stories specified (§10).
 5. `npm run check` / `test:unit` / `test:e2e` clean — no breaking type changes; reducer is additive.
 6. `docs/internals.md — Snapshot merge invariant` to be rewritten as "Reducer ordering invariant" (out of scope here, called out in implementation task).
