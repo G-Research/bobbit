@@ -2150,6 +2150,8 @@ All `{type:"event"}` broadcasts flow through a single helper `emitSessionEvent(s
 
 Other broadcast types (`session_status`, `session_title`, `messages`, `state`, `queue_update`, ...) do **not** carry `seq` - they are idempotent snapshots, not stream deltas, and the dup/reorder class of bug doesn't apply.
 
+**Project-wide vs session-scoped events.** `emitSessionEvent(session, event)` is for session-scoped frames that need ordering guarantees and per-session buffering for reconnect replay. Project-wide goal-state notifications (`goal_state_changed`, `goal_created`, `goal_setup_complete`, `mutation_decided`, ...) are broadcast via `broadcastToAll(event)` (the gateway-level fan-out passed into `nested-goal-routes.ts` and similar handlers): they are idempotent snapshots that every connected client receives regardless of session, so they bypass the per-session ring buffer and the seq/resume pipeline. Pick `emitSessionEvent` when the event belongs to one session's transcript; pick `broadcastToAll` when the event describes shared project state.
+
 ### Resume handshake
 
 The WS protocol (`src/server/ws/protocol.ts`) gains two message types:
