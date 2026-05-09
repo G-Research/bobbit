@@ -59,6 +59,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 ### Sessions, status, steer
 - **Mutate session status** → single writer `broadcastStatus()` in `src/server/agent/session-status.ts`. See [unify-session-status.md](docs/design/unify-session-status.md).
 - **Modify steer / queue dispatch** → single dispatch site `SessionManager._dispatchSteer()`; never reintroduce `PromptQueue.dispatched`. See [steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
+- **Modify in-place agent respawn (clients stay attached)** → `SessionManager._respawnAgentInPlace()`; covers `restartAgent`, `_restartSessionWithUpdatedRole`, `recoverSandboxSessions`, in-memory branch of `ensureSessionAlive`. See [sandbox-recovery-frame-of-reference.md](docs/design/sandbox-recovery-frame-of-reference.md).
 - **Continue an archived session** → `POST /api/sessions/:archivedId/continue`. See [lossless-continue-archived.md](docs/design/lossless-continue-archived.md).
 - **Re-attempt a goal** → `POST /api/sessions { reattemptGoalId }` → `buildReattemptContext()`.
 - **Server-side read/unread** → `lastReadAt` on `PersistedSession`; `POST /api/sessions/:id/mark-read`.
@@ -138,6 +139,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Continued session missing earlier transcript** — confirm cloned `.jsonl` at `agentSessionFile` path.
 - **Resumed reviewer terminated ~46ms after restart** — await `waitForStreaming` before `waitForIdle`.
 - **Duplicate `model_change` event at session startup** — spawn site must route through `resolveBridgeOptions`.
+- **UI freezes after Docker container recreated / sandbox respawn drops events** — single in-place respawn helper `_respawnAgentInPlace` in `src/server/agent/session-manager.ts`; snapshot lastSeq + statusVersion after `unsubscribe()` so client dedup gates keep advancing. See [docs/design/sandbox-recovery-frame-of-reference.md](docs/design/sandbox-recovery-frame-of-reference.md).
 
 ### Worktree / sandbox / projects
 - **Worktree setup not running** — single source of truth `runComponentSetups()` in `src/server/skills/worktree-setup.ts`.
