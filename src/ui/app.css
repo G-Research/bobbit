@@ -1630,17 +1630,18 @@ html {
 	96%     { z-index: -1; }
 	98%, 100% { z-index: 1; }
 }
-/* Accessory dives behind the sprite during the two up-right glances
-   in IDLE_EYE_SEQUENCE (25-45% and 70-80%) so the body occludes it
-   when the eyes look toward it. Previously the second behind-window
-   was 55-85% — too wide; the accessory was hidden during plain 'right'
-   gaze (55-67%), the right-blink (67-70%), and lingered into the
-   80-90% center phase. Tightened to 70-80% to match the up-right beat. */
+/* Accessory dives behind the sprite while the eyes look toward it.
+   The accessory sits on the right side of the body, so 'behind' covers
+   every right-looking phase in IDLE_EYE_SEQUENCE:
+     25-45% up-right — first glance
+     55-67% right · 67-70% blink+right · 70-80% up-right — second glance
+   Previously this second window ran 55-85%, which lingered behind into
+   the post-glance center phase (80-85%). Trimmed to end at 80%. */
 @keyframes magnifier-depth-idle {
 	0%, 24% { z-index: 1; }
 	25%, 45% { z-index: -1; }
-	46%, 69% { z-index: 1; }
-	70%, 80% { z-index: -1; }
+	46%, 54% { z-index: 1; }
+	55%, 80% { z-index: -1; }
 	81%, 100% { z-index: 1; }
 }
 
