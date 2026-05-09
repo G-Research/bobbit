@@ -495,7 +495,9 @@ async function waitForFile(gw: GW, id: string, ms = 30_000) {
 	while (Date.now() - t0 < ms) {
 		const sf = join(gw.dir, ".bobbit", "state", "sessions.json");
 		if (existsSync(sf)) {
-			const mine = JSON.parse(readFileSync(sf, "utf-8")).find((s: any) => s.id === id);
+			const raw = JSON.parse(readFileSync(sf, "utf-8"));
+			const arr: any[] = Array.isArray(raw) ? raw : (raw?.sessions ?? []);
+			const mine = arr.find((s: any) => s.id === id);
 			if (mine?.agentSessionFile && existsSync(mine.agentSessionFile)) return true;
 		}
 		await new Promise(r => setTimeout(r, 2_000));
