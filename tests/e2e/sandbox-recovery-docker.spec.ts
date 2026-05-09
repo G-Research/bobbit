@@ -11,6 +11,7 @@
  * 3. Worktree branches intact after recovery
  * 4. Health monitor handles repeated container kills
  */
+import { execFileSync } from "node:child_process";
 import { test, expect } from "./in-process-harness.js";
 import { isDockerAvailable } from "./test-utils/docker.js";
 import {
