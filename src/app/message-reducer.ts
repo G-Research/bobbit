@@ -188,14 +188,34 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 						m.id === incoming.id,
 				);
 				if (matchIdx === -1) {
+					// Text-fallback: pick the MOST RECENTLY inserted optimistic
+					// row whose text matches. With aborted-then-resent prompts of
+					// identical text where the server doesn't reflect the
+					// optimistic id back, the older orphan optimistic and the
+					// fresh optimistic both match by text. Echoes are for the
+					// fresh ones; promoting the orphan would leave the fresh
+					// row stuck at OPTIMISTIC_ORDER_BASE+tick (tail-end sentinel)
+					// rendering below subsequent server messages.
+					// _insertionTick is monotonic per-reducer, so the
+					// highest-tick match is the most-recently-inserted row.
+					// (Pinned by tests/message-reducer.test.ts (7a).)
 					const text = extractText(incoming);
-					matchIdx = messages.findIndex(
-						(m) =>
+					let bestTick = -Infinity;
+					for (let i = 0; i < messages.length; i++) {
+						const m = messages[i];
+						if (
 							m._origin === "optimistic" &&
 							typeof m.id === "string" &&
 							m.id.startsWith("optimistic_") &&
-							extractText(m) === text,
-					);
+							extractText(m) === text
+						) {
+							const t = (m as any)._insertionTick ?? 0;
+							if (t > bestTick) {
+								bestTick = t;
+								matchIdx = i;
+							}
+						}
+					}
 				}
 				if (matchIdx !== -1) {
 					const optimistic = messages[matchIdx];

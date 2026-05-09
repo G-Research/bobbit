@@ -170,6 +170,65 @@ describe("message-reducer", () => {
 		assert.strictEqual(s.messages[0]._order, 1);
 	});
 
+	it("(7a) abort-then-resend same text — echo upgrades the FRESH optimistic, not the orphan", () => {
+		// Regression: aborted prompts leave an orphan optimistic row in
+		// state.messages. If the user resends the same text, a NEW optimistic
+		// row is created. The server echoes for the resend; the text-fallback
+		// match must pick the most-recently-inserted optimistic, not the
+		// orphan, otherwise the orphan gets promoted to server-origin and
+		// the fresh prompt is left orphaned at OPTIMISTIC_ORDER_BASE+tick
+		// (renders below subsequent server messages, with no in-place upgrade).
+		let s = initialState();
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_orphan", "hi") });
+		// Aborted — no echo, no live-event. Optimistic stays.
+		s = reduce(s, { type: "optimistic-prompt", message: userMsg("optimistic_fresh", "hi") });
+		// Server echoes for the fresh prompt with a server-minted id.
+		s = reduce(s, liveMessageEnd(1, userMsg("srv-1", "hi")));
+		assert.strictEqual(s.messages.length, 2, "both rows survive: orphan still optimistic, fresh promoted");
+		const orphan = s.messages.find((m) => m.id === "optimistic_orphan");
+		const fresh = s.messages.find((m) => m.id === "optimistic_fresh");
+		assert.ok(orphan, "orphan optimistic row preserved");
+		assert.strictEqual(orphan?._origin, "optimistic", "orphan stays optimistic-origin");
+		assert.ok(fresh, "fresh row found and keeps optimistic_* id");
+		assert.strictEqual(fresh?._origin, "server", "fresh row promoted to server-origin");
+		assert.strictEqual(fresh?._order, 1, "fresh row has live seq as _order");
+	});
+
+	it("(7b) optimistic with attachments → server echo with attachments preserves single in-place row", () => {
+		// The optimistic-prompt path stamps user-with-attachments rows with
+		// a sentinel attachments array. The server echo carries the
+		// authoritative attachment metadata. After in-place upgrade we want
+		// EXACTLY one row, server-origin, optimistic id, with the server's
+		// attachments shape (the spread `{ ...incoming, id: opt.id }` keeps
+		// `incoming.attachments`).
+		const opt = {
+			id: "optimistic_atomic",
+			role: "user-with-attachments",
+			content: [{ type: "text", text: "see image" }],
+			attachments: [{ type: "image", id: "client-att-1", preview: "data:.." }],
+			timestamp: 0,
+		};
+		const echo = {
+			id: "optimistic_atomic",
+			role: "user-with-attachments",
+			content: [{ type: "text", text: "see image" }],
+			attachments: [{ type: "image", id: "server-att-1", url: "https://..." }],
+			timestamp: 1234,
+		};
+		const s = applyAll([
+			{ type: "optimistic-prompt", message: opt },
+			liveMessageEnd(1, echo),
+		]);
+		assert.strictEqual(s.messages.length, 1, "single survivor row");
+		assert.strictEqual(s.messages[0].id, "optimistic_atomic", "render-key id preserved");
+		assert.strictEqual(s.messages[0]._origin, "server", "origin promoted to server");
+		assert.strictEqual(s.messages[0]._order, 1, "_order = live seq");
+		// Server attachment shape wins (spread of `incoming` over optimistic id).
+		const atts = (s.messages[0] as any).attachments;
+		assert.strictEqual(atts?.[0]?.id, "server-att-1", "server attachment metadata adopted");
+		assert.strictEqual((s.messages[0] as any).timestamp, 1234, "server timestamp adopted");
+	});
+
 	it("(8) proposal burst — two assistant turns + toolResult, all in order", () => {
 		const a1 = assistantMsg("a1", "", {
 			content: [
