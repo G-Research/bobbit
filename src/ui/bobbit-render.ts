@@ -285,14 +285,15 @@ export function startCanvasEyeAnimation(
 
 		let pct: number;
 		if (cssAnim && cssAnim.currentTime != null) {
+			// Animation.currentTime already incorporates animation-delay (negative
+			// delays make currentTime start positive at T=0). Don't subtract
+			// delay again — doing so double-counts it and desyncs eyes from any
+			// CSS animation driven by the same --bobbit-idle-phase.
 			const ct = typeof cssAnim.currentTime === "number"
 				? cssAnim.currentTime
 				: (cssAnim.currentTime as CSSNumericValue).to("ms").value;
-			const delay = Number((cssAnim.effect as KeyframeEffect)?.getTiming?.()?.delay ?? 0);
-			const active = ct - delay;
-			pct = active >= 0
-				? ((active % cycleDurationMs) / cycleDurationMs * 100)
-				: 0;
+			const wrapped = ((ct % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+			pct = (wrapped / cycleDurationMs) * 100;
 		} else {
 			pct = (performance.now() % cycleDurationMs) / cycleDurationMs * 100;
 		}
