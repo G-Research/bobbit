@@ -8,8 +8,7 @@
  * to the running node binary, which is always correct.
  *
  * If this test fails, replace `spawn("node", [...])` with
- * `spawn(process.execPath, [...])` at the offending site. See the
- * "`process.execPath` invariant" entry in `docs/design/subgoals-retro-audit.md` §4.2.
+ * `spawn(process.execPath, [...])` at the offending site.
  */
 import fs from "node:fs";
 import path from "node:path";
