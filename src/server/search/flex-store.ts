@@ -154,7 +154,7 @@ interface ScoredDoc extends FlexDoc {
 
 export class FlexSearchStore {
 	readonly dataDir: string;
-	private readonly _idx: FlexDocumentInstance;
+	private _idx: FlexDocumentInstance;
 	private readonly _docs: Map<string, FlexDoc> = new Map();
 	private _saveTimer: NodeJS.Timeout | null = null;
 	private _flushInFlight: Promise<void> | null = null;
@@ -163,7 +163,11 @@ export class FlexSearchStore {
 
 	private constructor(dataDir: string) {
 		this.dataDir = dataDir;
-		this._idx = new FlexDocument({
+		this._idx = FlexSearchStore._newIndex();
+	}
+
+	private static _newIndex(): FlexDocumentInstance {
+		return new FlexDocument({
 			document: {
 				id: "id",
 				index: [
@@ -579,12 +583,19 @@ export class FlexSearchStore {
 		// If the replay files were all present and parsed cleanly, trust
 		// the in-memory index. Re-adding every mirror doc on the happy path
 		// used to freeze the event loop for many seconds on large indexes.
-		// Only fall back when nothing imported — that covers the missing /
-		// corrupt / format-drift cases the old unconditional re-add handled.
-		if (importSuccesses === 0 && importFailures > 0 && this._docs.size > 0) {
+		//
+		// Any import failure forces a full rebuild from the mirror. A
+		// partial replay leaves the in-memory index incoherent (e.g. doc
+		// store loaded but tag index missing entries), and the next
+		// debounced flush would silently overwrite the on-disk export
+		// with that incomplete state — search filters would degrade
+		// without any further warning. Drop the partial index entirely
+		// and rebuild from `__docs__.json`, which is our source of truth.
+		if (importFailures > 0 && this._docs.size > 0) {
 			console.warn(
-				`[search] Rebuilding in-memory index from mirror (${this._docs.size} docs) — on-disk exports missing or incompatible`,
+				`[search] Rebuilding in-memory index from mirror (${this._docs.size} docs) — ${importFailures} export file(s) failed to import (${importSuccesses} succeeded); partial state discarded`,
 			);
+			this._idx = FlexSearchStore._newIndex();
 			let n = 0;
 			for (const d of this._docs.values()) {
 				try { (this._idx.update as unknown as (id: string, d: unknown) => void)(d.id, d); } catch { /* non-fatal */ }
