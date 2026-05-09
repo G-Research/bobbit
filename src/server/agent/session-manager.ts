@@ -16,6 +16,7 @@ import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsCo
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
+import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
@@ -464,6 +465,14 @@ export class SessionManager {
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
+	/**
+	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
+	 * persisted `agentSessionFile` (and are newer than the most recent
+	 * `lastActivity` in the store). Populated by `restoreSessions()` via
+	 * `scanOrphanedTranscripts()`. Surfaced via `GET /api/health` so the
+	 * splash UI can show a one-line banner. Zero means "clean".
+	 */
+	orphanedTranscriptsCount = 0;
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
 	/** @internal Non-PCM test path only. */
@@ -576,9 +585,14 @@ export class SessionManager {
 					}
 
 					if (!worktreeOk) {
-						console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
-						try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
-						broadcastStatus(session, "terminated");
+						const psForGate = this.getSessionStore(session.projectId).get(session.id);
+						if (psForGate && shouldKeepDespiteOrphan(psForGate)) {
+							console.warn(`[orphan-cleanup] WARN: would-archive ${session.id} but worktree+recent-transcript present — leaving live`);
+						} else {
+							console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
+							try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
+							broadcastStatus(session, "terminated");
+						}
 						continue;
 					}
 				}
@@ -2415,6 +2429,31 @@ export class SessionManager {
 		// NOTE: Orphaned non-interactive session cleanup is no longer automatic
 		// on startup. Use the Settings → Maintenance UI or
 		// GET/POST /api/maintenance/orphaned-sessions to preview and clean up manually.
+
+		// Scan for orphaned agent-CLI transcripts — surface a banner if the
+		// session-metadata index has diverged from the on-disk JSONLs.
+		try {
+			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+			const tracked = new Set<string>();
+			let mostRecent = 0;
+			const allPersisted = this.projectContextManager
+				? [...this.projectContextManager.getAllSessions()]
+				: (this._testStore?.getAll() ?? []);
+			for (const ps of allPersisted) {
+				if (ps.agentSessionFile) tracked.add(ps.agentSessionFile);
+				if (ps.lastActivity && ps.lastActivity > mostRecent) mostRecent = ps.lastActivity;
+			}
+			// If the store is empty (fresh install), use a 24h floor so we don't
+			// flag every transcript from a previous install.
+			const floor = mostRecent > 0 ? mostRecent : (Date.now() - 24 * 60 * 60 * 1000);
+			const result = scanOrphanedTranscripts(agentSessionsRoot, tracked, floor);
+			this.orphanedTranscriptsCount = result.count;
+			if (result.count > 0) {
+				console.warn(`[session-store] WARN: ${result.count} agent transcript(s) on disk are not tracked in sessions.json`);
+			}
+		} catch (err) {
+			console.warn("[session-manager] orphan-transcript scan failed:", err);
+		}
 	}
 
 	// NOTE: cleanupOrphanedNonInteractiveSessions() was removed — replaced by
@@ -2457,6 +2496,11 @@ export class SessionManager {
 				ps = { ...ps, agentSessionFile: recovered };
 				// Fall through to normal restore below
 			} else {
+				if (shouldKeepDespiteOrphan(ps)) {
+					console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
+					this.addDormantSession(ps);
+					return;
+				}
 				if (ps.worktreePath && ps.branch) {
 					console.warn(
 						`[session-manager] Session ${ps.id} has no agentSessionFile but has worktree ` +
@@ -2473,6 +2517,11 @@ export class SessionManager {
 		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
 		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
+			if (shouldKeepDespiteOrphan(ps)) {
+				console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
+				this.addDormantSession(ps);
+				return;
+			}
 			console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
 			sessionStore.archive(ps.id);
 			return;
@@ -2578,6 +2627,11 @@ export class SessionManager {
 						}
 					}
 					if (!recovered) {
+						if (shouldKeepDespiteOrphan(ps)) {
+							console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
+							this.addDormantSession(ps);
+							return;
+						}
 						console.warn(`[session-manager] Archiving session ${ps.id} — sandbox worktree unrecoverable`);
 						try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* best-effort */ }
 						return; // Skip restoring this session
@@ -4682,6 +4736,13 @@ export class SessionManager {
 	async terminateOrphanedSessions(sessionIds: string[]): Promise<number> {
 		let terminated = 0;
 		for (const id of sessionIds) {
+			// Gate: refuse to archive if worktree dir + recent JSONL still present.
+			// Catches the post-crash bulk-archive bug from goal sessions-p-14dc3ec7.
+			const psForGate = this.resolveStoreForId(id)?.get(id);
+			if (psForGate && shouldKeepDespiteOrphan(psForGate)) {
+				console.warn(`[orphan-cleanup] WARN: would-archive ${id} but worktree+recent-transcript present — leaving live`);
+				continue;
+			}
 			try {
 				const didTerminate = await this.terminateSession(id);
 				if (didTerminate) {

@@ -2736,6 +2736,20 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const orphanTranscriptsBanner = () => {
+		const n = state.orphanedTranscriptsCount;
+		if (!n || n <= 0) return "";
+		return html`
+			<div
+				class="shrink-0 flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"
+				data-testid="orphan-transcripts-banner"
+				title="Agent transcripts exist on disk that are not tracked in sessions.json. See gateway logs for paths."
+			>
+				<span>${n} agent transcript${n === 1 ? "" : "s"} on disk are not tracked — see logs</span>
+			</div>
+		`;
+	};
+
 	const reconnectBanner = () => {
 		if (!connected || state.connectionStatus === "connected") return "";
 		return html`
@@ -3144,6 +3158,7 @@ export function doRenderApp(): void {
 
 		if (desktop) {
 			return html`
+				${orphanTranscriptsBanner()}
 				<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
 					<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>
 					<p class="text-sm text-muted-foreground">Select a session from the sidebar or create a new one</p>
