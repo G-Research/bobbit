@@ -11,8 +11,8 @@
  * 3. Worktree branches intact after recovery
  * 4. Health monitor handles repeated container kills
  */
-import { execFileSync } from "node:child_process";
 import { test, expect } from "./in-process-harness.js";
+import { isDockerAvailable } from "./test-utils/docker.js";
 import {
 	apiFetch,
 	readE2EToken,
@@ -22,15 +22,6 @@ import {
 	agentEndPredicate,
 	defaultProjectId,
 } from "./e2e-setup.js";
-
-function isDockerAvailable(): boolean {
-	try {
-		execFileSync("docker", ["info"], { stdio: "ignore", timeout: 5000 });
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Docker-dependent tests: container health monitor and session recovery

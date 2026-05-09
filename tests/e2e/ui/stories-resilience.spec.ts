@@ -4,13 +4,17 @@
  * These stories ARE the specification. Each test reads as a behavioral
  * requirement and runs as a Playwright E2E test.
  *
- * RE-01 through RE-06 and RE-08 require the manual-integration harness
- * (npm run test:manual) — server crash/restart is not available in the
- * standard E2E harness. They are written with full spec-framework API
- * but skipped in standard E2E runs.
+ * Crash/restart is wired into the spec framework via
+ * `event.server_crash()` / `event.server_restart()` (see
+ * tests/e2e/ui/spec-framework.ts). The worker-scoped `gateway` fixture
+ * exposes `crash()` / `restart()` helpers that re-bind the in-process
+ * gateway to the same port, so the page's WebSocket reconnect logic
+ * resumes against the same origin without a manual reload.
  *
- * RE-07 is the only test that runs in standard E2E — it tests WebSocket
- * disconnection followed by page reload.
+ * RE-05 (Docker sandbox container recovery) is gated on Docker
+ * availability via `isDockerAvailable()` from `../test-utils/docker.js`
+ * — mirroring `sandbox-recovery-docker.spec.ts`. RE-07 exercises plain
+ * WS disconnect + page reload (no server crash).
  *
  * Phase annotations control what gets tracked in the spec graph:
  *   setup  → preconditions, incidental navigation (not tracked)
@@ -19,7 +23,8 @@
  *   cleanup → teardown (not tracked)
  */
 import { test } from "../gateway-harness.js";
-import { waitForHealth } from "../e2e-setup.js";
+import { createGoal, deleteGoal, waitForHealth } from "../e2e-setup.js";
+import { isDockerAvailable } from "../test-utils/docker.js";
 import { SpecContext } from "./spec-framework.js";
 import {
 	STORY_RE01,
@@ -34,17 +39,20 @@ import {
 
 test.describe("CT-05: Resilience", () => {
 	let s: SpecContext;
+	let re02GoalId: string | undefined;
 
 	test.beforeAll(async () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
+		re02GoalId = undefined;
 	});
 
 	test.afterEach(async () => {
 		await s.cleanup();
+		if (re02GoalId) await deleteGoal(re02GoalId);
 	});
 
 	// ---------------------------------------------------------------
@@ -52,7 +60,7 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual
 	// ---------------------------------------------------------------
 
-	test.skip("RE-01: Single session survives server crash", async () => {
+	test("RE-01: Single session survives server crash", async () => {
 		s.begin(STORY_RE01);
 
 		// setup
@@ -80,11 +88,14 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual
 	// ---------------------------------------------------------------
 
-	test.skip("RE-02: Goal and dashboard survive server crash", async () => {
+	test("RE-02: Goal and dashboard survive server crash", async () => {
 		s.begin(STORY_RE02);
 
-		// setup — create goal with gates/tasks
+		// setup — create goal with gates/tasks (incidental, not part of contract)
+		const goal = await createGoal({ title: "RE-02 goal" });
+		re02GoalId = goal.id;
 		await s.open();
+		await s.navigate_to("goal", goal.id);
 
 		// act — crash and restart
 		s.act();
@@ -102,7 +113,7 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual
 	// ---------------------------------------------------------------
 
-	test.skip("RE-03: Multiple session types survive restart", async () => {
+	test("RE-03: Multiple session types survive restart", async () => {
 		s.begin(STORY_RE03);
 
 		// setup — create 5 different session types
@@ -139,7 +150,7 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual
 	// ---------------------------------------------------------------
 
-	test.skip("RE-04: Worktree preservation across crash", async () => {
+	test("RE-04: Worktree preservation across crash", async () => {
 		s.begin(STORY_RE04);
 
 		// setup — create a worktree session
@@ -165,7 +176,8 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual + Docker
 	// ---------------------------------------------------------------
 
-	test.skip("RE-05: Docker sandbox container recovery", async () => {
+	test("RE-05: Docker sandbox container recovery", async () => {
+		test.skip(!isDockerAvailable(), "Docker not available");
 		s.begin(STORY_RE05);
 
 		// setup — session using sandbox container
@@ -189,7 +201,7 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual
 	// ---------------------------------------------------------------
 
-	test.skip("RE-06: Crash during session setup", async () => {
+	test("RE-06: Crash during session setup", async () => {
 		s.begin(STORY_RE06);
 
 		// setup — begin session creation
@@ -246,7 +258,7 @@ test.describe("CT-05: Resilience", () => {
 	// INFRASTRUCTURE: Requires npm run test:manual
 	// ---------------------------------------------------------------
 
-	test.skip("RE-08: Rapid crash-restart cycle stability", async () => {
+	test("RE-08: Rapid crash-restart cycle stability", async () => {
 		s.begin(STORY_RE08);
 
 		// setup — sessions and goals exist
