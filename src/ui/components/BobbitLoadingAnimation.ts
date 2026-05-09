@@ -1,5 +1,4 @@
 import { html, TemplateResult } from 'lit';
-import { ref } from 'lit/directives/ref.js';
 import {
   CANONICAL_PALETTE,
   resolveBodyPixels,
@@ -9,52 +8,41 @@ import {
 } from '../bobbit-render.js';
 
 /**
- * Mount-time draw: renders the canonical bobbit body (center gaze, no blink)
- * to a <canvas> at exact device-pixel resolution. Same pipeline the main
- * sidebar/chat sprite uses (renderBlobSpriteCanvas → drawPixelsBresenham),
- * so pixel boundaries are crisp at any DPR / zoom level instead of relying
- * on box-shadow + image-rendering: pixelated.
+ * Pre-rendered sprite as a data: URL. Generated once on module load (lazily
+ * memoised, keyed by DPR so zoom changes regenerate). Using an <img> instead
+ * of a <canvas> means the sprite appears on the same paint as the surrounding
+ * scene — no JS-mount-time gap waiting for a ref callback to draw.
+ *
+ * Same pipeline the main sidebar/chat sprite uses (resolveBodyPixels +
+ * drawPixelsBresenham) so pixel boundaries stay crisp at any DPR.
  */
 const CSS_W = 40; // BODY_WIDTH (10) × scale 4
 const CSS_H = 36; // BODY_HEIGHT (9) × scale 4
 
-function paintLoadingBobbit(canvas: HTMLCanvasElement): void {
-  const dpr = window.devicePixelRatio || 1;
+let cachedUrl: string | null = null;
+let cachedDpr = 0;
+
+function getLoadingBobbitUrl(): string {
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+  if (cachedUrl && cachedDpr === dpr) return cachedUrl;
   const devW = Math.round(CSS_W * dpr);
   const devH = Math.round(CSS_H * dpr);
-  if (canvas.width !== devW || canvas.height !== devH) {
-    canvas.width = devW;
-    canvas.height = devH;
-  }
+  const canvas = document.createElement('canvas');
+  canvas.width = devW;
+  canvas.height = devH;
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, devW, devH);
+  if (!ctx) return cachedUrl ?? '';
   // Gaze 'right' matches the original hand-coded box-shadow eye positions
   // (pupils at x=4/x=7), so the bobbit keeps its down-right glance.
   const pixels = resolveBodyPixels(CANONICAL_PALETTE, 'right', false);
   drawPixelsBresenham(ctx, pixels, devW, devH);
+  cachedUrl = canvas.toDataURL();
+  cachedDpr = dpr;
+  return cachedUrl;
 }
 
 export function bobbitLoadingAnimation(): TemplateResult {
-  // Repaint on DPR change (zoom) so the sprite stays crisp.
-  let mediaQuery: MediaQueryList | null = null;
-  let mqHandler: (() => void) | null = null;
-  let canvasEl: HTMLCanvasElement | null = null;
-
-  const onCanvasRef = (el: Element | undefined) => {
-    if (el && el instanceof HTMLCanvasElement) {
-      canvasEl = el;
-      paintLoadingBobbit(el);
-      mediaQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-      mqHandler = () => { if (canvasEl) paintLoadingBobbit(canvasEl); };
-      mediaQuery.addEventListener?.('change', mqHandler);
-    } else {
-      if (mediaQuery && mqHandler) mediaQuery.removeEventListener?.('change', mqHandler);
-      mediaQuery = null;
-      mqHandler = null;
-      canvasEl = null;
-    }
-  };
+  const spriteUrl = getLoadingBobbitUrl();
 
   return html`
     <style>
@@ -359,12 +347,15 @@ export function bobbitLoadingAnimation(): TemplateResult {
             <div class="bobbit-loading-sweat-drop"></div>
           </div>
           <div class="bobbit-loading-anchor">
-            <canvas
-              ${ref(onCanvasRef)}
+            <img
               class="bobbit-loading-pixel"
+              src="${spriteUrl}"
               width="${BODY_WIDTH * 4}"
               height="${BODY_HEIGHT * 4}"
-            ></canvas>
+              alt=""
+              decoding="sync"
+              draggable="false"
+            />
           </div>
           <div class="bobbit-loading-dust">
             <div class="bobbit-loading-dust-px"></div>
