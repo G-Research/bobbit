@@ -267,37 +267,35 @@ export function startCanvasEyeAnimation(
 	const ctx = canvas.getContext("2d")!;
 	let rafId = 0;
 	let lastKey = "";
-	let cssAnim: Animation | null = null;
 
-	function findCssAnimation(): Animation | null {
-		try {
-			const anims = canvas.getAnimations();
-			for (const a of anims) {
-				const dur = (a.effect as KeyframeEffect)?.getTiming?.()?.duration;
-				if (dur === cycleDurationMs) return a;
-			}
-		} catch { /* getAnimations not supported */ }
-		return null;
+	// Phase clock: derive pct directly from performance.now() + the canvas's
+	// animation-delay. Negative delay (e.g. "-6.5s" set via --bobbit-idle-phase)
+	// shifts the phase forward. This bypasses Animation.currentTime semantics
+	// around negative delays — the CSS animation phase is fully determined by
+	// (wallclock - delay), so we compute it the same way and stay locked to
+	// every other CSS animation on the same element with the same delay.
+	const mountTime = performance.now();
+	function readDelayMs(): number {
+		const raw = getComputedStyle(canvas).animationDelay;
+		if (!raw) return 0;
+		// CSS may list multiple comma-separated values; the eye animation is the
+		// only one on this element so the first value is what we want.
+		const first = raw.split(",")[0].trim();
+		const m = /^(-?\d+(?:\.\d+)?)(s|ms)$/.exec(first);
+		if (!m) return 0;
+		return m[2] === "s" ? parseFloat(m[1]) * 1000 : parseFloat(m[1]);
 	}
 
 	function tick() {
-		if (!cssAnim) cssAnim = findCssAnimation();
-
-		let pct: number;
-		if (cssAnim && cssAnim.currentTime != null) {
-			// Animation.currentTime already incorporates animation-delay (negative
-			// delays make currentTime start positive at T=0). Don't subtract
-			// delay again — doing so double-counts it and desyncs eyes from any
-			// CSS animation driven by the same --bobbit-idle-phase.
-			const ct = typeof cssAnim.currentTime === "number"
-				? cssAnim.currentTime
-				: (cssAnim.currentTime as CSSNumericValue).to("ms").value;
-			const wrapped = ((ct % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
-			pct = (wrapped / cycleDurationMs) * 100;
-		} else {
-			pct = (performance.now() % cycleDurationMs) / cycleDurationMs * 100;
-		}
-
+		const delayMs = readDelayMs();
+		// active = elapsed-since-mount - delay. Negative delay (e.g. -6500)
+		// makes active = elapsed + 6500, so the cycle starts at the desired
+		// phase. Modulo keeps it bounded; the (+cycle)%cycle guards against
+		// any transient negative active time when the page is just mounting.
+		const elapsed = performance.now() - mountTime;
+		const active = elapsed - delayMs;
+		const wrapped = ((active % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+		const pct = (wrapped / cycleDurationMs) * 100;
 		let frame = sequence[0];
 		for (let i = sequence.length - 1; i >= 0; i--) {
 			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }
