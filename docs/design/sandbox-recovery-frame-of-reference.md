@@ -1,7 +1,7 @@
 # Sandbox-Recovery Frame-of-Reference Carry-Over
 
 **Status**: shipped
-**Related**: [`unify-session-status.md`](unify-session-status.md), [`streaming-dedup-reorder.md`](streaming-dedup-reorder.md)
+**Related**: [`unify-session-status.md`](unify-session-status.md), [`streaming-dedup-reorder.md`](streaming-dedup-reorder.md), [`perm-frame-late-joiner-seq-replay.md`](perm-frame-late-joiner-seq-replay.md) (single-allocation pin for the perm-frame seq, same bug-class as the respawn-helper callsite pin)
 **Code**: `src/server/agent/session-manager.ts` — `_respawnAgentInPlace`, `_snapshotStreamingFrameOfReference`, `EventBuffer.seedNextSeq`
 
 ---

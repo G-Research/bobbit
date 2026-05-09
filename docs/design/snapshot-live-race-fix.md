@@ -2,8 +2,9 @@
 
 Status: implemented on `goal/fix-snapsh-af9b8672`, two passes (`c2eeeb73`,
 `d62fc795`). Companion to [`unified-message-ordering-reducer.md`](./unified-message-ordering-reducer.md)
-(which gives the reducer its `_order` invariant) and [`streaming-dedup-reorder.md`](./streaming-dedup-reorder.md)
-(transport-level seq/ts envelope).
+(which gives the reducer its `_order` invariant), [`streaming-dedup-reorder.md`](./streaming-dedup-reorder.md)
+(transport-level seq/ts envelope), and [`perm-frame-late-joiner-seq-replay.md`](./perm-frame-late-joiner-seq-replay.md)
+(single-allocation invariant for the `tool_permission_needed` frame's `seq`/`ts`).
 
 ---
 
