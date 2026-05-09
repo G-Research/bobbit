@@ -143,8 +143,8 @@ function cleanDirs(dir: string) {
 
 test.describe.configure({ mode: "serial" });
 
-test("restart-minimal: plain + worktree session both survive a restart", async () => {
-	test.setTimeout(180_000);
+test("restart-minimal: plain + worktree session both survive a restart", async ({ page }) => {
+	test.setTimeout(240_000);
 
 	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
 	const port1 = await freePort();
@@ -202,15 +202,29 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	const wtPreTitle = await (await api(gw, `/api/sessions/${wtId}`)).json() as any;
 	const branchBeforeTitle = wtPreTitle.branch;
 	expect(branchBeforeTitle).toMatch(/^session\/[a-f0-9]{8}$/);
-	const titleRes = await api(gw, `/api/sessions/${wtId}`, {
-		method: "PATCH",
-		body: JSON.stringify({ title: "Renamed Pool Worktree" }),
-	});
-	expect(titleRes.status).toBe(200);
-	// Give any (unwanted) async work a moment to land before re-asserting.
-	await new Promise(r => setTimeout(r, 1_500));
+
+	// Drive the rename through the UI — a real user clicks the pencil button
+	// in the sidebar, edits the title, and presses Save. This exercises the
+	// real PATCH path the user goes through, not just the bare REST endpoint.
+	await page.goto(`${gw.base}/?token=${gw.token}#/session/${wtId}`);
+	await page.waitForSelector("textarea", { timeout: 30_000 });
+	const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+	await sidebar.waitFor({ timeout: 15_000 });
+	const sessionRow = sidebar.locator(`[data-session-id="${wtId}"]`);
+	await sessionRow.waitFor({ timeout: 10_000 });
+	await sessionRow.hover();
+	await sessionRow.locator('button[title="Modify"]').click();
+	const titleInput = page.locator('input[placeholder="Session title…"]').first();
+	await titleInput.waitFor({ timeout: 5_000 });
+	await titleInput.fill("Renamed Pool Worktree");
+	// Press Enter — the dialog handles Enter as Save and avoids selector
+	// ambiguity with other "Save" buttons in the page (e.g. role pickers).
+	await titleInput.press("Enter");
+	// Give the patch round-trip + sidebar refresh time to land.
+	await new Promise(r => setTimeout(r, 2_000));
 	const wtAfterRename = await (await api(gw, `/api/sessions/${wtId}`)).json() as any;
-	console.log(`  [boot] wt post-title. cwd=${wtAfterRename.cwd} branch=${wtAfterRename.branch}`);
+	console.log(`  [boot] wt post-title. title=${wtAfterRename.title} branch=${wtAfterRename.branch}`);
+	expect(wtAfterRename.title).toBe("Renamed Pool Worktree");
 	expect(wtAfterRename.branch).toBe(branchBeforeTitle);
 	expect(wtAfterRename.branch).not.toMatch(/^pool\//);
 
@@ -270,6 +284,23 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	// Read the post-restart sessions.json for diagnosis
 	const after = JSON.parse(readFileSync(sfPath, "utf-8")) as any[];
 	console.log(`  [restart] sessions.json now has ${after.length} entries (${after.filter(s => s.archived).length} archived)`);
+
+	// UI visibility assertion: a real user verifies sessions survive by
+	// reloading the app and seeing them in the sidebar. The renamed worktree
+	// session must show its new title; both sessions must be present.
+	if (failures.length === 0) {
+		try {
+			await page.goto(`${gw.base}/?token=${gw.token}`);
+			const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+			await sidebar.waitFor({ timeout: 15_000 });
+			await sidebar.getByText("Renamed Pool Worktree").first().waitFor({ timeout: 10_000 });
+			const sidebarText = (await sidebar.textContent()) || "";
+			expect(sidebarText).toContain("Renamed Pool Worktree");
+			console.log(`  [restart] sidebar shows renamed worktree session ✓`);
+		} catch (err) {
+			failures.push(`UI sidebar assertion failed: ${(err as Error).message}`);
+		}
+	}
 
 	await stopGW(gw);
 	cleanDirs(dir);

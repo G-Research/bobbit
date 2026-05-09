@@ -274,7 +274,7 @@ test.describe("Poly Repo — integration", () => {
 	});
 
 	// 1.  Project registration is poly-repo with two component repos.
-	test("registers a poly-repo project (container + 2 sibling git repos)", async () => {
+	test("registers a poly-repo project (container + 2 sibling git repos)", async ({ page }) => {
 		expect(projectId).toBeTruthy();
 
 		const projRes = await api(gw, `/api/projects/${projectId}`);
@@ -293,6 +293,12 @@ test.describe("Poly Repo — integration", () => {
 		expect(yaml).toContain("name: repo1");
 		expect(yaml).toContain("name: repo2");
 		expect(yaml).toContain("workflows:");
+
+		// UI visibility: the user sees the project in the sidebar.
+		await page.goto(`${gw.base}/?token=${gw.token}`);
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText("Poly Repo").first().waitFor({ timeout: 10_000 });
 	});
 
 	// 2.  A session creates worktrees for BOTH repos at the branch-container level.
@@ -429,13 +435,27 @@ test.describe("Poly Repo — integration", () => {
 	});
 
 	// 4.  Archive marks the goal archived AND tears down per-repo worktrees.
-	test("archive tears down per-repo worktrees and marks the goal archived", async ({}, ti) => {
-		ti.setTimeout(60_000);
+	test("archive tears down per-repo worktrees and marks the goal archived", async ({ page }, ti) => {
+		ti.setTimeout(90_000);
 		expect(goalId).toBeTruthy();
 		expect(Object.keys(goalRepoWorktrees)).toHaveLength(2);
 
-		const archiveRes = await api(gw, `/api/goals/${goalId}`, { method: "DELETE" });
-		expect([200, 204]).toContain(archiveRes.status);
+		// Drive the archive through the UI — a real user clicks Archive on the
+		// goal dashboard and confirms the modal.
+		await page.goto(`${gw.base}/?token=${gw.token}#/goal/${goalId}`);
+		const archiveBtn = page.locator('.nav button[title="Archive goal"]').first();
+		await archiveBtn.waitFor({ timeout: 15_000 });
+		await archiveBtn.click();
+		await page.locator('text=Archive Goal').first().waitFor({ timeout: 5_000 });
+		await page.keyboard.press("Enter");
+
+		// Wait for archived flag (the API call is fired off the click handler).
+		const archDeadline = Date.now() + 30_000;
+		while (Date.now() < archDeadline) {
+			const g = await (await api(gw, `/api/goals/${goalId}`)).json();
+			if (g.archived) break;
+			await new Promise(r => setTimeout(r, 250));
+		}
 
 		// Per-repo cleanup is fire-and-forget; poll up to 30s.
 		const deadline = Date.now() + 30_000;
@@ -450,5 +470,11 @@ test.describe("Poly Repo — integration", () => {
 
 		const after = await (await api(gw, `/api/goals/${goalId}`)).json();
 		expect(after.archived).toBe(true);
+
+		// UI visibility: project still renders after archive (no broken state).
+		await page.goto(`${gw.base}/?token=${gw.token}`);
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText("Poly Repo").first().waitFor({ timeout: 10_000 });
 	});
 });
