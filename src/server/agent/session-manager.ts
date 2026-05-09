@@ -597,12 +597,6 @@ export class SessionManager {
 					}
 				}
 
-				// Stop old RPC client gracefully (it's dead, but clean up listeners)
-				try {
-					session.unsubscribe();
-					await session.rpcClient.stop();
-				} catch { /* already dead — ignore */ }
-
 				// Get persisted session data for restore
 				const store = this.getSessionStore(session.projectId);
 				const ps = store.get(session.id);
@@ -611,21 +605,11 @@ export class SessionManager {
 					continue;
 				}
 
-				// Save connected WebSocket clients before removing session
+				// Save connected WebSocket clients in case respawn fails and we need
+				// to re-attach them to the original (now terminated) session.
 				const savedClients = new Set(session.clients);
-
-				// Remove from map so restoreSession can re-add it
-				this.sessions.delete(session.id);
 				try {
-					await this.restoreSession(ps);
-					// Re-attach WebSocket clients to the restored session
-					const restored = this.sessions.get(session.id);
-					if (restored) {
-						for (const ws of savedClients) {
-							if ((ws as any).readyState === 1) restored.clients.add(ws);
-						}
-						broadcastStatus(restored, "idle");
-					}
+					await this._respawnAgentInPlace(session, ps);
 					console.log(`[session-manager] Session ${session.id} recovered successfully`);
 				} catch (err) {
 					console.warn(`[session-manager] Failed to restore session ${session.id} after container recreation:`, err);
@@ -2203,53 +2187,21 @@ export class SessionManager {
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) return;
 
-		// Save state that must survive the restart
-		const clients = new Set(session.clients);
+		// Save in-memory grant state that restoreSession doesn't persist.
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
-		// CRITICAL: snapshot the streaming frame-of-reference so the client's
-		// `_highestSeq` and `_lastStatusVersion` trackers stay in sync after the
-		// in-place restart. The clients keep their WS open across the respawn,
-		// so a fresh seq-1 / version-1 frame would be silently dropped by their
-		// dedup gates. See preserveStreamingFrameOfReference() below.
-		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 
-		// Stop the current agent process
-		session.unsubscribe();
-		await session.rpcClient.stop();
+		const restored = await this._respawnAgentInPlace(session, ps, {
+			mutatePs: p => {
+				// restoreSession normally derives allowedTools from role YAML; session-only
+				// and one-time grants need the augmented list to round-trip.
+				(p as any)._overrideAllowedTools = savedAllowedTools;
+			},
+		});
 
-		// Remove from sessions map — restoreSession will re-add it
-		this.sessions.delete(session.id);
-
-		// Temporarily store overridden allowedTools so restoreSession can use them.
-		// restoreSession normally derives allowedTools from the role YAML, but for
-		// session-only and one-time grants the in-memory list includes extra tools.
-		(ps as any)._overrideAllowedTools = savedAllowedTools;
-		// Carry the streaming frame-of-reference into the new SessionInfo built
-		// inside restoreSession. Consumed and deleted there.
-		(ps as any)._restartFrameOfReference = frameOfRef;
-
-		// Restore the session (re-launches with correct tool activation)
-		try {
-			await this.restoreSession(ps);
-		} finally {
-			// Clean up the temporary override even if restoreSession fails
-			delete (ps as any)._overrideAllowedTools;
-			delete (ps as any)._restartFrameOfReference;
-		}
-
-		// Re-attach the saved clients and carry over grant state
-		const restored = this.sessions.get(session.id);
 		if (restored) {
-			for (const ws of clients) {
-				if ((ws as any).readyState === 1) {
-					restored.clients.add(ws);
-				}
-			}
-			// Restore in-memory grant state that restoreSession doesn't know about
 			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			broadcastStatus(restored, "idle");
 		}
 	}
 
@@ -2277,6 +2229,49 @@ export class SessionManager {
 	}
 
 	/**
+	 * Respawn a session's agent process in-place while WS clients stay attached.
+	 *
+	 * Owns the snapshot/unsubscribe/stop/restore/re-attach/broadcast dance shared
+	 * by `restartAgent`, `_restartSessionWithUpdatedRole`, `recoverSandboxSessions`,
+	 * and the in-memory branch of `ensureSessionAlive`.
+	 *
+	 * The streaming frame-of-reference is snapshotted AFTER `unsubscribe()` so a
+	 * final in-flight `agent_end`-style event cannot race past `lastSeq`. The
+	 * carry-over fields (`_restartFrameOfReference`, `_overrideAllowedTools`)
+	 * are stashed on the persisted-session record for `restoreSession()` to
+	 * consume, then unconditionally cleared in `finally`.
+	 */
+	private async _respawnAgentInPlace(
+		session: SessionInfo,
+		ps: PersistedSession,
+		opts?: { mutatePs?: (ps: PersistedSession) => void; finalStatus?: SessionStatus },
+	): Promise<SessionInfo | undefined> {
+		const savedClients = new Set(session.clients);
+		// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
+		session.unsubscribe();
+		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+
+		this.sessions.delete(session.id);
+		(ps as any)._restartFrameOfReference = frameOfRef;
+		opts?.mutatePs?.(ps);
+		try {
+			await this.restoreSession(ps);
+		} finally {
+			delete (ps as any)._restartFrameOfReference;
+			delete (ps as any)._overrideAllowedTools;
+		}
+		const restored = this.sessions.get(session.id);
+		if (restored) {
+			for (const ws of savedClients) {
+				if ((ws as any).readyState === 1) restored.clients.add(ws);
+			}
+			broadcastStatus(restored, opts?.finalStatus ?? "idle");
+		}
+		return restored;
+	}
+
+	/**
 	 * Restart the agent process for a session whose process has died.
 	 * Stops any remnant process, then restores from persisted state.
 	 * Re-attaches existing WS clients so the user can keep working.
@@ -2288,41 +2283,16 @@ export class SessionManager {
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
 
-		// Save state that must survive the restart
-		const clients = new Set(session.clients);
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
-		// Snapshot streaming frame-of-reference — see
-		// `_restartSessionWithUpdatedRole` for the full rationale.
-		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 
-		// Stop remnant process (may already be dead)
-		session.unsubscribe();
-		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		const restored = await this._respawnAgentInPlace(session, ps, {
+			mutatePs: p => { (p as any)._overrideAllowedTools = savedAllowedTools; },
+		});
 
-		// Remove from sessions map — restoreSession will re-add it
-		this.sessions.delete(sessionId);
-
-		(ps as any)._overrideAllowedTools = savedAllowedTools;
-		(ps as any)._restartFrameOfReference = frameOfRef;
-		try {
-			await this.restoreSession(ps);
-		} finally {
-			delete (ps as any)._overrideAllowedTools;
-			delete (ps as any)._restartFrameOfReference;
-		}
-
-		// Re-attach saved clients and carry over grant state
-		const restored = this.sessions.get(sessionId);
 		if (restored) {
-			for (const ws of clients) {
-				if ((ws as any).readyState === 1) {
-					restored.clients.add(ws);
-				}
-			}
 			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			broadcastStatus(restored, "idle");
 		} else {
 			throw new Error("Failed to restore session after restart");
 		}
@@ -4186,7 +4156,17 @@ export class SessionManager {
 		if (!persisted) {
 			throw new Error(`Cannot restore session ${sessionId}: no persisted data found`);
 		}
-		await this.restoreSession(persisted);
+		if (existing) {
+			// In-memory SessionInfo present (terminated, possibly with attached WS
+			// clients). Route through the in-place respawn helper so the streaming
+			// frame-of-reference carries over and post-restore frames aren't dropped
+			// by the client's dedup gates.
+			await this._respawnAgentInPlace(existing, persisted);
+		} else {
+			// Cold restore — no in-memory session, no live clients, fresh
+			// `_highestSeq=0` baseline on whoever connects next.
+			await this.restoreSession(persisted);
+		}
 		console.log(`[session-manager] Restored session ${sessionId} via ensureSessionAlive`);
 	}
 
