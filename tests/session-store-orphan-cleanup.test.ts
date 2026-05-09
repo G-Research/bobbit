@@ -1,14 +1,16 @@
 /**
- * SessionStore.scanOrphanedTranscripts() regression test.
+ * Orphan-cleanup regression tests.
  *
- * The orphan-transcript scan walks an `agentSessionsRoot` for `*.jsonl`
- * transcripts that are NOT referenced by any persisted session and whose
- * mtime is newer than the most recent `lastActivity` in the store. It is
- * a divergence signal — used to surface a banner after crash recovery
- * when the agent CLI wrote transcripts that the gateway's session-metadata
- * index lost.
- *
- * No auto-import. We test purely the count + paths + log line behaviour.
+ * Two layers:
+ *   1. `shouldKeepDespiteOrphan(ps)` predicate — used by SessionManager's
+ *      boot sweep to refuse to archive a session whose worktree is still
+ *      live AND whose agent JSONL was touched within the last 24h. The
+ *      end-to-end integration with `SessionManager.restoreSessions()`
+ *      lives in Task #2's tests.
+ *   2. `SessionStore.scanOrphanedTranscripts()` divergence-signal helper
+ *      — walks for `*.jsonl` transcripts not referenced by any persisted
+ *      session and newer than the most recent `lastActivity`. Surfaces a
+ *      banner; no auto-import.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +25,7 @@ fs.mkdirSync(stateDir, { recursive: true });
 fs.mkdirSync(transcriptsDir, { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { SessionStore } = await import("../src/server/agent/session-store.ts");
+const { SessionStore, shouldKeepDespiteOrphan } = await import("../src/server/agent/session-store.ts");
 type PersistedSession = import("../src/server/agent/session-store.ts").PersistedSession;
 
 function clearAll() {
@@ -62,6 +64,51 @@ function tracked(id: string, agentSessionFile: string, lastActivity: number): Pe
 		lastActivity,
 	};
 }
+
+describe("shouldKeepDespiteOrphan predicate", () => {
+	beforeEach(() => clearAll());
+	afterEach(() => clearAll());
+
+	it("Case A — no worktree, no recent transcript → false (would archive)", () => {
+		const ps = { worktreePath: undefined, agentSessionFile: undefined };
+		assert.equal(shouldKeepDespiteOrphan(ps), false);
+	});
+
+	it("Case A — worktree path missing on disk → false", () => {
+		const now = Date.now();
+		const recent = writeJsonl("recent.jsonl", now);
+		const ps = { worktreePath: path.join(tmpRoot, "does-not-exist"), agentSessionFile: recent };
+		assert.equal(shouldKeepDespiteOrphan(ps, now), false);
+	});
+
+	it("Case B — worktree exists + transcript within 24h → true (keep live)", () => {
+		const now = Date.now();
+		const wt = path.join(tmpRoot, "live-worktree");
+		fs.mkdirSync(wt, { recursive: true });
+		const recent = writeJsonl("keep-me.jsonl", now - 60_000);
+		assert.equal(shouldKeepDespiteOrphan({ worktreePath: wt, agentSessionFile: recent }, now), true);
+	});
+
+	it("Case C — worktree exists but transcript older than 24h → false", () => {
+		const now = Date.now();
+		const wt = path.join(tmpRoot, "live-worktree-stale");
+		fs.mkdirSync(wt, { recursive: true });
+		const stale = writeJsonl("stale.jsonl", now - 25 * 60 * 60 * 1000);
+		assert.equal(shouldKeepDespiteOrphan({ worktreePath: wt, agentSessionFile: stale }, now), false);
+	});
+
+	it("transcript path missing on disk → false even if worktree alive", () => {
+		const now = Date.now();
+		const wt = path.join(tmpRoot, "alive-no-transcript");
+		fs.mkdirSync(wt, { recursive: true });
+		assert.equal(shouldKeepDespiteOrphan({
+			worktreePath: wt,
+			agentSessionFile: path.join(tmpRoot, "missing.jsonl"),
+		}, now), false);
+	});
+
+	// integration: see session-manager test (task #2)
+});
 
 describe("SessionStore.scanOrphanedTranscripts", () => {
 	beforeEach(() => clearAll());

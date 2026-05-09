@@ -2,6 +2,33 @@ import fs from "node:fs";
 import path from "node:path";
 import type { QueuedMessage } from "../ws/protocol.js";
 
+/** 24h in ms — recency threshold for `shouldKeepDespiteOrphan`. */
+const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Tightened orphan-cleanup gate. Returns true when an apparently-orphaned
+ * session must NOT be archived because its worktree directory still exists
+ * AND its agent JSONL has been written within the last 24h. Caller is
+ * `SessionManager`'s boot orphan sweep — leave the session live; the user
+ * can archive manually from the UI if it really is dead.
+ *
+ * `now` is injectable for testability.
+ */
+export function shouldKeepDespiteOrphan(
+	ps: { worktreePath?: string; agentSessionFile?: string },
+	now: number = Date.now(),
+): boolean {
+	const wtAlive = !!ps.worktreePath && (() => {
+		try { return fs.existsSync(ps.worktreePath!); } catch { return false; }
+	})();
+	if (!wtAlive) return false;
+	const recentTranscript = !!ps.agentSessionFile && (() => {
+		try { return now - fs.statSync(ps.agentSessionFile!).mtimeMs < RECENT_TRANSCRIPT_WINDOW_MS; }
+		catch { return false; }
+	})();
+	return recentTranscript;
+}
+
 /** Persisted metadata for a single gateway session */
 export interface PersistedSession {
 	id: string;
