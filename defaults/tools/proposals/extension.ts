@@ -100,7 +100,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_goal",
 		label: "Propose Goal",
-		description: "Submit a goal proposal for user review. Prefer existing project workflow + roles; inlineWorkflow / inlineRoles only when no existing one fits or the user asked for it. Inline snapshots propagate to subgoals.",
+		description: "Submit a goal proposal. Prefer existing workflow/roles; inline only when needed.",
 		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields. Reuse existing workflow/roles by default.",
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
@@ -116,13 +116,13 @@ export default function (pi: ExtensionAPI) {
 				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.String())),
 				model: Type.Optional(Type.String()),
 				thinkingLevel: Type.Optional(Type.String()),
-			}), { description: "Per-goal ephemeral roles snapshotted onto the goal; resolved before the project/role-store cascade. Use for one-off roles bound to this goal; for permanent roles use propose_role. Inherited by children." })),
+			}), { description: "Per-goal ephemeral roles. Use propose_role for permanent ones." })),
 			inlineWorkflow: Type.Optional(Type.Object({
 				id: Type.String(),
 				name: Type.String(),
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
-			}, { description: "Inline workflow snapshot frozen onto the goal; bypasses the project workflow store for this goal. May reference roles in inlineRoles." })),
+			}, { description: "Inline workflow snapshot frozen on the goal; may reference inlineRoles." })),
 		}),
 		async execute(_id, args) {
 			// `workflow` (string id) and `inlineWorkflow` (full Workflow object)
@@ -334,10 +334,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "view_goal_spec",
 		label: "View Goal Spec",
-		description:
-			"Read the current `goal.spec` content for a goal (defaults to the agent's current goal via BOBBIT_GOAL_ID). " +
-			"Use after a `goal_spec_changed` notification to learn what the spec now says — the version injected into your " +
-			"system prompt at startup is NOT updated when the user / parent agent edits the spec mid-flight.",
+		description: "Read the current goal.spec for a goal. Use after goal_spec_changed; system-prompt copy is stale.",
 		promptSnippet: "View the current goal.spec content (the spec injected at startup may be stale).",
 		parameters: Type.Object({
 			goal_id: Type.Optional(Type.String({ description: "Goal id. Defaults to the current session's goal (BOBBIT_GOAL_ID)." })),

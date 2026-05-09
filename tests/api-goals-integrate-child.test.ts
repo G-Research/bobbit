@@ -126,7 +126,10 @@ describe("integrate-child REST primitives", () => {
 	// invokes the state-stamping `archiveGoalAfterMerge` rather than a
 	// plain `archiveGoal`. Mirrors the R-005 source-level pin below.
 	it("AC#1: integrate-child route uses archiveGoalAfterMerge (state-stamping path)", () => {
-		const src = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		// Route was extracted to nested-goal-routes.ts (Task D); look in both.
+		const serverSrc = fs.readFileSync(path.resolve(__dirname, "../src/server/server.ts"), "utf8");
+		const routesSrc = fs.readFileSync(path.resolve(__dirname, "../src/server/agent/nested-goal-routes.ts"), "utf8");
+		const src = serverSrc + "\n" + routesSrc;
 		assert.ok(
 			/integrate-child/.test(src),
 			"integrate-child route must exist",
