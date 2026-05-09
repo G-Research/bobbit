@@ -1,12 +1,8 @@
 # Subgoals (Experimental) toggle — design doc
 
-Status: design — implementation pending.
-Goal: `audit-subg-225e4d3d` (parent) → `subgoals-e-d4554c66` (this child).
-
 ## 1. Goal & motivation
 
-The parent goal is landing the full nested-goals stack in PR #497. Before
-that PR can merge to `master` we want a single named system-scope flag that
+The full nested-goals stack lands behind a named system-scope flag so that
 keeps the entire feature surface invisible to users until we promote it
 out of experimental status. Default OFF. When OFF, the agent and user
 experience must be byte-for-byte identical to pre-subgoals `master`.

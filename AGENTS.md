@@ -47,12 +47,14 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 ### Server / API
 - **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [rest-api.md](docs/rest-api.md).
 - **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, `RpcBridge` method.
+- **Broadcast a WS event** → session-scoped (transcript, ordered, replayed on resume) → `emitSessionEvent(session, event)`; project-wide goal-state snapshot → `broadcastToAll(event)`. See [internals.md#event-stream-ordering--dedup](docs/internals.md#event-stream-ordering--dedup).
 - **Add a tool** → `defaults/tools/<group>/` (or project override `.bobbit/config/tools/<group>/`); MCP auto-discovered from `.mcp.json`. **On-wire budget** — `pi.registerTool({ description })` ≤ 150 chars / ≤ 15 words (no examples, no anti-patterns); per-parameter `description` inside `Type.Object({...})` ≤ 80 chars sentence fragment, drop entirely when the name is self-explanatory. Detail belongs in **off-wire** YAML `docs` / `detail_docs`. Pinned by `tests/tool-description-budget.test.ts`. See [internals.md#mcp-tool-documentation](docs/internals.md#mcp-tool-documentation).
 - **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/`. See [skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
 - **Add a blocking tool** → [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
 - **Modify a store constructor** → stores take `stateDir`/`configDir` params; resolve via `ProjectContextManager`.
 - **Add/modify session creation** → `session-setup.ts`, `session-manager.ts`. See [internals.md#session-worktrees](docs/internals.md#session-worktrees).
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, `server.ts`, `goal-assistant.ts`. See [goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Notify team-lead of mid-flight goal-spec edit** → `notifyTeamLeadOfSpecChange` in `team-manager.ts`; emits `goal_spec_changed` WS frame. See [docs/design/goal-spec-edit-notification.md](docs/design/goal-spec-edit-notification.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
 - **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
 
@@ -171,6 +173,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Gate/task tool bloat** — use `?view=summary`; drill via `gate_inspect`.
 - **Auto-nudge flooding** — `nudgePending` guard in `TeamManager`.
 - **Reviewer spuriously nudges team-lead** — `kind: "reviewer"` filter in `resubscribeTeamEvents` / `notifyTeamLead`.
+- **Agent unaware of mid-flight goal-spec edit** — `goal_spec_changed` WS frame + throttled `notifyTeamLeadOfSpecChange`; agent re-reads via `view_goal_spec`. See [docs/design/goal-spec-edit-notification.md](docs/design/goal-spec-edit-notification.md).
 - **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`.
 
 ### Search / config / skills

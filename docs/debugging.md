@@ -407,7 +407,7 @@ See [docs/internals.md — Sub-goal sidebar placement](internals.md#sub-goal-sid
 
 ## Goal rendered twice in sidebar (live, mid-flight)
 
-Symptom: a single live goal appears in two sidebar locations simultaneously — once nested under its team-lead's expanded block (correct) and once at the project root or under its parent goal in the forest (wrong). Originally observed during dogfooding with goal `c761f4df` ("Trim source diff before merge") rendering both under team-lead Justin Time AND at the project root while still in-progress (`archived: false`, `state: "in-progress"`) — explicitly NOT an archive-flip race.
+Symptom: a single live goal appears in two sidebar locations simultaneously — once nested under its team-lead's expanded block (correct) and once at the project root or under its parent goal in the forest (wrong). The duplicate appears while the goal is still in-progress (`archived: false`, `state: "in-progress"`) — explicitly NOT an archive-flip race.
 
 ### Architecture
 
@@ -453,7 +453,7 @@ The previous `teamLeadIdsAttributable` filter (in `sidebar.ts`) leaked three rea
 
 ## Sidebar nests goal under wrong team-lead / unstamped child shows under a sibling
 
-Symptom: a sub-goal that should belong to team-lead A renders inside team-lead B's expanded block (a sibling). Collapsing B hides the orphan; collapsing A doesn't. Originally observed during dogfooding when sub-goals spawned via raw `POST /api/goals/:id/spawn-child` curl — with no `spawnedBySessionId` body field and no `x-bobbit-spawning-session` header — were misattributed under a sibling team-lead.
+Symptom: a sub-goal that should belong to team-lead A renders inside team-lead B's expanded block (a sibling). Collapsing B hides the orphan; collapsing A doesn't. Trigger: sub-goals spawned via raw `POST /api/goals/:id/spawn-child` with no `spawnedBySessionId` body field and no `x-bobbit-spawning-session` header are misattributed under a sibling team-lead.
 
 Cause: `spawnedBySessionId` was `undefined` on creation (cascade tier 5 hit — see [docs/nested-goals.md — Cascade resolution at spawn time](nested-goals.md#cascade-resolution-at-spawn-time)) AND the render-side fallback wasn't strict about `parentGoalId`. Two layers fix it:
 
@@ -841,7 +841,7 @@ Symptom: team-lead receives many `team_agent_finished` steers in quick successio
 
 ## Team-lead idle while coder is idle / workflow stalled
 
-Symptom: a team-lead session and one or more of its workers are all idle for many minutes; no auto-nudge fires; the goal silently makes no progress until a human manually `/notify`-pings the lead. Original repro (the bug that motivated the watchdog): subgoal `df3d8b33` ("Plan tab shows archived children") sat idle for **7+ minutes** — coder `85e8eda2` had finished pushing its branch, team-lead `f60e32d6` was idle, and only a manual ping resolved it.
+Symptom: a team-lead session and one or more of its workers are all idle for many minutes; no auto-nudge fires; the goal silently makes no progress until a human manually `/notify`-pings the lead. Canonical repro: a coder finishes pushing its branch and goes idle, the team-lead is also idle, and a 7+ minute stall persists until a manual ping resolves it.
 
 Three failure modes can produce this stall (ranked by likelihood, per the [auto-nudge design doc](design/auto-nudge-stuck-team-leads.md) Section 1):
 
@@ -869,7 +869,7 @@ All three live in `src/server/agent/team-manager.ts` and funnel through the sing
 
 ### Why "all workers idle" rather than "any worker idle"
 
-The watchdog predicate requires **every** active worker to be idle, not just one. The looser "any worker idle for 5+ minutes" variant would nag whenever one worker has finished and another is legitimately streaming — a common shape in parallel team-lead workflows. The stricter predicate matches the observed `df3d8b33` stall (lead idle + all workers idle) without producing false positives. Section 6 of the design doc records this as a deferred risk; loosen only if a real stall demonstrates it's needed.
+The watchdog predicate requires **every** active worker to be idle, not just one. The looser "any worker idle for 5+ minutes" variant would nag whenever one worker has finished and another is legitimately streaming — a common shape in parallel team-lead workflows. The stricter predicate matches the canonical stall mode (lead idle + all workers idle) without producing false positives. Section 6 of the design doc records this as a deferred risk; loosen only if a real stall demonstrates it's needed.
 
 ### Tests pinning the contract
 

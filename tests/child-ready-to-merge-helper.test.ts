@@ -29,7 +29,7 @@ const ROOT_RTM_VERIFY: VerifyStep[] = [
 	},
 ];
 
-const PARENT_BRANCH = "goal/audit-subg-225e4d3d";
+const PARENT_BRANCH = "goal/parent-example-deadbeef";
 
 function rootWorkflow(verify: VerifyStep[] = ROOT_RTM_VERIFY): Workflow {
 	return {

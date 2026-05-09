@@ -309,7 +309,7 @@ All mutations serialise through `SearchService` (already single-threaded per-pro
 
 ### 5.5 Size expectations
 
-FlexSearch document JSON for the existing Bobbit-as-a-dogfood corpus (goals + sessions + ~40 K messages) will be well under 100 MB — the removal of 768-dim float vectors (768 × 4 B × rowCount = ~150 MB for 50 K rows) easily dwarfs the FlexSearch postings overhead. No special compaction needed.
+FlexSearch document JSON for a representative Bobbit corpus (goals + sessions + ~40 K messages) will be well under 100 MB — the removal of 768-dim float vectors (768 × 4 B × rowCount = ~150 MB for 50 K rows) easily dwarfs the FlexSearch postings overhead. No special compaction needed.
 
 ---
 

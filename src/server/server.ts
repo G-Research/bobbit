@@ -3360,6 +3360,7 @@ async function handleApiRoute(
 		getGoalManagerForGoal,
 		readBody,
 		json,
+		jsonError,
 		broadcastToAll,
 	})) return;
 
