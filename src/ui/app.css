@@ -2529,33 +2529,60 @@ html {
 	}
 }
 
-/* Shadow follows horizontal position during busy hops */
+/* Shadow follows horizontal position during busy hops AND shrinks while
+   airborne. ScaleX/scaleY composes with the outer scale(4) — at airborne
+   peaks we shrink the shadow ellipse to sell altitude; on the ground it
+   returns to full size. Phases mirror blob-busy-move airborne moments:
+   bounce-1 peak ~8-10%, bounce-2 peak ~25%, hop-right peaks ~44%/52%,
+   hop-back peaks ~75%/84%. */
 @keyframes blob-busy-shadow {
-	/* Bouncing in place — shadow stays at X=0 */
-	0%   { transform: scale(4) translateX(0); }
-	41%  { transform: scale(4) translateX(0); }
-	/* Hop 1 right — airborne */
-	44%  { transform: scale(4) translateX(2px); }
+	/* On ground — full size */
+	0%   { transform: scale(4) translateX(0) scaleX(1) scaleY(1); }
+	/* Squat — slightly wider/flatter */
+	2%   { transform: scale(4) translateX(0) scaleX(1.05) scaleY(1); }
+	/* Bounce 1 launch — shrinking */
+	5%   { transform: scale(4) translateX(0) scaleX(0.78) scaleY(0.85); }
+	/* Bounce 1 peak — smallest, faintest */
+	8%   { transform: scale(4) translateX(0) scaleX(0.55) scaleY(0.7); }
+	10%  { transform: scale(4) translateX(0) scaleX(0.55) scaleY(0.7); }
+	/* Falling back */
+	12%  { transform: scale(4) translateX(0) scaleX(0.78) scaleY(0.85); }
+	/* Land */
+	14%  { transform: scale(4) translateX(0) scaleX(1.08) scaleY(1); }
+	16%  { transform: scale(4) translateX(0) scaleX(1) scaleY(1); }
+	/* Bounce 2 squat */
+	21%  { transform: scale(4) translateX(0) scaleX(1.04) scaleY(1); }
+	/* Bounce 2 peak — shallower */
+	25%  { transform: scale(4) translateX(0) scaleX(0.7) scaleY(0.78); }
+	/* Bounce 2 land */
+	27%  { transform: scale(4) translateX(0) scaleX(1.05) scaleY(1); }
+	31%  { transform: scale(4) translateX(0) scaleX(1) scaleY(1); }
+	/* Anticipation crouch held — full ground shadow */
+	37%  { transform: scale(4) translateX(0) scaleX(1.06) scaleY(1); }
+	41%  { transform: scale(4) translateX(0) scaleX(1) scaleY(1); }
+	/* Hop 1 right — airborne, shrunk */
+	44%  { transform: scale(4) translateX(2px) scaleX(0.65) scaleY(0.78); }
 	/* Landed hop 1 */
-	47%  { transform: scale(4) translateX(3px); }
-	49%  { transform: scale(4) translateX(3px); }
-	/* Hop 2 right — airborne */
-	52%  { transform: scale(4) translateX(4px); }
+	47%  { transform: scale(4) translateX(3px) scaleX(1.05) scaleY(1); }
+	49%  { transform: scale(4) translateX(3px) scaleX(1) scaleY(1); }
+	/* Hop 2 right — airborne, shrunk */
+	52%  { transform: scale(4) translateX(4px) scaleX(0.6) scaleY(0.75); }
 	/* Landed hop 2 + look-around */
-	55%  { transform: scale(4) translateX(6px); }
-	70%  { transform: scale(4) translateX(6px); }
+	55%  { transform: scale(4) translateX(6px) scaleX(1.05) scaleY(1); }
+	57%  { transform: scale(4) translateX(6px) scaleX(1) scaleY(1); }
+	70%  { transform: scale(4) translateX(6px) scaleX(1) scaleY(1); }
 	/* Squat before hop back */
-	72%  { transform: scale(4) translateX(6px); }
-	/* Hop back 1 — airborne [Step 4: wider spacing for relaxed trot] */
-	75%  { transform: scale(4) translateX(4px); }
+	72%  { transform: scale(4) translateX(6px) scaleX(1.04) scaleY(1); }
+	/* Hop back 1 — airborne, shrunk (relaxed → less shrinkage) */
+	75%  { transform: scale(4) translateX(4px) scaleX(0.72) scaleY(0.82); }
 	/* Landed */
-	78%  { transform: scale(4) translateX(3px); }
-	81%  { transform: scale(4) translateX(3px); }
-	/* Hop back 2 — airborne [Step 4: wider spacing] */
-	84%  { transform: scale(4) translateX(2px); }
+	78%  { transform: scale(4) translateX(3px) scaleX(1.04) scaleY(1); }
+	81%  { transform: scale(4) translateX(3px) scaleX(1) scaleY(1); }
+	/* Hop back 2 — airborne, shrunk */
+	84%  { transform: scale(4) translateX(2px) scaleX(0.72) scaleY(0.82); }
 	/* Landed back at origin */
-	87%  { transform: scale(4) translateX(0); }
-	100% { transform: scale(4) translateX(0); }
+	87%  { transform: scale(4) translateX(0) scaleX(1.08) scaleY(1); }
+	100% { transform: scale(4) translateX(0) scaleX(1) scaleY(1); }
 }
 /* Exit animation A — squish, wiggle, hop left and settle */
 .bobbit-blob--exit .bobbit-blob__sprite {
