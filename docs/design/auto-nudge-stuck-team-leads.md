@@ -1,16 +1,8 @@
 # Auto-nudge stuck team-leads when subordinates have completed work
 
-**Goal:** `auto-nudge-6eef577e`. Child of `audit-subg-225e4d3d`.
-**Status:** design — no production code yet.
-
 ## Motivation — observed stall
 
-During dogfooding of `audit-subg-225e4d3d`, subgoal `df3d8b33` ("Plan tab
-shows archived children") stalled for **7+ minutes**:
-
-- Coder session `85e8eda2` went idle (presumably after pushing its branch).
-- Team-lead session `f60e32d6` (Simba) was also idle.
-- Neither resumed until the user manually `/notify`-pinged the team-lead.
+A reproducible stall mode for nested-goal teams: a coder pushes its branch and goes idle, the team-lead is also idle, and neither resumes for many minutes. Symptom: a 7+ minute team-wide quiet period that only resolves when the user manually re-pings the team-lead, even though the second ping carries no new information.
 
 The existing `agent_end → notifyTeamLead` path in
 `src/server/agent/team-manager.ts` is supposed to fire on every team-member
@@ -72,8 +64,7 @@ with `kind: "worker"` (line 1115 in `spawnRole`) and the filter only
 excludes reviewer role agents.
 
 **(3) Unlikely — team-lead was archived/restarted between coder start and
-finish.** `df3d8b33` was an active subgoal at the time of the stall; if its
-team-lead had been archived the goal would have been in `setupStatus !==
+finish.** If the lead had been archived the goal would have been in `setupStatus !==
 ready` or had no `teamLeadSessionId`. The boot-respawn for sessionless
 in-progress goals at `_bootRespawnSessionlessGoals` (line 463) would have re-spawned a fresh
 team-lead, which we'd see in the session list. Neither was reported.
@@ -292,7 +283,7 @@ Restated verbatim from the goal spec, each with a one-line note.
   few map reads + a status check. Negligible up to thousands of teams.
 - **Should the watchdog also nudge when only *some* workers are idle?** The
   spec says "any team member is idle". The design above requires *all*
-  workers idle, which is stricter (matches the `df3d8b33` stall).
+  workers idle, which is stricter (matches the observed stall mode).
   Loosening to "any worker idle for 5+ minutes" risks nagging when one
   worker is finished and another is legitimately streaming. Defer the
   looser variant until a real stall demonstrates it's needed.

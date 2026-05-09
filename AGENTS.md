@@ -53,6 +53,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Modify a store constructor** → stores take `stateDir`/`configDir` params; resolve via `ProjectContextManager`.
 - **Add/modify session creation** → `session-setup.ts`, `session-manager.ts`. See [internals.md#session-worktrees](docs/internals.md#session-worktrees).
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, `server.ts`, `goal-assistant.ts`. See [goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
+- **Notify team-lead of mid-flight goal-spec edit** → `notifyTeamLeadOfSpecChange` in `team-manager.ts`; emits `goal_spec_changed` WS frame. See [docs/design/goal-spec-edit-notification.md](docs/design/goal-spec-edit-notification.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
 - **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
 
@@ -171,6 +172,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Gate/task tool bloat** — use `?view=summary`; drill via `gate_inspect`.
 - **Auto-nudge flooding** — `nudgePending` guard in `TeamManager`.
 - **Reviewer spuriously nudges team-lead** — `kind: "reviewer"` filter in `resubscribeTeamEvents` / `notifyTeamLead`.
+- **Agent unaware of mid-flight goal-spec edit** — `goal_spec_changed` WS frame + throttled `notifyTeamLeadOfSpecChange`; agent re-reads via `view_goal_spec`. See [docs/design/goal-spec-edit-notification.md](docs/design/goal-spec-edit-notification.md).
 - **Verification log Nx duplication** — funnel through `src/app/verification-event-bus.ts`.
 
 ### Search / config / skills
