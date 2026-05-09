@@ -293,15 +293,17 @@ export class AgentInterface extends LitElement {
 	private _pillsInitialized = false;
 	private _unsubscribeSession?: () => void;
 
-	// Tracks viewport <640px (Tailwind sm breakpoint) for mobile-only label abbreviation.
-	private _isMobileViewport = typeof window !== "undefined" && typeof window.matchMedia === "function"
+	// Tracks host container width <640px for compact label rendering. This catches
+	// both the mobile viewport case AND desktop with a side panel open shrinking
+	// the chat column below the threshold.
+	private _isNarrow = typeof window !== "undefined" && typeof window.matchMedia === "function"
 		? !window.matchMedia("(min-width: 640px)").matches
 		: false;
-	private _mobileMediaQuery?: MediaQueryList;
-	private _handleMobileMediaChange = (e: MediaQueryListEvent) => {
-		const next = !e.matches;
-		if (next !== this._isMobileViewport) {
-			this._isMobileViewport = next;
+	private _narrowResizeObserver?: ResizeObserver;
+	private _updateNarrow = (width: number) => {
+		const next = width > 0 && width < 640;
+		if (next !== this._isNarrow) {
+			this._isNarrow = next;
 			this.requestUpdate();
 		}
 	};
@@ -648,11 +650,15 @@ export class AgentInterface extends LitElement {
 		// Subscribe to external session if provided
 		this.setupSessionSubscription();
 
-		// Track viewport for mobile-only label abbreviation in the thinking selector.
-		if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
-			this._mobileMediaQuery = window.matchMedia("(min-width: 640px)");
-			this._isMobileViewport = !this._mobileMediaQuery.matches;
-			this._mobileMediaQuery.addEventListener("change", this._handleMobileMediaChange);
+		// Track host container width so the prompt-bar row compacts when the chat
+		// column is narrowed (mobile viewport OR desktop side-panel-open).
+		if (typeof ResizeObserver !== "undefined") {
+			this._narrowResizeObserver = new ResizeObserver((entries) => {
+				const w = entries[0]?.contentRect?.width ?? 0;
+				this._updateNarrow(w);
+			});
+			this._narrowResizeObserver.observe(this);
+			this._updateNarrow(this.getBoundingClientRect().width);
 		}
 
 		// Global Escape handler: abort the streaming agent regardless of focus,
@@ -694,9 +700,9 @@ export class AgentInterface extends LitElement {
 			this._pillResizeObserver = undefined;
 		}
 
-		if (this._mobileMediaQuery) {
-			this._mobileMediaQuery.removeEventListener("change", this._handleMobileMediaChange);
-			this._mobileMediaQuery = undefined;
+		if (this._narrowResizeObserver) {
+			this._narrowResizeObserver.disconnect();
+			this._narrowResizeObserver = undefined;
 		}
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
@@ -1405,7 +1411,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(ImageIcon, "sm")}
-					<span class="ml-0.5 hidden sm:inline">${imageModel.id}</span>
+					${this._isNarrow ? "" : html`<span class="ml-0.5">${imageModel.id}</span>`}
 				`,
 				className: "h-6 text-xs truncate",
 			})
@@ -1522,7 +1528,7 @@ export class AgentInterface extends LitElement {
 					${modelButton}
 					${imageModelButton}
 				</div>
-				${cwdHtml ? html`<div class="hidden sm:flex items-center pl-4">${cwdHtml}</div>` : ""}
+				${cwdHtml && !this._isNarrow ? html`<div class="flex items-center pl-4">${cwdHtml}</div>` : ""}
 				<div class="flex ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
 					<span class="cursor-pointer hover:text-foreground transition-colors"
@@ -2063,11 +2069,11 @@ export class AgentInterface extends LitElement {
 	override updated(changedProperties: Map<string, any>) {
 		super.updated(changedProperties);
 
-		// Mobile-only: rewrite the thinking-selector trigger label to an abbreviation.
+		// Narrow-only: rewrite the thinking-selector trigger label to an abbreviation.
 		// The Select component reuses option.label for both the trigger and the popover
 		// items, so we keep options on full labels and only retarget the trigger's
-		// visible text node here. Re-runs on every render and on viewport changes
-		// (which call requestUpdate via _handleMobileMediaChange).
+		// visible text node here. Re-runs on every render and on host-width changes
+		// (which call requestUpdate via the ResizeObserver in _updateNarrow).
 		this._syncThinkingTriggerLabel();
 
 		// Setup pill overflow observer once the pill strip is rendered
@@ -2132,7 +2138,7 @@ export class AgentInterface extends LitElement {
 		const level = (this.session?.state?.thinkingLevel as string | undefined) ?? "off";
 		const abbrev: Record<string, string> = { off: "Off", minimal: "Min", low: "Low", medium: "Med", high: "Hi" };
 		const full: Record<string, string> = { off: i18n("Off"), minimal: i18n("Minimal"), low: i18n("Low"), medium: i18n("Medium"), high: i18n("High") };
-		const desired = this._isMobileViewport ? (abbrev[level] ?? abbrev.off) : (full[level] ?? full.off);
+		const desired = this._isNarrow ? (abbrev[level] ?? abbrev.off) : (full[level] ?? full.off);
 		// The label span contains: whitespace text nodes (from Lit template formatting),
 		// an icon <span>, and the label text node. We want to update only the label —
 		// i.e. the last text node containing non-whitespace content. Updating the first
