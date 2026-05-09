@@ -212,7 +212,10 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 			persistedSearched = true;
 			const raw = fs.readFileSync(candidate, "utf-8");
 			if (raw.includes(sessionId)) {
-				const rows = JSON.parse(raw) as Array<Record<string, unknown>>;
+				const parsed = JSON.parse(raw) as
+					| Array<Record<string, unknown>>
+					| { sessions?: Array<Record<string, unknown>> };
+				const rows = Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
 				const row = rows.find(r => r.id === sessionId);
 				if (row) {
 					expect(row.branch).toBe(branch);
