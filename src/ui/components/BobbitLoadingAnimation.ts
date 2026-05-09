@@ -29,7 +29,9 @@ function paintLoadingBobbit(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   ctx.clearRect(0, 0, devW, devH);
-  const pixels = resolveBodyPixels(CANONICAL_PALETTE, 'center', false);
+  // Gaze 'right' matches the original hand-coded box-shadow eye positions
+  // (pupils at x=4/x=7), so the bobbit keeps its down-right glance.
+  const pixels = resolveBodyPixels(CANONICAL_PALETTE, 'right', false);
   drawPixelsBresenham(ctx, pixels, devW, devH);
 }
 
