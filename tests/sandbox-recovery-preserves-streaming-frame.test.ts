@@ -218,9 +218,12 @@ test("recoverSandboxSessions — wired through _respawnAgentInPlace + frame-of-r
 	const startMarker = "private async recoverSandboxSessions(";
 	const startIdx = src.indexOf(startMarker);
 	assert.ok(startIdx >= 0, "recoverSandboxSessions method not found in session-manager.ts");
-	// Heuristic body slice: take ~2000 chars from the method start, which is
-	// well within its body and well clear of unrelated methods.
-	const body = src.slice(startIdx, startIdx + 2000);
+	// Heuristic body slice: take from the method start until the next top-level
+	// `\n\t/**` doc-comment OR `\n\tprivate ` / `\n\tasync ` declaration — i.e.
+	// the next sibling method. This survives the worktree-repair block growing.
+	const rest = src.slice(startIdx + startMarker.length);
+	const endRel = rest.search(/\n\t(?:\/\*\*|private |async |public |constructor)/);
+	const body = rest.slice(0, endRel >= 0 ? endRel : 4000);
 
 	const hasHelperDefinition = /private\s+(?:async\s+)?_respawnAgentInPlace\s*\(/.test(src);
 	const recoveryUsesHelper = body.includes("_respawnAgentInPlace");
