@@ -434,8 +434,10 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const naturalSize = 76;
 	const s = size / naturalSize;
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
-	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
-	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
+	// Negative animation-delay: each blob starts at a different point in the
+	// 10s cycle, so eyes and accessories are phase-offset across rows.
+	// 1.3s prime-ish step keeps neighbours visibly out of sync.
+	const idlePhaseSec = -(phaseIndex * 1.3 % 10);
 
 	// Eye animation for idle blob
 	let cleanup: (() => void) | null = null;
@@ -452,7 +454,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	return html`
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
 			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
-				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
+				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-idle-phase:${idlePhaseSec.toFixed(2)}s;">
 					<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>
 					<div class="bobbit-blob__crown"></div>
 					<div class="bobbit-blob__bandana"></div>

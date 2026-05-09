@@ -1534,6 +1534,7 @@ html {
 	animation-duration: 10s, 10s;
 	animation-timing-function: step-end, step-end;
 	animation-iteration-count: infinite, infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s), var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 	translate: 0 -2px;
 }
@@ -1668,6 +1669,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__magnifier {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__magnifier {
@@ -1720,6 +1722,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__palette {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translate(-7.5px, -0.5px);
 }
 .bobbit-blob--exit .bobbit-blob__palette {
@@ -1778,6 +1781,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__pencil {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__pencil {
@@ -1831,6 +1835,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__shield {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__shield {
@@ -1884,6 +1889,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__set-square {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__set-square {
@@ -1977,6 +1983,7 @@ html {
 
 .bobbit-blob--idle .bobbit-blob__flask {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__flask {
@@ -2103,6 +2110,7 @@ html {
 
 .bobbit-blob--idle .bobbit-blob__wand {
 	animation: wand-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__wand {
@@ -2208,6 +2216,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__stamp {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__stamp {
@@ -2260,6 +2269,7 @@ html {
 }
 .bobbit-blob--idle .bobbit-blob__clipboard {
 	animation: magnifier-depth-idle 10s steps(1) infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
 	transform: scale(4) translateX(-7px);
 }
 .bobbit-blob--exit .bobbit-blob__clipboard {
@@ -3196,6 +3206,7 @@ html {
 .bobbit-blob--idle .bobbit-blob__sprite {
 	transform: scale(4) translateX(-7px);
 	animation: blob-idle-eyes 10s steps(1) infinite !important;
+	animation-delay: var(--bobbit-idle-phase, 0s) !important;
 }
 
 /* Idle eye cycle: center → look at user → blink left → look up-right →
@@ -4207,4 +4218,5 @@ canvas.bobbit-blob__sprite {
 }
 .bobbit-blob--idle canvas.bobbit-blob__sprite {
 	animation: blob-idle-eyes-canvas 10s steps(1) infinite !important;
+	animation-delay: var(--bobbit-idle-phase, 0s) !important;
 }
