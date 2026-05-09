@@ -1630,14 +1630,18 @@ html {
 	96%     { z-index: -1; }
 	98%, 100% { z-index: 1; }
 }
+/* Accessory dives behind the sprite during the two up-right glances
+   in IDLE_EYE_SEQUENCE (25-45% and 70-80%) so the body occludes it
+   when the eyes look toward it. Previously the second behind-window
+   was 55-85% — too wide; the accessory was hidden during plain 'right'
+   gaze (55-67%), the right-blink (67-70%), and lingered into the
+   80-90% center phase. Tightened to 70-80% to match the up-right beat. */
 @keyframes magnifier-depth-idle {
 	0%, 24% { z-index: 1; }
-	25%     { z-index: -1; }
-	45%     { z-index: -1; }
-	46%, 54% { z-index: 1; }
-	55%     { z-index: -1; }
-	85%     { z-index: -1; }
-	86%, 100% { z-index: 1; }
+	25%, 45% { z-index: -1; }
+	46%, 69% { z-index: 1; }
+	70%, 80% { z-index: -1; }
+	81%, 100% { z-index: 1; }
 }
 
 .bobbit-blob__magnifier {
