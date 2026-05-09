@@ -211,7 +211,7 @@ function buildEyePixelCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<s
  * distributed uniformly so adjacent columns never differ by more than 1px.
  * This guarantees pixel-perfect eyes at every DPR.
  */
-function drawPixelsBresenham(
+export function drawPixelsBresenham(
 	ctx: CanvasRenderingContext2D,
 	pixels: SpritePixel[],
 	devW: number,
