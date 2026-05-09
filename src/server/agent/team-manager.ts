@@ -158,7 +158,6 @@ export class TeamManager {
 	private lastNudgeAtPerGoal = new Map<string, number>();
 	/** Periodic 60s sweep that detects fully-idle teams. */
 	private stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
->>>>>>> 5723bf02 (feat(team-manager): stuck-team watchdog + child-RTM regression test)
 	private verificationHarness?: VerificationHarness;
 	/** Base workers-active idle nudge delay (ms); exponential up to MAX. */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;

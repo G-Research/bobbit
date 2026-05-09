@@ -1480,13 +1480,8 @@ export class SessionManager {
 			session.lastPromptImages = opts?.images;
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-<<<<<<< HEAD
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
-			// Lesson 4.9 — auto-revive a dead bridge before new-prompt dispatch.
-=======
-			broadcast(session.clients, { type: "session_status", status: "streaming", streamingStartedAt: session.streamingStartedAt });
-			// dead-bridge auto-revive — auto-revive a dead bridge before new-prompt dispatch.
->>>>>>> 3baf9584 (Trim AGENTS.md and replace Lesson N.M jargon with plain language)
+			// Auto-revive a dead bridge before new-prompt dispatch.
 			await this._dispatchPromptWithReviveOnDeadBridge(sessionId, prefixedDispatch, opts?.images);
 			return;
 		}

@@ -138,11 +138,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_prompt",
 		label: "Prompt Team Agent",
-<<<<<<< HEAD
-		description: "Prompt a team agent. Runs immediately if idle, else queues for next turn.",
-=======
-		description: "Send a prompt to a team agent. If the agent is idle, it starts working immediately. If the agent is busy, the message is queued and dispatched when the current turn ends. Use this to assign follow-up work, nudge idle agents, or queue instructions. Returns 409 if workflowGateId is provided and its upstream dependency gates have not all passed. The target session must either be in your own team OR be the team-lead of a direct child goal of your own goal; for sessions outside this scope use goal_pause / goal_archive_child instead.",
->>>>>>> 93ffa741 (feat(team-prompt): allow parent team-lead to prompt direct-child team-leads)
+		description: "Prompt a team agent (own team OR direct-child goal's team-lead). Runs immediately if idle, else queues. 409 if workflowGateId's upstream gates haven't passed. Other scopes: use goal_pause / goal_archive_child.",
 		promptSnippet: "Send a prompt to a team agent (immediate if idle, queued if busy).",
 		parameters: Type.Object({
 			session_id: Type.String(),

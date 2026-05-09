@@ -78,16 +78,9 @@ export interface PersistedGoal {
 	 */
 	dependsOnPlanIds?: string[];
 	/**
-<<<<<<< HEAD
 	 * Paused flag — user can pause a goal mid-flight (children may inherit via cascade).
 	 * Paused children do NOT count as in-flight for `anyInFlightChild`/parent nudge
-	 * suppression — the parent (or user) must act before the child can resume.
-	 * (Lesson 4.13)
-=======
-	 * Whether this goal is paused. Paused children do NOT count as in-flight
-	 * for `anyInFlightChild`/parent nudge suppression — the parent (or user)
-	 * must act before the child can resume. (paused children must NOT count as in-flight — paused != failed)
->>>>>>> 3baf9584 (Trim AGENTS.md and replace Lesson N.M jargon with plain language)
+	 * suppression — paused != failed; the parent (or user) must act before the child can resume.
 	 */
 	paused?: boolean;
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */

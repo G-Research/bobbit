@@ -1,12 +1,7 @@
 name: team_prompt
-<<<<<<< HEAD
-description: "Queued or immediate follow-up message to existing agent"
+description: "Queued or immediate follow-up to a team agent (own team OR a direct-child goal's team-lead). Other scopes: use goal_pause / goal_archive_child."
 summary: "Send prompt to a team agent"
 params: [session_id, message, workflowGateId?, inputGateIds?]
-=======
-description: "Send a prompt to a team agent (queued or immediate). The target session must either be in your own team OR be the team-lead of a direct child goal of your own goal. For sessions outside this scope, use `goal_pause` / `goal_archive_child` instead."
-summary: "Send a prompt to a team agent, queued or immediate."
->>>>>>> 93ffa741 (feat(team-prompt): allow parent team-lead to prompt direct-child team-leads)
 provider:
   type: bobbit-extension
   extension: extension.ts
