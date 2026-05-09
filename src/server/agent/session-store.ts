@@ -132,8 +132,15 @@ export class SessionStore {
 	private sessions: Map<string, PersistedSession> = new Map();
 	private saveTimer: ReturnType<typeof setTimeout> | null = null;
 	private static SAVE_DEBOUNCE_MS = 1000;
+	private static BACKUP_COUNT = 5;
 	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
 	private generation = 0;
+	/** Epoch read from disk on construction (or 0 for legacy/missing). */
+	private loadedEpoch = 0;
+	/** Epoch we have successfully written to disk this process. */
+	private writtenEpoch = 0;
+	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
+	private staleGuardTripped = false;
 
 	constructor(stateDir: string) {
 		this.storeDir = stateDir;
@@ -141,49 +148,271 @@ export class SessionStore {
 		this.load();
 	}
 
-	private load(): void {
-		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
-				if (Array.isArray(data)) {
-					for (const s of data) {
-						if (s.id) {
-							// Migrate legacy 'swarmGoalId' field to 'teamGoalId'
-							if (s.swarmGoalId !== undefined && s.teamGoalId === undefined) {
-								s.teamGoalId = s.swarmGoalId;
-								delete s.swarmGoalId;
-							}
-							// Lenient parse: silently drop legacy `personalities` field (feature removed)
-							if ("personalities" in s) {
-								delete s.personalities;
-							}
-							// Normalize legacy boolean flags to assistantType
-							if (!s.assistantType) {
-								if (s.goalAssistant) s.assistantType = "goal";
-								else if (s.roleAssistant) s.assistantType = "role";
-								else if (s.toolAssistant) s.assistantType = "tool";
-							}
-							this.sessions.set(s.id, s);
-						}
-					}
-				}
+	/** Normalise a single PersistedSession-shaped row read from disk (legacy field migration). */
+	private seedFromArray(rows: unknown[]): void {
+		for (const row of rows) {
+			if (!row || typeof row !== "object") continue;
+			const s = row as PersistedSession & {
+				swarmGoalId?: string;
+				personalities?: unknown;
+			};
+			if (!s.id) continue;
+			// Migrate legacy 'swarmGoalId' field to 'teamGoalId'
+			if (s.swarmGoalId !== undefined && s.teamGoalId === undefined) {
+				s.teamGoalId = s.swarmGoalId;
+				delete s.swarmGoalId;
 			}
-		} catch (err) {
-			console.error("[session-store] Failed to load persisted sessions:", err);
+			// Lenient parse: silently drop legacy `personalities` field (feature removed)
+			if ("personalities" in s) {
+				delete s.personalities;
+			}
+			// Normalize legacy boolean flags to assistantType
+			if (!s.assistantType) {
+				if (s.goalAssistant) s.assistantType = "goal";
+				else if (s.roleAssistant) s.assistantType = "role";
+				else if (s.toolAssistant) s.assistantType = "tool";
+			}
+			this.sessions.set(s.id, s);
 		}
+	}
+
+	/** Backup-file path for index 1..N. */
+	private bakPath(n: number): string {
+		return `${this.storeFile}.bak.${n}`;
+	}
+
+	private load(): void {
+		this.loadedEpoch = 0;
+		this.writtenEpoch = 0;
+
+		const candidates = [this.storeFile];
+		for (let i = 1; i <= SessionStore.BACKUP_COUNT; i++) candidates.push(this.bakPath(i));
+
+		for (const file of candidates) {
+			try {
+				if (!fs.existsSync(file)) continue;
+				const raw = fs.readFileSync(file, "utf-8");
+				const parsed = JSON.parse(raw);
+
+				if (Array.isArray(parsed)) {
+					// Legacy v1 shape
+					this.seedFromArray(parsed);
+					this.loadedEpoch = 0;
+					if (file !== this.storeFile) {
+						console.warn(`[session-store] Loaded from backup ${path.basename(file)} — primary missing/corrupt`);
+					}
+					return;
+				}
+				if (parsed && typeof parsed === "object" && (parsed as { version?: number }).version === 2 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)) {
+					const obj = parsed as { version: number; epoch?: number; sessions: unknown[] };
+					this.seedFromArray(obj.sessions);
+					this.loadedEpoch = typeof obj.epoch === "number" ? obj.epoch : 0;
+					if (file !== this.storeFile) {
+						console.warn(`[session-store] Loaded from backup ${path.basename(file)} (epoch ${this.loadedEpoch}) — primary missing/corrupt`);
+					}
+					return;
+				}
+				console.warn(`[session-store] ${file}: unrecognised shape, skipping`);
+			} catch (err) {
+				console.warn(`[session-store] Failed to parse ${file}:`, err);
+			}
+		}
+		// No file readable — start empty.
+	}
+
+	/**
+	 * Synchronously read just `sessions.json` and return its `epoch`.
+	 * Returns 0 for legacy v1 array shape; -1 if the file is missing or
+	 * unparseable. Used by saveNow() to detect external rewrites.
+	 */
+	private peekDiskEpoch(): number {
+		try {
+			if (!fs.existsSync(this.storeFile)) return -1;
+			const raw = fs.readFileSync(this.storeFile, "utf-8");
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) return 0;
+			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
+				return (parsed as { epoch: number }).epoch;
+			}
+			return -1;
+		} catch {
+			return -1;
+		}
+	}
+
+	/** Rotate sessions.json → .bak.1 → .bak.2 → … → .bak.N. Best-effort. */
+	private rotateBackups(): void {
+		try {
+			if (!fs.existsSync(this.storeFile)) return;
+			const N = SessionStore.BACKUP_COUNT;
+			// Drop the oldest if it exists.
+			try { if (fs.existsSync(this.bakPath(N))) fs.unlinkSync(this.bakPath(N)); } catch { /* non-fatal */ }
+			// Shift .bak.{i} -> .bak.{i+1} for i = N-1 down to 1.
+			for (let i = N - 1; i >= 1; i--) {
+				try {
+					if (fs.existsSync(this.bakPath(i))) {
+						fs.renameSync(this.bakPath(i), this.bakPath(i + 1));
+					}
+				} catch { /* non-fatal */ }
+			}
+			// Copy current sessions.json → .bak.1 (copy, not rename — saveNow will
+			// overwrite via tmp+rename and we want to keep the current file present
+			// in case the new write fails).
+			try { fs.copyFileSync(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
+		} catch {
+			// Backup failure must never block a save.
+		}
+	}
+
+	/** True if the most recent saveNow() refused to write due to the stale-snapshot guard. */
+	isStaleGuardTripped(): boolean {
+		return this.staleGuardTripped;
+	}
+
+	/** Epoch read from disk at construction. Test-visible. */
+	getLoadedEpoch(): number {
+		return this.loadedEpoch;
+	}
+
+	/** Epoch most recently written to disk this process. Test-visible. */
+	getWrittenEpoch(): number {
+		return this.writtenEpoch;
 	}
 
 	/** Write sessions to disk immediately (synchronous). */
 	private saveNow(): void {
+		if (this.staleGuardTripped) return;
 		try {
 			if (!fs.existsSync(this.storeDir)) {
 				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
-			const data = Array.from(this.sessions.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+
+			// Stale-snapshot guard: if the on-disk epoch is HIGHER than what we
+			// last loaded AND we have not yet written anything this process, refuse
+			// — we'd be clobbering newer state (e.g. cloud-sync / antivirus / manual
+			// restore from .pre-migration backup under a running gateway).
+			const onDiskEpoch = this.peekDiskEpoch();
+			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
+				console.error(
+					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
+					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
+					`recovery (cloud sync / antivirus / .pre-migration). ` +
+					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
+					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
+				);
+				this.staleGuardTripped = true;
+				return;
+			}
+
+			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
+			const payload = {
+				version: 2 as const,
+				epoch: nextEpoch,
+				sessions: Array.from(this.sessions.values()),
+			};
+			const json = JSON.stringify(payload, null, 2);
+
+			// Rotate .bak (keep N=5) before writing — best-effort.
+			this.rotateBackups();
+
+			// Atomic: write to .tmp, fsync, rename.
+			const tmp = `${this.storeFile}.tmp`;
+			const fd = fs.openSync(tmp, "w");
+			try {
+				fs.writeFileSync(fd, json, "utf-8");
+				try { fs.fsyncSync(fd); } catch { /* fsync may fail on Windows network shares — non-fatal */ }
+			} finally {
+				fs.closeSync(fd);
+			}
+			fs.renameSync(tmp, this.storeFile);
+			this.writtenEpoch = nextEpoch;
 		} catch (err) {
 			console.error("[session-store] Failed to save sessions:", err);
+			// Best-effort cleanup of stray .tmp from a failed write.
+			try {
+				const tmp = `${this.storeFile}.tmp`;
+				if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+			} catch { /* ignore */ }
 		}
+	}
+
+	/**
+	 * Walk `agentSessionsRoot` for `*.jsonl` transcripts that are not referenced
+	 * by any persisted session (`agentSessionFile`) and whose mtime is newer
+	 * than the most recent `lastActivity` in the store. Useful as a divergence
+	 * signal after crash recovery — the agent CLI may have written transcripts
+	 * that never made it into the session-metadata index.
+	 *
+	 * Does NOT auto-import. Caps the returned `paths` at `maxPaths` (default 50)
+	 * and emits at most 20 `[session-store] WARN: orphaned transcript: …` log
+	 * lines.
+	 */
+	scanOrphanedTranscripts(
+		agentSessionsRoot: string,
+		options: { mostRecentLastActivity?: number; maxPaths?: number; maxLogLines?: number } = {},
+	): { count: number; paths: string[] } {
+		const maxPaths = options.maxPaths ?? 50;
+		const maxLogLines = options.maxLogLines ?? 20;
+		const threshold = options.mostRecentLastActivity ?? this.computeMostRecentLastActivity();
+
+		const tracked = new Set<string>();
+		for (const s of this.sessions.values()) {
+			if (s.agentSessionFile) {
+				tracked.add(path.resolve(s.agentSessionFile));
+			}
+		}
+
+		const paths: string[] = [];
+		let count = 0;
+		let logged = 0;
+
+		const walk = (dir: string) => {
+			let entries: fs.Dirent[];
+			try {
+				entries = fs.readdirSync(dir, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const ent of entries) {
+				const full = path.join(dir, ent.name);
+				if (ent.isDirectory()) {
+					walk(full);
+					continue;
+				}
+				if (!ent.isFile()) continue;
+				if (!ent.name.endsWith(".jsonl")) continue;
+				const resolved = path.resolve(full);
+				if (tracked.has(resolved)) continue;
+				try {
+					const st = fs.statSync(full);
+					if (st.mtimeMs < threshold) continue;
+				} catch {
+					continue;
+				}
+				count++;
+				if (paths.length < maxPaths) paths.push(resolved);
+				if (logged < maxLogLines) {
+					console.warn(`[session-store] WARN: orphaned transcript: ${resolved}`);
+					logged++;
+				}
+			}
+		};
+
+		try {
+			if (fs.existsSync(agentSessionsRoot)) walk(agentSessionsRoot);
+		} catch {
+			// non-fatal — return whatever we collected
+		}
+
+		return { count, paths };
+	}
+
+	private computeMostRecentLastActivity(): number {
+		let max = 0;
+		for (const s of this.sessions.values()) {
+			if (typeof s.lastActivity === "number" && s.lastActivity > max) max = s.lastActivity;
+		}
+		return max;
 	}
 
 	/** Schedule a debounced save — coalesces rapid writes into one disk flush. */
