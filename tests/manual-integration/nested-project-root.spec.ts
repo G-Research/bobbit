@@ -226,7 +226,7 @@ test.describe("Nested project root — integration", () => {
 	});
 
 	// 1.  Project registers at the nested folder (not normalized to repo root).
-	test("project registers with rootPath = nested subdirectory", async () => {
+	test("project registers with rootPath = nested subdirectory", async ({ page }) => {
 		expect(projectId).toBeTruthy();
 
 		const res = await api(gw, `/api/projects/${projectId}`);
@@ -243,10 +243,16 @@ test.describe("Nested project root — integration", () => {
 		expect(Array.isArray(cfg.components)).toBe(true);
 		expect(cfg.components).toHaveLength(1);
 		expect(cfg.components[0].name).toBe("Nested Project");
+
+		// UI visibility: the user sees the project listed in the sidebar.
+		await page.goto(`${gw.base}/?token=${gw.token}`);
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText("Nested Project").first().waitFor({ timeout: 10_000 });
 	});
 
 	// 2.  A session creates a worktree at the GIT-REPO level and offsets cwd correctly.
-	test("session worktree is at the repo level; cwd is offset into x/project-root", async ({}, ti) => {
+	test("session worktree is at the repo level; cwd is offset into x/project-root", async ({ page }, ti) => {
 		ti.setTimeout(120_000);
 
 		const sessRes = await api(gw, "/api/sessions", {
@@ -299,6 +305,12 @@ test.describe("Nested project root — integration", () => {
 		}).trim();
 		expect(branch).not.toBe("master");
 		expect(branch.length).toBeGreaterThan(0);
+
+		// UI visibility: the user can navigate to the session and see the chat
+		// composer ready. This proves the offset cwd produced a usable session
+		// from an end-user perspective, not just on disk.
+		await page.goto(`${gw.base}/?token=${gw.token}#/session/${sessionId}`);
+		await page.waitForSelector("textarea", { timeout: 15_000 });
 	});
 
 	// 3.  A goal on this project provisions its worktree the same way.
@@ -348,14 +360,34 @@ test.describe("Nested project root — integration", () => {
 	// 4.  Archive marks the goal as archived (single-repo + autoStartTeam=false:
 	//     worktree cleanup is owned by session purge, not goal archive — see
 	//     archiveGoal() in goal-manager.ts).
-	test("archiving the goal succeeds and marks it archived", async ({}, ti) => {
-		ti.setTimeout(30_000);
+	test("archiving the goal succeeds and marks it archived", async ({ page }, ti) => {
+		ti.setTimeout(90_000);
 		expect(goalId).toBeTruthy();
 
-		const archiveRes = await api(gw, `/api/goals/${goalId}`, { method: "DELETE" });
-		expect([200, 204]).toContain(archiveRes.status);
+		// Drive the archive through the UI — a real user clicks the Archive
+		// button on the goal dashboard and confirms the modal.
+		await page.goto(`${gw.base}/?token=${gw.token}#/goal/${goalId}`);
+		const archiveBtn = page.locator('.nav button[title="Archive goal"]').first();
+		await archiveBtn.waitFor({ timeout: 15_000 });
+		await archiveBtn.click();
+		// Confirm dialog: Enter accepts the default destructive action.
+		await page.locator('text=Archive Goal').first().waitFor({ timeout: 5_000 });
+		await page.keyboard.press("Enter");
 
-		const after = await (await api(gw, `/api/goals/${goalId}`)).json();
-		expect(after.archived).toBe(true);
+		// Server-side state pinned via API: archived flag must flip.
+		const deadline = Date.now() + 30_000;
+		let archived = false;
+		while (Date.now() < deadline) {
+			const after = await (await api(gw, `/api/goals/${goalId}`)).json();
+			if (after.archived) { archived = true; break; }
+			await new Promise(r => setTimeout(r, 250));
+		}
+		expect(archived, "goal not marked archived after UI Archive click").toBe(true);
+
+		// UI visibility: project still renders (no broken state after archive).
+		await page.goto(`${gw.base}/?token=${gw.token}`);
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText("Nested Project").first().waitFor({ timeout: 10_000 });
 	});
 });
