@@ -154,9 +154,15 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const role = incoming.role;
 			let messages = state.messages.slice();
 
-			// Drop any prior server entry with the same id (replace-by-id).
+			// Drop any prior SERVER entry with the same id (replace-by-id).
+			// Optimistic rows are reconciled separately below — if we drop
+			// them here, the optimistic→server in-place upgrade can't find a
+			// match and we end up appending a fresh server row instead of
+			// replacing in place. The optimistic id matches the live echo's
+			// id only when the agent (or in tests, the bridge) reflects the
+			// optimistic id back, so this filter is essential.
 			if (typeof incoming.id === "string" && incoming.id.length > 0) {
-				const idx = messages.findIndex((m) => m.id === incoming.id);
+				const idx = messages.findIndex((m) => m.id === incoming.id && m._origin !== "optimistic");
 				if (idx !== -1) {
 					messages.splice(idx, 1);
 				}
@@ -164,31 +170,55 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 			// Reconcile user echoes against optimistic rows: id-match, then
 			// text-fallback when the optimistic id matches `^optimistic_`.
+			//
+			// In-place upgrade: when we find an optimistic match we REPLACE the
+			// row at the same index, preserving the optimistic `id` and `_order`.
+			// This keeps Lit's `repeat()` render key stable across the
+			// optimistic→server handoff so the <user-message> DOM element is
+			// updated in place rather than torn down + recreated. Without this
+			// the user-message bubble flickers through 2-3 distinct DOM
+			// elements per send (caught by the transcript-fidelity harness +
+			// pinned by tests/e2e/ui/regressions/user-message-render-churn.spec.ts).
+			let replacedOptimistic = false;
 			if (role === "user" || role === "user-with-attachments") {
-				const idMatchIdx = messages.findIndex(
+				let matchIdx = messages.findIndex(
 					(m) =>
 						m._origin === "optimistic" &&
 						typeof incoming.id === "string" &&
 						m.id === incoming.id,
 				);
-				if (idMatchIdx !== -1) {
-					messages.splice(idMatchIdx, 1);
-				} else {
+				if (matchIdx === -1) {
 					const text = extractText(incoming);
-					const textIdx = messages.findIndex(
+					matchIdx = messages.findIndex(
 						(m) =>
 							m._origin === "optimistic" &&
 							typeof m.id === "string" &&
 							m.id.startsWith("optimistic_") &&
 							extractText(m) === text,
 					);
-					if (textIdx !== -1) {
-						messages.splice(textIdx, 1);
-					}
+				}
+				if (matchIdx !== -1) {
+					const optimistic = messages[matchIdx];
+					// Promote the optimistic row to server origin while keeping
+					// the original id so the render key is stable. Update _order
+					// to the live event's seq so the row sorts correctly relative
+					// to subsequent server messages (the optimistic _order is a
+					// tail-sentinel meant only for "waiting for echo" placement).
+					const merged = {
+						...incoming,
+						id: optimistic.id,
+						_origin: "server" as const,
+						_order: seq,
+						_insertionTick: tick,
+					};
+					messages[matchIdx] = merged as OrderedMessage;
+					replacedOptimistic = true;
 				}
 			}
 
-			messages.push(stamp(incoming, "server", seq, tick));
+			if (!replacedOptimistic) {
+				messages.push(stamp(incoming, "server", seq, tick));
+			}
 			return {
 				messages: sortMessages(messages),
 				nextTick: tick + 1,

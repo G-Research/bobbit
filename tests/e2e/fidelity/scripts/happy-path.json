@@ -1,0 +1,19 @@
+{
+  "name": "happy-path",
+  "description": "Single user prompt, single assistant text reply, idle. The simplest possible end-to-end shape — proves the harness can drive a real session through the real reducer/WS.",
+  "firstPaintBudgetMs": 3000,
+  "idleSettleBudgetMs": 1500,
+  "steps": [
+    { "on": "user_prompt" },
+    { "at": "+5ms",   "emit": { "type": "session_status", "status": "streaming" } },
+    { "at": "+10ms",  "emit": { "type": "agent_start" } },
+    { "at": "+50ms",  "emit": { "type": "message_end",
+      "message": {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Hello from the scripted agent." }]
+      }
+    }},
+    { "at": "+60ms",  "emit": { "type": "agent_end" } },
+    { "at": "+70ms",  "emit": { "type": "session_status", "status": "idle" } }
+  ]
+}

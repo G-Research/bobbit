@@ -50,6 +50,10 @@ const ALLOW_LIST = new Set([
 	"mock-agent-core.mjs",
 	"mock-agent.mjs",
 	"port-test-helper.mjs",
+	// Fidelity harness — script time-base requires real setTimeout (a script
+	// step `at: "+50ms"` is *intentionally* a wall-clock delay; that's the
+	// thing being measured). Treat the bridge as harness infrastructure.
+	"scripted-agent-bridge.mjs",
 ]);
 
 // Patterns that count as a "sleep". Each pattern must match exactly one

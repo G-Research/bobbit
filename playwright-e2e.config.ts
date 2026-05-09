@@ -90,7 +90,10 @@ export default defineConfig({
 			name: "browser",
 			testDir: "./tests/e2e",
 			testMatch: [
-				"**/ui/*.spec.ts",
+				"**/ui/**/*.spec.ts",
+				"**/fidelity/*.spec.ts",
+				"**/fidelity/**/*.spec.ts",
+				"**/regressions/**/*.spec.ts",
 				"**/session-lifecycle-ui*.spec.ts",
 				"**/mcp-tool-permission*.spec.ts",
 				"**/mcp-integration*.spec.ts",

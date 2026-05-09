@@ -161,6 +161,17 @@ export class UserMessage extends LitElement {
 		this.style.display = "block";
 	}
 
+	override updated(): void {
+		// Stable join key for outcome-only test harnesses (transcript fidelity
+		// recorder, etc). The id is taken straight off the underlying message;
+		// when missing (optimistic / pre-server-confirm), we synthesise from
+		// timestamp so consecutive renders of the same logical message keep
+		// the same key.
+		const m: any = this.message;
+		const id = (typeof m?.id === "string" && m.id) || (m?.timestamp ? `synth:user:${m.timestamp}` : "");
+		if (id) this.setAttribute("data-message-id", id);
+	}
+
 	override render() {
 		const rawContent =
 			typeof this.message.content === "string"
@@ -202,6 +213,13 @@ export class UserMessage extends LitElement {
 
 @customElement("assistant-message")
 export class AssistantMessage extends LitElement {
+	/** Outcome-only stable join key for test harnesses. See UserMessage.updated(). */
+	override updated(): void {
+		const m: any = this.message;
+		const id = (typeof m?.id === "string" && m.id) || (m?.timestamp ? `synth:assistant:${m.timestamp}` : "");
+		if (id) this.setAttribute("data-message-id", id);
+	}
+
 	@property({ type: Object }) message!: AssistantMessageType;
 	@property({ type: Array }) tools?: AgentTool<any>[];
 	@property({ type: Object }) pendingToolCalls?: Set<string>;

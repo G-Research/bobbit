@@ -43,6 +43,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Add a UI E2E test** → `tests/e2e/ui/`, import `../gateway-harness.js`; see `session-interactions.spec.ts`.
 - **Add a Tier 2.5 video-capturing E2E test** → [docs/testing-tier-2-5.md](docs/testing-tier-2-5.md).
 - **Assert tail-chat / scroll-pin** → helpers in `tests/e2e/ui/tail-chat-helpers.ts`; outcome-only. See [tail-chat-redesign.md](docs/design/tail-chat-redesign.md).
+- **Run / extend the transcript-fidelity harness** → scripts in `tests/e2e/fidelity/scripts/*.json`, ScriptedAgentBridge, DOMRecorder, oracle. Failures auto-capture stand-alone reproducer specs under `test-results/fidelity-repros/`. See [transcript-fidelity-harness.md](docs/design/transcript-fidelity-harness.md).
 
 ### Server / API
 - **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [rest-api.md](docs/rest-api.md).
@@ -197,6 +198,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Markdown not rendering in chat / proposal panel** — call `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts`.
 - **Header toast vs proposal toast testid collision** — `header-toast` vs `proposal-toast`; two slots in `src/app/render.ts`.
 - **Mobile annotation popover doesn't open** — `_onMobileAddComment` must set `_popoverReferenceRect` before mount.
+- **`<user-message>` flickers through 2-3 DOM elements per send (optimistic→confirmed handoff churn)** — fixed by in-place upgrade in `message-reducer.ts` (preserves optimistic id + render key). Pinned by `tests/e2e/ui/regressions/user-message-render-churn.spec.ts`.
 
 ### QA / preview / tier-2.5 / images
 - **QA screenshot token bloat** — extension must emit `[screenshot_file]` not `[screenshot_base64]`.

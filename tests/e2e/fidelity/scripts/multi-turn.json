@@ -1,0 +1,34 @@
+{
+  "name": "multi-turn",
+  "description": "Three user prompts in sequence, each followed by an assistant reply. Exercises session re-entry — the script's `on: user_prompt` matchers run sequentially so the bridge cycles through three turns. The harness drives three sendMessage() calls.",
+  "firstPaintBudgetMs": 3000,
+  "idleSettleBudgetMs": 1500,
+  "steps": [
+    { "on": "user_prompt" },
+    { "at": "+5ms",   "emit": { "type": "session_status", "status": "streaming" } },
+    { "at": "+10ms",  "emit": { "type": "agent_start" } },
+    { "at": "+30ms",  "emit": { "type": "message_end",
+      "message": { "role": "assistant",
+        "content": [{ "type": "text", "text": "Reply one." }] } } },
+    { "at": "+40ms",  "emit": { "type": "agent_end" } },
+    { "at": "+50ms",  "emit": { "type": "session_status", "status": "idle" } },
+
+    { "on": "user_prompt" },
+    { "at": "+5ms",   "emit": { "type": "session_status", "status": "streaming" } },
+    { "at": "+10ms",  "emit": { "type": "agent_start" } },
+    { "at": "+30ms",  "emit": { "type": "message_end",
+      "message": { "role": "assistant",
+        "content": [{ "type": "text", "text": "Reply two." }] } } },
+    { "at": "+40ms",  "emit": { "type": "agent_end" } },
+    { "at": "+50ms",  "emit": { "type": "session_status", "status": "idle" } },
+
+    { "on": "user_prompt" },
+    { "at": "+5ms",   "emit": { "type": "session_status", "status": "streaming" } },
+    { "at": "+10ms",  "emit": { "type": "agent_start" } },
+    { "at": "+30ms",  "emit": { "type": "message_end",
+      "message": { "role": "assistant",
+        "content": [{ "type": "text", "text": "Reply three." }] } } },
+    { "at": "+40ms",  "emit": { "type": "agent_end" } },
+    { "at": "+50ms",  "emit": { "type": "session_status", "status": "idle" } }
+  ]
+}

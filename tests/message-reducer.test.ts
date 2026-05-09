@@ -135,7 +135,14 @@ describe("message-reducer", () => {
 		assert.ok(s.messages[1]._order > Number.MAX_SAFE_INTEGER - 1_000_000_000);
 	});
 
-	it("(6) optimistic → echo (id match)", () => {
+	it("(6) optimistic → echo (id match) replaces in place", () => {
+		// In-place upgrade: the optimistic row's id is preserved so Lit's
+		// repeat() render key is stable across the optimistic→server
+		// handoff. Without this the <user-message> DOM element gets torn
+		// down + recreated, which the transcript-fidelity harness flagged
+		// via the user-message-render-churn regression. _origin
+		// transitions to "server" and _order updates to the live seq so
+		// the row sorts correctly relative to subsequent server messages.
 		const opt = { ...userMsg("optimistic_1", "hi") };
 		const s = applyAll([
 			{ type: "optimistic-prompt", message: opt },
@@ -143,17 +150,23 @@ describe("message-reducer", () => {
 		]);
 		assert.strictEqual(s.messages.length, 1);
 		assert.strictEqual(s.messages[0].id, "optimistic_1");
-		assert.strictEqual(s.messages[0]._order, 1);
 		assert.strictEqual(s.messages[0]._origin, "server");
+		assert.strictEqual(s.messages[0]._order, 1);
 	});
 
-	it("(7) optimistic → echo (text fallback)", () => {
+	it("(7) optimistic → echo (text fallback) preserves optimistic id", () => {
+		// The server echo arrives with a different id (`srv1`) but matches
+		// an `optimistic_*` row by text. We replace in place, KEEPING the
+		// optimistic id so the render key is stable. The merged row carries
+		// the server message's other fields, `_origin: "server"`, and
+		// _order = live seq.
 		const s = applyAll([
 			{ type: "optimistic-prompt", message: userMsg("optimistic_1", "hi") },
 			liveMessageEnd(1, userMsg("srv1", "hi")),
 		]);
 		assert.strictEqual(s.messages.length, 1);
-		assert.strictEqual(s.messages[0].id, "srv1");
+		assert.strictEqual(s.messages[0].id, "optimistic_1");
+		assert.strictEqual(s.messages[0]._origin, "server");
 		assert.strictEqual(s.messages[0]._order, 1);
 	});
 

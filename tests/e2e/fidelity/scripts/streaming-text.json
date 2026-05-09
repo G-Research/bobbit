@@ -1,0 +1,31 @@
+{
+  "name": "streaming-text",
+  "description": "Agent streams text via N message_update deltas, then commits with message_end. Exercises the StreamingMessageContainer + message-list dual-render handoff that historically races on message_end (see docs/design/snapshot-live-race-fix.md).",
+  "firstPaintBudgetMs": 3000,
+  "idleSettleBudgetMs": 1500,
+  "steps": [
+    { "on": "user_prompt" },
+    { "at": "+5ms",   "emit": { "type": "session_status", "status": "streaming" } },
+    { "at": "+10ms",  "emit": { "type": "agent_start" } },
+    { "at": "+30ms",  "emit": { "type": "message_update",
+      "message": { "id": "asst-1", "role": "assistant",
+        "content": [{ "type": "text", "text": "The" }] } } },
+    { "at": "+60ms",  "emit": { "type": "message_update",
+      "message": { "id": "asst-1", "role": "assistant",
+        "content": [{ "type": "text", "text": "The quick" }] } } },
+    { "at": "+90ms",  "emit": { "type": "message_update",
+      "message": { "id": "asst-1", "role": "assistant",
+        "content": [{ "type": "text", "text": "The quick brown" }] } } },
+    { "at": "+120ms", "emit": { "type": "message_update",
+      "message": { "id": "asst-1", "role": "assistant",
+        "content": [{ "type": "text", "text": "The quick brown fox" }] } } },
+    { "at": "+150ms", "emit": { "type": "message_update",
+      "message": { "id": "asst-1", "role": "assistant",
+        "content": [{ "type": "text", "text": "The quick brown fox jumps" }] } } },
+    { "at": "+180ms", "emit": { "type": "message_end",
+      "message": { "id": "asst-1", "role": "assistant",
+        "content": [{ "type": "text", "text": "The quick brown fox jumps over the lazy dog." }] } } },
+    { "at": "+200ms", "emit": { "type": "agent_end" } },
+    { "at": "+220ms", "emit": { "type": "session_status", "status": "idle" } }
+  ]
+}

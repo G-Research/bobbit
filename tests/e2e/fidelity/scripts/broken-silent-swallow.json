@@ -1,0 +1,19 @@
+{
+  "name": "broken-silent-swallow",
+  "description": "Deliberately broken script: announces an assistant message via message_update but never emits the matching message_end, then settles idle. Models the production class of bugs where a streaming message gets dropped between snapshot/live merge. The oracle MUST catch this — the assistant slot is announced (delta visible) then either the slot is finalised empty or the streaming-container clears it without committing to the transcript.",
+  "firstPaintBudgetMs": 3000,
+  "idleSettleBudgetMs": 1500,
+  "steps": [
+    { "on": "user_prompt" },
+    { "at": "+5ms",  "emit": { "type": "session_status", "status": "streaming" } },
+    { "at": "+10ms", "emit": { "type": "agent_start" } },
+    { "at": "+30ms", "emit": { "type": "message_update",
+      "message": {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Streaming this then dropping it..." }]
+      }
+    }},
+    { "at": "+200ms", "emit": { "type": "agent_end" } },
+    { "at": "+220ms", "emit": { "type": "session_status", "status": "idle" } }
+  ]
+}
