@@ -268,33 +268,35 @@ export function startCanvasEyeAnimation(
 	let rafId = 0;
 	let lastKey = "";
 
-	// Phase clock: derive pct from the *document timeline*, which is what CSS
-	// animations use as their wall clock. Using performance.now() - mountTime
-	// would only match CSS if the canvas mounted at page-load (T=0); on the
-	// roles page canvases mount several seconds after load (after fetchRoles
-	// resolves), so a mount-relative clock drifts from CSS by exactly the
-	// mount delay. document.timeline.currentTime starts at page load and
-	// matches CSS's notion of time exactly.
-	function readDelayMs(): number {
-		const raw = getComputedStyle(canvas).animationDelay;
-		if (!raw) return 0;
-		// CSS may list multiple comma-separated values; the eye animation is the
-		// only one on this element so the first value is what we want.
-		const first = raw.split(",")[0].trim();
-		const m = /^(-?\d+(?:\.\d+)?)(s|ms)$/.exec(first);
-		if (!m) return 0;
-		return m[2] === "s" ? parseFloat(m[1]) * 1000 : parseFloat(m[1]);
+	// Single source of truth: the canvas already has its own CSS animation
+	// (blob-busy-move-canvas / blob-idle-eyes-canvas) with the right
+	// animation-delay (--bobbit-idle-phase) applied. Reading that animation's
+	// currentTime gives us the *exact same* clock value CSS uses to evaluate
+	// every other animation on the same element — including sibling
+	// accessories (magnifier-depth-idle) that share the same delay.
+	//
+	// This bypasses every clock-arithmetic edge case (mount time, document
+	// timeline epoch, negative-delay semantics): we don't compute the phase,
+	// we observe the same one CSS observes.
+	function readPhasePct(): number {
+		const anims = canvas.getAnimations();
+		// Pick the 10s-cycle animation; its currentTime already accounts for
+		// animation-delay (negative delays make it start positive).
+		let anim: Animation | undefined;
+		for (const a of anims) {
+			const dur = (a.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
+			if (dur === cycleDurationMs) { anim = a; break; }
+		}
+		if (!anim || anim.currentTime == null) return 0;
+		const raw = typeof anim.currentTime === "number"
+			? anim.currentTime
+			: Number((anim.currentTime as CSSNumericValue).to("ms").value);
+		const wrapped = ((raw % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+		return (wrapped / cycleDurationMs) * 100;
 	}
 
 	function tick() {
-		const delayMs = readDelayMs();
-		const tlc = document.timeline.currentTime;
-		const now = typeof tlc === "number"
-			? tlc
-			: tlc != null ? Number((tlc as CSSNumericValue).to("ms").value) : performance.now();
-		const active = now - delayMs;
-		const wrapped = ((active % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
-		const pct = (wrapped / cycleDurationMs) * 100;
+		const pct = readPhasePct();
 		let frame = sequence[0];
 		for (let i = sequence.length - 1; i >= 0; i--) {
 			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }
