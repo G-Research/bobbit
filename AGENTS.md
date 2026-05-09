@@ -47,6 +47,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 ### Server / API
 - **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [rest-api.md](docs/rest-api.md).
 - **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, `RpcBridge` method.
+- **Broadcast a WS event** → session-scoped (transcript, ordered, replayed on resume) → `emitSessionEvent(session, event)`; project-wide goal-state snapshot → `broadcastToAll(event)`. See [internals.md#event-stream-ordering--dedup](docs/internals.md#event-stream-ordering--dedup).
 - **Add a tool** → `defaults/tools/<group>/` (or project override `.bobbit/config/tools/<group>/`); MCP auto-discovered from `.mcp.json`. **On-wire budget** — `pi.registerTool({ description })` ≤ 150 chars / ≤ 15 words (no examples, no anti-patterns); per-parameter `description` inside `Type.Object({...})` ≤ 80 chars sentence fragment, drop entirely when the name is self-explanatory. Detail belongs in **off-wire** YAML `docs` / `detail_docs`. Pinned by `tests/tool-description-budget.test.ts`. See [internals.md#mcp-tool-documentation](docs/internals.md#mcp-tool-documentation).
 - **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/`. See [skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
 - **Add a blocking tool** → [docs/blocking-tools.md](docs/blocking-tools.md). (`ask_user_choices` is non-blocking — [docs/non-blocking-ask.md](docs/non-blocking-ask.md).)
