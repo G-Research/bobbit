@@ -189,8 +189,16 @@ export interface ChatBlobOptions {
 // CANVAS EYE ANIMATION
 // ============================================================================
 
-/** CSS scale factor used by .bobbit-blob__sprite */
-const CSS_SCALE = 4;
+/**
+ * Oversample factor for the canvas backing buffer (per sprite pixel, before DPR).
+ * The canvas displays at CSS 40×36 (BODY_WIDTH/HEIGHT × 4) but draws into a
+ * BODY × HI × dpr buffer. The browser then bilinearly downsamples to screen.
+ * Each sprite pixel becomes a uniformly-coloured HI×HI block, so at rest the
+ * downsample reproduces the source colour exactly — but during rotation /
+ * non-uniform scale the bilinear filter smooths jagged 1–2 device-pixel jitter
+ * that nearest-neighbor (image-rendering: pixelated) would otherwise produce.
+ * This is the same technique renderSidebarBobbitCanvas uses. */
+const CANVAS_HI = 8;
 
 /** Pre-render all unique eye frames for an eye sequence as SpritePixel arrays */
 function buildEyePixelCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<string, SpritePixel[]> {
@@ -246,12 +254,12 @@ export function startCanvasEyeAnimation(
 ): () => void {
 	const cache = buildEyePixelCache(palette, sequence);
 
-	// Size canvas backing to exact device pixel count
+	// Oversample: each sprite pixel → (HI × dpr) device pixels in the buffer.
+	// CSS displays at 40×36 (BODY × CSS_SCALE); browser bilinearly downsamples
+	// from buffer → screen, smoothing rotations without softening at-rest pixels.
 	const dpr = window.devicePixelRatio || 1;
-	const cssW = BODY_WIDTH * CSS_SCALE;
-	const cssH = BODY_HEIGHT * CSS_SCALE;
-	const devW = Math.round(cssW * dpr);
-	const devH = Math.round(cssH * dpr);
+	const devW = Math.round(BODY_WIDTH * CANVAS_HI * dpr);
+	const devH = Math.round(BODY_HEIGHT * CANVAS_HI * dpr);
 	canvas.width = devW;
 	canvas.height = devH;
 	// CSS dimensions are handled by the canvas.bobbit-blob__sprite rule (40×36px)
@@ -334,8 +342,8 @@ export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): Templ
 				const pixels = cache.get("center-false");
 				if (pixels) {
 					const dpr = window.devicePixelRatio || 1;
-					const devW = Math.round(BODY_WIDTH * CSS_SCALE * dpr);
-					const devH = Math.round(BODY_HEIGHT * CSS_SCALE * dpr);
+					const devW = Math.round(BODY_WIDTH * CANVAS_HI * dpr);
+					const devH = Math.round(BODY_HEIGHT * CANVAS_HI * dpr);
 					el.width = devW;
 					el.height = devH;
 					const ctx = el.getContext("2d")!;

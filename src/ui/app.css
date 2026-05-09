@@ -4170,7 +4170,13 @@ canvas.bobbit-blob__sprite {
 	transform-origin: 20px 32px;
 	transform: none;
 	box-shadow: none !important;
-	image-rendering: pixelated;
+	/* Canvas is oversampled (BODY × 8 × dpr) and bilinearly downsampled by the
+	   browser. Each sprite pixel is a uniform 8×8 block, so at rest the bilinear
+	   filter reproduces source colours exactly — but during rotation /
+	   non-uniform scale (busy hop frames) it smooths jagged 1–2 device-pixel
+	   jitter that nearest-neighbor (image-rendering: pixelated) produces, which
+	   was visible as eye glitching during the right-hop phase. */
+	image-rendering: auto;
 	/* Default (busy) animation — swap to canvas variants */
 	animation:
 		blob-busy-move-canvas 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
