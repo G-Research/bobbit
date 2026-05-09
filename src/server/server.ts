@@ -1573,7 +1573,14 @@ async function handleApiRoute(
 	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
 		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
-		json({ status: "ok", sessions: sessionManager.listSessions().length, localhost: isLocalhost, aigw: !!getAigwUrl(preferencesStore), setupComplete: isSetupComplete() });
+		json({
+			status: "ok",
+			sessions: sessionManager.listSessions().length,
+			localhost: isLocalhost,
+			aigw: !!getAigwUrl(preferencesStore),
+			setupComplete: isSetupComplete(),
+			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
+		});
 		return;
 	}
 
