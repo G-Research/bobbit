@@ -268,13 +268,13 @@ export function startCanvasEyeAnimation(
 	let rafId = 0;
 	let lastKey = "";
 
-	// Phase clock: derive pct directly from performance.now() + the canvas's
-	// animation-delay. Negative delay (e.g. "-6.5s" set via --bobbit-idle-phase)
-	// shifts the phase forward. This bypasses Animation.currentTime semantics
-	// around negative delays — the CSS animation phase is fully determined by
-	// (wallclock - delay), so we compute it the same way and stay locked to
-	// every other CSS animation on the same element with the same delay.
-	const mountTime = performance.now();
+	// Phase clock: derive pct from the *document timeline*, which is what CSS
+	// animations use as their wall clock. Using performance.now() - mountTime
+	// would only match CSS if the canvas mounted at page-load (T=0); on the
+	// roles page canvases mount several seconds after load (after fetchRoles
+	// resolves), so a mount-relative clock drifts from CSS by exactly the
+	// mount delay. document.timeline.currentTime starts at page load and
+	// matches CSS's notion of time exactly.
 	function readDelayMs(): number {
 		const raw = getComputedStyle(canvas).animationDelay;
 		if (!raw) return 0;
@@ -288,12 +288,11 @@ export function startCanvasEyeAnimation(
 
 	function tick() {
 		const delayMs = readDelayMs();
-		// active = elapsed-since-mount - delay. Negative delay (e.g. -6500)
-		// makes active = elapsed + 6500, so the cycle starts at the desired
-		// phase. Modulo keeps it bounded; the (+cycle)%cycle guards against
-		// any transient negative active time when the page is just mounting.
-		const elapsed = performance.now() - mountTime;
-		const active = elapsed - delayMs;
+		const tlc = document.timeline.currentTime;
+		const now = typeof tlc === "number"
+			? tlc
+			: tlc != null ? Number((tlc as CSSNumericValue).to("ms").value) : performance.now();
+		const active = now - delayMs;
 		const wrapped = ((active % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
 		const pct = (wrapped / cycleDurationMs) * 100;
 		let frame = sequence[0];
