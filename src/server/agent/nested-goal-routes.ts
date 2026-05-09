@@ -40,6 +40,13 @@ export interface NestedGoalRouteDeps {
 	getGoalManagerForGoal(goalId: string): GoalManager;
 	readBody(req: http.IncomingMessage): Promise<any>;
 	json(body: unknown, status?: number): void;
+	/**
+	 * Canonical descriptive-error response — `{ error, stack, ...extra }`
+	 * (post `6d422ca6`). Used for caught exceptions so clients receive a
+	 * stack trace; structured-validation errors keep using `json(...)`
+	 * with their `code` payload.
+	 */
+	jsonError(status: number, err: unknown, extra?: Record<string, unknown>): void;
 	broadcastToAll(event: any): void;
 }
 
@@ -101,6 +108,7 @@ export async function tryHandleNestedGoalRoute(
 		getGoalManagerForGoal,
 		readBody,
 		json,
+		jsonError,
 		broadcastToAll,
 	} = deps;
 
@@ -353,10 +361,8 @@ export async function tryHandleNestedGoalRoute(
 					});
 			}
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
 			// createGoal throws on cycle violations and missing parent.
-			if (/cycle|ancestor/i.test(msg)) { json({ error: msg }, 400); return true; }
-			json({ error: msg }, 400);
+			jsonError(400, err);
 		}
 		return true;
 	}
@@ -493,7 +499,7 @@ export async function tryHandleNestedGoalRoute(
 				await goalManager.updateGoal(goal.id, { replanCount: (goal.replanCount ?? 0) + 1 });
 				json({ kind: verdict.kind, summary: verdict.summary, applied: true });
 			} catch (err) {
-				json({ error: err instanceof Error ? err.message : String(err) }, 500);
+				jsonError(500, err);
 			}
 			return true;
 		}
@@ -628,10 +634,9 @@ export async function tryHandleNestedGoalRoute(
 			}
 			json({ error: "Unexpected merge outcome", output: outcome.output ?? "" }, 500);
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
 			const code = (err as any)?.code;
-			if (code === "PARENT_MISMATCH") { json({ error: msg, code }, 400); return true; }
-			json({ error: msg }, 500);
+			if (code === "PARENT_MISMATCH") { jsonError(400, err, { code }); return true; }
+			jsonError(500, err);
 		}
 		return true;
 	}
@@ -754,7 +759,7 @@ export async function tryHandleNestedGoalRoute(
 			}
 			json({ applied: true, replanCount: newReplanCount, autoPaused: !!updates.paused });
 		} catch (err) {
-			json({ error: err instanceof Error ? err.message : String(err) }, 500);
+			jsonError(500, err);
 		}
 		return true;
 	}
