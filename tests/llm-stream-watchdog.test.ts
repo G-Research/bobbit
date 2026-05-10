@@ -21,6 +21,8 @@ const {
 	shouldSuppressDrainForStallRetry,
 	shouldSkipErrorMessageEnd,
 	resolveWatchdogConfigFromEnv,
+	surfaceStallNow,
+	armWatchdogAfterRetry,
 } = await import("../src/server/agent/stream-watchdog.ts");
 type WatchdogConfig = import("../src/server/agent/stream-watchdog.ts").WatchdogConfig;
 type WatchdogSession = import("../src/server/agent/stream-watchdog.ts").WatchdogSession;
@@ -89,6 +91,30 @@ const isAlive = () => true;
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+/**
+ * Simulate the SessionManager's `agent_end` handler dispatching a stashed
+ * silent-retry. After the production fix the watchdog no longer auto-re-prompts
+ * via `setTimeout(0)`; instead it stashes `pendingStallRetry` and the
+ * SessionManager's `agent_end` handler dispatches it once the agent has fully
+ * wound down. Tests that exercise multi-stall flows must mirror that hand-off.
+ *
+ * Returns once the re-prompt resolves or rejects so callers can await it.
+ */
+async function simulateSessionManagerAgentEnd(session: WatchdogSession): Promise<void> {
+	onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+	const pending = session.pendingStallRetry;
+	session.pendingStallRetry = undefined;
+	if (pending) {
+		try {
+			await session.rpcClient.prompt(pending.text, pending.images);
+			// armWatchdogAfterRetry equivalent
+			session.lastLlmFrameAt = Date.now();
+			session.awaitingLlmFrame = true;
+		} catch { /* tests that exercise rejection paths drive surfacing themselves */ }
+	}
+	session.suppressNextDrainForStallRetry = false;
+}
+
 describe("stream-watchdog: silent-retry then surface", () => {
 	/**
 	 * Wait for the next stall + re-prompt cycle. The watchdog's tick is
@@ -102,8 +128,8 @@ describe("stream-watchdog: silent-retry then surface", () => {
 		const deadline = Date.now() + 1000;
 		while (Date.now() < deadline) {
 			if (rpc.abortCalls > beforeAborts) {
-				// Abort fired — wait one microtask + setTimeout(0) for the re-prompt.
-				await sleep(15);
+				// Abort fired — give microtasks a chance to settle before assertions.
+				await sleep(5);
 				return;
 			}
 			await sleep(10);
@@ -123,8 +149,10 @@ describe("stream-watchdog: silent-retry then surface", () => {
 		// First stall (attempt 1) → silent retry.
 		await waitForStall(rpc, 0);
 		assert.equal(rpc.abortCalls, 1, "abort fired on first stall");
-		assert.equal(rpc.promptCalls.length, 1, "first re-prompt issued");
-		assert.equal(rpc.promptCalls[0].text, "hello world");
+		// Post-fix: watchdog stashes pendingStallRetry; the manager dispatches it.
+		assert.equal(rpc.promptCalls.length, 0, "watchdog itself does not re-prompt anymore");
+		assert.ok(session.pendingStallRetry, "pendingStallRetry stashed for manager dispatch");
+		assert.equal(session.pendingStallRetry?.text, "hello world");
 		assert.equal(session.streamStallRetries, 1);
 		assert.equal(session.lastTurnErrored, undefined, "silent retry must not set lastTurnErrored");
 		assert.equal(session.consecutiveErrorTurns ?? 0, 0, "silent retry must NOT bump consecutiveErrorTurns");
@@ -132,24 +160,29 @@ describe("stream-watchdog: silent-retry then surface", () => {
 
 		// Simulate the agent_end the abort emits. The watchdog must preserve
 		// streamStallRetries while the suppression flag is set. The manager
-		// then consumes the flag exactly once — mirror that here. The fresh
-		// agent_start arrives once the re-prompt's agent run begins; mirror
-		// that too so the watchdog re-arms (production flow: abort → agent_end
-		// → the setTimeout(0) re-prompt → fresh agent_start).
-		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+		// then dispatches the stashed re-prompt and consumes the flag exactly
+		// once — mirror that here. The fresh agent_start arrives once the
+		// re-prompt's agent run begins; mirror that too so the watchdog re-arms
+		// (production flow: abort → agent_end → manager dispatches re-prompt
+		// → fresh agent_start).
+		assert.equal(session.streamStallRetries, 1,
+			"retry counter set on first silent retry");
+		// SessionManager's agent_end handler dispatches the stashed re-prompt
+		// (post-fix: watchdog no longer auto-re-prompts via setTimeout).
+		await simulateSessionManagerAgentEnd(session);
+		assert.equal(rpc.promptCalls.length, 1, "first re-prompt dispatched by manager");
+		assert.equal(rpc.promptCalls[0].text, "hello world");
 		assert.equal(session.streamStallRetries, 1,
 			"retry counter preserved across agent_end during silent-retry");
-		session.suppressNextDrainForStallRetry = false;
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 
 		// Second stall (attempt 2) — silent retry.
 		await waitForStall(rpc, 1);
 		assert.equal(rpc.abortCalls, 2, "abort fired on second stall");
-		assert.equal(rpc.promptCalls.length, 2);
 		assert.equal(session.streamStallRetries, 2);
 		assert.equal(session.consecutiveErrorTurns ?? 0, 0, "silent retry #2 must NOT bump consecutiveErrorTurns");
-		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
-		session.suppressNextDrainForStallRetry = false;
+		await simulateSessionManagerAgentEnd(session);
+		assert.equal(rpc.promptCalls.length, 2, "second re-prompt dispatched by manager");
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 
 		// Third stall (attempt 3, > maxRetries) — surface to user.
@@ -321,17 +354,16 @@ describe("stream-watchdog: production-shape abort frames", () => {
 		const syntheticEvents: any[] = [];
 		session.emitSyntheticEvent = (ev) => syntheticEvents.push(ev);
 
-		// Drive 3 stalls.
+		// Drive 3 stalls. Post-fix: each silent retry stashes pendingStallRetry,
+		// then simulateSessionManagerAgentEnd dispatches it.
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 		const deadline = Date.now() + 2000;
 		while (Date.now() < deadline && rpc.abortCalls < 1) await sleep(10);
-		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
-		session.suppressNextDrainForStallRetry = false;
+		await simulateSessionManagerAgentEnd(session);
 		session.suppressNextErrorMessageEnd = false;
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 		while (Date.now() < deadline && rpc.abortCalls < 2) await sleep(10);
-		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
-		session.suppressNextDrainForStallRetry = false;
+		await simulateSessionManagerAgentEnd(session);
 		session.suppressNextErrorMessageEnd = false;
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 		while (Date.now() < deadline && rpc.abortCalls < 3) await sleep(10);
@@ -416,16 +448,36 @@ describe("stream-watchdog: silent-retry dispatch failure", () => {
 		// Arm.
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 
-		// Wait for the first stall + silent-retry re-prompt to fire (and reject).
-		// Bounded budget: timeoutMs (100) + 100ms = 200ms. Post-fix the watchdog
-		// must surface within this window. Pre-fix the watchdog would still be
-		// idling here (next stall only at ~timeoutMs * 2 = 200ms+ from the
-		// re-prompt's setTimeout(0) reset of lastLlmFrameAt).
+		// Wait for the first stall — watchdog stashes pendingStallRetry.
 		const budgetMs = FAST_CFG.timeoutMs + 100;
-		const deadline = Date.now() + budgetMs;
-		while (Date.now() < deadline) {
-			if (session.lastTurnErrored === true) break;
+		const stallDeadline = Date.now() + budgetMs;
+		while (Date.now() < stallDeadline) {
+			if (rpc.abortCalls >= 1) break;
 			await sleep(10);
+		}
+		assert.equal(rpc.abortCalls, 1, "silent-retry abort fired");
+		assert.ok(session.pendingStallRetry, "pendingStallRetry stashed for manager dispatch");
+
+		// Mirror SessionManager._dispatchPendingStallRetry: prompt() rejects
+		// because abortInFlight is still set; the manager's catch block calls
+		// surfaceStallNow synchronously.
+		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+		const pending = session.pendingStallRetry!;
+		session.pendingStallRetry = undefined;
+		session.suppressNextDrainForStallRetry = false;
+		try {
+			await session.rpcClient.prompt(pending.text, pending.images);
+			armWatchdogAfterRetry(session, FAST_CFG, isAlive);
+		} catch {
+			const ageMs = Date.now() - (session.lastLlmFrameAt ?? Date.now());
+			await surfaceStallNow(session, FAST_CFG, ageMs);
+		}
+
+		// At this point lastTurnErrored MUST be true — surfacing has happened
+		// synchronously in the catch path, not after another timeoutMs cycle.
+		const deadline = Date.now() + budgetMs;
+		while (Date.now() < deadline && session.lastTurnErrored !== true) {
+			await sleep(5);
 		}
 
 		// At least one re-prompt was attempted (the rejecting one).
@@ -511,8 +563,7 @@ describe("stream-watchdog: end-to-end production-shape flow", () => {
 		assert.equal(session.lastTurnErrored ?? false, false,
 			"silent retry must NOT mark turn as errored");
 
-		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
-		session.suppressNextDrainForStallRetry = false;
+		await simulateSessionManagerAgentEnd(session);
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 
 		// Stall #2.
@@ -522,8 +573,7 @@ describe("stream-watchdog: end-to-end production-shape flow", () => {
 		assert.equal(session.consecutiveErrorTurns ?? 0, 0,
 			"silent retry #2 must NOT bump");
 
-		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
-		session.suppressNextDrainForStallRetry = false;
+		await simulateSessionManagerAgentEnd(session);
 		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
 
 		// Stall #3 (surfaced). Watchdog bumps the counter manually,

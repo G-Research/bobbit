@@ -87,6 +87,8 @@ import {
 	shouldSkipErrorMessageEnd,
 	shouldSuppressUserEchoBroadcast,
 	shouldSuppressAbortBroadcast,
+	armWatchdogAfterRetry,
+	surfaceStallNow,
 } from "./stream-watchdog.js";
 import { ToolRetryHarness } from "./tool-retry-harness.js";
 
@@ -222,6 +224,13 @@ export interface SessionInfo {
 	 *  next `agent_end` consumes this and skips the normal drain/idle-broadcast
 	 *  path so the watchdog can re-dispatch the prompt without the queue racing it. */
 	suppressNextDrainForStallRetry?: boolean;
+	/** Stashed by `stream-watchdog.handleStreamStall` and consumed by this
+	 *  manager's `agent_end` handler, which dispatches the re-prompt only after
+	 *  the agent has fully wound down. See stream-watchdog.ts for the rationale. */
+	pendingStallRetry?: { text: string; images?: any; attempt: number; total: number };
+	/** Set after a successful re-prompt dispatch; logged by `stream-watchdog.onAgentEvent`
+	 *  on the next clean `agent_end` so successful silent recoveries are greppable. */
+	silentRetrySuccessLogPending?: { attempt: number; total: number };
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
 	pendingAutoRetryTimer?: ReturnType<typeof setTimeout>;
 	/** Whether tool calls were executed during the current/last turn */
@@ -1620,6 +1629,45 @@ export class SessionManager {
 	 * that case remove() is a no-op (returns false), broadcastQueue stays
 	 * idempotent.
 	 */
+	/**
+	 * Dispatch a watchdog-stashed silent-retry re-prompt. Called from the
+	 * `agent_end` handler AFTER the agent has fully wound down, so the
+	 * `prompt()` call is no longer racing the abort handshake's "Agent is
+	 * already processing" window.
+	 *
+	 * On success: arms the watchdog so the next stall can re-fire, and stages
+	 * a success log line for the next clean `agent_end`.
+	 * On failure: surfaces the stall immediately (avoids the pre-fix bug where
+	 * a swallowed rejection would leave the watchdog idling another full
+	 * `timeoutMs` cycle before the next stall could surface). Then propagates
+	 * idle status because the suppression branch in `agent_end` short-circuits
+	 * the usual idle broadcast.
+	 */
+	private async _dispatchPendingStallRetry(
+		session: SessionInfo,
+		pending: NonNullable<SessionInfo["pendingStallRetry"]>,
+	): Promise<void> {
+		const cfg = resolveWatchdogConfigFromEnv();
+		try {
+			await session.rpcClient.prompt(pending.text, pending.images);
+			session.silentRetrySuccessLogPending = { attempt: pending.attempt, total: pending.total };
+			armWatchdogAfterRetry(session, cfg, (id) => this.sessions.has(id));
+		} catch (err) {
+			console.error(
+				`[stream-watchdog] session=${session.id} retry-dispatch failed:`,
+				(err as Error)?.message ?? err,
+			);
+			const ageMs = Date.now() - (session.lastLlmFrameAt ?? Date.now());
+			await surfaceStallNow(session, cfg, ageMs);
+			// Surfacing already set lastTurnErrored / lastTurnErrorMessage and
+			// emitted the synthetic message_end. Now propagate idle status
+			// because the suppression branch in agent_end short-circuited it.
+			session.streamingStartedAt = undefined;
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
+			broadcastStatus(session, "idle");
+		}
+	}
+
 	private async _dispatchSteer(session: SessionInfo, rows: QueuedMessage[]): Promise<void> {
 		if (rows.length === 0) return;
 		const bg = (this as any).bgProcessManager;
@@ -1979,6 +2027,11 @@ export class SessionManager {
 			// stick in "aborting" forever.
 			if (shouldSuppressDrainForStallRetry(session, wasAborting)) {
 				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+				const pending = session.pendingStallRetry;
+				session.pendingStallRetry = undefined;
+				if (pending) {
+					void this._dispatchPendingStallRetry(session, pending);
+				}
 				return !suppressBroadcast;
 			}
 

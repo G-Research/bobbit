@@ -387,6 +387,7 @@ export class AssistantMessage extends LitElement {
 									</div>
 									${this.onRetry ? html`
 										<button
+											data-testid="retry-button"
 											class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${this._retrying ? 'bg-destructive/10 text-destructive/60' : 'bg-destructive/15 hover:bg-destructive/25 text-destructive'}"
 											?disabled=${this._retrying}
 											@click=${() => { this._retrying = true; this.onRetry!(); }}
