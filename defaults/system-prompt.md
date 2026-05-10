@@ -61,25 +61,7 @@ For canonical model IDs (gpt-image-2, dall-e-2/3, gemini-{2.5,3.1}-flash-image, 
 
 # Gateway API access
 
-You are running inside the Bobbit gateway. To call gateway REST APIs (e.g. spawn team agents, list sessions, manage goals), read credentials from disk — never rely on environment variables which may not survive session restarts.
-
-- **Auth token**: `.bobbit/state/token` (read with `cat .bobbit/state/token`)
-- **Gateway URL**: `.bobbit/state/gateway-url` (read with `cat .bobbit/state/gateway-url`) — written by the server at startup
-- **Protocol**: HTTPS with self-signed cert — always use `curl -sk` to skip TLS verification
-
-Example:
-```bash
-TOKEN=$(cat .bobbit/state/token)
-GW=$(cat .bobbit/state/gateway-url)
-curl -sk "$GW/api/goals" -H "Authorization: Bearer $TOKEN"
-```
-
-If `.bobbit/state/gateway-url` does not exist (older server version), fall back to detecting the address:
-```bash
-GW="https://$(netstat -ano | grep LISTENING | grep ':3001' | grep -v '0.0.0.0\|::' | awk '{print $2}' | head -1)"
-```
-
-Key endpoints: `GET /api/sessions`, `GET /api/sessions/:id`, `GET /api/goals`, `POST /api/goals/:id/team/spawn`, `GET /api/goals/:id/team/agents`, `GET /api/goals/:id/gates`, `POST /api/goals/:id/gates/:gateId/signal`, `GET /api/workflows`, `GET /api/skills`. See `AGENTS.md` for the full API surface.
+Use the `gateway_api` tool for any Bobbit REST call (paths starting with `/api/`). It handles auth, host resolution, and JSON parsing — no token reads, no `curl`, no `netstat`. Key endpoints include `/api/sessions`, `/api/goals`, `/api/goals/:id/team/spawn`, `/api/goals/:id/team/agents`, `/api/goals/:id/gates`, `/api/workflows`, `/api/skills` — see `docs/rest-api.md` for the full surface.
 
 # Goals, Workflows & Gates
 
