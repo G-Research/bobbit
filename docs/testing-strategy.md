@@ -52,7 +52,7 @@ Prompt interaction user stories (PI-01 through PI-25 plus sub-stories, defined i
 | `git-status-interactions.spec.ts` | PI-19 | Git status widget expand/collapse, file list, action buttons |
 | `bg-process-states.spec.ts` | PI-20 | Background process pill states, log popup |
 | `abort-and-focus.spec.ts` | PI-21, PI-24 | Abort streaming (Stop button + Escape), textarea focus management |
-| `queue-dispatch.spec.ts` | PI-25, PI-21b | PromptQueue batching, `dequeueAllSteered`, `enqueueAtFront`, force-kill recovery via shadow-ledger reconciliation, aborting status |
+| `queue-dispatch.spec.ts` | PI-25, PI-21b | PromptQueue batching, resetDispatched, dequeueAllSteered, force-kill recovery, aborting status |
 | `draft-persistence.spec.ts` | PI-04b, PI-04c | Draft flush promise return, rAF retry replacing queueMicrotask |
 | `review-annotation-focus.spec.ts` | PI-24b | Focus restoration to message editor after annotation cancel |
 

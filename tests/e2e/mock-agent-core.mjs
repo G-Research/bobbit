@@ -65,9 +65,11 @@
  *
  * Steer (RPC, not a prompt-text trigger)
  * --------------------------------------
- *  Steer commands (handleCommand → case "steer") abort the in-flight turn
- *  and queue a fresh handlePrompt(steeredText), which produces a real
- *  <user-message> in the chat. Tests assert on that transcript event.
+ *  Steer commands (handleCommand → case "steer") emit a synchronous
+ *  [STEER_RECEIVED] <text> assistant message for back-compat with
+ *  tests/e2e/steer-midturn.spec.ts and tests/e2e/ui/bg-wait-steer-flow.spec.ts,
+ *  then abort the in-flight turn and queue a fresh handlePrompt(steeredText)
+ *  which produces a real <user-message> in the chat.
  *
  * ----------------------------------------------------------------------
  *
@@ -1712,10 +1714,16 @@ export class MockAgentCore {
 			case "steer": {
 				// Production behaviour: steer interrupts the current turn and
 				// the steered text becomes a fresh user prompt with its own
-				// assistant turn. Tests scan the rendered chat for a
-				// <user-message> matching the steered text — we get that by
-				// queueing a real handlePrompt round-trip after the in-flight
-				// turn finishes.
+				// assistant turn. Two listeners care about the result:
+				//   - Legacy E2E tests (steer-midturn.spec.ts,
+				//     bg-wait-steer-flow.spec.ts) scan for an assistant
+				//     message_end whose text contains both 'STEER_RECEIVED' and
+				//     the steered text — we emit that synchronously below as a
+				//     back-compat marker.
+				//   - New tests scan the rendered chat for a <user-message>
+				//     matching the steered text — we get that by queueing a
+				//     real handlePrompt round-trip after the in-flight turn
+				//     finishes.
 				//
 				// Crucially we do NOT null out currentAbortController here:
 				// the in-flight handlePrompt is still on the call stack and
@@ -1724,6 +1732,12 @@ export class MockAgentCore {
 				// which lets the in-flight burst overlap with the steered
 				// handlePrompt and corrupts ordering.
 				const steeredText = msg.message || msg.text || "";
+				const marker = {
+					role: "assistant",
+					content: [{ type: "text", text: `[STEER_RECEIVED] ${steeredText}` }],
+				};
+				this.conversationMessages.push(marker);
+				this.emit({ type: "message_end", message: marker });
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 				}

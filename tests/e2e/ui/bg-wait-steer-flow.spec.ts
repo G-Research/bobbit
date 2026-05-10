@@ -19,14 +19,14 @@
  *      `_dispatchSteeredMessages()` calls `bgProcessManager.abortAllWaits()`
  *      so any in-flight `bash_bg wait` long-poll is unblocked with
  *      `aborted:true` — the bg process itself is left running.
- *   5. The steered text is rendered as a user-message in the chat,
+ *   5. The mock agent emits `[STEER_RECEIVED]` on receiving the steer,
  *      proving the steer text actually reached the agent.
  *
  * Together the assertions guarantee that:
  *   - The UI steer button reaches the server (sent-indicator appears).
  *   - The bash_bg-wait abort hook on the steer-dispatch path actually fires
  *     (wait returns aborted:true within the timeout, bg proc still running).
- *   - The steer is delivered to the agent (user-message rendered in chat).
+ *   - The steer is delivered to the agent (STEER_RECEIVED in chat).
  *
  * If any of those wires regress in isolation — e.g. someone removes the
  * `bg.abortAllWaits` call from `_dispatchSteeredMessages`, or the steer pill
@@ -128,12 +128,12 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		// for the busy tool's _end event) which this assertion catches.
 		expect(elapsed).toBeLessThan(3_000);
 
-		// 6. Steer text actually reached the agent — its handlePrompt round-trip
-		//    renders a user-message containing the steered text.
+		// 6. Steer text actually reached the agent — mock agent emits
+		//    [STEER_RECEIVED] on rpcClient.steer().
 		await expect(
-			page.locator("user-message").filter({ hasText: "steer-during-bg-wait" }).first(),
+			page.getByText("STEER_RECEIVED").first(),
 		).toBeVisible({ timeout: 15_000 });
-		await rec.capture("steered user-message rendered — steer reached agent");
+		await rec.capture("STEER_RECEIVED rendered — steer reached agent");
 
 		// 7. After all the dust settles, the bg process is still running.
 		const listRes = await apiFetch(`/api/sessions/${sessionId}/bg-processes`);

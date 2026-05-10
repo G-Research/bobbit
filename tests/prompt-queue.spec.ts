@@ -222,38 +222,5 @@ test.describe("PromptQueue", () => {
 		expect(q.toArray().map(m => m.text)).toEqual(["A", "B", "C"]);
 		expect(q.length).toBe(3);
 	});
-});
 
-test.describe("enqueueAtFront", () => {
-	test("inserts at index 0 of an empty queue", () => {
-		const q = new PromptQueue();
-		const m = q.enqueueAtFront("X");
-		expect(q.length).toBe(1);
-		expect(q.toArray()[0].id).toBe(m.id);
-		expect(q.toArray()[0].text).toBe("X");
-	});
-
-	test("steered enqueueAtFront stays first when followed by a normal enqueue", () => {
-		const q = new PromptQueue();
-		const s = q.enqueueAtFront("S", { isSteered: true });
-		q.enqueue("Normal");
-		const arr = q.toArray();
-		expect(arr.map(m => m.text)).toEqual(["S", "Normal"]);
-		expect(arr[0].id).toBe(s.id);
-		expect(arr[0].isSteered).toBe(true);
-	});
-
-	test("multiple enqueueAtFront calls preserve REVERSE insertion order", () => {
-		const q = new PromptQueue();
-		q.enqueue("existing");
-		const first = q.enqueueAtFront("first");
-		const second = q.enqueueAtFront("second");
-		const third = q.enqueueAtFront("third");
-		// Most recent ends up at index 0.
-		const arr = q.toArray();
-		expect(arr.map(m => m.text)).toEqual(["third", "second", "first", "existing"]);
-		expect(arr[0].id).toBe(third.id);
-		expect(arr[1].id).toBe(second.id);
-		expect(arr[2].id).toBe(first.id);
-	});
 });

@@ -45,16 +45,15 @@ test.describe("Steer mid-turn delivery", () => {
 			// deliver this immediately via rpcClient.steer()
 			conn.send({ type: "steer", text: "STEER_REDIRECT_123" });
 
-			// The mock agent runs handlePrompt(steeredText) after the in-flight
-			// turn aborts, which emits a user-role message_end with the steered
-			// text. We assert on that transcript event.
+			// The mock agent emits a message_end with [STEER_RECEIVED] when
+			// it receives a steer. This should arrive BEFORE the agent_end
+			// from the original turn.
 			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					(m.data?.message?.content?.[0]?.text || "").includes("STEER_REDIRECT_123"),
-				8000,
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED"),
+				5000,
 			);
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_REDIRECT_123");
@@ -104,14 +103,12 @@ test.describe("Steer mid-turn delivery", () => {
 			);
 
 			// The steered message is dispatched at tool_execution_end (after
-			// the 2s tool call finishes). The mock agent emits a user-role
-			// message_end via handlePrompt(steeredText).
+			// the 2s tool call finishes). The mock agent emits [STEER_RECEIVED].
 			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					(m.data?.message?.content?.[0]?.text || "").includes("STEER_QUEUED_TEST_456"),
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED"),
 				10_000,
 			);
 
@@ -155,19 +152,18 @@ test.describe("Steer mid-turn delivery", () => {
 			);
 
 			// At tool_execution_end, both steers are batched into a single
-			// rpcClient.steer() call (joined by \n) OR delivered as two
-			// separate user prompts. Accept either: each substring must show
-			// up in at least one user-role message_end event.
-			for (const needle of ["STEER_BATCH_MSG_1", "STEER_BATCH_MSG_2"]) {
-				await conn.waitFor(
-					(m) =>
-						m.type === "event" &&
-						m.data?.type === "message_end" &&
-						m.data?.message?.role === "user" &&
-						(m.data?.message?.content?.[0]?.text || "").includes(needle),
-					10_000,
-				);
-			}
+			// rpcClient.steer() call. The mock agent emits one [STEER_RECEIVED].
+			const steerAck = await conn.waitFor(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.content?.[0]?.text?.includes("STEER_RECEIVED"),
+				10_000,
+			);
+
+			const receivedText = steerAck.data.message.content[0].text;
+			expect(receivedText).toContain("STEER_BATCH_MSG_1");
+			expect(receivedText).toContain("STEER_BATCH_MSG_2");
 		} finally {
 			conn.close();
 			await deleteSession(sessionId);

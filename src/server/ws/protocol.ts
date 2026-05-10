@@ -8,6 +8,9 @@ export interface QueuedMessage {
 	images?: Array<{ type: "image"; data: string; mimeType: string }>;
 	attachments?: unknown[];
 	isSteered: boolean;
+	/** True if this message was already dispatched mid-turn via steer RPC.
+	 *  Kept in queue so the UI shows "Sent" until the turn ends. */
+	dispatched?: boolean;
 	createdAt: number;
 }
 
