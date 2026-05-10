@@ -20,6 +20,7 @@ import { RpcBridge } from "./rpc-bridge.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import type { SessionStore } from "./session-store.js";
+import { ToolRetryHarness } from "./tool-retry-harness.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -151,7 +152,7 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }) => Promise<boolean>;
-	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
+	handleAgentLifecycle: (session: SessionInfo, event: any) => boolean;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
@@ -480,12 +481,28 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 		const truncated = truncateLargeToolContent(ev);
 		emitSessionEvent(session, truncated);
 	};
+
+	// Generic tool-error retry harness. Observes tool_execution_end events
+	// and re-emits a targeted nudge for schema/validation errors. Coordinates
+	// with verification-harness via session._verificationOwnedToolUses.
+	// See docs/design/tool-retry-harness.md.
+	try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+	session.toolRetryHarness = new ToolRetryHarness({
+		session,
+		onMetadata: ({ count, lastReason }) => {
+			try { ctx.store.update(session.id, { toolAutoRetries: { count, lastReason } }); } catch { /* ignore */ }
+		},
+	});
+	session.toolRetryHarness.start();
+
 	return session.rpcClient.onEvent((event: any) => {
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
-		ctx.handleAgentLifecycle(session, event);
-		const truncated = truncateLargeToolContent(event);
-		emitSessionEvent(session, truncated);
+		const shouldBroadcast = ctx.handleAgentLifecycle(session, event);
+		if (shouldBroadcast) {
+			const truncated = truncateLargeToolContent(event);
+			emitSessionEvent(session, truncated);
+		}
 		ctx.trackCostFromEvent(session, event);
 	});
 }

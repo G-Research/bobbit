@@ -85,7 +85,10 @@ import {
 	disposeStreamWatchdog,
 	shouldSuppressDrainForStallRetry,
 	shouldSkipErrorMessageEnd,
+	shouldSuppressUserEchoBroadcast,
+	shouldSuppressAbortBroadcast,
 } from "./stream-watchdog.js";
+import { ToolRetryHarness } from "./tool-retry-harness.js";
 
 /**
  * Returns true only for rpc events that represent genuine new user-visible
@@ -301,6 +304,15 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
+	/**
+	 * Tool-use IDs whose schema-retry is owned by `verification-harness.ts`.
+	 * The generic `tool-retry-harness.ts` defers to the verification path on
+	 * these IDs to avoid double-retry amplification. Cleared by the
+	 * verification harness when its step terminates.
+	 */
+	_verificationOwnedToolUses?: Set<string>;
+	/** Generic tool-error retry harness. Started after `rpcClient.start()`. */
+	toolRetryHarness?: ToolRetryHarness;
 }
 
 // `spliceInFlightMessage` lives in its own module so unit tests can import
@@ -1788,8 +1800,15 @@ export class SessionManager {
 	 * Called from every event listener before broadcasting.
 	 * - Tracks message_end with stopReason "error" so we can suppress queue draining.
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
+	 *
+	 * Returns `true` if the caller should broadcast `event` to WS clients,
+	 * `false` if the event must be dropped pre-broadcast. Stream-watchdog
+	 * silent-retry user echoes and abort "Request aborted" frames return
+	 * `false`; everything else returns `true`. Dropping must happen BEFORE
+	 * `emitSessionEvent` so the frame doesn't burn a `seq` (see
+	 * docs/design/perm-frame-late-joiner-seq-replay.md).
 	 */
-	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+	private handleAgentLifecycle(session: SessionInfo, event: any): boolean {
 		// LLM stream-inactivity watchdog: arm/disarm based on event type. Must run
 		// FIRST so an event mid-tear-down doesn't sneak past while the timer is
 		// already firing. See `./stream-watchdog.ts` for the stall path.
@@ -1850,9 +1869,27 @@ export class SessionManager {
 			// drainQueue path would re-enqueue and redispatch via rpcClient.prompt,
 			// causing the steer to fire twice. Leave the steered rows in the queue
 			// so the post-abort drainQueue is the single dispatch site.
-			if (session.status === "aborting") return;
+			if (session.status === "aborting") return true;
 			const steered = session.promptQueue.dequeueAllSteered();
 			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
+		}
+
+		// Stream-watchdog broadcast suppression. The watchdog drops these
+		// frames pre-broadcast so silent retries are silent on-wire as well
+		// as on-screen. Independent of the bookkeeping flag below.
+		let suppressBroadcast = false;
+		if (event.type === "message_end" && event.message?.role === "user") {
+			if (shouldSuppressUserEchoBroadcast(session)) {
+				suppressBroadcast = true;
+			}
+		} else if (
+			event.type === "message_end" &&
+			event.message?.role === "assistant" &&
+			event.message.stopReason === "error"
+		) {
+			if (shouldSuppressAbortBroadcast(session)) {
+				suppressBroadcast = true;
+			}
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -1942,7 +1979,7 @@ export class SessionManager {
 			// stick in "aborting" forever.
 			if (shouldSuppressDrainForStallRetry(session, wasAborting)) {
 				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
-				return;
+				return !suppressBroadcast;
 			}
 
 			session.streamingStartedAt = undefined;
@@ -2029,6 +2066,8 @@ export class SessionManager {
 				}
 			}
 		}
+
+		return !suppressBroadcast;
 	}
 
 	/**
@@ -2348,6 +2387,8 @@ export class SessionManager {
 		// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+		try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+		session.toolRetryHarness = undefined;
 		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
 		this.sessions.delete(session.id);
@@ -2931,10 +2972,12 @@ export class SessionManager {
 				}
 			}
 
-			this.handleAgentLifecycle(session, event);
+			const shouldBroadcast = this.handleAgentLifecycle(session, event);
 
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			if (shouldBroadcast) {
+				const truncated = truncateLargeToolContent(event);
+				emitSessionEvent(session, truncated);
+			}
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
@@ -2952,6 +2995,21 @@ export class SessionManager {
 		};
 
 		session.unsubscribe = unsub;
+
+		// Generic tool-error retry harness. Observes `tool_execution_end` events
+		// and re-emits a targeted nudge for schema/validation errors. Coordinates
+		// with verification-harness via `_verificationOwnedToolUses`.
+		// See docs/design/tool-retry-harness.md.
+		const retryHarnessStore = restoreStore;
+		session.toolRetryHarness = new ToolRetryHarness({
+			session,
+			onMetadata: ({ count, lastReason }) => {
+				try {
+					retryHarnessStore.update(ps.id, { toolAutoRetries: { count, lastReason } });
+				} catch { /* ignore */ }
+			},
+		});
+		session.toolRetryHarness.start();
 
 		await rpcClient.start();
 
@@ -3751,9 +3809,11 @@ export class SessionManager {
 
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
-			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			const shouldBroadcast = this.handleAgentLifecycle(session, event);
+			if (shouldBroadcast) {
+				const truncated = truncateLargeToolContent(event);
+				emitSessionEvent(session, truncated);
+			}
 			this.trackCostFromEvent(session, event);
 		});
 		session.unsubscribe = unsub;
@@ -4098,9 +4158,11 @@ export class SessionManager {
 				session.lastActivity = Date.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
-			this.handleAgentLifecycle(session, event);
-			const truncated = truncateLargeToolContent(event);
-			emitSessionEvent(session, truncated);
+			const shouldBroadcast = this.handleAgentLifecycle(session, event);
+			if (shouldBroadcast) {
+				const truncated = truncateLargeToolContent(event);
+				emitSessionEvent(session, truncated);
+			}
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -4127,6 +4189,18 @@ export class SessionManager {
 			const truncated = truncateLargeToolContent(ev);
 			emitSessionEvent(session, truncated);
 		};
+		// Re-bind the generic tool-retry harness to the new rpcClient.
+		try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+		{
+			const rebindStore = this.resolveStoreForSession(session.id);
+			session.toolRetryHarness = new ToolRetryHarness({
+				session,
+				onMetadata: ({ count, lastReason }) => {
+					try { rebindStore.update(session.id, { toolAutoRetries: { count, lastReason } }); } catch { /* ignore */ }
+				},
+			});
+			session.toolRetryHarness.start();
+		}
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
@@ -4381,6 +4455,10 @@ export class SessionManager {
 
 		// Clear the LLM stream-inactivity watchdog timer.
 		disposeStreamWatchdog(session);
+
+		// Stop the generic tool-retry harness (unsubscribes from rpcClient).
+		try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+		session.toolRetryHarness = undefined;
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
 		// saved before we archive.  Without this, a quick terminate can race
@@ -5145,10 +5223,12 @@ export class SessionManager {
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
 
-				this.handleAgentLifecycle(session, event);
+				const shouldBroadcast = this.handleAgentLifecycle(session, event);
 
-				const truncated = truncateLargeToolContent(event);
-				emitSessionEvent(session, truncated);
+				if (shouldBroadcast) {
+					const truncated = truncateLargeToolContent(event);
+					emitSessionEvent(session, truncated);
+				}
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 
@@ -5175,6 +5255,18 @@ export class SessionManager {
 				const truncated = truncateLargeToolContent(ev);
 				emitSessionEvent(session, truncated);
 			};
+			// Re-bind the generic tool-retry harness to the new rpcClient.
+			try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+			{
+				const rebindStore = this.resolveStoreForSession(session.id);
+				session.toolRetryHarness = new ToolRetryHarness({
+					session,
+					onMetadata: ({ count, lastReason }) => {
+						try { rebindStore.update(session.id, { toolAutoRetries: { count, lastReason } }); } catch { /* ignore */ }
+					},
+				});
+				session.toolRetryHarness.start();
+			}
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);

@@ -13,6 +13,7 @@
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
+import type { GatewayInfo } from "../gateway-harness.js";
 import { pollUntil } from "../test-utils/cleanup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
@@ -815,6 +816,7 @@ export class SpecContext {
 	_phase: TestPhase = "setup";
 
 	private _page: Page;
+	private _gateway?: GatewayInfo;
 
 	// Regions
 	readonly sidebar: SidebarRegion;
@@ -828,8 +830,9 @@ export class SpecContext {
 	readonly search_page: RegionHandle;
 	readonly modal: RegionHandle;
 
-	constructor(page: Page) {
+	constructor(page: Page, gateway?: GatewayInfo) {
 		this._page = page;
+		this._gateway = gateway;
 		this.sidebar = new SidebarRegion(page, ".sidebar-edge", "sidebar");
 		this.sidebar.ctx = this;
 		this.editor = new EditorRegion(page, "message-editor", "editor");
@@ -838,7 +841,7 @@ export class SpecContext {
 		this.context_bar.ctx = this;
 		this.stats_bar = this._region(".stats-bar, .status-bar", "stats_bar");
 		this.message_list = this._region(".messages, .message-list, message-list", "message_list");
-		this.dashboard = this._region(".goal-dashboard, goal-dashboard", "dashboard");
+		this.dashboard = this._region(".dashboard-container, .goal-dashboard, goal-dashboard", "dashboard");
 		this.settings = this._region(".settings-page, settings-page", "settings");
 		this.review_pane = this._region("review-pane", "review_pane");
 		this.search_page = this._region(".search-page, search-page", "search_page");
@@ -962,12 +965,44 @@ export class SpecContext {
 	readonly event = {
 		server_crash: async () => {
 			trackIntent(this._activeStory, this._phase, "server_crash");
-			// Implementation depends on test harness — kill server process
-			throw new Error("server_crash: requires manual-integration harness — not available in standard E2E");
+			if (!this._gateway) {
+				throw new Error("server_crash: SpecContext was constructed without a gateway fixture");
+			}
+			await this._gateway.crash();
+			// Wait for the client to observe the disconnect. The client
+			// doesn't expose its WebSocket on `window.__bobbit_ws`, so we
+			// poll `window.bobbitState.connectionStatus` instead. Best-effort
+			// — swallow timeout because the assertion that follows the
+			// crash is the real contract under test.
+			await this._page.waitForFunction(() => {
+				const s = (window as any).bobbitState;
+				return !!s && s.connectionStatus !== "connected";
+			}, undefined, { timeout: 5_000 }).catch(() => { /* best-effort */ });
 		},
 		server_restart: async () => {
 			trackIntent(this._activeStory, this._phase, "server_restart");
-			throw new Error("server_restart: requires manual-integration harness — not available in standard E2E");
+			if (!this._gateway) {
+				throw new Error("server_restart: SpecContext was constructed without a gateway fixture");
+			}
+			await this._gateway.restart();
+			// Wait for the client to reach the server again. Two-stage:
+			// (a) /api/health responds (server bound and accepting requests),
+			// (b) if a session is active, its WebSocket is also reconnected
+			//     (state.connectionStatus === "connected"). On the landing
+			//     page (#/) no session WS exists, so connectionStatus stays
+			//     "disconnected" — (a) alone is sufficient. Reconnect failure
+			// must fail the test (no .catch()).
+			await this._page.waitForFunction(async () => {
+				try {
+					const r = await fetch("/api/health", { cache: "no-store" });
+					if (!r.ok) return false;
+				} catch { return false; }
+				const s = (window as any).bobbitState;
+				const hash = window.location.hash || "";
+				const onSession = /^#\/session\//.test(hash);
+				if (onSession) return !!s && s.connectionStatus === "connected";
+				return true;
+			}, undefined, { timeout: 20_000, polling: 250 });
 		},
 		disconnect: async () => {
 			trackIntent(this._activeStory, this._phase, "disconnect");
@@ -1019,7 +1054,7 @@ export class SpecContext {
 			const realId = handle?.goalId || id;
 			trackRegion(this._activeStory, this._phase, "dashboard");
 			await navigateToHash(this._page, `#/goal/${realId}`);
-			await expect(this._page.locator(".goal-dashboard, goal-dashboard").first())
+			await expect(this._page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first())
 				.toBeVisible({ timeout: 15_000 });
 		} else if (target === "settings") {
 			trackRegion(this._activeStory, this._phase, "settings");
