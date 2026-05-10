@@ -422,6 +422,14 @@ export class MockAgentCore {
 			const filePath = MockAgentCore.extractFilePath(text);
 			return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
 		}
+		if (lower.includes("ask_user_choices_bad_then_ok")) {
+			// Trigger for tool-retry-harness E2E: emit a multi-question
+			// ask_user_choices with NO tab_label on the first turn (the
+			// extension's `ok({error})` body classifies as schema). The
+			// generic tool-retry harness's nudge prompt fires; on the next
+			// turn we emit a corrected call with tab_labels.
+			return { askUserChoices: "badThenOk" };
+		}
 		if (lower.includes("ask_user_choices_multi")) {
 			return { askUserChoices: "multi" };
 		}
@@ -591,7 +599,7 @@ export class MockAgentCore {
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
 		} else if (toolAction && toolAction.askUserChoices) {
-			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+			await this._handleAskUserChoices(toolAction.askUserChoices);
 		} else if (toolAction && toolAction.liveUpdateProposal) {
 			await this._handleLiveUpdateProposal();
 		} else if (toolAction && toolAction.componentConfigProposal) {
@@ -1124,7 +1132,16 @@ export class MockAgentCore {
 		}
 	}
 
-	async _handleAskUserChoices(multi = false) {
+	async _handleAskUserChoices(modeArg = false) {
+		// Backwards compat: callers pass `true|"multi"|"badThenOk"` or `false`.
+		const mode = modeArg === true || modeArg === "multi" ? "multi"
+			: modeArg === "badThenOk" ? "badThenOk"
+			: "single";
+		// If a bad-then-ok flow is mid-flight, the harness's retry nudge will
+		// re-enter via respondToPrompt's generic ask_user_choices match. Honour
+		// the followup flag here regardless of requested mode.
+		if (mode === "badThenOk" || this._askRetryFollowUp) return this._handleAskBadThenOk();
+		const multi = mode === "multi";
 		// Non-blocking model: the ask_user_choices tool returns immediately with
 		// a `{status:"posted", tool_use_id}` stub and the turn ends. The user's
 		// answers arrive in a *later* prompt as an envelope user message — see
@@ -1169,6 +1186,71 @@ export class MockAgentCore {
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Tool-retry-harness E2E trigger.
+	 *
+	 * Turn 1: emit a multi-question `ask_user_choices` with NO `tab_label`.
+	 * The extension returns `ok({ error: "ask_user_choices: questions[0]..." })`
+	 * which the generic tool-retry harness classifies as `schema` and reacts
+	 * to with a nudge prompt. The nudge arrives as a normal `prompt()` call
+	 * via `rpcClient.prompt`, which the mock handles as a fresh user turn
+	 * via `handlePrompt`. The flag set here makes that follow-up emit a
+	 * CORRECTED multi-question ask with `tab_label`s set.
+	 */
+	async _handleAskBadThenOk() {
+		if (this._askRetryFollowUp) {
+			this._askRetryFollowUp = false;
+			const toolId = `tool_ask_${Date.now()}_ok`;
+			const questions = [
+				{ question: "Pick a colour", options: ["red", "green", "blue"], tab_label: "Colour" },
+				{ question: "Pick an animal", options: ["cat", "dog"], tab_label: "Animal" },
+			];
+			this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
+			const aMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
+			};
+			this.conversationMessages.push(aMsg);
+			this.emit({ type: "message_end", message: aMsg });
+			const stub = { status: "posted", tool_use_id: toolId };
+			const stubText = JSON.stringify(stub);
+			this.emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: "complete", output: stubText });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError: false });
+			const rMsg = {
+				role: "toolResult", toolCallId: toolId, toolName: "ask_user_choices", isError: false,
+				content: [{ type: "text", text: stubText }],
+			};
+			this.conversationMessages.push(rMsg);
+			this.emit({ type: "message_end", message: rMsg });
+			return;
+		}
+		// Turn 1: bad ask with no tab_label — the extension returns an error body.
+		this._askRetryFollowUp = true;
+		const toolId = `tool_ask_${Date.now()}_bad`;
+		const questions = [
+			{ question: "Pick a colour", options: ["red", "green", "blue"] },
+			{ question: "Pick an animal", options: ["cat", "dog"] },
+		];
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
+		const aMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
+		};
+		this.conversationMessages.push(aMsg);
+		this.emit({ type: "message_end", message: aMsg });
+		// Mirror the real ask_user_choices extension's validation: ok({error}).
+		const err = { error: "ask_user_choices: questions[0].tab_label is required for multi-question asks (2\u20134 words, \u226424 chars)." };
+		const errText = JSON.stringify(err);
+		this.emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: "complete", output: errText });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError: false, result: { content: [{ type: "text", text: errText }] } });
+		const rMsg = {
+			role: "toolResult", toolCallId: toolId, toolName: "ask_user_choices", isError: false,
+			content: [{ type: "text", text: errText }],
+		};
+		this.conversationMessages.push(rMsg);
+		this.emit({ type: "message_end", message: rMsg });
 	}
 
 	/**

@@ -4154,6 +4154,18 @@ export class SessionManager {
 			const truncated = truncateLargeToolContent(ev);
 			emitSessionEvent(session, truncated);
 		};
+		// Re-bind the generic tool-retry harness to the new rpcClient.
+		try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+		{
+			const rebindStore = this.resolveStoreForSession(session.id);
+			session.toolRetryHarness = new ToolRetryHarness({
+				session,
+				onMetadata: ({ count, lastReason }) => {
+					try { rebindStore.update(session.id, { toolAutoRetries: { count, lastReason } }); } catch { /* ignore */ }
+				},
+			});
+			session.toolRetryHarness.start();
+		}
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
@@ -5206,6 +5218,18 @@ export class SessionManager {
 				const truncated = truncateLargeToolContent(ev);
 				emitSessionEvent(session, truncated);
 			};
+			// Re-bind the generic tool-retry harness to the new rpcClient.
+			try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+			{
+				const rebindStore = this.resolveStoreForSession(session.id);
+				session.toolRetryHarness = new ToolRetryHarness({
+					session,
+					onMetadata: ({ count, lastReason }) => {
+						try { rebindStore.update(session.id, { toolAutoRetries: { count, lastReason } }); } catch { /* ignore */ }
+					},
+				});
+				session.toolRetryHarness.start();
+			}
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
