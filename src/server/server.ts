@@ -2797,10 +2797,6 @@ async function handleApiRoute(
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
-			// Generic tool-error retry counters — see
-			// docs/design/tool-retry-harness.md. Surfaced for the observe
-			// detector; the UI does not render this field initially.
-			toolAutoRetries: sessionPs?.toolAutoRetries,
 		});
 		return;
 	}

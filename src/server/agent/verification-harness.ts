@@ -683,11 +683,6 @@ export class VerificationHarness {
 		const errListenerUnsub = session.rpcClient.onEvent((event: any) => {
 			if (event.type === "tool_execution_end" && event.isError) {
 				lastErroredToolOutput = extractToolResultText(event.result);
-				// Mark this tool_use as verification-owned so the generic
-				// tool-retry harness defers and we don't double-retry.
-				if (event.toolCallId) {
-					(session._verificationOwnedToolUses ??= new Set<string>()).add(event.toolCallId);
-				}
 			}
 		});
 
@@ -1846,9 +1841,6 @@ export class VerificationHarness {
 			errListenerUnsub = session.rpcClient.onEvent((event: any) => {
 				if (event.type === "tool_execution_end" && event.isError) {
 					lastErroredToolOutput = extractToolResultText(event.result);
-					if (event.toolCallId) {
-						(session._verificationOwnedToolUses ??= new Set<string>()).add(event.toolCallId);
-					}
 				}
 			});
 
@@ -2149,9 +2141,6 @@ export class VerificationHarness {
 			qaErrListenerUnsub = session.rpcClient.onEvent((event: any) => {
 				if (event.type === "tool_execution_end" && event.isError) {
 					qaLastErroredToolOutput = extractToolResultText(event.result);
-					if (event.toolCallId) {
-						(session._verificationOwnedToolUses ??= new Set<string>()).add(event.toolCallId);
-					}
 				}
 			});
 
@@ -2285,9 +2274,6 @@ export class VerificationHarness {
 			legacyErrListenerUnsub = rpc.onEvent((event: any) => {
 				if (event.type === "tool_execution_end" && event.isError) {
 					legacyLastErroredToolOutput = extractToolResultText(event.result);
-					// Legacy path uses a standalone RpcBridge (no SessionInfo);
-					// the generic tool-retry harness never observes this rpc, so no
-					// _verificationOwnedToolUses tagging is needed here.
 				}
 			});
 
