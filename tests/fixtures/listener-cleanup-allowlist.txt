@@ -24,7 +24,6 @@ src/ui/components/AgentInterface.ts
 src/ui/components/BgProcessPill.ts
 src/ui/components/ContinueSessionChooser.ts
 src/ui/components/DiffBlock.ts
-src/ui/components/MessageEditor.ts
 src/ui/components/Messages.ts
 src/ui/components/ProjectPickerPopover.ts
 src/ui/components/SandboxedIframe.ts

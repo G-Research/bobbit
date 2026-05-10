@@ -1,8 +1,10 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import type { Model } from "@mariozechner/pi-ai";
-import { html, LitElement, nothing } from "lit";
+import { html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BobbitElement } from "./base/BobbitElement.js";
+import { LifecycleTimers } from "./base/lifecycle-timers.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { live } from "lit/directives/live.js";
 import { GripVertical, Loader2, Mic, MicOff, Paperclip, Pencil, Send, Square, Zap, X } from "lucide";
@@ -33,7 +35,7 @@ export interface QueuedMessage {
 }
 
 @customElement("message-editor")
-export class MessageEditor extends LitElement {
+export class MessageEditor extends BobbitElement {
 	private _value = "";
 	private textareaRef = createRef<HTMLTextAreaElement>();
 
@@ -106,7 +108,9 @@ export class MessageEditor extends LitElement {
 	private speechSupported = typeof window !== "undefined" && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 	/** The textarea value before speech started — we append after this */
 	private preSpeechText = "";
-	private stopTimeout: ReturnType<typeof setTimeout> | null = null;
+	private stopTimeout: number | null = null;
+	/** Lifecycle-bound timers — cleared automatically on disconnect. */
+	private _timers = new LifecycleTimers(this.signal);
 
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -653,7 +657,7 @@ export class MessageEditor extends LitElement {
 		if (this.speechRecognition) {
 			// Delay stop() to let the recognizer finalize the tail end of speech
 			const recognition = this.speechRecognition;
-			this.stopTimeout = setTimeout(() => {
+			this.stopTimeout = this._timers.setTimeout(() => {
 				recognition.stop();
 				this.stopTimeout = null;
 			}, 500);
@@ -680,8 +684,11 @@ export class MessageEditor extends LitElement {
 
 	override connectedCallback() {
 		super.connectedCallback();
-		document.addEventListener("keydown", this.handleGlobalKeyDown);
-		document.addEventListener("keyup", this.handleGlobalKeyUp);
+		// On re-attach `BobbitElement` rebuilds the abort controller, so we
+		// also need a fresh `LifecycleTimers` bound to the new signal.
+		this._timers = new LifecycleTimers(this.signal);
+		document.addEventListener("keydown", this.handleGlobalKeyDown, { signal: this.signal });
+		document.addEventListener("keyup", this.handleGlobalKeyUp, { signal: this.signal });
 		// Restore draft from sessionStorage if available. This runs synchronously
 		// when the element is created/reattached, BEFORE any Lit render cycle
 		// can reset _value to "". session-manager saves the draft text here
@@ -696,10 +703,11 @@ export class MessageEditor extends LitElement {
 	}
 
 	override disconnectedCallback() {
-		super.disconnectedCallback();
-		document.removeEventListener("keydown", this.handleGlobalKeyDown);
-		document.removeEventListener("keyup", this.handleGlobalKeyUp);
+		// Document listeners + the stop-timeout are signal-bound and torn
+		// down by `BobbitElement.disconnectedCallback()` (called LAST). We
+		// only need to actively stop a live SpeechRecognition session.
 		this.stopSpeechRecognition();
+		super.disconnectedCallback();
 	}
 
 	override firstUpdated() {
