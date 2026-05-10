@@ -1,6 +1,6 @@
 # Steer subsystem rewrite — single source of truth, exactly-once, durable
 
-Status: implemented (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`).
+Status: implemented (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`). Reverted on `master` between `v0.8.0` and the freeze investigation, then restored on `goal/restore-st-ac566fee` once the actual freeze culprit was isolated to PR #514 (the WebSocket `emitSessionEvent` refactor — out of scope for this design and intentionally absent from `master`). The four implementation commits plus the three follow-ups (#477 abort-race, #478 listener-ordering, #480 `bash_bg wait` end-of-turn hint) are all back in place.
 
 ## 1. Problem
 
