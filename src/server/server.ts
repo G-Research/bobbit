@@ -69,7 +69,7 @@ import * as previewMount from "./preview/mount.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
-import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
+import { ReviewAnnotationStore } from "./review-annotation-store.js";
 
 import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -1051,7 +1051,7 @@ async function handleApiRoute(
 	roleManager: RoleManager,
 	toolManager: ToolManager,
 	projectContextManager: ProjectContextManager,
-	bgProcessManager: BgProcessManager,
+	_bgProcessManager: BgProcessManager,
 	_staffManager: StaffManager,
 	verificationHarness: VerificationHarness,
 	_preferencesStore: PreferencesStore,
@@ -1064,7 +1064,7 @@ async function handleApiRoute(
 	configCascade: ConfigCascade,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
-	reviewAnnotationStore?: ReviewAnnotationStore,
+	_reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 ) {
@@ -3884,118 +3884,6 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Background process endpoints ──────────────────────────────
-
-	// POST /api/sessions/:id/bg-processes — create a background process
-	const bgCreateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes$/);
-	if (bgCreateMatch && req.method === "POST") {
-		const id = bgCreateMatch[1];
-		const session = sessionManager.getSession(id);
-		if (!session) { json({ error: "Session not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body?.command) { json({ error: "command is required" }, 400); return; }
-		try {
-			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed, body.name);
-			json(info, 201);
-		} catch (err: any) {
-			if (err?.message?.includes("Sandboxed session without containerId")) {
-				json({ error: "Sandboxed session cannot run host processes" }, 403);
-			} else {
-				throw err;
-			}
-		}
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes — list background processes
-	if (bgCreateMatch && req.method === "GET") {
-		const id = bgCreateMatch[1];
-		json({ processes: bgProcessManager.list(id) });
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/logs — get logs
-	const bgLogsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/logs$/);
-	if (bgLogsMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgLogsMatch;
-		const logs = bgProcessManager.getLogs(sessionId, processId);
-		if (!logs) { json({ error: "Process not found" }, 404); return; }
-		const tail = parseInt(url.searchParams.get("tail") || "200", 10);
-		json({
-			log: logs.log.slice(-tail),
-			stdout: logs.stdout.slice(-tail),
-			stderr: logs.stderr.slice(-tail),
-		});
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/grep — search logs
-	const bgGrepMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/grep$/);
-	if (bgGrepMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgGrepMatch;
-		const pattern = url.searchParams.get("pattern") || "";
-		if (!pattern) { json({ error: "pattern is required" }, 400); return; }
-		const context = parseInt(url.searchParams.get("context") || "0", 10);
-		const maxResults = parseInt(url.searchParams.get("max") || "50", 10);
-		const result = bgProcessManager.grepLogs(sessionId, processId, pattern, context, maxResults);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/head — first N lines
-	const bgHeadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/head$/);
-	if (bgHeadMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgHeadMatch;
-		const lines = parseInt(url.searchParams.get("lines") || "50", 10);
-		const result = bgProcessManager.headLogs(sessionId, processId, lines);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/slice — line range (1-indexed)
-	const bgSliceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/slice$/);
-	if (bgSliceMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgSliceMatch;
-		const from = parseInt(url.searchParams.get("from") || "1", 10);
-		const to = parseInt(url.searchParams.get("to") || "50", 10);
-		const result = bgProcessManager.sliceLogs(sessionId, processId, from, to);
-		if (!result) { json({ error: "Process not found" }, 404); return; }
-		json(result);
-		return;
-	}
-
-	// GET /api/sessions/:id/bg-processes/:pid/wait — block until exit or timeout
-	const bgWaitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)\/wait$/);
-	if (bgWaitMatch && req.method === "GET") {
-		const [, sessionId, processId] = bgWaitMatch;
-		const timeout = parseInt(url.searchParams.get("timeout") || "300", 10);
-		const controller = new AbortController();
-		bgProcessManager.registerWait(sessionId, controller);
-		try {
-			const result = await bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal);
-			if (!result) { json({ error: "Process not found" }, 404); return; }
-			json(result);
-		} finally {
-			bgProcessManager.unregisterWait(sessionId, controller);
-		}
-		return;
-	}
-
-	// DELETE /api/sessions/:id/bg-processes/:pid — kill or remove a background process
-	const bgKillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)$/);
-	if (bgKillMatch && req.method === "DELETE") {
-		const [, sessionId, processId] = bgKillMatch;
-		// Try kill first (running), then remove (exited)
-		const killed = bgProcessManager.kill(sessionId, processId);
-		if (!killed) {
-			const removed = bgProcessManager.remove(sessionId, processId);
-			if (!removed) { json({ error: "Process not found" }, 404); return; }
-		}
-		json({ ok: true });
-		return;
-	}
 	// ── Draft endpoints ─────────────────────────────────────────────
 
 	// PUT|POST /api/sessions/:id/draft — upsert a draft
@@ -4082,111 +3970,6 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		sessionManager.deleteDraft(id, type);
-		json({ ok: true });
-		return;
-	}
-
-	// ── Review annotation endpoints ────────────────────────────────
-
-	// POST /api/sessions/:id/review/annotations/bulk — bulk save all annotations + submitted flag (used by sendBeacon on page unload)
-	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations/bulk")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Invalid body" }, 400); return; }
-		const annotations: Record<string, ReviewAnnotation[]> = {};
-		if (body.annotations && typeof body.annotations === "object") {
-			for (const [docTitle, anns] of Object.entries(body.annotations)) {
-				if (Array.isArray(anns)) {
-					annotations[docTitle] = anns as ReviewAnnotation[];
-				}
-			}
-		}
-		// If `submitted` is omitted (or non-boolean), preserve whatever is
-		// already on disk. This is critical: the page-unload beacon historically
-		// sent `submitted: false` whenever the local cache hadn't observed a
-		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
-		// tabs, REST clients, the test harness) on the next page reload (RP-09).
-		// The client now omits the field unless it positively wants to write
-		// `true`; the legacy clear path still goes through the dedicated
-		// /review/submitted PUT.
-		const submitted = typeof body.submitted === "boolean"
-			? body.submitted
-			: reviewAnnotationStore.isSubmitted(sessionId);
-		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
-		json({ ok: true });
-		return;
-	}
-
-	// GET /api/sessions/:id/review/annotations
-	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const data = reviewAnnotationStore.getAll(sessionId);
-		json(data);
-		return;
-	}
-
-	// POST /api/sessions/:id/review/annotations
-	if (req.method === "POST" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/annotations")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const body = await readBody(req);
-		if (!body?.docTitle || !body?.annotation) {
-			json({ error: "docTitle and annotation required" }, 400);
-			return;
-		}
-		reviewAnnotationStore.addAnnotation(sessionId, body.docTitle, body.annotation);
-		json({ ok: true });
-		return;
-	}
-
-	// DELETE /api/sessions/:id/review/annotations[/:annotationId]
-	if (req.method === "DELETE" && url.pathname.startsWith("/api/sessions/") && url.pathname.includes("/review/annotations")) {
-		const parts = url.pathname.split("/");
-		const sessionId = parts[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		if (parts.length >= 7 && parts[6]) {
-			// DELETE /api/sessions/:id/review/annotations/:annotationId
-			const annotationId = decodeURIComponent(parts[6]);
-			const docTitle = url.searchParams.get("docTitle");
-			if (!docTitle) { json({ error: "docTitle query parameter is required" }, 400); return; }
-			reviewAnnotationStore.removeAnnotation(sessionId, docTitle, annotationId);
-			json({ ok: true });
-		} else {
-			// DELETE /api/sessions/:id/review/annotations — clear all or by docTitle
-			const body = await readBody(req);
-			const docTitle = body?.docTitle;
-			if (docTitle) {
-				reviewAnnotationStore.clearAnnotations(sessionId, docTitle);
-			} else {
-				reviewAnnotationStore.clearAll(sessionId);
-			}
-			json({ ok: true });
-		}
-		return;
-	}
-
-	// GET /api/sessions/:id/review/submitted
-	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
-		return;
-	}
-
-	// PUT /api/sessions/:id/review/submitted
-	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
-		const sessionId = url.pathname.split("/")[3];
-		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
-		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
-		const body = await readBody(req);
-		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
 		json({ ok: true });
 		return;
 	}
