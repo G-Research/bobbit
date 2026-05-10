@@ -11,6 +11,8 @@
  */
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
 import { buildActivationHeader } from "../skills/skill-manifest.js";
+import { isGitRepo, getRepoRoot } from "../skills/git.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 import type { Route } from "./types.js";
 
 // BFS helper: walk delegateOf, teamLeadSessionId, teamGoalId, and goalId chains
@@ -227,6 +229,136 @@ export const sessionsRoutes: Route[] = [
 			} catch (err: any) {
 				jsonError(500, err);
 			}
+		},
+	},
+	{
+		method: "POST",
+		pattern: /^\/api\/sessions\/([^/]+)\/continue$/,
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
+			const { sessionManager, projectRegistry, sandboxManager, roleManager } = deps;
+			const archivedId = params[1];
+			await readBody().catch(() => ({}));
+
+			const ps = sessionManager.getPersistedSession(archivedId);
+			if (!ps) { json({ error: "session not found" }, 404); return; }
+			if (!ps.archived) { json({ error: "source not archived" }, 409); return; }
+			if (ps.goalId || ps.delegateOf || ps.teamGoalId || ps.assistantType) {
+				json({ error: "goal, delegate, team, or assistant sessions cannot be continued" }, 422);
+				return;
+			}
+			if (!ps.projectId || !projectRegistry.get(ps.projectId)) {
+				json({ error: "source project no longer registered" }, 410);
+				return;
+			}
+
+			const { sessionFileCopy, CrossRealmCopyError } = await import("../agent/session-fs.js");
+			const { formatAgentSessionFilePath } = await import("../agent/agent-session-path.js");
+			const { copyToolContentDirIfPresent, cleanupFailedContinue } = await import("../agent/continue-archived.js");
+			const nodeFs = await import("node:fs");
+			const { randomUUID } = await import("node:crypto");
+
+			let sourceJsonl = ps.agentSessionFile;
+			if (!sourceJsonl) {
+				const recovered = sessionManager.recoverSessionFile(ps);
+				if (recovered) sourceJsonl = recovered;
+			}
+			if (!sourceJsonl) {
+				json({ error: "archived transcript missing or empty" }, 404);
+				return;
+			}
+
+			if (!ps.sandboxed) {
+				try {
+					const st = nodeFs.statSync(sourceJsonl);
+					if (!st.isFile() || st.size === 0) {
+						json({ error: "archived transcript missing or empty" }, 404);
+						return;
+					}
+				} catch {
+					json({ error: "archived transcript missing or empty" }, 404);
+					return;
+				}
+			}
+
+			const proj = projectRegistry.get(ps.projectId)!;
+			const projCwd = proj.rootPath;
+			const wantWorktree = !!ps.worktreePath;
+			let worktreeOpts: { repoPath: string } | undefined;
+			if (wantWorktree) {
+				try {
+					if (await isGitRepo(projCwd)) {
+						worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+					}
+				} catch { /* ignore */ }
+			}
+
+			const newSessionId = randomUUID();
+			const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
+
+			const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+			const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
+			try {
+				await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+			} catch (err) {
+				if (err instanceof CrossRealmCopyError) {
+					json({ error: "cross-realm continue not supported" }, 422);
+					return;
+				}
+				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+				jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			try {
+				copyToolContentDirIfPresent(archivedId, newSessionId, bobbitStateDir());
+			} catch (err) {
+				console.warn(`[continue-archived] tool-content copy failed (non-fatal): ${err}`);
+			}
+
+			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			const createOpts: any = {
+				sessionId: newSessionId,
+				projectId: ps.projectId,
+				sandboxed: !!ps.sandboxed,
+				worktreeOpts,
+				preExistingAgentSessionFile: destJsonl,
+				skipAutoModel: !!(ps.modelProvider && ps.modelId),
+			};
+			if (ps.modelProvider && ps.modelId) {
+				createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+			}
+			if (role) {
+				createOpts.rolePrompt = role.promptTemplate;
+				createOpts.roleName = role.name;
+				createOpts.role = role.name;
+				createOpts.accessory = role.accessory;
+			}
+
+			let newSession;
+			try {
+				newSession = await sessionManager.createSession(
+					projCwd, undefined, undefined, undefined, createOpts,
+				);
+			} catch (err) {
+				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+				jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			const baseTitle = (ps.title || "session").trim() || "session";
+			const continuedTitle = `Continued: ${baseTitle}`;
+			sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
+
+			if (ps.modelProvider && ps.modelId) {
+				sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
+			}
+
+			json({
+				id: newSession.id,
+				cwd: newSession.cwd,
+				status: newSession.status,
+				title: continuedTitle,
+			}, 201);
 		},
 	},
 	{

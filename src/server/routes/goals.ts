@@ -13,6 +13,8 @@ import {
 } from "./cross-project.js";
 import { GateDependencyError } from "../agent/team-manager.js";
 import { checkGateDependencies } from "../agent/gate-dependency-check.js";
+import { resolveProjectForRequest } from "../agent/resolve-project.js";
+import { deleteRemoteGoalBranches } from "../git/goal-branches.js";
 import type { Route } from "./types.js";
 
 // BFS helper: walk delegateOf, teamLeadSessionId, teamGoalId, and goalId chains
@@ -40,6 +42,149 @@ function bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[] {
 }
 
 export const goalsRoutes: Route[] = [
+	{
+		method: "POST",
+		pattern: "/api/goals",
+		handler: async ({ deps, readBody, json, jsonError }) => {
+			const { config, projectRegistry, projectContextManager, sandboxManager, configCascade, teamManager, broadcastToAll } = deps;
+			const body = await readBody();
+			const title = body?.title;
+			let cwd = body?.cwd || config.defaultCwd;
+			if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
+				const proj = projectRegistry.get(body.projectId);
+				if (proj) cwd = proj.rootPath;
+			}
+			const spec = body?.spec || "";
+			const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
+			if (!title || typeof title !== "string") {
+				json({ error: "Missing title" }, 400);
+				return;
+			}
+			try {
+				const sandboxed = body.sandboxed === true;
+				const autoStartTeam = body.autoStartTeam !== false;
+				let enabledOptionalSteps: string[] | undefined;
+				if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
+					enabledOptionalSteps = body.enabledOptionalSteps;
+				}
+				const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
+				if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+				const targetProjectId = resolved.projectId;
+				if (!body?.cwd) cwd = resolved.project.rootPath;
+				const targetCtx = projectContextManager.getOrCreate(targetProjectId);
+				if (!targetCtx) {
+					json({ error: "Invalid project" }, 400);
+					return;
+				}
+				if (sandboxed && sandboxManager) {
+					try {
+						await sandboxManager.ensureForProject(targetProjectId);
+					} catch (err) {
+						jsonError(500, err, { error: `Sandbox init failed: ${(err as Error).message || err}` });
+						return;
+					}
+				}
+				const targetGoalManager = targetCtx.goalManager;
+				const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+				const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+				const goal = await targetGoalManager.createGoal(title, cwd, {
+					spec,
+					workflowId,
+					workflowStore: targetCtx.workflowStore,
+					resolvedWorkflow,
+					sandboxed,
+					enabledOptionalSteps,
+					projectId: targetProjectId,
+				});
+				if (targetProjectId) {
+					targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
+					goal.projectId = targetProjectId;
+				}
+				if (body.reattemptOf && typeof body.reattemptOf === "string") {
+					targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
+					goal.reattemptOf = body.reattemptOf;
+				}
+				targetGoalManager.updateGoal(goal.id, { autoStartTeam });
+				goal.autoStartTeam = autoStartTeam;
+				if (goal.workflow) {
+					targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
+				}
+				json(goal, 201);
+
+				if (goal.setupStatus === "preparing") {
+					if (goal.autoStartTeam) {
+						targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
+							broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+						}).catch((err) => {
+							const g = targetGoalManager.getGoal(goal.id);
+							if (g?.setupStatus === "ready") {
+								broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+								console.error("[goal] Auto-start team failed (worktree ready):", err);
+							} else {
+								broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
+							}
+						});
+					} else {
+						targetGoalManager.setupWorktree(goal.id).then(() => {
+							broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
+						}).catch((err) => {
+							broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
+						});
+					}
+				}
+			} catch (err) {
+				jsonError(400, err);
+			}
+		},
+	},
+	{
+		method: "DELETE",
+		pattern: /^\/api\/goals\/([^/]+)$/,
+		handler: async ({ deps, params, json }) => {
+			const { projectContextManager, teamManager, verificationHarness, prStatusStore } = deps;
+			const id = params[1];
+			for (const active of verificationHarness.getActiveVerifications(id)) {
+				try {
+					await verificationHarness.cancelStaleVerifications(id, active.gateId);
+				} catch (err) {
+					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
+				}
+			}
+			const goalProjectCtx = projectContextManager.getContextForGoal(id);
+			const teamEntry = goalProjectCtx?.teamStore.get(id);
+			const agentBranches: string[] = [];
+			if (teamEntry?.agents) {
+				for (const a of teamEntry.agents) {
+					if (a.branch) agentBranches.push(a.branch);
+				}
+			}
+			if (teamEntry?.teamLeadSessionId) {
+				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+				if (tl?.branch) agentBranches.push(tl.branch);
+			}
+
+			const teamState = teamManager.getTeamState(id);
+			if (teamState) {
+				try {
+					await teamManager.teardownTeam(id);
+				} catch (err) {
+					console.error(`[api] Error tearing down team for goal ${id}:`, err);
+				}
+			}
+			const deleteGoalMgr = getGoalManagerForGoal(deps, id);
+			await deleteGoalMgr.archiveGoal(id);
+
+			const archivedGoal = deleteGoalMgr.getGoal(id);
+			if (archivedGoal?.repoPath) {
+				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
+				});
+			}
+
+			prStatusStore.remove(id);
+			json({ ok: true });
+		},
+	},
 	{
 		method: "GET",
 		pattern: "/api/goals",

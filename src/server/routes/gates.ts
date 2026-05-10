@@ -6,10 +6,183 @@
  * now — it's tightly coupled to verificationHarness, gate cascade reset,
  * and broadcast plumbing. Migrating it is tracked as follow-up work.
  */
+import { randomUUID } from "node:crypto";
 import { getGoalAcrossProjects } from "./cross-project.js";
+import { execGitSafe } from "../git/git-exec.js";
+import { detectPrimaryBranch } from "../skills/git.js";
+import { hasTransitiveDep } from "../agent/gate-deps.js";
 import type { Route } from "./types.js";
 
 export const gatesRoutes: Route[] = [
+	{
+		method: "POST",
+		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signal$/,
+		handler: async ({ deps, params, readBody, json }) => {
+			const { projectContextManager, verificationHarness, broadcastToGoal } = deps;
+			const [, goalId, gateId] = params;
+			const goal = getGoalAcrossProjects(deps, goalId);
+			if (!goal) { json({ error: "Goal not found" }, 404); return; }
+			if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+			if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+			const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
+			if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+			const gateStore = gateSignalCtx.gateStore;
+			const gateDef = goal.workflow.gates.find(g => g.id === gateId);
+			if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+
+			const body = await readBody();
+			const signalSessionId = body?.sessionId || "unknown";
+
+			for (const depId of gateDef.dependsOn) {
+				const depGate = gateStore.getGate(goalId, depId);
+				if (!depGate || depGate.status !== "passed") {
+					const depDef = goal.workflow.gates.find(g => g.id === depId);
+					json({ error: `Upstream gate "${depDef?.name || depId}" has not passed yet` }, 409);
+					return;
+				}
+			}
+
+			if (gateDef.metadata && body?.metadata) {
+				for (const key of Object.keys(gateDef.metadata)) {
+					if (!(key in body.metadata)) {
+						json({ error: `Missing required metadata field: ${key}` }, 400);
+						return;
+					}
+				}
+			} else if (gateDef.metadata && !body?.metadata) {
+				const required = Object.keys(gateDef.metadata);
+				if (required.length > 0) {
+					json({ error: `Missing required metadata fields: ${required.join(", ")}` }, 400);
+					return;
+				}
+			}
+
+			let commitSha = "unknown";
+			try {
+				commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
+			} catch { /* ignore */ }
+
+			if (commitSha !== "unknown") {
+				const activeVers = verificationHarness.getActiveVerifications(goalId);
+				const runningDup = activeVers.find(v => {
+					if (v.gateId !== gateId || v.overallStatus !== "running") return false;
+					const gs = gateStore.getGate(goalId, gateId);
+					const s = gs?.signals.find(s => s.id === v.signalId);
+					return s?.commitSha === commitSha;
+				});
+				if (runningDup) {
+					const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
+					if (!alive) {
+						console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
+						await verificationHarness.cancelStaleVerifications(goalId, gateId);
+					} else {
+						json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
+						return;
+					}
+				}
+			}
+
+			if (commitSha !== "unknown") {
+				const existingGateForCache = gateStore.getGate(goalId, gateId);
+				if (existingGateForCache) {
+					const priorPassed = existingGateForCache.signals.find(s =>
+						s.commitSha === commitSha && s.verification?.status === "passed"
+					);
+					if (priorPassed?.verification) {
+						const cachedSignal = {
+							id: randomUUID(),
+							gateId,
+							goalId,
+							sessionId: body?.sessionId || "unknown",
+							timestamp: Date.now(),
+							commitSha,
+							metadata: body?.metadata,
+							content: body?.content,
+							contentVersion: body?.content ? (existingGateForCache.currentContentVersion || 0) + 1 : undefined,
+							verification: {
+								status: "passed" as const,
+								steps: priorPassed.verification.steps.map(s => ({ ...s, output: `[cached from prior signal] ${s.output}` })),
+							},
+						};
+						gateStore.recordSignal(cachedSignal);
+						if (body?.content && cachedSignal.contentVersion) {
+							gateStore.updateGateContent(goalId, gateId, body.content, cachedSignal.contentVersion);
+						}
+						if (body?.metadata) {
+							gateStore.updateGateMetadata(goalId, gateId, body.metadata);
+						}
+						gateStore.updateGateStatus(goalId, gateId, "passed");
+						broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
+						broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
+						broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
+						const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+						json({ signal: { id: cachedSignal.id, gateId, goalId, status: "passed", steps: verifySteps, cached: true } }, 201);
+						return;
+					}
+				}
+			}
+
+			const existingGate = gateStore.getGate(goalId, gateId);
+			const contentVersion = body?.content ? (existingGate?.currentContentVersion || 0) + 1 : undefined;
+
+			if (existingGate && existingGate.status === "passed") {
+				gateStore.cascadeReset(goalId, gateId, goal.workflow);
+				for (const g of goal.workflow.gates) {
+					if (g.dependsOn.includes(gateId) || hasTransitiveDep(goal.workflow, g.id, gateId)) {
+						const downstream = gateStore.getGate(goalId, g.id);
+						if (downstream) {
+							broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: g.id, status: downstream.status });
+						}
+					}
+				}
+			}
+
+			const signal = {
+				id: randomUUID(),
+				gateId,
+				goalId,
+				sessionId: signalSessionId,
+				timestamp: Date.now(),
+				commitSha,
+				metadata: body?.metadata,
+				content: body?.content,
+				contentVersion,
+				verification: { status: "running" as const, steps: [] },
+			};
+
+			gateStore.recordSignal(signal);
+
+			if (body?.content && contentVersion) {
+				gateStore.updateGateContent(goalId, gateId, body.content, contentVersion);
+			}
+			if (body?.metadata) {
+				gateStore.updateGateMetadata(goalId, gateId, body.metadata);
+			}
+
+			broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
+
+			const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
+			for (const gs of gateStore.getGatesForGoal(goalId)) {
+				const def = goal.workflow?.gates?.find((g: any) => g.id === gs.gateId);
+				allGateStates.set(gs.gateId, {
+					metadata: gs.currentMetadata,
+					content: gs.currentContent,
+					status: gs.status,
+					injectDownstream: def?.injectDownstream,
+				});
+			}
+
+			await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
+			const primary = await detectPrimaryBranch(goal.cwd).catch(() => "master");
+			verificationHarness.verifyGateSignal(
+				signal, gateDef, goal.cwd, goal.branch, primary, allGateStates, goal.spec,
+			).catch(err => console.error("[verification] Gate signal error:", err));
+
+			const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
+			json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
+		},
+	},
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/gates$/,

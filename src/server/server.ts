@@ -30,13 +30,12 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
 
-import { isGitRepo, getRepoRoot, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, stripTokenFromGitUrl } from "./skills/git.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore, validateComponentsConfig, LEGACY_QA_TOP_LEVEL_KEYS } from "./agent/project-config-store.js";
-import { hasTransitiveDep } from "./agent/gate-deps.js";
 import { loadManifest, serveStatic } from "./static.js";
 import { readBody } from "./routes/route-helpers.js";
 import { dispatch as dispatchRoute } from "./routes/dispatcher.js";
@@ -73,8 +72,6 @@ const execFileAsync = promisify(execFileCb);
 // ── Git helpers, status cache, PR cache, goal-branch deletion ──
 // All extracted to ./git/* — re-exported from this file so test hooks remain
 // importable from "./server.js" (see tests/e2e/git-status-caching.spec.ts).
-import { execGitSafe } from "./git/git-exec.js";
-import { deleteRemoteGoalBranches } from "./git/goal-branches.js";
 import { clearPrStatusCache } from "./git/pr-status.js";
 // Re-export git-status test hooks so existing imports from "./server.js" keep
 // working (see tests/e2e/git-status-caching.spec.ts).
@@ -1006,22 +1003,22 @@ async function handleApiRoute(
 	sessionManager: SessionManager,
 	config: GatewayConfig,
 	_colorStore: ColorStore,
-	prStatusStore: PrStatusStore,
-	teamManager: TeamManager,
+	_prStatusStore: PrStatusStore,
+	_teamManager: TeamManager,
 	roleManager: RoleManager,
 	_toolManager: ToolManager,
 	projectContextManager: ProjectContextManager,
 	_bgProcessManager: BgProcessManager,
 	_staffManager: StaffManager,
-	verificationHarness: VerificationHarness,
+	_verificationHarness: VerificationHarness,
 	_preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
 	_groupPolicyStore: ToolGroupPolicyStore,
-	broadcastToGoal: (goalId: string, event: any) => void,
-	broadcastToAll: (event: any) => void,
-	sandboxManager: SandboxManager | null,
+	_broadcastToGoal: (goalId: string, event: any) => void,
+	_broadcastToAll: (event: any) => void,
+	_sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
-	configCascade: ConfigCascade,
+	_configCascade: ConfigCascade,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
 	_reviewAnnotationStore?: ReviewAnnotationStore,
@@ -1775,170 +1772,6 @@ async function handleApiRoute(
 
 	// ── Goal endpoints ─────────────────────────────────────────────
 
-	// POST /api/goals
-	if (url.pathname === "/api/goals" && req.method === "POST") {
-		const body = await readBody(req);
-		const title = body?.title;
-		let cwd = body?.cwd || config.defaultCwd;
-		// If a projectId is provided and no explicit cwd, use the project's rootPath
-		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
-			const proj = projectRegistry.get(body.projectId);
-			if (proj) cwd = proj.rootPath;
-		}
-		const spec = body?.spec || "";
-		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
-		if (!title || typeof title !== "string") {
-			json({ error: "Missing title" }, 400);
-			return;
-		}
-		try {
-			const sandboxed = body.sandboxed === true;
-			const autoStartTeam = body.autoStartTeam !== false; // default true
-			let enabledOptionalSteps: string[] | undefined;
-			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
-				enabledOptionalSteps = body.enabledOptionalSteps;
-			}
-			// Resolve target project — explicit projectId or cwd-match. No fallback.
-			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
-			const targetProjectId = resolved.projectId;
-			// If caller passed a projectId but no cwd, use the project's rootPath.
-			if (!body?.cwd) cwd = resolved.project.rootPath;
-			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
-			if (!targetCtx) {
-				json({ error: "Invalid project" }, 400);
-				return;
-			}
-			// Lazy per-project sandbox init — idempotent, deduped by SandboxManager.
-			if (sandboxed && sandboxManager) {
-				try {
-					await sandboxManager.ensureForProject(targetProjectId);
-				} catch (err) {
-					jsonError(500, err, { error: `Sandbox init failed: ${(err as Error).message || err}` });
-					return;
-				}
-			}
-			const targetGoalManager = targetCtx.goalManager;
-			// Resolve workflow through the config cascade (builtin → server → project)
-			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-			const goal = await targetGoalManager.createGoal(title, cwd, {
-				spec,
-				workflowId,
-				workflowStore: targetCtx.workflowStore,
-				resolvedWorkflow,
-				sandboxed,
-				enabledOptionalSteps,
-				projectId: targetProjectId,
-			});
-			// Set projectId (explicit or auto-detected from cwd)
-			if (targetProjectId) {
-				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
-				goal.projectId = targetProjectId;
-			}
-			// Set reattemptOf if provided
-			if (body.reattemptOf && typeof body.reattemptOf === "string") {
-				targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
-				goal.reattemptOf = body.reattemptOf;
-			}
-			// Persist autoStartTeam flag
-			targetGoalManager.updateGoal(goal.id, { autoStartTeam });
-			goal.autoStartTeam = autoStartTeam;
-			// Initialize gate states for the workflow
-			if (goal.workflow) {
-				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
-			}
-			json(goal, 201);
-
-			// Fire-and-forget async worktree setup (and optionally start team)
-			if (goal.setupStatus === "preparing") {
-				if (goal.autoStartTeam) {
-					targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-					}).catch((err) => {
-						const g = targetGoalManager.getGoal(goal.id);
-						if (g?.setupStatus === "ready") {
-							broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-							console.error("[goal] Auto-start team failed (worktree ready):", err);
-						} else {
-							broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
-						}
-					});
-				} else {
-					targetGoalManager.setupWorktree(goal.id).then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-					}).catch((err) => {
-						broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
-					});
-				}
-			}
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// DELETE /api/goals/:id — archive + remote-branch cleanup. GET/PUT are
-	// migrated to routes/goals.ts; the dispatcher catches them before we get
-	// here.
-	const goalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)$/);
-	if (goalMatch && req.method === "DELETE") {
-		const id = goalMatch[1];
-		{
-			// Cancel any in-flight gate verifications (terminates reviewer sessions)
-			for (const active of verificationHarness.getActiveVerifications(id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(id, active.gateId);
-				} catch (err) {
-					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
-				}
-			}
-			// Capture agent branches BEFORE teardown erases the team store entry.
-			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
-			// mutates teamEntry.agents in place via dismissRole(), so we must
-			// snapshot the branch names into a fresh string[] now — reading
-			// teamEntry.agents after teardown returns an empty array.
-			const goalProjectCtx = projectContextManager.getContextForGoal(id);
-			const teamEntry = goalProjectCtx?.teamStore.get(id);
-			const agentBranches: string[] = [];
-			if (teamEntry?.agents) {
-				for (const a of teamEntry.agents) {
-					if (a.branch) agentBranches.push(a.branch);
-				}
-			}
-			// Include the team-lead's own session branch if it differs from goal.branch.
-			if (teamEntry?.teamLeadSessionId) {
-				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-				if (tl?.branch) agentBranches.push(tl.branch);
-			}
-
-			// Tear down any active team first (dismisses agents, cleans up their worktrees)
-			const teamState = teamManager.getTeamState(id);
-			if (teamState) {
-				try {
-					await teamManager.teardownTeam(id);
-				} catch (err) {
-					console.error(`[api] Error tearing down team for goal ${id}:`, err);
-				}
-			}
-			// Archive instead of hard-delete — tasks, gates, team state remain intact
-			const deleteGoalMgr = getGoalManagerForGoal(id);
-			await deleteGoalMgr.archiveGoal(id);
-
-			// Fire-and-forget: clean up remote branches for this goal
-			const archivedGoal = deleteGoalMgr.getGoal(id);
-			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
-					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
-				});
-			}
-
-			prStatusStore.remove(id);
-			json({ ok: true });
-			return;
-		}
-	}
-
 	// ── Role endpoints ─────────────────────────────────────────────
 
 	// ── Config: default cwd ──
@@ -1947,352 +1780,8 @@ async function handleApiRoute(
 
 	// ── Task endpoints ─────────────────────────────────────────────
 
-	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate
-	const gateSignalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signal$/);
-	if (gateSignalMatch && req.method === "POST") {
-		const [, goalId, gateId] = gateSignalMatch;
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
-		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
-		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
-		if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
-		const gateStore = gateSignalCtx.gateStore;
-		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
-		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
-
-		const body = await readBody(req);
-		const signalSessionId = body?.sessionId || "unknown";
-
-		// Validate dependencies are met
-		for (const depId of gateDef.dependsOn) {
-			const depGate = gateStore.getGate(goalId, depId);
-			if (!depGate || depGate.status !== "passed") {
-				const depDef = goal.workflow.gates.find(g => g.id === depId);
-				json({ error: `Upstream gate "${depDef?.name || depId}" has not passed yet` }, 409);
-				return;
-			}
-		}
-
-		// Validate metadata against gate's schema
-		if (gateDef.metadata && body?.metadata) {
-			for (const key of Object.keys(gateDef.metadata)) {
-				if (!(key in body.metadata)) {
-					json({ error: `Missing required metadata field: ${key}` }, 400);
-					return;
-				}
-			}
-		} else if (gateDef.metadata && !body?.metadata) {
-			const required = Object.keys(gateDef.metadata);
-			if (required.length > 0) {
-				json({ error: `Missing required metadata fields: ${required.join(", ")}` }, 400);
-				return;
-			}
-		}
-
-		// Get commit SHA
-		let commitSha = "unknown";
-		try {
-			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
-		} catch { /* ignore */ }
-
-		// Reject if verification is already running for this gate+commit
-		if (commitSha !== "unknown") {
-			const activeVers = verificationHarness.getActiveVerifications(goalId);
-			const runningDup = activeVers.find(v => {
-				if (v.gateId !== gateId || v.overallStatus !== "running") return false;
-				const gs = gateStore.getGate(goalId, gateId);
-				const s = gs?.signals.find(s => s.id === v.signalId);
-				return s?.commitSha === commitSha;
-			});
-			if (runningDup) {
-				// Check if sessions are actually alive — auto-cancel zombies
-				const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
-				if (!alive) {
-					console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
-					await verificationHarness.cancelStaleVerifications(goalId, gateId);
-					// Fall through to create new signal
-				} else {
-					json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
-					return;
-				}
-			}
-		}
-
-		// Auto-pass if a prior signal for the same commit already fully passed
-		if (commitSha !== "unknown") {
-			const existingGateForCache = gateStore.getGate(goalId, gateId);
-			if (existingGateForCache) {
-				const priorPassed = existingGateForCache.signals.find(s =>
-					s.commitSha === commitSha && s.verification?.status === "passed"
-				);
-				if (priorPassed?.verification) {
-					// Create a signal record with cached results
-					const cachedSignal = {
-						id: randomUUID(),
-						gateId,
-						goalId,
-						sessionId: body?.sessionId || "unknown",
-						timestamp: Date.now(),
-						commitSha,
-						metadata: body?.metadata,
-						content: body?.content,
-						contentVersion: body?.content ? (existingGateForCache.currentContentVersion || 0) + 1 : undefined,
-						verification: {
-							status: "passed" as const,
-							steps: priorPassed.verification.steps.map(s => ({ ...s, output: `[cached from prior signal] ${s.output}` })),
-						},
-					};
-					gateStore.recordSignal(cachedSignal);
-					if (body?.content && cachedSignal.contentVersion) {
-						gateStore.updateGateContent(goalId, gateId, body.content, cachedSignal.contentVersion);
-					}
-					if (body?.metadata) {
-						gateStore.updateGateMetadata(goalId, gateId, body.metadata);
-					}
-					gateStore.updateGateStatus(goalId, gateId, "passed");
-					broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: cachedSignal.id });
-					broadcastToGoal(goalId, { type: "gate_verification_complete", goalId, gateId, signalId: cachedSignal.id, status: "passed" });
-					broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "passed" });
-					const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
-					json({ signal: { id: cachedSignal.id, gateId, goalId, status: "passed", steps: verifySteps, cached: true } }, 201);
-					return;
-				}
-			}
-		}
-
-		// Compute content version
-		const existingGate = gateStore.getGate(goalId, gateId);
-		const contentVersion = body?.content ? (existingGate?.currentContentVersion || 0) + 1 : undefined;
-
-		// Check if this is a re-signal of a passed gate — cascade reset
-		if (existingGate && existingGate.status === "passed") {
-			gateStore.cascadeReset(goalId, gateId, goal.workflow);
-			// Broadcast resets for downstream gates
-			for (const g of goal.workflow.gates) {
-				if (g.dependsOn.includes(gateId) || hasTransitiveDep(goal.workflow, g.id, gateId)) {
-					const downstream = gateStore.getGate(goalId, g.id);
-					if (downstream) {
-						broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: g.id, status: downstream.status });
-					}
-				}
-			}
-		}
-
-		// Create signal record
-		const signal = {
-			id: randomUUID(),
-			gateId,
-			goalId,
-			sessionId: signalSessionId,
-			timestamp: Date.now(),
-			commitSha,
-			metadata: body?.metadata,
-			content: body?.content,
-			contentVersion,
-			verification: { status: "running" as const, steps: [] },
-		};
-
-		gateStore.recordSignal(signal);
-
-		// Update gate content/metadata if provided
-		if (body?.content && contentVersion) {
-			gateStore.updateGateContent(goalId, gateId, body.content, contentVersion);
-		}
-		if (body?.metadata) {
-			gateStore.updateGateMetadata(goalId, gateId, body.metadata);
-		}
-
-		// Broadcast signal received
-		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
-
-		// Build gate state map for metadata variable resolution + LLM reviewer context
-		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
-		for (const gs of gateStore.getGatesForGoal(goalId)) {
-			const def = goal.workflow?.gates?.find((g: any) => g.id === gs.gateId);
-			allGateStates.set(gs.gateId, {
-				metadata: gs.currentMetadata,
-				content: gs.currentContent,
-				status: gs.status,
-				injectDownstream: def?.injectDownstream,
-			});
-		}
-
-		// Cancel any in-flight verifications for the same gate before starting new ones
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
-
-		// Fire-and-forget verification — resolve primary branch dynamically so
-		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
-		// hardcoded "master". See docs/goals-workflows-tasks.md — Gate baselines.
-		const primary = await detectPrimaryBranch(goal.cwd).catch(() => "master");
-		verificationHarness.verifyGateSignal(
-			signal, gateDef, goal.cwd, goal.branch, primary, allGateStates, goal.spec,
-		).catch(err => console.error("[verification] Gate signal error:", err));
-
-		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
-		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
-		return;
-	}
-
 	// ── Team endpoints ─────────────────────────────────────────────
 	// Routes accept both /team/ and legacy /swarm/ paths
-
-	// POST /api/sessions/:archivedId/continue — Continue-Archived (lossless)
-	//
-	// Clones the archived session's `.jsonl` into a fresh slot, registers it
-	// as the new session's `agentSessionFile`, and lets the agent CLI rehydrate
-	// from it via `switch_session` — same mechanism the restart-resume path
-	// uses for live sessions. No transcript stringification, no system-prompt
-	// seeding, no byte budget.
-	const continueMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/continue$/);
-	if (continueMatch && req.method === "POST") {
-		const archivedId = continueMatch[1];
-		// Body is read for parity but no fields are required — the legacy `mode`
-		// parameter is ignored.
-		await readBody(req).catch(() => ({}));
-
-		// Resolve the archived session across all project contexts.
-		const ps = sessionManager.getPersistedSession(archivedId);
-		if (!ps) { json({ error: "session not found" }, 404); return; }
-		if (!ps.archived) { json({ error: "source not archived" }, 409); return; }
-		if (ps.goalId || ps.delegateOf || ps.teamGoalId || ps.assistantType) {
-			json({ error: "goal, delegate, team, or assistant sessions cannot be continued" }, 422);
-			return;
-		}
-		if (!ps.projectId || !projectRegistry.get(ps.projectId)) {
-			json({ error: "source project no longer registered" }, 410);
-			return;
-		}
-
-		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
-		// sessions whose persisted `agentSessionFile` was never populated.
-		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
-		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
-		const { copyToolContentDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
-		const nodeFs = await import("node:fs");
-		const { randomUUID } = await import("node:crypto");
-
-		let sourceJsonl = ps.agentSessionFile;
-		if (!sourceJsonl) {
-			const recovered = sessionManager.recoverSessionFile(ps);
-			if (recovered) sourceJsonl = recovered;
-		}
-		if (!sourceJsonl) {
-			json({ error: "archived transcript missing or empty" }, 404);
-			return;
-		}
-
-		// Verify the source file actually exists and is non-empty. For non-sandboxed
-		// sessions a quick host-side stat suffices; sandboxed sessions defer to the
-		// copy step (which surfaces the failure as a 500). Empty / missing → 404.
-		if (!ps.sandboxed) {
-			try {
-				const st = nodeFs.statSync(sourceJsonl);
-				if (!st.isFile() || st.size === 0) {
-					json({ error: "archived transcript missing or empty" }, 404);
-					return;
-				}
-			} catch {
-				json({ error: "archived transcript missing or empty" }, 404);
-				return;
-			}
-		}
-
-		const proj = projectRegistry.get(ps.projectId)!;
-		const projCwd = proj.rootPath;
-		const wantWorktree = !!ps.worktreePath;
-		let worktreeOpts: { repoPath: string } | undefined;
-		if (wantWorktree) {
-			try {
-				if (await isGitRepo(projCwd)) {
-					worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
-				}
-			} catch { /* ignore — no worktree */ }
-		}
-
-		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
-		// for worktree-backed sessions the agent CLI will rotate to a new file
-		// once the worktree cwd is final, but the cloned file we hand it via
-		// `switch_session` is what gets adopted.
-		const newSessionId = randomUUID();
-		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
-
-		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
-		const srcCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
-		const dstCtx = { sandboxed: !!ps.sandboxed, projectId: ps.projectId };
-		try {
-			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
-		} catch (err) {
-			if (err instanceof CrossRealmCopyError) {
-				json({ error: "cross-realm continue not supported" }, 422);
-				return;
-			}
-			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
-			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
-			return;
-		}
-
-		// Defensive forward-compat: copy the lazy tool-content cache if present.
-		try {
-			copyToolContentDirIfPresent(archivedId, newSessionId, bobbitStateDir());
-		} catch (err) {
-			console.warn(`[continue-archived] tool-content copy failed (non-fatal): ${err}`);
-		}
-
-		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
-		const createOpts: any = {
-			sessionId: newSessionId,
-			projectId: ps.projectId,
-			sandboxed: !!ps.sandboxed,
-			worktreeOpts,
-			preExistingAgentSessionFile: destJsonl,
-			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
-			skipAutoModel: !!(ps.modelProvider && ps.modelId),
-		};
-		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
-		// redundant initial `model_change` event with its hardcoded default.
-		if (ps.modelProvider && ps.modelId) {
-			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
-		}
-		if (role) {
-			createOpts.rolePrompt = role.promptTemplate;
-			createOpts.roleName = role.name;
-			createOpts.role = role.name;
-			createOpts.accessory = role.accessory;
-		}
-
-		let newSession;
-		try {
-			newSession = await sessionManager.createSession(
-				projCwd, undefined, undefined, undefined, createOpts,
-			);
-		} catch (err) {
-			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
-			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
-			return;
-		}
-
-		const baseTitle = (ps.title || "session").trim() || "session";
-		const continuedTitle = `Continued: ${baseTitle}`;
-		// markGenerated: prevents the first-message auto-titler from overwriting
-		// "Continued: …" once the user sends their first prompt in the new session.
-		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
-
-		if (ps.modelProvider && ps.modelId) {
-			// Model is pinned at spawn via createOpts.initialModel above; just
-			// persist the choice so a later restore picks it up. No redundant
-			// post-spawn setModel — that's the whole point of spawn-time pinning.
-			sessionManager.persistSessionModel(newSession.id, ps.modelProvider, ps.modelId);
-		}
-
-		json({
-			id: newSession.id,
-			cwd: newSession.cwd,
-			status: newSession.status,
-			title: continuedTitle,
-		}, 201);
-		return;
-	}
 
 	json({ error: "Not found" }, 404);
 }
