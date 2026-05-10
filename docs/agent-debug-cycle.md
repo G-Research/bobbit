@@ -2,6 +2,8 @@
 
 How to debug and validate UI features using an agent driving a real browser against an isolated gateway — without touching the production dev server.
 
+> The `curl` snippets below target a **separate isolated gateway** you spin up in a temp dir for debugging. For calls to your *own* session's gateway, use the [`gateway_api`](gateway-api-tool.md) tool — it resolves the token and URL automatically.
+
 ## Why This Exists
 
 Automated E2E tests use mock agents and synthetic REST calls to simulate user flows. This misses bugs that only manifest through the **real code path**: real agent → real tool call → real guard extension → real WebSocket broadcast → real UI render.
