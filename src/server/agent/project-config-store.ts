@@ -2,6 +2,55 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 
+/**
+ * The seven legacy top-level QA keys that have moved to per-component
+ * `config:` maps. Rejected on PUT and stripped from GET responses as
+ * defence in depth (state-migration removes them on boot).
+ */
+export const LEGACY_QA_TOP_LEVEL_KEYS = [
+	"qa_start_command",
+	"qa_build_command",
+	"qa_health_check",
+	"qa_browser_entry",
+	"qa_env",
+	"qa_max_duration_minutes",
+	"qa_max_scenarios",
+] as const;
+
+/**
+ * Validate the per-component `config:` map (post-migration, opaque
+ * key→string). Rules mirror the propose_project tool's runtime validator:
+ *   - keys must be non-empty strings
+ *   - values must be strings
+ *   - max 100 entries per component
+ *
+ * Returns null on success, or a string error message suitable for HTTP 400.
+ */
+export function validateComponentsConfig(components: unknown): string | null {
+	if (!Array.isArray(components)) return null;
+	for (const c of components) {
+		if (!c || typeof c !== "object") continue;
+		const cfg = (c as { config?: unknown }).config;
+		if (cfg === undefined || cfg === null) continue;
+		if (typeof cfg !== "object" || Array.isArray(cfg)) {
+			return `components[${(c as { name?: unknown }).name ?? "?"}].config: must be an object`;
+		}
+		const entries = Object.entries(cfg as Record<string, unknown>);
+		if (entries.length > 100) {
+			return `components[${(c as { name?: unknown }).name ?? "?"}].config: too many entries (max 100, got ${entries.length})`;
+		}
+		for (const [k, v] of entries) {
+			if (typeof k !== "string" || k.length === 0) {
+				return `components[${(c as { name?: unknown }).name ?? "?"}].config: empty key`;
+			}
+			if (typeof v !== "string") {
+				return `components[${(c as { name?: unknown }).name ?? "?"}].config.${k}: must be string, got ${typeof v}`;
+			}
+		}
+	}
+	return null;
+}
+
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
 // `project.rootPath` to compute on-disk locations. Reject `..` segments and
