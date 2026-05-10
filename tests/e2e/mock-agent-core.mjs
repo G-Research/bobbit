@@ -65,11 +65,9 @@
  *
  * Steer (RPC, not a prompt-text trigger)
  * --------------------------------------
- *  Steer commands (handleCommand → case "steer") emit a synchronous
- *  [STEER_RECEIVED] <text> assistant message for back-compat with
- *  tests/e2e/steer-midturn.spec.ts and tests/e2e/ui/bg-wait-steer-flow.spec.ts,
- *  then abort the in-flight turn and queue a fresh handlePrompt(steeredText)
- *  which produces a real <user-message> in the chat.
+ *  Steer commands (handleCommand → case "steer") abort the in-flight turn
+ *  and queue a fresh handlePrompt(steeredText), which produces a real
+ *  <user-message> in the chat. Tests assert on that transcript event.
  *
  * ----------------------------------------------------------------------
  *
@@ -652,6 +650,13 @@ export class MockAgentCore {
 			this.emit({ type: "tool_execution_start", toolName: "Bash", toolId: busyToolId, input: { command: "sleep" } });
 			await this.tick(busyMs);
 			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				// Real-agent fidelity (MOCK_ABORT_TOOL_END=1): the bash tool
+				// extension emits tool_execution_end on abort because the
+				// underlying bash process is killed. Default mock returns
+				// early for backwards compatibility with existing tests.
+				if (this.env.MOCK_ABORT_TOOL_END === "1") {
+					this.emit({ type: "tool_execution_end", toolCallId: busyToolId, toolName: "Bash", isError: true });
+				}
 				this.currentAbortController = null;
 				return;
 			}
@@ -1697,6 +1702,14 @@ export class MockAgentCore {
 		switch (msg.type) {
 			case "prompt":
 			case "follow_up": {
+				// Real-agent fidelity (MOCK_ABORT_BUSY=1): reject prompts that
+				// arrive in the same microtask as agent_end-from-abort, mirroring
+				// pi-agent-core's "Agent is already processing." guard.
+				if (this._busyOverride) {
+					return { success: false, error: "Agent is already processing." };
+				}
+				// A fresh prompt restarts the loop — clear the abort window.
+				this._abortedRecently = false;
 				// Respond to ack, then handle prompt async. Serialize onto the
 				// per-instance promise chain so concurrent prompts queue up
 				// rather than interleave (which would double-assign
@@ -1714,16 +1727,10 @@ export class MockAgentCore {
 			case "steer": {
 				// Production behaviour: steer interrupts the current turn and
 				// the steered text becomes a fresh user prompt with its own
-				// assistant turn. Two listeners care about the result:
-				//   - Legacy E2E tests (steer-midturn.spec.ts,
-				//     bg-wait-steer-flow.spec.ts) scan for an assistant
-				//     message_end whose text contains both 'STEER_RECEIVED' and
-				//     the steered text — we emit that synchronously below as a
-				//     back-compat marker.
-				//   - New tests scan the rendered chat for a <user-message>
-				//     matching the steered text — we get that by queueing a
-				//     real handlePrompt round-trip after the in-flight turn
-				//     finishes.
+				// assistant turn. Tests scan the rendered chat for a
+				// <user-message> matching the steered text — we get that by
+				// queueing a real handlePrompt round-trip after the in-flight
+				// turn finishes.
 				//
 				// Crucially we do NOT null out currentAbortController here:
 				// the in-flight handlePrompt is still on the call stack and
@@ -1732,15 +1739,22 @@ export class MockAgentCore {
 				// which lets the in-flight burst overlap with the steered
 				// handlePrompt and corrupts ordering.
 				const steeredText = msg.message || msg.text || "";
-				const marker = {
-					role: "assistant",
-					content: [{ type: "text", text: `[STEER_RECEIVED] ${steeredText}` }],
-				};
-				this.conversationMessages.push(marker);
-				this.emit({ type: "message_end", message: marker });
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 				}
+
+				// Real-agent fidelity (MOCK_STEER_QUEUE_DROP=1): the SDK queues
+				// steer text on `_steeringMessages` and only consumes it at the
+				// start of the NEXT loop iteration. If the agent loop has just
+				// been aborted (and won't iterate again until a fresh prompt()),
+				// the steer text is silently dropped — the SDK accepts the RPC
+				// but the message never surfaces as a <user-message>. Default
+				// mock immediately runs handlePrompt(steeredText), which always
+				// surfaces the message; that hides this real-agent failure mode.
+				if (this.env.MOCK_STEER_QUEUE_DROP === "1" && this._abortedRecently) {
+					return { success: true };
+				}
+
 				if (steeredText) {
 					this._promptChain = this._promptChain
 						.catch(() => {})
@@ -1757,12 +1771,52 @@ export class MockAgentCore {
 					this.currentAbortController.abort();
 					this.currentAbortController = null;
 				}
+				// MOCK_STEER_QUEUE_DROP fidelity: mark a window during which steer
+				// RPCs return success but their text is dropped (matching SDK
+				// behaviour where _steeringMessages is populated but the loop
+				// has exited). Cleared on the next prompt() so a fresh user
+				// turn (which restarts the loop) processes steers normally.
+				if (this.env.MOCK_STEER_QUEUE_DROP === "1") {
+					this._abortedRecently = true;
+				}
+				// Real-agent fidelity (MOCK_ABORT_BUSY=1): the SDK emits agent_end
+				// from `handleRunFailure` while `activeRun` is still set; only the
+				// outer try/finally's `finishRun()` clears it on the next microtask.
+				// A synchronous prompt() call from an agent_end listener (e.g.
+				// drainQueue calling rpcClient.prompt) therefore rejects with
+				// "Agent is already processing." Setting _busyOverride here for one
+				// microtask reproduces that exact race — cleared via setImmediate so
+				// any deferred drain (microtask / setImmediate / setTimeout) succeeds.
+				if (this.env.MOCK_ABORT_BUSY === "1") {
+					this._busyOverride = true;
+					setImmediate(() => { this._busyOverride = false; });
+				}
 				// Emit abort events synchronously — the caller's `await abort()`
 				// resolves on the return value below, after which their listener
 				// setup (if any) has already been registered via prior calls.
 				// In-process listeners are effectively ordered, so emitting here
 				// delivers events to all currently-subscribed handlers without
 				// racing a subsequent prompt's new abortController.
+				//
+				// Real-agent fidelity: when the user aborts an in-flight turn, the
+				// real Claude bridge surfaces the abort by emitting an assistant
+				// `message_end` with `stopReason:"error"` (rendered as "Request
+				// aborted" in the UI) BEFORE the terminal `agent_end`. This is the
+				// signal that flips `session.lastTurnErrored=true` in the server,
+				// which then gates `drainQueue` off in the `agent_end` handler.
+				// The MOCK_ABORT_AS_ERROR opt-in switches the mock to that shape so
+				// tests can exercise the error-gated drain path without changing
+				// the default abort behaviour for tests that rely on the clean
+				// (non-errored) abort.
+				if (this.env.MOCK_ABORT_AS_ERROR === "1") {
+					const abortedMsg = {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: "Request aborted",
+					};
+					this.emit({ type: "message_end", message: abortedMsg });
+				}
 				this.emit({ type: "agent_end" });
 				this.emit({ type: "session_status", status: "idle" });
 				return { success: true };

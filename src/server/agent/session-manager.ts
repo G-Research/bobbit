@@ -238,6 +238,25 @@ export interface SessionInfo {
 	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 	/**
+	 * Shadow ledger of steer texts that have been dispatched to the SDK
+	 * (`rpcClient.steer()` resolved) but have not yet echoed back as a
+	 * user-role `message_end`. This is design §6.1 mitigation B: because
+	 * Bobbit cannot extend the upstream pi-coding-agent RPC bridge to
+	 * proxy `AgentSession.clearQueue()`, we mirror the SDK's text-match
+	 * splice logic at our layer for the abort-reconciliation case only.
+	 *
+	 * Lifecycle:
+	 *   - push: after `await rpcClient.steer(text)` resolves in `_dispatchSteer`.
+	 *   - splice: on `message_end(role:user)` whose body matches the front entry,
+	 *     mirroring `_processAgentEvent`'s `_steeringMessages.indexOf` removal.
+	 *   - drain: in `_reconcileAfterAbort` — re-enqueue at front so the next
+	 *     turn redispatches them as a steered batch.
+	 *
+	 * Bounded growth: every entry has a paired SDK echo or an abort-drain;
+	 * neither path is silently dropped.
+	 */
+	inFlightSteerTexts?: string[];
+	/**
 	 * Latest in-flight `message_update` payload. Set on every `message_update`
 	 * event with a non-empty `event.message`; cleared on `message_end`,
 	 * `agent_end`, and `process_exit`. Used to splice the in-flight row into
@@ -1473,8 +1492,6 @@ export class SessionManager {
 	deliverLiveSteer(sessionId: string, message: string): Promise<unknown> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
-		const bg = (this as any).bgProcessManager;
-		if (bg) bg.abortAllWaits(sessionId);
 
 		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
 		// there is no live turn to inject into, so we either dispatch a regular
@@ -1485,9 +1502,8 @@ export class SessionManager {
 				console.log(
 					`[session-manager] Session ${sessionId} has ${consec} consecutive errored turns; parking live-steer. Human action required.`
 				);
-				// Preserve PI-25b/c invariant: persist to promptQueue so it survives
-				// Stop/Retry. Keep isSteered; do NOT mark dispatched (no in-flight
-				// turn to inject into). drainQueue will pick it up after user Retry.
+				// Persist to promptQueue so it survives Stop/Retry. drainQueue will
+				// pick it up after user Retry.
 				const queued = session.promptQueue.enqueue(message, { isSteered: true });
 				this.broadcastQueue(session);
 				return Promise.resolve({ queued: true, parked: true, id: queued.id });
@@ -1502,17 +1518,12 @@ export class SessionManager {
 			return this.enqueuePrompt(sessionId, message, { isSteered: true });
 		}
 
-		// Persist the live-steer text in promptQueue as {isSteered, dispatched}
-		// so it survives abort. The SDK parks the steer until the next tool
-		// boundary and discards it if the turn is aborted; without a server-side
-		// record the text would be silently lost. The happy path cleans up via
-		// the `message_end(user)` → removeDispatched() hook in handleAgentLifecycle.
-		// On abort, the agent_end handler re-arms non-flushed steered rows so
-		// drainQueue redelivers them. See goal "Fix steer-lost-on-abort bug".
+		// Happy path: enqueue then dispatch via the single _dispatchSteer site.
+		// _dispatchSteer removes the row from promptQueue *before* awaiting the
+		// RPC, so the SDK becomes the sole authority for in-flight steer text.
 		const queued = session.promptQueue.enqueue(message, { isSteered: true });
-		session.promptQueue.markDispatched(queued.id);
 		this.broadcastQueue(session);
-		return session.rpcClient.steer(message);
+		return this._dispatchSteer(session, [queued]);
 	}
 
 	/**
@@ -1552,26 +1563,88 @@ export class SessionManager {
 	}
 
 	/**
-	 * Batch all steered+undispatched messages and dispatch via rpcClient.steer().
-	 * Marks each as dispatched so they aren't sent again.
-	 * Called from handleAgentLifecycle on tool_execution_end events.
+	 * Single dispatch site for steered prompts. Removes rows from promptQueue
+	 * *before* awaiting rpcClient.steer() so the SDK becomes the sole
+	 * authority for in-flight steer text. On RPC failure, rows are
+	 * re-enqueued at the front in original order (steered group still sorts
+	 * first via PromptQueue.reorder()).
+	 *
+	 * Tool-boundary callers may pre-pop rows with dequeueAllSteered() — in
+	 * that case remove() is a no-op (returns false), broadcastQueue stays
+	 * idempotent.
 	 */
-	private _dispatchSteeredMessages(session: SessionInfo): void {
-		const steeredMessages = session.promptQueue.toArray()
-			.filter((m: any) => m.isSteered && !m.dispatched);
-		if (steeredMessages.length === 0) return;
-
-		const batchText = steeredMessages.map((m: any) => m.text).join("\n");
-		for (const m of steeredMessages) {
-			session.promptQueue.markDispatched(m.id);
-		}
-
-		// Same abort behaviour as deliverLiveSteer — unblock any bash_bg wait first.
+	private async _dispatchSteer(session: SessionInfo, rows: QueuedMessage[]): Promise<void> {
+		if (rows.length === 0) return;
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(session.id);
-		session.rpcClient.steer(batchText).catch((err: any) => {
-			console.error(`[session-manager] Failed to dispatch steered messages for ${session.id}:`, err);
-		});
+		const batchText = rows.map(r => r.text).join("\n");
+		for (const r of rows) session.promptQueue.remove(r.id);
+		this.broadcastQueue(session);
+
+		// Record on the shadow ledger BEFORE the RPC resolves so that an
+		// agent_end firing during the await window (e.g. user aborts mid-steer)
+		// still sees the in-flight entry and can re-enqueue it via
+		// _reconcileAfterAbort. Otherwise the steer text is delivered to the
+		// SDK's _steeringMessages but the aborted agent loop never consumes it,
+		// and the bobbit server has no record of it to redispatch.
+		//
+		// On RPC failure we splice this exact entry back out and re-enqueue
+		// the rows at front of promptQueue, so the next drain redispatches.
+		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
+		session.inFlightSteerTexts.push(batchText);
+		try {
+			const steerResp = await session.rpcClient.steer(batchText);
+			if ((steerResp as any)?.success === false) {
+				throw new Error((steerResp as any)?.error || "steer rejected");
+			}
+		} catch (err) {
+			// Splice this entry from the ledger — it never reached the SDK so
+			// it shouldn't show up as "in-flight" for reconcile.
+			const lidx = session.inFlightSteerTexts.lastIndexOf(batchText);
+			if (lidx !== -1) session.inFlightSteerTexts.splice(lidx, 1);
+			for (const r of [...rows].reverse()) {
+				session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
+			}
+			this.broadcastQueue(session);
+			console.error(`[session-manager] _dispatchSteer failed for ${session.id}:`, err);
+			throw err;
+		}
+	}
+
+	/**
+	 * Splice an entry from the shadow ledger when its echo arrives.
+	 * Matches the SDK's text-match removal at agent-session.js:265-280:
+	 * find the first index whose text equals the user-message body, splice it.
+	 * Silent no-op for non-matching messages (regular prompts, follow-ups,
+	 * skill-expansion echoes whose body has been rewritten).
+	 */
+	private _consumeSteerEcho(session: SessionInfo, event: any): void {
+		const ledger = session.inFlightSteerTexts;
+		if (!ledger || ledger.length === 0) return;
+		if (event.type !== "message_end") return;
+		if (event.message?.role !== "user") return;
+		const text = extractUserMessageText(event.message);
+		if (!text) return;
+		const idx = ledger.indexOf(text);
+		if (idx !== -1) ledger.splice(idx, 1);
+	}
+
+	/**
+	 * Drain the shadow ledger and re-enqueue any unresolved steers at the
+	 * front of promptQueue as steered rows. Called from agent_end while
+	 * `wasAborting`, and from `forceAbort` after killing the bridge — both
+	 * cases where a steer the SDK accepted may never echo because the turn
+	 * was torn down. The next drainQueue picks the rows up as a steered
+	 * batch via `_dispatchSteer`, redispatching exactly once.
+	 */
+	private _reconcileAfterAbort(session: SessionInfo): void {
+		const ledger = session.inFlightSteerTexts;
+		if (!ledger || ledger.length === 0) return;
+		for (const text of [...ledger].reverse()) {
+			session.promptQueue.enqueueAtFront(text, { isSteered: true });
+		}
+		ledger.length = 0;
+		this.broadcastQueue(session);
 	}
 
 	/** Reorder queued messages to match the given ID list. */
@@ -1613,7 +1686,7 @@ export class SessionManager {
 			next = { ...steered[0], text: batchText };
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
-			next = session.promptQueue.dequeueUndispatched();
+			next = session.promptQueue.dequeue();
 		}
 
 		this.broadcastQueue(session);
@@ -1631,11 +1704,48 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 
-		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
-		dispatchPromise.catch((err: any) => {
-			console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
+		// Snapshot the rows we're about to dispatch so we can re-enqueue them
+		// if the agent rejects the prompt (e.g. "Agent is already processing."
+		// when drainQueue races the SDK's finishRun() during a graceful abort).
+		const dispatchedRowsForRecovery = steered.length > 0
+			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true }))
+			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
+
+		const recoverDispatchedRows = (reason: string) => {
+			console.warn(`[session-manager] drainQueue dispatch failed for ${session.id} (${reason}); re-enqueueing ${dispatchedRowsForRecovery.length} row(s) at front`);
+			// Re-enqueue at front in original order so the next drain re-dispatches
+			// the same batch. Reverse iteration because enqueueAtFront unshifts.
+			for (const r of [...dispatchedRowsForRecovery].reverse()) {
+				session.promptQueue.enqueueAtFront(r.text, {
+					images: r.images,
+					attachments: r.attachments,
+					isSteered: r.isSteered,
+				});
+			}
 			broadcastStatus(session, "idle");
-		});
+			this.broadcastQueue(session);
+			// Schedule a follow-up drain on the next tick so the rows we just
+			// re-enqueued get another chance once the bridge has finished its
+			// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
+			// (including the SDK's finally{finishRun()}) run first.
+			setTimeout(() => { this.drainQueue(session); }, 0);
+		};
+
+		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
+		dispatchPromise
+			.then((resp: any) => {
+				// The bridge resolves with `{success:false, error}` when the agent
+				// rejects the command (the most common case is the abort/drainQueue
+				// race below). Treat that the same as a thrown rejection — recover
+				// the dequeued rows so a future drain can redispatch them.
+				if (resp && resp.success === false) {
+					recoverDispatchedRows(resp.error || "unknown");
+				}
+			})
+			.catch((err: any) => {
+				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}:`, err);
+				recoverDispatchedRows(err?.message || String(err));
+			});
 	}
 
 	/**
@@ -1678,12 +1788,26 @@ export class SessionManager {
 			}
 		}
 
+		// Splice this echoed user message off the shadow ledger if it was a
+		// dispatched steer. Mirrors the SDK's _steeringMessages text-match
+		// removal (agent-session.js:265–280); harmless no-op for non-steer
+		// user messages (regular prompts, follow-ups, ask responses).
+		this._consumeSteerEcho(session, event);
+
 		// Tool boundary: dispatch accumulated steered messages as a batch
 		// (PI-10b). Steers sent during a long tool call are collected in the
 		// queue and delivered together when the tool finishes, before the
 		// agent starts its next step.
 		if (event.type === "tool_execution_end") {
-			this._dispatchSteeredMessages(session);
+			// If we're already aborting, do NOT dispatch steers via rpcClient.steer.
+			// The agent loop is being torn down — the SDK would queue the steer
+			// onto _steeringMessages but never consume it, AND the post-abort
+			// drainQueue path would re-enqueue and redispatch via rpcClient.prompt,
+			// causing the steer to fire twice. Leave the steered rows in the queue
+			// so the post-abort drainQueue is the single dispatch site.
+			if (session.status === "aborting") return;
+			const steered = session.promptQueue.dequeueAllSteered();
+			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -1696,13 +1820,6 @@ export class SessionManager {
 				// Any non-error terminal assistant message resets the cap budget.
 				// Only stopReason:"error" advances the counter.
 				session.consecutiveErrorTurns = 0;
-			}
-		}
-
-		// When a steered user message appears in chat, remove the dispatched pill
-		if (event.type === "message_end" && event.message?.role === "user") {
-			if (session.promptQueue.removeDispatched()) {
-				this.broadcastQueue(session);
 			}
 		}
 
@@ -1723,26 +1840,36 @@ export class SessionManager {
 				session.oneTimeGrantedTools = [];
 			}
 
-			// Dispatch any remaining steered messages before going idle.
-			// Most steers are dispatched at tool boundaries (tool_execution_end),
-			// but if steers arrive after the last tool call or during a non-tool
-			// turn, they would otherwise be lost. This is the safety net.
-			this._dispatchSteeredMessages(session);
+			// Safety net: if steers arrived after the last tool call or during a
+			// non-tool turn (no tool_execution_end fired), dispatch them now.
+			if (session.status !== "aborting") {
+				const steered = session.promptQueue.dequeueAllSteered();
+				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
+			}
 
-			// If this agent_end is the result of an abort, re-arm any steered
-			// rows still flagged dispatched. Those are live-steers (or batched
-			// steers) the SDK parked and then discarded when the turn was torn
-			// down. Any successfully-delivered steer has already been removed
-			// via the message_end(user) → removeDispatched() hook above, so
-			// whatever remains is genuinely undelivered. drainQueue below will
-			// redispatch them (steered first, then normal) once the session is
-			// idle. Edge case: if the SDK delivered the steer to the transcript
-			// but the unsubscribe raced and we missed the message_end, we may
-			// redeliver once — at-least-once is preferred over lost user text.
 			const wasAborting = session.status === "aborting";
 			if (wasAborting) {
-				session.promptQueue.resetDispatched();
+				// Reconcile in-flight steers that the SDK accepted but never
+				// echoed because the turn was aborted. Re-enqueueing at front
+				// as steered means drainQueue → _dispatchSteer redispatches
+				// the batch on the next turn. Plus a defensive rebroadcast in
+				// case the queue was mutated mid-abort.
+				this._reconcileAfterAbort(session);
 				this.broadcastQueue(session);
+
+				// User-initiated abort: clear lastTurnErrored so the queue
+				// drains. The error stopReason on the aborted assistant
+				// message_end is a side-effect of the user pressing Stop, NOT
+				// a model malfunction. Queued steered messages represent fresh
+				// user intent that should dispatch immediately — leaving the
+				// flag set would park them until the next enqueuePrompt's
+				// implicit unstick, which is exactly the bug repro'd by
+				// tests/e2e/ui/steer-during-bash-tool.spec.ts (MOCK_ABORT_AS_ERROR).
+				// Reset the consecutive-error counter too — a Stop click is a
+				// successful user-controlled exit, not a streak of failures.
+				session.lastTurnErrored = false;
+				session.lastTurnErrorMessage = undefined;
+				session.consecutiveErrorTurns = 0;
 			}
 
 			session.streamingStartedAt = undefined;
@@ -4798,6 +4925,29 @@ export class SessionManager {
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
 
+		// CRITICAL: register the agent_end listener BEFORE calling abort().
+		// The pi-agent-core SDK can emit agent_end synchronously inside the
+		// await of rpcClient.abort() (handleRunFailure emits before finishRun()
+		// clears activeRun). If we register after the await, we miss the event,
+		// the grace period times out, and we fall into the force-kill branch —
+		// which then kills the bridge process *after* drainQueue (running off
+		// agent_end) has already dispatched a queued prompt to that bridge.
+		// Result: the steered user-message echo renders but the agent process
+		// is killed before it can produce an assistant response.
+		let resolveSettled!: (v: boolean) => void;
+		const settledPromise = new Promise<boolean>((resolve) => { resolveSettled = resolve; });
+		const settleTimer = setTimeout(() => {
+			unsubSettle();
+			resolveSettled(false);
+		}, gracePeriodMs);
+		const unsubSettle = session.rpcClient.onEvent((event: any) => {
+			if (event.type === "agent_end") {
+				clearTimeout(settleTimer);
+				unsubSettle();
+				resolveSettled(true);
+			}
+		});
+
 		// Try graceful abort first
 		try {
 			await session.rpcClient.abort();
@@ -4805,24 +4955,7 @@ export class SessionManager {
 			// Abort RPC itself may fail/timeout — proceed to force kill
 		}
 
-		// Wait for the agent to become idle
-		const settled = await new Promise<boolean>((resolve) => {
-			if (session.status !== "streaming" && session.status !== "aborting") {
-				resolve(true);
-				return;
-			}
-			const timer = setTimeout(() => {
-				unsub();
-				resolve(false);
-			}, gracePeriodMs);
-			const unsub = session.rpcClient.onEvent((event: any) => {
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsub();
-					resolve(true);
-				}
-			});
-		});
+		const settled = await settledPromise;
 
 		if (settled) return;
 
@@ -4843,6 +4976,12 @@ export class SessionManager {
 		// Kill the process
 		session.unsubscribe();
 		await session.rpcClient.stop();
+
+		// Reconcile any in-flight steers that died with the bridge: anything
+		// in the shadow ledger was accepted by the SDK but never echoed (the
+		// process is dead before its message_end could arrive). Re-enqueue
+		// at front so the post-respawn drainQueue redispatches them once.
+		this._reconcileAfterAbort(session);
 
 		// Emit agent_end so clients know streaming stopped
 		broadcast(session.clients, { type: "event", data: { type: "agent_end", messages: [] } });
@@ -4937,10 +5076,6 @@ export class SessionManager {
 			// Swap in the new bridge
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
-
-			// Reset dispatched flags so steered messages that were sent to the
-			// now-dead process are picked up by drainQueue after restart.
-			session.promptQueue.resetDispatched();
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);

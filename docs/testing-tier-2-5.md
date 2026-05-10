@@ -96,7 +96,7 @@ caught PR #433 and PR #436. Copy them.
   - After typing → `Typed: "STAY_BUSY:5000 working"`
   - Before clicking → `About to click Steer`
   - After clicking → `Clicked Steer — should abort wait`
-  - After awaiting an event → `STEER_RECEIVED arrived in transcript`
+  - After awaiting an event → `Steered <user-message> rendered in chat`
 - **Beats are cheap** (~50ms each — one screenshot, one label string). Err on more rather than fewer. 5–15 beats per test is the sweet spot.
 - **Use descriptive labels** that read well as a slideshow. The label is shown beneath every thumbnail in the report and as the active-thumb caption while the video plays.
 - **One test = one user story.** Don't combine "test send" + "test edit" + "test queue" into one test. Split them. The video for each test should be a coherent story.
@@ -146,7 +146,7 @@ The full trigger contract lives in the header comment of `mock-agent-core.mjs`. 
 | UI primitives | `ask_user_choices` | Single-select widget. |
 | UI primitives | `ask_user_choices_multi` | Multi-select widget. |
 
-**Steer round-trip** (RPC, not a prompt-text trigger): the mock's steer handler emits a synchronous `[STEER_RECEIVED] <text>` assistant message for back-compat, then aborts the in-flight turn and queues a fresh `handlePrompt(steeredText)` so a real `<user-message>` lands in the chat.
+**Steer round-trip** (RPC, not a prompt-text trigger): the mock's steer handler aborts the in-flight turn and queues a fresh `handlePrompt(steeredText)` so a real `<user-message>` lands in the chat. There is no `[STEER_RECEIVED]` ACK string — it was removed in the steer-subsystem rewrite so tests assert on production-shape transcript state (browser tests scrape `<user-message>` elements; API tests read `agent_session.messages`). Re-introducing a synthetic ACK marker would let tests pass against a broken transcript.
 
 When in doubt about exact event semantics, read the header comment in `mock-agent-core.mjs` — it is the stable contract.
 
