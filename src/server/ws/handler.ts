@@ -358,13 +358,15 @@ export function handleWebSocketConnection(
 				}
 			})();
 
-			// If there's a pending tool permission request, send it to the new client.
-			// Stamp a fresh seq+ts so the client reducer can order this frame relative
-			// to live events. See docs/design/unified-message-ordering-reducer.md §3.1.
+			// If there's a pending tool permission request, replay it to the new
+			// client. We REUSE the original broadcast's seq/ts (stashed on the
+			// pending-grant record) instead of allocating a fresh seq — a fresh
+			// unicast seq would leave already-attached clients gap-buffering the
+			// next live event forever. Pinned by
+			// tests/perm-frame-late-joiner-seq-gap.test.ts.
 			const pendingPerm = sessionManager.getPendingToolPermission(sessionId);
 			if (pendingPerm) {
-				const { seq, ts } = session.eventBuffer.pushFrame();
-				send(ws, { type: "tool_permission_needed", ...pendingPerm, seq, ts });
+				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
 			return;
 		}

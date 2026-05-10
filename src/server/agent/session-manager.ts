@@ -241,6 +241,11 @@ export interface SessionInfo {
 		toolName: string;
 		toolGroup: string;
 		timer: ReturnType<typeof setTimeout>;
+		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
+		 * verbatim to late-joining clients so we never burn a fresh global seq
+		 * on a unicast frame. See tests/perm-frame-late-joiner-seq-gap.test.ts. */
+		seq: number;
+		ts: number;
 	};
 	/** Tools granted via "one-time" mode — revoked on agent_end */
 	oneTimeGrantedTools?: string[];
@@ -447,6 +452,20 @@ function spliceSkillExpansionsIntoEvent(
 	const rewrittenMsg = rewriteUserMessageText(msg, envelope.originalText);
 	rewrittenMsg.skillExpansions = envelope.skillExpansions;
 	return { ...ev, message: rewrittenMsg };
+}
+
+/** Snapshot of the active pending tool-permission grant, returned to clients
+ * that attach mid-perm so they can replay the SAME seq/ts as the original
+ * broadcast — never allocating a fresh sequence number. Pinned by
+ * tests/perm-frame-late-joiner-seq-gap.test.ts. */
+export interface PendingToolPermissionSnapshot {
+	toolName: string;
+	group: string;
+	roleName: string;
+	roleLabel: string;
+	lastPromptText?: string;
+	seq: number;
+	ts: number;
 }
 
 export interface SessionManagerOptions {
@@ -2207,6 +2226,15 @@ export class SessionManager {
 			session.pendingGrantRequest = undefined;
 		}
 
+		// Stamp seq+ts so client reducer can order this frame relative to live
+		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
+		// IMPORTANT: this is the ONLY frame-allocation callsite in src/server/.
+		// Late-joiners that attach while this perm is pending must REPLAY the
+		// same seq/ts (via getPendingToolPermission) — never allocate a fresh
+		// seq — or already-attached clients will gap-buffer the next live
+		// event. Pinned by tests/perm-frame-late-joiner-seq-gap.test.ts.
+		const { seq, ts } = session.eventBuffer.pushFrame();
+
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -2214,15 +2242,12 @@ export class SessionManager {
 				resolve({ granted: false });
 			}, 5 * 60 * 1000); // 5 minute timeout
 
-			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer };
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer, seq, ts };
 		});
 
 		// Broadcast to UI clients
 		const roleName = session.role || "general";
 		const role = this.roleManager?.getRole(roleName);
-		// Stamp seq+ts so client reducer can order this frame relative to live
-		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
-		const { seq, ts } = session.eventBuffer.pushFrame();
 		broadcast(session.clients, {
 			type: "tool_permission_needed",
 			toolName,
@@ -3672,7 +3697,7 @@ export class SessionManager {
 	 * Get the pending tool permission request for a session, if any.
 	 * Used to send the permission card to newly connecting clients.
 	 */
-	getPendingToolPermission(id: string): { toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string } | undefined {
+	getPendingToolPermission(id: string): /* includes replayed seq: number; ts: number */ PendingToolPermissionSnapshot | undefined {
 		const session = this.sessions.get(id);
 		if (!session?.pendingGrantRequest) return undefined;
 		const roleName = session.role || "general";
@@ -3683,6 +3708,8 @@ export class SessionManager {
 			roleName: role?.name ?? roleName,
 			roleLabel: role?.label ?? roleName,
 			lastPromptText: session.lastPromptText,
+			seq: session.pendingGrantRequest.seq,
+			ts: session.pendingGrantRequest.ts,
 		};
 	}
 

@@ -141,6 +141,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Resumed reviewer terminated ~46ms after restart** — await `waitForStreaming` before `waitForIdle`.
 - **Duplicate `model_change` event at session startup** — spawn site must route through `resolveBridgeOptions`.
 - **UI freezes after Docker container recreated / sandbox respawn drops events** — single in-place respawn helper `_respawnAgentInPlace` in `src/server/agent/session-manager.ts`; snapshot lastSeq + statusVersion after `unsubscribe()` so client dedup gates keep advancing. See [docs/design/sandbox-recovery-frame-of-reference.md](docs/design/sandbox-recovery-frame-of-reference.md).
+- **Stream freezes on existing tab while perm card pending / late-joiner burns a unicast seq** — `EventBuffer.pushFrame()` must be called from exactly one site (`requestToolGrant`); on-attach replay reuses `getPendingToolPermission()`'s stashed `seq`/`ts`. See [docs/design/perm-frame-late-joiner-seq-replay.md](docs/design/perm-frame-late-joiner-seq-replay.md).
 
 ### Worktree / sandbox / projects
 - **Worktree setup not running** — single source of truth `runComponentSetups()` in `src/server/skills/worktree-setup.ts`.
