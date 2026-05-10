@@ -43,6 +43,8 @@ const {
 	onAgentEvent,
 	disposeStreamWatchdog,
 	shouldSkipErrorMessageEnd,
+	shouldSuppressUserEchoBroadcast,
+	shouldSuppressAbortBroadcast,
 } = await import("../src/server/agent/stream-watchdog.ts");
 type WatchdogConfig = import("../src/server/agent/stream-watchdog.ts").WatchdogConfig;
 type WatchdogSession = import("../src/server/agent/stream-watchdog.ts").WatchdogSession;
@@ -106,26 +108,33 @@ describe("stream-watchdog: duplicate broadcasts on silent retry (reproducer)", (
 		// because today's code calls `emitSessionEvent` unconditionally.
 		const broadcasts: any[] = [];
 		const simulateBroadcast = (event: any) => {
+			let suppressBroadcast = false;
+			if (event?.type === "message_end" && event?.message?.role === "user") {
+				if (shouldSuppressUserEchoBroadcast(session)) suppressBroadcast = true;
+			} else if (
+				event?.type === "message_end" &&
+				event?.message?.role === "assistant" &&
+				event.message.stopReason === "error"
+			) {
+				if (shouldSuppressAbortBroadcast(session)) suppressBroadcast = true;
+			}
 			if (
 				event?.type === "message_end" &&
 				event?.message?.role === "assistant" &&
 				(event.message.stopReason === "error" || event.message.stopReason === "aborted")
 			) {
-				// Today's session-manager.ts:1862-1873 consumes the flag for
-				// bookkeeping only. The frame still flows to clients.
+				// Bookkeeping flag (independent of broadcast suppression).
 				shouldSkipErrorMessageEnd(session);
 			}
-			// Today: emitSessionEvent runs unconditionally for every event.
-			// After the fix, the implementer will gate this push on a
-			// `shouldBroadcast` decision derived from new suppression flags.
-			broadcasts.push(event);
+			if (!suppressBroadcast) broadcasts.push(event);
 		};
 
-		// The watchdog will emit the surfaced-stall synthetic message_end
-		// directly through this hook (bypasses handleAgentLifecycle in prod;
-		// in our model we still route it through simulateBroadcast so it
-		// counts as a broadcast).
-		session.emitSyntheticEvent = (ev: any) => simulateBroadcast(ev);
+		// The watchdog emits the surfaced-stall synthetic message_end
+		// directly through this hook. In production this bypasses
+		// handleAgentLifecycle (see session-manager.ts emitSyntheticEvent
+		// wiring) and goes straight to emitSessionEvent. Mirror that here:
+		// push directly onto broadcasts without consulting suppression flags.
+		session.emitSyntheticEvent = (ev: any) => { broadcasts.push(ev); };
 
 		// Original user prompt: the agent's first echo of the user's message.
 		simulateBroadcast({
