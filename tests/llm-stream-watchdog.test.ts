@@ -610,3 +610,124 @@ describe("stream-watchdog: end-to-end production-shape flow", () => {
 		disposeStreamWatchdog(session);
 	});
 });
+
+describe("stream-watchdog: silent-retry success telemetry", () => {
+	// Spec (Bug 1, fix req #5): on a successful silent-retry dispatch, the
+	// next clean (non-errored) `agent_end` MUST log exactly one
+	//   [stream-watchdog] session=<id> silent-retry N/M succeeded
+	// line so successful self-heals are greppable in the server log. The
+	// success-pending state is staged by the SessionManager's dispatch path
+	// (`silentRetrySuccessLogPending`) and consumed by `onAgentEvent` on the
+	// first non-suppressed, non-errored agent_end.
+	it("logs exactly one 'succeeded' line on next clean agent_end after a successful retry", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("telemetry-1", rpc);
+
+		const origLog = console.log;
+		const logged: string[] = [];
+		console.log = (...args: any[]) => { logged.push(args.map(String).join(" ")); };
+
+		try {
+			// Drive one stall → silent-retry stash → manager dispatches it.
+			onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+			const deadline = Date.now() + 1000;
+			while (Date.now() < deadline && rpc.abortCalls === 0) await sleep(10);
+			assert.equal(rpc.abortCalls, 1, "silent-retry abort fired");
+			assert.ok(session.pendingStallRetry, "pendingStallRetry stashed");
+
+			// Mirror SessionManager._dispatchPendingStallRetry on the success path:
+			// agent_end fires (with suppression flag still set), manager dispatches
+			// the re-prompt, and on success stages silentRetrySuccessLogPending.
+			onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+			const pending = session.pendingStallRetry!;
+			session.pendingStallRetry = undefined;
+			session.suppressNextDrainForStallRetry = false;
+			await session.rpcClient.prompt(pending.text, pending.images);
+			session.silentRetrySuccessLogPending = { attempt: pending.attempt, total: pending.total };
+			armWatchdogAfterRetry(session, FAST_CFG, isAlive);
+
+			// New turn streams cleanly: agent_start → message_update → clean agent_end.
+			onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+			onAgentEvent(
+				session,
+				{ type: "message_update", message: { id: "m1", content: [{ type: "text", text: "ok" }] } },
+				FAST_CFG,
+				isAlive,
+			);
+			// Clean agent_end: lastTurnErrored is false/unset, suppression flag is
+			// not set → telemetry should fire here.
+			session.lastTurnErrored = false;
+			onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+
+			const hits = logged.filter(l => /silent-retry \d+\/\d+ succeeded/.test(l));
+			assert.equal(hits.length, 1, `exactly one success log line (got ${hits.length}: ${JSON.stringify(logged)})`);
+			assert.match(hits[0], new RegExp(`session=${session.id}`));
+			assert.match(hits[0], /silent-retry 1\/2 succeeded/);
+			assert.equal(session.silentRetrySuccessLogPending, undefined,
+				"pending log state is cleared after firing");
+
+			// A second clean agent_end MUST NOT re-log (state already cleared).
+			logged.length = 0;
+			onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+			onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+			const hits2 = logged.filter(l => /silent-retry \d+\/\d+ succeeded/.test(l));
+			assert.equal(hits2.length, 0, "telemetry must not re-fire on subsequent agent_end");
+		} finally {
+			console.log = origLog;
+			disposeStreamWatchdog(session);
+		}
+	});
+});
+
+describe("stream-watchdog: empty-prompt guard", () => {
+	// Spec (Bug 1, fix req #4): if `lastPromptText` is missing or empty, the
+	// watchdog must surface immediately on the very first stall rather than
+	// looping silent retries with an empty re-prompt (which is worse than a
+	// stall — the agent has nothing to retry against).
+	it("surfaces on first stall when lastPromptText is empty (no silent retries)", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("empty-prompt", rpc);
+		session.lastPromptText = ""; // empty — guard must trip
+		const syntheticEvents: any[] = [];
+		session.emitSyntheticEvent = (ev) => syntheticEvents.push(ev);
+
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		const deadline = Date.now() + 1000;
+		while (Date.now() < deadline && rpc.abortCalls === 0) await sleep(10);
+
+		assert.equal(rpc.abortCalls, 1, "abort fired on first stall");
+		assert.equal(session.lastTurnErrored, true,
+			"empty prompt must surface immediately, not loop silent retries");
+		assert.equal(session.consecutiveErrorTurns, 1,
+			"surfaced stall bumps consecutiveErrorTurns by exactly 1");
+		assert.equal(session.streamStallRetries, 0,
+			"retry counter reset after immediate surfacing (never advanced)");
+		assert.equal(session.pendingStallRetry, undefined,
+			"no pendingStallRetry stashed (no silent retry attempted)");
+		assert.equal(rpc.promptCalls.length, 0, "no re-prompt issued for empty text");
+		assert.equal(syntheticEvents.length, 1, "surfaced stall emits synthetic message_end");
+		assert.match(syntheticEvents[0].message.errorMessage, /stream stalled/i);
+
+		disposeStreamWatchdog(session);
+	});
+
+	it("surfaces on first stall when lastPromptText is undefined", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("missing-prompt", rpc);
+		session.lastPromptText = undefined; // missing — guard must trip
+
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		const deadline = Date.now() + 1000;
+		while (Date.now() < deadline && rpc.abortCalls === 0) await sleep(10);
+
+		assert.equal(rpc.abortCalls, 1, "abort fired on first stall");
+		assert.equal(session.lastTurnErrored, true,
+			"undefined prompt must surface immediately");
+		assert.equal(session.consecutiveErrorTurns, 1);
+		assert.equal(rpc.promptCalls.length, 0, "no re-prompt for undefined text");
+
+		disposeStreamWatchdog(session);
+	});
+});
