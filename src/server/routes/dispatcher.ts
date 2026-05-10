@@ -16,6 +16,9 @@ import { readBody } from "./route-helpers.js";
 import type { Route, RouteContext } from "./types.js";
 import type { RouteDeps } from "./route-deps.js";
 import { healthRoutes } from "./health.js";
+import { sandboxRoutes } from "./sandbox.js";
+import { oauthRoutes } from "./oauth.js";
+import { imageGenerationRoutes } from "./image-generation.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -23,6 +26,9 @@ import { healthRoutes } from "./health.js";
 // `handleApiRoute()` (see requestHandler in server.ts).
 const allRoutes: ReadonlyArray<Route> = [
 	...healthRoutes,
+	...sandboxRoutes,
+	...oauthRoutes,
+	...imageGenerationRoutes,
 ];
 
 /**

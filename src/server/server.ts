@@ -16,7 +16,6 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
@@ -63,7 +62,7 @@ import { dispatch as dispatchRoute } from "./routes/dispatcher.js";
 import type { RouteDeps } from "./routes/route-deps.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
@@ -78,12 +77,12 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
-import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
+import { getAvailableImageModels } from "./agent/image-generation.js";
 import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
+import { resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
@@ -1159,70 +1158,6 @@ async function handleApiRoute(
 			if (task) return getTaskManagerForGoal(task.goalId);
 		}
 		throw new Error(`Task "${taskId}" not found in any project`);
-	}
-
-	// GET /api/sandbox-pool (deprecated — no longer a real pool, returns basic stats)
-	if (url.pathname === "/api/sandbox-pool" && req.method === "GET") {
-		if (sandboxManager) {
-			const stats = sandboxManager.getStats();
-			json({ ...stats, type: "sandbox" });
-		} else {
-			json({ enabled: false });
-		}
-		return;
-	}
-
-	// GET /api/worktree-pool
-	if (url.pathname === "/api/worktree-pool" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId");
-		if (projectId) {
-			const pool = sessionManager.getWorktreePool(projectId);
-			json(pool ? pool.getStatus() : { enabled: false, ready: 0, target: 0, filling: false });
-		} else {
-			const pools: Record<string, any> = {};
-			for (const [pid, pool] of sessionManager.getAllWorktreePools()) {
-				pools[pid] = pool.getStatus();
-			}
-			json({ pools });
-		}
-		return;
-	}
-
-	// GET /api/sandbox-status
-	if (url.pathname === "/api/sandbox-status" && req.method === "GET") {
-		const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		const configured = sandboxConfig === "docker";
-		const status = await checkDockerAvailability(configured ? imageName : undefined);
-		json({ ...status, configured });
-		return;
-	}
-
-	// POST /api/sandbox-image/build
-	if (url.pathname === "/api/sandbox-image/build" && req.method === "POST") {
-		const imageName = projectConfigStore.get("sandbox_image") || "bobbit-agent";
-		if (!fs.existsSync(path.join(config.defaultCwd, "docker", "Dockerfile"))) {
-			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
-			return;
-		}
-		if (isBuildingImage()) {
-			json({ error: "Build already in progress" }, 409);
-			return;
-		}
-		const result = await buildSandboxImage(imageName, config.defaultCwd);
-		if (result.success) {
-			json({ success: true });
-		} else {
-			json({ success: false, error: result.error }, 500);
-		}
-		return;
-	}
-
-	// GET /api/sandbox/host-tokens
-	if (url.pathname === "/api/sandbox/host-tokens" && req.method === "GET") {
-		const tokens = detectHostTokens(preferencesStore);
-		json(tokens);
-		return;
 	}
 
 	// ── Project Detection & Browse ────────────────────────────────────
@@ -3217,73 +3152,6 @@ async function handleApiRoute(
 			json(getAvailableImageModels(preferencesStore));
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load image models: ${err.message}` });
-		}
-		return;
-	}
-
-	// POST /api/image-generation/generate — gateway-side image generation for the generate_image tool
-	if (url.pathname === "/api/image-generation/generate" && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object" || typeof body.prompt !== "string") {
-			json({ error: "Missing prompt" }, 400);
-			return;
-		}
-		const MAX_PROMPT_CHARS = 8192;
-		if (body.prompt.length > MAX_PROMPT_CHARS) {
-			json({ error: "prompt exceeds 8192 chars" }, 400);
-			return;
-		}
-		// Clamp `n` to integer in [1,4]; reject non-integers / out-of-range.
-		let n: number | undefined;
-		if (body.n !== undefined && body.n !== null) {
-			if (typeof body.n !== "number" || !Number.isInteger(body.n) || body.n < 1 || body.n > 4) {
-				json({ error: "n must be 1..4" }, 400);
-				return;
-			}
-			n = body.n;
-		}
-		const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
-		// Sandbox guard: callers under a sandbox-scoped token must identify a
-		// session in their scope. Without sessionId we cannot prove ownership,
-		// so refuse rather than silently broadcasting credentials.
-		if (sandboxScope && (!sessionId || !sandboxScope.sessionIds.has(sessionId))) {
-			json({ error: "session not in sandbox scope" }, 403);
-			return;
-		}
-		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
-		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
-		// Canonicalise both sides so equality compares apples-to-apples (e.g. user
-		// pref "google/nano-banana" vs requested "google/gemini-2.5-flash-image").
-		const selectedModelRaw = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
-		const selectedModel = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
-		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
-		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
-		const model = requestedModel
-			&& (
-				!sessionId
-				|| requestedModel === selectedModel
-				|| imageModelMentionedInText(preferencesStore, requestedModel, lastUserPrompt)
-			)
-			? requestedModel
-			: selectedModel;
-		try {
-			const result = await generateImage(preferencesStore, {
-				prompt: body.prompt,
-				model,
-				size: typeof body.size === "string" ? body.size : undefined,
-				quality: typeof body.quality === "string" ? body.quality : undefined,
-				background: typeof body.background === "string" ? body.background : undefined,
-				format: typeof body.format === "string" ? body.format : undefined,
-				aspectRatio: typeof body.aspectRatio === "string" ? body.aspectRatio : undefined,
-				imageSize: typeof body.imageSize === "string" ? body.imageSize : undefined,
-				n,
-			});
-			json({
-				model: { provider: result.model.provider, id: result.model.id, name: result.model.name, api: result.model.api },
-				images: result.images,
-			});
-		} catch (err: any) {
-			jsonError(500, err);
 		}
 		return;
 	}
@@ -5554,77 +5422,6 @@ async function handleApiRoute(
 			return;
 		}
 		json({ ok: true });
-		return;
-	}
-
-	// GET /api/connection-info — LAN addresses for multi-device access
-	if (url.pathname === "/api/connection-info" && req.method === "GET") {
-		const interfaces = await import("node:os").then((os) => os.networkInterfaces());
-		const addresses: { ip: string; name: string }[] = [];
-		for (const [name, addrs] of Object.entries(interfaces)) {
-			if (!addrs) continue;
-			for (const addr of addrs) {
-				if (addr.family === "IPv4" && !addr.internal) {
-					addresses.push({ ip: addr.address, name });
-				}
-			}
-		}
-		json({ addresses, port: config.port });
-		return;
-	}
-
-	// GET /api/oauth/status
-	if (url.pathname === "/api/oauth/status" && req.method === "GET") {
-		try {
-			json(oauthStatus(url.searchParams.get("provider") ?? undefined));
-		} catch (err) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// GET /api/oauth/flow-status?flowId=<id>[&provider=…] — callback-based OAuth progress
-	if (url.pathname === "/api/oauth/flow-status" && req.method === "GET") {
-		const flowId = url.searchParams.get("flowId");
-		if (!flowId) {
-			json({ error: "Missing flowId" }, 400);
-			return;
-		}
-		const provider = url.searchParams.get("provider") || undefined;
-		const status = oauthFlowStatus(flowId, provider);
-		if (status.error === "flow not found") {
-			json(status, 404);
-			return;
-		}
-		json(status);
-		return;
-	}
-
-	// POST /api/oauth/start — begin OAuth flow, returns auth URL
-	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
-		try {
-			const body = await readBody(req).catch(() => ({}));
-			const result = await oauthStart(body?.provider);
-			json(result);
-		} catch (err) {
-			jsonError(500, err);
-		}
-		return;
-	}
-
-	// POST /api/oauth/complete — exchange code for tokens
-	if (url.pathname === "/api/oauth/complete" && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body?.flowId || !body?.code) {
-			json({ error: "Missing flowId or code" }, 400);
-			return;
-		}
-		try {
-			const result = await oauthComplete(body.flowId, body.code);
-			json(result, result.success ? 200 : 400);
-		} catch (err) {
-			jsonError(500, err);
-		}
 		return;
 	}
 
