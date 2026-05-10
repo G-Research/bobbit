@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import type { Agent, AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
-import { StringEnum, type ToolCall } from "@mariozechner/pi-ai";
+import type { ToolCall } from "@mariozechner/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -38,7 +38,9 @@ export interface Artifact {
 
 // JSON-schema friendly parameters object (LLM-facing)
 const artifactsParamsSchema = Type.Object({
-	command: StringEnum(["create", "update", "rewrite", "get", "delete", "logs"], {
+	command: Type.Unsafe<"create" | "update" | "rewrite" | "get" | "delete" | "logs">({
+		type: "string",
+		enum: ["create", "update", "rewrite", "get", "delete", "logs"],
 		description: "The operation to perform",
 	}),
 	filename: Type.String({ description: "Filename including extension (e.g., 'index.html', 'script.js')" }),
@@ -264,7 +266,7 @@ export class ArtifactsPanel extends LitElement {
 	}
 
 	// Build the AgentTool (no details payload; return only output strings)
-	public get tool(): AgentTool<typeof artifactsParamsSchema, undefined> {
+	public get tool(): AgentTool<any, undefined> {
 		return {
 			label: "Artifacts",
 			name: "artifacts",
@@ -276,10 +278,10 @@ export class ArtifactsPanel extends LitElement {
 				];
 				return ARTIFACTS_TOOL_DESCRIPTION(runtimeProviderDescriptions);
 			},
-			parameters: artifactsParamsSchema,
+			parameters: artifactsParamsSchema as any,
 			// Execute mutates our local store and returns a plain output
-			execute: async (_toolCallId: string, args: Static<typeof artifactsParamsSchema>, _signal?: AbortSignal) => {
-				const output = await this.executeCommand(args);
+			execute: async (_toolCallId: string, args: any, _signal?: AbortSignal) => {
+				const output = await this.executeCommand(args as ArtifactsParams);
 				return { content: [{ type: "text", text: output }], details: undefined };
 			},
 		};
