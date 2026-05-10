@@ -152,7 +152,7 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }) => Promise<boolean>;
-	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
+	handleAgentLifecycle: (session: SessionInfo, event: any) => boolean;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
@@ -498,9 +498,11 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 	return session.rpcClient.onEvent((event: any) => {
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
-		ctx.handleAgentLifecycle(session, event);
-		const truncated = truncateLargeToolContent(event);
-		emitSessionEvent(session, truncated);
+		const shouldBroadcast = ctx.handleAgentLifecycle(session, event);
+		if (shouldBroadcast) {
+			const truncated = truncateLargeToolContent(event);
+			emitSessionEvent(session, truncated);
+		}
 		ctx.trackCostFromEvent(session, event);
 	});
 }
