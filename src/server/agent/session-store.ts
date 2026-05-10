@@ -103,6 +103,13 @@ export interface PersistedSession {
 	sandboxed?: boolean;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
+	/**
+	 * Aggregate counter of generic tool-error retries issued by
+	 * `tool-retry-harness.ts` for this session. Server-only metadata; not
+	 * present on the wire / message schema. See
+	 * docs/design/tool-retry-harness.md.
+	 */
+	toolAutoRetries?: { count: number; lastReason: string };
 }
 
 /**
@@ -147,6 +154,7 @@ export type UpdatableSessionFields = Pick<
 	| "sandboxed"
 	| "projectId"
 	| "repoWorktrees"
+	| "toolAutoRetries"
 >;
 
 /**

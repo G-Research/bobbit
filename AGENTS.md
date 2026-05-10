@@ -56,6 +56,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
 - **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
 - **Tune the LLM stream watchdog** → `BOBBIT_LLM_STREAM_TIMEOUT_MS` / `BOBBIT_LLM_STREAM_MAX_RETRIES`; see [docs/llm-stream-watchdog.md](docs/llm-stream-watchdog.md).
+- **Add a tool retry classifier** → `tool-retry-harness.ts`; `tool_execution_end + isError` listener, structured nudge via `rpcClient.prompt`. See [tool-retry-harness.md](docs/design/tool-retry-harness.md).
 
 ### Sessions, status, steer
 - **Mutate session status** → single writer `broadcastStatus()` in `src/server/agent/session-status.ts`. See [unify-session-status.md](docs/design/unify-session-status.md).

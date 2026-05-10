@@ -183,11 +183,21 @@ export const PROBE_SOURCE = `
 		});
 		var compact = msgs.map(function (m, i) {
 			var content = "";
+			var toolBlocks = [];
 			if (typeof m.content === "string") content = m.content;
 			else if (Array.isArray(m.content)) {
 				for (var j = 0; j < m.content.length; j++) {
 					var c = m.content[j];
-					if (c && typeof c.text === "string") content += c.text;
+					if (!c || typeof c !== "object") continue;
+					if (typeof c.text === "string") content += c.text;
+					if (c.type === "tool_use" || c.type === "tool_result") {
+						toolBlocks.push({
+							type: c.type,
+							tool_use_id: c.tool_use_id || c.id || c.toolCallId,
+							tool_name: c.name || c.tool_name || c.toolName,
+							isError: c.is_error === true || c.isError === true,
+						});
+					}
 				}
 			}
 			return {
@@ -198,6 +208,7 @@ export const PROBE_SOURCE = `
 				timestamp: m.timestamp,
 				id: m.id,
 				fingerprint: fingerprint(content),
+				toolBlocks: toolBlocks.length ? toolBlocks : undefined,
 			};
 		});
 		return {

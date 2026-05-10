@@ -86,6 +86,7 @@ import {
 	shouldSuppressDrainForStallRetry,
 	shouldSkipErrorMessageEnd,
 } from "./stream-watchdog.js";
+import { ToolRetryHarness } from "./tool-retry-harness.js";
 
 /**
  * Returns true only for rpc events that represent genuine new user-visible
@@ -301,6 +302,15 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
+	/**
+	 * Tool-use IDs whose schema-retry is owned by `verification-harness.ts`.
+	 * The generic `tool-retry-harness.ts` defers to the verification path on
+	 * these IDs to avoid double-retry amplification. Cleared by the
+	 * verification harness when its step terminates.
+	 */
+	_verificationOwnedToolUses?: Set<string>;
+	/** Generic tool-error retry harness. Started after `rpcClient.start()`. */
+	toolRetryHarness?: ToolRetryHarness;
 }
 
 // `spliceInFlightMessage` lives in its own module so unit tests can import
@@ -2348,6 +2358,8 @@ export class SessionManager {
 		// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+		try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+		session.toolRetryHarness = undefined;
 		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
 		this.sessions.delete(session.id);
@@ -2952,6 +2964,21 @@ export class SessionManager {
 		};
 
 		session.unsubscribe = unsub;
+
+		// Generic tool-error retry harness. Observes `tool_execution_end` events
+		// and re-emits a targeted nudge for schema/validation errors. Coordinates
+		// with verification-harness via `_verificationOwnedToolUses`.
+		// See docs/design/tool-retry-harness.md.
+		const retryHarnessStore = restoreStore;
+		session.toolRetryHarness = new ToolRetryHarness({
+			session,
+			onMetadata: ({ count, lastReason }) => {
+				try {
+					retryHarnessStore.update(ps.id, { toolAutoRetries: { count, lastReason } });
+				} catch { /* ignore */ }
+			},
+		});
+		session.toolRetryHarness.start();
 
 		await rpcClient.start();
 
@@ -4381,6 +4408,10 @@ export class SessionManager {
 
 		// Clear the LLM stream-inactivity watchdog timer.
 		disposeStreamWatchdog(session);
+
+		// Stop the generic tool-retry harness (unsubscribes from rpcClient).
+		try { session.toolRetryHarness?.stop(); } catch { /* ignore */ }
+		session.toolRetryHarness = undefined;
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
 		// saved before we archive.  Without this, a quick terminate can race

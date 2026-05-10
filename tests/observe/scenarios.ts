@@ -131,8 +131,33 @@ const interrupt: Scenario = {
 	},
 };
 
+const toolErrorRetry: Scenario = {
+	name: "tool-error-retry",
+	description:
+		"Send a prompt that nudges the agent toward a multi-question " +
+		"`ask_user_choices` call. Verifies the tool-retry-harness suppresses " +
+		"visible errored tool_results — see docs/design/tool-retry-harness.md.",
+	async run({ page, act, gatewayUrl, token }) {
+		await act("open-app", () => openApp(page, gatewayUrl, token));
+		await act("new-session", () => newSession(page));
+		await act("send-multi-ask", () =>
+			sendPrompt(
+				page,
+				"Use `ask_user_choices` to ask me TWO questions at once: " +
+					"(1) 'Pick a colour' with options red, green, blue and " +
+					"(2) 'Pick an animal' with options cat, dog. " +
+					"Make sure each question has a tab_label.",
+			),
+		);
+		await act("wait-idle", async () => {
+			await waitForIdle(page, 180_000);
+		});
+	},
+};
+
 export const SCENARIOS: Record<string, Scenario> = {
 	basic,
 	"rapid-fire": rapidFire,
 	interrupt,
+	"tool-error-retry": toolErrorRetry,
 };

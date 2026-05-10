@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import { Observer, PROBE_SOURCE } from "./observer.ts";
 import { SCENARIOS } from "./scenarios.ts";
-import { detectHangs, detectOutOfOrder } from "./detectors.ts";
+import { detectHangs, detectOutOfOrder, detectVisibleToolErrors } from "./detectors.ts";
 import { writeReport } from "./report.ts";
 import type { RunMeta } from "./types.ts";
 
@@ -226,6 +226,7 @@ async function main(): Promise<void> {
 		// Run detectors over the recorded timeline.
 		detectHangs(observer.timeline, args.hangMs);
 		detectOutOfOrder(observer.timeline);
+		detectVisibleToolErrors(observer.timeline);
 
 		writeFileSync(
 			join(outDir, "timeline.json"),

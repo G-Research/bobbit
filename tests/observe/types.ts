@@ -2,6 +2,13 @@
  * Shared types for the observe harness.
  */
 
+export interface MessageToolBlock {
+	type: "tool_use" | "tool_result" | string;
+	tool_use_id?: string;
+	tool_name?: string;
+	isError?: boolean;
+}
+
 export interface MessageSnapshot {
 	/** Position in state.messages after sort by (_order, _insertionTick). */
 	stateIndex: number;
@@ -12,6 +19,8 @@ export interface MessageSnapshot {
 	id?: string;
 	/** Short fingerprint of content for cross-tick identity. */
 	fingerprint: string;
+	/** Tool-related blocks lifted from message.content (best-effort). */
+	toolBlocks?: MessageToolBlock[];
 }
 
 export interface DomMessageRef {
@@ -50,7 +59,7 @@ export interface RunMeta {
 }
 
 export interface Finding {
-	kind: "hang" | "out-of-order";
+	kind: "hang" | "out-of-order" | "visible-tool-error";
 	atMs: number;
 	tickIndex: number;
 	detail: string;

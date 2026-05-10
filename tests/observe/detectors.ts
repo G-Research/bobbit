@@ -13,7 +13,7 @@
  * Both push entries into `timeline.findings`.
  */
 
-import type { Timeline, Finding, TickRecord } from "./types.ts";
+import type { Timeline, Finding, TickRecord, MessageToolBlock } from "./types.ts";
 
 const STREAMING_STATUSES = new Set(["streaming", "pending", "preparing", "starting"]);
 
@@ -118,4 +118,75 @@ function signature(t: TickRecord): string {
 	const msgs = t.session?.messages ?? [];
 	const tail = msgs[msgs.length - 1];
 	return `${msgs.length}|${tail ? tail.fingerprint : "-"}`;
+}
+
+/**
+ * Walk timeline ticks for any errored `tool_result` block whose `tool_use_id`
+ * is not followed within `windowMs` (default 30 s) by a successful
+ * `tool_result` for the same tool name. Emits a finding per offending
+ * tool_use_id (deduped across ticks).
+ *
+ * The detector reads `MessageSnapshot.toolBlocks` populated by the observer
+ * probe. When the probe didn't capture tool blocks (legacy snapshots), the
+ * detector is a no-op.
+ */
+export function detectVisibleToolErrors(
+	timeline: Timeline,
+	windowMs: number = 30_000,
+): void {
+	const flagged = new Set<string>();
+	const ticks = timeline.ticks;
+	for (let i = 0; i < ticks.length; i++) {
+		const t = ticks[i];
+		const msgs = t.session?.messages ?? [];
+		for (const m of msgs) {
+			const blocks: MessageToolBlock[] = m.toolBlocks ?? [];
+			for (const b of blocks) {
+				if (b.type !== "tool_result" || !b.isError || !b.tool_use_id) continue;
+				if (flagged.has(b.tool_use_id)) continue;
+				const toolName = b.tool_name;
+				const recovered = hasLaterSuccessForTool(ticks, i, t.t, windowMs, toolName, b.tool_use_id);
+				if (!recovered) {
+					flagged.add(b.tool_use_id);
+					timeline.findings.push({
+						kind: "visible-tool-error",
+						atMs: t.t,
+						tickIndex: i,
+						detail: `errored tool_result for ${toolName ?? "<unknown tool>"} (tool_use_id=${b.tool_use_id}) not followed by a successful retry within ${windowMs}ms`,
+						evidence: { toolName, toolUseId: b.tool_use_id },
+					});
+				}
+			}
+		}
+	}
+}
+
+function hasLaterSuccessForTool(
+	ticks: TickRecord[],
+	startIdx: number,
+	atMs: number,
+	windowMs: number,
+	toolName: string | undefined,
+	erroredToolUseId: string,
+): boolean {
+	if (!toolName) return false;
+	for (let j = startIdx; j < ticks.length; j++) {
+		const t = ticks[j];
+		if (t.t - atMs > windowMs) return false;
+		const msgs = t.session?.messages ?? [];
+		for (const m of msgs) {
+			const blocks: MessageToolBlock[] = m.toolBlocks ?? [];
+			for (const b of blocks) {
+				if (
+					b.type === "tool_result" &&
+					!b.isError &&
+					b.tool_name === toolName &&
+					b.tool_use_id !== erroredToolUseId
+				) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
 }
