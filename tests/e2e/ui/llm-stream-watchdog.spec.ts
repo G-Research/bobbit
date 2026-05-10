@@ -92,4 +92,47 @@ test.describe("LLM stream-inactivity watchdog", () => {
 		await sendMessage(page, "follow-up after stall");
 		await waitForSessionStatus(sessionId, "idle", 15_000);
 	});
+
+	test("silent retry recovers — fresh frames after one stall, no surfaced error", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		await openApp(page);
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		await sendMessage(page, `STREAM_STALL_THEN_REPLY:30000`);
+		// After one stall + one silent retry, the agent recovers cleanly.
+		await waitForSessionStatus(sessionId, "idle", 10_000);
+
+		const resp = await apiFetch(`/api/sessions/${sessionId}`);
+		const data = await resp.json() as { lastTurnErrored: boolean; consecutiveErrorTurns: number };
+		expect(data.lastTurnErrored, "silent retry must produce a clean turn").toBe(false);
+		expect(data.consecutiveErrorTurns, "no surfaced stall, counter stays 0").toBe(0);
+
+		await expect(page.getByText(/RECOVERED/).first()).toBeVisible({ timeout: 5_000 });
+		// PR #539 invariant: no duplicate user echoes.
+		const userMessages = await page.locator("user-message").count();
+		expect(userMessages, "exactly one user-message row").toBe(1);
+		// No "Request aborted" rows visible — the abort frame is suppressed.
+		await expect(page.getByText(/request aborted/i)).toHaveCount(0);
+	});
+
+	test("surfaced stall shows a working Retry button on the last assistant message", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		await openApp(page);
+		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+		await sendMessage(page, `STREAM_STALL:${STALL_MS}`);
+		await waitForSessionStatus(sessionId, "idle", 10_000);
+		await expect(page.getByText(/stream stalled/i).first()).toBeVisible({ timeout: 5_000 });
+
+		const retryBtn = page.getByTestId("retry-button");
+		await expect(retryBtn).toBeVisible();
+		await retryBtn.click();
+		await waitForSessionStatus(sessionId, "streaming", 5_000);
+		// Don't wait for full recovery (it'll stall again) — just confirm the
+		// click re-dispatched the original prompt.
+	});
 });

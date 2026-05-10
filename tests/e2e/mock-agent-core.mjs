@@ -482,6 +482,45 @@ export class MockAgentCore {
 		// the request, `currentAbortController.signal.aborted` flips true and we
 		// exit the turn cleanly. Otherwise we let the stall run to completion
 		// and emit a normal agent_end so non-watchdog tests can still assert.
+		// STREAM_STALL_THEN_REPLY:<stallMs>
+		// First call with this prompt: emit agent_start and stall for <stallMs>
+		// (mimicking a wedged stream). When the watchdog aborts, exit cleanly
+		// like STREAM_STALL.
+		// Subsequent calls with the SAME prompt text (the watchdog's silent-retry
+		// re-prompt routes through here): emit a clean assistant message_end
+		// containing the text "RECOVERED" so E2E tests can assert successful
+		// silent recovery without the stall replaying.
+		const stallThenReplyMatch = text.match(/STREAM_STALL_THEN_REPLY:(\d+)/);
+		if (stallThenReplyMatch) {
+			this._stallThenReplyCount = (this._stallThenReplyCount ?? 0) + 1;
+			if (this._stallThenReplyCount === 1) {
+				const stallMs = parseInt(stallThenReplyMatch[1], 10);
+				this._stallActive = true;
+				try { await this.tick(stallMs); } finally { this._stallActive = false; }
+				if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+					this.currentAbortController = null;
+					return;
+				}
+				this.currentAbortController = null;
+				this.emit({ type: "agent_end" });
+				this.emit({ type: "session_status", status: "idle" });
+				return;
+			}
+			// Second+ call: clean reply.
+			this.emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "RECOVERED" }],
+					stopReason: "end_turn",
+				},
+			});
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
 		const stallMatch = text.match(/STREAM_STALL:(\d+)/);
 		if (stallMatch) {
 			const stallMs = parseInt(stallMatch[1], 10);

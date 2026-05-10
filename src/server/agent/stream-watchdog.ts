@@ -88,6 +88,18 @@ export interface WatchdogSession {
 	lastTurnErrorMessage?: string;
 	lastPromptText?: string;
 	lastPromptImages?: any;
+	/** Stashed by the silent-retry branch of `handleStreamStall` and consumed
+	 *  by the SessionManager's `agent_end` handler. The handler dispatches the
+	 *  re-prompt only AFTER the agent has fully wound down (i.e. emitted
+	 *  `agent_end` for the aborted turn) — this avoids the production race
+	 *  where `setTimeout(0)` schedules the re-prompt before the agent finishes
+	 *  tearing down and `prompt()` rejects with "Agent is already processing".
+	 *  See docs/llm-stream-watchdog.md (Bug 1 hardening). */
+	pendingStallRetry?: { text: string; images?: any; attempt: number; total: number };
+	/** Set by the SessionManager after a successful re-prompt dispatch; logged
+	 *  on the next clean (non-errored) `agent_end` so successful silent
+	 *  recoveries are greppable in the server log. Cleared after logging. */
+	silentRetrySuccessLogPending?: { attempt: number; total: number };
 	/** Broadcast a synthetic agent event to the session's WS clients. Wired
 	 *  by `SessionManager.handleAgentLifecycle` (delegates to `emitSessionEvent`).
 	 *  Used for the surfaced-stall `message_end` so the UI's transcript renders
@@ -144,6 +156,16 @@ export function onAgentEvent(
 			// the counter is reset.
 			if (!session.suppressNextDrainForStallRetry) {
 				session.streamStallRetries = 0;
+				// If a previous silent retry re-dispatched successfully and this
+				// agent_end represents a clean (non-suppressed, non-errored)
+				// turn, log the recovery so successful self-heals are greppable.
+				const pending = session.silentRetrySuccessLogPending;
+				if (pending && !session.lastTurnErrored) {
+					console.log(
+						`[stream-watchdog] session=${session.id} silent-retry ${pending.attempt}/${pending.total} succeeded`,
+					);
+					session.silentRetrySuccessLogPending = undefined;
+				}
 			}
 			return;
 		case "process_exit":
@@ -186,7 +208,7 @@ function ensureTimer(
 export async function handleStreamStall(
 	session: WatchdogSession,
 	cfg: WatchdogConfig,
-	isAlive: IsAliveFn,
+	_isAlive: IsAliveFn,
 ): Promise<void> {
 	const lastFrame = session.lastLlmFrameAt ?? 0;
 	const ageMs = Date.now() - lastFrame;
@@ -205,51 +227,27 @@ export async function handleStreamStall(
 	session.awaitingLlmFrame = false;
 
 	if (attempt > cfg.maxRetries) {
-		// Surface to user. Bump consecutiveErrorTurns by exactly 1 so the
-		// existing implicit-unstick path keeps its semantics (3 surfaced
-		// stalls in a row → next user message is parked).
-		session.streamStallRetries = 0;
-		session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
-		session.lastTurnErrored = true;
-		const errorMessage =
-			`Model stream stalled — no frames for ${Math.round(ageMs / 1000)}s ` +
-			`(attempted ${cfg.maxRetries + 1}× before giving up).`;
-		session.lastTurnErrorMessage = errorMessage;
-		// Suppress the next assistant `message_end` (the abort's "Request
-		// aborted" frame): it would otherwise clobber lastTurnErrorMessage
-		// and double-bump consecutiveErrorTurns. Watchdog owns the
-		// bookkeeping for this transition, end-to-end.
-		session.suppressNextErrorMessageEnd = true;
-		// Also drop the abort's error frame from the WS broadcast — we've
-		// already emitted the user-facing synthetic stalled-stream frame
-		// (below); a trailing "Request aborted" row would visibly duplicate
-		// the surfaced error in the chat transcript.
-		session.suppressNextAbortMessageEnd = true;
-		// Emit a synthetic `message_end` so the UI transcript shows the
-		// stalled-stream text. The UI renders `message.errorMessage` from
-		// `message_end` events (see `src/ui/components/Messages.ts`); without
-		// this synthetic frame the user would see only the generic "Request
-		// aborted" produced by the upstream abort path.
-		try {
-			session.emitSyntheticEvent?.({
-				type: "message_end",
-				message: {
-					role: "assistant",
-					content: [],
-					stopReason: "error",
-					errorMessage,
-				},
-			});
-		} catch { /* best-effort: telemetry only, never block abort */ }
-		try { await session.rpcClient.abort(); } catch { /* best-effort */ }
+		await surfaceStallNow(session, cfg, ageMs);
 		return;
 	}
 
-	// Silent retry: increment counter, abort the underlying request, then
-	// re-issue the same prompt on the next tick. Status stays "streaming"
-	// throughout the retry; the `agent_end` consumer of
-	// `suppressNextDrainForStallRetry` short-circuits the idle-broadcast
-	// + queue-drain so the watchdog is the sole re-dispatcher.
+	// Empty-prompt guard: re-issuing "" is worse than a stall (the agent has
+	// nothing to retry against). Surface immediately instead of looping over
+	// empty prompts.
+	if (!session.lastPromptText || session.lastPromptText.length === 0) {
+		await surfaceStallNow(session, cfg, ageMs);
+		return;
+	}
+
+	// Silent retry: increment counter, set suppression flags, abort the
+	// underlying request, and STASH the retry parameters in
+	// `pendingStallRetry`. The SessionManager's `agent_end` handler dispatches
+	// the re-prompt AFTER the agent has fully wound down — this avoids the
+	// production race where a `setTimeout(0)`-scheduled prompt lands inside
+	// the abort handshake's "Agent is already processing" window and rejects
+	// silently. Status stays "streaming" throughout the retry; the `agent_end`
+	// consumer of `suppressNextDrainForStallRetry` short-circuits the
+	// idle-broadcast + queue-drain so the watchdog is the sole re-dispatcher.
 	session.streamStallRetries = attempt;
 	console.log(
 		`[stream-watchdog] session=${session.id} silent-retry ${attempt}/${cfg.maxRetries}`,
@@ -267,15 +265,79 @@ export async function handleStreamStall(
 	// "Request aborted" rows in the chat transcript.
 	session.suppressNextUserEcho = true;
 	session.suppressNextAbortMessageEnd = true;
+	session.pendingStallRetry = {
+		text: session.lastPromptText,
+		images: session.lastPromptImages,
+		attempt,
+		total: cfg.maxRetries,
+	};
 	try { await session.rpcClient.abort(); } catch { /* best-effort */ }
-	setTimeout(() => {
-		if (!isAlive(session.id)) return;
-		const text = session.lastPromptText ?? "";
-		void session.rpcClient.prompt(text, session.lastPromptImages).catch(() => { /* next stall will surface */ });
-		session.lastLlmFrameAt = Date.now();
-		session.awaitingLlmFrame = true;
-		ensureTimer(session, cfg, isAlive);
-	}, 0);
+}
+
+/**
+ * Surface a stalled-stream error to the user. Sets the watchdog-owned state
+ * (lastTurnErrored, lastTurnErrorMessage, consecutiveErrorTurns +1), arms the
+ * suppression flags so the abort's "Request aborted" frame is dropped from
+ * both bookkeeping and broadcast, emits the synthetic `message_end` carrying
+ * the user-visible text, and aborts the in-flight request.
+ *
+ * Exported so the SessionManager's retry-dispatch fast-path can re-use it
+ * when `prompt()` rejects (production race: agent still mid-abort).
+ */
+export async function surfaceStallNow(
+	session: WatchdogSession,
+	cfg: WatchdogConfig,
+	ageMs: number,
+): Promise<void> {
+	session.streamStallRetries = 0;
+	session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+	session.lastTurnErrored = true;
+	const errorMessage =
+		`Model stream stalled — no frames for ${Math.round(ageMs / 1000)}s ` +
+		`(attempted ${cfg.maxRetries + 1}× before giving up).`;
+	session.lastTurnErrorMessage = errorMessage;
+	session.suppressNextErrorMessageEnd = true;
+	session.suppressNextAbortMessageEnd = true;
+	// Stable id on the synthetic frame so the UI's MessageList can reliably
+	// identify this as the last assistant message and render the Retry button.
+	const syntheticId = `stalled-stream-${Date.now()}-${session.id.slice(0, 8)}`;
+	try {
+		session.emitSyntheticEvent?.({
+			type: "message_end",
+			message: {
+				id: syntheticId,
+				role: "assistant",
+				// Populate `content` with the error text so the assistant-message
+				// renderer's error-block branch lights up (it is gated on
+				// `stopReason === "error" && errorMessage`, but an empty content
+				// array can cause the surrounding row to render no children, hiding
+				// the error block in some layouts). One text chunk keeps the diff
+				// minimal vs. lifting the gate in Messages.ts.
+				content: [{ type: "text", text: errorMessage }],
+				stopReason: "error",
+				errorMessage,
+			},
+		});
+	} catch { /* best-effort: telemetry only, never block abort */ }
+	try { await session.rpcClient.abort(); } catch { /* best-effort */ }
+}
+
+/**
+ * Helper for `SessionManager._dispatchPendingStallRetry`. Re-arms the watchdog
+ * after a successful silent-retry re-prompt: refreshes the frame timestamp,
+ * sets `awaitingLlmFrame`, and ensures the timer is alive. Mirrors the path
+ * `agent_start` would take when the new turn's first frame arrives, but lets
+ * the SessionManager call it synchronously after `prompt()` resolves so the
+ * watchdog never observes a gap.
+ */
+export function armWatchdogAfterRetry(
+	session: WatchdogSession,
+	cfg: WatchdogConfig,
+	isAlive: IsAliveFn,
+): void {
+	session.lastLlmFrameAt = Date.now();
+	session.awaitingLlmFrame = true;
+	ensureTimer(session, cfg, isAlive);
 }
 
 /**
