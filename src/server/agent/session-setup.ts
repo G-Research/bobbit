@@ -451,6 +451,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths);
 
 	plan.bridgeOptions.args = [...activation.args, ...(plan.bridgeOptions.args || [])];
+	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
 	const guardPath = ctx.toolManager ? writeToolGuardExtension(
