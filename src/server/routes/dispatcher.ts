@@ -38,6 +38,8 @@ import { sessionsBgRoutes } from "./sessions-bg.js";
 import { sessionsReviewRoutes } from "./sessions-review.js";
 import { sessionsGitRoutes } from "./sessions-git.js";
 import { previewRoutes } from "./preview.js";
+import { sessionsContentRoutes } from "./sessions-content.js";
+import { sessionsProposalsRoutes } from "./sessions-proposals.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -67,6 +69,8 @@ const allRoutes: ReadonlyArray<Route> = [
 	...sessionsReviewRoutes,
 	...sessionsGitRoutes,
 	...previewRoutes,
+	...sessionsContentRoutes,
+	...sessionsProposalsRoutes,
 ];
 
 /**
