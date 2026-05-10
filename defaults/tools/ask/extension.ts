@@ -60,7 +60,7 @@ export default function (pi: ExtensionAPI) {
 						minimum: 1,
 						description: "Max selections when multi:true. Default options.length.",
 					})),
-				}, { additionalProperties: true }),
+				}),
 				{ minItems: 1, maxItems: 5 },
 			),
 		}),
