@@ -6,10 +6,12 @@ import type {
 	ToolResultMessage as ToolResultMessageType,
 	UserMessage as UserMessageType,
 } from "@mariozechner/pi-ai";
-import { html, LitElement, type TemplateResult } from "lit";
+import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { marked } from "marked";
+import { BobbitElement } from "./base/BobbitElement.js";
+import { LifecycleTimers } from "./base/lifecycle-timers.js";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderTool } from "../tools/index.js";
 import { TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
@@ -148,7 +150,7 @@ function renderTextWithSkillChips(
 }
 
 @customElement("user-message")
-export class UserMessage extends LitElement {
+export class UserMessage extends BobbitElement {
 	@property({ type: Object }) message!: UserMessageWithAttachments | UserMessageType;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -201,7 +203,7 @@ export class UserMessage extends LitElement {
 }
 
 @customElement("assistant-message")
-export class AssistantMessage extends LitElement {
+export class AssistantMessage extends BobbitElement {
 	@property({ type: Object }) message!: AssistantMessageType;
 	@property({ type: Array }) tools?: AgentTool<any>[];
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
@@ -216,7 +218,8 @@ export class AssistantMessage extends LitElement {
 	@state() private _retrying = false;
 
 	private _throttledContent: string = "";
-	private _contentThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+	private _contentThrottleTimer: number | null = null;
+	private _timers = new LifecycleTimers(this.signal);
 
 	private _getThrottledContent(text: string): string {
 		// Reset throttle when content diverges completely from the snapshot
@@ -229,7 +232,7 @@ export class AssistantMessage extends LitElement {
 		}
 		if (!this._contentThrottleTimer) {
 			this._throttledContent = text;
-			this._contentThrottleTimer = setTimeout(() => {
+			this._contentThrottleTimer = this._timers.setTimeout(() => {
 				this._contentThrottleTimer = null;
 			}, 250);
 		}
@@ -243,6 +246,9 @@ export class AssistantMessage extends LitElement {
 	override connectedCallback(): void {
 		ensureMarkdownBlock();
 		super.connectedCallback();
+		// On re-attach the lifecycle controller is fresh; re-bind timers to the
+		// new signal so the throttle setTimeout clears on the next disconnect.
+		this._timers = new LifecycleTimers(this.signal);
 		this.style.display = "block";
 	}
 
@@ -421,7 +427,7 @@ export class AssistantMessage extends LitElement {
 }
 
 @customElement("tool-message-debug")
-export class ToolMessageDebugView extends LitElement {
+export class ToolMessageDebugView extends BobbitElement {
 	@property({ type: Object }) callArgs: any;
 	@property({ type: Object }) result?: ToolResultMessageType;
 	@property({ type: Boolean }) hasResult: boolean = false;
@@ -477,7 +483,7 @@ export class ToolMessageDebugView extends LitElement {
 }
 
 @customElement("tool-message")
-export class ToolMessage extends LitElement {
+export class ToolMessage extends BobbitElement {
 	@property({ type: Object }) toolCall!: ToolCall;
 	@property({ type: Object }) tool?: AgentTool<any>;
 	@property({ type: Object }) result?: ToolResultMessageType;
@@ -559,18 +565,10 @@ export class ToolMessage extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
-		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
-		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
-		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-		this.addEventListener("load-full-content", this._onLoadFullContent);
-	}
-
-	override disconnectedCallback(): void {
-		super.disconnectedCallback();
-		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
-		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
-		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-		this.removeEventListener("load-full-content", this._onLoadFullContent);
+		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady, { signal: this.signal });
+		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage, { signal: this.signal });
+		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded, { signal: this.signal });
+		this.addEventListener("load-full-content", this._onLoadFullContent, { signal: this.signal });
 	}
 
 	override render() {
@@ -620,7 +618,7 @@ export class ToolMessage extends LitElement {
 }
 
 @customElement("aborted-message")
-export class AbortedMessage extends LitElement {
+export class AbortedMessage extends BobbitElement {
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
