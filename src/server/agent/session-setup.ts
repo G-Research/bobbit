@@ -469,6 +469,17 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 /** Shared event subscription, returns unsubscribe fn. */
 export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): () => void {
+	// Wire stream-watchdog → client-broadcast bridge for the surfaced-stall path.
+	// Bypasses `handleAgentLifecycle`: the watchdog has already done all the
+	// session-state bookkeeping (lastTurnErrored, consecutiveErrorTurns,
+	// suppressNextErrorMessageEnd) manually. Routing through the lifecycle
+	// handler would consume `suppressNextErrorMessageEnd` here, leaving
+	// nothing to suppress the real agent's subsequent "Request aborted"
+	// frame — which would then double-bump the counter.
+	session.emitSyntheticEvent = (ev: any) => {
+		const truncated = truncateLargeToolContent(ev);
+		emitSessionEvent(session, truncated);
+	};
 	return session.rpcClient.onEvent((event: any) => {
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });

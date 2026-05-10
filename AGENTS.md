@@ -55,6 +55,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, `server.ts`, `goal-assistant.ts`. See [goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
 - **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
+- **Tune the LLM stream watchdog** → `BOBBIT_LLM_STREAM_TIMEOUT_MS` / `BOBBIT_LLM_STREAM_MAX_RETRIES`; see [docs/llm-stream-watchdog.md](docs/llm-stream-watchdog.md).
 
 ### Sessions, status, steer
 - **Mutate session status** → single writer `broadcastStatus()` in `src/server/agent/session-status.ts`. See [unify-session-status.md](docs/design/unify-session-status.md).
