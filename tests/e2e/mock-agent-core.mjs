@@ -1133,15 +1133,12 @@ export class MockAgentCore {
 	}
 
 	async _handleAskUserChoices(modeArg = false) {
-		// Backwards compat: callers pass `true|"multi"|"badThenOk"` or `false`.
-		const mode = modeArg === true || modeArg === "multi" ? "multi"
-			: modeArg === "badThenOk" ? "badThenOk"
-			: "single";
-		// If a bad-then-ok flow is mid-flight, the harness's retry nudge will
-		// re-enter via respondToPrompt's generic ask_user_choices match. Honour
-		// the followup flag here regardless of requested mode.
-		if (mode === "badThenOk" || this._askRetryFollowUp) return this._handleAskBadThenOk();
-		const multi = mode === "multi";
+		// `respondToPrompt` returns `askUserChoices: true` for the basic single
+		// trigger, `"multi"` for `_multi`, and `"badThenOk"` for the retry
+		// trigger. The dispatcher passes the raw value through. Preserve the
+		// pre-harness boolean contract: `true` is multi=false (single mode).
+		if (modeArg === "badThenOk" || this._askRetryFollowUp) return this._handleAskBadThenOk();
+		const multi = modeArg === "multi";
 		// Non-blocking model: the ask_user_choices tool returns immediately with
 		// a `{status:"posted", tool_use_id}` stub and the turn ends. The user's
 		// answers arrive in a *later* prompt as an envelope user message — see
