@@ -35,10 +35,14 @@ export interface WatchdogConfig {
  * `BOBBIT_LLM_STREAM_MAX_RETRIES` defaults to 2.
  */
 export function resolveWatchdogConfigFromEnv(): WatchdogConfig {
-	return {
-		timeoutMs: Number(process.env.BOBBIT_LLM_STREAM_TIMEOUT_MS ?? 30_000),
-		maxRetries: Number(process.env.BOBBIT_LLM_STREAM_MAX_RETRIES ?? 2),
-	};
+	// NaN guard: if the env var is set but non-numeric (e.g. empty string,
+	// `"foo"`, garbage from a misconfigured shell) `Number()` returns NaN,
+	// which would `<= 0`-disable the watchdog silently. Fall back to defaults.
+	const rawMs = Number(process.env.BOBBIT_LLM_STREAM_TIMEOUT_MS);
+	const timeoutMs = Number.isFinite(rawMs) ? rawMs : 30_000;
+	const rawMax = Number(process.env.BOBBIT_LLM_STREAM_MAX_RETRIES);
+	const maxRetries = Number.isFinite(rawMax) ? rawMax : 2;
+	return { timeoutMs, maxRetries };
 }
 
 /** Subset of `SessionInfo` the watchdog touches. */
@@ -53,11 +57,28 @@ export interface WatchdogSession {
 	awaitingLlmFrame?: boolean;
 	streamStallRetries?: number;
 	suppressNextDrainForStallRetry?: boolean;
+	/** One-shot: tells the SessionManager `message_end` handler to skip its
+	 *  normal lastTurnErrored/consecutiveErrorTurns bookkeeping for the next
+	 *  assistant `message_end`. Set by the watchdog before initiating an
+	 *  abort, since the real agent emits a `message_end{stopReason:"error",
+	 *  errorMessage:"Request aborted"}` after every abort.
+	 *   - Silent retry: prevents the abort's error frame from advancing
+	 *     `consecutiveErrorTurns` (silent retries MUST NOT bump the counter).
+	 *   - Surfaced stall: the watchdog has already set state to its preferred
+	 *     values (and emitted a synthetic stalled-stream `message_end`); the
+	 *     abort's "Request aborted" frame must not clobber them. */
+	suppressNextErrorMessageEnd?: boolean;
 	consecutiveErrorTurns?: number;
 	lastTurnErrored?: boolean;
 	lastTurnErrorMessage?: string;
 	lastPromptText?: string;
 	lastPromptImages?: any;
+	/** Broadcast a synthetic agent event to the session's WS clients. Wired
+	 *  by `SessionManager.handleAgentLifecycle` (delegates to `emitSessionEvent`).
+	 *  Used for the surfaced-stall `message_end` so the UI's transcript renders
+	 *  the stalled-stream error text — the UI reads `errorMessage` from this
+	 *  frame, which is why we can't rely on `lastTurnErrorMessage` alone. */
+	emitSyntheticEvent?: (event: any) => void;
 }
 
 /** Callback that returns true if the session is still alive (in the manager's map). */
@@ -95,6 +116,11 @@ export function onAgentEvent(
 		case "tool_execution_end":
 			session.awaitingLlmFrame = true;
 			session.lastLlmFrameAt = now;
+			// Symmetry with `agent_start` / silent-retry re-arm: a session that
+			// only ever runs tools (e.g. tool-loop turns where `agent_start`
+			// preceded the watchdog's first arming opportunity) still needs a
+			// timer once the tool finishes and we go back to waiting on the LLM.
+			ensureTimer(session, cfg, isAlive);
 			return;
 		case "agent_end":
 			session.awaitingLlmFrame = false;
@@ -170,9 +196,31 @@ export async function handleStreamStall(
 		session.streamStallRetries = 0;
 		session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
 		session.lastTurnErrored = true;
-		session.lastTurnErrorMessage =
+		const errorMessage =
 			`Model stream stalled — no frames for ${Math.round(ageMs / 1000)}s ` +
 			`(attempted ${cfg.maxRetries + 1}× before giving up).`;
+		session.lastTurnErrorMessage = errorMessage;
+		// Suppress the next assistant `message_end` (the abort's "Request
+		// aborted" frame): it would otherwise clobber lastTurnErrorMessage
+		// and double-bump consecutiveErrorTurns. Watchdog owns the
+		// bookkeeping for this transition, end-to-end.
+		session.suppressNextErrorMessageEnd = true;
+		// Emit a synthetic `message_end` so the UI transcript shows the
+		// stalled-stream text. The UI renders `message.errorMessage` from
+		// `message_end` events (see `src/ui/components/Messages.ts`); without
+		// this synthetic frame the user would see only the generic "Request
+		// aborted" produced by the upstream abort path.
+		try {
+			session.emitSyntheticEvent?.({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage,
+				},
+			});
+		} catch { /* best-effort: telemetry only, never block abort */ }
 		try { await session.rpcClient.abort(); } catch { /* best-effort */ }
 		return;
 	}
@@ -187,6 +235,12 @@ export async function handleStreamStall(
 		`[stream-watchdog] session=${session.id} silent-retry ${attempt}/${cfg.maxRetries}`,
 	);
 	session.suppressNextDrainForStallRetry = true;
+	// In production the real agent emits `message_end{stopReason:"error",
+	// errorMessage:"Request aborted"}` on every abort, including silent-retry
+	// aborts. Without this flag the SessionManager's message_end handler
+	// would bump `consecutiveErrorTurns` on each silent retry, violating the
+	// design invariant that only the SURFACED failure advances the counter.
+	session.suppressNextErrorMessageEnd = true;
 	try { await session.rpcClient.abort(); } catch { /* best-effort */ }
 	setTimeout(() => {
 		if (!isAlive(session.id)) return;
@@ -196,6 +250,36 @@ export async function handleStreamStall(
 		session.awaitingLlmFrame = true;
 		ensureTimer(session, cfg, isAlive);
 	}, 0);
+}
+
+/**
+ * Helper for the `agent_end` branch in `SessionManager.handleAgentLifecycle`.
+ * Decides whether the silent-retry suppression should short-circuit the
+ * idle-broadcast/drain. A concurrent user Stop must always win — when the
+ * session has already transitioned to `aborting`, we clear the flag and let
+ * the standard `wasAborting` cleanup proceed (which broadcasts idle).
+ *
+ * Returns `true` iff the caller should short-circuit. The flag is consumed
+ * (cleared) on every call regardless.
+ */
+export function shouldSuppressDrainForStallRetry(
+	session: WatchdogSession,
+	isAborting: boolean,
+): boolean {
+	if (!session.suppressNextDrainForStallRetry) return false;
+	session.suppressNextDrainForStallRetry = false;
+	return !isAborting;
+}
+
+/**
+ * Helper for the `message_end` branch in `SessionManager.handleAgentLifecycle`.
+ * Returns `true` iff the next assistant `message_end` should skip the standard
+ * lastTurnErrored / consecutiveErrorTurns bookkeeping. Consumed exactly once.
+ */
+export function shouldSkipErrorMessageEnd(session: WatchdogSession): boolean {
+	if (!session.suppressNextErrorMessageEnd) return false;
+	session.suppressNextErrorMessageEnd = false;
+	return true;
 }
 
 /** Clear the timer and reset the awaiting flag. Idempotent. */

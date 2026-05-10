@@ -71,8 +71,21 @@ test.describe("LLM stream-inactivity watchdog", () => {
 		expect(resp.ok).toBe(true);
 		const data = await resp.json() as { lastTurnErrored: boolean; consecutiveErrorTurns: number };
 		expect(data.lastTurnErrored, "watchdog must mark the surfaced stall as errored").toBe(true);
-		// Exactly 1 \u2014 silent retries do NOT bump the counter; only the surface does.
+		// Exactly 1 \u2014 silent retries do NOT bump the counter; only the surface
+		// does. The mock-agent emits production-shape
+		// `message_end{stopReason:"error", errorMessage:"Request aborted"}` on
+		// every abort (matching real agent fidelity), so the suppression flag
+		// (`suppressNextErrorMessageEnd`) is what keeps this at 1 instead of 3.
 		expect(data.consecutiveErrorTurns, "consecutiveErrorTurns must bump by exactly 1 (not 3)").toBe(1);
+
+		// Transcript must show the user-visible stalled-stream text. The UI
+		// reads `errorMessage` from `message_end` events (Messages.ts); the
+		// surfaced-stall path emits a synthetic `message_end` so this string
+		// reaches the chat. Without the synthetic-event wiring the user would
+		// see only the generic "Request aborted".
+		await expect(
+			page.getByText(/stream stalled/i).first(),
+		).toBeVisible({ timeout: 5_000 });
 
 		// Implicit-unstick path: a single surfaced stall still allows the next
 		// prompt to dispatch (the cap is MAX_CONSECUTIVE_ERROR_TURNS = 3).
