@@ -1749,6 +1749,26 @@ export class MockAgentCore {
 				// In-process listeners are effectively ordered, so emitting here
 				// delivers events to all currently-subscribed handlers without
 				// racing a subsequent prompt's new abortController.
+				//
+				// Real-agent fidelity: when the user aborts an in-flight turn, the
+				// real Claude bridge surfaces the abort by emitting an assistant
+				// `message_end` with `stopReason:"error"` (rendered as "Request
+				// aborted" in the UI) BEFORE the terminal `agent_end`. This is the
+				// signal that flips `session.lastTurnErrored=true` in the server,
+				// which then gates `drainQueue` off in the `agent_end` handler.
+				// The MOCK_ABORT_AS_ERROR opt-in switches the mock to that shape so
+				// tests can exercise the error-gated drain path without changing
+				// the default abort behaviour for tests that rely on the clean
+				// (non-errored) abort.
+				if (this.env.MOCK_ABORT_AS_ERROR === "1") {
+					const abortedMsg = {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: "Request aborted",
+					};
+					this.emit({ type: "message_end", message: abortedMsg });
+				}
 				this.emit({ type: "agent_end" });
 				this.emit({ type: "session_status", status: "idle" });
 				return { success: true };
