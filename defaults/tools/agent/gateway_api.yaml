@@ -1,0 +1,82 @@
+name: gateway_api
+description: "Call a Bobbit gateway REST endpoint. Path must start with /api/."
+summary: "Call the local Bobbit gateway REST API; auth + JSON handled."
+params: [method, path, body?, query?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Agent
+docs: |-
+  Make authenticated REST calls to the local Bobbit gateway without touching token files, `curl`, or `netstat`. `path` must begin with `/api/`; host and auth are injected. Response body is parsed as JSON when `Content-Type: application/json`, otherwise returned as a string. Non-2xx responses are returned as `{status, body}` — they do NOT throw or set `isError`.
+detail_docs: >-
+  ## Purpose
+
+
+  Replace the old "cat .bobbit/state/token + curl -sk" pattern. The tool runs
+  inside the agent process, resolves the gateway URL + bearer token from the
+  session environment, and calls the local gateway directly.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `method` | `"GET" \| "POST" \| "PUT" \| "DELETE" \| "PATCH"` | yes | HTTP method. |
+
+  | `path` | string | yes | Must start with `/api/`. Anything else is rejected. No host. |
+
+  | `body` | unknown | no | JSON-serialised request body. Only meaningful for POST/PUT/PATCH. |
+
+  | `query` | `Record<string,string>` | no | Encoded with `URLSearchParams` and appended to `path`. |
+
+
+  ## Behaviour
+
+
+  - Response `Content-Type: application/json` → `body` is the parsed object.
+  Otherwise `body` is the raw string. JSON parse failure falls back to raw text.
+
+  - Non-2xx responses do **not** throw — the agent sees `{status, body}` like
+  a normal HTTP client and can react.
+
+  - Body is truncated at **64 KiB** of stringified output with the suffix
+  `\n…(truncated, N bytes)`. When the parsed body is an object that exceeds
+  the cap it is re-packed as the truncated string (so the limit is predictable).
+
+  - Path is validated with a strict `startsWith("/api/")` check after the
+  raw string — `..`, `http://...`, or absolute paths to other endpoints are
+  rejected with `isError: true`.
+
+
+  ## Examples
+
+
+  ```
+
+  # List sessions
+
+  gateway_api(method="GET", path="/api/sessions")
+
+
+  # Inspect a goal's gates
+
+  gateway_api(method="GET", path="/api/goals/abc-123/gates")
+
+
+  # Spawn a team agent
+
+  gateway_api(
+    method="POST",
+    path="/api/goals/abc-123/team/spawn",
+    body={"role": "coder", "instructions": "..."}
+  )
+
+
+  # Query parameters
+
+  gateway_api(method="GET", path="/api/sessions", query={"archived": "1"})
+
+  ```

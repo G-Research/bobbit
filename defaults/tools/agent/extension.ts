@@ -312,6 +312,91 @@ const extension: ExtensionFactory = (pi) => {
 		},
 	});
 
+	pi.registerTool({
+		name: "gateway_api",
+		label: "Gateway API",
+		description: "Call a Bobbit gateway REST endpoint. Path must start with /api/.",
+		promptSnippet:
+			"gateway_api - Call the local Bobbit gateway REST API; auth + JSON handled.",
+		promptGuidelines: [
+			"Use this for any Bobbit /api/* call — never read tokens or shell out to curl",
+			"path MUST start with /api/. No host, no scheme — the tool resolves them",
+			"Non-2xx responses are returned as { status, body } — they do NOT throw",
+			"Response body is parsed JSON when Content-Type is application/json, else raw string",
+		],
+		parameters: Type.Object({
+			method: Type.Union([
+				Type.Literal("GET"),
+				Type.Literal("POST"),
+				Type.Literal("PUT"),
+				Type.Literal("DELETE"),
+				Type.Literal("PATCH"),
+			], { description: "HTTP method." }),
+			path: Type.String({ description: "Must start with /api/. No host or scheme." }),
+			body: Type.Optional(Type.Unknown({ description: "JSON-serialised request body." })),
+			query: Type.Optional(Type.Record(Type.String(), Type.String(), {
+				description: "Appended to path via URLSearchParams.",
+			})),
+		}),
+
+		async execute(_toolCallId, params) {
+			const method = (params as any).method as string;
+			const rawPath = (params as any).path as string;
+			const body = (params as any).body;
+			const query = (params as any).query as Record<string, string> | undefined;
+
+			if (typeof rawPath !== "string" || !rawPath.startsWith("/api/")) {
+				return {
+					isError: true,
+					content: [{ type: "text", text: "gateway_api: path must start with /api/" }],
+				};
+			}
+
+			let fullPath = rawPath;
+			if (query && Object.keys(query).length > 0) {
+				const qs = new URLSearchParams(query).toString();
+				if (qs) fullPath += (fullPath.includes("?") ? "&" : "?") + qs;
+			}
+
+			let resp: Response;
+			try {
+				resp = await gatewayFetch(fullPath, {
+					method,
+					body: body !== undefined ? JSON.stringify(body) : undefined,
+				});
+			} catch (err: any) {
+				return {
+					isError: true,
+					content: [{ type: "text", text: "gateway_api: " + (err?.message ?? String(err)) }],
+				};
+			}
+
+			const ct = resp.headers.get("content-type") || "";
+			const rawText = await resp.text();
+			let parsedBody: unknown = rawText;
+			if (ct.toLowerCase().startsWith("application/json")) {
+				try { parsedBody = JSON.parse(rawText); } catch { parsedBody = rawText; }
+			}
+
+			// Truncate the stringified body to 64 KiB for a predictable cap.
+			const MAX_BYTES = 64 * 1024;
+			const bodyStr = typeof parsedBody === "string" ? parsedBody : JSON.stringify(parsedBody);
+			const byteLen = Buffer.byteLength(bodyStr, "utf8");
+			let outBody: unknown = parsedBody;
+			if (byteLen > MAX_BYTES) {
+				const sliced = bodyStr.slice(0, MAX_BYTES);
+				outBody = sliced + `\n…(truncated, ${byteLen} bytes)`;
+			}
+
+			return {
+				content: [{
+					type: "text",
+					text: JSON.stringify({ status: resp.status, body: outBody }, null, 2),
+				}],
+			};
+		},
+	});
+
 	// Prevent recursive delegation — delegate sessions should not spawn more delegates
 	if (process.env.BOBBIT_DELEGATE_OF) {
 		// Don't register the delegate tool in delegate sessions
