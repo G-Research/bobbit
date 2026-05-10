@@ -16,7 +16,7 @@ import { SessionManager } from "./agent/session-manager.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
-import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
+import { getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
@@ -1100,29 +1100,6 @@ async function handleApiRoute(
 			return ctx ? ctx.goalStore.getLive() : [];
 		}
 		return projectContextManager.getAllLiveGoals();
-	}
-
-	/** Resolve per-project config store, falling back to the default. */
-	function resolveProjectConfigStore(pid: string | null): ProjectConfigStore {
-		if (pid && projectContextManager) {
-			const ctx = projectContextManager.getOrCreate(pid);
-			if (ctx) return ctx.projectConfigStore;
-		}
-		return projectConfigStore;
-	}
-
-	/**
-	 * Resolve the host-side cwd for slash-skill discovery.
-	 * For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...)
-	 * which doesn't exist on the host. Use the project's rootPath instead so skill
-	 * files (.claude/skills/, .bobbit/skills/) are found on the host filesystem.
-	 */
-	function resolveSkillDiscoveryCwd(cwd: string, projectId: string | null | undefined): string {
-		if (projectId && projectContextManager) {
-			const ctx = projectContextManager.getOrCreate(projectId);
-			if (ctx) return ctx.project.rootPath;
-		}
-		return cwd;
 	}
 
 	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
@@ -4965,154 +4942,6 @@ async function handleApiRoute(
 			const msg = err instanceof Error ? err.message : String(err);
 			json({ error: msg }, 500);
 		}
-		return;
-	}
-
-	// GET /api/slash-skills — discover .claude/skills/ SKILL.md files for autocomplete
-	if (url.pathname === "/api/slash-skills" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
-		// Skill files live on the host, so resolve the project rootPath for discovery.
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
-		return;
-	}
-
-	// GET /api/slash-skills/details — full slash skill details including content and file paths
-	if (url.pathname === "/api/slash-skills/details" && req.method === "GET") {
-		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore);
-		const directories = getSkillDirectories(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })), directories });
-		return;
-	}
-
-	// ── Workflow endpoints ──────────────────────────────────────────
-
-	// GET /api/workflows — project-scoped only. Without projectId returns [].
-	const workflowsMatch = url.pathname === "/api/workflows";
-	if (workflowsMatch && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		const resolved = configCascade.resolveWorkflows(projectId);
-		json({ workflows: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
-		return;
-	}
-
-	// POST /api/workflows — requires projectId.
-	if (workflowsMatch && req.method === "POST") {
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const targetProjectId = body?.projectId;
-		if (!targetProjectId) { json({ error: "projectId required" }, 400); return; }
-		try {
-			const ctx = projectContextManager.getOrCreate(targetProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const now = Date.now();
-			const workflow = {
-				id: body.id as string,
-				name: (body.name as string) ?? body.id,
-				description: (body.description as string) ?? "",
-				gates: body.gates || [],
-				createdAt: now,
-				updatedAt: now,
-			};
-			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-			ctx.workflowStore.put(workflow);
-			json(workflow, 201);
-		} catch (err: any) {
-			jsonError(400, err);
-		}
-		return;
-	}
-
-	// POST /api/workflows/:id/customize — copy resolved workflow into a project.
-	const workflowCustomizeMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/customize$/);
-	if (workflowCustomizeMatch && req.method === "POST") {
-		const id = decodeURIComponent(workflowCustomizeMatch[1]);
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "projectId required" }, 400); return; }
-
-		const resolved = configCascade.resolveWorkflows(projectId);
-		const source = resolved.find(r => r.item.id === id);
-		if (!source) { json({ error: "Workflow not found" }, 404); return; }
-
-		const ctx = projectContextManager.getOrCreate(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-
-		const now = Date.now();
-		const copy = { ...source.item, createdAt: now, updatedAt: now };
-		ctx.workflowStore.put(copy);
-		json(copy, 201);
-		return;
-	}
-
-	// DELETE /api/workflows/:id/override — remove project-level override.
-	const workflowOverrideMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/override$/);
-	if (workflowOverrideMatch && req.method === "DELETE") {
-		const id = decodeURIComponent(workflowOverrideMatch[1]);
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "projectId required" }, 400); return; }
-
-		const ctx = projectContextManager.getOrCreate(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-
-		ctx.workflowStore.remove(id);
-		json({ ok: true });
-		return;
-	}
-
-	// GET /api/workflows/:id
-	const workflowMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
-	if (workflowMatch && req.method === "GET") {
-		const id = decodeURIComponent(workflowMatch[1]);
-		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (!qProjectId) { json({ error: "Workflow not found" }, 404); return; }
-		const resolved = configCascade.resolveWorkflows(qProjectId);
-		const found = resolved.find(r => r.item.id === id);
-		if (!found) { json({ error: "Workflow not found" }, 404); return; }
-		json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
-		return;
-	}
-
-	// PUT /api/workflows/:id — requires projectId.
-	if (workflowMatch && req.method === "PUT") {
-		const id = decodeURIComponent(workflowMatch[1]);
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
-		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
-		const ctx = projectContextManager.getOrCreate(qProjectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const existing = ctx.workflowStore.get(id);
-		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-		const updated = {
-			...existing,
-			name: body.name ?? existing.name,
-			description: body.description ?? existing.description,
-			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-			id,
-			updatedAt: Date.now(),
-		};
-		ctx.workflowStore.put(updated);
-		json(updated);
-		return;
-	}
-
-	// DELETE /api/workflows/:id — requires projectId.
-	if (workflowMatch && req.method === "DELETE") {
-		const id = decodeURIComponent(workflowMatch[1]);
-		const qProjectId = url.searchParams.get("projectId") || undefined;
-		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
-		const ctx = projectContextManager.getOrCreate(qProjectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		ctx.workflowStore.remove(id);
-		json({ ok: true });
 		return;
 	}
 
