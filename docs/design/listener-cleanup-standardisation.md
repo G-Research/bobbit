@@ -21,9 +21,13 @@ The fix is not per-site bandaids. It is a single, lint-enforceable convention.
 
 ### 2.1 `BobbitElement` base class
 
+All Bobbit web components extend `LitElement` (`lit@^3.3.1`), not `HTMLElement` directly. `BobbitElement` therefore extends `LitElement` and chains through Lit's reactive lifecycle hooks (`connectedCallback` / `disconnectedCallback`), which Lit explicitly supports as long as `super` is called.
+
 ```ts
 // src/ui/components/base/BobbitElement.ts
-export abstract class BobbitElement extends HTMLElement {
+import { LitElement } from "lit";
+
+export abstract class BobbitElement extends LitElement {
   // Recreated on every (re)connection. Aborted on disconnect.
   // Marked non-public; subclasses access via the `signal` getter.
   #lifecycle: AbortController = new AbortController();
@@ -33,15 +37,17 @@ export abstract class BobbitElement extends HTMLElement {
   }
 
   /** Subclasses override and call super.connectedCallback() FIRST. */
-  connectedCallback(): void {
+  override connectedCallback(): void {
     if (this.#lifecycle.signal.aborted) {
       // Re-attach: replace the spent controller.
       this.#lifecycle = new AbortController();
     }
+    super.connectedCallback();
   }
 
   /** Subclasses override and call super.disconnectedCallback() LAST. */
-  disconnectedCallback(): void {
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
     this.#lifecycle.abort();
   }
 
@@ -54,9 +60,11 @@ export abstract class BobbitElement extends HTMLElement {
 
 Notes:
 
+- `super.connectedCallback()` / `super.disconnectedCallback()` are mandatory — Lit relies on them to wire up the reactive update queue. Subclasses follow the same rule when overriding.
 - The controller is **recreated** on `connectedCallback` if it was aborted, so reusable elements that move around the DOM (e.g. `ToolGroup`, `MessageEditor`) work transparently. First connect is a no-op (controller is fresh from the field initialiser).
 - `signal` is a getter (not a field), so subclass code that captures `const signal = this.signal` *before* re-attach receives a stale signal — that is intentional: capture inside the binding call site, not in the constructor.
-- `disconnectedCallback` aborts unconditionally; it is safe to call `abort()` on an already-aborted controller.
+- `disconnectedCallback` aborts unconditionally after `super`; it is safe to call `abort()` on an already-aborted controller.
+- This base class is **purely additive** to Lit — it does not touch `render()`, `update()`, or reactive properties. Existing `@customElement` / `@property` / `@state` decorators on subclasses continue to work unchanged.
 
 ### 2.2 `LifecycleTimers` helper
 
@@ -96,21 +104,24 @@ Subclasses that want timers instantiate `new LifecycleTimers(this.signal)` once 
 
 ### 2.3 BEFORE / AFTER — `GitStatusWidget.ts`
 
-**Before** (representative pattern, current code uses 5 `addEventListener` / 4 `removeEventListener` calls and a `setInterval` with no greppable clear):
+**Before** (representative shape — current code uses Lit, decorators, and 5 `addEventListener` / 4 `removeEventListener` calls plus a `setInterval` with no greppable clear):
 
 ```ts
-class GitStatusWidget extends HTMLElement {
+@customElement('git-status-widget')
+export class GitStatusWidget extends LitElement {
   private _onWindowFocus = () => this._refresh();
   private _onVisibility  = () => this._refresh();
   private _pollId: number | null = null;
 
-  connectedCallback() {
+  override connectedCallback() {
+    super.connectedCallback();
     window.addEventListener("focus",      this._onWindowFocus);
     document.addEventListener("visibilitychange", this._onVisibility);
     this._pollId = window.setInterval(() => this._refresh(), 30_000);
   }
 
-  disconnectedCallback() {
+  override disconnectedCallback() {
+    super.disconnectedCallback();
     window.removeEventListener("focus",      this._onWindowFocus);
     document.removeEventListener("visibilitychange", this._onVisibility);
     if (this._pollId != null) window.clearInterval(this._pollId);
@@ -122,8 +133,9 @@ class GitStatusWidget extends HTMLElement {
 **After**:
 
 ```ts
-class GitStatusWidget extends BobbitElement {
-  connectedCallback() {
+@customElement('git-status-widget')
+export class GitStatusWidget extends BobbitElement {
+  override connectedCallback() {
     super.connectedCallback();
     const { signal } = this;
     const timers = new LifecycleTimers(signal);
@@ -132,9 +144,12 @@ class GitStatusWidget extends BobbitElement {
     document.addEventListener("visibilitychange", () => this._refresh(), { signal });
     timers.setInterval(() => this._refresh(), 30_000);
   }
-  // No disconnectedCallback override needed — base class aborts the signal.
+  // No disconnectedCallback override needed — base class aborts the signal
+  // (after calling super.disconnectedCallback()).
 }
 ```
+
+Decorators, reactive properties, and `render()` are unchanged. Migration is purely a swap of the binding mechanics.
 
 Net effect: -1 `disconnectedCallback`, -2 stored handler refs, +0 leaks possible because every binding is bound to `signal`.
 
@@ -145,7 +160,7 @@ We pick **a custom AST scan in `tests/listener-cleanup.test.ts`** over an ESLint
 Justification:
 
 - The repo already runs `tsc` via `npm run check` and Node-runner unit tests via `npm run test:unit`, both of which gate CI. There is no existing ESLint config wired to CI; standing one up just for one rule is more friction than benefit.
-- The check is a simple AST predicate: `CallExpression` whose callee is `addEventListener`, with fewer than 3 args **or** whose 3rd arg lacks a `signal` property. ts-morph (already a transitive dep via `typescript`) is sufficient.
+- The check is a simple AST predicate: `CallExpression` whose callee is `addEventListener`, with fewer than 3 args **or** whose 3rd arg lacks a `signal` property. The TypeScript compiler API is **already a direct dependency** (`typescript@^5.7.3`) and is what `npm run check` uses; we use `ts.createSourceFile(...)` + a manual recursive `forEachChild` walker. **No new dependency.** (An earlier draft of this doc claimed `ts-morph` was a transitive dep — it is not, and we do not need it; raw `typescript` is sufficient for a predicate this small.)
 - A test file gives us co-location with the leak-regression test (Section 4) and makes the allowlist a plain text file under `tests/fixtures/`.
 
 ### 3.1 Allowlist format
@@ -280,7 +295,7 @@ These modules bind to long-lived globals (`window`, `document`, the WebSocket) a
 Each phase = 1 PR. Within Phases 2 and 3, **one file per commit** so reverts stay surgical.
 
 - **Phase 1 — foundation.** Add `BobbitElement`, `LifecycleTimers`, `onAbort`, the AST test, and the empty allowlist (all 19 component files exempt). Zero behaviour change. Smallest possible PR.
-- **Phase 2 — hot files.** Migrate, in order: `AgentInterface.ts`, `SandboxedIframe.ts`, `GitStatusWidget.ts`, `MessageEditor.ts`, then thread `AbortSignal` through `follow-tail.ts`. Each commit removes the file from the allowlist. The listener-leak regression test (Section 4) lands in the same PR as the first migrated component (likely `GitStatusWidget` — smallest blast radius).
+- **Phase 2 — hot files.** The goal spec orders these as: `AgentInterface.ts`, `SandboxedIframe.ts`, `GitStatusWidget.ts`, `MessageEditor.ts`, then thread `AbortSignal` through `follow-tail.ts`. **We swap the order so the regression-test harness lands first against the smallest component**: `GitStatusWidget.ts` migrates *first* (alongside the leak-regression test infrastructure), then `MessageEditor.ts`, then `SandboxedIframe.ts`, then `AgentInterface.ts`, then `follow-tail.ts`. Rationale: `AgentInterface.ts` is the largest and most behaviour-sensitive file (scroll invariant, two-flag state machine); landing the regression test against it as the very first migration is unnecessarily risky. The goal spec's ordering is a suggestion, not a contract — completeness of Phase 2 is what matters. Each commit still removes exactly one file from the allowlist.
 - **Phase 3 — long-tail components.** The remaining 14 files in `src/ui/components/**`. Each commit removes one allowlist entry and adds an entry to the leak-regression test.
 - **Phase 4 — allowlist removal.** Once `src/ui/components/**` is empty in the allowlist, delete the allowlist file and tighten the AST test to fail on *any* offending site under `src/ui/components/**`. New components are now compliant by default.
 - **Phase 5 — `src/app/` audit.** Walk the six hot files (Section 5.2). For each `addEventListener`: add `// app-lifetime listener` if global, else accept an `AbortSignal` parameter on the calling function and route it from the owning component. No allowlist for `src/app/**`; the audit is a one-shot, reviewed PR.
@@ -294,7 +309,7 @@ Each phase = 1 PR. Within Phases 2 and 3, **one file per commit** so reverts sta
 
 ## 8. Open questions
 
-1. **Re-attach semantics for `MessageEditor` and `ToolGroup`.** Both elements get reparented during list re-renders. Is the "abort on disconnect, recreate on connect" model correct for them, or do callers rely on internal state (typed text, expand/collapse) surviving DOM moves? If the latter, we need a separate `cleanup()` method distinct from disconnect. To resolve: read `Messages.ts` re-render path before Phase 3.
+1. **Re-attach semantics for `MessageEditor` and `ToolGroup`.** Both elements may get reparented during list re-renders. Is the "abort on disconnect, recreate on connect" model correct for them, or do callers rely on internal state (typed text, expand/collapse) surviving DOM moves? If the latter, we need a separate `cleanup()` method distinct from disconnect. **This question must be resolved before `MessageEditor.ts` is migrated in Phase 2** (it is the second file in the revised Phase 2 order). Resolution: read `Messages.ts` re-render path during the same PR that migrates `MessageEditor`, and if internal state survival is required, document the divergence (e.g. keep listener handler refs alive across disconnect, but still bind via `{ signal }` so abort cleanly disconnects them when the element is finally destroyed). The two concerns are orthogonal — `BobbitElement` does not require state to be discarded; it requires *listeners* to be released.
 2. **`AnnotationStore.ts` is not a `HTMLElement`.** It uses `addEventListener` on its own custom `EventTarget`. Does it need `BobbitElement` semantics, or is it already lifetime-bounded by its owning `ReviewPane`? Likely just accepts an `AbortSignal` in its constructor — confirm during Phase 3.
 3. **AST test runtime cost.** Parsing every file in `src/ui/components/**` on each `npm run test:unit` run is fine today (~20 files), but the test should be a single Node-runner test, not one-per-file, to keep the suite under the 30 s budget.
 4. **Should `src/app/follow-tail.ts` migration land in Phase 2 or Phase 5?** The goal lists it in Phase 2 hot files, but it is not a component. The plan above treats it as Phase 2 (signal-threading work) since `AgentInterface` is its only caller and the two are tightly coupled. Confirm before starting Phase 2.
