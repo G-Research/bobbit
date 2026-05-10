@@ -57,6 +57,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
 - **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
 - **Tune the LLM stream watchdog** → `BOBBIT_LLM_STREAM_TIMEOUT_MS` / `BOBBIT_LLM_STREAM_MAX_RETRIES`; see [docs/llm-stream-watchdog.md](docs/llm-stream-watchdog.md).
+- **Add a tool retry classifier** → `tool-retry-harness.ts`; `tool_execution_end + isError` listener, structured nudge via `rpcClient.prompt`. See [tool-retry-harness.md](docs/design/tool-retry-harness.md).
 
 ### Sessions, status, steer
 - **Mutate session status** → single writer `broadcastStatus()` in `src/server/agent/session-status.ts`. See [unify-session-status.md](docs/design/unify-session-status.md).
@@ -129,6 +130,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Boot bulk-archives live sessions / orphaned-transcripts banner** — `shouldKeepDespiteOrphan` gate in `orphan-cleanup.ts`; `[session-store] REFUSING to save` = stale-snapshot guard tripped. See [session-store-crash-safety.md](docs/design/session-store-crash-safety.md).
 - **Stop button stuck visible / duplicate user message on second send** — `_state.status` write outside `case "session_status"`/`"state"`/`reset()`, or server `session.status` write outside `broadcastStatus()`. See [unify-session-status.md](docs/design/unify-session-status.md).
 - **Duplicate user message rows / "Request aborted" rows after a stalled stream** — silent-retry user echoes and watchdog-driven abort error frames must drop pre-broadcast via `suppressNextUserEcho` / `suppressNextAbortMessageEnd` in `stream-watchdog.ts`. See [docs/llm-stream-watchdog.md](docs/llm-stream-watchdog.md).
+- **Errored `ask_user_choices` / `propose_*` `tool_result` left visible / two question cards for one ask** — `ToolRetryHarness` constructed in `subscribeToEvents()` (session-setup.ts) + re-bound in `SessionManager` respawn paths; coordinates with `verification-harness.ts` via `_verificationOwnedToolUses`. See [docs/design/tool-retry-harness.md](docs/design/tool-retry-harness.md).
 - **`lastActivity` reads "just now" after restart** — `isUserVisibleActivity` filter in `session-manager.ts`.
 - **Live-steer lost / duplicated after Stop** — single `_dispatchSteer()` + shadow ledger `inFlightSteerTexts`; never re-add `PromptQueue.dispatched`. See [docs/design/steer-subsystem-rewrite.md](docs/design/steer-subsystem-rewrite.md).
 - **Session wedged after errored turn** — implicit unstick; capped at `MAX_CONSECUTIVE_ERROR_TURNS = 3`.
