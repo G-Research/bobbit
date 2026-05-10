@@ -176,12 +176,7 @@ export class ToolRetryHarness {
 		this.session = opts.session;
 		this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
 		this.onMetadata = opts.onMetadata;
-		this.debug = opts.debug ?? ((msg, info) => {
-			// Temporary instrumentation per goal §Instrumentation plan.
-			// Removed in a follow-up once the observe scenario is stable.
-			// eslint-disable-next-line no-console
-			console.debug(`[tool-retry] ${msg}`, info);
-		});
+		this.debug = opts.debug ?? (() => { /* no-op; tests inject a stub */ });
 	}
 
 	start(): void {
