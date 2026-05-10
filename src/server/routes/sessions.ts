@@ -9,11 +9,22 @@
  * in server.ts for now — both are tightly coupled to delegate-spawn / lossless-
  * resume plumbing worth a dedicated follow-up commit.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { getSlashSkill, buildSlashSkillPrompt } from "../skills/slash-skills.js";
 import { buildActivationHeader } from "../skills/skill-manifest.js";
 import { isGitRepo, getRepoRoot } from "../skills/git.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { resolveProjectForRequest } from "../agent/resolve-project.js";
+import { shouldCreateWorktree } from "../agent/worktree-decision.js";
+import { checkDockerAvailability } from "../agent/sandbox-status.js";
+import { recordElapsed } from "../agent/profiling.js";
+import { getGoalAcrossProjects, getGoalManagerForGoal } from "./cross-project.js";
 import type { Route } from "./types.js";
+
+/** Cached Docker availability result to avoid running `docker info` per session creation */
+let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
 
 // BFS helper: walk delegateOf, teamLeadSessionId, teamGoalId, and goalId chains
 // from seed IDs through an archived session pool.
@@ -40,6 +51,235 @@ function bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[] {
 }
 
 export const sessionsRoutes: Route[] = [
+	{
+		method: "POST",
+		pattern: "/api/sessions",
+		handler: async ({ deps, sandboxScope, readBody, json, jsonError }) => {
+			const { sessionManager, config, projectRegistry, projectContextManager, projectConfigStore, roleManager, sandboxTokenStore } = deps;
+			const __t0 = performance.now();
+			try {
+			const body = await readBody();
+
+			// ── Delegate session creation ──
+			if (body?.delegateOf && body?.instructions) {
+				if (sandboxScope) {
+					const parentId = body.delegateOf;
+					if (!sandboxScope.sessionIds.has(parentId)) {
+						json({ error: "Forbidden: delegate parent must be own session" }, 403);
+						return;
+					}
+				}
+				try {
+					const cwd = body.cwd || config.defaultCwd;
+					const session = await sessionManager.createDelegateSession(body.delegateOf, {
+						instructions: body.instructions,
+						cwd,
+						title: body.title,
+						context: body.context,
+					});
+					if (sandboxScope && sandboxTokenStore) {
+						sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
+					}
+					json({
+						id: session.id,
+						cwd: session.cwd,
+						status: session.status,
+						delegateOf: session.delegateOf,
+					}, 201);
+				} catch (err) {
+					jsonError(500, err);
+				}
+				return;
+			}
+
+			// ── Normal session creation ──
+			const goalId = body?.goalId;
+
+			let assistantType = body?.assistantType as string | undefined;
+			if (!assistantType) {
+				if (body?.goalAssistant) assistantType = "goal";
+				else if (body?.roleAssistant) assistantType = "role";
+				else if (body?.toolAssistant) assistantType = "tool";
+			}
+
+			let cwd = body?.cwd || config.defaultCwd;
+			if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
+				const proj = projectRegistry.get(body.projectId);
+				if (proj) cwd = proj.rootPath;
+			}
+			if (goalId) {
+				const goal = getGoalAcrossProjects(deps, goalId);
+				if (goal) {
+					cwd = body?.cwd || goal.cwd;
+					if (goal.state === "todo") {
+						await getGoalManagerForGoal(deps, goalId).updateGoal(goalId, { state: "in-progress" });
+					}
+				}
+			}
+
+			const args = body?.args;
+
+			const roleId = body?.roleId;
+			let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string } | undefined;
+
+			if (roleId && typeof roleId === "string") {
+				const role = roleManager.getRole(roleId);
+				if (!role) {
+					json({ error: `Role "${roleId}" not found` }, 404);
+					return;
+				}
+				createOpts = {
+					rolePrompt: role.promptTemplate,
+					roleName: role.name,
+					role: role.name,
+					accessory: role.accessory,
+				};
+			}
+
+			let worktreeOpts: { repoPath: string } | undefined;
+			const wantWorktree = shouldCreateWorktree({ worktree: body?.worktree, assistantType, goalId }, true);
+
+			const reattemptGoalId = body?.reattemptGoalId as string | undefined;
+
+			let sandboxed = body?.sandboxed === true;
+			if (sandboxScope) sandboxed = true;
+			if (sandboxed) {
+				const sandboxConfig = projectConfigStore.get("sandbox") || "none";
+				if (sandboxConfig !== "docker") {
+					json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+					return;
+				}
+				const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
+				if (!hasReadyContainer) {
+					if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
+						const dockerStatus = await checkDockerAvailability();
+						_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
+					}
+					if (!_dockerAvailCache.available) {
+						json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
+						return;
+					}
+				}
+			}
+
+			const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
+			let resolvedProjectId = body?.projectId as string | undefined;
+			let provisionalProjectId: string | undefined;
+
+			if (reattemptGoalId && !body?.cwd) {
+				const origGoal = getGoalAcrossProjects(deps, reattemptGoalId);
+				if (origGoal) {
+					cwd = origGoal.cwd || cwd;
+					if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
+				}
+			}
+
+			if (cwd && !fs.existsSync(cwd) && resolvedProjectId) {
+				const staleCwd = cwd;
+				const proj = projectRegistry.get(resolvedProjectId);
+				let fallback: string | undefined;
+				if (proj && fs.existsSync(proj.rootPath)) fallback = proj.rootPath;
+				if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
+				if (fallback) {
+					console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
+					cwd = fallback;
+				} else {
+					json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+					return;
+				}
+			}
+
+			if (isProjectAssistant && cwd && !resolvedProjectId) {
+				const provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
+				provisionalProjectId = provisionalProject.id;
+				resolvedProjectId = provisionalProject.id;
+				const provCtx = projectContextManager.getOrCreate(provisionalProject.id);
+				if (provCtx) {
+					provCtx.gateStore.onStatusChange = () => {
+						provCtx.goalStore.bumpGeneration();
+					};
+				}
+			}
+
+			if (!resolvedProjectId) {
+				const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
+				if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+				resolvedProjectId = resolved.projectId;
+			}
+
+			if (wantWorktree) {
+				try {
+					const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
+					const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
+					const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
+					if (isMulti && proj?.rootPath) {
+						worktreeOpts = { repoPath: proj.rootPath };
+					} else if (await isGitRepo(cwd)) {
+						const repoPath = await getRepoRoot(cwd);
+						worktreeOpts = { repoPath };
+					}
+				} catch {
+					/* not a git repo */
+				}
+			}
+
+			let autoSandboxBranch: string | undefined;
+			if (sandboxed && !goalId && !assistantType) {
+				const shortId = randomUUID().slice(0, 8);
+				autoSandboxBranch = `session/s-${shortId}`;
+			}
+
+			try {
+				const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
+
+				if (!createOpts?.role && assistantType) {
+					sessionManager.updateSessionMeta(session.id, { role: "assistant", accessory: "wand" });
+					session.role = "assistant";
+					session.accessory = "wand";
+				}
+
+				if (reattemptGoalId) {
+					sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
+				}
+
+				if (resolvedProjectId) {
+					sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
+				}
+
+				json({
+					id: session.id,
+					cwd: session.cwd,
+					status: session.status,
+					goalId: session.goalId,
+					assistantType: session.assistantType,
+					goalAssistant: session.assistantType === "goal",
+					roleAssistant: session.assistantType === "role",
+					toolAssistant: session.assistantType === "tool",
+					role: session.role,
+					accessory: session.accessory,
+					reattemptGoalId,
+					...(provisionalProjectId ? { provisionalProjectId } : {}),
+				}, 201);
+			} catch (err) {
+				const e = err as Error & { code?: string; cause?: unknown };
+				console.error(
+					`[POST /api/sessions] failed cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"} ` +
+					`goal=${goalId ?? "(none)"} assistant=${assistantType ?? "(none)"} sandbox=${sandboxed ? "yes" : "no"}: ` +
+					`${e.message ?? String(err)}\n${e.stack ?? ""}`,
+				);
+				if (e.cause) console.error("  caused by:", e.cause);
+				json({
+					error: String(err),
+					message: e.message,
+					code: e.code,
+					cause: e.cause ? String(e.cause) : undefined,
+				}, 500);
+			}
+			} finally {
+				recordElapsed("POST /api/sessions", performance.now() - __t0);
+			}
+		},
+	},
 	{
 		method: "GET",
 		pattern: "/api/search",

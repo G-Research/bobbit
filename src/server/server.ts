@@ -1,6 +1,5 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -17,13 +16,11 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { TeamManager } from "./agent/team-manager.js";
-import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager } from "./agent/tool-manager.js";
 
 import { initPromptDirs } from "./agent/system-prompt.js";
-import { recordElapsed } from "./agent/profiling.js";
 
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import { TaskManager } from "./agent/task-manager.js";
@@ -55,10 +52,7 @@ import { ReviewAnnotationStore } from "./review-annotation-store.js";
 
 import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
-import { resolveProjectForRequest } from "./agent/resolve-project.js";
-import { GoalManager } from "./agent/goal-manager.js";
 import { resolveHostTokenValue } from "./agent/host-tokens.js";
-import type { PersistedGoal } from "./agent/goal-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -84,9 +78,6 @@ export {
 	__clearGitStatusFake,
 	__forceGitStatusCacheExpiry,
 } from "./git/git-status.js";
-
-/** Cached Docker availability result to avoid running `docker info` per session creation */
-let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
 
 export interface TlsConfig {
 	cert: string;  // path to PEM certificate
@@ -1001,11 +992,11 @@ async function handleApiRoute(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 	sessionManager: SessionManager,
-	config: GatewayConfig,
+	_config: GatewayConfig,
 	_colorStore: ColorStore,
 	_prStatusStore: PrStatusStore,
 	_teamManager: TeamManager,
-	roleManager: RoleManager,
+	_roleManager: RoleManager,
 	_toolManager: ToolManager,
 	projectContextManager: ProjectContextManager,
 	_bgProcessManager: BgProcessManager,
@@ -1019,8 +1010,8 @@ async function handleApiRoute(
 	_sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	_configCascade: ConfigCascade,
-	sandboxScope?: SandboxScope,
-	sandboxTokenStore?: SandboxTokenStore,
+	_sandboxScope?: SandboxScope,
+	_sandboxTokenStore?: SandboxTokenStore,
 	_reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
@@ -1036,21 +1027,6 @@ async function handleApiRoute(
 		const e = err instanceof Error ? err : new Error(String(err));
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
-
-	// ── Cross-project helper functions ─────────────────────────────
-
-	/** Retrieve a goal from any project context. */
-	function getGoalAcrossProjects(goalId: string): PersistedGoal | undefined {
-		const ctx = projectContextManager.getContextForGoal(goalId);
-		return ctx?.goalStore.get(goalId);
-	}
-
-	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
-	function getGoalManagerForGoal(goalId: string): GoalManager {
-		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) throw new Error(`Goal "${goalId}" not found in any project`);
-		return ctx.goalManager;
-	}
 
 	// ── Project Detection & Browse ────────────────────────────────────
 
@@ -1487,286 +1463,6 @@ async function handleApiRoute(
 
 			json({ ok: true });
 			return;
-		}
-	}
-
-	// POST /api/sessions
-	if (url.pathname === "/api/sessions" && req.method === "POST") {
-		const __t0 = performance.now();
-		try {
-		const body = await readBody(req);
-
-		// ── Delegate session creation ──
-		if (body?.delegateOf && body?.instructions) {
-			// Sandbox guard: delegate parent must be own session or registered child
-			if (sandboxScope) {
-				const parentId = body.delegateOf;
-				if (!sandboxScope.sessionIds.has(parentId)) {
-					json({ error: "Forbidden: delegate parent must be own session" }, 403);
-					return;
-				}
-			}
-			try {
-				const cwd = body.cwd || config.defaultCwd;
-				const session = await sessionManager.createDelegateSession(body.delegateOf, {
-					instructions: body.instructions,
-					cwd,
-					title: body.title,
-					context: body.context,
-				});
-				// Register delegate as child in parent's sandbox scope
-				if (sandboxScope && sandboxTokenStore) {
-					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
-				}
-				json({
-					id: session.id,
-					cwd: session.cwd,
-					status: session.status,
-					delegateOf: session.delegateOf,
-				}, 201);
-			} catch (err) {
-				jsonError(500, err);
-			}
-			return;
-		}
-
-		// ── Normal session creation ──
-		const goalId = body?.goalId;
-
-		// Accept both new assistantType and legacy boolean fields
-		let assistantType = body?.assistantType as string | undefined;
-		if (!assistantType) {
-			if (body?.goalAssistant) assistantType = "goal";
-			else if (body?.roleAssistant) assistantType = "role";
-			else if (body?.toolAssistant) assistantType = "tool";
-		}
-
-		// If creating under a goal, use the goal's cwd as default
-		let cwd = body?.cwd || config.defaultCwd;
-		// If a projectId is provided and no explicit cwd, use the project's rootPath
-		if (!body?.cwd && body?.projectId && typeof body.projectId === "string") {
-			const proj = projectRegistry.get(body.projectId);
-			if (proj) cwd = proj.rootPath;
-		}
-		if (goalId) {
-			const goal = getGoalAcrossProjects(goalId);
-			if (goal) {
-				cwd = body?.cwd || goal.cwd;
-				// Auto-transition goal to in-progress when first session starts
-				if (goal.state === "todo") {
-					await getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "in-progress" });
-				}
-			}
-		}
-
-		const args = body?.args;
-
-		// If a roleId is provided, look up the role and pass its prompt/tools/accessory
-		const roleId = body?.roleId;
-		let createOpts: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string } | undefined;
-
-		if (roleId && typeof roleId === "string") {
-			const role = roleManager.getRole(roleId);
-			if (!role) {
-				json({ error: `Role "${roleId}" not found` }, 404);
-				return;
-			}
-			createOpts = {
-				rolePrompt: role.promptTemplate,
-				roleName: role.name,
-				role: role.name,
-				accessory: role.accessory,
-			};
-		}
-
-		// ── Worktree support ──
-		// Non-assistant, non-goal sessions get a worktree by default unless explicitly opted out.
-		// Goal sessions have their own worktree logic via goalManager.setupWorktreeAndStartTeam().
-		// Resolution of `worktreeOpts` is deferred until after `resolvedProjectId` is
-		// finalised below — multi-repo (poly-repo) projects need the project's container
-		// rootPath as repoPath, not `getRepoRoot(cwd)` (which fails for non-git containers).
-		let worktreeOpts: { repoPath: string } | undefined;
-		const wantWorktree = shouldCreateWorktree({ worktree: body?.worktree, assistantType, goalId }, true);
-
-		// ── Re-attempt support ──
-		const reattemptGoalId = body?.reattemptGoalId as string | undefined;
-
-		// ── Sandbox validation ──
-		// Sandbox-scoped tokens MUST create sandboxed sessions — prevent escape
-		let sandboxed = body?.sandboxed === true;
-		if (sandboxScope) sandboxed = true;
-		if (sandboxed) {
-			const sandboxConfig = projectConfigStore.get("sandbox") || "none";
-			if (sandboxConfig !== "docker") {
-				json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
-				return;
-			}
-			// Skip Docker check if sandbox manager has ready containers.
-			// Otherwise use a cached result to avoid running `docker info` on every session creation.
-			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
-			if (!hasReadyContainer) {
-				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
-					const dockerStatus = await checkDockerAvailability();
-					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
-				}
-				if (!_dockerAvailCache.available) {
-					json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
-					return;
-				}
-			}
-		}
-
-		// Auto-detect projectId from cwd if not explicitly provided.
-		// Project assistant sessions (assistantType "project" or "project-scaffolding") are
-		// setting up a NEW project — they get a provisional project registration so sessions
-		// persist under their own project context (survives page refresh).
-		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
-		let resolvedProjectId = body?.projectId as string | undefined;
-		let provisionalProjectId: string | undefined;
-
-		// If re-attempting a goal, inherit cwd and projectId from the original goal
-		if (reattemptGoalId && !body?.cwd) {
-			const origGoal = getGoalAcrossProjects(reattemptGoalId);
-			if (origGoal) {
-				cwd = origGoal.cwd || cwd;
-				if (!resolvedProjectId && origGoal.projectId) resolvedProjectId = origGoal.projectId;
-			}
-		}
-
-		// Guard against stale cwd (e.g. re-attempting a goal whose worktree was deleted,
-		// or a project whose rootPath is gone). spawn("node", { cwd }) on Windows
-		// reports a missing cwd as ENOENT, masquerading as if the `node` binary was missing.
-		// Fall back to the project rootPath when we have a resolved project to anchor the
-		// fallback. If no project is resolved yet, leave cwd alone — the resolver below
-		// will reject a bogus cwd with the canonical 400 rather than silently rewriting
-		// it to defaultCwd (which would mask user error and match an unrelated project).
-		if (cwd && !fs.existsSync(cwd) && resolvedProjectId) {
-			const staleCwd = cwd;
-			const proj = projectRegistry.get(resolvedProjectId);
-			let fallback: string | undefined;
-			if (proj && fs.existsSync(proj.rootPath)) fallback = proj.rootPath;
-			if (!fallback && fs.existsSync(config.defaultCwd)) fallback = config.defaultCwd;
-			if (fallback) {
-				console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
-				cwd = fallback;
-			} else {
-				json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
-				return;
-			}
-		}
-
-		// For project assistants, register a provisional project at the target cwd
-		if (isProjectAssistant && cwd && !resolvedProjectId) {
-			const provisionalProject = projectRegistry.registerProvisional(path.basename(cwd), cwd);
-			provisionalProjectId = provisionalProject.id;
-			resolvedProjectId = provisionalProject.id;
-			// Ensure a ProjectContext exists for the provisional project
-			const provCtx = projectContextManager.getOrCreate(provisionalProject.id);
-			if (provCtx) {
-				provCtx.gateStore.onStatusChange = () => {
-					provCtx.goalStore.bumpGeneration();
-				};
-			}
-		}
-
-		// Project must be resolvable explicitly or from cwd — no silent default fallback.
-		// (Provisional-project handling above may already have set resolvedProjectId;
-		// if so, skip the resolver.)
-		if (!resolvedProjectId) {
-			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
-			resolvedProjectId = resolved.projectId;
-		}
-
-		// Now that `resolvedProjectId` is known, resolve `worktreeOpts`.
-		// Multi-repo (poly-repo) short-circuit mirrors goal-manager.ts::createGoal:
-		// if any component has repo !== ".", the project's rootPath IS the repoPath
-		// even though it isn't itself a git repo. Without this, the `isGitRepo(cwd)`
-		// check below returns false for the container directory and sessions would
-		// run with no worktree at all.
-		if (wantWorktree) {
-			try {
-				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
-				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
-				const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
-				if (isMulti && proj?.rootPath) {
-					worktreeOpts = { repoPath: proj.rootPath };
-				} else if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
-				}
-			} catch {
-				// Not a git repo or git not available — silently ignore
-			}
-		}
-
-		// ── Sandbox auto-branch ──
-		// For sandboxed non-goal, non-assistant sessions, generate a branch so they get
-		// a container worktree instead of defaulting to /workspace.
-		let autoSandboxBranch: string | undefined;
-		if (sandboxed && !goalId && !assistantType) {
-			const shortId = randomUUID().slice(0, 8);
-			autoSandboxBranch = `session/s-${shortId}`;
-		}
-
-		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
-
-			// Set assistant role metadata if no explicit role was provided
-			if (!createOpts?.role && assistantType) {
-				sessionManager.updateSessionMeta(session.id, { role: "assistant", accessory: "wand" });
-				session.role = "assistant";
-				session.accessory = "wand";
-			}
-
-			// Store reattemptGoalId on the session if provided
-			if (reattemptGoalId) {
-				sessionManager.getSessionStore(session.projectId).update(session.id, { reattemptGoalId });
-			}
-
-			// Store projectId on the session if resolved (explicit or auto-detected).
-			// Project assistant sessions keep their provisional projectId so they
-			// persist under the provisional project's store and appear in the sidebar.
-			if (resolvedProjectId) {
-				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
-			}
-
-			json({
-				id: session.id,
-				cwd: session.cwd,
-				status: session.status,
-				goalId: session.goalId,
-				assistantType: session.assistantType,
-				// Legacy boolean fields for backward compat
-				goalAssistant: session.assistantType === "goal",
-				roleAssistant: session.assistantType === "role",
-				toolAssistant: session.assistantType === "tool",
-				role: session.role,
-				accessory: session.accessory,
-				reattemptGoalId,
-				...(provisionalProjectId ? { provisionalProjectId } : {}),
-			}, 201);
-		} catch (err) {
-			// Log full error context server-side so that flaky 500s in tests
-			// (e.g. resilience suite under FS contention) leave a usable trail.
-			// `String(err)` alone drops the stack and any error.cause chain.
-			const e = err as Error & { code?: string; cause?: unknown };
-			console.error(
-				`[POST /api/sessions] failed cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"} ` +
-				`goal=${goalId ?? "(none)"} assistant=${assistantType ?? "(none)"} sandbox=${sandboxed ? "yes" : "no"}: ` +
-				`${e.message ?? String(err)}\n${e.stack ?? ""}`,
-			);
-			if (e.cause) console.error("  caused by:", e.cause);
-			json({
-				error: String(err),
-				message: e.message,
-				code: e.code,
-				cause: e.cause ? String(e.cause) : undefined,
-			}, 500);
-		}
-		return;
-		} finally {
-			recordElapsed("POST /api/sessions", performance.now() - __t0);
 		}
 	}
 
