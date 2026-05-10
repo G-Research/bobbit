@@ -1230,7 +1230,7 @@ export class SessionManager {
 		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
-	): { args: string[]; env: Record<string, string> } {
+	): string[] {
 		const flatNames = allowedTools?.map(e => e.name);
 
 		// MCP proxy extensions
@@ -1258,7 +1258,7 @@ export class SessionManager {
 			args.push("--extension", guardPath);
 		}
 
-		return { args, env: activation.env };
+		return args;
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string): import("./role-store.js").Role | undefined {
@@ -2816,9 +2816,8 @@ export class SessionManager {
 			: this.resolveEffectiveAllowedTools(restoredRole);
 		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
-		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		const toolArgs = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
+		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -4135,9 +4134,8 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
-		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
+		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
@@ -5200,9 +5198,8 @@ export class SessionManager {
 			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
 			const role = this.resolveSessionRole(session.role, session.assistantType);
 			const effective = this.resolveEffectiveAllowedTools(role);
-			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
-			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
-			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			const toolArgs = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
+			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
