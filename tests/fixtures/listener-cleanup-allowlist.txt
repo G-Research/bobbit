@@ -1,0 +1,39 @@
+# Listener-cleanup allowlist
+#
+# Files in src/ui/components/** that are exempt from the
+# `addEventListener(..., { signal })` requirement until they are
+# migrated. See:
+#   - docs/design/listener-cleanup-standardisation.md
+#   - tests/listener-cleanup.test.ts
+#
+# Format: one repo-relative path per line. Blank lines and lines
+# starting with `#` are ignored.
+#
+# Each migration commit MUST remove exactly one line from this file in
+# the same commit that swaps the file's bindings to use { signal }.
+# The test will fail if a path here:
+#   - no longer exists, or
+#   - has zero addEventListener calls, or
+#   - is already compliant with the convention.
+# That keeps this file a true ratchet: tightening only, never loosening.
+#
+# When this list is empty, delete the file altogether. The test will
+# then enforce the convention on every file in src/ui/components/**.
+
+src/ui/components/AgentInterface.ts
+src/ui/components/BgProcessPill.ts
+src/ui/components/ContinueSessionChooser.ts
+src/ui/components/DiffBlock.ts
+src/ui/components/GitStatusWidget.ts
+src/ui/components/MessageEditor.ts
+src/ui/components/Messages.ts
+src/ui/components/ProjectPickerPopover.ts
+src/ui/components/SandboxedIframe.ts
+src/ui/components/SearchBox.ts
+src/ui/components/ToolGroup.ts
+src/ui/components/review/AnnotationPopover.ts
+src/ui/components/review/AnnotationStore.ts
+src/ui/components/review/ReviewDocument.ts
+src/ui/components/review/ReviewPane.ts
+src/ui/components/sandbox/ConsoleRuntimeProvider.ts
+src/ui/components/sandbox/RuntimeMessageRouter.ts
