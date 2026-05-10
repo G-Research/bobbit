@@ -68,21 +68,6 @@ export interface WatchdogSession {
 	 *     values (and emitted a synthetic stalled-stream `message_end`); the
 	 *     abort's "Request aborted" frame must not clobber them. */
 	suppressNextErrorMessageEnd?: boolean;
-	/** One-shot: drop the next user-role `message_end` from the WS broadcast.
-	 *  Set by the watchdog before each silent-retry `rpcClient.prompt(...)` so
-	 *  the agent SDK's user-echo of the re-issued prompt does NOT render as a
-	 *  duplicate user message in the chat transcript. Consumed exactly once by
-	 *  the SessionManager's `handleAgentLifecycle` user-echo path. */
-	suppressNextUserEcho?: boolean;
-	/** One-shot: drop the next assistant `message_end{stopReason:"error"}`
-	 *  frame from the WS broadcast (the abort's "Request aborted" frame).
-	 *  Independent from `suppressNextErrorMessageEnd` (which only suppresses
-	 *  internal bookkeeping). Both flags are set together for silent retries
-	 *  AND for the surfaced-stall path (where the synthetic stalled-stream
-	 *  frame is emitted manually and the abort's real error frame would
-	 *  otherwise duplicate "Request aborted" on screen). Consumed exactly
-	 *  once by `handleAgentLifecycle`. */
-	suppressNextAbortMessageEnd?: boolean;
 	consecutiveErrorTurns?: number;
 	lastTurnErrored?: boolean;
 	lastTurnErrorMessage?: string;
@@ -220,11 +205,6 @@ export async function handleStreamStall(
 		// and double-bump consecutiveErrorTurns. Watchdog owns the
 		// bookkeeping for this transition, end-to-end.
 		session.suppressNextErrorMessageEnd = true;
-		// Also drop the abort's error frame from the WS broadcast — we've
-		// already emitted the user-facing synthetic stalled-stream frame
-		// (below); a trailing "Request aborted" row would visibly duplicate
-		// the surfaced error in the chat transcript.
-		session.suppressNextAbortMessageEnd = true;
 		// Emit a synthetic `message_end` so the UI transcript shows the
 		// stalled-stream text. The UI renders `message.errorMessage` from
 		// `message_end` events (see `src/ui/components/Messages.ts`); without
@@ -261,12 +241,6 @@ export async function handleStreamStall(
 	// would bump `consecutiveErrorTurns` on each silent retry, violating the
 	// design invariant that only the SURFACED failure advances the counter.
 	session.suppressNextErrorMessageEnd = true;
-	// Also drop both user-echo and abort-error frames from the WS broadcast.
-	// The user sent ONE prompt; silent retries are silent on-wire as well as
-	// on-screen — they must not produce duplicate user rows or visible
-	// "Request aborted" rows in the chat transcript.
-	session.suppressNextUserEcho = true;
-	session.suppressNextAbortMessageEnd = true;
 	try { await session.rpcClient.abort(); } catch { /* best-effort */ }
 	setTimeout(() => {
 		if (!isAlive(session.id)) return;
@@ -305,33 +279,6 @@ export function shouldSuppressDrainForStallRetry(
 export function shouldSkipErrorMessageEnd(session: WatchdogSession): boolean {
 	if (!session.suppressNextErrorMessageEnd) return false;
 	session.suppressNextErrorMessageEnd = false;
-	return true;
-}
-
-/**
- * Helper for the WS-broadcast gate in `SessionManager.handleAgentLifecycle`.
- * Returns `true` iff the next user-role `message_end` should be dropped from
- * the broadcast (silent-retry user echo). Consumed exactly once.
- *
- * The flag is one-shot regardless of body match: `lastPromptText` is set
- * right before each silent-retry `prompt()` call, so by construction the
- * very next user `message_end` IS the re-issued prompt's echo.
- */
-export function shouldSuppressUserEchoBroadcast(session: WatchdogSession): boolean {
-	if (!session.suppressNextUserEcho) return false;
-	session.suppressNextUserEcho = false;
-	return true;
-}
-
-/**
- * Helper for the WS-broadcast gate in `SessionManager.handleAgentLifecycle`.
- * Returns `true` iff the next assistant error `message_end` should be
- * dropped from the broadcast (the abort's "Request aborted" frame).
- * Consumed exactly once.
- */
-export function shouldSuppressAbortBroadcast(session: WatchdogSession): boolean {
-	if (!session.suppressNextAbortMessageEnd) return false;
-	session.suppressNextAbortMessageEnd = false;
 	return true;
 }
 

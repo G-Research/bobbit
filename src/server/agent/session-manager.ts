@@ -85,8 +85,6 @@ import {
 	disposeStreamWatchdog,
 	shouldSuppressDrainForStallRetry,
 	shouldSkipErrorMessageEnd,
-	shouldSuppressUserEchoBroadcast,
-	shouldSuppressAbortBroadcast,
 } from "./stream-watchdog.js";
 
 /**
@@ -1790,15 +1788,8 @@ export class SessionManager {
 	 * Called from every event listener before broadcasting.
 	 * - Tracks message_end with stopReason "error" so we can suppress queue draining.
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
-	 *
-	 * Returns `true` if the caller should broadcast `event` to WS clients,
-	 * `false` if the event must be dropped pre-broadcast. Stream-watchdog
-	 * silent-retry user echoes and abort "Request aborted" frames return
-	 * `false`; everything else returns `true`. Dropping must happen BEFORE
-	 * `emitSessionEvent` so the frame doesn't burn a `seq` (see
-	 * docs/design/perm-frame-late-joiner-seq-replay.md).
 	 */
-	private handleAgentLifecycle(session: SessionInfo, event: any): boolean {
+	private handleAgentLifecycle(session: SessionInfo, event: any): void {
 		// LLM stream-inactivity watchdog: arm/disarm based on event type. Must run
 		// FIRST so an event mid-tear-down doesn't sneak past while the timer is
 		// already firing. See `./stream-watchdog.ts` for the stall path.
@@ -1859,27 +1850,9 @@ export class SessionManager {
 			// drainQueue path would re-enqueue and redispatch via rpcClient.prompt,
 			// causing the steer to fire twice. Leave the steered rows in the queue
 			// so the post-abort drainQueue is the single dispatch site.
-			if (session.status === "aborting") return true;
+			if (session.status === "aborting") return;
 			const steered = session.promptQueue.dequeueAllSteered();
 			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
-		}
-
-		// Stream-watchdog broadcast suppression. The watchdog drops these
-		// frames pre-broadcast so silent retries are silent on-wire as well
-		// as on-screen. Independent of the bookkeeping flag below.
-		let suppressBroadcast = false;
-		if (event.type === "message_end" && event.message?.role === "user") {
-			if (shouldSuppressUserEchoBroadcast(session)) {
-				suppressBroadcast = true;
-			}
-		} else if (
-			event.type === "message_end" &&
-			event.message?.role === "assistant" &&
-			event.message.stopReason === "error"
-		) {
-			if (shouldSuppressAbortBroadcast(session)) {
-				suppressBroadcast = true;
-			}
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -1969,7 +1942,7 @@ export class SessionManager {
 			// stick in "aborting" forever.
 			if (shouldSuppressDrainForStallRetry(session, wasAborting)) {
 				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
-				return !suppressBroadcast;
+				return;
 			}
 
 			session.streamingStartedAt = undefined;
@@ -2056,8 +2029,6 @@ export class SessionManager {
 				}
 			}
 		}
-
-		return !suppressBroadcast;
 	}
 
 	/**
@@ -2960,12 +2931,10 @@ export class SessionManager {
 				}
 			}
 
-			const shouldBroadcast = this.handleAgentLifecycle(session, event);
+			this.handleAgentLifecycle(session, event);
 
-			if (shouldBroadcast) {
-				const truncated = truncateLargeToolContent(event);
-				emitSessionEvent(session, truncated);
-			}
+			const truncated = truncateLargeToolContent(event);
+			emitSessionEvent(session, truncated);
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
 
@@ -3782,11 +3751,9 @@ export class SessionManager {
 
 		const unsub = rpcClient.onEvent((event: any) => {
 			session.lastActivity = Date.now();
-			const shouldBroadcast = this.handleAgentLifecycle(session, event);
-			if (shouldBroadcast) {
-				const truncated = truncateLargeToolContent(event);
-				emitSessionEvent(session, truncated);
-			}
+			this.handleAgentLifecycle(session, event);
+			const truncated = truncateLargeToolContent(event);
+			emitSessionEvent(session, truncated);
 			this.trackCostFromEvent(session, event);
 		});
 		session.unsubscribe = unsub;
@@ -4131,11 +4098,9 @@ export class SessionManager {
 				session.lastActivity = Date.now();
 				roleStore.update(id, { lastActivity: session.lastActivity });
 			}
-			const shouldBroadcast = this.handleAgentLifecycle(session, event);
-			if (shouldBroadcast) {
-				const truncated = truncateLargeToolContent(event);
-				emitSessionEvent(session, truncated);
-			}
+			this.handleAgentLifecycle(session, event);
+			const truncated = truncateLargeToolContent(event);
+			emitSessionEvent(session, truncated);
 			if (!switchingSession) this.trackCostFromEvent(session, event);
 		});
 
@@ -5180,12 +5145,10 @@ export class SessionManager {
 					abortStore.update(id, { lastActivity: session.lastActivity });
 				}
 
-				const shouldBroadcast = this.handleAgentLifecycle(session, event);
+				this.handleAgentLifecycle(session, event);
 
-				if (shouldBroadcast) {
-					const truncated = truncateLargeToolContent(event);
-					emitSessionEvent(session, truncated);
-				}
+				const truncated = truncateLargeToolContent(event);
+				emitSessionEvent(session, truncated);
 				if (!switchingSession) this.trackCostFromEvent(session, event);
 			});
 

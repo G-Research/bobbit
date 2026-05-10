@@ -69,21 +69,16 @@ When the watchdog tick observes `awaitingLlmFrame === true` and
 ### Silent retry (attempts 1..maxRetries)
 
 1. `streamStallRetries` is incremented.
-2. Four one-shot flags are set on the session before the abort:
-   `suppressNextDrainForStallRetry` (skip idle broadcast + queue drain on
-   the upcoming `agent_end`), `suppressNextErrorMessageEnd` (skip
-   `consecutiveErrorTurns` bookkeeping for the abort's error frame),
-   `suppressNextAbortMessageEnd` (drop that abort error frame from the WS
-   broadcast), and `suppressNextUserEcho` (drop the SDK's user-echo of the
-   re-issued prompt from the WS broadcast).
+2. `suppressNextDrainForStallRetry` and `suppressNextErrorMessageEnd` are set
+   so the upcoming `message_end{stopReason:"error", errorMessage:"Request
+   aborted"}` (the real agent emits this on every abort) does NOT advance
+   `consecutiveErrorTurns` and does NOT broadcast idle / drain the queue.
 3. `rpcClient.abort()` cancels the in-flight request.
 4. On the next tick the watchdog re-issues `lastPromptText` /
    `lastPromptImages` via `rpcClient.prompt(...)`, refreshes
    `lastLlmFrameAt`, and re-arms.
 
-The session never leaves `streaming`. The transcript shows nothing — silent
-retries are silent on-wire as well as on-screen. See [Suppression contract](#suppression-contract)
-for why both broadcast flags are needed alongside the bookkeeping flag.
+The session never leaves `streaming`. The transcript shows nothing.
 
 ### Surfaced stall (attempt maxRetries + 1)
 
@@ -92,18 +87,13 @@ for why both broadcast flags are needed alongside the bookkeeping flag.
 3. `lastTurnErrored` set to `true`; `lastTurnErrorMessage` set to the
    stalled-stream text.
 4. `suppressNextErrorMessageEnd` is set so the abort's "Request aborted"
-   frame doesn't double-bump the counter or clobber the error message,
-   and `suppressNextAbortMessageEnd` is set so that same frame is also
-   dropped from the WS broadcast (otherwise it would render as a
-   visible "Request aborted" row immediately after the synthetic
-   stalled-stream frame, duplicating the surfaced error on screen).
+   frame doesn't double-bump the counter or clobber the error message.
 5. A synthetic `message_end{stopReason:"error", errorMessage:"Model stream
    stalled — no frames for Xs (attempted N× before giving up)."}` is
-   broadcast directly via `session.emitSyntheticEvent`, bypassing
-   `handleAgentLifecycle` entirely, so the UI renders the stalled-stream
-   text in the transcript (the UI's `Messages.ts` reads `errorMessage`
-   off the `message_end` frame — `lastTurnErrorMessage` alone is not
-   enough).
+   broadcast via `session.emitSyntheticEvent`, so the UI renders the
+   stalled-stream text in the transcript (the UI's `Messages.ts` reads
+   `errorMessage` off the `message_end` frame — `lastTurnErrorMessage`
+   alone is not enough).
 6. `rpcClient.abort()` runs.
 
 The session leaves `streaming` via the standard idle broadcast and the user
@@ -111,57 +101,6 @@ sees a normal errored turn. They can prompt again — the existing implicit
 unstick path (see [debugging.md → Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn))
 will dispatch the next message with the usual `[SYSTEM: previous turn failed
 with: …]` stub.
-
-### Suppression contract
-
-The watchdog uses three independent one-shot flags on `WatchdogSession`
-that split into two concerns: bookkeeping (mutates session state) and
-broadcast (gates the WS frame).
-
-- **`suppressNextErrorMessageEnd`** — bookkeeping only. The next
-  assistant `message_end{stopReason:"error"}` skips the standard
-  `lastTurnErrored` / `consecutiveErrorTurns` mutation inside
-  `handleAgentLifecycle`. The frame is still broadcast (unless paired
-  with the abort flag below). Consumed by `shouldSkipErrorMessageEnd`.
-
-- **`suppressNextUserEcho`** — broadcast only. The next user-role
-  `message_end` is dropped from the WS broadcast. The agent SDK emits a
-  user-echo frame for every `rpcClient.prompt(...)` call, including the
-  watchdog's silent-retry re-prompts; without this flag those echoes
-  render as duplicate user rows in the chat transcript. Consumed by
-  `shouldSuppressUserEchoBroadcast`.
-
-- **`suppressNextAbortMessageEnd`** — broadcast only. The next assistant
-  `message_end{stopReason:"error"}` is dropped from the WS broadcast.
-  The real agent emits this "Request aborted" frame on every abort, and
-  the UI's `Messages.ts` would otherwise render it as a visible
-  "Request aborted" row. Consumed by `shouldSuppressAbortBroadcast`.
-
-The split matters because the two concerns interleave differently in the
-two paths:
-
-| Path           | Bookkeeping (`…ErrorMessageEnd`) | User echo | Abort frame |
-|----------------|----------------------------------|-----------|-------------|
-| Silent retry   | suppressed                       | suppressed| suppressed  |
-| Surfaced stall | suppressed                       | n/a       | suppressed  |
-
-For silent retries all three flags fire together so the user sees
-nothing surface. For the surfaced stall the watchdog emits its own
-synthetic stalled-stream `message_end` directly via `emitSyntheticEvent`
-(which bypasses `handleAgentLifecycle`), and then suppresses the abort's
-real error frame on both the wire and the counter — the synthetic frame
-is the surfaced error, not the abort's generic "Request aborted".
-
-**Broadcast suppression must run before `emitSessionEvent`.**
-`handleAgentLifecycle` returns a `boolean` (`true` = broadcast,
-`false` = drop); every caller in `session-manager.ts` and
-`session-setup.ts` gates the `emitSessionEvent` call on the return
-value. Dropping after `emitSessionEvent` would burn a `seq`, breaking
-the late-joiner replay invariant — see
-[docs/design/perm-frame-late-joiner-seq-replay.md](design/perm-frame-late-joiner-seq-replay.md).
-The bookkeeping flag is independent and continues to mutate session
-state inline inside `handleAgentLifecycle` regardless of the broadcast
-decision.
 
 ### Counter semantics
 
