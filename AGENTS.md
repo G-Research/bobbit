@@ -223,6 +223,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **OAuth callback never completes** — poll `GET /api/oauth/flow-status?flowId=&provider=`.
 - **Bundle-size assertion fails** — `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json`; 600 kB main / 500 kB per-chunk.
 - **TypeBox version skew (artifacts.ts compile error after pi bump)** — pi-ai pulls typebox 1.x transitively; we pin 0.34. Use inline `Type.Unsafe<>` + `AgentTool<any>` in mixed-typebox files. See [typebox-version-skew.md](docs/typebox-version-skew.md).
+- **Spawned agent only sees pi's 7 file builtins (no bash/web/browser/propose_*/etc.) after a pi bump** — pi 0.70+ made `--tools <list>` a unified allowlist applied to builtins AND extension-registered tools. Bobbit now passes `--no-builtin-tools` and re-registers the desired pi file builtins via `defaults/tools/_builtins/extension.ts`, gated by `BOBBIT_BUILTIN_TOOLS` env var. Both `rpc-bridge.ts` and `tool-activation.ts::computeToolActivationArgs` must agree on the new pattern; never reintroduce `--tools` for activation. Pinned by `tests/tool-activation.spec.ts`.
 
 ## Maintaining this file
 
