@@ -304,6 +304,14 @@ export const reviewBackend: AnnotationBackend = {
 // dedicated PUT has flushed; the existing PUT is a superset of that
 // guarantee but the beacon is harmless when it agrees.
 
+// App-lifetime listener: this module's `beforeunload` flush has no owning
+// component. It is registered at module-load and must live for the whole
+// app lifetime. We bind it to a never-aborting `AbortController.signal`
+// purely to satisfy the listener-cleanup convention
+// (`docs/design/listener-cleanup-standardisation.md` §2 / OQ2). The signal
+// is intentionally never aborted.
+const _appLifetimeSignal = new AbortController().signal;
+
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
     for (const [sessionId, sessionCache] of _annotationCache) {
@@ -323,5 +331,5 @@ if (typeof window !== "undefined") {
         new Blob([JSON.stringify(payload)], { type: "application/json" }),
       );
     }
-  });
+  }, { signal: _appLifetimeSignal });
 }

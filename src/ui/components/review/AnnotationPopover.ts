@@ -1,7 +1,9 @@
-import { html, LitElement, css } from "lit";
+import { html, css } from "lit";
 import { customElement, property, query } from "lit/decorators.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Copy, Check } from "lucide";
+import { BobbitElement } from "../base/BobbitElement.js";
+import { LifecycleTimers, onAbort } from "../base/lifecycle-timers.js";
 
 /**
  * <annotation-popover> — A floating comment input popover for text annotations.
@@ -73,7 +75,7 @@ export function closeAnnotationPopover(): void {
 }
 
 @customElement("annotation-popover")
-export class AnnotationPopover extends LitElement {
+export class AnnotationPopover extends BobbitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   /** DOMRect of the selection range (viewport coordinates). */
   @property({ attribute: false }) referenceRect: DOMRect | null = null;
@@ -88,10 +90,13 @@ export class AnnotationPopover extends LitElement {
   @query("textarea") private _textarea!: HTMLTextAreaElement;
 
   private _touchStartY = 0;
-  private _vpResizeHandler: (() => void) | null = null;
-  private _outsideClickHandler: ((e: MouseEvent) => void) | null = null;
+  /** Per-open AbortController for the outside-click listener. */
+  private _outsideClickCtl: AbortController | null = null;
+  /** Per-open AbortController for the viewport-resize listener. */
+  private _viewportCtl: AbortController | null = null;
   private _copied = false;
   private _copyResetTimer: number | undefined;
+  private _timers: LifecycleTimers = new LifecycleTimers(this.signal);
 
   static styles = css`
     :host {
@@ -291,10 +296,20 @@ export class AnnotationPopover extends LitElement {
     }
   }
 
-  disconnectedCallback(): void {
-    super.disconnectedCallback();
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // On re-attach `BobbitElement` rebuilds the abort controller, so we
+    // also need a fresh `LifecycleTimers` bound to the new signal.
+    this._timers = new LifecycleTimers(this.signal);
+  }
+
+  override disconnectedCallback(): void {
+    // Detach per-open controllers eagerly. Their signals are also chained
+    // to `this.signal` via `onAbort` below, but explicit clearing keeps
+    // the references null after disconnect.
     this._detachViewportListener();
     this._detachOutsideClickHandler();
+    super.disconnectedCallback();
   }
 
   /**
@@ -357,44 +372,50 @@ export class AnnotationPopover extends LitElement {
   }
 
   private _attachOutsideClickHandler(): void {
-    if (this._outsideClickHandler) return;
-    this._outsideClickHandler = (e: MouseEvent) => {
+    if (this._outsideClickCtl) return;
+    const ctl = new AbortController();
+    this._outsideClickCtl = ctl;
+    // Chain to the lifecycle so disconnect also tears this listener down.
+    onAbort(this.signal, () => ctl.abort());
+    const handler = (e: MouseEvent) => {
       const path = e.composedPath();
       if (!path.includes(this)) {
         this._cancel();
       }
     };
     // Defer one tick so the click that opened the popover doesn't immediately close it.
-    setTimeout(() => {
-      if (this._outsideClickHandler) {
-        document.addEventListener("mousedown", this._outsideClickHandler, true);
-      }
+    this._timers.setTimeout(() => {
+      if (ctl.signal.aborted) return;
+      document.addEventListener("mousedown", handler, { capture: true, signal: ctl.signal });
     }, 0);
   }
 
   private _detachOutsideClickHandler(): void {
-    if (this._outsideClickHandler) {
-      document.removeEventListener("mousedown", this._outsideClickHandler, true);
-      this._outsideClickHandler = null;
+    if (this._outsideClickCtl) {
+      this._outsideClickCtl.abort();
+      this._outsideClickCtl = null;
     }
   }
 
   private _attachViewportListener(): void {
-    if (!window.visualViewport || this._vpResizeHandler) return;
-    this._vpResizeHandler = () => {
+    if (!window.visualViewport || this._viewportCtl) return;
+    const ctl = new AbortController();
+    this._viewportCtl = ctl;
+    onAbort(this.signal, () => ctl.abort());
+    const handler = () => {
       if (this.mode !== "bottom-sheet" || !this.open) return;
       const offset = window.innerHeight - window.visualViewport!.height;
       this.style.bottom = `${offset}px`;
     };
-    window.visualViewport.addEventListener("resize", this._vpResizeHandler);
-    this._vpResizeHandler();
+    window.visualViewport.addEventListener("resize", handler, { signal: ctl.signal });
+    handler();
   }
 
   private _detachViewportListener(): void {
-    if (this._vpResizeHandler && window.visualViewport) {
-      window.visualViewport.removeEventListener("resize", this._vpResizeHandler);
+    if (this._viewportCtl) {
+      this._viewportCtl.abort();
+      this._viewportCtl = null;
     }
-    this._vpResizeHandler = null;
     if (this.mode === "bottom-sheet") this.style.bottom = "0";
   }
 
@@ -465,7 +486,7 @@ export class AnnotationPopover extends LitElement {
     this._copied = true;
     this.requestUpdate();
     if (this._copyResetTimer != null) clearTimeout(this._copyResetTimer);
-    this._copyResetTimer = window.setTimeout(() => {
+    this._copyResetTimer = this._timers.setTimeout(() => {
       this._copied = false;
       this.requestUpdate();
       this._copyResetTimer = undefined;

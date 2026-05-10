@@ -1,5 +1,7 @@
-import { html, LitElement } from "lit";
+import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BobbitElement } from "../base/BobbitElement.js";
+import { LifecycleTimers } from "../base/lifecycle-timers.js";
 import { marked } from "marked";
 import { createTextAnnotator, type TextAnnotator } from "@recogito/text-annotator";
 import "@recogito/text-annotator/text-annotator.css";
@@ -22,7 +24,7 @@ import "./review-pane.css";
  * can access the rendered DOM directly.
  */
 @customElement("review-document")
-export class ReviewDocument extends LitElement {
+export class ReviewDocument extends BobbitElement {
   @property({ type: String }) markdown = "";
   @property({ type: String }) sessionId = "";
   @property({ type: String }) docTitle = "";
@@ -55,46 +57,33 @@ export class ReviewDocument extends LitElement {
   private _pendingSelection: { quote: string; prefix: string; suffix: string; start: number; end: number; isCode: boolean } | null = null;
   private _contentEl: HTMLDivElement | null = null;
   private _selectionDebounceTimer: number | undefined;
-  private _boundSelectionChange: (() => void) | null = null;
-  private _boundMobileAnnotationTap: ((e: Event) => void) | null = null;
   private _toastTimer: number | undefined;
   private _editingAnnotationId: string | null = null;
   private _pendingAnnId: string | null = null;
+  private _timers: LifecycleTimers = new LifecycleTimers(this.signal);
 
   // Render into light DOM so annotator can access elements
   createRenderRoot() {
     return this;
   }
 
-  connectedCallback(): void {
+  override connectedCallback(): void {
     super.connectedCallback();
+    // On re-attach `BobbitElement` rebuilds the abort controller, so we
+    // also need a fresh `LifecycleTimers` bound to the new signal.
+    this._timers = new LifecycleTimers(this.signal);
     this._isMobile = window.matchMedia("(pointer: coarse)").matches;
     if (this._isMobile) {
-      this._boundSelectionChange = this._onSelectionChange.bind(this);
-      document.addEventListener("selectionchange", this._boundSelectionChange);
+      document.addEventListener("selectionchange", () => this._onSelectionChange(), { signal: this.signal });
     }
   }
 
-  disconnectedCallback(): void {
-    super.disconnectedCallback();
+  override disconnectedCallback(): void {
     this._destroyAnnotator();
-    // Clean up mobile listeners
-    if (this._boundSelectionChange) {
-      document.removeEventListener("selectionchange", this._boundSelectionChange);
-      this._boundSelectionChange = null;
-    }
-    if (this._selectionDebounceTimer != null) {
-      clearTimeout(this._selectionDebounceTimer);
-      this._selectionDebounceTimer = undefined;
-    }
-    if (this._boundMobileAnnotationTap) {
-      this._contentEl?.removeEventListener("click", this._boundMobileAnnotationTap);
-      this._boundMobileAnnotationTap = null;
-    }
-    if (this._toastTimer != null) {
-      clearTimeout(this._toastTimer);
-      this._toastTimer = undefined;
-    }
+    // Listener cleanup (selectionchange, click on _contentEl) is handled
+    // by `this.signal` aborting in `BobbitElement.disconnectedCallback()`.
+    // Timers tracked via `_timers` are cleared the same way.
+    super.disconnectedCallback();
   }
 
   protected updated(changed: Map<string, unknown>): void {
@@ -182,9 +171,9 @@ export class ReviewDocument extends LitElement {
         this._handleSelection(annotation);
       });
 
-      // Listen for clicks on existing annotation highlights (edit/delete)
-      this._boundMobileAnnotationTap = this._onMobileAnnotationTap.bind(this);
-      this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap);
+      // Listen for clicks on existing annotation highlights (edit/delete).
+      // Bound to the lifecycle signal so disconnect tears it down.
+      this._contentEl?.addEventListener("click", (e) => this._onMobileAnnotationTap(e), { signal: this.signal });
     } catch (e) {
       console.warn("[review-document] Failed to attach text annotator:", e);
     }
@@ -240,7 +229,7 @@ export class ReviewDocument extends LitElement {
   private _onSelectionChange(): void {
     if (!this._isMobile) return;
     if (this._selectionDebounceTimer != null) clearTimeout(this._selectionDebounceTimer);
-    this._selectionDebounceTimer = window.setTimeout(() => {
+    this._selectionDebounceTimer = this._timers.setTimeout(() => {
       this._handleMobileSelection();
     }, 300);
   }
@@ -391,7 +380,7 @@ export class ReviewDocument extends LitElement {
   private _showToast(message: string): void {
     this._toastMessage = message;
     if (this._toastTimer != null) clearTimeout(this._toastTimer);
-    this._toastTimer = window.setTimeout(() => {
+    this._toastTimer = this._timers.setTimeout(() => {
       this._toastMessage = "";
       this._toastTimer = undefined;
     }, 2000);
