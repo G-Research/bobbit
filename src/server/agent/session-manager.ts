@@ -77,6 +77,16 @@ export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "a
  */
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 
+// LLM stream-inactivity watchdog. Logic lives in `./stream-watchdog.ts` so
+// unit tests can exercise it without dragging in the SessionManager graph.
+import {
+	resolveWatchdogConfigFromEnv,
+	onAgentEvent as streamWatchdogOnAgentEvent,
+	disposeStreamWatchdog,
+	shouldSuppressDrainForStallRetry,
+	shouldSkipErrorMessageEnd,
+} from "./stream-watchdog.js";
+
 /**
  * Returns true only for rpc events that represent genuine new user-visible
  * activity (a message, tool call, or end-of-turn). Lifecycle frames the
@@ -184,6 +194,31 @@ export interface SessionInfo {
 	transientRetryAttempts?: number;
 	/** Count of consecutive agent turns that ended with stopReason:"error". Resets on any non-error message_end or explicit retry. */
 	consecutiveErrorTurns?: number;
+	/** Stream-watchdog: one-shot suppression of `message_end{stopReason:"error"}`
+	 * bookkeeping. The watchdog sets this before each abort it initiates so the
+	 * abort's "Request aborted" frame doesn't (a) double-count silent retries in
+	 * `consecutiveErrorTurns` or (b) clobber the surfaced stall's `lastTurnErrorMessage`.
+	 * See `./stream-watchdog.ts`. */
+	suppressNextErrorMessageEnd?: boolean;
+	/** Stream-watchdog: emit a synthetic event to the session's WS clients
+	 * (without re-running `handleAgentLifecycle`, which would consume
+	 * `suppressNextErrorMessageEnd` and re-bookkeep). Used by the surfaced
+	 * stall path to render a stalled-stream message in the chat transcript. */
+	emitSyntheticEvent?: (event: any) => void;
+	/** LLM stream-inactivity watchdog state — see STREAM_INACTIVITY_TIMEOUT_MS. */
+	streamWatchdogTimer?: ReturnType<typeof setInterval>;
+	/** Wall time (ms) of last frame seen on the LLM stream. Updated by the watchdog. */
+	lastLlmFrameAt?: number;
+	/** True iff the agent is currently waiting on the LLM stream (not running a tool, not idle).
+	 *  The watchdog only fires when this is true. */
+	awaitingLlmFrame?: boolean;
+	/** Stall retry counter for the current turn. Reset on a non-stalled agent_end
+	 *  (success) or when the stall is surfaced to the user. */
+	streamStallRetries?: number;
+	/** One-shot flag set by the watchdog before aborting for a silent retry. The
+	 *  next `agent_end` consumes this and skips the normal drain/idle-broadcast
+	 *  path so the watchdog can re-dispatch the prompt without the queue racing it. */
+	suppressNextDrainForStallRetry?: boolean;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
 	pendingAutoRetryTimer?: ReturnType<typeof setTimeout>;
 	/** Whether tool calls were executed during the current/last turn */
@@ -1755,6 +1790,16 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		// LLM stream-inactivity watchdog: arm/disarm based on event type. Must run
+		// FIRST so an event mid-tear-down doesn't sneak past while the timer is
+		// already firing. See `./stream-watchdog.ts` for the stall path.
+		streamWatchdogOnAgentEvent(
+			session,
+			event,
+			resolveWatchdogConfigFromEnv(),
+			(id) => this.sessions.has(id),
+		);
+
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -1812,11 +1857,21 @@ export class SessionManager {
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
 			const errored = event.message.stopReason === "error";
-			session.lastTurnErrored = errored;
-			session.lastTurnErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
-			if (errored) {
+			// Stream-watchdog: when the watchdog initiates an abort it sets
+			// `suppressNextErrorMessageEnd` so the abort's emitted
+			// `message_end{stopReason:"error", errorMessage:"Request aborted"}`
+			// doesn't (silent retry) double-bump `consecutiveErrorTurns` or
+			// (surfaced stall) clobber the watchdog's own `lastTurnErrorMessage`.
+			// Consumed exactly once, error frames only.
+			if (errored && shouldSkipErrorMessageEnd(session)) {
+				// Skip bookkeeping entirely — watchdog already set state correctly.
+			} else if (errored) {
+				session.lastTurnErrored = true;
+				session.lastTurnErrorMessage = event.message.errorMessage || "";
 				session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
 			} else {
+				session.lastTurnErrored = false;
+				session.lastTurnErrorMessage = undefined;
 				// Any non-error terminal assistant message resets the cap budget.
 				// Only stopReason:"error" advances the counter.
 				session.consecutiveErrorTurns = 0;
@@ -1870,6 +1925,24 @@ export class SessionManager {
 				session.lastTurnErrored = false;
 				session.lastTurnErrorMessage = undefined;
 				session.consecutiveErrorTurns = 0;
+			}
+
+			// Stream-watchdog silent-retry: if the watchdog set this flag right
+			// before calling rpcClient.abort(), suppress the idle-broadcast +
+			// drain so the queue doesn't race the watchdog's re-prompt. Status
+			// stays "streaming" throughout the retry; `streamingStartedAt` is
+			// left untouched so the UI "streaming for X" counter doesn't flicker.
+			// Consumed exactly once.
+			//
+			// Race guard: a concurrent user Stop must always win. If the session
+			// is already in `aborting` (user pressed Stop after the watchdog
+			// fired but before this `agent_end` arrived), the helper clears the
+			// flag and returns false so the standard `wasAborting` path above
+			// continues to broadcastStatus(idle) — otherwise the session would
+			// stick in "aborting" forever.
+			if (shouldSuppressDrainForStallRetry(session, wasAborting)) {
+				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+				return;
 			}
 
 			session.streamingStartedAt = undefined;
@@ -2864,6 +2937,19 @@ export class SessionManager {
 			emitSessionEvent(session, truncated);
 			if (!restoring) this.trackCostFromEvent(session, event);
 		});
+
+		// Wire stream-watchdog → client-broadcast bridge so the surfaced-stall
+		// path can render its synthetic `message_end` in the chat transcript.
+		// Bypasses `handleAgentLifecycle`: the watchdog has already done all the
+		// session-state bookkeeping (lastTurnErrored, consecutiveErrorTurns,
+		// suppressNextErrorMessageEnd) manually. Routing through the lifecycle
+		// handler would consume `suppressNextErrorMessageEnd` here, leaving
+		// nothing to suppress the real agent's subsequent "Request aborted"
+		// frame — which would then double-bump the counter.
+		session.emitSyntheticEvent = (ev: any) => {
+			const truncated = truncateLargeToolContent(ev);
+			emitSessionEvent(session, truncated);
+		};
 
 		session.unsubscribe = unsub;
 
@@ -4036,6 +4122,11 @@ export class SessionManager {
 		// Swap in the new bridge and update metadata
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
+		// Re-wire stream-watchdog synthetic-event bridge — see initial spawn site.
+		session.emitSyntheticEvent = (ev: any) => {
+			const truncated = truncateLargeToolContent(ev);
+			emitSessionEvent(session, truncated);
+		};
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
@@ -4287,6 +4378,9 @@ export class SessionManager {
 			clearTimeout(session.pendingAutoRetryTimer);
 			session.pendingAutoRetryTimer = undefined;
 		}
+
+		// Clear the LLM stream-inactivity watchdog timer.
+		disposeStreamWatchdog(session);
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
 		// saved before we archive.  Without this, a quick terminate can race
@@ -5076,6 +5170,11 @@ export class SessionManager {
 			// Swap in the new bridge
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+			// Re-wire stream-watchdog synthetic-event bridge — see initial spawn site.
+			session.emitSyntheticEvent = (ev: any) => {
+				const truncated = truncateLargeToolContent(ev);
+				emitSessionEvent(session, truncated);
+			};
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
