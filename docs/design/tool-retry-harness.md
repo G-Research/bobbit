@@ -44,18 +44,22 @@ terminated.
 ```
 class ToolRetryHarness {
   constructor(opts: {
-    sessionId: string;
-    rpcClient: PiRpcClient;
+    session: SessionLike;        // { id, rpcClient, _verificationOwnedToolUses? }
+    maxRetries?: number;         // default 2
     onMetadata?: (delta: { count: number; lastReason: string }) => void;
-    maxRetries?: number;        // default 2
+    debug?: (msg: string, info: Record<string, unknown>) => void;
   });
-  start(): void;                // subscribes to rpcClient.onEvent
-  stop(): void;                 // unsubscribes
+  start(): void;                 // subscribes to session.rpcClient.onEvent
+  stop(): void;                  // unsubscribes
   // exposed for tests:
-  classify(event: ToolExecutionEnd): "schema" | "domain" | "ignore";
+  classify(event: ToolExecutionEndEvent): "schema" | "domain" | "ignore";
   buildNudge(toolName: string, quotedError: string): string;
 }
 ```
+
+The harness takes the whole `SessionLike` (not just an id + rpcClient) so
+it can read `session._verificationOwnedToolUses` for verification
+coordination without extra plumbing.
 
 **Key invariants**
 
@@ -137,9 +141,28 @@ not double-charge.
 
 ### Wiring
 
-`SessionManager` constructs one `ToolRetryHarness` per session at
-spawn time and calls `start()` after the `rpcClient` becomes
-available (same lifecycle as the existing tool-execution event sink).
+The primary wiring site is **`subscribeToEvents()` in
+`src/server/agent/session-setup.ts`** — called for every newly-spawned
+session just before `rpcClient.onEvent` is subscribed for the
+lifecycle/broadcast pipeline. The harness is constructed there with
+an `onMetadata` callback that calls `ctx.store.update(session.id, { toolAutoRetries })`.
+
+`SessionManager` re-instantiates the harness at three additional
+lifecycle points where the `rpcClient` is replaced beneath an existing
+`SessionInfo`:
+
+- `restoreSession` — bring a persisted session back online.
+- `_respawnAgentInPlace` — Docker container recreated / role updated /
+  sandbox recovery (clients stay attached). See
+  `docs/design/sandbox-recovery-frame-of-reference.md`.
+- The in-memory branch of `ensureSessionAlive` /
+  `recoverSandboxSessions`.
+
+Each site stops the previous harness instance before constructing a
+new one bound to the new `rpcClient`. Termination flows go through
+`session.toolRetryHarness?.stop()`.
+
+`SessionInfo` carries the harness as `toolRetryHarness?: ToolRetryHarness`.
 
 `verification-harness.ts` keeps its existing wiring. Its targeted
 JSON-retry logic is left in place at the four call sites
@@ -158,20 +181,27 @@ JSON-retry logic is left in place at the four call sites
 If both fire on the same tool call (verification's
 `verification_result` schema retry + generic schema retry), the
 generic harness's `tool_use_id` cap prevents amplification — the
-verification harness is the one that owns the `verification_result`
-nudge content; the generic harness will see the validation error,
-classify it, but skip the retry because verification has already
-retried (lookup: verification harness sets a flag on the session
-saying "I'm handling this `tool_use_id`"). Concrete coordination:
+verification harness owns the `verification_result` nudge content; the
+generic harness sees the validation error, classifies it, but skips
+the retry because verification has already claimed the `tool_use_id`.
+Concrete coordination:
 
 ```ts
 // On the session object:
 session._verificationOwnedToolUses?: Set<string>;
 ```
 
-The verification harness adds the `tool_use_id` it's about to retry
-to that set; the generic harness skips any `tool_use_id` already in
-the set. Both clear entries on success.
+The verification harness's in-session `tool_execution_end` listener
+adds the `tool_use_id` it's about to retry to that set on
+`isError === true`. The generic harness skips any `tool_use_id`
+already present.
+
+**Legacy / standalone-RpcBridge exception.** `verification-harness.ts`
+has a second listener wired against a transient `RpcBridge` used for
+the LLM-review review-session path. That bridge has no `SessionInfo`
+and the generic harness is never bound to it, so no
+`_verificationOwnedToolUses` tagging is needed (or possible) there.
+The code at that site documents the omission inline.
 
 ### Interaction with the LLM stream watchdog
 
@@ -198,10 +228,15 @@ toolAutoRetries?: {
 };
 ```
 
-Updated via the existing `SessionStore.update(sessionId, partial)`
-path. Surfaced in `GET /api/sessions/:id` automatically because the
-endpoint already returns the full persisted shape. The UI does not
-render this initially — the field exists for the observe-loop
+Updated via `SessionStore.update(sessionId, { toolAutoRetries })`
+from the harness's `onMetadata` callback (one call per successful
+nudge dispatch). The field is included in the
+`SessionStore.UpdatableField` whitelist so it round-trips through the
+standard update path.
+
+`GET /api/sessions/:id` (in `src/server/server.ts`) explicitly copies
+`toolAutoRetries` from the persisted record into the response. The UI
+does not render this initially — the field exists for the observe-loop
 detector to assert on.
 
 ## Observe-loop integration
@@ -285,12 +320,20 @@ New:
 - `tests/e2e/tool-error-retry.spec.ts`
 
 Modified:
-- `src/server/agent/session-manager.ts` — instantiate / wire the harness.
+- `src/server/agent/session-setup.ts` — primary wiring site
+  (`subscribeToEvents()`); instantiate the harness on every new session.
+- `src/server/agent/session-manager.ts` — re-instantiate the harness
+  at `restoreSession`, `_respawnAgentInPlace`, and the in-memory
+  branch of `ensureSessionAlive` / `recoverSandboxSessions`.
 - `src/server/agent/session-store.ts` — add `toolAutoRetries` to
-  `PersistedSession`.
+  `PersistedSession` and the `UpdatableField` whitelist.
+- `src/server/server.ts` — surface `toolAutoRetries` on
+  `GET /api/sessions/:id`.
 - `src/server/agent/verification-harness.ts` — populate
-  `_verificationOwnedToolUses` so the generic harness defers to it on
-  the four existing schema-retry call sites.
+  `_verificationOwnedToolUses` from the in-session
+  `tool_execution_end` listener (the legacy standalone-RpcBridge path
+  is intentionally not tagged — it isn't observed by the generic
+  harness).
 - `tests/observe/detectors.ts` — add `detectVisibleToolErrors`.
 - `tests/observe/types.ts` — add `"visible-tool-error"` finding kind.
 - `tests/observe/scenarios.ts` — add `tool-error-retry` scenario.
