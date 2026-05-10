@@ -98,8 +98,8 @@ test.describe("CT-18: Multi-project goal/session routing @quarantine", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 		const dirA = mkTempDir("A");
 		const dirB = mkTempDir("B");
 		tempDirs.push(dirA, dirB);
@@ -438,8 +438,8 @@ test.describe("CT-19: First-run and single-project UX @quarantine", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 		initialProjects = await listProjects();
 	});
 

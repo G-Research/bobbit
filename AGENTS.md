@@ -41,6 +41,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 ### Tests
 - **Add an API E2E test** → `tests/e2e/`, import `./in-process-harness.js`; see `gates-api.spec.ts`.
 - **Add a UI E2E test** → `tests/e2e/ui/`, import `../gateway-harness.js`; see `session-interactions.spec.ts`.
+- **Write a crash/restart E2E test** → `event.server_crash()` / `event.server_restart()` in `spec-framework.ts`; see `stories-resilience.spec.ts`.
 - **Add a Tier 2.5 video-capturing E2E test** → [docs/testing-tier-2-5.md](docs/testing-tier-2-5.md).
 - **Assert tail-chat / scroll-pin** → helpers in `tests/e2e/ui/tail-chat-helpers.ts`; outcome-only. See [tail-chat-redesign.md](docs/design/tail-chat-redesign.md).
 
