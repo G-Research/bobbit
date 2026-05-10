@@ -3,5 +3,6 @@
 // migrate to BobbitElement and gain a leak-regression test case.
 import "../../src/ui/components/GitStatusWidget.js";
 import "../../src/ui/components/MessageEditor.js";
+import "../../src/ui/components/SandboxedIframe.js";
 
 (window as any).__ready = true;

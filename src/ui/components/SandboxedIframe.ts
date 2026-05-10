@@ -1,5 +1,6 @@
-import { LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { BobbitElement } from "./base/BobbitElement.js";
+import { LifecycleTimers, onAbort } from "./base/lifecycle-timers.js";
 import { ConsoleRuntimeProvider } from "./sandbox/ConsoleRuntimeProvider.js";
 import { RuntimeMessageBridge } from "./sandbox/RuntimeMessageBridge.js";
 import { type MessageConsumer, RUNTIME_MESSAGE_ROUTER } from "./sandbox/RuntimeMessageRouter.js";
@@ -45,7 +46,7 @@ function escapeScriptContent(code: string): string {
 }
 
 @customElement("sandbox-iframe")
-export class SandboxIframe extends LitElement {
+export class SandboxIframe extends BobbitElement {
 	private iframe?: HTMLIFrameElement;
 
 	/**
@@ -59,16 +60,14 @@ export class SandboxIframe extends LitElement {
 		return this;
 	}
 
-	override connectedCallback() {
-		super.connectedCallback();
-	}
-
 	override disconnectedCallback() {
-		super.disconnectedCallback();
-		// Note: We don't unregister the sandbox here for loadContent() mode
+		// Window-level message listeners are bound with `{ signal: this.signal }`
+		// and torn down automatically by `BobbitElement.disconnectedCallback()`.
+		// Note: we don't unregister the sandbox here for loadContent() mode
 		// because the caller (HtmlArtifact) owns the sandbox lifecycle.
 		// For execute() mode, the sandbox is unregistered in the cleanup function.
 		this.iframe?.remove();
+		super.disconnectedCallback();
 	}
 
 	/**
@@ -146,7 +145,7 @@ export class SandboxIframe extends LitElement {
 		// Update router with iframe reference BEFORE appending to DOM
 		RUNTIME_MESSAGE_ROUTER.setSandboxIframe(sandboxId, this.iframe);
 
-		// Listen for open-external-url messages from iframe
+		// Listen for open-external-url messages from iframe — component-lifetime.
 		const externalUrlHandler = (e: MessageEvent) => {
 			if (e.data.type === "open-external-url" && e.source === this.iframe?.contentWindow) {
 				// Use chrome.tabs API to open in new tab
@@ -159,13 +158,17 @@ export class SandboxIframe extends LitElement {
 				}
 			}
 		};
-		window.addEventListener("message", externalUrlHandler);
+		window.addEventListener("message", externalUrlHandler, { signal: this.signal });
 
-		// Listen for sandbox-ready and sandbox-error messages directly
+		// Local controller scoped to the load handshake. Aborted on first
+		// ready/error message OR on component disconnect, which in turn
+		// removes BOTH listeners atomically (one-shot semantics).
+		const loadCtl = new AbortController();
+		onAbort(this.signal, () => loadCtl.abort());
+
 		const readyHandler = (e: MessageEvent) => {
 			if (e.data.type === "sandbox-ready" && e.source === this.iframe?.contentWindow) {
-				window.removeEventListener("message", readyHandler);
-				window.removeEventListener("message", errorHandler);
+				loadCtl.abort();
 
 				// Send content to sandbox
 				this.iframe?.contentWindow?.postMessage(
@@ -181,8 +184,7 @@ export class SandboxIframe extends LitElement {
 
 		const errorHandler = (e: MessageEvent) => {
 			if (e.data.type === "sandbox-error" && e.source === this.iframe?.contentWindow) {
-				window.removeEventListener("message", readyHandler);
-				window.removeEventListener("message", errorHandler);
+				loadCtl.abort();
 
 				// The sandbox.js already sent us the error via postMessage.
 				// We need to convert it to an execution-error message that the execute() consumer will handle.
@@ -198,8 +200,8 @@ export class SandboxIframe extends LitElement {
 			}
 		};
 
-		window.addEventListener("message", readyHandler);
-		window.addEventListener("message", errorHandler);
+		window.addEventListener("message", readyHandler, { signal: loadCtl.signal });
+		window.addEventListener("message", errorHandler, { signal: loadCtl.signal });
 
 		this.appendChild(this.iframe);
 	}
@@ -217,14 +219,14 @@ export class SandboxIframe extends LitElement {
 		// Update router with iframe reference BEFORE appending to DOM
 		RUNTIME_MESSAGE_ROUTER.setSandboxIframe(sandboxId, this.iframe);
 
-		// Listen for open-external-url messages from iframe
+		// Listen for open-external-url messages from iframe — component-lifetime.
 		const externalUrlHandler = (e: MessageEvent) => {
 			if (e.data.type === "open-external-url" && e.source === this.iframe?.contentWindow) {
 				// Fallback for non-extension context
 				window.open(e.data.url, "_blank");
 			}
 		};
-		window.addEventListener("message", externalUrlHandler);
+		window.addEventListener("message", externalUrlHandler, { signal: this.signal });
 
 		this.appendChild(this.iframe);
 	}
@@ -262,6 +264,14 @@ export class SandboxIframe extends LitElement {
 		const files: SandboxFile[] = [];
 		let completed = false;
 
+		// Per-call lifecycle controller. Aborted in cleanup() — tears down
+		// the timeout, the user-signal abort binding, and any per-call
+		// message listeners. Also aborted on component disconnect so an
+		// in-flight execute doesn't leak listeners across mount cycles.
+		const execCtl = new AbortController();
+		onAbort(this.signal, () => execCtl.abort());
+		const execTimers = new LifecycleTimers(execCtl.signal);
+
 		return new Promise((resolve, reject) => {
 			// 4. Create execution consumer for lifecycle messages
 			const executionConsumer: MessageConsumer = {
@@ -298,8 +308,9 @@ export class SandboxIframe extends LitElement {
 				}
 
 				RUNTIME_MESSAGE_ROUTER.unregisterSandbox(sandboxId);
-				signal?.removeEventListener("abort", abortHandler);
-				clearTimeout(timeoutId);
+				// Aborting execCtl cleans up: the user-signal `abort` binding,
+				// the 120s timeout, and the ready/error message listeners.
+				execCtl.abort();
 				this.iframe?.remove();
 				this.iframe = undefined;
 			};
@@ -314,11 +325,11 @@ export class SandboxIframe extends LitElement {
 			};
 
 			if (signal) {
-				signal.addEventListener("abort", abortHandler);
+				signal.addEventListener("abort", abortHandler, { signal: execCtl.signal });
 			}
 
-			// Timeout handler (30 seconds)
-			const timeoutId = setTimeout(() => {
+			// Timeout handler (120 seconds)
+			execTimers.setTimeout(() => {
 				if (!completed) {
 					completed = true;
 					cleanup();
@@ -354,11 +365,15 @@ export class SandboxIframe extends LitElement {
 				// Update router with iframe reference BEFORE appending to DOM
 				RUNTIME_MESSAGE_ROUTER.setSandboxIframe(sandboxId, this.iframe);
 
+				// Per-handshake controller — aborted on the first ready/error
+				// message OR on cleanup (via execCtl).
+				const handshakeCtl = new AbortController();
+				onAbort(execCtl.signal, () => handshakeCtl.abort());
+
 				// Listen for sandbox-ready and sandbox-error messages
 				const readyHandler = (e: MessageEvent) => {
 					if (e.data.type === "sandbox-ready" && e.source === this.iframe?.contentWindow) {
-						window.removeEventListener("message", readyHandler);
-						window.removeEventListener("message", errorHandler);
+						handshakeCtl.abort();
 
 						// Send content to sandbox
 						this.iframe?.contentWindow?.postMessage(
@@ -374,8 +389,7 @@ export class SandboxIframe extends LitElement {
 
 				const errorHandler = (e: MessageEvent) => {
 					if (e.data.type === "sandbox-error" && e.source === this.iframe?.contentWindow) {
-						window.removeEventListener("message", readyHandler);
-						window.removeEventListener("message", errorHandler);
+						handshakeCtl.abort();
 
 						// Convert sandbox-error to execution-error for the execution consumer
 						window.postMessage(
@@ -389,8 +403,8 @@ export class SandboxIframe extends LitElement {
 					}
 				};
 
-				window.addEventListener("message", readyHandler);
-				window.addEventListener("message", errorHandler);
+				window.addEventListener("message", readyHandler, { signal: handshakeCtl.signal });
+				window.addEventListener("message", errorHandler, { signal: handshakeCtl.signal });
 
 				this.appendChild(this.iframe);
 			} else {
