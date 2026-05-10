@@ -1,5 +1,6 @@
-import { html, LitElement } from "lit";
+import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BobbitElement } from "../base/BobbitElement.js";
 import { getAnnotations, getTotalAnnotationCount, composeReviewFeedback } from "./AnnotationStore.js";
 import "./ReviewDocument.js";
 import "./review-pane.css";
@@ -11,7 +12,7 @@ import "./review-pane.css";
  * action bar. Uses light DOM for consistent styling with the app theme.
  */
 @customElement("review-pane")
-export class ReviewPane extends LitElement {
+export class ReviewPane extends BobbitElement {
   @property({ attribute: false })
   documents: Map<string, { title: string; markdown: string }> = new Map();
 
@@ -25,17 +26,10 @@ export class ReviewPane extends LitElement {
     return this;
   }
 
-  private _boundCacheReady = () => this._refreshCounts();
-
-  connectedCallback(): void {
+  override connectedCallback(): void {
     super.connectedCallback();
     this._refreshCounts();
-    window.addEventListener("annotation-cache-ready", this._boundCacheReady);
-  }
-
-  disconnectedCallback(): void {
-    super.disconnectedCallback();
-    window.removeEventListener("annotation-cache-ready", this._boundCacheReady);
+    window.addEventListener("annotation-cache-ready", () => this._refreshCounts(), { signal: this.signal });
   }
 
   protected updated(changed: Map<string, unknown>): void {

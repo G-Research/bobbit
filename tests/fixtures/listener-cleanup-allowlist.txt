@@ -20,9 +20,5 @@
 # When this list is empty, delete the file altogether. The test will
 # then enforce the convention on every file in src/ui/components/**.
 
-src/ui/components/review/AnnotationPopover.ts
-src/ui/components/review/AnnotationStore.ts
-src/ui/components/review/ReviewDocument.ts
-src/ui/components/review/ReviewPane.ts
 src/ui/components/sandbox/ConsoleRuntimeProvider.ts
 src/ui/components/sandbox/RuntimeMessageRouter.ts
