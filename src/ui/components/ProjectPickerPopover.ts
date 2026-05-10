@@ -9,8 +9,9 @@
 //     projects.
 // Keeping the picker folder-only is deliberate: it stays a fast keyboard-driven
 // jump-to-project widget. See docs/design/multi-repo-components.md §8.1.
-import { html, LitElement, nothing } from "lit";
+import { html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BobbitElement } from "./base/BobbitElement.js";
 
 /**
  * Project info exposed to the picker. Callers pass the subset of their
@@ -40,7 +41,7 @@ export interface ProjectPickerItem {
  * listening for `close` to tear it down.
  */
 @customElement("project-picker-popover")
-export class ProjectPickerPopover extends LitElement {
+export class ProjectPickerPopover extends BobbitElement {
 	@property({ attribute: false }) projects: ProjectPickerItem[] = [];
 	@property({ attribute: false }) anchorEl: HTMLElement | null = null;
 	@property({ type: Boolean, reflect: true }) open = false;
@@ -52,6 +53,13 @@ export class ProjectPickerPopover extends LitElement {
 	private _onDocKeyDown = (ev: KeyboardEvent) => this._handleDocKeyDown(ev);
 	private _previousFocus: HTMLElement | null = null;
 	private _listenersBound = false;
+	/**
+	 * Per-open AbortController. The popover binds/unbinds its document
+	 * listeners as `open` toggles while it stays in the DOM, so we can't
+	 * rely solely on the lifecycle signal for cleanup. The lifecycle
+	 * signal still aborts these on disconnect (see `_bindListeners`).
+	 */
+	private _openController: AbortController | null = null;
 
 	// Light DOM — Tailwind/host CSS applies.
 	override createRenderRoot() {
@@ -68,8 +76,8 @@ export class ProjectPickerPopover extends LitElement {
 	}
 
 	override disconnectedCallback(): void {
-		super.disconnectedCallback();
 		this._unbindListeners();
+		super.disconnectedCallback();
 	}
 
 	override updated(changed: Map<string, unknown>) {
@@ -108,15 +116,20 @@ export class ProjectPickerPopover extends LitElement {
 
 	private _bindListeners() {
 		if (this._listenersBound) return;
-		document.addEventListener("pointerdown", this._onDocPointerDown, true);
-		document.addEventListener("keydown", this._onDocKeyDown, true);
+		// Combine a per-open controller with the element's lifecycle signal so
+		// listeners tear down on either close OR disconnect.
+		const openCtl = new AbortController();
+		this._openController = openCtl;
+		const signal = AbortSignal.any([openCtl.signal, this.signal]);
+		document.addEventListener("pointerdown", this._onDocPointerDown, { capture: true, signal });
+		document.addEventListener("keydown", this._onDocKeyDown, { capture: true, signal });
 		this._listenersBound = true;
 	}
 
 	private _unbindListeners() {
 		if (!this._listenersBound) return;
-		document.removeEventListener("pointerdown", this._onDocPointerDown, true);
-		document.removeEventListener("keydown", this._onDocKeyDown, true);
+		this._openController?.abort();
+		this._openController = null;
 		this._listenersBound = false;
 	}
 

@@ -1,7 +1,8 @@
-import { html, LitElement, nothing, render as litRender } from "lit";
+import { html, nothing, render as litRender } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
+import { BobbitElement } from "./base/BobbitElement.js";
 import "./LiveTimer.js";
 
 export interface BgProcessInfo {
@@ -20,7 +21,7 @@ export interface BgProcessInfo {
  * Provides a kill button for running processes.
  */
 @customElement("bg-process-pill")
-export class BgProcessPill extends LitElement {
+export class BgProcessPill extends BobbitElement {
 	@property({ attribute: false }) process!: BgProcessInfo;
 	@property() sessionId = "";
 	@property({ attribute: false }) onKill?: (id: string) => void;
@@ -55,21 +56,22 @@ export class BgProcessPill extends LitElement {
 		}
 	};
 
-	connectedCallback() {
+	override connectedCallback() {
 		super.connectedCallback();
 		this.style.display = 'inline-flex';
 		this.style.alignItems = 'center';
 		this.style.position = 'relative';
 		this.style.top = '1px';
-		document.addEventListener("click", this._onDocumentClick, true);
-		document.addEventListener("keydown", this._onEscapeKey, true);
+		document.addEventListener("click", this._onDocumentClick, { capture: true, signal: this.signal });
+		document.addEventListener("keydown", this._onEscapeKey, { capture: true, signal: this.signal });
 	}
 
-	disconnectedCallback() {
-		super.disconnectedCallback();
-		document.removeEventListener("click", this._onDocumentClick, true);
-		document.removeEventListener("keydown", this._onEscapeKey, true);
+	override disconnectedCallback() {
+		// Document listeners are torn down by the lifecycle signal aborting
+		// in `BobbitElement.disconnectedCallback()`; we only need to tear
+		// down the DOM portal we appended to <body>.
 		this._removePortal();
+		super.disconnectedCallback();
 	}
 
 	private _removePortal() {
@@ -88,7 +90,7 @@ export class BgProcessPill extends LitElement {
 				this._closing = false;
 				this.expanded = false;
 				this._removePortal();
-			}, { once: true });
+			}, { once: true, signal: this.signal });
 		} else {
 			this._closing = false;
 			this.expanded = false;

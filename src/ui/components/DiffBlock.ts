@@ -1,8 +1,9 @@
 import { icon } from "@mariozechner/mini-lit";
-import { LitElement } from "lit";
 import { property, state } from "lit/decorators.js";
 import { html, type TemplateResult } from "lit/html.js";
 import { Check, Copy, Columns2, Rows2 } from "lucide";
+import { BobbitElement } from "./base/BobbitElement.js";
+import { LifecycleTimers } from "./base/lifecycle-timers.js";
 import { i18n } from "../utils/i18n.js";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -145,12 +146,14 @@ export function isGitDiff(text: string): boolean {
 
 const MOBILE_BREAKPOINT = 768;
 
-export class DiffBlock extends LitElement {
+export class DiffBlock extends BobbitElement {
 	@property() content: string = "";
 	@state() private copied = false;
 	/** null = auto (side-by-side on desktop, inline on mobile) */
 	@state() private viewMode: "side-by-side" | "inline" | null = null;
 	@state() private windowWidth = typeof window !== "undefined" ? window.innerWidth : 1024;
+
+	private _timers = new LifecycleTimers(this.signal);
 
 	private _resizeHandler = () => {
 		this.windowWidth = window.innerWidth;
@@ -162,13 +165,10 @@ export class DiffBlock extends LitElement {
 
 	override connectedCallback(): void {
 		super.connectedCallback();
+		// Re-attach: refresh the timers helper to bind to the new lifecycle signal.
+		this._timers = new LifecycleTimers(this.signal);
 		this.style.display = "block";
-		window.addEventListener("resize", this._resizeHandler);
-	}
-
-	override disconnectedCallback(): void {
-		super.disconnectedCallback();
-		window.removeEventListener("resize", this._resizeHandler);
+		window.addEventListener("resize", this._resizeHandler, { signal: this.signal });
 	}
 
 	private get effectiveMode(): "side-by-side" | "inline" {
@@ -180,7 +180,7 @@ export class DiffBlock extends LitElement {
 		try {
 			await navigator.clipboard.writeText(this.content || "");
 			this.copied = true;
-			setTimeout(() => { this.copied = false; }, 1500);
+			this._timers.setTimeout(() => { this.copied = false; }, 1500);
 		} catch (e) {
 			console.error("Copy failed", e);
 		}

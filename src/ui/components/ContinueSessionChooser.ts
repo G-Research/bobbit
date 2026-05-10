@@ -7,17 +7,16 @@
  * Light DOM so inherited CSS (Tailwind-like utility classes + CSS vars)
  * applies. The modal manages its own backdrop + Escape-to-close behaviour.
  */
-import { LitElement, html } from "lit";
+import { html } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { BobbitElement } from "./base/BobbitElement.js";
 
 @customElement("continue-session-chooser")
-export class ContinueSessionChooser extends LitElement {
+export class ContinueSessionChooser extends BobbitElement {
 	/** The archived session being continued. Used for display only. */
 	@property() sessionId = "";
 	/** Rough message count shown in the modal chrome. */
 	@property({ type: Number }) messageCount = 0;
-
-	private _boundKeyDown = this._onKeyDown.bind(this);
 
 	override createRenderRoot() {
 		return this;
@@ -30,20 +29,15 @@ export class ContinueSessionChooser extends LitElement {
 		this.style.position = "fixed";
 		this.style.inset = "0";
 		this.style.zIndex = "50";
-		document.addEventListener("keydown", this._boundKeyDown);
+		document.addEventListener("keydown", this._onKeyDown, { signal: this.signal });
 	}
 
-	override disconnectedCallback() {
-		super.disconnectedCallback();
-		document.removeEventListener("keydown", this._boundKeyDown);
-	}
-
-	private _onKeyDown(e: KeyboardEvent) {
+	private _onKeyDown = (e: KeyboardEvent) => {
 		if (e.key === "Escape") {
 			e.preventDefault();
 			this._cancel();
 		}
-	}
+	};
 
 	private _cancel = () => {
 		this.dispatchEvent(new CustomEvent("cancel", { bubbles: false }));

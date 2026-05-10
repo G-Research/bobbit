@@ -1,7 +1,9 @@
-import { LitElement, html } from "lit";
+import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Search, X } from "lucide";
+import { BobbitElement } from "./base/BobbitElement.js";
+import { LifecycleTimers } from "./base/lifecycle-timers.js";
 
 /**
  * Sidebar search input with debounced queries, keyboard shortcut (Ctrl+K / Cmd+K),
@@ -12,7 +14,7 @@ import { Search, X } from "lucide";
  *  - `search-clear`: fired when the user clears/escapes
  */
 @customElement("search-box")
-export class SearchBox extends LitElement {
+export class SearchBox extends BobbitElement {
 	@property({ type: String }) query = "";
 	@property({ type: Boolean }) collapsed = false;
 
@@ -20,8 +22,8 @@ export class SearchBox extends LitElement {
 
 	@state() private _focused = false;
 
-	private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
-	private _boundKeydown: ((e: KeyboardEvent) => void) | null = null;
+	private _debounceTimer: number | null = null;
+	private _timers = new LifecycleTimers(this.signal);
 
 	protected override createRenderRoot() {
 		return this; // light DOM — Tailwind works
@@ -29,29 +31,18 @@ export class SearchBox extends LitElement {
 
 	override connectedCallback() {
 		super.connectedCallback();
-		this._boundKeydown = this._handleGlobalKeydown.bind(this);
-		document.addEventListener("keydown", this._boundKeydown);
-	}
-
-	override disconnectedCallback() {
-		super.disconnectedCallback();
-		if (this._boundKeydown) {
-			document.removeEventListener("keydown", this._boundKeydown);
-			this._boundKeydown = null;
-		}
-		if (this._debounceTimer) {
-			clearTimeout(this._debounceTimer);
-			this._debounceTimer = null;
-		}
+		// Re-attach: refresh the timers helper to bind to the new lifecycle signal.
+		this._timers = new LifecycleTimers(this.signal);
+		document.addEventListener("keydown", this._handleGlobalKeydown, { signal: this.signal });
 	}
 
 	/** Ctrl+K / Cmd+K focuses the input. */
-	private _handleGlobalKeydown(e: KeyboardEvent) {
+	private _handleGlobalKeydown = (e: KeyboardEvent) => {
 		if (e.key === "k" && (e.ctrlKey || e.metaKey)) {
 			e.preventDefault();
 			this._focusInput();
 		}
-	}
+	};
 
 	private _focusInput() {
 		const input = this.querySelector<HTMLInputElement>("input[data-search]");
@@ -62,8 +53,8 @@ export class SearchBox extends LitElement {
 		const value = (e.target as HTMLInputElement).value;
 		this.query = value;
 
-		if (this._debounceTimer) clearTimeout(this._debounceTimer);
-		this._debounceTimer = setTimeout(() => {
+		if (this._debounceTimer !== null) clearTimeout(this._debounceTimer);
+		this._debounceTimer = this._timers.setTimeout(() => {
 			this._debounceTimer = null;
 			this.dispatchEvent(new CustomEvent("search-input", {
 				bubbles: true,
@@ -83,7 +74,7 @@ export class SearchBox extends LitElement {
 
 	private _clear() {
 		this.query = "";
-		if (this._debounceTimer) {
+		if (this._debounceTimer !== null) {
 			clearTimeout(this._debounceTimer);
 			this._debounceTimer = null;
 		}
