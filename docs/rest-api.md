@@ -2,6 +2,10 @@
 
 All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
 
+For the per-domain module layout (where each route's handler lives, how to add
+a new endpoint), see [server-routes.md](server-routes.md). This page is the
+HTTP-surface contract reference.
+
 ### Error response shape
 
 Non-2xx JSON responses follow:
@@ -11,7 +15,7 @@ Non-2xx JSON responses follow:
 ```
 
 - `error` — human-readable message; always present.
-- `stack` — server stack trace. Caught-exception responses (handlers using the `jsonError(status, err, extra?)` helper in `src/server/server.ts`) always include it; validation 4xx responses with literal strings (e.g. `"Missing title"`) omit it.
+- `stack` — server stack trace. Every error response now goes through `ctx.jsonError(status, err, extra?)` (helper in `src/server/routes/route-helpers.ts`), which always emits `stack`. Pre-split handlers that wrote literal-string 4xxs without `stack` were normalised onto `jsonError` during the route-split refactor.
 - `code` — optional machine-readable code (e.g. `"symlink_root"`).
 - Additional fields may be merged via `extra` (e.g. `canonical` for symlink rejection).
 

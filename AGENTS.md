@@ -45,7 +45,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Assert tail-chat / scroll-pin** → helpers in `tests/e2e/ui/tail-chat-helpers.ts`; outcome-only. See [tail-chat-redesign.md](docs/design/tail-chat-redesign.md).
 
 ### Server / API
-- **Add a REST endpoint** → `handleApiRoute()` in `src/server/server.ts`. See [rest-api.md](docs/rest-api.md).
+- **Add a REST endpoint** → append a `Route` to the right `src/server/routes/<domain>.ts`; anchored `^…$` regex if it captures. See [server-routes.md](docs/server-routes.md), [rest-api.md](docs/rest-api.md).
 - **Add a WebSocket command** → `ClientMessage` in `ws/protocol.ts`, handle in `ws/handler.ts`, `RpcBridge` method.
 - **Add a tool** → `defaults/tools/<group>/` (or project override `.bobbit/config/tools/<group>/`); MCP auto-discovered from `.mcp.json`. **On-wire budget** — `pi.registerTool({ description })` ≤ 150 chars / ≤ 15 words (no examples, no anti-patterns); per-parameter `description` inside `Type.Object({...})` ≤ 80 chars sentence fragment, drop entirely when the name is self-explanatory. Detail belongs in **off-wire** YAML `docs` / `detail_docs`. Pinned by `tests/tool-description-budget.test.ts`. See [internals.md#mcp-tool-documentation](docs/internals.md#mcp-tool-documentation).
 - **Add a slash skill** → `SKILL.md` in `.claude/skills/<name>/`. See [skill-ux-and-autonomous-activation.md](docs/design/skill-ux-and-autonomous-activation.md).
@@ -54,7 +54,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 - **Add/modify session creation** → `session-setup.ts`, `session-manager.ts`. See [internals.md#session-worktrees](docs/internals.md#session-worktrees).
 - **Add a goal feature** → `goal-manager.ts` / `goal-store.ts`, `server.ts`, `goal-assistant.ts`. See [goals-workflows-tasks.md](docs/goals-workflows-tasks.md).
 - **Add a verification reminder site** → `src/server/agent/verification-harness.ts`; await `waitForStreaming(...).catch(()=>{})` before `waitForIdle`.
-- **Return errors from a server handler** → `jsonError(status, err, extra?)` in `src/server/server.ts`. See [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
+- **Return errors from a server handler** → `ctx.jsonError(status, err, extra?)` (helper in `src/server/routes/route-helpers.ts`); never `ctx.json({error})`. See [server-routes.md](docs/server-routes.md), [rest-api.md#error-response-shape](docs/rest-api.md#error-response-shape).
 - **Tune the LLM stream watchdog** → `BOBBIT_LLM_STREAM_TIMEOUT_MS` / `BOBBIT_LLM_STREAM_MAX_RETRIES`; see [docs/llm-stream-watchdog.md](docs/llm-stream-watchdog.md).
 
 ### Sessions, status, steer
