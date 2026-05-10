@@ -30,8 +30,8 @@ test.describe("CT-02: Draft preservation", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 		await s.createTestSession("A");
 		await s.createTestSession("B");
 		await s.open();
