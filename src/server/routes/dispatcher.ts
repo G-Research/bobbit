@@ -19,6 +19,7 @@ import { healthRoutes } from "./health.js";
 import { sandboxRoutes } from "./sandbox.js";
 import { oauthRoutes } from "./oauth.js";
 import { imageGenerationRoutes } from "./image-generation.js";
+import { modelsRoutes } from "./models.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -29,6 +30,7 @@ const allRoutes: ReadonlyArray<Route> = [
 	...sandboxRoutes,
 	...oauthRoutes,
 	...imageGenerationRoutes,
+	...modelsRoutes,
 ];
 
 /**

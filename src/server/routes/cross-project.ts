@@ -14,6 +14,24 @@ import { TaskManager as TaskManagerCtor } from "../agent/task-manager.js";
 import type { PersistedGoal } from "../agent/goal-store.js";
 import type { RouteDeps } from "./route-deps.js";
 
+/** Return preferences with sensitive keys (providerKey.*) filtered out. */
+export function getSafePreferences(deps: RouteDeps): Record<string, unknown> {
+	const all = deps.preferencesStore.getAll();
+	const filtered: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(all)) {
+		if (!key.startsWith("providerKey.")) {
+			filtered[key] = value;
+		}
+	}
+	return filtered;
+}
+
+/** Broadcast preferences_changed with sensitive keys filtered out. */
+export function broadcastPreferencesChanged(deps: RouteDeps): void {
+	deps.broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences(deps) });
+}
+
+
 /** Retrieve a goal from any project context. */
 export function getGoalAcrossProjects(deps: RouteDeps, goalId: string): PersistedGoal | undefined {
 	const ctx = deps.projectContextManager.getContextForGoal(goalId);
