@@ -41,7 +41,6 @@ import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
-import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -107,255 +106,36 @@ const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "co
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
 
-/**
- * Delete remote branches associated with a goal (integration + agent worktree branches).
- * Fire-and-forget — errors are logged but never block the archive flow.
- */
-async function deleteRemoteGoalBranches(
-	goal: PersistedGoal,
-	extraBranches: readonly string[],
-	repoPath: string,
-): Promise<void> {
-	const branches = new Set<string>();
-	if (goal.branch) branches.add(goal.branch);
-	for (const b of extraBranches) {
-		if (b) branches.add(b);
-	}
-	if (branches.size === 0) return;
-	if (shouldSkipRemotePush()) return;
-
-	// Multi-repo: iterate all configured repos and run `git push --delete` in
-	// each one in parallel. Single-repo collapses to a single repoPath.
-	const goalRepoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
-	const repoPaths: string[] = goalRepoWorktrees && Object.keys(goalRepoWorktrees).length > 0
-		? Object.keys(goalRepoWorktrees).map(repo => repo === "." ? repoPath : path.join(repoPath, repo))
-		: [repoPath];
-
-	await Promise.allSettled(repoPaths.flatMap(rp => Array.from(branches).map(async (branch) => {
-		try {
-			await execFileAsync("git", ["push", "origin", "--delete", branch], {
-				cwd: rp,
-				timeout: 15_000,
-			});
-			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
-		} catch (err) {
-			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
-		}
-	})));
-}
+// ── Git helpers, status cache, PR cache, goal-branch deletion ──
+// All extracted to ./git/* — re-exported from this file so test hooks remain
+// importable from "./server.js" (see tests/e2e/git-status-caching.spec.ts).
+import { execGit, execGitSafe } from "./git/git-exec.js";
+import { getGitDiff } from "./git/git-diff.js";
+import { getCachedPrStatus } from "./git/pr-status.js";
+import { deleteRemoteGoalBranches } from "./git/goal-branches.js";
+import { clearPrStatusCache } from "./git/pr-status.js";
+import {
+	batchGitStatus,
+	invalidateGitStatusCache,
+	__getGitStatusInvocationCount,
+	__resetGitStatusInvocationCount,
+	__setGitStatusFake,
+	__clearGitStatusFake,
+	__forceGitStatusCacheExpiry,
+	type GitStatusResult,
+} from "./git/git-status.js";
+export type { GitStatusResult };
+export {
+	invalidateGitStatusCache,
+	__getGitStatusInvocationCount,
+	__resetGitStatusInvocationCount,
+	__setGitStatusFake,
+	__clearGitStatusFake,
+	__forceGitStatusCacheExpiry,
+};
 
 /** Cached Docker availability result to avoid running `docker info` per session creation */
 let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null = null;
-
-// ── PR status cache (avoids blocking event loop with gh CLI every poll) ──
-const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
-const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
-const _prInFlight = new Map<string, Promise<any | null>>();
-
-// Cache viewer permission per repo (rarely changes, long TTL)
-const _repoPermCache = new Map<string, { perm: string; ts: number }>();
-const REPO_PERM_CACHE_TTL_MS = 300_000; // 5 minutes
-
-async function getViewerIsAdmin(cwd: string): Promise<boolean> {
-	const cached = _repoPermCache.get(cwd);
-	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
-	try {
-		const { stdout } = await execAsync("gh repo view --json viewerPermission", {
-			cwd, encoding: "utf-8", timeout: 10000,
-		});
-		const perm = JSON.parse(stdout).viewerPermission ?? "";
-		_repoPermCache.set(cwd, { perm, ts: Date.now() });
-		return perm === "ADMIN";
-	} catch {
-		_repoPermCache.set(cwd, { perm: "", ts: Date.now() });
-		return false;
-	}
-}
-
-async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
-	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	const ghFields = "--json state,url,number,title,mergeable,headRefName,reviewDecision";
-	const branchArg = branch ? ` ${branch}` : "";
-	const cmd = `gh pr view${branchArg} ${ghFields}`;
-
-	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
-	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
-	for (const dir of cwdsToTry) {
-		try {
-			const { stdout } = await execAsync(cmd, { cwd: dir, encoding: "utf-8", timeout: 10000 });
-			const pr = JSON.parse(stdout);
-			const viewerIsAdmin = await getViewerIsAdmin(dir);
-			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
-			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
-			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
-			return data;
-		} catch {
-			// Try next cwd
-		}
-	}
-	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
-	return null;
-}
-
-async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
-	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	const cached = _prCache.get(cacheKey);
-	if (cached && Date.now() - cached.ts < cached.ttl) return cached.data;
-
-	const existing = _prInFlight.get(cacheKey);
-	if (existing) return existing;
-
-	const p = _fetchPrStatus(cwd, branch, fallbackCwd);
-	_prInFlight.set(cacheKey, p);
-	try { return await p; } finally { _prInFlight.delete(cacheKey); }
-}
-
-// ── Async git helpers (avoid blocking event loop) ──
-async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: string): Promise<string> {
-	if (containerId) {
-		// Run inside Docker container
-		const { stdout } = await execFileAsync("docker", [
-			"exec", "-w", cwd, containerId, "/bin/sh", "-c", cmd,
-		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
-		return stdout.trim();
-	}
-	const { stdout } = await execAsync(cmd, { cwd, encoding: "utf-8", timeout });
-	return stdout.trim();
-}
-async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string): Promise<string> {
-	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
-}
-
-/** Git status result shape (+ optional partial/untrackedIncluded flags). */
-export interface GitStatusResult {
-	branch: string; primaryBranch: string; isOnPrimary: boolean;
-	status: { file: string; status: string }[];
-	hasUpstream: boolean; ahead: number; behind: number;
-	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
-	insertionsVsPrimary: number; deletionsVsPrimary: number;
-	clean: boolean; summary: string; unpushed: boolean;
-	/** true if porcelain (Phase B) was skipped or timed-out */
-	partial?: boolean;
-	/** true only when ?untracked=1 was passed (-uall); false on default -uno */
-	untrackedIncluded?: boolean;
-}
-
-// ── Git status cache + single-flight ──
-// Short TTL (2000ms) to coalesce the storm of event-driven refreshes (reconnect,
-// agent-idle, session-switch, goal-dashboard fan-out across N sessions sharing
-// a cwd) into one underlying git invocation. Native parallel execFile typically
-// returns in 50-150 ms on Windows / 10-30 ms on Linux, so 2 s of staleness is
-// imperceptible to the widget (which polls every 10 s) and high-value for
-// coalescing. Errors are NOT cached (so a transient failure doesn't stick).
-// Key includes the untracked flag so dropdown (full) and pill-strip (summary)
-// responses never cross-contaminate each other.
-const GIT_STATUS_TTL_MS = 2000;
-interface GitStatusCacheEntry {
-	promise: Promise<GitStatusResult | null>;
-	resolvedAt: number; // 0 while in flight
-	result: GitStatusResult | null | undefined; // undefined while in flight
-}
-const gitStatusCache = new Map<string, GitStatusCacheEntry>();
-
-/** Test-only invocation counter (underlying git script runs). */
-let _runBatchGitStatusCount = 0;
-export function __getGitStatusInvocationCount(): number { return _runBatchGitStatusCount; }
-export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCount = 0; }
-
-/** Test-only hook: if set, replaces the real `runBatchGitStatus` git-spawn
- *  path with a fake. Used by `tests/e2e/git-status-caching.spec.ts` to
- *  exercise the TTL/single-flight/coalesce logic deterministically without
- *  spawning Git Bash under CI load (which fails unpredictably). Production
- *  code never sets this. */
-let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean }) => Promise<GitStatusResult | null>) | undefined;
-export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
-export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
-
-function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
-	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
-}
-
-/** Invalidate both summary and untracked cache entries for a cwd (optionally
- *  scoped to a container). Call after any local git mutation (commit, pull,
- *  push, rebase, merge). */
-export function invalidateGitStatusCache(cwd: string, containerId?: string): void {
-	gitStatusCache.delete(gitStatusCacheKey(cwd, containerId, true));
-	gitStatusCache.delete(gitStatusCacheKey(cwd, containerId, false));
-}
-
-/** Test-only: mark all cache entries for a cwd as TTL-expired without
- *  sleeping. Used by `tests/e2e/git-status-caching.spec.ts` to deterministically
- *  exercise the TTL re-run path without inflating wall-clock time. Sets
- *  `resolvedAt` to a timestamp older than `GIT_STATUS_TTL_MS` so the next
- *  call falls through to a fresh invocation. */
-export function __forceGitStatusCacheExpiry(cwd: string, containerId?: string): void {
-	const staleAt = Date.now() - GIT_STATUS_TTL_MS - 1000;
-	for (const untracked of [true, false]) {
-		const entry = gitStatusCache.get(gitStatusCacheKey(cwd, containerId, untracked));
-		if (entry && entry.result !== undefined) entry.resolvedAt = staleAt;
-	}
-}
-
-function evictExpired(now: number): void {
-	if (gitStatusCache.size <= 200) return;
-	for (const [k, v] of gitStatusCache) {
-		if (v.resolvedAt !== 0 && now - v.resolvedAt > 5000) gitStatusCache.delete(k);
-	}
-}
-
-/** Cached wrapper over runBatchGitStatus with TTL + single-flight. */
-async function batchGitStatus(
-	cwd: string,
-	containerId?: string,
-	opts?: { untracked?: boolean },
-): Promise<GitStatusResult | null> {
-	const key = gitStatusCacheKey(cwd, containerId, opts?.untracked);
-	const now = Date.now();
-	evictExpired(now);
-	const existing = gitStatusCache.get(key);
-	if (existing) {
-		if (existing.result === undefined) return existing.promise; // in flight
-		if (now - existing.resolvedAt < GIT_STATUS_TTL_MS) return existing.result; // fresh
-		// stale — fall through and re-run
-	}
-
-	const promise = runBatchGitStatus(cwd, containerId, opts).then(
-		(result) => {
-			const entry = gitStatusCache.get(key);
-			if (entry && entry.promise === promise) {
-				entry.result = result;
-				entry.resolvedAt = Date.now();
-			}
-			return result;
-		},
-		(err) => {
-			// Do NOT cache errors — next caller will retry fresh.
-			const entry = gitStatusCache.get(key);
-			if (entry && entry.promise === promise) gitStatusCache.delete(key);
-			throw err;
-		},
-	);
-	gitStatusCache.set(key, { promise, resolvedAt: 0, result: undefined });
-	return promise;
-}
-
-/** Batched git status — host path uses native parallel execFile (no shell);
- *  container path keeps the legacy `docker exec sh -c <batch>` round-trip.
- *  Implementation lives in `./skills/git-status-native.ts`. Returns null if
- *  not a git repository. `partial` is reserved for a future degraded-mode
- *  flag and is currently always `false` on success. */
-async function runBatchGitStatus(
-	cwd: string,
-	containerId?: string,
-	opts?: { untracked?: boolean },
-): Promise<GitStatusResult | null> {
-	_runBatchGitStatusCount++;
-	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
-	return runBatchGitStatusNative(cwd, { ...opts, containerId });
-}
-
-// ── Git diff helper (shared between session and goal endpoints) ──
-const DIFF_MAX_BYTES = 500 * 1024; // 500KB
 
 /**
  * The seven legacy top-level QA keys that have moved to per-component
@@ -404,73 +184,6 @@ function validateComponentsConfig(components: unknown): string | null {
 		}
 	}
 	return null;
-}
-
-async function getGitDiff(cwd: string, file?: string, containerId?: string): Promise<string> {
-	const opts = { cwd, encoding: "utf-8" as const, timeout: 5000 };
-	let hasHead = true;
-	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId); } catch { hasHead = false; }
-
-	let diff = "";
-	if (file) {
-		// Sanitize: reject path traversal, absolute paths, drive letters
-		if (file.includes("..") || path.isAbsolute(file) || /^[a-zA-Z]:/.test(file)) {
-			throw new Error("INVALID_PATH");
-		}
-		if (containerId) {
-			// Run git diff inside container
-			if (hasHead) {
-				diff = await execGitSafe(`git diff HEAD -- ${file}`, cwd, "", containerId);
-			} else {
-				diff = await execGitSafe(`git diff --cached -- ${file}`, cwd, "", containerId)
-					+ await execGitSafe(`git diff -- ${file}`, cwd, "", containerId);
-			}
-			if (!diff.trim()) {
-				diff = await execGitSafe(`git diff --no-index /dev/null -- ${file}`, cwd, "", containerId);
-			}
-		} else if (hasHead) {
-			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
-			diff = stdout;
-		} else {
-			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached", "--", file], opts);
-			const { stdout: s2 } = await execFileAsync("git", ["diff", "--", file], opts);
-			diff = s1 + s2;
-		}
-		// Try untracked if empty (host path only — container path handled above)
-		if (!diff.trim() && !containerId) {
-			try {
-				const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
-				const { stdout } = await execFileAsync("git", ["diff", "--no-index", devNull, "--", file], opts);
-				diff = stdout;
-			} catch (e: any) {
-				// git diff --no-index exits 1 when there are differences
-				if (e.stdout) diff = e.stdout;
-			}
-		}
-	} else {
-		if (containerId) {
-			if (hasHead) {
-				diff = await execGitSafe("git diff HEAD", cwd, "", containerId);
-			} else {
-				diff = await execGitSafe("git diff --cached", cwd, "", containerId)
-					+ await execGitSafe("git diff", cwd, "", containerId);
-			}
-		} else if (hasHead) {
-			const { stdout } = await execFileAsync("git", ["diff", "HEAD"], opts);
-			diff = stdout;
-		} else {
-			const { stdout: s1 } = await execFileAsync("git", ["diff", "--cached"], opts);
-			const { stdout: s2 } = await execFileAsync("git", ["diff"], opts);
-			diff = s1 + s2;
-		}
-	}
-
-	if (!diff.trim()) throw new Error("NO_DIFF");
-
-	if (Buffer.byteLength(diff, "utf-8") > DIFF_MAX_BYTES) {
-		diff = diff.slice(0, DIFF_MAX_BYTES) + "\n\n--- Diff truncated (exceeded 500KB) ---";
-	}
-	return diff;
 }
 
 export interface TlsConfig {
@@ -937,8 +650,7 @@ export function createGateway(config: GatewayConfig) {
 		const goalCtx = projectContextManager.getContextForGoal(goalId);
 		const goal = goalCtx?.goalStore.get(goalId);
 		if (!goal) return;
-		_prCache.delete(goal.cwd);
-		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
+		clearPrStatusCache(goal.cwd, goal.branch);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 	});
 	// Broadcast a message to all WebSocket clients subscribed to a specific session.
@@ -5263,8 +4975,7 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
-		_prCache.delete(cwd);
-		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+		clearPrStatusCache(cwd, goal.branch);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -5290,8 +5001,7 @@ async function handleApiRoute(
 		const goalMergeBranch = resolvedGoalBranch ? ` ${resolvedGoalBranch}` : "";
 		try {
 			await execAsync(`gh pr merge${goalMergeBranch} --${method}${goalAdminFlag}`, { cwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+			clearPrStatusCache(cwd, goal.branch);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -6697,8 +6407,7 @@ async function handleApiRoute(
 			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
 			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
 			await execAsync(`gh pr merge${sessMergeBranchArg} --${method}${sessAdminFlag}`, { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
+			clearPrStatusCache(cwd, sessMergeBranch);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

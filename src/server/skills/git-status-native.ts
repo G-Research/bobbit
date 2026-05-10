@@ -18,7 +18,7 @@
  */
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import type { GitStatusResult } from "../server.js";
+import type { GitStatusResult } from "../git/git-status.js";
 
 const execFileAsync = promisify(execFileCb);
 
