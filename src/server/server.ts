@@ -60,6 +60,8 @@ import { ProjectConfigStore, validateComponentsConfig, LEGACY_QA_TOP_LEVEL_KEYS 
 import { hasTransitiveDep } from "./agent/gate-deps.js";
 import { loadManifest, serveStatic } from "./static.js";
 import { readBody } from "./routes/route-helpers.js";
+import { dispatch as dispatchRoute } from "./routes/dispatcher.js";
+import type { RouteDeps } from "./routes/route-deps.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
@@ -429,7 +431,10 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
+			const handled = await dispatchRoute(url, req, res, routeDeps, sandboxScope);
+			if (!handled) {
+				await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
+			}
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -635,6 +640,37 @@ export function createGateway(config: GatewayConfig) {
 			console.error(`[verification] Failed to notify team lead for goal ${goalId}:`, err);
 		}
 	});
+
+	// Single bag of dependencies for the per-domain route handlers in routes/.
+	// Constructed once after all stores + broadcasters are wired. Note that
+	// `sandboxManager` is bound late (after Docker availability is checked
+	// further down) — we read it via a getter so the deps bag captures the
+	// current value at call time, not the initial null.
+	const routeDeps: RouteDeps = {
+		config,
+		sessionManager,
+		teamManager,
+		roleManager,
+		roleStore,
+		toolManager,
+		groupPolicyStore,
+		preferencesStore,
+		projectConfigStore,
+		projectRegistry,
+		projectContextManager,
+		colorStore,
+		prStatusStore,
+		reviewAnnotationStore,
+		bgProcessManager,
+		staffManager,
+		verificationHarness,
+		get sandboxManager() { return sandboxManager; },
+		sandboxTokenStore,
+		configCascade,
+		broadcastToGoal,
+		broadcastToAll,
+		broadcastToSession,
+	} as RouteDeps;
 
 	const isLocalhostServer = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
