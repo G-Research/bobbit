@@ -27,6 +27,7 @@ import { skillsRoutes } from "./skills.js";
 import { workflowsRoutes } from "./workflows.js";
 import { staffRoutes } from "./staff.js";
 import { mcpRoutes } from "./mcp.js";
+import { maintenanceRoutes } from "./maintenance.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -45,6 +46,7 @@ const allRoutes: ReadonlyArray<Route> = [
 	...workflowsRoutes,
 	...staffRoutes,
 	...mcpRoutes,
+	...maintenanceRoutes,
 ];
 
 /**
