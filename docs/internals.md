@@ -1597,7 +1597,7 @@ Level-1 (description listing) and Level-2 (the SKILL.md body itself, which is ca
 
 **Workaround.** If a built-in or personal skill needs Level-3 access inside the sandbox, copy its directory into the project's `.claude/skills/` tree. A bind-mount or copy-on-activate mechanism that exposes built-in/personal skill roots automatically is a planned follow-up, not part of v1.
 
-**Manual verification recipe.** Inside the sandbox:
+**Manual verification recipe.** Inside the sandbox (humans / external scripts — agents should use the `gateway_api` tool, see [gateway-api-tool.md](gateway-api-tool.md)):
 
 ```bash
 # Project-local skill works (resource list populated):
