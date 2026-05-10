@@ -68,6 +68,7 @@ One-liner task → entry point. Follow links for walkthroughs. **Keep entries to
 
 ### UI
 - **Add a UI component** → `src/ui/components/`, export from `src/ui/index.ts`.
+- **Add a UI component with proper listener cleanup** → `extends BobbitElement` from `src/ui/components/base/BobbitElement.ts`; pass `{ signal: this.signal }` to every `addEventListener`; use `LifecycleTimers` from `base/lifecycle-timers.ts` for `setTimeout`/`setInterval`/`raf`. See [listener-cleanup-standardisation.md](docs/design/listener-cleanup-standardisation.md).
 - **Add a tool renderer** → `src/ui/tools/renderers/`, register in `src/ui/tools/index.ts`; see `ProposalRenderer.ts`.
 - **Show a server error in a modal** → `<error-details>` + `showConnectionError(...)` in `src/app/dialogs.ts`; API wrappers in `src/app/api.ts` attach `code`/`stack`.
 - **Add a route-level page (lazy)** → `lazyPage(...)` branch in `mainArea()` in `src/app/render.ts`. See [ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md).
@@ -202,6 +203,7 @@ Keyword index — full diagnostic walkthroughs live in [docs/debugging.md](docs/
 - **Markdown not rendering in chat / proposal panel** — call `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts`.
 - **Header toast vs proposal toast testid collision** — `header-toast` vs `proposal-toast`; two slots in `src/app/render.ts`.
 - **Mobile annotation popover doesn't open** — `_onMobileAddComment` must set `_popoverReferenceRect` before mount.
+- **`addEventListener` in `src/ui/components/**` without `{ signal }` fails CI** — `tests/listener-cleanup.test.ts` AST scan; extend `BobbitElement` and pass `{ signal: this.signal }`. See [listener-cleanup-standardisation.md](docs/design/listener-cleanup-standardisation.md).
 
 ### QA / preview / tier-2.5 / images
 - **QA screenshot token bloat** — extension must emit `[screenshot_file]` not `[screenshot_base64]`.

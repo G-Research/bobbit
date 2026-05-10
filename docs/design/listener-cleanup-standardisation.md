@@ -314,3 +314,24 @@ Each phase = 1 PR. Within Phases 2 and 3, **one file per commit** so reverts sta
 3. **AST test runtime cost.** Parsing every file in `src/ui/components/**` on each `npm run test:unit` run is fine today (~20 files), but the test should be a single Node-runner test, not one-per-file, to keep the suite under the 30 s budget.
 4. **Should `src/app/follow-tail.ts` migration land in Phase 2 or Phase 5?** The goal lists it in Phase 2 hot files, but it is not a component. The plan above treats it as Phase 2 (signal-threading work) since `AgentInterface` is its only caller and the two are tightly coupled. Confirm before starting Phase 2.
 5. **Worker / `MessagePort` listeners.** `SandboxedIframe.ts` and the `sandbox/Runtime*` modules attach listeners to `MessagePort`s and `Worker`s, not just `window`. `{ signal }` is supported on these targets in modern browsers — verify our minimum browser baseline (the repo currently targets evergreen Chromium per Playwright config) before relying on it.
+
+## 9. Status (as of 2026-05-10)
+
+Implementation landed on `goal/standardis-7465ad1d` (HEAD `2fad819e`).
+
+- **Components migrated.** All 19 web components under `src/ui/components/**` extend `BobbitElement`. The `BobbitElement` base lives at `src/ui/components/base/BobbitElement.ts`; the timer helper at `src/ui/components/base/lifecycle-timers.ts` (exports `onAbort` and `LifecycleTimers`).
+- **Allowlist deleted.** Phase 4 ratchet engaged: `tests/listener-cleanup.test.ts` is now strict — any `addEventListener(...)` under `src/ui/components/**` without an `{ signal }` option fails CI. There is no exemption file.
+- **Regression harness in place.** `tests/listener-leak-regression.spec.ts` (Playwright `file://`) drives `tests/fixtures/listener-leak-fixture.html` + `tests/fixtures/listener-leak-entry.ts`, mounting/disconnecting hot components 10× and asserting the wrapped `EventTarget.prototype.addEventListener` counter does not grow.
+
+### Open-question resolutions
+
+1. **Re-attach semantics for `MessageEditor` / `ToolGroup`** — confirmed: abort-on-disconnect is correct. Internal state survival is handled by parent re-render; listeners are re-bound on each `connectedCallback` against a fresh signal. No separate `cleanup()` method needed.
+2. **`AnnotationStore.ts`** — not a `HTMLElement`; takes an `AbortSignal` in its constructor and threads it to its internal `EventTarget` listeners. Lifetime is bounded by the owning `ReviewPane`.
+3. **AST test runtime cost** — single Node-runner test parses all 19 component files in well under the 30 s suite budget. Not split per-file.
+4. **`src/app/follow-tail.ts`** — migrated as the final piece of Phase 2 per the doc's revised plan. It now accepts an optional `AbortSignal` parameter; `AgentInterface` passes `this.signal`.
+5. **Worker / `MessagePort` listeners** — `{ signal }` confirmed supported on the evergreen-Chromium baseline used by `SandboxedIframe.ts` and `sandbox/Runtime*`; bound the same way as DOM listeners.
+
+### Deferred (out of scope for this PR)
+
+- **Phase 5 — `src/app/` audit.** Five hot files still bind listeners to long-lived globals without explicit lifecycle wiring: `session-manager.ts`, `render.ts`, `dialogs.ts`, `goal-dashboard.ts`, `remote-agent.ts`. Each site needs either a `// app-lifetime listener` annotation or an `AbortSignal` threaded from the caller. To be tackled in a follow-up PR; no new `src/app/**` lint rule yet.
+- **Per-component leak-regression cases for the long tail.** Intentionally omitted. The strict AST scan plus the four hot-file leak tests are the safety net; the harness is structured so additional component cases can be appended cheaply if a regression motivates it.
