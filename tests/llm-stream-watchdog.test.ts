@@ -31,6 +31,8 @@ interface FakeRpc {
 	abortCalls: number;
 	promptCalls: Array<{ text: string; images?: any }>;
 	process: { pid: number };
+	/** One-shot: when set, the next prompt() call rejects with this error. */
+	rejectNextPrompt?: Error;
 }
 
 function makeRpc(): FakeRpc {
@@ -41,6 +43,11 @@ function makeRpc(): FakeRpc {
 		async abort() { c.abortCalls++; return { success: true }; },
 		async prompt(text: string, images?: any) {
 			c.promptCalls.push({ text, images });
+			if (c.rejectNextPrompt) {
+				const err = c.rejectNextPrompt;
+				c.rejectNextPrompt = undefined;
+				throw err;
+			}
 			return { success: true };
 		},
 	};
@@ -352,6 +359,85 @@ describe("stream-watchdog: user-Stop race during silent retry", () => {
 			"user Stop must win — helper returns false so caller proceeds to broadcastStatus(idle)");
 		assert.equal(session.suppressNextDrainForStallRetry, false,
 			"flag cleared so a stale flag can't strand the next agent_end");
+
+		disposeStreamWatchdog(session);
+	});
+});
+
+describe("stream-watchdog: silent-retry dispatch failure", () => {
+	// Bug 1 (issue-analysis): the silent-retry branch issues
+	//   `setTimeout(0) → rpcClient.prompt(...).catch(()=>{})`
+	// and silently swallows dispatch failures. When `prompt()` rejects (the
+	// real-agent shape: "Agent is already processing" because the abort hasn't
+	// fully torn down yet), the watchdog presets `lastLlmFrameAt = Date.now()`
+	// and idles waiting for frames that will never arrive. The next stall
+	// fires only after another full `timeoutMs` cycle.
+	//
+	// Post-fix expectation: a rejected re-prompt surfaces the stall
+	// IMMEDIATELY (within one tick), not after another full `timeoutMs`.
+	it("stream-watchdog: silent retry surfaces immediately when re-prompt dispatch rejects", async () => {
+		const rpc = makeRpc();
+		// Configure the FIRST silent-retry re-prompt to reject with the
+		// production-shape error.
+		rpc.rejectNextPrompt = new Error("Agent is already processing.");
+		const session = makeSession("silent-retry-reject", rpc);
+		const syntheticEvents: any[] = [];
+		session.emitSyntheticEvent = (ev) => syntheticEvents.push(ev);
+
+		// Arm.
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		// Wait for the first stall + silent-retry re-prompt to fire (and reject).
+		// Bounded budget: timeoutMs (100) + 100ms = 200ms. Post-fix the watchdog
+		// must surface within this window. Pre-fix the watchdog would still be
+		// idling here (next stall only at ~timeoutMs * 2 = 200ms+ from the
+		// re-prompt's setTimeout(0) reset of lastLlmFrameAt).
+		const budgetMs = FAST_CFG.timeoutMs + 100;
+		const deadline = Date.now() + budgetMs;
+		while (Date.now() < deadline) {
+			if (session.lastTurnErrored === true) break;
+			await sleep(10);
+		}
+
+		// At least one re-prompt was attempted (the rejecting one).
+		assert.ok(
+			rpc.promptCalls.length >= 1,
+			`re-prompt was issued (got promptCalls=${rpc.promptCalls.length})`,
+		);
+
+		// CORE ASSERTION: the watchdog surfaced the stall to the user within
+		// the bounded budget — it did NOT swallow the rejection and idle
+		// waiting for another `timeoutMs` cycle.
+		assert.equal(
+			session.lastTurnErrored,
+			true,
+			"expected lastTurnErrored=true within timeoutMs+100ms after dispatch rejection " +
+			`(got ${session.lastTurnErrored}); the watchdog must surface immediately on rejected re-prompt`,
+		);
+		assert.match(
+			session.lastTurnErrorMessage ?? "",
+			/stream stalled/i,
+			"surfaced error message must mention 'stream stalled'",
+		);
+		assert.equal(
+			session.consecutiveErrorTurns,
+			1,
+			"surfaced stall bumps consecutiveErrorTurns by exactly 1",
+		);
+		assert.equal(
+			syntheticEvents.length,
+			1,
+			"exactly one synthetic message_end emitted on surfaced stall",
+		);
+		assert.equal(syntheticEvents[0].type, "message_end");
+		assert.equal(syntheticEvents[0].message.stopReason, "error");
+
+		// Two aborts: one for the silent retry, one for the surfacing path.
+		assert.equal(
+			rpc.abortCalls,
+			2,
+			"expected 2 aborts (one for the silent-retry attempt, one for the immediate surfacing after dispatch rejection)",
+		);
 
 		disposeStreamWatchdog(session);
 	});
