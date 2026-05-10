@@ -1,5 +1,7 @@
 # REST API
 
+> **Agents:** call these endpoints via the `gateway_api` tool, not `curl`. The tool resolves the local gateway URL and bearer token from the session environment, validates the `/api/` path prefix, and parses JSON responses for you. Parameter contract and examples live in [`defaults/tools/agent/gateway_api.yaml`](../defaults/tools/agent/gateway_api.yaml) under `detail_docs` — that's the single source of truth. See also [gateway-api-tool.md](gateway-api-tool.md) for the rationale. This page documents the underlying HTTP surface for humans, external scripts, and the tool's implementation.
+
 All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
 
 ### Error response shape
