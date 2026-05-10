@@ -29,6 +29,7 @@ import { staffRoutes } from "./staff.js";
 import { mcpRoutes } from "./mcp.js";
 import { maintenanceRoutes } from "./maintenance.js";
 import { costRoutes } from "./cost.js";
+import { projectsRoutes } from "./projects.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -49,6 +50,7 @@ const allRoutes: ReadonlyArray<Route> = [
 	...mcpRoutes,
 	...maintenanceRoutes,
 	...costRoutes,
+	...projectsRoutes,
 ];
 
 /**
