@@ -385,11 +385,7 @@ describe("computeToolActivationArgs", () => {
 		assert.ok(extensionPaths.some((p: string) => p.replace(/\\/g, "/").endsWith("/images/extension.ts")));
 		assert.ok(extensionPaths.some((p: string) => p.replace(/\\/g, "/").endsWith("/ask/extension.ts")));
 		assert.ok(!activation.args.some((arg: string) => arg.includes("mcp-extensions/nano-banana")));
-		// After the pi 0.70+ migration, file builtins are re-registered via
-		// _builtins/extension.ts driven by the BOBBIT_BUILTIN_TOOLS env var,
-		// rather than enumerated in --tools.
-		assert.ok(activation.args.includes("--no-builtin-tools"));
-		assert.ok(!activation.args.includes("--tools"));
-		assert.match(activation.env.BOBBIT_BUILTIN_TOOLS, /\bread\b/);
+		assert.ok(activation.args.includes("--tools"));
+		assert.match(activation.args[activation.args.indexOf("--tools") + 1], /\bread\b/);
 	});
 });
