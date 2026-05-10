@@ -19,12 +19,12 @@ export const workflowsRoutes: Route[] = [
 		pattern: "/api/workflows",
 		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			const targetProjectId = body?.projectId;
-			if (!targetProjectId) { json({ error: "projectId required" }, 400); return; }
+			if (!targetProjectId) { jsonError(400, new Error("projectId required")); return; }
 			try {
 				const ctx = deps.projectContextManager.getOrCreate(targetProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				const now = Date.now();
 				const workflow = {
 					id: body.id as string,
@@ -45,17 +45,17 @@ export const workflowsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/workflows\/([^/]+)\/customize$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = decodeURIComponent(params[1]);
 			const projectId = url.searchParams.get("projectId") || undefined;
-			if (!projectId) { json({ error: "projectId required" }, 400); return; }
+			if (!projectId) { jsonError(400, new Error("projectId required")); return; }
 
 			const resolved = deps.configCascade.resolveWorkflows(projectId);
 			const source = resolved.find(r => r.item.id === id);
-			if (!source) { json({ error: "Workflow not found" }, 404); return; }
+			if (!source) { jsonError(404, new Error("Workflow not found")); return; }
 
 			const ctx = deps.projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 
 			const now = Date.now();
 			const copy = { ...source.item, createdAt: now, updatedAt: now };
@@ -66,13 +66,13 @@ export const workflowsRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/workflows\/([^/]+)\/override$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = decodeURIComponent(params[1]);
 			const projectId = url.searchParams.get("projectId") || undefined;
-			if (!projectId) { json({ error: "projectId required" }, 400); return; }
+			if (!projectId) { jsonError(400, new Error("projectId required")); return; }
 
 			const ctx = deps.projectContextManager.getOrCreate(projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 
 			ctx.workflowStore.remove(id);
 			json({ ok: true });
@@ -81,29 +81,29 @@ export const workflowsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/workflows\/([^/]+)$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = decodeURIComponent(params[1]);
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (!qProjectId) { json({ error: "Workflow not found" }, 404); return; }
+			if (!qProjectId) { jsonError(404, new Error("Workflow not found")); return; }
 			const resolved = deps.configCascade.resolveWorkflows(qProjectId);
 			const found = resolved.find(r => r.item.id === id);
-			if (!found) { json({ error: "Workflow not found" }, 404); return; }
+			if (!found) { jsonError(404, new Error("Workflow not found")); return; }
 			json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
 		},
 	},
 	{
 		method: "PUT",
 		pattern: /^\/api\/workflows\/([^/]+)$/,
-		handler: async ({ deps, params, url, readBody, json }) => {
+		handler: async ({ deps, params, url, readBody, json, jsonError }) => {
 			const id = decodeURIComponent(params[1]);
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+			if (!qProjectId) { jsonError(400, new Error("projectId required")); return; }
 			const ctx = deps.projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			const existing = ctx.workflowStore.get(id);
-			if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
+			if (!existing) { jsonError(404, new Error("Workflow not found in project")); return; }
 			const updated = {
 				...existing,
 				name: body.name ?? existing.name,
@@ -119,12 +119,12 @@ export const workflowsRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/workflows\/([^/]+)$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = decodeURIComponent(params[1]);
 			const qProjectId = url.searchParams.get("projectId") || undefined;
-			if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
+			if (!qProjectId) { jsonError(400, new Error("projectId required")); return; }
 			const ctx = deps.projectContextManager.getOrCreate(qProjectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			ctx.workflowStore.remove(id);
 			json({ ok: true });
 		},

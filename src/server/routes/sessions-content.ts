@@ -12,57 +12,57 @@ export const sessionsContentRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/output$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			try {
 				const output = await deps.sessionManager.getSessionOutput(id);
 				json({ output });
 			} catch {
-				json({ error: "Failed to get output" }, 500);
+				jsonError(500, new Error("Failed to get output"));
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/mark-read$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const ok = deps.sessionManager.markSessionRead(id);
-			if (!ok) { json({ error: "session not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("session not found")); return; }
 			json({ ok: true });
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/generate-title$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			try {
 				const title = await deps.sessionManager.generateTitleForAnySession(id);
 				if (!title) {
-					json({ error: "Could not generate title (session not found or no messages)" }, 404);
+					jsonError(404, new Error("Could not generate title (session not found or no messages)"));
 					return;
 				}
 				json({ title });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},
 	{
 		method: "PUT",
 		pattern: /^\/api\/sessions\/([^/]+)\/title$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const body = await readBody();
 			const title = body?.title;
 			if (!title || typeof title !== "string") {
-				json({ error: "Missing title" }, 400);
+				jsonError(400, new Error("Missing title"));
 				return;
 			}
 			const ok = deps.sessionManager.setTitle(id, title);
 			if (!ok) {
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			json({ ok: true });
@@ -76,21 +76,21 @@ export const sessionsContentRoutes: Route[] = [
 			const messageIndex = parseInt(params[2], 10);
 			const blockIndex = parseInt(params[3], 10);
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			try {
 				const msgsResp = await session.rpcClient.getMessages();
 				const messages = msgsResp?.data?.messages || msgsResp?.data;
-				if (!Array.isArray(messages)) { json({ error: "Could not retrieve messages" }, 500); return; }
+				if (!Array.isArray(messages)) { jsonError(500, new Error("Could not retrieve messages")); return; }
 				const msg = messages[messageIndex];
-				if (!msg) { json({ error: "Message not found" }, 404); return; }
+				if (!msg) { jsonError(404, new Error("Message not found")); return; }
 				const content = Array.isArray(msg.content) ? msg.content : [];
 				const block = content[blockIndex];
-				if (!block) { json({ error: "Block not found" }, 404); return; }
+				if (!block) { jsonError(404, new Error("Block not found")); return; }
 				let toolContent = block.arguments?.content ?? block.input?.content;
 				if (toolContent === undefined && block.type === "text" && typeof block.text === "string") {
 					toolContent = block.text;
 				}
-				if (toolContent === undefined) { json({ error: "No content in block" }, 404); return; }
+				if (toolContent === undefined) { jsonError(404, new Error("No content in block")); return; }
 				json({ content: toolContent });
 			} catch (err) {
 				jsonError(500, err);
@@ -103,15 +103,15 @@ export const sessionsContentRoutes: Route[] = [
 		handler: async ({ deps, params, req, url, json, jsonError }) => {
 			const targetId = params[1];
 			const targetPs = deps.sessionManager.getPersistedSession(targetId);
-			if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-			if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+			if (!targetPs) { jsonError(404, new Error("session_not_found")); return; }
+			if (!targetPs.agentSessionFile) { jsonError(404, new Error("transcript_unavailable")); return; }
 
 			const callerSid = req.headers["x-bobbit-session-id"];
 			const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
 			if (callerSidStr) {
 				const callerPs = deps.sessionManager.getPersistedSession(callerSidStr);
 				if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
-					json({ error: "permission_denied" }, 403); return;
+					jsonError(403, new Error("permission_denied")); return;
 				}
 			}
 
@@ -142,7 +142,7 @@ export const sessionsContentRoutes: Route[] = [
 			} catch (err) {
 				if (err instanceof TranscriptReaderError) {
 					const status = err.code === "transcript_unavailable" ? 404 : 400;
-					json({ error: err.code, detail: err.message }, status);
+					jsonError(status, new Error(err.code), { detail: err.message });
 				} else {
 					jsonError(500, err, { error: "internal_error", detail: String(err) });
 				}
@@ -152,10 +152,10 @@ export const sessionsContentRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/abort$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			if (session.status !== "streaming") { json({ ok: true, status: session.status }); return; }
 			await deps.sessionManager.forceAbort(id);
 			json({ ok: true, status: "idle" });
@@ -164,7 +164,7 @@ export const sessionsContentRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/prompt-sections$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const persisted = loadPersistedPromptSections(id);
 			if (persisted) {
@@ -172,7 +172,7 @@ export const sessionsContentRoutes: Route[] = [
 				return;
 			}
 			const parts = deps.sessionManager.getPromptParts(id);
-			if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
+			if (!parts) { jsonError(404, new Error("Session not found or no prompt data")); return; }
 			if (!parts.toolDocs && deps.toolManager) {
 				parts.toolDocs = deps.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 			}
@@ -184,15 +184,15 @@ export const sessionsContentRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/draft$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = params[1];
 			const type = url.searchParams.get("type");
-			if (!type) { json({ error: "Missing type query param" }, 400); return; }
+			if (!type) { jsonError(400, new Error("Missing type query param")); return; }
 			const data = deps.sessionManager.getDraft(id, type);
 			if (data === undefined) {
 				const session = deps.sessionManager.getSession(id);
-				if (!session) { json({ error: "Session not found" }, 404); return; }
-				json({ error: "Draft not found" }, 404);
+				if (!session) { jsonError(404, new Error("Session not found")); return; }
+				jsonError(404, new Error("Draft not found"));
 				return;
 			}
 			json({ type, data });
@@ -201,43 +201,43 @@ export const sessionsContentRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: /^\/api\/sessions\/([^/]+)\/draft$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const body = await readBody();
 			if (!body || typeof body.type !== "string") {
-				json({ error: "Missing type" }, 400);
+				jsonError(400, new Error("Missing type"));
 				return;
 			}
 			const ok = deps.sessionManager.setDraft(id, body.type, body.data);
-			if (!ok) { json({ error: "Session not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("Session not found")); return; }
 			json({ ok: true });
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/draft$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			// Same handler as PUT — sendBeacon uses POST.
 			const id = params[1];
 			const body = await readBody();
 			if (!body || typeof body.type !== "string") {
-				json({ error: "Missing type" }, 400);
+				jsonError(400, new Error("Missing type"));
 				return;
 			}
 			const ok = deps.sessionManager.setDraft(id, body.type, body.data);
-			if (!ok) { json({ error: "Session not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("Session not found")); return; }
 			json({ ok: true });
 		},
 	},
 	{
 		method: "DELETE",
 		pattern: /^\/api\/sessions\/([^/]+)\/draft$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = params[1];
 			const type = url.searchParams.get("type");
-			if (!type) { json({ error: "Missing type query param" }, 400); return; }
+			if (!type) { jsonError(400, new Error("Missing type query param")); return; }
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			deps.sessionManager.deleteDraft(id, type);
 			json({ ok: true });
 		},

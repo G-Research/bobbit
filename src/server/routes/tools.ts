@@ -64,14 +64,14 @@ export const toolsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/tools\/([^/]+)\/customize$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const scope = url.searchParams.get("scope") || "server";
 			const projectId = url.searchParams.get("projectId") || undefined;
 
 			const resolved = deps.configCascade.resolveTools(projectId);
 			const source = resolved.find(r => r.item.name === name);
-			if (!source) { json({ error: "Tool not found" }, 404); return; }
+			if (!source) { jsonError(404, new Error("Tool not found")); return; }
 
 			const builtinDir = builtinToolsDir();
 			const serverToolsDir = path.join(bobbitConfigDir(), "tools");
@@ -90,12 +90,12 @@ export const toolsRoutes: Route[] = [
 				groupDir = findToolGroupDir(name, serverToolsDir);
 			}
 			if (!groupDir) groupDir = findToolGroupDir(name, builtinDir) || findToolGroupDir(name, serverToolsDir);
-			if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
+			if (!groupDir) { jsonError(400, new Error("Could not determine tool group directory")); return; }
 
 			let targetToolsDir: string;
 			if (scope === "project" && projectId) {
 				const ctx = deps.projectContextManager.getOrCreate(projectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				targetToolsDir = path.join(ctx.configDir, "tools");
 			} else {
 				targetToolsDir = serverToolsDir;
@@ -110,7 +110,7 @@ export const toolsRoutes: Route[] = [
 			const srcDir = path.join(actualSourceDir, groupDir);
 			const destDir = path.join(targetToolsDir, groupDir);
 
-			if (!fs.existsSync(srcDir)) { json({ error: "Source tool group not found" }, 404); return; }
+			if (!fs.existsSync(srcDir)) { jsonError(404, new Error("Source tool group not found")); return; }
 
 			copyDirRecursive(srcDir, destDir);
 
@@ -120,7 +120,7 @@ export const toolsRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/tools\/([^/]+)\/override$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const scope = url.searchParams.get("scope") || "server";
 			const projectId = url.searchParams.get("projectId") || undefined;
@@ -128,7 +128,7 @@ export const toolsRoutes: Route[] = [
 			let targetToolsDir: string;
 			if (scope === "project" && projectId) {
 				const ctx = deps.projectContextManager.getOrCreate(projectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				targetToolsDir = path.join(ctx.configDir, "tools");
 			} else {
 				targetToolsDir = path.join(bobbitConfigDir(), "tools");
@@ -136,7 +136,7 @@ export const toolsRoutes: Route[] = [
 
 			let groupDir = findToolGroupDir(name, targetToolsDir);
 			if (!groupDir) groupDir = findToolGroupDir(name, builtinToolsDir());
-			if (!groupDir) { json({ error: "Could not determine tool group directory" }, 400); return; }
+			if (!groupDir) { jsonError(400, new Error("Could not determine tool group directory")); return; }
 
 			const dirToRemove = path.join(targetToolsDir, groupDir);
 			if (fs.existsSync(dirToRemove)) {
@@ -149,20 +149,20 @@ export const toolsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/tools\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const tool = deps.toolManager.getToolByName(name);
-			if (!tool) { json({ error: "Tool not found" }, 404); return; }
+			if (!tool) { jsonError(404, new Error("Tool not found")); return; }
 			json(tool);
 		},
 	},
 	{
 		method: "PUT",
 		pattern: /^\/api\/tools\/([^/]+)$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			const ok = deps.toolManager.updateToolMetadata(name, {
 				description: body.description,
 				group: body.group,
@@ -170,7 +170,7 @@ export const toolsRoutes: Route[] = [
 				detail_docs: body.detail_docs,
 				grantPolicy: body.grantPolicy,
 			});
-			if (!ok) { json({ error: "Tool not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("Tool not found")); return; }
 			json({ ok: true });
 		},
 	},
@@ -185,12 +185,12 @@ export const toolsRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: /^\/api\/tool-group-policies\/(.+)$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const group = decodeURIComponent(params[1]);
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			if (body.policy && !VALID_POLICIES.includes(body.policy)) {
-				json({ error: `Invalid policy. Must be one of: allow, ask, never` }, 400);
+				jsonError(400, new Error(`Invalid policy. Must be one of: allow, ask, never`));
 				return;
 			}
 			deps.groupPolicyStore.setGroupPolicy(group, body.policy || null);

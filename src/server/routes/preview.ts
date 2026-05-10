@@ -18,11 +18,11 @@ export const previewRoutes: Route[] = [
 		handler: async ({ url, sandboxScope, readBody, json, jsonError }) => {
 			const sessionId = url.searchParams.get("sessionId") || "";
 			if (!VALID_SESSION_ID.test(sessionId)) {
-				json({ error: "Invalid sessionId" }, 400);
+				jsonError(400, new Error("Invalid sessionId"));
 				return;
 			}
 			if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
-				json({ error: "Forbidden: session out of scope" }, 403);
+				jsonError(403, new Error("Forbidden: session out of scope"));
 				return;
 			}
 			const body = await readBody().catch(() => ({}));
@@ -31,11 +31,11 @@ export const previewRoutes: Route[] = [
 			const hasAssets = Array.isArray(body?.assets);
 			const hasManifest = typeof body?.manifest === "string" && body.manifest.length > 0;
 			if (!hasHtml && !hasFile) {
-				json({ error: "Body must contain one of 'html' or 'file'" }, 400);
+				jsonError(400, new Error("Body must contain one of 'html' or 'file'"));
 				return;
 			}
 			if (hasHtml && (hasAssets || hasManifest)) {
-				json({ error: "`assets`/`manifest` only valid with `file`" }, 400);
+				jsonError(400, new Error("`assets`/`manifest` only valid with `file`"));
 				return;
 			}
 			try {
@@ -45,7 +45,7 @@ export const previewRoutes: Route[] = [
 					if (typeof body.entry === "string" && body.entry.length > 0) {
 						const e = body.entry;
 						if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
-							json({ error: "Invalid entry name" }, 400);
+							jsonError(400, new Error("Invalid entry name"));
 							return;
 						}
 						entry = e;
@@ -54,32 +54,32 @@ export const previewRoutes: Route[] = [
 				} else {
 					const filePath = body.file as string;
 					if (!path.isAbsolute(filePath)) {
-						json({ error: "file path must be absolute" }, 400);
+						jsonError(400, new Error("file path must be absolute"));
 						return;
 					}
 					if (!fs.existsSync(filePath)) {
-						json({ error: "file not found" }, 404);
+						jsonError(404, new Error("file not found"));
 						return;
 					}
 					let stat: fs.Stats;
 					try { stat = fs.statSync(filePath); } catch {
-						json({ error: "file not found" }, 404);
+						jsonError(404, new Error("file not found"));
 						return;
 					}
 					if (!stat.isFile()) {
-						json({ error: "path is not a regular file" }, 404);
+						jsonError(404, new Error("path is not a regular file"));
 						return;
 					}
 					const base = path.basename(filePath).toLowerCase();
 					if (!base.endsWith(".html") && !base.endsWith(".htm")) {
-						json({ error: "file must end in .html or .htm" }, 400);
+						jsonError(400, new Error("file must end in .html or .htm"));
 						return;
 					}
 					const declared: string[] = [];
 					if (hasAssets) {
 						for (const a of body.assets as unknown[]) {
 							if (typeof a !== "string") {
-								json({ error: "`assets[]` entries must be strings" }, 400);
+								jsonError(400, new Error("`assets[]` entries must be strings"));
 								return;
 							}
 							declared.push(a);
@@ -89,12 +89,12 @@ export const previewRoutes: Route[] = [
 						const manifestRel = body.manifest as string;
 						if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
 							manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
-							json({ error: "Invalid manifest path" }, 400);
+							jsonError(400, new Error("Invalid manifest path"));
 							return;
 						}
 						const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
 						if (!fs.existsSync(manifestAbs)) {
-							json({ error: `Manifest '${manifestRel}' not found` }, 404);
+							jsonError(404, new Error(`Manifest '${manifestRel}' not found`));
 							return;
 						}
 						let manifestParsed: any;
@@ -105,12 +105,12 @@ export const previewRoutes: Route[] = [
 							return;
 						}
 						if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
-							json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
+							jsonError(400, new Error("Manifest must be an object with an `assets[]` array"));
 							return;
 						}
 						for (const a of manifestParsed.assets) {
 							if (typeof a !== "string") {
-								json({ error: "Manifest `assets[]` entries must be strings" }, 400);
+								jsonError(400, new Error("Manifest `assets[]` entries must be strings"));
 								return;
 							}
 							declared.push(a);
@@ -148,11 +148,11 @@ export const previewRoutes: Route[] = [
 		handler: async ({ url, sandboxScope, json, jsonError }) => {
 			const sessionId = url.searchParams.get("sessionId") || "";
 			if (!VALID_SESSION_ID.test(sessionId)) {
-				json({ error: "Invalid sessionId" }, 400);
+				jsonError(400, new Error("Invalid sessionId"));
 				return;
 			}
 			if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
-				json({ error: "Forbidden: session out of scope" }, 403);
+				jsonError(403, new Error("Forbidden: session out of scope"));
 				return;
 			}
 			try {
@@ -160,13 +160,13 @@ export const previewRoutes: Route[] = [
 				const dir = previewMount.mountDir(sessionId);
 				const entry = pickEntry(dir);
 				if (!entry) {
-					json({ error: "no preview mount" }, 404);
+					jsonError(404, new Error("no preview mount"));
 					return;
 				}
 				const entryPath = path.join(dir, entry);
 				let stat: fs.Stats;
 				try { stat = fs.statSync(entryPath); } catch {
-					json({ error: "no preview mount" }, 404);
+					jsonError(404, new Error("no preview mount"));
 					return;
 				}
 				json({
@@ -187,14 +187,14 @@ export const previewRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/preview-events$/,
-		handler: async ({ params, req, res, sandboxScope, json }) => {
+		handler: async ({ params, req, res, sandboxScope, jsonError }) => {
 			const sid = params[1];
 			if (!VALID_SESSION_ID.test(sid)) {
-				json({ error: "Invalid sessionId" }, 400);
+				jsonError(400, new Error("Invalid sessionId"));
 				return;
 			}
 			if (sandboxScope) {
-				json({ error: "Forbidden" }, 403);
+				jsonError(403, new Error("Forbidden"));
 				return;
 			}
 			res.writeHead(200, {

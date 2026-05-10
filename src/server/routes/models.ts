@@ -47,7 +47,7 @@ export const modelsRoutes: Route[] = [
 		handler: async ({ readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body || !body.type || !body.baseUrl) {
-				json({ error: "Missing required fields: type, baseUrl" }, 400);
+				jsonError(400, new Error("Missing required fields: type, baseUrl"));
 				return;
 			}
 			const config: CustomProviderConfig = {
@@ -68,10 +68,10 @@ export const modelsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/custom-providers",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body || !body.id || !body.type || !body.baseUrl) {
-				json({ error: "Missing required fields: id, type, baseUrl" }, 400);
+				jsonError(400, new Error("Missing required fields: id, type, baseUrl"));
 				return;
 			}
 			const configs = (deps.preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
@@ -96,10 +96,10 @@ export const modelsRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/custom-providers\/(.+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const providerId = decodeURIComponent(params[1]);
 			if (!providerId) {
-				json({ error: "Missing provider id" }, 400);
+				jsonError(400, new Error("Missing provider id"));
 				return;
 			}
 			const configs = (deps.preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
@@ -122,15 +122,15 @@ export const modelsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/provider-keys\/(.+)$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const provider = decodeURIComponent(params[1]);
 			if (!provider) {
-				json({ error: "Missing provider name" }, 400);
+				jsonError(400, new Error("Missing provider name"));
 				return;
 			}
 			const body = await readBody();
 			if (!body?.key || typeof body.key !== "string") {
-				json({ error: "Missing 'key' field" }, 400);
+				jsonError(400, new Error("Missing 'key' field"));
 				return;
 			}
 			deps.preferencesStore.set(`providerKey.${provider}`, body.key);
@@ -140,10 +140,10 @@ export const modelsRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/provider-keys\/(.+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const provider = decodeURIComponent(params[1]);
 			if (!provider) {
-				json({ error: "Missing provider name" }, 400);
+				jsonError(400, new Error("Missing provider name"));
 				return;
 			}
 			deps.preferencesStore.remove(`providerKey.${provider}`);
@@ -173,7 +173,7 @@ export const modelsRoutes: Route[] = [
 		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.url || typeof body.url !== "string") {
-				json({ error: "Missing 'url' field" }, 400);
+				jsonError(400, new Error("Missing 'url' field"));
 				return;
 			}
 			try {
@@ -202,7 +202,7 @@ export const modelsRoutes: Route[] = [
 		handler: async ({ readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.url || typeof body.url !== "string") {
-				json({ error: "Missing 'url' field" }, 400);
+				jsonError(400, new Error("Missing 'url' field"));
 				return;
 			}
 			try {
@@ -219,7 +219,7 @@ export const modelsRoutes: Route[] = [
 		handler: async ({ deps, json, jsonError }) => {
 			const aigwUrl = getAigwUrl(deps.preferencesStore);
 			if (!aigwUrl) {
-				json({ error: "No AI Gateway configured" }, 400);
+				jsonError(400, new Error("No AI Gateway configured"));
 				return;
 			}
 			try {
@@ -239,12 +239,12 @@ export const modelsRoutes: Route[] = [
 			const body = await readBody();
 			const pref = typeof body?.pref === "string" ? body.pref.trim() : "";
 			if (!pref) {
-				json({ ok: false, error: "Missing 'pref' field" }, 400);
+				jsonError(400, new Error("Missing 'pref' field"), { ok: false });
 				return;
 			}
 			const slash = pref.indexOf("/");
 			if (slash <= 0) {
-				json({ ok: false, error: "Malformed pref — expected 'provider/modelId'" }, 400);
+				jsonError(400, new Error("Malformed pref — expected 'provider/modelId'"), { ok: false });
 				return;
 			}
 			const provider = pref.slice(0, slash);
@@ -253,18 +253,11 @@ export const modelsRoutes: Route[] = [
 				const models = await getAvailableModels(deps.preferencesStore);
 				const resolved = models.find((m) => m.provider === provider && m.id === modelId);
 				if (!resolved) {
-					json({
-						ok: false,
-						error: `Model "${pref}" is not in the current available-models list. It may be a stale preference.`,
-					}, 404);
+					jsonError(404, new Error(`Model "${pref}" is not in the current available-models list. It may be a stale preference.`), { ok: false });
 					return;
 				}
 				if (provider !== "aigw") {
-					json({
-						ok: false,
-						modelResolved: resolved.id,
-						error: "Test not supported for this provider yet — only AI Gateway models can be tested from here.",
-					}, 422);
+					jsonError(422, new Error("Test not supported for this provider yet — only AI Gateway models can be tested from here."), { ok: false, modelResolved: resolved.id });
 					return;
 				}
 				const aigwUrl = getAigwUrl(deps.preferencesStore);

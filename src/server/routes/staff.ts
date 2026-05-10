@@ -24,17 +24,17 @@ export const staffRoutes: Route[] = [
 		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.name || typeof body.name !== "string") {
-				json({ error: "Missing name" }, 400);
+				jsonError(400, new Error("Missing name"));
 				return;
 			}
 			if (!body?.systemPrompt || typeof body.systemPrompt !== "string") {
-				json({ error: "Missing systemPrompt" }, 400);
+				jsonError(400, new Error("Missing systemPrompt"));
 				return;
 			}
 			const cwd = body.cwd || deps.config.defaultCwd;
 			const resolved = resolveProjectForRequest(deps.projectRegistry, deps.projectContextManager, { projectId: body.projectId, cwd });
 			if (!resolved.ok) {
-				json({ error: resolved.error }, resolved.status);
+				jsonError(resolved.status, new Error(resolved.error));
 				return;
 			}
 			const projectId = resolved.projectId;
@@ -60,7 +60,7 @@ export const staffRoutes: Route[] = [
 		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const staff = deps.staffManager.getStaff(id);
-			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+			if (!staff) { jsonError(404, new Error("Staff agent not found")); return; }
 			const body = await readBody();
 			try {
 				const sessionId = await deps.staffManager.wake(id, body?.prompt, deps.sessionManager);
@@ -73,17 +73,17 @@ export const staffRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/staff\/([^/]+)\/sessions$/,
-		handler: ({ json }) => {
-			json({ error: "Deprecated. Staff agents have a single permanent session. Use GET /api/staff/:id." }, 410);
+		handler: ({ jsonError }) => {
+			jsonError(410, new Error("Deprecated. Staff agents have a single permanent session. Use GET /api/staff/:id."));
 		},
 	},
 	{
 		method: "GET",
 		pattern: /^\/api\/staff\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const staff = deps.staffManager.getStaff(id);
-			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+			if (!staff) { jsonError(404, new Error("Staff agent not found")); return; }
 			const sandboxed = staff.projectId ? (deps.projectContextManager.getOrCreate(staff.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
 			json({ ...staff, sandboxed });
 		},
@@ -91,10 +91,10 @@ export const staffRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: /^\/api\/staff\/([^/]+)$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			const ok = deps.staffManager.updateStaff(id, {
 				name: body.name,
 				description: body.description,
@@ -105,17 +105,17 @@ export const staffRoutes: Route[] = [
 				memory: body.memory,
 				roleId: body.roleId,
 			});
-			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("Staff agent not found")); return; }
 			json(deps.staffManager.getStaff(id));
 		},
 	},
 	{
 		method: "DELETE",
 		pattern: /^\/api\/staff\/([^/]+)$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const ok = await deps.staffManager.deleteStaff(id, deps.sessionManager);
-			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("Staff agent not found")); return; }
 			json({ ok: true });
 		},
 	},

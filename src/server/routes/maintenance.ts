@@ -120,15 +120,15 @@ export const maintenanceRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/search/rebuild",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
 			if (!projectId || typeof projectId !== "string") {
-				json({ error: "Missing projectId" }, 400);
+				jsonError(400, new Error("Missing projectId"));
 				return;
 			}
 			const ctx = resolveSearchProject(deps, projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			await ctx.searchIndex.whenReady();
 			const state = ctx.searchIndex.getState();
 			if (state !== "ready") {
@@ -144,11 +144,11 @@ export const maintenanceRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: "/api/search/stats",
-		handler: async ({ deps, url, json }) => {
+		handler: async ({ deps, url, json, jsonError }) => {
 			const projectId = url.searchParams.get("projectId") || undefined;
-			if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
+			if (!projectId) { jsonError(400, new Error("Missing projectId")); return; }
 			const ctx = resolveSearchProject(deps, projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			await ctx.searchIndex.whenReady();
 			const stats = await ctx.searchIndex.getStats();
 			json(stats);
@@ -157,15 +157,15 @@ export const maintenanceRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/search/compact",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
 			if (!projectId || typeof projectId !== "string") {
-				json({ error: "Missing projectId" }, 400);
+				jsonError(400, new Error("Missing projectId"));
 				return;
 			}
 			const ctx = resolveSearchProject(deps, projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			await ctx.searchIndex.whenReady();
 			const state = ctx.searchIndex.getState();
 			if (state !== "ready") {
@@ -176,18 +176,18 @@ export const maintenanceRoutes: Route[] = [
 				await ctx.searchIndex.compact();
 				json({ ok: true });
 			} catch (err) {
-				json({ error: `Compact failed: ${(err as Error).message}` }, 500);
+				jsonError(500, new Error(`Compact failed: ${(err as Error).message}`));
 			}
 		},
 	},
 	{
 		method: "GET",
 		pattern: "/api/maintenance/orphaned-index-rows",
-		handler: async ({ deps, url, json }) => {
+		handler: async ({ deps, url, json, jsonError }) => {
 			const projectId = url.searchParams.get("projectId") || undefined;
-			if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
+			if (!projectId) { jsonError(400, new Error("Missing projectId")); return; }
 			const ctx = resolveSearchProject(deps, projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			await ctx.searchIndex.whenReady();
 			const store = ctx.searchIndex.getStore();
 			if (!store) {
@@ -224,22 +224,22 @@ export const maintenanceRoutes: Route[] = [
 				}
 				json({ count: orphans.length, sample: orphans.slice(0, 100) });
 			} catch (err) {
-				json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
+				jsonError(500, new Error(`Orphan scan failed: ${(err as Error).message}`));
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: "/api/maintenance/cleanup-index-rows",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			const projectId = body && typeof body === "object" ? (body as any).projectId : undefined;
 			if (!projectId || typeof projectId !== "string") {
-				json({ error: "Missing projectId" }, 400);
+				jsonError(400, new Error("Missing projectId"));
 				return;
 			}
 			const ctx = resolveSearchProject(deps, projectId);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			await ctx.searchIndex.whenReady();
 			const store = ctx.searchIndex.getStore();
 			if (!store) {
@@ -268,7 +268,7 @@ export const maintenanceRoutes: Route[] = [
 				if (toDelete.length) await store.deleteByIds(toDelete);
 				json({ deleted: toDelete.length });
 			} catch (err) {
-				json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
+				jsonError(500, new Error(`Cleanup failed: ${(err as Error).message}`));
 			}
 		},
 	},

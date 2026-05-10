@@ -22,10 +22,10 @@ export const preferencesConfigRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: "/api/config/cwd",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.cwd || typeof body.cwd !== "string") {
-				json({ error: "Missing or invalid cwd" }, 400);
+				jsonError(400, new Error("Missing or invalid cwd"));
 				return;
 			}
 			deps.config.defaultCwd = body.cwd;
@@ -43,9 +43,9 @@ export const preferencesConfigRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: "/api/preferences",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
-			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			if (!body || typeof body !== "object") { jsonError(400, new Error("Missing body")); return; }
 			for (const [key, value] of Object.entries(body)) {
 				if (value === null || value === undefined) {
 					deps.preferencesStore.remove(key);
@@ -86,10 +86,10 @@ export const preferencesConfigRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: "/api/config-directories",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body || typeof body !== "object" || typeof (body as any).path !== "string") {
-				json({ error: "Missing 'path' in body" }, 400);
+				jsonError(400, new Error("Missing 'path' in body"));
 				return;
 			}
 			const projectId = (body as any).projectId as string | null ?? null;
@@ -112,17 +112,17 @@ export const preferencesConfigRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: "/api/project-config",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const { projectConfigStore } = deps;
 			const body = await readBody();
-			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			if (!body || typeof body !== "object") { jsonError(400, new Error("Missing body")); return; }
 			const bodyMap = body as Record<string, unknown>;
 
 			// Reject legacy top-level qa_* keys — they have moved into
 			// `components[<name>].config`.
 			for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
 				if (key in bodyMap) {
-					json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
+					jsonError(400, new Error(`${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead`));
 					return;
 				}
 			}
@@ -138,17 +138,17 @@ export const preferencesConfigRoutes: Route[] = [
 				const v = bodyMap[key];
 				if (v === null || v === "") { migratedExtracted[key] = null; delete bodyMap[key]; continue; }
 				if (typeof v === "string") {
-					json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
+					jsonError(400, new Error(`Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string`));
 					return;
 				}
-				if (expect === "array" && !Array.isArray(v)) { json({ error: `Field "${key}" must be an array` }, 400); return; }
+				if (expect === "array" && !Array.isArray(v)) { jsonError(400, new Error(`Field "${key}" must be an array`)); return; }
 				migratedExtracted[key] = v;
 				delete bodyMap[key];
 			}
 
 			for (const [key, value] of Object.entries(bodyMap)) {
 				if (key.includes(".")) {
-					json({ error: `Config key "${key}" must not contain dots` }, 400);
+					jsonError(400, new Error(`Config key "${key}" must not contain dots`));
 					return;
 				}
 				if (value === null || value === "") {

@@ -30,12 +30,12 @@ export const projectsRoutes: Route[] = [
 			const { projectRegistry, projectContextManager, sessionManager } = deps;
 			const body = await readBody();
 			if (typeof body?.name !== "string" || typeof body?.rootPath !== "string") {
-				json({ error: "Missing name or rootPath" }, 400);
+				jsonError(400, new Error("Missing name or rootPath"));
 				return;
 			}
 			{
 				const err = validateComponentsConfig((body as Record<string, unknown>).components);
-				if (err) { json({ error: err }, 400); return; }
+				if (err) { jsonError(400, new Error(err)); return; }
 			}
 			try {
 				const upsert = body.upsert === true;
@@ -74,12 +74,7 @@ export const projectsRoutes: Route[] = [
 					project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
 				} catch (regErr: any) {
 					if (regErr instanceof SymlinkProjectRootError) {
-						json({
-							error: "Project root is a symlink",
-							code: "symlink_root",
-							rootPath: regErr.rootPath,
-							canonical: regErr.canonical,
-						}, 400);
+						jsonError(400, new Error("Project root is a symlink"), { code: "symlink_root", rootPath: regErr.rootPath, canonical: regErr.canonical });
 						return;
 					}
 					throw regErr;
@@ -104,7 +99,7 @@ export const projectsRoutes: Route[] = [
 								);
 								if (errors.length > 0) {
 									projectRegistry.remove(project.id);
-									json({ error: "Workflow validation failed", details: errors }, 400);
+									jsonError(400, new Error("Workflow validation failed"), { details: errors });
 									return;
 								}
 							} catch { /* best-effort */ }
@@ -173,22 +168,22 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: /^\/api\/projects\/([^/]+)\/config$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const ctx = deps.projectContextManager.getOrCreate(params[1]);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			const body = await readBody();
-			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			if (!body || typeof body !== "object") { jsonError(400, new Error("Missing body")); return; }
 
 			for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
 				if (key in (body as Record<string, unknown>)) {
-					json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
+					jsonError(400, new Error(`${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead`));
 					return;
 				}
 			}
 
 			{
 				const err = validateComponentsConfig((body as Record<string, unknown>).components);
-				if (err) { json({ error: err }, 400); return; }
+				if (err) { jsonError(400, new Error(err)); return; }
 			}
 
 			let components = (body as Record<string, unknown>).components;
@@ -244,7 +239,7 @@ export const projectsRoutes: Route[] = [
 
 			for (const [key] of Object.entries(body)) {
 				if (key.includes(".")) {
-					json({ error: `Config key "${key}" must not contain dots` }, 400);
+					jsonError(400, new Error(`Config key "${key}" must not contain dots`));
 					return;
 				}
 			}
@@ -257,7 +252,7 @@ export const projectsRoutes: Route[] = [
 						components as Parameters<typeof validateAllWorkflows>[1],
 					);
 					if (errors.length > 0) {
-						json({ error: "Workflow validation failed", details: errors }, 400);
+						jsonError(400, new Error("Workflow validation failed"), { details: errors });
 						return;
 					}
 				} catch (err) {
@@ -279,11 +274,11 @@ export const projectsRoutes: Route[] = [
 					continue;
 				}
 				if (typeof v === "string") {
-					json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
+					jsonError(400, new Error(`Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string`));
 					return;
 				}
 				if (expect === "array" && !Array.isArray(v)) {
-					json({ error: `Field "${key}" must be an array` }, 400);
+					jsonError(400, new Error(`Field "${key}" must be an array`));
 					return;
 				}
 				migratedExtracted[key] = v;
@@ -354,10 +349,10 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/projects/detect",
-		handler: async ({ readBody, json }) => {
+		handler: async ({ readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body || typeof body.path !== "string") {
-				json({ error: "Missing path" }, 400);
+				jsonError(400, new Error("Missing path"));
 				return;
 			}
 			const dirPath = path.resolve(body.path);
@@ -391,7 +386,7 @@ export const projectsRoutes: Route[] = [
 							}
 						}
 					} else {
-						json({ error: "Path is not a directory" }, 400);
+						jsonError(400, new Error("Path is not a directory"));
 						return;
 					}
 				} catch {
@@ -409,9 +404,9 @@ export const projectsRoutes: Route[] = [
 		handler: async ({ url, readBody, json, jsonError }) => {
 			const body = await readBody().catch(() => ({}));
 			const rawPath = url.searchParams.get("path") ?? (body && typeof body.path === "string" ? body.path : "");
-			if (!rawPath) { json({ error: "Missing path" }, 400); return; }
+			if (!rawPath) { jsonError(400, new Error("Missing path")); return; }
 			const dirPath = path.resolve(rawPath);
-			if (!fs.existsSync(dirPath)) { json({ error: "Path not found" }, 404); return; }
+			if (!fs.existsSync(dirPath)) { jsonError(404, new Error("Path not found")); return; }
 			try {
 				const { scanRepos } = await import("../agent/repo-scan.js");
 				const { scanMonorepo } = await import("../agent/monorepo-scan.js");
@@ -426,9 +421,9 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/projects\/([^/]+)\/structured$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const ctx = deps.projectContextManager.getOrCreate(params[1]);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			const components = ctx.projectConfigStore.getComponents();
 			const workflows = ctx.projectConfigStore.getWorkflows() ?? {};
 			const worktreeRoot = ctx.projectConfigStore.get("worktree_root") ?? "";
@@ -440,7 +435,7 @@ export const projectsRoutes: Route[] = [
 		pattern: /^\/api\/projects\/([^/]+)\/rescan-repos$/,
 		handler: async ({ deps, params, json, jsonError }) => {
 			const project = deps.projectRegistry.get(params[1]);
-			if (!project) { json({ error: "Project not found" }, 404); return; }
+			if (!project) { jsonError(404, new Error("Project not found")); return; }
 			try {
 				const { scanRepos } = await import("../agent/repo-scan.js");
 				const { scanMonorepo } = await import("../agent/monorepo-scan.js");
@@ -455,23 +450,23 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: "/api/browse-directory",
-		handler: ({ deps, url, json }) => {
+		handler: ({ deps, url, json, jsonError }) => {
 			const rawPath = url.searchParams.get("path");
 			const dirPath = rawPath ? path.resolve(rawPath) : deps.config.defaultCwd;
 
 			if (!fs.existsSync(dirPath)) {
-				json({ error: "Directory not found" }, 404);
+				jsonError(404, new Error("Directory not found"));
 				return;
 			}
 
 			try {
 				const stat = fs.statSync(dirPath);
 				if (!stat.isDirectory()) {
-					json({ error: "Path is not a directory" }, 400);
+					jsonError(400, new Error("Path is not a directory"));
 					return;
 				}
 			} catch {
-				json({ error: "Cannot access path" }, 400);
+				jsonError(400, new Error("Cannot access path"));
 				return;
 			}
 
@@ -491,7 +486,7 @@ export const projectsRoutes: Route[] = [
 					}
 				}
 			} catch {
-				json({ error: "Cannot read directory" }, 500);
+				jsonError(500, new Error("Cannot read directory"));
 				return;
 			}
 
@@ -513,9 +508,9 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/projects\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const project = deps.projectRegistry.get(params[1]);
-			if (!project) { json({ error: "Project not found" }, 404); return; }
+			if (!project) { jsonError(404, new Error("Project not found")); return; }
 			json(project);
 		},
 	},
@@ -548,7 +543,7 @@ export const projectsRoutes: Route[] = [
 			const forceDelete = process.env.BOBBIT_E2E === "1" && url.searchParams.get("force") === "1";
 			const visibleCount = deps.projectRegistry.list().filter(p => !p.hidden).length;
 			if (project && !project.hidden && visibleCount === 1 && !forceDelete) {
-				json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
+				jsonError(400, new Error("Cannot delete the last remaining project — add another project first"));
 				return;
 			}
 			try {
@@ -589,18 +584,18 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/projects\/([^/]+)\/config\/defaults$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const ctx = deps.projectContextManager.getOrCreate(params[1]);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			json(ctx.projectConfigStore.getDefaults());
 		},
 	},
 	{
 		method: "GET",
 		pattern: /^\/api\/projects\/([^/]+)\/config\/resolved$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const ctx = deps.projectContextManager.getOrCreate(params[1]);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			const defaults = ctx.projectConfigStore.getDefaults();
 			const result: Record<string, { value: unknown; source: string }> = {};
 			for (const key of Object.keys(defaults)) {
@@ -637,9 +632,9 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/projects\/([^/]+)\/config$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const ctx = deps.projectContextManager.getOrCreate(params[1]);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			const flat = ctx.projectConfigStore.getAll();
 			const config: Record<string, unknown> = { ...flat };
 			config.config_directories = ctx.projectConfigStore.getConfigDirectories();
@@ -652,9 +647,9 @@ export const projectsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/projects\/([^/]+)\/qa-testing-config$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const ctx = deps.projectContextManager.getOrCreate(params[1]);
-			if (!ctx) { json({ error: "Project not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 			json({ configured: ctx.projectConfigStore.isQaConfiguredOnAnyComponent() });
 		},
 	},

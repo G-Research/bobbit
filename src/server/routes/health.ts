@@ -31,11 +31,11 @@ export const healthRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/internal\/test\/replay-buffered-events\/([^/]+)$/,
-		handler: async ({ deps, params, json }) => {
-			if (process.env.BOBBIT_E2E !== "1") { json({ error: "BOBBIT_E2E not enabled" }, 403); return; }
+		handler: async ({ deps, params, json, jsonError }) => {
+			if (process.env.BOBBIT_E2E !== "1") { jsonError(403, new Error("BOBBIT_E2E not enabled")); return; }
 			const sessionId = params[1];
 			const session = deps.sessionManager.getSession(sessionId);
-			if (!session) { json({ error: "session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("session not found")); return; }
 			const entries = session.eventBuffer.getAll() as any[];
 			let replayed = 0;
 			const deadline = Date.now() + PACE_TIMEOUT_MS;
@@ -91,7 +91,7 @@ export const healthRoutes: Route[] = [
 		pattern: "/api/system-prompt-context",
 		handler: async ({ readBody, json, jsonError }) => {
 			const body = await readBody();
-			if (!body || typeof body.context !== "string") { json({ error: "Missing context" }, 400); return; }
+			if (!body || typeof body.context !== "string") { jsonError(400, new Error("Missing context")); return; }
 			const systemPromptPath = path.join(bobbitConfigDir(), "system-prompt.md");
 			try {
 				let existing = "";
@@ -125,7 +125,7 @@ export const healthRoutes: Route[] = [
 			try {
 				if (!fs.existsSync(userPath)) {
 					if (!fs.existsSync(defaultPath)) {
-						json({ error: "Default system-prompt.md not found in install" }, 500);
+						jsonError(500, new Error("Default system-prompt.md not found in install"));
 						return;
 					}
 					fs.mkdirSync(path.dirname(userPath), { recursive: true });
@@ -150,10 +150,10 @@ export const healthRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: "/api/ca-cert",
-		handler: ({ deps, res, json }) => {
+		handler: ({ deps, res, jsonError }) => {
 			const caCertPath = deps.config.tls?.caCert;
 			if (!caCertPath || !fs.existsSync(caCertPath)) {
-				json({ error: "No CA certificate available. Server is using a self-signed certificate." }, 404);
+				jsonError(404, new Error("No CA certificate available. Server is using a self-signed certificate."));
 				return;
 			}
 			const certData = fs.readFileSync(caCertPath);

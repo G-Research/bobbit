@@ -9,19 +9,19 @@ export const costRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/cost\/breakdown$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const sessionId = params[1];
 			const live = deps.sessionManager.getSession(sessionId);
 			const sessionForCost = live ?? deps.sessionManager.getPersistedSession(sessionId);
 			if (!sessionForCost?.projectId) {
-				json({ error: "Session not found or has no project" }, 404);
+				jsonError(404, new Error("Session not found or has no project"));
 				return;
 			}
 			const costTracker = deps.sessionManager.getCostTracker(sessionForCost.projectId);
 			const allCosts = costTracker.getAllCosts();
 			const sessionCost = allCosts.get(sessionId);
 			if (!sessionCost) {
-				json({ error: "No cost data" }, 404);
+				jsonError(404, new Error("No cost data"));
 				return;
 			}
 
@@ -50,17 +50,17 @@ export const costRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/cost$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const liveSession = deps.sessionManager.getSession(id);
 			const sessionForCost = liveSession ?? deps.sessionManager.getPersistedSession(id);
 			if (!sessionForCost?.projectId) {
-				json({ error: "Session not found or has no project" }, 404);
+				jsonError(404, new Error("Session not found or has no project"));
 				return;
 			}
 			const cost = deps.sessionManager.getCostTracker(sessionForCost.projectId).getSessionCost(id);
 			if (!cost) {
-				json({ error: "No cost data for this session" }, 404);
+				jsonError(404, new Error("No cost data for this session"));
 				return;
 			}
 			json(cost);
@@ -69,11 +69,11 @@ export const costRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/cost\/breakdown$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const goalId = params[1];
 			const goal = getGoalAcrossProjects(deps, goalId);
 			if (!goal) {
-				json({ error: "Goal not found" }, 404);
+				jsonError(404, new Error("Goal not found"));
 				return;
 			}
 			if (!goal.projectId) {
@@ -114,11 +114,11 @@ export const costRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/cost$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const goalId = params[1];
 			const goal = getGoalAcrossProjects(deps, goalId);
 			if (!goal) {
-				json({ error: "Goal not found" }, 404);
+				jsonError(404, new Error("Goal not found"));
 				return;
 			}
 			if (!goal.projectId) {
@@ -133,11 +133,11 @@ export const costRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/tasks\/([^/]+)\/cost$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const taskId = params[1];
 			const task = getTaskManagerForTask(deps, taskId).getTask(taskId);
 			if (!task) {
-				json({ error: "Task not found" }, 404);
+				jsonError(404, new Error("Task not found"));
 				return;
 			}
 			if (!task.assignedSessionId) {

@@ -36,10 +36,10 @@ export const mcpRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/mcp-servers\/([^/]+)\/restart$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const mcpManager = deps.sessionManager.getMcpManager();
 			if (!mcpManager) {
-				json({ error: "MCP not initialized" }, 500);
+				jsonError(500, new Error("MCP not initialized"));
 				return;
 			}
 			const serverName = decodeURIComponent(params[1]);
@@ -48,7 +48,7 @@ export const mcpRoutes: Route[] = [
 			if (!existing || !existing.config) {
 				const discovered = mcpManager.discoverServers();
 				if (!discovered[serverName]) {
-					json({ error: `MCP server "${serverName}" not found` }, 404);
+					jsonError(404, new Error(`MCP server "${serverName}" not found`));
 					return;
 				}
 				await mcpManager.connectServer(serverName, discovered[serverName]);
@@ -77,10 +77,10 @@ export const mcpRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/internal/mcp-call",
-		handler: async ({ deps, req, json }) => {
+		handler: async ({ deps, req, json, jsonError }) => {
 			const mcpManager = deps.sessionManager.getMcpManager();
 			if (!mcpManager) {
-				json({ error: "MCP not initialized" }, 500);
+				jsonError(500, new Error("MCP not initialized"));
 				return;
 			}
 			let parsedToolForError: string | undefined;
@@ -93,13 +93,13 @@ export const mcpRoutes: Route[] = [
 				const { tool, args } = JSON.parse(body);
 				parsedToolForError = typeof tool === "string" ? tool : undefined;
 				if (!tool) {
-					json({ error: "Missing 'tool' field" }, 400);
+					jsonError(400, new Error("Missing 'tool' field"));
 					return;
 				}
 
 				const mcpSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
 				if (!mcpSessionId) {
-					json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
+					jsonError(403, new Error("Missing X-Bobbit-Session-Id header"));
 					return;
 				}
 				const mcpSession = deps.sessionManager.getSession(mcpSessionId);
@@ -108,13 +108,13 @@ export const mcpRoutes: Route[] = [
 					?? null
 				);
 				if (!mcpSession && !persistedSession) {
-					json({ error: `Session "${mcpSessionId}" not found` }, 403);
+					jsonError(403, new Error(`Session "${mcpSessionId}" not found`));
 					return;
 				}
 				const toolStr = tool as string;
 				if (!toolStr.startsWith("mcp__") && mcpSession?.allowedTools && mcpSession.allowedTools.length > 0) {
 					if (!mcpSession.allowedTools.some((t: string) => t.toLowerCase() === toolStr.toLowerCase())) {
-						json({ error: `Tool "${tool}" is not allowed for this session` }, 403);
+						jsonError(403, new Error(`Tool "${tool}" is not allowed for this session`));
 						return;
 					}
 				}
@@ -126,7 +126,7 @@ export const mcpRoutes: Route[] = [
 					const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
 					const policy = resolveGrantPolicy(toolStr, opGroup, role, deps.toolManager, deps.groupPolicyStore);
 					if (policy === "never") {
-						json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
+						jsonError(403, new Error(`tool ${toolStr} denied by policy`), { tool: toolStr, reason: "policy=never" });
 						return;
 					}
 				}
@@ -145,17 +145,17 @@ export const mcpRoutes: Route[] = [
 						parsedOperation = parsedErr.sub ? `${parsedErr.sub}__${parsedErr.op}` : parsedErr.op;
 					}
 				}
-				json({ error: e.message, server: parsedServer, operation: parsedOperation, stack: e.stack }, 500);
+				jsonError(500, new Error(e.message), { server: parsedServer, operation: parsedOperation, stack: e.stack });
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: "/api/internal/mcp-describe",
-		handler: async ({ deps, req, json }) => {
+		handler: async ({ deps, req, json, jsonError }) => {
 			const mcpManager = deps.sessionManager.getMcpManager();
 			if (!mcpManager) {
-				json({ error: "MCP not initialized" }, 500);
+				jsonError(500, new Error("MCP not initialized"));
 				return;
 			}
 			try {
@@ -168,13 +168,13 @@ export const mcpRoutes: Route[] = [
 				const server: string | undefined = parsed?.server;
 				const operation: string | undefined = parsed?.operation;
 				if (!server || typeof server !== "string") {
-					json({ error: "Missing 'server' field" }, 400);
+					jsonError(400, new Error("Missing 'server' field"));
 					return;
 				}
 
 				const describeSessionId = req.headers["x-bobbit-session-id"] as string | undefined;
 				if (!describeSessionId) {
-					json({ error: "Missing X-Bobbit-Session-Id header" }, 403);
+					jsonError(403, new Error("Missing X-Bobbit-Session-Id header"));
 					return;
 				}
 				const liveSession = deps.sessionManager.getSession(describeSessionId);
@@ -183,7 +183,7 @@ export const mcpRoutes: Route[] = [
 					?? null
 				);
 				if (!liveSession && !persistedSession) {
-					json({ error: `Session "${describeSessionId}" not found` }, 403);
+					jsonError(403, new Error(`Session "${describeSessionId}" not found`));
 					return;
 				}
 
@@ -191,7 +191,7 @@ export const mcpRoutes: Route[] = [
 				const status = statuses.find(s => s.name === server);
 				if (!status || status.status !== "connected") {
 					const reason = status?.error ?? (status ? status.status : "unknown server");
-					json({ error: `server ${server} not connected: ${reason}` }, 503);
+					jsonError(503, new Error(`server ${server} not connected: ${reason}`));
 					return;
 				}
 
@@ -199,7 +199,7 @@ export const mcpRoutes: Route[] = [
 				if (operation) {
 					const match = infos.find(i => i.mcpToolName === operation);
 					if (!match) {
-						json({ error: "operation not found" }, 404);
+						jsonError(404, new Error("operation not found"));
 						return;
 					}
 					json({ tool: { name: match.mcpToolName, description: match.description, inputSchema: match.inputSchema } });
@@ -215,7 +215,7 @@ export const mcpRoutes: Route[] = [
 			} catch (err) {
 				const e = err as Error;
 				console.error(`[mcp] Describe failed:`, e.stack || e);
-				json({ error: e.message, stack: e.stack }, 500);
+				jsonError(500, new Error(e.message), { stack: e.stack });
 			}
 		},
 	},

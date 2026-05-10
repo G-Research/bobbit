@@ -23,13 +23,13 @@ export const sessionsGitRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/file-content$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 
 			const filePath = url.searchParams.get("path");
-			if (!filePath) { json({ error: "Missing path parameter" }, 400); return; }
+			if (!filePath) { jsonError(400, new Error("Missing path parameter")); return; }
 
 			const snapshotId = url.searchParams.get("snapshotId");
 			const snapshotDir = path.join(bobbitStateDir(), "html-snapshots");
@@ -40,7 +40,7 @@ export const sessionsGitRoutes: Route[] = [
 					const content = fs.readFileSync(snapshotFile, "utf-8");
 					json({ content });
 				} catch {
-					json({ error: "Snapshot read failed" }, 500);
+					jsonError(500, new Error("Snapshot read failed"));
 				}
 				return;
 			}
@@ -52,7 +52,7 @@ export const sessionsGitRoutes: Route[] = [
 			try {
 				const stat = fs.statSync(resolved);
 				if (stat.isDirectory() || stat.size > 512 * 1024) {
-					json({ error: "File too large or is a directory" }, 400);
+					jsonError(400, new Error("File too large or is a directory"));
 					return;
 				}
 				const content = fs.readFileSync(resolved, "utf-8");
@@ -66,7 +66,7 @@ export const sessionsGitRoutes: Route[] = [
 
 				json({ content });
 			} catch {
-				json({ error: "File not found" }, 404);
+				jsonError(404, new Error("File not found"));
 			}
 		},
 	},
@@ -77,13 +77,13 @@ export const sessionsGitRoutes: Route[] = [
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
 			if (!session) {
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
 
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 
 			const sessUntracked = url.searchParams.get('untracked') === '1';
 			if (url.searchParams.get('fetch') === 'true') {
@@ -99,7 +99,7 @@ export const sessionsGitRoutes: Route[] = [
 				jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
 				return;
 			}
-			if (!result) { json({ error: "Not a git repository" }, 400); return; }
+			if (!result) { jsonError(400, new Error("Not a git repository")); return; }
 
 			json(result);
 
@@ -118,17 +118,17 @@ export const sessionsGitRoutes: Route[] = [
 		handler: async ({ deps, params, url, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			const file = url.searchParams.get("file") || undefined;
 			try {
 				const diff = await getGitDiff(cwd, file, cid);
 				json({ diff });
 			} catch (err: any) {
-				if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
-				if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
+				if (err.message === "INVALID_PATH") { jsonError(400, new Error("Invalid file path")); return; }
+				if (err.message === "NO_DIFF") { jsonError(404, new Error("No diff found")); return; }
 				jsonError(500, err);
 			}
 		},
@@ -136,10 +136,10 @@ export const sessionsGitRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/commits$/,
-		handler: async ({ deps, params, url, json }) => {
+		handler: async ({ deps, params, url, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: 'Session not found' }, 404); return; }
+			if (!session) { jsonError(404, new Error('Session not found')); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
 			if (!cid && !fs.existsSync(cwd)) { json({ commits: [] }); return; }
@@ -201,20 +201,20 @@ export const sessionsGitRoutes: Route[] = [
 
 				json({ commits });
 			} catch (e: any) {
-				json({ error: 'Failed to read git log', detail: e.message }, 500);
+				jsonError(500, new Error('Failed to read git log'), { detail: e.message });
 			}
 		},
 	},
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/pr-status$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			const goalBranch = session.goalId ? getGoalAcrossProjects(deps, session.goalId)?.branch : undefined;
 			let sessionBranch = goalBranch || deps.sessionManager.getPersistedSession(id)?.branch;
 			if (cid && cwd) {
@@ -229,61 +229,61 @@ export const sessionsGitRoutes: Route[] = [
 				const goalId = session.goalId;
 				if (goalId) deps.prStatusStore.set(goalId, pr);
 				json(pr);
-			} else { json({ error: "No PR found" }, 404); }
+			} else { jsonError(404, new Error("No PR found")); }
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/git-pull$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			try {
 				const output = await execGit('git pull', cwd, 30000, cid);
 				invalidateGitStatusCache(cwd, cid);
 				json({ ok: true, output });
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				json({ error: msg }, 500);
+				jsonError(500, new Error(msg));
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/git-push$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			try {
 				const output = await execGit('git push', cwd, 30000, cid);
 				invalidateGitStatusCache(cwd, cid);
 				json({ ok: true, output });
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				json({ error: msg }, 500);
+				jsonError(500, new Error(msg));
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/git-squash-push$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			try {
 				let primaryBranch = "master";
 				try {
@@ -298,7 +298,7 @@ export const sessionsGitRoutes: Route[] = [
 				const primaryRef = `origin/${primaryBranch}`;
 
 				const aheadCount = parseInt(await execGit(`git rev-list --count ${primaryRef}..HEAD`, cwd, 5000, cid), 10) || 0;
-				if (aheadCount === 0) { json({ error: "No commits ahead of master" }, 400); return; }
+				if (aheadCount === 0) { jsonError(400, new Error("No commits ahead of master")); return; }
 
 				const logOutput = await execGit(`git log --format="%s" ${primaryRef}..HEAD`, cwd, 5000, cid);
 				const commitMessages = logOutput.trim().split("\n").filter(Boolean);
@@ -333,9 +333,9 @@ export const sessionsGitRoutes: Route[] = [
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				if (msg.includes("CONFLICT") || msg.includes("merge-tree")) {
-					json({ error: "Merge conflicts with master. Use 'Merge master' first to resolve." }, 409);
+					jsonError(409, new Error("Merge conflicts with master. Use 'Merge master' first to resolve."));
 				} else {
-					json({ error: msg }, 500);
+					jsonError(500, new Error(msg));
 				}
 			}
 		},
@@ -343,13 +343,13 @@ export const sessionsGitRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/git-merge-primary$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			try {
 				let primaryBranch = "master";
 				try {
@@ -377,24 +377,24 @@ export const sessionsGitRoutes: Route[] = [
 				json({ ok: true, output });
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				json({ error: msg }, 500);
+				jsonError(500, new Error(msg));
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/pr-merge$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const session = deps.sessionManager.getSession(id);
-			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Session not found")); return; }
 			const cwd = session.cwd;
 			const cid = session.sandboxed ? session.containerId : undefined;
-			if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+			if (!cid && !fs.existsSync(cwd)) { jsonError(404, new Error("Working directory not found")); return; }
 			const body = await readBody();
 			const method = body?.method ?? "squash";
 			if (!["merge", "squash", "rebase"].includes(method)) {
-				json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
+				jsonError(400, new Error("Invalid merge method. Must be merge, squash, or rebase."));
 				return;
 			}
 			const sessAdminFlag = body?.admin ? " --admin" : "";
@@ -409,7 +409,7 @@ export const sessionsGitRoutes: Route[] = [
 				json({ ok: true });
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				json({ error: msg }, 500);
+				jsonError(500, new Error(msg));
 			}
 		},
 	},

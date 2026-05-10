@@ -52,21 +52,21 @@ export const sandboxRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/sandbox-image/build",
-		handler: async ({ deps, json }) => {
+		handler: async ({ deps, json, jsonError }) => {
 			const imageName = deps.projectConfigStore.get("sandbox_image") || "bobbit-agent";
 			if (!fs.existsSync(path.join(deps.config.defaultCwd, "docker", "Dockerfile"))) {
-				json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
+				jsonError(404, new Error("Dockerfile not found at docker/Dockerfile"));
 				return;
 			}
 			if (isBuildingImage()) {
-				json({ error: "Build already in progress" }, 409);
+				jsonError(409, new Error("Build already in progress"));
 				return;
 			}
 			const result = await buildSandboxImage(imageName, deps.config.defaultCwd);
 			if (result.success) {
 				json({ success: true });
 			} else {
-				json({ success: false, error: result.error }, 500);
+				jsonError(500, new Error(result.error), { success: false });
 			}
 		},
 	},

@@ -25,10 +25,10 @@ export const rolesRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: /^\/api\/roles\/assistant\/prompts\/(.+)$/,
-		handler: async ({ params, readBody, json }) => {
+		handler: async ({ params, readBody, json, jsonError }) => {
 			const type = decodeURIComponent(params[1]);
 			if (!type) {
-				json({ error: "Missing type parameter" }, 400);
+				jsonError(400, new Error("Missing type parameter"));
 				return;
 			}
 			const body = await readBody();
@@ -39,7 +39,7 @@ export const rolesRoutes: Route[] = [
 				promptTitle: body?.promptTitle,
 			});
 			if (!updated) {
-				json({ error: `Unknown assistant type: ${type}` }, 404);
+				jsonError(404, new Error(`Unknown assistant type: ${type}`));
 				return;
 			}
 			json(updated);
@@ -63,7 +63,7 @@ export const rolesRoutes: Route[] = [
 			try {
 				if (targetProjectId) {
 					const ctx = deps.projectContextManager.getOrCreate(targetProjectId);
-					if (!ctx) { json({ error: "Project not found" }, 404); return; }
+					if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 					const now = Date.now();
 					const role = {
 						name: body?.name,
@@ -101,20 +101,20 @@ export const rolesRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/roles\/([^/]+)\/customize$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const scope = url.searchParams.get("scope") || "server";
 			const projectId = url.searchParams.get("projectId") || undefined;
 
 			const resolved = deps.configCascade.resolveRoles(projectId);
 			const source = resolved.find(r => r.item.name === name);
-			if (!source) { json({ error: "Role not found" }, 404); return; }
+			if (!source) { jsonError(404, new Error("Role not found")); return; }
 
 			let targetStore;
 			if (scope === "project") {
-				if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
+				if (!projectId) { jsonError(400, new Error("projectId required for project scope")); return; }
 				const ctx = deps.projectContextManager.getOrCreate(projectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				targetStore = ctx.roleStore;
 			} else {
 				targetStore = deps.roleStore;
@@ -129,16 +129,16 @@ export const rolesRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/roles\/([^/]+)\/override$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const scope = url.searchParams.get("scope") || "server";
 			const projectId = url.searchParams.get("projectId") || undefined;
 
 			let targetStore;
 			if (scope === "project") {
-				if (!projectId) { json({ error: "projectId required for project scope" }, 400); return; }
+				if (!projectId) { jsonError(400, new Error("projectId required for project scope")); return; }
 				const ctx = deps.projectContextManager.getOrCreate(projectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				targetStore = ctx.roleStore;
 			} else {
 				targetStore = deps.roleStore;
@@ -151,17 +151,17 @@ export const rolesRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/roles\/([^/]+)$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const qProjectId = url.searchParams.get("projectId") || undefined;
 			if (qProjectId) {
 				const resolved = deps.configCascade.resolveRoles(qProjectId);
 				const found = resolved.find(r => r.item.name === name);
-				if (!found) { json({ error: "Role not found" }, 404); return; }
+				if (!found) { jsonError(404, new Error("Role not found")); return; }
 				json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
 			} else {
 				const role = deps.roleManager.getRole(name);
-				if (!role) { json({ error: "Role not found" }, 404); return; }
+				if (!role) { jsonError(404, new Error("Role not found")); return; }
 				json(role);
 			}
 		},
@@ -169,16 +169,16 @@ export const rolesRoutes: Route[] = [
 	{
 		method: "PUT",
 		pattern: /^\/api\/roles\/([^/]+)$/,
-		handler: async ({ deps, params, url, readBody, json }) => {
+		handler: async ({ deps, params, url, readBody, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			const qProjectId = url.searchParams.get("projectId") || undefined;
 			if (qProjectId) {
 				const ctx = deps.projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				const existing = ctx.roleStore.get(name);
-				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
+				if (!existing) { jsonError(404, new Error("Role not found in project")); return; }
 				let toolPolicies = existing.toolPolicies;
 				if (body.toolPolicies !== undefined) {
 					const cleaned: Record<string, any> = {};
@@ -243,7 +243,7 @@ export const rolesRoutes: Route[] = [
 						return cleaned;
 					})() : undefined,
 				});
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
+				if (!ok) { jsonError(404, new Error("Role not found")); return; }
 				json({ ok: true });
 			}
 		},
@@ -251,17 +251,17 @@ export const rolesRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/roles\/([^/]+)$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const name = decodeURIComponent(params[1]);
 			const qProjectId = url.searchParams.get("projectId") || undefined;
 			if (qProjectId) {
 				const ctx = deps.projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				if (!ctx) { jsonError(404, new Error("Project not found")); return; }
 				ctx.roleStore.remove(name);
 				json({ ok: true });
 			} else {
 				const ok = deps.roleManager.deleteRole(name);
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
+				if (!ok) { jsonError(404, new Error("Role not found")); return; }
 				json({ ok: true });
 			}
 		},

@@ -17,18 +17,18 @@ export const gatesRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signal$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const { projectContextManager, verificationHarness, broadcastToGoal } = deps;
 			const [, goalId, gateId] = params;
 			const goal = getGoalAcrossProjects(deps, goalId);
-			if (!goal) { json({ error: "Goal not found" }, 404); return; }
-			if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
-			if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+			if (!goal) { jsonError(404, new Error("Goal not found")); return; }
+			if (goal.archived) { jsonError(409, new Error("Goal is archived")); return; }
+			if (!goal.workflow) { jsonError(400, new Error("Goal has no workflow")); return; }
 			const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
-			if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+			if (!gateSignalCtx) { jsonError(404, new Error("Goal not found in any project")); return; }
 			const gateStore = gateSignalCtx.gateStore;
 			const gateDef = goal.workflow.gates.find(g => g.id === gateId);
-			if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+			if (!gateDef) { jsonError(404, new Error(`Unknown gate: ${gateId}`)); return; }
 
 			const body = await readBody();
 			const signalSessionId = body?.sessionId || "unknown";
@@ -37,7 +37,7 @@ export const gatesRoutes: Route[] = [
 				const depGate = gateStore.getGate(goalId, depId);
 				if (!depGate || depGate.status !== "passed") {
 					const depDef = goal.workflow.gates.find(g => g.id === depId);
-					json({ error: `Upstream gate "${depDef?.name || depId}" has not passed yet` }, 409);
+					jsonError(409, new Error(`Upstream gate "${depDef?.name || depId}" has not passed yet`));
 					return;
 				}
 			}
@@ -45,14 +45,14 @@ export const gatesRoutes: Route[] = [
 			if (gateDef.metadata && body?.metadata) {
 				for (const key of Object.keys(gateDef.metadata)) {
 					if (!(key in body.metadata)) {
-						json({ error: `Missing required metadata field: ${key}` }, 400);
+						jsonError(400, new Error(`Missing required metadata field: ${key}`));
 						return;
 					}
 				}
 			} else if (gateDef.metadata && !body?.metadata) {
 				const required = Object.keys(gateDef.metadata);
 				if (required.length > 0) {
-					json({ error: `Missing required metadata fields: ${required.join(", ")}` }, 400);
+					jsonError(400, new Error(`Missing required metadata fields: ${required.join(", ")}`));
 					return;
 				}
 			}
@@ -76,7 +76,7 @@ export const gatesRoutes: Route[] = [
 						console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
 						await verificationHarness.cancelStaleVerifications(goalId, gateId);
 					} else {
-						json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
+						jsonError(409, new Error("Verification already in progress for this commit"), { existingSignalId: runningDup.signalId });
 						return;
 					}
 				}
@@ -186,12 +186,12 @@ export const gatesRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/gates$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const goalId = params[1];
 			const goal = getGoalAcrossProjects(deps, goalId);
-			if (!goal) { json({ error: "Goal not found" }, 404); return; }
+			if (!goal) { jsonError(404, new Error("Goal not found")); return; }
 			const gateCtx = deps.projectContextManager.getContextForGoal(goalId);
-			if (!gateCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+			if (!gateCtx) { jsonError(404, new Error("Goal not found in any project")); return; }
 			const gateStore = gateCtx.gateStore;
 			const gates = gateStore.getGatesForGoal(goalId);
 			const enriched = gates.map(g => {
@@ -227,16 +227,16 @@ export const gatesRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/inspect$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const [, goalId, gateId] = params;
 			const ctx = deps.projectContextManager.getContextForGoal(goalId);
-			if (!ctx) { json({ error: "Goal not found" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Goal not found")); return; }
 			const gate = ctx.gateStore.getGate(goalId, gateId);
-			if (!gate) { json({ error: "Gate not found" }, 404); return; }
+			if (!gate) { jsonError(404, new Error("Gate not found")); return; }
 
 			const section = url.searchParams.get("section");
 			if (!section || !["content", "verification", "signals"].includes(section)) {
-				json({ error: "section query parameter is required: 'content', 'verification', or 'signals'" }, 400);
+				jsonError(400, new Error("section query parameter is required: 'content', 'verification', or 'signals'"));
 				return;
 			}
 
@@ -251,7 +251,7 @@ export const gatesRoutes: Route[] = [
 
 			if (section === "content") {
 				const resolved = resolveSignal();
-				if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+				if (!resolved) { jsonError(404, new Error("Signal not found")); return; }
 				json({
 					gateId, section: "content",
 					signalIndex: resolved.index,
@@ -263,7 +263,7 @@ export const gatesRoutes: Route[] = [
 
 			if (section === "verification") {
 				const resolved = resolveSignal();
-				if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+				if (!resolved) { jsonError(404, new Error("Signal not found")); return; }
 				const v = resolved.signal.verification;
 				json({
 					gateId, section: "verification",
@@ -301,38 +301,38 @@ export const gatesRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signals$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const [, goalId, gateId] = params;
 			const ctx = deps.projectContextManager.getContextForGoal(goalId);
-			if (!ctx) { json({ error: "Goal not found in any project" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Goal not found in any project")); return; }
 			const gate = ctx.gateStore.getGate(goalId, gateId);
-			if (!gate) { json({ error: "Gate not found" }, 404); return; }
+			if (!gate) { jsonError(404, new Error("Gate not found")); return; }
 			json({ signals: gate.signals });
 		},
 	},
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const [, goalId, gateId] = params;
 			const ctx = deps.projectContextManager.getContextForGoal(goalId);
-			if (!ctx) { json({ error: "Goal not found in any project" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Goal not found in any project")); return; }
 			const gate = ctx.gateStore.getGate(goalId, gateId);
-			if (!gate) { json({ error: "Gate not found" }, 404); return; }
+			if (!gate) { jsonError(404, new Error("Gate not found")); return; }
 			json({ content: gate.currentContent, version: gate.currentContentVersion });
 		},
 	},
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/workflow-context\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const goalId = params[1];
 			const gateId = params[2];
 			const goal = getGoalAcrossProjects(deps, goalId);
-			if (!goal) { json({ error: "Goal not found" }, 404); return; }
-			if (!goal.workflow) { json({ error: "Goal has no workflow" }, 404); return; }
+			if (!goal) { jsonError(404, new Error("Goal not found")); return; }
+			if (!goal.workflow) { jsonError(404, new Error("Goal has no workflow")); return; }
 			const gateDef = goal.workflow.gates.find(g => g.id === gateId);
-			if (!gateDef) { json({ error: "Gate not found" }, 404); return; }
+			if (!gateDef) { jsonError(404, new Error("Gate not found")); return; }
 
 			const context = deps.teamManager.buildDependencyContext(goalId, gateId);
 			json({ context, gate: gateDef });
@@ -350,12 +350,12 @@ export const gatesRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/cancel-verification$/,
-		handler: async ({ deps, params, json }) => {
+		handler: async ({ deps, params, json, jsonError }) => {
 			const [, goalId, gateId] = params;
 			const goal = getGoalAcrossProjects(deps, goalId);
-			if (!goal) { json({ error: "Goal not found" }, 404); return; }
-			if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
-			if (goal.state === "shelved") { json({ error: "Goal is shelved" }, 400); return; }
+			if (!goal) { jsonError(404, new Error("Goal not found")); return; }
+			if (goal.archived) { jsonError(409, new Error("Goal is archived")); return; }
+			if (goal.state === "shelved") { jsonError(400, new Error("Goal is shelved")); return; }
 
 			const activeVers = deps.verificationHarness.getActiveVerifications(goalId);
 			const running = activeVers.find(v => v.gateId === gateId && v.overallStatus === "running");
@@ -373,13 +373,13 @@ export const gatesRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/gates\/([^/]+)$/,
-		handler: ({ deps, params, url, json }) => {
+		handler: ({ deps, params, url, json, jsonError }) => {
 			const [, goalId, gateId] = params;
 			const ctx = deps.projectContextManager.getContextForGoal(goalId);
-			if (!ctx) { json({ error: "Goal not found in any project" }, 404); return; }
+			if (!ctx) { jsonError(404, new Error("Goal not found in any project")); return; }
 			const gateStore = ctx.gateStore;
 			const gate = gateStore.getGate(goalId, gateId);
-			if (!gate) { json({ error: "Gate not found" }, 404); return; }
+			if (!gate) { jsonError(404, new Error("Gate not found")); return; }
 			const goal = getGoalAcrossProjects(deps, goalId);
 			const def = goal?.workflow?.gates.find(wg => wg.id === gateId);
 			if (url.searchParams.get("view") === "summary") {

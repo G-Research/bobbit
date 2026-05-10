@@ -57,7 +57,7 @@ export const goalsRoutes: Route[] = [
 			const spec = body?.spec || "";
 			const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 			if (!title || typeof title !== "string") {
-				json({ error: "Missing title" }, 400);
+				jsonError(400, new Error("Missing title"));
 				return;
 			}
 			try {
@@ -68,12 +68,12 @@ export const goalsRoutes: Route[] = [
 					enabledOptionalSteps = body.enabledOptionalSteps;
 				}
 				const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
-				if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+				if (!resolved.ok) { jsonError(resolved.status, new Error(resolved.error)); return; }
 				const targetProjectId = resolved.projectId;
 				if (!body?.cwd) cwd = resolved.project.rootPath;
 				const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 				if (!targetCtx) {
-					json({ error: "Invalid project" }, 400);
+					jsonError(400, new Error("Invalid project"));
 					return;
 				}
 				if (sandboxed && sandboxManager) {
@@ -254,12 +254,12 @@ export const goalsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/goals\/([^/]+)\/retry-setup$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const goalId = params[1];
 			const retryGoalManager = getGoalManagerForGoal(deps, goalId);
 			const ok = retryGoalManager.retrySetup(goalId);
 			if (!ok) {
-				json({ error: "Goal not found or not in error state" }, 400);
+				jsonError(400, new Error("Goal not found or not in error state"));
 				return;
 			}
 			json({ ok: true });
@@ -288,22 +288,22 @@ export const goalsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			const goal = getGoalAcrossProjects(deps, id);
-			if (!goal) { json({ error: "Goal not found" }, 404); return; }
+			if (!goal) { jsonError(404, new Error("Goal not found")); return; }
 			json(goal);
 		},
 	},
 	{
 		method: "PUT",
 		pattern: /^\/api\/goals\/([^/]+)$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const putGoal = getGoalAcrossProjects(deps, id);
-			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
+			if (putGoal?.archived) { jsonError(409, new Error("Goal is archived")); return; }
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			const goalMgr = getGoalManagerForGoal(deps, id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -315,7 +315,7 @@ export const goalsRoutes: Route[] = [
 				branch: body.branch,
 				reattemptOf: body.reattemptOf,
 			});
-			if (!ok) { json({ error: "Goal not found" }, 404); return; }
+			if (!ok) { jsonError(404, new Error("Goal not found")); return; }
 			json({ ok: true });
 		},
 	},
@@ -340,16 +340,16 @@ export const goalsRoutes: Route[] = [
 			const goalId = params[1];
 			const spawnGoal = getGoalAcrossProjects(deps, goalId);
 			if (spawnGoal?.archived) {
-				json({ error: "Goal is archived" }, 409);
+				jsonError(409, new Error("Goal is archived"));
 				return;
 			}
 			if (spawnGoal && spawnGoal.setupStatus !== "ready") {
-				json({ error: "Goal setup not complete" }, 409);
+				jsonError(409, new Error("Goal setup not complete"));
 				return;
 			}
 			const body = await readBody();
 			if (!body?.role || !body?.task) {
-				json({ error: "Missing role or task" }, 400);
+				jsonError(400, new Error("Missing role or task"));
 				return;
 			}
 			try {
@@ -373,7 +373,7 @@ export const goalsRoutes: Route[] = [
 		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.sessionId) {
-				json({ error: "Missing sessionId" }, 400);
+				jsonError(400, new Error("Missing sessionId"));
 				return;
 			}
 			try {
@@ -387,11 +387,11 @@ export const goalsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/goals\/([^/]+)\/(?:team|swarm)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const goalId = params[1];
 			const state = deps.teamManager.getTeamState(goalId);
 			if (!state) {
-				json({ error: "No active team for this goal" }, 404);
+				jsonError(404, new Error("No active team for this goal"));
 				return;
 			}
 			json(state);
@@ -404,21 +404,21 @@ export const goalsRoutes: Route[] = [
 			const goalId = params[1];
 			const body = await readBody();
 			if (!body?.sessionId || !body?.message) {
-				json({ error: "Missing sessionId or message" }, 400);
+				jsonError(400, new Error("Missing sessionId or message"));
 				return;
 			}
 			const agents = deps.teamManager.listAgents(goalId);
 			if (!agents.find(a => a.sessionId === body.sessionId)) {
-				json({ error: "Session is not a member of this team" }, 403);
+				jsonError(403, new Error("Session is not a member of this team"));
 				return;
 			}
 			const session = deps.sessionManager.getSession(body.sessionId);
 			if (!session) {
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			if (session.status !== "streaming") {
-				json({ error: "Agent is not currently streaming — use team/prompt instead" }, 409);
+				jsonError(409, new Error("Agent is not currently streaming — use team/prompt instead"));
 				return;
 			}
 			try {
@@ -436,17 +436,17 @@ export const goalsRoutes: Route[] = [
 			const goalId = params[1];
 			const body = await readBody();
 			if (!body?.sessionId) {
-				json({ error: "Missing sessionId" }, 400);
+				jsonError(400, new Error("Missing sessionId"));
 				return;
 			}
 			const agents = deps.teamManager.listAgents(goalId);
 			if (!agents.find(a => a.sessionId === body.sessionId)) {
-				json({ error: "Session is not a member of this team" }, 403);
+				jsonError(403, new Error("Session is not a member of this team"));
 				return;
 			}
 			const session = deps.sessionManager.getSession(body.sessionId);
 			if (!session) {
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			try {
@@ -465,21 +465,21 @@ export const goalsRoutes: Route[] = [
 			const goalId = params[1];
 			const body = await readBody();
 			if (!body?.sessionId || !body?.message) {
-				json({ error: "Missing sessionId or message" }, 400);
+				jsonError(400, new Error("Missing sessionId or message"));
 				return;
 			}
 			const agents = deps.teamManager.listAgents(goalId);
 			if (!agents.find(a => a.sessionId === body.sessionId)) {
-				json({ error: "Session is not a member of this team" }, 403);
+				jsonError(403, new Error("Session is not a member of this team"));
 				return;
 			}
 			const session = deps.sessionManager.getSession(body.sessionId);
 			if (!session) {
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			if (session.nonInteractive) {
-				json({ error: "Cannot prompt a non-interactive (automated review) session" }, 400);
+				jsonError(400, new Error("Cannot prompt a non-interactive (automated review) session"));
 				return;
 			}
 			const wfGateId = typeof body.workflowGateId === "string" ? body.workflowGateId : undefined;
@@ -492,7 +492,7 @@ export const goalsRoutes: Route[] = [
 					const gateStates = goalGateStore.getGatesForGoal(goalId);
 					const depError = checkGateDependencies(wfGateId, goal.workflow.gates, gateStates);
 					if (depError) {
-						json({ error: depError }, 409);
+						jsonError(409, new Error(depError));
 						return;
 					}
 				}

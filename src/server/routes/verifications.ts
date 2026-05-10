@@ -21,19 +21,19 @@ export const verificationsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/internal/verification-result",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.sessionId || !body?.verdict || !body?.summary || typeof body.sessionId !== "string" || typeof body.verdict !== "string" || typeof body.summary !== "string") {
-				json({ error: "Missing required fields: sessionId, verdict, summary" }, 400);
+				jsonError(400, new Error("Missing required fields: sessionId, verdict, summary"));
 				return;
 			}
 			const resolver = deps.verificationHarness.pendingResults.get(body.sessionId);
 			if (!resolver) {
-				json({ error: "No pending verification for this session" }, 404);
+				jsonError(404, new Error("No pending verification for this session"));
 				return;
 			}
 			if (typeof body.report_html === "string" && typeof body.report_html_file === "string") {
-				json({ error: "Provide either report_html or report_html_file, not both" }, 400);
+				jsonError(400, new Error("Provide either report_html or report_html_file, not both"));
 				return;
 			}
 			let reportHtml: string | undefined = typeof body.report_html === "string" ? body.report_html : undefined;
@@ -52,12 +52,12 @@ export const verificationsRoutes: Route[] = [
 					const stat = fs.statSync(filePath);
 					const MAX_REPORT_SIZE = 10 * 1024 * 1024; // 10 MB
 					if (stat.size > MAX_REPORT_SIZE) {
-						json({ error: `Report file too large (${stat.size} bytes, max ${MAX_REPORT_SIZE})` }, 400);
+						jsonError(400, new Error(`Report file too large (${stat.size} bytes, max ${MAX_REPORT_SIZE})`));
 						return;
 					}
 					reportHtml = fs.readFileSync(filePath, "utf-8");
 				} catch (e: any) {
-					json({ error: `Failed to read report file: ${e.message}` }, 400);
+					jsonError(400, new Error(`Failed to read report file: ${e.message}`));
 					return;
 				}
 			}
@@ -84,17 +84,17 @@ export const verificationsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: "/api/internal/user-question/submit",
-		handler: async ({ deps, readBody, json }) => {
+		handler: async ({ deps, readBody, json, jsonError }) => {
 			const body = await readBody();
 			const { sessionId, toolUseId, answers } = body || {};
 			if (typeof sessionId !== "string" || typeof toolUseId !== "string" || !Array.isArray(answers)) {
-				json({ error: "Missing required fields: sessionId, toolUseId, answers" }, 400);
+				jsonError(400, new Error("Missing required fields: sessionId, toolUseId, answers"));
 				return;
 			}
 			const answerErr = validateAnswers(answers);
-			if (answerErr) { json({ error: answerErr }, 400); return; }
+			if (answerErr) { jsonError(400, new Error(answerErr)); return; }
 			const session = deps.sessionManager.getSession(sessionId);
-			if (!session) { json({ error: "Unknown session" }, 404); return; }
+			if (!session) { jsonError(404, new Error("Unknown session")); return; }
 
 			let messages: any[] = [];
 			try {
@@ -102,7 +102,7 @@ export const verificationsRoutes: Route[] = [
 				const raw = msgsResp?.data?.messages || msgsResp?.data;
 				if (Array.isArray(raw)) messages = raw;
 			} catch (e: any) {
-				json({ error: `Could not load transcript: ${e?.message || String(e)}` }, 500);
+				jsonError(500, new Error(`Could not load transcript: ${e?.message || String(e)}`));
 				return;
 			}
 
@@ -136,11 +136,11 @@ export const verificationsRoutes: Route[] = [
 				if (matchedQuestions) break;
 			}
 			if (!matchedQuestions) {
-				json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
+				jsonError(404, new Error("No matching ask_user_choices tool call in transcript"));
 				return;
 			}
 			const crossErr = crossValidate(matchedQuestions, answers);
-			if (crossErr) { json({ error: crossErr }, 400); return; }
+			if (crossErr) { jsonError(400, new Error(crossErr)); return; }
 
 			const envelope = buildAskResponseEnvelope(toolUseId, answers);
 			askSubmittedToolUseIds.add(dedupKey);
@@ -148,7 +148,7 @@ export const verificationsRoutes: Route[] = [
 				await deps.sessionManager.enqueuePrompt(sessionId, envelope);
 			} catch (e: any) {
 				askSubmittedToolUseIds.delete(dedupKey);
-				json({ error: `Failed to enqueue response: ${e?.message || String(e)}` }, 500);
+				jsonError(500, new Error(`Failed to enqueue response: ${e?.message || String(e)}`));
 				return;
 			}
 			json({ ok: true });

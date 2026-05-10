@@ -20,10 +20,10 @@ export const oauthRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: "/api/oauth/flow-status",
-		handler: ({ url, json }) => {
+		handler: ({ url, json, jsonError }) => {
 			const flowId = url.searchParams.get("flowId");
 			if (!flowId) {
-				json({ error: "Missing flowId" }, 400);
+				jsonError(400, new Error("Missing flowId"));
 				return;
 			}
 			const provider = url.searchParams.get("provider") || undefined;
@@ -54,7 +54,7 @@ export const oauthRoutes: Route[] = [
 		handler: async ({ readBody, json, jsonError }) => {
 			const body = await readBody();
 			if (!body?.flowId || !body?.code) {
-				json({ error: "Missing flowId or code" }, 400);
+				jsonError(400, new Error("Missing flowId or code"));
 				return;
 			}
 			try {

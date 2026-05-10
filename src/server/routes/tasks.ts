@@ -43,18 +43,18 @@ export const tasksRoutes: Route[] = [
 		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const goalId = params[1];
 			const goal = getGoalAcrossProjects(deps, goalId);
-			if (!goal) { json({ error: "Goal not found" }, 404); return; }
-			if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+			if (!goal) { jsonError(404, new Error("Goal not found")); return; }
+			if (goal.archived) { jsonError(409, new Error("Goal is archived")); return; }
 
 			const body = await readBody();
 			const title = body?.title;
 			const type = body?.type;
 			if (!title || typeof title !== "string") {
-				json({ error: "Missing title" }, 400);
+				jsonError(400, new Error("Missing title"));
 				return;
 			}
 			if (!type || typeof type !== "string") {
-				json({ error: "Missing type" }, 400);
+				jsonError(400, new Error("Missing type"));
 				return;
 			}
 			try {
@@ -74,14 +74,14 @@ export const tasksRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/tasks\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			try {
 				const task = getTaskManagerForTask(deps, id).getTask(id);
-				if (!task) { json({ error: "Task not found" }, 404); return; }
+				if (!task) { jsonError(404, new Error("Task not found")); return; }
 				json(task);
 			} catch {
-				json({ error: "Task not found" }, 404);
+				jsonError(404, new Error("Task not found"));
 			}
 		},
 	},
@@ -91,7 +91,7 @@ export const tasksRoutes: Route[] = [
 		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const id = params[1];
 			const body = await readBody();
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			if (!body) { jsonError(400, new Error("Missing body")); return; }
 			try {
 				const tm = getTaskManagerForTask(deps, id);
 				const task = tm.getTask(id);
@@ -109,7 +109,7 @@ export const tasksRoutes: Route[] = [
 					branch: typeof body.branch === "string" ? body.branch : undefined,
 					resultSummary: typeof body.resultSummary === "string" ? body.resultSummary : undefined,
 				});
-				if (!ok) { json({ error: "Task not found" }, 404); return; }
+				if (!ok) { jsonError(404, new Error("Task not found")); return; }
 
 				if (body.state && body.state !== prevState && (body.state === "complete" || body.state === "skipped" || body.state === "blocked") && task?.goalId) {
 					deps.teamManager.notifyTeamLeadOfTaskCompletion(task.goalId, task.title, body.state);
@@ -124,14 +124,14 @@ export const tasksRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/tasks\/([^/]+)$/,
-		handler: ({ deps, params, json }) => {
+		handler: ({ deps, params, json, jsonError }) => {
 			const id = params[1];
 			try {
 				const ok = getTaskManagerForTask(deps, id).deleteTask(id);
-				if (!ok) { json({ error: "Task not found" }, 404); return; }
+				if (!ok) { jsonError(404, new Error("Task not found")); return; }
 				json({ ok: true });
 			} catch {
-				json({ error: "Task not found" }, 404);
+				jsonError(404, new Error("Task not found"));
 			}
 		},
 	},
@@ -143,13 +143,13 @@ export const tasksRoutes: Route[] = [
 			const body = await readBody();
 			const sessionId = body?.sessionId;
 			if (!sessionId || typeof sessionId !== "string") {
-				json({ error: "Missing sessionId" }, 400);
+				jsonError(400, new Error("Missing sessionId"));
 				return;
 			}
 			try {
 				const tm = getTaskManagerForTask(deps, taskId);
 				const ok = tm.assignTask(taskId, sessionId);
-				if (!ok) { json({ error: "Task not found" }, 400); return; }
+				if (!ok) { jsonError(400, new Error("Task not found")); return; }
 
 				const agent = deps.teamManager.findAgentBySessionId(sessionId);
 				if (agent) {
@@ -178,18 +178,18 @@ export const tasksRoutes: Route[] = [
 			const body = await readBody();
 			const state = body?.state;
 			if (!state || typeof state !== "string") {
-				json({ error: "Missing state" }, 400);
+				jsonError(400, new Error("Missing state"));
 				return;
 			}
 			if (!VALID_TASK_STATES.has(state)) {
-				json({ error: `Invalid task state: ${state}` }, 400);
+				jsonError(400, new Error(`Invalid task state: ${state}`));
 				return;
 			}
 			try {
 				const tm = getTaskManagerForTask(deps, taskId);
 				const task = tm.getTask(taskId);
 				const ok = tm.transitionTask(taskId, state as TaskState);
-				if (!ok) { json({ error: "Task not found" }, 400); return; }
+				if (!ok) { jsonError(400, new Error("Task not found")); return; }
 
 				if ((state === "complete" || state === "skipped" || state === "blocked") && task?.goalId) {
 					deps.teamManager.notifyTeamLeadOfTaskCompletion(task.goalId, task.title, state);

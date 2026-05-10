@@ -65,7 +65,7 @@ export const sessionsRoutes: Route[] = [
 				if (sandboxScope) {
 					const parentId = body.delegateOf;
 					if (!sandboxScope.sessionIds.has(parentId)) {
-						json({ error: "Forbidden: delegate parent must be own session" }, 403);
+						jsonError(403, new Error("Forbidden: delegate parent must be own session"));
 						return;
 					}
 				}
@@ -125,7 +125,7 @@ export const sessionsRoutes: Route[] = [
 			if (roleId && typeof roleId === "string") {
 				const role = roleManager.getRole(roleId);
 				if (!role) {
-					json({ error: `Role "${roleId}" not found` }, 404);
+					jsonError(404, new Error(`Role "${roleId}" not found`));
 					return;
 				}
 				createOpts = {
@@ -146,7 +146,7 @@ export const sessionsRoutes: Route[] = [
 			if (sandboxed) {
 				const sandboxConfig = projectConfigStore.get("sandbox") || "none";
 				if (sandboxConfig !== "docker") {
-					json({ error: "Docker sandbox is not configured. Set sandbox: \"docker\" in project settings." }, 400);
+					jsonError(400, new Error("Docker sandbox is not configured. Set sandbox: \"docker\" in project settings."));
 					return;
 				}
 				const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
@@ -156,7 +156,7 @@ export const sessionsRoutes: Route[] = [
 						_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
 					}
 					if (!_dockerAvailCache.available) {
-						json({ error: `Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}` }, 503);
+						jsonError(503, new Error(`Docker is not available: ${_dockerAvailCache.error || "Docker not detected"}`));
 						return;
 					}
 				}
@@ -184,7 +184,7 @@ export const sessionsRoutes: Route[] = [
 					console.warn(`[POST /api/sessions] cwd ${staleCwd} does not exist — falling back to ${fallback}`);
 					cwd = fallback;
 				} else {
-					json({ error: `Working directory does not exist: ${staleCwd}` }, 400);
+					jsonError(400, new Error(`Working directory does not exist: ${staleCwd}`));
 					return;
 				}
 			}
@@ -203,7 +203,7 @@ export const sessionsRoutes: Route[] = [
 
 			if (!resolvedProjectId) {
 				const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
-				if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+				if (!resolved.ok) { jsonError(resolved.status, new Error(resolved.error)); return; }
 				resolvedProjectId = resolved.projectId;
 			}
 
@@ -268,12 +268,7 @@ export const sessionsRoutes: Route[] = [
 					`${e.message ?? String(err)}\n${e.stack ?? ""}`,
 				);
 				if (e.cause) console.error("  caused by:", e.cause);
-				json({
-					error: String(err),
-					message: e.message,
-					code: e.code,
-					cause: e.cause ? String(e.cause) : undefined,
-				}, 500);
+				jsonError(500, new Error(String(err)), { message: e.message, code: e.code, cause: e.cause ? String(e.cause) : undefined });
 			}
 			} finally {
 				recordElapsed("POST /api/sessions", performance.now() - __t0);
@@ -283,10 +278,10 @@ export const sessionsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: "/api/search",
-		handler: async ({ deps, url, json }) => {
+		handler: async ({ deps, url, json, jsonError }) => {
 			const q = url.searchParams.get("q");
 			if (!q) {
-				json({ error: "Missing query parameter 'q'" }, 400);
+				jsonError(400, new Error("Missing query parameter 'q'"));
 				return;
 			}
 			const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10) || 20), 100);
@@ -300,7 +295,7 @@ export const sessionsRoutes: Route[] = [
 				const results = await deps.projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames });
 				json(results);
 			} catch (err) {
-				json({ error: `Search failed: ${err}` }, 500);
+				jsonError(500, new Error(`Search failed: ${err}`));
 			}
 		},
 	},
@@ -399,18 +394,18 @@ export const sessionsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/activate-skill$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const sessionId = params[1];
 			const session = deps.sessionManager.getSession(sessionId);
 			if (!session) {
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			const body = await readBody();
 			const skillName = typeof body?.name === "string" ? body.name : "";
 			const skillArgs = typeof body?.args === "string" ? body.args : "";
 			if (!skillName) {
-				json({ error: "name is required" }, 400);
+				jsonError(400, new Error("name is required"));
 				return;
 			}
 			let resolvedConfigStore: { get(key: string): string | undefined } | undefined = deps.projectConfigStore;
@@ -424,11 +419,11 @@ export const sessionsRoutes: Route[] = [
 			}
 			const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
 			if (!skill) {
-				json({ error: `Skill "${skillName}" not found` }, 404);
+				jsonError(404, new Error(`Skill "${skillName}" not found`));
 				return;
 			}
 			if (skill.disableModelInvocation === true) {
-				json({ error: `Skill "${skillName}" has disable-model-invocation: true and cannot be activated by the model` }, 403);
+				jsonError(403, new Error(`Skill "${skillName}" has disable-model-invocation: true and cannot be activated by the model`));
 				return;
 			}
 			const pathRewrite = session.sandboxed
@@ -460,7 +455,7 @@ export const sessionsRoutes: Route[] = [
 			const sessionId = params[1];
 			const body = await readBody();
 			if (!body || !body.toolName || !body.toolGroup) {
-				json({ error: "toolName and toolGroup required" }, 400);
+				jsonError(400, new Error("toolName and toolGroup required"));
 				return;
 			}
 			try {
@@ -480,14 +475,14 @@ export const sessionsRoutes: Route[] = [
 			await readBody().catch(() => ({}));
 
 			const ps = sessionManager.getPersistedSession(archivedId);
-			if (!ps) { json({ error: "session not found" }, 404); return; }
-			if (!ps.archived) { json({ error: "source not archived" }, 409); return; }
+			if (!ps) { jsonError(404, new Error("session not found")); return; }
+			if (!ps.archived) { jsonError(409, new Error("source not archived")); return; }
 			if (ps.goalId || ps.delegateOf || ps.teamGoalId || ps.assistantType) {
-				json({ error: "goal, delegate, team, or assistant sessions cannot be continued" }, 422);
+				jsonError(422, new Error("goal, delegate, team, or assistant sessions cannot be continued"));
 				return;
 			}
 			if (!ps.projectId || !projectRegistry.get(ps.projectId)) {
-				json({ error: "source project no longer registered" }, 410);
+				jsonError(410, new Error("source project no longer registered"));
 				return;
 			}
 
@@ -503,7 +498,7 @@ export const sessionsRoutes: Route[] = [
 				if (recovered) sourceJsonl = recovered;
 			}
 			if (!sourceJsonl) {
-				json({ error: "archived transcript missing or empty" }, 404);
+				jsonError(404, new Error("archived transcript missing or empty"));
 				return;
 			}
 
@@ -511,11 +506,11 @@ export const sessionsRoutes: Route[] = [
 				try {
 					const st = nodeFs.statSync(sourceJsonl);
 					if (!st.isFile() || st.size === 0) {
-						json({ error: "archived transcript missing or empty" }, 404);
+						jsonError(404, new Error("archived transcript missing or empty"));
 						return;
 					}
 				} catch {
-					json({ error: "archived transcript missing or empty" }, 404);
+					jsonError(404, new Error("archived transcript missing or empty"));
 					return;
 				}
 			}
@@ -541,7 +536,7 @@ export const sessionsRoutes: Route[] = [
 				await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
 			} catch (err) {
 				if (err instanceof CrossRealmCopyError) {
-					json({ error: "cross-realm continue not supported" }, 422);
+					jsonError(422, new Error("cross-realm continue not supported"));
 					return;
 				}
 				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
@@ -720,7 +715,7 @@ export const sessionsRoutes: Route[] = [
 	{
 		method: "DELETE",
 		pattern: /^\/api\/sessions\/([^/]+)$/,
-		handler: async ({ deps, params, url, json }) => {
+		handler: async ({ deps, params, url, json, jsonError }) => {
 			const id = params[1];
 			const purge = url.searchParams.get("purge") === "true";
 			const archivedSession = deps.sessionManager.getArchivedSession(id);
@@ -739,7 +734,7 @@ export const sessionsRoutes: Route[] = [
 						return;
 					}
 				}
-				json({ error: "Session not found" }, 404);
+				jsonError(404, new Error("Session not found"));
 				return;
 			}
 			if (purge) {
@@ -756,18 +751,18 @@ export const sessionsRoutes: Route[] = [
 			const id = params[1];
 			const body = await readBody();
 			if (!body || typeof body !== "object") {
-				json({ error: "Invalid body" }, 400);
+				jsonError(400, new Error("Invalid body"));
 				return;
 			}
 
 			if (typeof body.title === "string") {
 				const ok = sessionManager.setTitle(id, body.title);
-				if (!ok) { json({ error: "Session not found" }, 404); return; }
+				if (!ok) { jsonError(404, new Error("Session not found")); return; }
 			}
 
 			if (typeof body.colorIndex === "number") {
 				if (body.colorIndex < 0 || body.colorIndex > 13) {
-					json({ error: "colorIndex must be 0-13" }, 400);
+					jsonError(400, new Error("colorIndex must be 0-13"));
 					return;
 				}
 				colorStore.set(id, body.colorIndex);
@@ -775,7 +770,7 @@ export const sessionsRoutes: Route[] = [
 
 			if (typeof body.projectId === "string") {
 				const session = sessionManager.getSession(id);
-				if (!session) { json({ error: "Session not found" }, 404); return; }
+				if (!session) { jsonError(404, new Error("Session not found")); return; }
 				const oldProjectId = session.projectId;
 				const newProjectId = body.projectId || undefined;
 				session.projectId = newProjectId;
@@ -787,7 +782,7 @@ export const sessionsRoutes: Route[] = [
 
 			if (typeof body.preview === "boolean") {
 				const session = sessionManager.getSession(id);
-				if (!session) { json({ error: "Session not found" }, 404); return; }
+				if (!session) { jsonError(404, new Error("Session not found")); return; }
 				session.preview = body.preview;
 				sessionManager.persistSessionMetadata(session).catch(() => {});
 				broadcastToAll({ type: "preview_changed", sessionId: id, preview: body.preview });
@@ -795,10 +790,10 @@ export const sessionsRoutes: Route[] = [
 
 			if (typeof body.roleId === "string" && body.roleId !== "") {
 				const role = roleManager.getRole(body.roleId);
-				if (!role) { json({ error: `Role "${body.roleId}" not found` }, 404); return; }
+				if (!role) { jsonError(404, new Error(`Role "${body.roleId}" not found`)); return; }
 				try {
 					const ok = await sessionManager.assignRole(id, role);
-					if (!ok) { json({ error: "Session not found" }, 404); return; }
+					if (!ok) { jsonError(404, new Error("Session not found")); return; }
 				} catch (err) {
 					jsonError(400, err);
 					return;
@@ -814,7 +809,7 @@ export const sessionsRoutes: Route[] = [
 
 			if (typeof body.assistantType === "string" || typeof body.goalAssistant === "boolean" || typeof body.goalId === "string") {
 				const session = sessionManager.getSession(id);
-				if (!session) { json({ error: "Session not found" }, 404); return; }
+				if (!session) { jsonError(404, new Error("Session not found")); return; }
 				if (typeof body.assistantType === "string") session.assistantType = body.assistantType || undefined;
 				else if (typeof body.goalAssistant === "boolean") session.assistantType = body.goalAssistant ? "goal" : undefined;
 				if (typeof body.goalId === "string") session.goalId = body.goalId;
@@ -848,7 +843,7 @@ export const sessionsRoutes: Route[] = [
 					if (archived) {
 						sessionManager.updateArchivedMeta(id, { teamLeadSessionId: body.teamLeadSessionId });
 					} else {
-						json({ error: "Session not found" }, 404); return;
+						jsonError(404, new Error("Session not found")); return;
 					}
 				}
 			}

@@ -23,10 +23,10 @@ export const sessionsProposalsRoutes: Route[] = [
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/proposals$/,
-		handler: async ({ params, json }) => {
+		handler: async ({ params, json, jsonError }) => {
 			const sessionId = params[1];
 			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
-				json({ error: "Invalid sessionId" }, 400);
+				jsonError(400, new Error("Invalid sessionId"));
 				return;
 			}
 			const stateDir = bobbitStateDir();
@@ -42,7 +42,7 @@ export const sessionsProposalsRoutes: Route[] = [
 				}
 				json({ proposals });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},
@@ -50,11 +50,11 @@ export const sessionsProposalsRoutes: Route[] = [
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)\/edit$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const sessionId = params[1];
 			const typeStr = params[2];
-			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { json({ error: "Invalid sessionId" }, 400); return; }
-			if (!isProposalType(typeStr)) { json({ error: `Unknown proposal type: ${typeStr}` }, 400); return; }
+			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { jsonError(400, new Error("Invalid sessionId")); return; }
+			if (!isProposalType(typeStr)) { jsonError(400, new Error(`Unknown proposal type: ${typeStr}`)); return; }
 			const proposalType = typeStr as ProposalType;
 			const stateDir = bobbitStateDir();
 			const body = await readBody();
@@ -85,18 +85,18 @@ export const sessionsProposalsRoutes: Route[] = [
 				});
 				json({ ok: true, newContent: result.newContent, rev: result.rev });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)\/seed$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const sessionId = params[1];
 			const typeStr = params[2];
-			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { json({ error: "Invalid sessionId" }, 400); return; }
-			if (!isProposalType(typeStr)) { json({ error: `Unknown proposal type: ${typeStr}` }, 400); return; }
+			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { jsonError(400, new Error("Invalid sessionId")); return; }
+			if (!isProposalType(typeStr)) { jsonError(400, new Error(`Unknown proposal type: ${typeStr}`)); return; }
 			const proposalType = typeStr as ProposalType;
 			const stateDir = bobbitStateDir();
 			const body = await readBody();
@@ -127,18 +127,18 @@ export const sessionsProposalsRoutes: Route[] = [
 				});
 				json({ ok: true, rev: writeRes.rev });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},
 	{
 		method: "POST",
 		pattern: /^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)\/restore$/,
-		handler: async ({ deps, params, readBody, json }) => {
+		handler: async ({ deps, params, readBody, json, jsonError }) => {
 			const sessionId = params[1];
 			const typeStr = params[2];
-			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { json({ error: "Invalid sessionId" }, 400); return; }
-			if (!isProposalType(typeStr)) { json({ error: `Unknown proposal type: ${typeStr}` }, 400); return; }
+			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { jsonError(400, new Error("Invalid sessionId")); return; }
+			if (!isProposalType(typeStr)) { jsonError(400, new Error(`Unknown proposal type: ${typeStr}`)); return; }
 			const proposalType = typeStr as ProposalType;
 			const stateDir = bobbitStateDir();
 			const body = await readBody();
@@ -169,18 +169,18 @@ export const sessionsProposalsRoutes: Route[] = [
 				});
 				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},
 	{
 		method: "GET",
 		pattern: /^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)$/,
-		handler: async ({ params, res, json }) => {
+		handler: async ({ params, res, json, jsonError }) => {
 			const sessionId = params[1];
 			const typeStr = params[2];
-			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { json({ error: "Invalid sessionId" }, 400); return; }
-			if (!isProposalType(typeStr)) { json({ error: `Unknown proposal type: ${typeStr}` }, 400); return; }
+			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { jsonError(400, new Error("Invalid sessionId")); return; }
+			if (!isProposalType(typeStr)) { jsonError(400, new Error(`Unknown proposal type: ${typeStr}`)); return; }
 			const proposalType = typeStr as ProposalType;
 			const stateDir = bobbitStateDir();
 			try {
@@ -193,18 +193,18 @@ export const sessionsProposalsRoutes: Route[] = [
 				res.writeHead(200, { "Content-Type": contentType });
 				res.end(content);
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},
 	{
 		method: "DELETE",
 		pattern: /^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)$/,
-		handler: async ({ deps, params, res, json }) => {
+		handler: async ({ deps, params, res, jsonError }) => {
 			const sessionId = params[1];
 			const typeStr = params[2];
-			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { json({ error: "Invalid sessionId" }, 400); return; }
-			if (!isProposalType(typeStr)) { json({ error: `Unknown proposal type: ${typeStr}` }, 400); return; }
+			if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) { jsonError(400, new Error("Invalid sessionId")); return; }
+			if (!isProposalType(typeStr)) { jsonError(400, new Error(`Unknown proposal type: ${typeStr}`)); return; }
 			const proposalType = typeStr as ProposalType;
 			const stateDir = bobbitStateDir();
 			try {
@@ -213,7 +213,7 @@ export const sessionsProposalsRoutes: Route[] = [
 				res.writeHead(204);
 				res.end();
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				jsonError(500, err);
 			}
 		},
 	},

@@ -18,25 +18,25 @@ export const imageGenerationRoutes: Route[] = [
 			const { sessionManager, preferencesStore } = deps;
 			const body = await readBody();
 			if (!body || typeof body !== "object" || typeof body.prompt !== "string") {
-				json({ error: "Missing prompt" }, 400);
+				jsonError(400, new Error("Missing prompt"));
 				return;
 			}
 			const MAX_PROMPT_CHARS = 8192;
 			if (body.prompt.length > MAX_PROMPT_CHARS) {
-				json({ error: "prompt exceeds 8192 chars" }, 400);
+				jsonError(400, new Error("prompt exceeds 8192 chars"));
 				return;
 			}
 			let n: number | undefined;
 			if (body.n !== undefined && body.n !== null) {
 				if (typeof body.n !== "number" || !Number.isInteger(body.n) || body.n < 1 || body.n > 4) {
-					json({ error: "n must be 1..4" }, 400);
+					jsonError(400, new Error("n must be 1..4"));
 					return;
 				}
 				n = body.n;
 			}
 			const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
 			if (sandboxScope && (!sessionId || !sandboxScope.sessionIds.has(sessionId))) {
-				json({ error: "session not in sandbox scope" }, 403);
+				jsonError(403, new Error("session not in sandbox scope"));
 				return;
 			}
 			const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
