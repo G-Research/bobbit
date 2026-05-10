@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Listener-leak regression fixture</title>
+<style>
+	:root {
+		--primary: #60a5fa;
+		--border: #333;
+		--card: #1e1e30;
+		--foreground: #e0e0e0;
+		--muted-foreground: #888;
+	}
+	body { font-family: sans-serif; padding: 16px; background: #1a1a2e; color: #e0e0e0; }
+	.inline-flex { display: inline-flex; }
+	.items-center { align-items: center; }
+	.gap-1 { gap: 0.25rem; }
+	.px-1\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+	.py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+	.rounded-full { border-radius: 9999px; }
+	.bg-card { background: var(--card); }
+	.border { border: 1px solid var(--border); }
+	.border-border { border-color: var(--border); }
+	.text-muted-foreground { color: var(--muted-foreground); }
+	.text-foreground { color: var(--foreground); }
+	.text-\[11px\] { font-size: 11px; }
+	.shrink-0 { flex-shrink: 0; }
+	.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.cursor-pointer { cursor: pointer; }
+	.relative { position: relative; }
+</style>
+<script>
+// Install the listener counter BEFORE any component module is imported.
+// We wrap addEventListener / removeEventListener on EventTarget.prototype
+// and track live counts in a WeakMap. When `{ signal }` is supplied, we
+// decrement on the signal's `abort` event using the ORIGINAL (unwrapped)
+// addEventListener so the wrapping doesn't recurse.
+//
+// See docs/design/listener-cleanup-standardisation.md §4.
+(function installListenerCounter() {
+	const counts = new WeakMap();
+	const origAdd = EventTarget.prototype.addEventListener;
+	const origRemove = EventTarget.prototype.removeEventListener;
+
+	function inc(target) {
+		const n = counts.get(target) || 0;
+		counts.set(target, n + 1);
+	}
+	function dec(target) {
+		const n = counts.get(target) || 0;
+		counts.set(target, Math.max(0, n - 1));
+	}
+
+	EventTarget.prototype.addEventListener = function (type, listener, options) {
+		// Normalise options to extract `signal` without losing other flags.
+		let signal;
+		if (options && typeof options === "object") {
+			signal = options.signal;
+		}
+		const result = origAdd.call(this, type, listener, options);
+		// If `listener` is null/undefined the browser ignores the call.
+		if (listener == null) return result;
+		// If signal is already aborted, the browser doesn't actually add the
+		// listener — don't count it.
+		if (signal && signal.aborted) return result;
+		inc(this);
+		const target = this;
+		if (signal) {
+			origAdd.call(signal, "abort", function onAbort() {
+				dec(target);
+			}, { once: true });
+		}
+		return result;
+	};
+
+	EventTarget.prototype.removeEventListener = function (type, listener, options) {
+		const result = origRemove.call(this, type, listener, options);
+		if (listener == null) return result;
+		// Best-effort: we can't tell if the listener was actually registered.
+		// For the regression test we only care that listeners with a signal
+		// auto-decrement on abort; manual removeEventListener pairs are an
+		// upper bound.
+		dec(this);
+		return result;
+	};
+
+	function totalLiveListeners(targets) {
+		let n = 0;
+		for (const t of targets) {
+			n += counts.get(t) || 0;
+		}
+		return n;
+	}
+
+	window.__totalLiveListeners = totalLiveListeners;
+	window.__listenerCounts = counts;
+})();
+</script>
+</head>
+<body>
+<div id="container"></div>
+<script src="./listener-leak-bundle.js"></script>
+</body>
+</html>

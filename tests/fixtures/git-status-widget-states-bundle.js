@@ -596,6 +596,36 @@
     return n4({ ...r8, state: true, attribute: false });
   }
 
+  // src/ui/components/base/BobbitElement.ts
+  var BobbitElement = class extends i4 {
+    // Recreated on every (re)connection. Aborted on disconnect.
+    #lifecycle = new AbortController();
+    /** Aborted when the element is disconnected from the DOM. */
+    get signal() {
+      return this.#lifecycle.signal;
+    }
+    /** Subclasses override and call `super.connectedCallback()` FIRST. */
+    connectedCallback() {
+      if (this.#lifecycle.signal.aborted) {
+        this.#lifecycle = new AbortController();
+      }
+      super.connectedCallback();
+    }
+    /** Subclasses override and call `super.disconnectedCallback()` LAST. */
+    disconnectedCallback() {
+      super.disconnectedCallback();
+      this.#lifecycle.abort();
+    }
+    /**
+     * Escape hatch: abort the current lifecycle without waiting for
+     * `disconnectedCallback`. Useful for elements that have an explicit
+     * `close()` API. Safe to call multiple times.
+     */
+    abortLifecycle() {
+      this.#lifecycle.abort();
+    }
+  };
+
   // node_modules/lit-html/directive-helpers.js
   var { I: t4 } = j;
   var r6 = (o9) => void 0 === o9.strings;
@@ -1364,7 +1394,7 @@
   }
 
   // src/ui/components/GitStatusWidget.ts
-  var GitStatusWidget = class extends i4 {
+  var GitStatusWidget = class extends BobbitElement {
     constructor() {
       super(...arguments);
       this.branch = "";
@@ -1461,23 +1491,21 @@
       this._dropdownEl.addEventListener("animationend", () => {
         this._closing = false;
         this.expanded = false;
-      }, { once: true });
+      }, { once: true, signal: this.signal });
     }
     createRenderRoot() {
       return this;
     }
     connectedCallback() {
       super.connectedCallback();
-      document.addEventListener("click", this._onDocumentClick, true);
-      document.addEventListener("keydown", this._onEscapeKeyDropdown, true);
+      document.addEventListener("click", this._onDocumentClick, { capture: true, signal: this.signal });
+      document.addEventListener("keydown", this._onEscapeKeyDropdown, { capture: true, signal: this.signal });
     }
     disconnectedCallback() {
-      super.disconnectedCallback();
-      document.removeEventListener("click", this._onDocumentClick, true);
-      document.removeEventListener("keydown", this._onEscapeKeyDropdown, true);
       this._removeDropdown();
       this._removeModal();
       this._removeCommitsModal();
+      super.disconnectedCallback();
     }
     _removeDropdown() {
       if (this._dropdownEl) {
@@ -1903,7 +1931,7 @@
       this._modalEl = document.createElement("div");
       this._modalEl.id = "git-diff-modal";
       document.body.appendChild(this._modalEl);
-      document.addEventListener("keydown", this._onEscapeKey);
+      document.addEventListener("keydown", this._onEscapeKey, { signal: this.signal });
       this._renderModal();
     }
     _renderModal() {
@@ -1949,7 +1977,6 @@
       this._removeModal();
     }
     _removeModal() {
-      document.removeEventListener("keydown", this._onEscapeKey);
       if (this._modalEl) {
         this._modalEl.remove();
         this._modalEl = null;
@@ -1989,7 +2016,7 @@
       this._commitsModalEl = document.createElement("div");
       this._commitsModalEl.id = "git-commits-modal";
       document.body.appendChild(this._commitsModalEl);
-      document.addEventListener("keydown", this._onEscapeKey);
+      document.addEventListener("keydown", this._onEscapeKey, { signal: this.signal });
       this._renderCommitsModal();
     }
     _renderCommitsModal() {
@@ -2054,7 +2081,6 @@
     }
     _removeCommitsModal() {
       if (this._commitsModalEl) {
-        document.removeEventListener("keydown", this._onEscapeKey);
         this._commitsModalEl.remove();
         this._commitsModalEl = null;
       }

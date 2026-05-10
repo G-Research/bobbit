@@ -1,9 +1,10 @@
-import { html, LitElement, nothing, render } from 'lit';
+import { html, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { BobbitElement } from './base/BobbitElement.js';
 import './DiffBlock.js';
 
 @customElement('git-status-widget')
-export class GitStatusWidget extends LitElement {
+export class GitStatusWidget extends BobbitElement {
     @property() branch = '';
     @property() primaryBranch = 'master';
     @property({ type: Boolean }) isOnPrimary = true;
@@ -142,26 +143,28 @@ export class GitStatusWidget extends LitElement {
         this._dropdownEl.addEventListener('animationend', () => {
             this._closing = false;
             this.expanded = false;
-        }, { once: true });
+        }, { once: true, signal: this.signal });
     }
 
     createRenderRoot() {
         return this;
     }
 
-    connectedCallback() {
+    override connectedCallback() {
         super.connectedCallback();
-        document.addEventListener('click', this._onDocumentClick, true);
-        document.addEventListener('keydown', this._onEscapeKeyDropdown, true);
+        document.addEventListener('click', this._onDocumentClick, { capture: true, signal: this.signal });
+        document.addEventListener('keydown', this._onEscapeKeyDropdown, { capture: true, signal: this.signal });
     }
 
-    disconnectedCallback() {
-        super.disconnectedCallback();
-        document.removeEventListener('click', this._onDocumentClick, true);
-        document.removeEventListener('keydown', this._onEscapeKeyDropdown, true);
+    override disconnectedCallback() {
+        // Listener cleanup (document click/keydown + animationend +
+        // _onEscapeKey on the modals) is handled by `this.signal` aborting
+        // in `BobbitElement.disconnectedCallback()`. We only need to tear
+        // down the DOM portals we appended to <body>.
         this._removeDropdown();
         this._removeModal();
         this._removeCommitsModal();
+        super.disconnectedCallback();
     }
 
     private _removeDropdown() {
@@ -591,7 +594,7 @@ export class GitStatusWidget extends LitElement {
         this._modalEl = document.createElement('div');
         this._modalEl.id = 'git-diff-modal';
         document.body.appendChild(this._modalEl);
-        document.addEventListener('keydown', this._onEscapeKey);
+        document.addEventListener('keydown', this._onEscapeKey, { signal: this.signal });
         this._renderModal();
     }
 
@@ -640,7 +643,10 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _removeModal() {
-        document.removeEventListener('keydown', this._onEscapeKey);
+        // `_onEscapeKey` is shared with the commits modal and is bound via
+        // `{ signal: this.signal }`, so cleanup happens on disconnect; here
+        // we only tear down the portal element. `_onEscapeKey` itself is a
+        // no-op when both `_modalEl` and `_commitsModalEl` are null.
         if (this._modalEl) {
             this._modalEl.remove();
             this._modalEl = null;
@@ -685,7 +691,7 @@ export class GitStatusWidget extends LitElement {
         this._commitsModalEl = document.createElement('div');
         this._commitsModalEl.id = 'git-commits-modal';
         document.body.appendChild(this._commitsModalEl);
-        document.addEventListener('keydown', this._onEscapeKey);
+        document.addEventListener('keydown', this._onEscapeKey, { signal: this.signal });
         this._renderCommitsModal();
     }
 
@@ -752,8 +758,9 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _removeCommitsModal() {
+        // See `_removeModal` — the `keydown` listener is signal-bound and
+        // cleaned up on disconnect.
         if (this._commitsModalEl) {
-            document.removeEventListener('keydown', this._onEscapeKey);
             this._commitsModalEl.remove();
             this._commitsModalEl = null;
         }
