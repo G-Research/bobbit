@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverFile = path.join(repoRoot, "src", "server", "server.ts");
 
-const LIMIT = 5800; // ratchet — lower as more routes migrate.
+const LIMIT = 1500; // design-doc §10 target.
 
 describe("server.ts size budget", () => {
 	it(`src/server/server.ts ≤ ${LIMIT} lines`, () => {

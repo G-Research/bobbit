@@ -16,7 +16,7 @@ const serverFile = path.join(repoRoot, "src", "server", "server.ts");
 
 // Current count of `req.method ===` lines inside server.ts (handleApiRoute body).
 // Ratchet downward in commits that migrate more routes.
-const MAX_REQ_METHOD_REFS = 130;
+const MAX_REQ_METHOD_REFS = 5;
 
 describe("server.ts route-handler leakage", () => {
 	it(`server.ts contains ≤ ${MAX_REQ_METHOD_REFS} \`req.method ===\` references`, () => {
