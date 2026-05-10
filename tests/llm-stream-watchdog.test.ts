@@ -18,6 +18,9 @@ import assert from "node:assert/strict";
 const {
 	onAgentEvent,
 	disposeStreamWatchdog,
+	shouldSuppressDrainForStallRetry,
+	shouldSkipErrorMessageEnd,
+	resolveWatchdogConfigFromEnv,
 } = await import("../src/server/agent/stream-watchdog.ts");
 type WatchdogConfig = import("../src/server/agent/stream-watchdog.ts").WatchdogConfig;
 type WatchdogSession = import("../src/server/agent/stream-watchdog.ts").WatchdogSession;
@@ -196,5 +199,249 @@ describe("stream-watchdog: disabled mode (timeoutMs <= 0)", () => {
 
 		await sleep(120);
 		assert.equal(rpc.abortCalls, 0, "no abort when disabled");
+	});
+});
+
+describe("stream-watchdog: env NaN guard", () => {
+	it("falls back to defaults when env vars are non-numeric", () => {
+		const origMs = process.env.BOBBIT_LLM_STREAM_TIMEOUT_MS;
+		const origMax = process.env.BOBBIT_LLM_STREAM_MAX_RETRIES;
+		try {
+			process.env.BOBBIT_LLM_STREAM_TIMEOUT_MS = "not-a-number";
+			process.env.BOBBIT_LLM_STREAM_MAX_RETRIES = "garbage";
+			const cfg = resolveWatchdogConfigFromEnv();
+			assert.equal(cfg.timeoutMs, 30_000, "NaN env falls back to 30s default");
+			assert.equal(cfg.maxRetries, 2, "NaN env falls back to maxRetries=2 default");
+		} finally {
+			if (origMs === undefined) delete process.env.BOBBIT_LLM_STREAM_TIMEOUT_MS;
+			else process.env.BOBBIT_LLM_STREAM_TIMEOUT_MS = origMs;
+			if (origMax === undefined) delete process.env.BOBBIT_LLM_STREAM_MAX_RETRIES;
+			else process.env.BOBBIT_LLM_STREAM_MAX_RETRIES = origMax;
+		}
+	});
+});
+
+describe("stream-watchdog: race vs user Stop", () => {
+	it("shouldSuppressDrainForStallRetry yields to a concurrent user abort", () => {
+		const rpc = makeRpc();
+		const session = makeSession("race1", rpc);
+		session.suppressNextDrainForStallRetry = true;
+
+		// User pressed Stop after watchdog set the flag but before agent_end.
+		// The helper must clear the flag AND return false so the standard
+		// `wasAborting` path proceeds to broadcastStatus(idle).
+		const suppress = shouldSuppressDrainForStallRetry(session, /*isAborting*/ true);
+		assert.equal(suppress, false, "user abort wins; do not short-circuit drain");
+		assert.equal(session.suppressNextDrainForStallRetry, false,
+			"flag cleared so a stale flag can't strand the next agent_end");
+	});
+
+	it("shouldSuppressDrainForStallRetry short-circuits when not aborting", () => {
+		const rpc = makeRpc();
+		const session = makeSession("race2", rpc);
+		session.suppressNextDrainForStallRetry = true;
+
+		const suppress = shouldSuppressDrainForStallRetry(session, /*isAborting*/ false);
+		assert.equal(suppress, true, "watchdog-driven retry: caller should short-circuit");
+		assert.equal(session.suppressNextDrainForStallRetry, false, "flag is consumed");
+	});
+
+	it("shouldSuppressDrainForStallRetry is a no-op when flag unset", () => {
+		const rpc = makeRpc();
+		const session = makeSession("race3", rpc);
+		assert.equal(shouldSuppressDrainForStallRetry(session, false), false);
+		assert.equal(shouldSuppressDrainForStallRetry(session, true), false);
+	});
+});
+
+describe("stream-watchdog: production-shape abort frames", () => {
+	// In production the real agent emits `message_end{stopReason:"error",
+	// errorMessage:"Request aborted"}` on every abort, INCLUDING the silent-
+	// retry aborts. The standard SessionManager handler would bump
+	// consecutiveErrorTurns on each, violating the design invariant that only
+	// the surfaced (3rd-attempt) failure advances the counter. The watchdog
+	// sets `suppressNextErrorMessageEnd` before each abort to prevent that.
+	it("suppressNextErrorMessageEnd is set on every silent retry", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("prod1", rpc);
+
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		// Wait for first stall.
+		const deadline = Date.now() + 1000;
+		while (Date.now() < deadline && rpc.abortCalls === 0) await sleep(10);
+		assert.equal(rpc.abortCalls, 1);
+		assert.equal(session.suppressNextErrorMessageEnd, true,
+			"silent-retry abort sets the suppress flag");
+
+		// Simulate the production-shape abort response: the helper consumes
+		// the flag and tells the caller to skip bookkeeping.
+		const skip = shouldSkipErrorMessageEnd(session);
+		assert.equal(skip, true, "helper returns true on first error message_end");
+		assert.equal(session.suppressNextErrorMessageEnd, false, "flag is consumed");
+
+		// A second error message_end (e.g. spurious double frame) is NOT
+		// suppressed — each abort gets exactly one suppression slot.
+		assert.equal(shouldSkipErrorMessageEnd(session), false);
+
+		disposeStreamWatchdog(session);
+	});
+
+	it("surfaced stall sets the flag AND emits a synthetic message_end", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("prod2", rpc);
+		const syntheticEvents: any[] = [];
+		session.emitSyntheticEvent = (ev) => syntheticEvents.push(ev);
+
+		// Drive 3 stalls.
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+		const deadline = Date.now() + 2000;
+		while (Date.now() < deadline && rpc.abortCalls < 1) await sleep(10);
+		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+		session.suppressNextDrainForStallRetry = false;
+		session.suppressNextErrorMessageEnd = false;
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+		while (Date.now() < deadline && rpc.abortCalls < 2) await sleep(10);
+		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+		session.suppressNextDrainForStallRetry = false;
+		session.suppressNextErrorMessageEnd = false;
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+		while (Date.now() < deadline && rpc.abortCalls < 3) await sleep(10);
+
+		assert.equal(rpc.abortCalls, 3);
+		assert.equal(session.suppressNextErrorMessageEnd, true,
+			"surfaced stall also sets the suppress flag (the abort emits another error frame)");
+		assert.equal(syntheticEvents.length, 1, "exactly one synthetic message_end");
+		const ev = syntheticEvents[0];
+		assert.equal(ev.type, "message_end");
+		assert.equal(ev.message.role, "assistant");
+		assert.equal(ev.message.stopReason, "error");
+		assert.match(ev.message.errorMessage, /stream stalled/i,
+			"synthetic message_end carries the stalled-stream user-visible text");
+
+		disposeStreamWatchdog(session);
+	});
+});
+
+describe("stream-watchdog: user-Stop race during silent retry", () => {
+	// Reproduces the [HIGH] race fixed by `shouldSuppressDrainForStallRetry`:
+	// watchdog initiates a silent-retry abort; user clicks Stop before
+	// `agent_end` arrives. Without the fix the suppression branch returned
+	// early and the session stuck in `aborting` forever (no broadcastStatus).
+	it("user Stop wins over silent-retry suppression — session reaches idle", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("race-stop", rpc);
+
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		// Wait for first stall — watchdog set the suppression flag and called abort().
+		const deadline = Date.now() + 1000;
+		while (Date.now() < deadline && rpc.abortCalls === 0) await sleep(10);
+		assert.equal(rpc.abortCalls, 1);
+		assert.equal(session.suppressNextDrainForStallRetry, true);
+
+		// Simulate the SessionManager `agent_end` handler that runs inline
+		// in production. Two cases interleaved here:
+		//   case A: user did NOT press Stop → helper short-circuits, drain
+		//           is suppressed, watchdog re-prompts.
+		//   case B: user DID press Stop → helper clears the flag and returns
+		//           false; standard wasAborting path proceeds.
+		const userPressedStop = true;
+		const suppress = shouldSuppressDrainForStallRetry(session, userPressedStop);
+		assert.equal(suppress, false,
+			"user Stop must win — helper returns false so caller proceeds to broadcastStatus(idle)");
+		assert.equal(session.suppressNextDrainForStallRetry, false,
+			"flag cleared so a stale flag can't strand the next agent_end");
+
+		disposeStreamWatchdog(session);
+	});
+});
+
+describe("stream-watchdog: end-to-end production-shape flow", () => {
+	// Mimics the full SessionManager bookkeeping under production-shape
+	// abort frames. Asserts the design invariant: silent retries do NOT
+	// advance `consecutiveErrorTurns`; only the surfaced stall does (+1).
+	function simulateMessageEnd(session: WatchdogSession, errored: boolean, errorMessage?: string) {
+		// Mirror the SessionManager handler logic in src/server/agent/session-manager.ts
+		// (the message_end branch).
+		if (errored && shouldSkipErrorMessageEnd(session)) {
+			return; // Watchdog owns the bookkeeping.
+		}
+		if (errored) {
+			session.lastTurnErrored = true;
+			session.lastTurnErrorMessage = errorMessage || "";
+			session.consecutiveErrorTurns = (session.consecutiveErrorTurns ?? 0) + 1;
+		} else {
+			session.lastTurnErrored = false;
+			session.lastTurnErrorMessage = undefined;
+			session.consecutiveErrorTurns = 0;
+		}
+	}
+
+	it("silent retries do not bump consecutiveErrorTurns under prod-shape aborts", async () => {
+		const rpc = makeRpc();
+		const session = makeSession("prod3", rpc);
+
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		// Stall #1.
+		const deadline1 = Date.now() + 1000;
+		while (Date.now() < deadline1 && rpc.abortCalls === 0) await sleep(10);
+		assert.equal(rpc.abortCalls, 1);
+
+		// Production agent emits the abort error frame BEFORE agent_end.
+		simulateMessageEnd(session, true, "Request aborted");
+		assert.equal(session.consecutiveErrorTurns ?? 0, 0,
+			"silent retry must NOT bump (suppression flag consumed)");
+		assert.equal(session.lastTurnErrored ?? false, false,
+			"silent retry must NOT mark turn as errored");
+
+		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+		session.suppressNextDrainForStallRetry = false;
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		// Stall #2.
+		const deadline2 = Date.now() + 1000;
+		while (Date.now() < deadline2 && rpc.abortCalls < 2) await sleep(10);
+		simulateMessageEnd(session, true, "Request aborted");
+		assert.equal(session.consecutiveErrorTurns ?? 0, 0,
+			"silent retry #2 must NOT bump");
+
+		onAgentEvent(session, { type: "agent_end" }, FAST_CFG, isAlive);
+		session.suppressNextDrainForStallRetry = false;
+		onAgentEvent(session, { type: "agent_start" }, FAST_CFG, isAlive);
+
+		// Stall #3 (surfaced). Watchdog bumps the counter manually,
+		// then emits the synthetic message_end (which IS suppressed by
+		// the same flag), then aborts — the abort's error frame is
+		// suppressed by the same flag. Wait, it's only one slot... let's
+		// confirm exactly one bump in total.
+		const evs: any[] = [];
+		session.emitSyntheticEvent = (ev) => {
+			evs.push(ev);
+			// The synthetic event flows directly to clients (bypassing
+			// handleAgentLifecycle) per session-manager.ts wiring — do not
+			// run simulateMessageEnd here.
+		};
+
+		const deadline3 = Date.now() + 1000;
+		while (Date.now() < deadline3 && rpc.abortCalls < 3) await sleep(10);
+		assert.equal(rpc.abortCalls, 3);
+		assert.equal(session.consecutiveErrorTurns, 1,
+			"surfaced stall bumps by exactly 1 (manual watchdog bump)");
+		assert.equal(session.lastTurnErrored, true);
+		assert.match(session.lastTurnErrorMessage ?? "", /stream stalled/i);
+
+		// Now the production abort emits its own error frame. The
+		// suppression flag is set, so this MUST be skipped.
+		simulateMessageEnd(session, true, "Request aborted");
+		assert.equal(session.consecutiveErrorTurns, 1,
+			"abort's 'Request aborted' frame must NOT bump again (still 1)");
+		assert.equal(session.lastTurnErrored, true,
+			"watchdog's lastTurnErrored preserved");
+		assert.match(session.lastTurnErrorMessage ?? "", /stream stalled/i,
+			"watchdog's lastTurnErrorMessage NOT clobbered by 'Request aborted'");
+
+		disposeStreamWatchdog(session);
 	});
 });

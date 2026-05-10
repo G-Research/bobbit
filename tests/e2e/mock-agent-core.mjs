@@ -477,11 +477,20 @@ export class MockAgentCore {
 		const stallMatch = text.match(/STREAM_STALL:(\d+)/);
 		if (stallMatch) {
 			const stallMs = parseInt(stallMatch[1], 10);
-			await this.tick(stallMs);
+			this._stallActive = true;
+			try {
+				await this.tick(stallMs);
+			} finally {
+				this._stallActive = false;
+			}
 			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
-				// abort already emitted agent_end synchronously in handleCommand;
-				// don't double-emit — that would clobber
-				// `suppressNextDrainForStallRetry` book-keeping in SessionManager.
+				// abort already emitted production-shape
+				// `message_end{stopReason:"error", errorMessage:"Request aborted"}`
+				// + `agent_end` synchronously in handleCommand (matching real-agent
+				// abort fidelity, like MOCK_ABORT_AS_ERROR=1). The stream-watchdog
+				// requires this to exercise the production-shape suppression path:
+				// `suppressNextErrorMessageEnd` consumed inside the message_end
+				// handler so silent retries don't double-bump consecutiveErrorTurns.
 				this.currentAbortController = null;
 				return;
 			}
@@ -1791,6 +1800,11 @@ export class MockAgentCore {
 			}
 
 			case "abort": {
+				// Track whether a turn was actually in-flight when the abort
+				// landed. STREAM_STALL needs production-shape error frames on
+				// every abort (the real agent does this), regardless of the
+				// MOCK_ABORT_AS_ERROR opt-in.
+				const wasStalling = this._stallActive === true;
 				if (this.currentAbortController) {
 					this.currentAbortController.abort();
 					this.currentAbortController = null;
@@ -1832,7 +1846,12 @@ export class MockAgentCore {
 				// tests can exercise the error-gated drain path without changing
 				// the default abort behaviour for tests that rely on the clean
 				// (non-errored) abort.
-				if (this.env.MOCK_ABORT_AS_ERROR === "1") {
+				// Production-shape error frame on abort. Two trigger paths:
+				//   1. `MOCK_ABORT_AS_ERROR=1` env opt-in (existing behaviour).
+				//   2. STREAM_STALL turn in flight — stream-watchdog tests need
+				//      the production-shape abort response so the suppression
+				//      path is exercised end-to-end.
+				if (this.env.MOCK_ABORT_AS_ERROR === "1" || wasStalling) {
 					const abortedMsg = {
 						role: "assistant",
 						content: [],
