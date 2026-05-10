@@ -76,14 +76,57 @@ When the watchdog tick observes `awaitingLlmFrame === true` and
    `suppressNextAbortMessageEnd` (drop that abort error frame from the WS
    broadcast), and `suppressNextUserEcho` (drop the SDK's user-echo of the
    re-issued prompt from the WS broadcast).
-3. `rpcClient.abort()` cancels the in-flight request.
-4. On the next tick the watchdog re-issues `lastPromptText` /
-   `lastPromptImages` via `rpcClient.prompt(...)`, refreshes
-   `lastLlmFrameAt`, and re-arms.
+3. `rpcClient.abort()` is **awaited** so the agent fully tears down the
+   in-flight request before any re-dispatch.
+4. The pending re-prompt is stashed on the session as
+   `pendingStallRetry = { text, images, attempt, total }`. The actual
+   `rpcClient.prompt(...)` re-dispatch happens later, from
+   `SessionManager._dispatchPendingStallRetry()` on the next `agent_end`
+   (the same callsite that already runs `shouldSuppressDrainForStallRetry`,
+   guaranteeing the agent is fully wound down). On a successful dispatch
+   the helper `armWatchdogAfterRetry()` refreshes `lastLlmFrameAt`,
+   re-sets `awaitingLlmFrame`, and re-arms the timer.
+
+**Why not `setTimeout(0)`?** The original implementation self-dispatched
+from the watchdog tick via `setTimeout(0)`. In production this raced the
+abort handshake: the SDK was still mid-abort when `prompt()` was called
+and rejected with "Agent is already processing". That rejection was
+swallowed by `.catch(() => {})` while `lastLlmFrameAt` had already been
+refreshed, so the watchdog idled for another full `timeoutMs` waiting for
+frames that would never arrive — silent retries were no-ops. Driving
+re-dispatch from `agent_end` is the same path manual `retryLastPrompt`
+uses, which has always worked. See `_dispatchPendingStallRetry` in
+`src/server/agent/session-manager.ts`.
 
 The session never leaves `streaming`. The transcript shows nothing — silent
 retries are silent on-wire as well as on-screen. See [Suppression contract](#suppression-contract)
 for why both broadcast flags are needed alongside the bookkeeping flag.
+
+### Empty-prompt guard
+
+If `lastPromptText` is missing or empty when a stall is detected, the
+watchdog skips silent retries entirely and goes straight to the surfaced
+path via `surfaceStallNow()`. Re-prompting with `""` would be worse than a
+stall — the agent would either reject it or burn a turn on no input. The
+guard fires on the first stall, not after exhausting retries.
+
+### Dispatch-failure path
+
+If the awaited `rpcClient.prompt(...)` from `_dispatchPendingStallRetry`
+rejects (e.g. the agent died, the sandbox was torn down, or the SDK still
+refuses the prompt for some other reason), the watchdog surfaces
+**immediately** rather than waiting another `timeoutMs` cycle. The manager
+calls `surfaceStallNow(session, cfg, ageMs)` synchronously and then
+broadcasts idle (the `agent_end` suppression branch short-circuited the
+standard idle broadcast, so it has to be issued explicitly). One log line
+is emitted:
+
+```
+[stream-watchdog] session=<id> retry-dispatch failed: <err>
+```
+
+This is greppable as a distinct failure mode from the retry-exhausted
+surface.
 
 ### Surfaced stall (attempt maxRetries + 1)
 
@@ -100,10 +143,17 @@ for why both broadcast flags are needed alongside the bookkeeping flag.
 5. A synthetic `message_end{stopReason:"error", errorMessage:"Model stream
    stalled — no frames for Xs (attempted N× before giving up)."}` is
    broadcast directly via `session.emitSyntheticEvent`, bypassing
-   `handleAgentLifecycle` entirely, so the UI renders the stalled-stream
-   text in the transcript (the UI's `Messages.ts` reads `errorMessage`
-   off the `message_end` frame — `lastTurnErrorMessage` alone is not
-   enough).
+   `handleAgentLifecycle` entirely. The frame carries two fields the UI
+   needs to render the **Retry button** (gated in
+   `src/ui/components/Messages.ts` / `MessageList.ts` on `isLastAssistant
+   && stopReason==="error" && onRetry`):
+   - a stable `id: "stalled-stream-<ts>-<sid>"` so the renderer treats it
+     as a normal assistant message rather than an unkeyed orphan, and
+   - a non-empty `content: [{ type: "text", text: errorMessage }]` chunk.
+   In production both were missing — the synthetic frame had no `id` and
+   `content: []` — and the Retry button silently failed to appear on
+   surfaced stalls. The button has `data-testid="retry-button"` for E2E
+   targeting.
 6. `rpcClient.abort()` runs.
 
 The session leaves `streaming` via the standard idle broadcast and the user
@@ -202,10 +252,16 @@ Every stall emits one greppable line per attempt:
 ```
 [stream-watchdog] session=c3d43268 pid=12345 last-frame-age=30041ms attempt=1/3 — aborting turn
 [stream-watchdog] session=c3d43268 silent-retry 1/2
+[stream-watchdog] session=c3d43268 silent-retry 1/2 succeeded
 [stream-watchdog] session=c3d43268 pid=12345 last-frame-age=30022ms attempt=2/3 — aborting turn
 [stream-watchdog] session=c3d43268 silent-retry 2/2
-[stream-watchdog] session=c3d43268 pid=12345 last-frame-age=30015ms attempt=3/3 — aborting turn
+[stream-watchdog] session=c3d43268 retry-dispatch failed: Agent is already processing
 ```
+
+The `succeeded` line is logged exactly once on the next clean (non-errored,
+non-suppressed) `agent_end` after a retry dispatch resolves —
+`silentRetrySuccessLogPending` is staged in `_dispatchPendingStallRetry`
+and cleared by `onAgentEvent`'s `agent_end` branch so it can't re-fire.
 
 Grep recipes:
 
@@ -216,8 +272,11 @@ grep '\[stream-watchdog\]' server.log
 # Surfaced stalls (3rd+ attempt) for a given session
 grep '\[stream-watchdog\] session=c3d43268.*attempt=3/' server.log
 
-# Sessions that recovered silently (saw a retry but never a surfaced one)
-grep '\[stream-watchdog\]' server.log | grep -v attempt=3/
+# Sessions that recovered silently
+grep '\[stream-watchdog\].*succeeded' server.log
+
+# Retry dispatches that failed (race with abort, dead agent, etc.)
+grep '\[stream-watchdog\].*retry-dispatch failed' server.log
 ```
 
 `pid` is best-effort: it reads through to the production `RpcBridge`'s
@@ -294,6 +353,12 @@ Unit (`tests/llm-stream-watchdog.test.ts`):
   stuck in `aborting`.
 - `end-to-end production-shape flow` — full sequence with the agent's
   real abort frames interleaved.
+- `silent-retry dispatch failure` — rejected re-prompt surfaces
+  immediately, no extra `timeoutMs` cycle.
+- `silent-retry success telemetry` — exactly one `succeeded` line per
+  recovery, cleared after emit.
+- `empty-prompt guard` — empty / undefined `lastPromptText` surfaces on
+  first stall, no `pendingStallRetry`, no `prompt()` call.
 
 E2E (`tests/e2e/ui/llm-stream-watchdog.spec.ts`):
 
@@ -301,3 +366,9 @@ E2E (`tests/e2e/ui/llm-stream-watchdog.spec.ts`):
   unwedges` — drives a real session with a controllable stall, asserts the
   user-visible transcript message and that the session leaves `streaming`
   and accepts a follow-up prompt.
+- `silent retry recovers` — uses the `STREAM_STALL_THEN_REPLY:<ms>`
+  mock-agent directive; asserts `lastTurnErrored=false`, no duplicate user
+  rows, no "Request aborted" rows.
+- `surfaced stall shows a working Retry button` — asserts
+  `getByTestId("retry-button")` is visible and click re-dispatches the
+  original prompt.
