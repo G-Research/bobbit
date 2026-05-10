@@ -11,6 +11,15 @@
 //   - delta < 0  → update cached height, do nothing.
 //   - delta == 0 → no-op (the canonical vibration-loop fix).
 //   - delta > 0  → if stickToBottom, scroll to bottom; else just update cache.
+//
+// Listener cleanup: callers may pass an AbortSignal via the options arg to
+// `reconcileFollowTail`. The signal is captured the first time listeners are
+// attached for a given element and threaded into every addEventListener call
+// (the signal IS the dispose mechanism — see
+// docs/design/listener-cleanup-standardisation.md). When omitted the
+// listeners live for the lifetime of the element (the existing behaviour);
+// this is the path used by the long-lived proposal/dialog panels in
+// `src/app/render.ts`, which are audited in Phase 5.
 
 interface LockState {
 	stickToBottom: boolean;
@@ -23,6 +32,17 @@ interface LockState {
 	attached: boolean;
 }
 
+export interface FollowTailOptions {
+	/**
+	 * Optional AbortSignal that ties the underlying DOM listeners to a
+	 * component lifecycle. When the signal aborts, the browser removes the
+	 * listeners — no manual cleanup required. Captured on the first
+	 * `reconcileFollowTail` call for a given element; subsequent calls with
+	 * a different signal are ignored (one element ↔ one lifecycle).
+	 */
+	signal?: AbortSignal;
+}
+
 // WeakMap keyed by the scroll element. When Lit detaches and re-attaches
 // the same element across renders, the same WeakMap entry is reused — the
 // lock state therefore persists across re-renders. When the element is
@@ -32,7 +52,7 @@ interface LockState {
 const locks = new WeakMap<HTMLElement, LockState>();
 const TAIL_PX = 5;
 
-function ensureLock(el: HTMLElement): LockState {
+function ensureLock(el: HTMLElement, signal: AbortSignal | undefined): LockState {
 	let s = locks.get(el);
 	if (!s) {
 		s = {
@@ -47,13 +67,13 @@ function ensureLock(el: HTMLElement): LockState {
 		locks.set(el, s);
 	}
 	if (!s.attached) {
-		attachListeners(el, s);
+		attachListeners(el, s, signal);
 		s.attached = true;
 	}
 	return s;
 }
 
-function attachListeners(el: HTMLElement, s: LockState) {
+function attachListeners(el: HTMLElement, s: LockState, signal: AbortSignal | undefined) {
 	const onScroll = () => {
 		if (
 			s.lastProgScrollTop !== null &&
@@ -82,23 +102,30 @@ function attachListeners(el: HTMLElement, s: LockState) {
 			s.selectionEnd = el.selectionEnd;
 		}
 	};
-	el.addEventListener("scroll", onScroll, { passive: true });
-	el.addEventListener("wheel", onUserIntent, { passive: true });
-	el.addEventListener("touchstart", onUserIntent, { passive: true });
-	el.addEventListener("keydown", onKeydown);
-	el.addEventListener("select", captureSelection);
-	el.addEventListener("keyup", captureSelection);
-	el.addEventListener("click", captureSelection);
+	el.addEventListener("scroll", onScroll, { passive: true, signal });
+	el.addEventListener("wheel", onUserIntent, { passive: true, signal });
+	el.addEventListener("touchstart", onUserIntent, { passive: true, signal });
+	el.addEventListener("keydown", onKeydown, { signal });
+	el.addEventListener("select", captureSelection, { signal });
+	el.addEventListener("keyup", captureSelection, { signal });
+	el.addEventListener("click", captureSelection, { signal });
 }
 
 /**
  * Call AFTER content is rewritten (i.e. after Lit has flushed the new value
  * for this element). Restores scrollTop/selection if we were tracking the
  * tail; otherwise leaves them alone.
+ *
+ * Pass `{ signal }` to tie the listeners attached on first call to a
+ * component lifecycle (recommended for callers in `src/ui/components/**`).
+ * Omitted = listeners live for the element's lifetime (legacy behaviour).
  */
-export function reconcileFollowTail(el: HTMLElement | null | undefined): void {
+export function reconcileFollowTail(
+	el: HTMLElement | null | undefined,
+	opts?: FollowTailOptions,
+): void {
 	if (!el) return;
-	const s = ensureLock(el);
+	const s = ensureLock(el, opts?.signal);
 	const newHeight = el.scrollHeight;
 	const delta = newHeight - s.lastScrollHeight;
 
@@ -148,4 +175,3 @@ export function reconcileFollowTail(el: HTMLElement | null | undefined): void {
 		}
 	}
 }
-
