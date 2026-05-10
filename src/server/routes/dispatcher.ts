@@ -41,6 +41,7 @@ import { previewRoutes } from "./preview.js";
 import { sessionsContentRoutes } from "./sessions-content.js";
 import { sessionsProposalsRoutes } from "./sessions-proposals.js";
 import { verificationsRoutes } from "./verifications.js";
+import { sessionsRoutes } from "./sessions.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -73,6 +74,7 @@ const allRoutes: ReadonlyArray<Route> = [
 	...sessionsContentRoutes,
 	...sessionsProposalsRoutes,
 	...verificationsRoutes,
+	...sessionsRoutes,
 ];
 
 /**
