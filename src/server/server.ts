@@ -61,7 +61,6 @@ import { readBody } from "./routes/route-helpers.js";
 import { dispatch as dispatchRoute } from "./routes/dispatcher.js";
 import type { RouteDeps } from "./routes/route-deps.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
-import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -1061,7 +1060,7 @@ async function handleApiRoute(
 	bgProcessManager: BgProcessManager,
 	staffManager: StaffManager,
 	verificationHarness: VerificationHarness,
-	preferencesStore: PreferencesStore,
+	_preferencesStore: PreferencesStore,
 	projectConfigStore: ProjectConfigStore,
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
@@ -2948,188 +2947,6 @@ async function handleApiRoute(
 	}
 
 	// ── Config: default cwd ──
-
-	// GET /api/config/cwd
-	if (url.pathname === "/api/config/cwd" && req.method === "GET") {
-		json({ cwd: config.defaultCwd });
-		return;
-	}
-
-	// PUT /api/config/cwd
-	if (url.pathname === "/api/config/cwd" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body?.cwd || typeof body.cwd !== "string") {
-			json({ error: "Missing or invalid cwd" }, 400);
-			return;
-		}
-		config.defaultCwd = body.cwd;
-		preferencesStore.set("defaultCwd", body.cwd);
-		json({ cwd: config.defaultCwd });
-		return;
-	}
-
-	// ── Preferences ──
-
-	/** Return preferences with sensitive keys (providerKey.*) filtered out. */
-	function getSafePreferences(): Record<string, unknown> {
-		const all = preferencesStore.getAll();
-		const filtered: Record<string, unknown> = {};
-		for (const [key, value] of Object.entries(all)) {
-			if (!key.startsWith("providerKey.")) {
-				filtered[key] = value;
-			}
-		}
-		return filtered;
-	}
-
-	/** Broadcast preferences_changed with sensitive keys filtered out. */
-	function broadcastPreferencesChanged(): void {
-		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
-	}
-
-	// GET /api/preferences — return all preferences (filter sensitive keys)
-	if (url.pathname === "/api/preferences" && req.method === "GET") {
-		json(getSafePreferences());
-		return;
-	}
-
-	// PUT /api/preferences — merge preferences
-	if (url.pathname === "/api/preferences" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		for (const [key, value] of Object.entries(body)) {
-			if (value === null || value === undefined) {
-				preferencesStore.remove(key);
-			} else {
-				preferencesStore.set(key, value);
-			}
-		}
-		json({ ok: true });
-		broadcastPreferencesChanged();
-		return;
-	}
-
-	// GET /api/project-config — return project settings
-	if (url.pathname === "/api/project-config" && req.method === "GET") {
-		json(projectConfigStore.getWithDefaults());
-		return;
-	}
-
-	// GET /api/project-config/defaults — return just the defaults
-	if (url.pathname === "/api/project-config/defaults" && req.method === "GET") {
-		json(projectConfigStore.getDefaults());
-		return;
-	}
-
-	// GET /api/config-directories — return all scanned config directories
-	if (url.pathname === "/api/config-directories" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId");
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		const resolvedCwd = projectId && projectContextManager
-			? projectContextManager.getOrCreate(projectId)?.project.rootPath ?? config.defaultCwd
-			: config.defaultCwd;
-		json(getAllConfigDirectories(resolvedCwd, resolvedStore));
-		return;
-	}
-
-	// DELETE /api/config-directories — remove a built-in directory from scanning
-	if (url.pathname === "/api/config-directories" && req.method === "DELETE") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object" || typeof (body as any).path !== "string") {
-			json({ error: "Missing 'path' in body" }, 400);
-			return;
-		}
-		const projectId = (body as any).projectId as string | null ?? null;
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		removeBuiltinDirectory(resolvedStore, (body as any).path);
-		json({ ok: true });
-		return;
-	}
-
-	// POST /api/config-directories/reset — reset all config dirs to defaults
-	if (url.pathname === "/api/config-directories/reset" && req.method === "POST") {
-		const body = await readBody(req);
-		const projectId = body && typeof body === "object" ? ((body as any).projectId as string | null ?? null) : null;
-		const resolvedStore = resolveProjectConfigStore(projectId);
-		resetConfigDirectories(resolvedStore);
-		json({ ok: true });
-		return;
-	}
-
-	// PUT /api/project-config — update server-scope project config fields
-	if (url.pathname === "/api/project-config" && req.method === "PUT") {
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
-		const bodyMap = body as Record<string, unknown>;
-
-		// Reject legacy top-level qa_* keys — they have moved into
-		// `components[<name>].config`.
-		for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
-			if (key in bodyMap) {
-				json({ error: `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead` }, 400);
-				return;
-			}
-		}
-
-		// Native-YAML migrated fields: must be sent as structured types.
-		const MIGRATED_FIELDS = [
-			{ key: "config_directories", expect: "array" as const },
-			{ key: "sandbox_tokens", expect: "array" as const },
-		];
-		const migratedExtracted: Record<string, unknown> = {};
-		for (const { key, expect } of MIGRATED_FIELDS) {
-			if (!(key in bodyMap)) continue;
-			const v = bodyMap[key];
-			if (v === null || v === "") { migratedExtracted[key] = null; delete bodyMap[key]; continue; }
-			if (typeof v === "string") {
-				json({ error: `Field "${key}" must be sent as a structured ${expect}, not a JSON-encoded string` }, 400);
-				return;
-			}
-			if (expect === "array" && !Array.isArray(v)) { json({ error: `Field "${key}" must be an array` }, 400); return; }
-			migratedExtracted[key] = v;
-			delete bodyMap[key];
-		}
-
-		for (const [key, value] of Object.entries(bodyMap)) {
-			if (key.includes(".")) {
-				json({ error: `Config key "${key}" must not contain dots` }, 400);
-				return;
-			}
-			if (value === null || value === "") {
-				projectConfigStore.remove(key);
-			} else if (typeof value === "string") {
-				projectConfigStore.set(key, value);
-			}
-		}
-
-		// Apply migrated structured fields via typed setters.
-		if ("config_directories" in migratedExtracted) {
-			const v = migratedExtracted.config_directories;
-			if (v === null) projectConfigStore.remove("config_directories");
-			else if (Array.isArray(v)) {
-				projectConfigStore.setConfigDirectories(
-					v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
-						path: String(e.path),
-						types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
-					})),
-				);
-			}
-		}
-		if ("sandbox_tokens" in migratedExtracted) {
-			const v = migratedExtracted.sandbox_tokens;
-			if (v === null) projectConfigStore.remove("sandbox_tokens");
-			else if (Array.isArray(v)) {
-				projectConfigStore.setSandboxTokens(
-					v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
-						key: String(e.key), enabled: e.enabled !== false,
-					})),
-				);
-			}
-		}
-
-		json({ ok: true });
-		return;
-	}
 
 	// ── Unified Model Registry ──
 
