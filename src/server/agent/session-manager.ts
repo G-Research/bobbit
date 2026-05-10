@@ -4925,6 +4925,29 @@ export class SessionManager {
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
 
+		// CRITICAL: register the agent_end listener BEFORE calling abort().
+		// The pi-agent-core SDK can emit agent_end synchronously inside the
+		// await of rpcClient.abort() (handleRunFailure emits before finishRun()
+		// clears activeRun). If we register after the await, we miss the event,
+		// the grace period times out, and we fall into the force-kill branch —
+		// which then kills the bridge process *after* drainQueue (running off
+		// agent_end) has already dispatched a queued prompt to that bridge.
+		// Result: the steered user-message echo renders but the agent process
+		// is killed before it can produce an assistant response.
+		let resolveSettled!: (v: boolean) => void;
+		const settledPromise = new Promise<boolean>((resolve) => { resolveSettled = resolve; });
+		const settleTimer = setTimeout(() => {
+			unsubSettle();
+			resolveSettled(false);
+		}, gracePeriodMs);
+		const unsubSettle = session.rpcClient.onEvent((event: any) => {
+			if (event.type === "agent_end") {
+				clearTimeout(settleTimer);
+				unsubSettle();
+				resolveSettled(true);
+			}
+		});
+
 		// Try graceful abort first
 		try {
 			await session.rpcClient.abort();
@@ -4932,24 +4955,7 @@ export class SessionManager {
 			// Abort RPC itself may fail/timeout — proceed to force kill
 		}
 
-		// Wait for the agent to become idle
-		const settled = await new Promise<boolean>((resolve) => {
-			if (session.status !== "streaming" && session.status !== "aborting") {
-				resolve(true);
-				return;
-			}
-			const timer = setTimeout(() => {
-				unsub();
-				resolve(false);
-			}, gracePeriodMs);
-			const unsub = session.rpcClient.onEvent((event: any) => {
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsub();
-					resolve(true);
-				}
-			});
-		});
+		const settled = await settledPromise;
 
 		if (settled) return;
 
