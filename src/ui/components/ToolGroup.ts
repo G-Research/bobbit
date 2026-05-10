@@ -1,8 +1,9 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
 import { icon } from "@mariozechner/mini-lit";
-import { html, LitElement } from "lit";
+import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BobbitElement } from "./base/BobbitElement.js";
 import {
 	Bot,
 	FileText,
@@ -71,7 +72,7 @@ function truncate(s: string, max: number): string {
  * collapsible card showing a summary header.
  */
 @customElement("tool-group")
-export class ToolGroup extends LitElement {
+export class ToolGroup extends BobbitElement {
 	@property({ type: String }) toolName = "";
 	@property({ type: Array }) toolCalls: ToolCall[] = [];
 	@property({ type: Array }) tools: AgentTool[] = [];
@@ -96,12 +97,7 @@ export class ToolGroup extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
-		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-	}
-
-	override disconnectedCallback(): void {
-		super.disconnectedCallback();
-		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded, { signal: this.signal });
 	}
 
 	private _toggle() {

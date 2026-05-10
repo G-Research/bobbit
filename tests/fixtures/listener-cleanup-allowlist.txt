@@ -23,10 +23,8 @@
 src/ui/components/BgProcessPill.ts
 src/ui/components/ContinueSessionChooser.ts
 src/ui/components/DiffBlock.ts
-src/ui/components/Messages.ts
 src/ui/components/ProjectPickerPopover.ts
 src/ui/components/SearchBox.ts
-src/ui/components/ToolGroup.ts
 src/ui/components/review/AnnotationPopover.ts
 src/ui/components/review/AnnotationStore.ts
 src/ui/components/review/ReviewDocument.ts
