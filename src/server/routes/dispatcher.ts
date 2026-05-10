@@ -15,13 +15,15 @@ import { matchRoute } from "./match-route.js";
 import { readBody } from "./route-helpers.js";
 import type { Route, RouteContext } from "./types.js";
 import type { RouteDeps } from "./route-deps.js";
+import { healthRoutes } from "./health.js";
 
 // Registered route arrays — populated as domain migrations land. Each
-// `routes/<domain>.ts` exports a `domainRoutes: Route[]` array. Until all
-// migrations land, an empty `allRoutes` here means the dispatcher always
-// returns "no match" and `requestHandler` falls through to the legacy
-// `handleApiRoute()`.
-const allRoutes: ReadonlyArray<Route> = [];
+// `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
+// migrations land, unmatched requests fall through to the legacy
+// `handleApiRoute()` (see requestHandler in server.ts).
+const allRoutes: ReadonlyArray<Route> = [
+	...healthRoutes,
+];
 
 /**
  * Try to dispatch a request to a registered route handler. Returns true if
