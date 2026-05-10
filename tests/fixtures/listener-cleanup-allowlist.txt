@@ -20,7 +20,6 @@
 # When this list is empty, delete the file altogether. The test will
 # then enforce the convention on every file in src/ui/components/**.
 
-src/ui/components/AgentInterface.ts
 src/ui/components/BgProcessPill.ts
 src/ui/components/ContinueSessionChooser.ts
 src/ui/components/DiffBlock.ts

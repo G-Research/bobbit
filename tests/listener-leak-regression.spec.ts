@@ -22,13 +22,15 @@ const FIXTURE = path.resolve("tests/fixtures/listener-leak-fixture.html");
 const BUNDLE = path.resolve("tests/fixtures/listener-leak-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/listener-leak-entry.ts");
 const WIDGET_SRC = path.resolve("src/ui/components/GitStatusWidget.ts");
+const AGENT_SRC = path.resolve("src/ui/components/AgentInterface.ts");
 const BASE_SRC = path.resolve("src/ui/components/base/BobbitElement.ts");
+const TIMERS_SRC = path.resolve("src/ui/components/base/lifecycle-timers.ts");
 
 test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, WIDGET_SRC, BASE_SRC],
+		deps: [ENTRY, WIDGET_SRC, AGENT_SRC, BASE_SRC, TIMERS_SRC],
 	});
 });
 
@@ -87,6 +89,47 @@ test.describe("listener-leak regression", () => {
 
 		// Every sample must be at the baseline. If any cycle leaked even one
 		// listener, the count grows monotonically and this fails.
+		for (let i = 0; i < samples.length; i++) {
+			expect(
+				samples[i],
+				`After mount/disconnect cycle ${i + 1}, listener count on (window, document) was ${samples[i]} (baseline ${baseline}). Sample history: ${JSON.stringify(samples)}`,
+			).toBe(baseline);
+		}
+	});
+
+	test("agent-interface releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
+		await gotoAndWait(page, "agent-interface");
+
+		const baseline = await page.evaluate(() =>
+			(window as any).__totalLiveListeners([window, document]),
+		);
+
+		const samples: number[] = [];
+		for (let i = 0; i < 10; i++) {
+			await page.evaluate(() => {
+				const el = document.getElementById("container")!;
+				const w = document.createElement("agent-interface") as any;
+				// No session set — component renders the "No session set"
+				// placeholder branch but still installs window/document
+				// listeners in connectedCallback (Escape handler, narrow RO).
+				// That's enough to exercise the cleanup path.
+				w.readOnly = true;
+				el.appendChild(w);
+			});
+			await page.waitForTimeout(20);
+
+			await page.evaluate(() => {
+				const el = document.getElementById("container")!;
+				while (el.firstChild) el.removeChild(el.firstChild);
+			});
+			await page.waitForTimeout(20);
+
+			const after = await page.evaluate(() =>
+				(window as any).__totalLiveListeners([window, document]),
+			);
+			samples.push(after);
+		}
+
 		for (let i = 0; i < samples.length; i++) {
 			expect(
 				samples[i],
