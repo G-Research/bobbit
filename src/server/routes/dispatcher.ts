@@ -32,6 +32,8 @@ import { costRoutes } from "./cost.js";
 import { projectsRoutes } from "./projects.js";
 import { tasksRoutes } from "./tasks.js";
 import { gatesRoutes } from "./gates.js";
+import { goalsRoutes } from "./goals.js";
+import { goalsGitRoutes } from "./goals-git.js";
 
 // Registered route arrays — populated as domain migrations land. Each
 // `routes/<domain>.ts` exports a `<domain>Routes: Route[]` array. Until all
@@ -55,6 +57,8 @@ const allRoutes: ReadonlyArray<Route> = [
 	...projectsRoutes,
 	...tasksRoutes,
 	...gatesRoutes,
+	...goalsGitRoutes,
+	...goalsRoutes,
 ];
 
 /**
