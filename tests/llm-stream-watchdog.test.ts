@@ -31,8 +31,20 @@ interface FakeRpc {
 	abortCalls: number;
 	promptCalls: Array<{ text: string; images?: any }>;
 	process: { pid: number };
-	/** One-shot: when set, the next prompt() call rejects with this error. */
-	rejectNextPrompt?: Error;
+	/** True while an abort handshake is mid-flight (set on abort() entry,
+	 *  cleared shortly after on a later macrotask). Models the real agent's
+	 *  "Agent is already processing" window where prompt() rejects if called
+	 *  before the abort fully unwinds. */
+	abortInFlight?: boolean;
+	/** When true (default false), prompt() will reject with
+	 *  `new Error("Agent is already processing.")` if called while
+	 *  `abortInFlight === true`. Off by default so existing tests are
+	 *  unaffected; the dispatch-failure test opts in. */
+	modelAbortBusy?: boolean;
+	/** How long abortInFlight stays set after abort() resolves. Short enough
+	 *  to be invisible to follow-up calls in fast tests, long enough to
+	 *  reliably overlap a `setTimeout(0)`-scheduled prompt. */
+	abortBusyWindowMs?: number;
 }
 
 function makeRpc(): FakeRpc {
@@ -40,13 +52,22 @@ function makeRpc(): FakeRpc {
 		abortCalls: 0,
 		promptCalls: [],
 		process: { pid: 12345 },
-		async abort() { c.abortCalls++; return { success: true }; },
+		abortInFlight: false,
+		async abort() {
+			c.abortCalls++;
+			c.abortInFlight = true;
+			// Clear the in-flight window on a later macrotask. A `setTimeout(0)`
+			// scheduled by the caller AFTER `await abort()` resolves will
+			// generally race with this; we use a short positive delay so the
+			// watchdog's race is deterministic in test (prompt sees the flag).
+			const windowMs = c.abortBusyWindowMs ?? 30;
+			setTimeout(() => { c.abortInFlight = false; }, windowMs);
+			return { success: true };
+		},
 		async prompt(text: string, images?: any) {
 			c.promptCalls.push({ text, images });
-			if (c.rejectNextPrompt) {
-				const err = c.rejectNextPrompt;
-				c.rejectNextPrompt = undefined;
-				throw err;
+			if (c.modelAbortBusy && c.abortInFlight) {
+				throw new Error("Agent is already processing.");
 			}
 			return { success: true };
 		},
@@ -377,9 +398,17 @@ describe("stream-watchdog: silent-retry dispatch failure", () => {
 	// IMMEDIATELY (within one tick), not after another full `timeoutMs`.
 	it("stream-watchdog: silent retry surfaces immediately when re-prompt dispatch rejects", async () => {
 		const rpc = makeRpc();
-		// Configure the FIRST silent-retry re-prompt to reject with the
-		// production-shape error.
-		rpc.rejectNextPrompt = new Error("Agent is already processing.");
+		// Model the real-agent race: prompt() rejects with "Agent is already
+		// processing." when called while an abort handshake is mid-flight.
+		// The watchdog's silent-retry branch does:
+		//   await rpcClient.abort();
+		//   setTimeout(() => { void rpcClient.prompt(...).catch(()=>{}); }, 0);
+		// The setTimeout(0) callback fires while abortInFlight is still true
+		// (cleared ~30ms later), so prompt() rejects — matching production.
+		// No one-shot opt-in: the rejection is triggered by the watchdog's
+		// natural sequencing.
+		rpc.modelAbortBusy = true;
+		rpc.abortBusyWindowMs = 30;
 		const session = makeSession("silent-retry-reject", rpc);
 		const syntheticEvents: any[] = [];
 		session.emitSyntheticEvent = (ev) => syntheticEvents.push(ev);
