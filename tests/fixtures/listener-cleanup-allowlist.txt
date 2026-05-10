@@ -27,7 +27,6 @@ src/ui/components/DiffBlock.ts
 src/ui/components/MessageEditor.ts
 src/ui/components/Messages.ts
 src/ui/components/ProjectPickerPopover.ts
-src/ui/components/SandboxedIframe.ts
 src/ui/components/SearchBox.ts
 src/ui/components/ToolGroup.ts
 src/ui/components/review/AnnotationPopover.ts

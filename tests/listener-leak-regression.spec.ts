@@ -22,13 +22,15 @@ const FIXTURE = path.resolve("tests/fixtures/listener-leak-fixture.html");
 const BUNDLE = path.resolve("tests/fixtures/listener-leak-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/listener-leak-entry.ts");
 const WIDGET_SRC = path.resolve("src/ui/components/GitStatusWidget.ts");
+const SANDBOX_SRC = path.resolve("src/ui/components/SandboxedIframe.ts");
 const BASE_SRC = path.resolve("src/ui/components/base/BobbitElement.ts");
+const TIMERS_SRC = path.resolve("src/ui/components/base/lifecycle-timers.ts");
 
 test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, WIDGET_SRC, BASE_SRC],
+		deps: [ENTRY, WIDGET_SRC, SANDBOX_SRC, BASE_SRC, TIMERS_SRC],
 	});
 });
 
@@ -87,6 +89,46 @@ test.describe("listener-leak regression", () => {
 
 		// Every sample must be at the baseline. If any cycle leaked even one
 		// listener, the count grows monotonically and this fails.
+		for (let i = 0; i < samples.length; i++) {
+			expect(
+				samples[i],
+				`After mount/disconnect cycle ${i + 1}, listener count on (window, document) was ${samples[i]} (baseline ${baseline}). Sample history: ${JSON.stringify(samples)}`,
+			).toBe(baseline);
+		}
+	});
+
+	test("sandbox-iframe releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
+		await gotoAndWait(page, "sandbox-iframe");
+
+		const baseline = await page.evaluate(() =>
+			(window as any).__totalLiveListeners([window, document]),
+		);
+
+		const samples: number[] = [];
+		for (let i = 0; i < 10; i++) {
+			await page.evaluate(() => {
+				const el = document.getElementById("container")!;
+				// Mount with no `sandboxUrlProvider` — the element binds no
+				// listeners until `loadContent`/`execute` is called, but the
+				// regression test only cares that connect/disconnect itself
+				// is leak-free.
+				const w = document.createElement("sandbox-iframe") as any;
+				el.appendChild(w);
+			});
+			await page.waitForTimeout(20);
+
+			await page.evaluate(() => {
+				const el = document.getElementById("container")!;
+				while (el.firstChild) el.removeChild(el.firstChild);
+			});
+			await page.waitForTimeout(20);
+
+			const after = await page.evaluate(() =>
+				(window as any).__totalLiveListeners([window, document]),
+			);
+			samples.push(after);
+		}
+
 		for (let i = 0; i < samples.length; i++) {
 			expect(
 				samples[i],
