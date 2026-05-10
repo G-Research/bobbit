@@ -3,8 +3,10 @@ import { isAskResponseEnvelope } from "../../shared/ask-envelope.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { streamSimple, type ToolResultMessage, type Usage } from "@mariozechner/pi-ai";
-import { html, LitElement, nothing } from "lit";
+import { html, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
+import { BobbitElement } from "./base/BobbitElement.js";
+import { LifecycleTimers } from "./base/lifecycle-timers.js";
 import { ArrowDown, Brain, Image as ImageIcon, Sparkles } from "lucide";
 import { ModelSelector } from "../dialogs/ModelSelector.js";
 import { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
@@ -31,7 +33,11 @@ import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 
 @customElement("agent-interface")
-export class AgentInterface extends LitElement {
+export class AgentInterface extends BobbitElement {
+	/** Lifecycle-bound timer helper. Reassigned on every `connectedCallback`
+	 * so reusable elements that move around the DOM pick up the fresh signal
+	 * created by `BobbitElement` on re-attach. */
+	private _timers: LifecycleTimers = new LifecycleTimers(this.signal);
 	// Optional external session: when provided, this component becomes a view over the session
 	@property({ attribute: false }) session?: Agent;
 	@property({ type: Boolean }) enableAttachments = true;
@@ -136,7 +142,7 @@ export class AgentInterface extends LitElement {
 			if (chooser.parentElement) chooser.parentElement.removeChild(chooser);
 		};
 
-		chooser.addEventListener("cancel", () => cleanup());
+		chooser.addEventListener("cancel", () => cleanup(), { signal: this.signal });
 		chooser.addEventListener("continue", async () => {
 			cleanup();
 			const archivedId = this.session?.sessionId;
@@ -165,7 +171,7 @@ export class AgentInterface extends LitElement {
 				console.error("Continue in new session threw:", err);
 				this._showContinueError(String(err));
 			}
-		});
+		}, { signal: this.signal });
 	}
 
 	private _showContinueError(message: string) {
@@ -175,7 +181,7 @@ export class AgentInterface extends LitElement {
 			"position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;padding:10px 14px;border-radius:6px;font-size:13px;max-width:90vw;background:var(--destructive,#b91c1c);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,0.2);";
 		host.textContent = message;
 		document.body.appendChild(host);
-		setTimeout(() => {
+		this._timers.setTimeout(() => {
 			if (host.parentElement) host.parentElement.removeChild(host);
 		}, 5000);
 	}
@@ -238,7 +244,7 @@ export class AgentInterface extends LitElement {
 	private _animation: { current: number; target: number; velocity: number; rafId: number; resolve: () => void } | null = null;
 	/** Pending setTimeout for the deferred scroll handler. Queued at most
 	 * once per scroll event; cleared when the handler runs. */
-	private _scrollDeferTimer: ReturnType<typeof setTimeout> | null = null;
+	private _scrollDeferTimer: number | null = null;
 	private _scrollContainer?: HTMLElement;
 	private _resizeObserver?: ResizeObserver;
 	private _lastScrollHeight = 0;
@@ -362,7 +368,7 @@ export class AgentInterface extends LitElement {
 
 	public setInput(text: string, attachments?: Attachment[]) {
 		const update = () => {
-			if (!this._messageEditor) requestAnimationFrame(update);
+			if (!this._messageEditor) this._timers.raf(update);
 			else {
 				this._messageEditor.value = text;
 				this._messageEditor.attachments = attachments || [];
@@ -447,7 +453,7 @@ export class AgentInterface extends LitElement {
 			if (Math.abs(el.scrollTop - target) >= 1) {
 				this._writeScrollTop(target);
 			}
-			return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+			return new Promise((resolve) => this._timers.raf(() => resolve()));
 		}
 		// Spring animation path. Used only by the explicit jump-to-bottom
 		// click — gives the user a smooth-feel landing instead of a hard jump.
@@ -474,13 +480,13 @@ export class AgentInterface extends LitElement {
 					return;
 				}
 				this._writeScrollTop(Math.round(anim.current));
-				anim.rafId = requestAnimationFrame(step);
+				anim.rafId = this._timers.raf(step);
 			};
 			this._animation = {
 				current: el.scrollTop,
 				target,
 				velocity: 0,
-				rafId: requestAnimationFrame(step),
+				rafId: this._timers.raf(step),
 				resolve,
 			};
 		});
@@ -543,6 +549,10 @@ export class AgentInterface extends LitElement {
 
 	override async connectedCallback() {
 		super.connectedCallback();
+		// Refresh the timer helper to use the freshly minted AbortSignal —
+		// `BobbitElement.connectedCallback()` replaces the controller after a
+		// disconnect/reconnect cycle.
+		this._timers = new LifecycleTimers(this.signal);
 
 		this.style.display = "flex";
 		this.style.flexDirection = "column";
@@ -581,8 +591,8 @@ export class AgentInterface extends LitElement {
 				// handler reads this flag and skips classification while it
 				// is non-zero, eliminating Bug B (resize-vs-scroll ambiguity).
 				this._resizeDifference = delta;
-				requestAnimationFrame(() => {
-					setTimeout(() => {
+				this._timers.raf(() => {
+					this._timers.setTimeout(() => {
 						if (this._resizeDifference === delta) this._resizeDifference = 0;
 					}, 1);
 				});
@@ -624,13 +634,13 @@ export class AgentInterface extends LitElement {
 			}
 
 			// Track user scroll to decide stick-to-bottom state.
-			this._scrollContainer.addEventListener("scroll", this._handleScroll, { passive: true });
+			this._scrollContainer.addEventListener("scroll", this._handleScroll, { passive: true, signal: this.signal });
 			// Explicit user-intent listeners — any of these immediately
 			// unsticks (synchronously, BEFORE the resulting scroll event
 			// reaches the deferred handler).
-			this._scrollContainer.addEventListener("wheel", this._handleUserIntent, { passive: true });
-			this._scrollContainer.addEventListener("touchstart", this._handleUserIntent, { passive: true });
-			this._scrollContainer.addEventListener("keydown", this._handleScrollKeydown);
+			this._scrollContainer.addEventListener("wheel", this._handleUserIntent, { passive: true, signal: this.signal });
+			this._scrollContainer.addEventListener("touchstart", this._handleUserIntent, { passive: true, signal: this.signal });
+			this._scrollContainer.addEventListener("keydown", this._handleScrollKeydown, { signal: this.signal });
 
 			// Capture-phase `load` listener for `<img>`/`<iframe>` decode
 			// reflows. NOT redundant with the RO `delta>0` branch: image
@@ -644,7 +654,7 @@ export class AgentInterface extends LitElement {
 					this._scrollToBottomNow({ animate: false });
 				}
 			};
-			this._scrollContainer.addEventListener("load", this._imageLoadHandler, { capture: true });
+			this._scrollContainer.addEventListener("load", this._imageLoadHandler, { capture: true, signal: this.signal });
 		}
 
 		// Subscribe to external session if provided
@@ -666,28 +676,22 @@ export class AgentInterface extends LitElement {
 		// own Escape handler still runs (it calls onAbort too — server-side
 		// abort is idempotent), but unfocused users get the same Stop behaviour.
 		if (typeof document !== "undefined") {
-			document.addEventListener("keydown", this._handleGlobalEscape, true);
+			document.addEventListener("keydown", this._handleGlobalEscape, { capture: true, signal: this.signal });
 		}
 	}
 
 	override disconnectedCallback() {
-		super.disconnectedCallback();
-
-		// Clean up observers and listeners
+		// ResizeObserver / animation / WS subscription cleanup is NOT covered
+		// by the lifecycle AbortSignal — handle them explicitly. Listener
+		// removal (scroll/wheel/touchstart/keydown/load on the scroll
+		// container, document keydown, document click) happens automatically
+		// via the signal abort triggered by `super.disconnectedCallback()`.
 		if (this._resizeObserver) {
 			this._resizeObserver.disconnect();
 			this._resizeObserver = undefined;
 		}
-
-		if (this._scrollContainer) {
-			this._scrollContainer.removeEventListener("scroll", this._handleScroll);
-			this._scrollContainer.removeEventListener("wheel", this._handleUserIntent);
-			this._scrollContainer.removeEventListener("touchstart", this._handleUserIntent);
-			this._scrollContainer.removeEventListener("keydown", this._handleScrollKeydown);
-			if (this._imageLoadHandler) {
-				this._scrollContainer.removeEventListener("load", this._imageLoadHandler, { capture: true } as any);
-				this._imageLoadHandler = undefined;
-			}
+		if (this._imageLoadHandler) {
+			this._imageLoadHandler = undefined;
 		}
 		this._cancelAnimation();
 		if (this._scrollDeferTimer) {
@@ -705,13 +709,13 @@ export class AgentInterface extends LitElement {
 			this._narrowResizeObserver = undefined;
 		}
 
-		document.removeEventListener("click", this._handleMoreClickOutside, true);
-		document.removeEventListener("keydown", this._handleGlobalEscape, true);
-
 		if (this._unsubscribeSession) {
 			this._unsubscribeSession();
 			this._unsubscribeSession = undefined;
 		}
+
+		// Call super LAST so the abort fires after our explicit teardown.
+		super.disconnectedCallback();
 	}
 
 	private setupSessionSubscription() {
@@ -939,7 +943,7 @@ export class AgentInterface extends LitElement {
 		// Defer body via setTimeout(0) so RO can set `_resizeDifference`
 		// before we classify. Coalesce: only one timer in flight.
 		if (this._scrollDeferTimer) clearTimeout(this._scrollDeferTimer);
-		this._scrollDeferTimer = setTimeout(() => {
+		this._scrollDeferTimer = this._timers.setTimeout(() => {
 			this._scrollDeferTimer = null;
 			if (!this._scrollContainer) return;
 
@@ -968,7 +972,7 @@ export class AgentInterface extends LitElement {
 			// us pinned — exercised by tail-chat-jump-button-false-positive.
 			if (!gestureFresh) {
 				if (this._isAtBottom && !this._escapedFromLock && !this._isNearBottom()) {
-					requestAnimationFrame(() => this._pinIfSticking());
+					this._timers.raf(() => this._pinIfSticking());
 				}
 				this._refreshJumpButton();
 				return;
@@ -1921,9 +1925,12 @@ export class AgentInterface extends LitElement {
 		this._moreExpanded = !this._moreExpanded;
 		this.requestUpdate();
 		if (this._moreExpanded) {
-			// Defer adding click-outside so this click doesn't immediately close it
-			requestAnimationFrame(() => {
-				document.addEventListener("click", this._handleMoreClickOutside, true);
+			// Defer adding click-outside so this click doesn't immediately close it.
+			// Pass `signal` so the listener is also auto-removed on disconnect — the
+			// explicit `removeEventListener` below still runs on collapse and on the
+			// click-outside path itself, which is the dynamic teardown.
+			this._timers.raf(() => {
+				document.addEventListener("click", this._handleMoreClickOutside, { capture: true, signal: this.signal });
 			});
 		} else {
 			document.removeEventListener("click", this._handleMoreClickOutside, true);
@@ -1962,7 +1969,7 @@ export class AgentInterface extends LitElement {
 			if (hiddenIds.has(id)) {
 				// Pill is in the "More" popover — dismiss directly, no animation
 				this.onBgProcessDismiss?.(id);
-				requestAnimationFrame(() => this._measurePillOverflow());
+				this._timers.raf(() => this._measurePillOverflow());
 				return;
 			}
 		}
@@ -1989,7 +1996,7 @@ export class AgentInterface extends LitElement {
 			this._dismissingId = null;
 			this.onBgProcessDismiss?.(id);
 			// Recalculate overflow after removal
-			requestAnimationFrame(() => this._measurePillOverflow());
+			this._timers.raf(() => this._measurePillOverflow());
 		}
 		if (e.animationName === 'pill-slide-in') {
 			this._promotedIds.delete(id);
@@ -2089,7 +2096,7 @@ export class AgentInterface extends LitElement {
 			}
 			// Measure after renders that change pill count
 			if (changedProperties.has('bgProcesses')) {
-				requestAnimationFrame(() => this._measurePillOverflow());
+				this._timers.raf(() => this._measurePillOverflow());
 			}
 
 

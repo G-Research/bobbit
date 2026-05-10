@@ -4,5 +4,6 @@
 import "../../src/ui/components/GitStatusWidget.js";
 import "../../src/ui/components/MessageEditor.js";
 import "../../src/ui/components/SandboxedIframe.js";
+import "../../src/ui/components/AgentInterface.js";
 
 (window as any).__ready = true;

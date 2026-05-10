@@ -24,6 +24,7 @@ const ENTRY = path.resolve("tests/fixtures/listener-leak-entry.ts");
 const WIDGET_SRC = path.resolve("src/ui/components/GitStatusWidget.ts");
 const MESSAGE_EDITOR_SRC = path.resolve("src/ui/components/MessageEditor.ts");
 const SANDBOX_SRC = path.resolve("src/ui/components/SandboxedIframe.ts");
+const AGENT_SRC = path.resolve("src/ui/components/AgentInterface.ts");
 const BASE_SRC = path.resolve("src/ui/components/base/BobbitElement.ts");
 const TIMERS_SRC = path.resolve("src/ui/components/base/lifecycle-timers.ts");
 
@@ -31,7 +32,15 @@ test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, WIDGET_SRC, MESSAGE_EDITOR_SRC, SANDBOX_SRC, BASE_SRC, TIMERS_SRC],
+		deps: [
+			ENTRY,
+			WIDGET_SRC,
+			MESSAGE_EDITOR_SRC,
+			SANDBOX_SRC,
+			AGENT_SRC,
+			BASE_SRC,
+			TIMERS_SRC,
+		],
 	});
 });
 
@@ -49,129 +58,106 @@ async function gotoAndWait(page: any, tag: string) {
 	);
 }
 
-test.describe("listener-leak regression", () => {
-	test("git-status-widget releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
-		await gotoAndWait(page, "git-status-widget");
+interface MountConfig {
+	tag: string;
+	prepare?: (el: any) => void;
+}
 
-		// Baseline: count listeners on shared targets BEFORE we mount anything.
-		// Anything Lit / customElements installed at module load time is
-		// considered part of the baseline — the test only asserts that each
-		// MOUNT/DISCONNECT cycle restores it.
-		const baseline = await page.evaluate(() =>
+async function runLeakCycle(page: any, cfg: MountConfig) {
+	await gotoAndWait(page, cfg.tag);
+
+	// Baseline: count listeners on shared targets BEFORE we mount anything.
+	// Anything Lit / customElements installed at module load time is part of
+	// the baseline — we only assert that each MOUNT/DISCONNECT cycle restores
+	// it.
+	const baseline = await page.evaluate(() =>
+		(window as any).__totalLiveListeners([window, document]),
+	);
+
+	const samples: number[] = [];
+	for (let i = 0; i < 10; i++) {
+		await page.evaluate(
+			({ tag, prepareSrc }: { tag: string; prepareSrc: string | null }) => {
+				const el = document.getElementById("container")!;
+				const node = document.createElement(tag) as any;
+				if (prepareSrc) {
+					// eslint-disable-next-line @typescript-eslint/no-implied-eval
+					const prepare = new Function("el", prepareSrc);
+					prepare(node);
+				}
+				el.appendChild(node);
+			},
+			{
+				tag: cfg.tag,
+				prepareSrc: cfg.prepare ? `(${cfg.prepare.toString()})(el);` : null,
+			},
+		);
+		// Let Lit complete its first render + connectedCallback.
+		await page.waitForTimeout(20);
+
+		await page.evaluate(() => {
+			const el = document.getElementById("container")!;
+			while (el.firstChild) el.removeChild(el.firstChild);
+		});
+		// Allow signal-abort microtasks to flush.
+		await page.waitForTimeout(20);
+
+		const after = await page.evaluate(() =>
 			(window as any).__totalLiveListeners([window, document]),
 		);
+		samples.push(after);
+	}
 
-		const samples: number[] = [];
-		for (let i = 0; i < 10; i++) {
-			await page.evaluate(() => {
-				const el = document.getElementById("container")!;
-				const w = document.createElement("git-status-widget") as any;
+	// Every sample must be at the baseline. If any cycle leaked even one
+	// listener, the count grows monotonically and this fails.
+	for (let i = 0; i < samples.length; i++) {
+		expect(
+			samples[i],
+			`After mount/disconnect cycle ${i + 1}, listener count on (window, document) was ${samples[i]} (baseline ${baseline}). Sample history: ${JSON.stringify(samples)}`,
+		).toBe(baseline);
+	}
+}
+
+test.describe("listener-leak regression", () => {
+	test("git-status-widget releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
+		await runLeakCycle(page, {
+			tag: "git-status-widget",
+			prepare: (w) => {
 				w.branch = "feature/x";
 				w.primaryBranch = "master";
 				w.isOnPrimary = false;
 				w.clean = true;
-				el.appendChild(w);
-			});
-			// Let Lit complete its first render + connectedCallback.
-			await page.waitForTimeout(20);
-
-			await page.evaluate(() => {
-				const el = document.getElementById("container")!;
-				while (el.firstChild) el.removeChild(el.firstChild);
-			});
-			// Allow signal-abort microtasks to flush.
-			await page.waitForTimeout(20);
-
-			const after = await page.evaluate(() =>
-				(window as any).__totalLiveListeners([window, document]),
-			);
-			samples.push(after);
-		}
-
-		// Every sample must be at the baseline. If any cycle leaked even one
-		// listener, the count grows monotonically and this fails.
-		for (let i = 0; i < samples.length; i++) {
-			expect(
-				samples[i],
-				`After mount/disconnect cycle ${i + 1}, listener count on (window, document) was ${samples[i]} (baseline ${baseline}). Sample history: ${JSON.stringify(samples)}`,
-			).toBe(baseline);
-		}
+			},
+		});
 	});
 
 	test("message-editor releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
-		await gotoAndWait(page, "message-editor");
-
-		const baseline = await page.evaluate(() =>
-			(window as any).__totalLiveListeners([window, document]),
-		);
-
-		const samples: number[] = [];
-		for (let i = 0; i < 10; i++) {
-			await page.evaluate(() => {
-				const el = document.getElementById("container")!;
-				const e = document.createElement("message-editor") as any;
+		await runLeakCycle(page, {
+			tag: "message-editor",
+			prepare: (e) => {
 				// Minimal props — component renders fine without sessionId.
 				e.isStreaming = false;
-				el.appendChild(e);
-			await page.waitForTimeout(20);
-
-			await page.evaluate(() => {
-				const el = document.getElementById("container")!;
-				while (el.firstChild) el.removeChild(el.firstChild);
-			});
-			await page.waitForTimeout(20);
-
-			const after = await page.evaluate(() =>
-				(window as any).__totalLiveListeners([window, document]),
-			);
-			samples.push(after);
-		}
-
-		for (let i = 0; i < samples.length; i++) {
-			expect(
-				samples[i],
-				`After mount/disconnect cycle ${i + 1}, listener count on (window, document) was ${samples[i]} (baseline ${baseline}). Sample history: ${JSON.stringify(samples)}`,
-			).toBe(baseline);
-		}
+			},
+		});
 	});
 
 	test("sandbox-iframe releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
-		await gotoAndWait(page, "sandbox-iframe");
+		// Mount with no `sandboxUrlProvider` — the element binds no listeners
+		// until `loadContent`/`execute` is called, but the regression test only
+		// cares that connect/disconnect itself is leak-free.
+		await runLeakCycle(page, { tag: "sandbox-iframe" });
+	});
 
-		const baseline = await page.evaluate(() =>
-			(window as any).__totalLiveListeners([window, document]),
-		);
-
-		const samples: number[] = [];
-		for (let i = 0; i < 10; i++) {
-			await page.evaluate(() => {
-				const el = document.getElementById("container")!;
-				// Mount with no `sandboxUrlProvider` — the element binds no
-				// listeners until `loadContent`/`execute` is called, but the
-				// regression test only cares that connect/disconnect itself
-				// is leak-free.
-				const w = document.createElement("sandbox-iframe") as any;
-				el.appendChild(w);
-			});
-			await page.waitForTimeout(20);
-
-			await page.evaluate(() => {
-				const el = document.getElementById("container")!;
-				while (el.firstChild) el.removeChild(el.firstChild);
-			});
-			await page.waitForTimeout(20);
-
-			const after = await page.evaluate(() =>
-				(window as any).__totalLiveListeners([window, document]),
-			);
-			samples.push(after);
-		}
-
-		for (let i = 0; i < samples.length; i++) {
-			expect(
-				samples[i],
-				`After mount/disconnect cycle ${i + 1}, listener count on (window, document) was ${samples[i]} (baseline ${baseline}). Sample history: ${JSON.stringify(samples)}`,
-			).toBe(baseline);
-		}
+	test("agent-interface releases all listeners on disconnect (10x mount cycle)", async ({ page }) => {
+		await runLeakCycle(page, {
+			tag: "agent-interface",
+			prepare: (w) => {
+				// No session set — component renders the "No session set"
+				// placeholder branch but still installs window/document
+				// listeners in connectedCallback (Escape handler, narrow RO).
+				// That's enough to exercise the cleanup path.
+				w.readOnly = true;
+			},
+		});
 	});
 });
