@@ -89,25 +89,41 @@ export class ConsoleRuntimeProvider implements SandboxRuntimeProvider {
 			// Track errors for HTML artifacts
 			let lastError: { message: string; stack: string } | null = null;
 
+			// Listener-cleanup: this runtime function is stringified and run inside
+			// the sandbox iframe. Real cleanup happens when the iframe is removed,
+			// but we still bind through an AbortController so the static
+			// `{ signal }` invariant from listener-cleanup-standardisation.md
+			// holds at every call site in src/ui/components/**.
+			const runtimeCtl = new AbortController();
+			const { signal } = runtimeCtl;
+
 			// Error handlers - track errors but don't log them
 			// (they'll be shown via execution-error message)
-			window.addEventListener("error", (e) => {
-				const text = `${e.error?.stack || e.message || String(e)} at line ${e.lineno || "?"}:${e.colno || "?"}`;
+			window.addEventListener(
+				"error",
+				(e) => {
+					const text = `${e.error?.stack || e.message || String(e)} at line ${e.lineno || "?"}:${e.colno || "?"}`;
 
-				lastError = {
-					message: e.error?.message || e.message || String(e),
-					stack: e.error?.stack || text,
-				};
-			});
+					lastError = {
+						message: e.error?.message || e.message || String(e),
+						stack: e.error?.stack || text,
+					};
+				},
+				{ signal },
+			);
 
-			window.addEventListener("unhandledrejection", (e) => {
-				const text = `Unhandled promise rejection: ${e.reason?.message || e.reason || "Unknown error"}`;
+			window.addEventListener(
+				"unhandledrejection",
+				(e) => {
+					const text = `Unhandled promise rejection: ${e.reason?.message || e.reason || "Unknown error"}`;
 
-				lastError = {
-					message: e.reason?.message || String(e.reason) || "Unhandled promise rejection",
-					stack: e.reason?.stack || text,
-				};
-			});
+					lastError = {
+						message: e.reason?.message || String(e.reason) || "Unhandled promise rejection",
+						stack: e.reason?.stack || text,
+					};
+				},
+				{ signal },
+			);
 
 			// Expose complete() method for user code to call
 			let completionSent = false;

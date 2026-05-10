@@ -44,6 +44,15 @@ export class RuntimeMessageRouter {
 	private userScriptMessageListener:
 		| ((message: any, sender: any, sendResponse: (response: any) => void) => boolean)
 		| null = null;
+	/**
+	 * Listener-cleanup: this router is a process-singleton with a count-based
+	 * listener lifecycle — `window`/`chrome.runtime` listeners attach on first
+	 * sandbox register and detach on last unregister. The `AbortController`
+	 * is recreated every attach cycle so each `addEventListener` call still
+	 * passes `{ signal }` per the convention in
+	 * `docs/design/listener-cleanup-standardisation.md` §2.
+	 */
+	private listenerCtl: AbortController | null = null;
 
 	/**
 	 * Register a new sandbox with its runtime providers.
@@ -82,13 +91,13 @@ export class RuntimeMessageRouter {
 
 		// If no more sandboxes, remove global listeners
 		if (this.sandboxes.size === 0) {
-			// Remove iframe listener
-			if (this.messageListener) {
-				window.removeEventListener("message", this.messageListener);
-				this.messageListener = null;
-			}
+			// Aborting the controller detaches the window "message" listener
+			// (bound with { signal }). The chrome.runtime user-script listener
+			// has no signal-based detach, so remove it explicitly.
+			this.listenerCtl?.abort();
+			this.listenerCtl = null;
+			this.messageListener = null;
 
-			// Remove user script listener
 			if (this.userScriptMessageListener && typeof chrome !== "undefined" && chrome.runtime?.onUserScriptMessage) {
 				chrome.runtime.onUserScriptMessage.removeListener(this.userScriptMessageListener);
 				this.userScriptMessageListener = null;
@@ -121,6 +130,11 @@ export class RuntimeMessageRouter {
 	 * Setup the global message listeners (called automatically)
 	 */
 	private setupListener(): void {
+		// Ensure a fresh controller exists for this attach cycle.
+		if (!this.listenerCtl) {
+			this.listenerCtl = new AbortController();
+		}
+
 		// Setup sandbox iframe listener
 		if (!this.messageListener) {
 			this.messageListener = async (e: MessageEvent) => {
@@ -160,7 +174,7 @@ export class RuntimeMessageRouter {
 				}
 			};
 
-			window.addEventListener("message", this.messageListener);
+			window.addEventListener("message", this.messageListener, { signal: this.listenerCtl.signal });
 		}
 
 		// Setup user script message listener

@@ -31,5 +31,3 @@ src/ui/components/review/AnnotationPopover.ts
 src/ui/components/review/AnnotationStore.ts
 src/ui/components/review/ReviewDocument.ts
 src/ui/components/review/ReviewPane.ts
-src/ui/components/sandbox/ConsoleRuntimeProvider.ts
-src/ui/components/sandbox/RuntimeMessageRouter.ts
