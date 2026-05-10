@@ -467,6 +467,30 @@ export class MockAgentCore {
 		this.emit({ type: "agent_start" });
 		this.emit({ type: "session_status", status: "streaming" });
 
+		// STREAM_STALL:<ms>
+		// Simulate the wedged-LLM-stream regression: emit `agent_start` and then
+		// go silent (no further frames) for <ms> milliseconds. Used to drive the
+		// LLM stream-inactivity watchdog from E2E tests. If the watchdog aborts
+		// the request, `currentAbortController.signal.aborted` flips true and we
+		// exit the turn cleanly. Otherwise we let the stall run to completion
+		// and emit a normal agent_end so non-watchdog tests can still assert.
+		const stallMatch = text.match(/STREAM_STALL:(\d+)/);
+		if (stallMatch) {
+			const stallMs = parseInt(stallMatch[1], 10);
+			await this.tick(stallMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				// abort already emitted agent_end synchronously in handleCommand;
+				// don't double-emit — that would clobber
+				// `suppressNextDrainForStallRetry` book-keeping in SessionManager.
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
 		await this.tick(5);
 
 		// Non-blocking ask_user_choices: if this prompt is the envelope user

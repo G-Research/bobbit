@@ -77,6 +77,14 @@ export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "a
  */
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 
+// LLM stream-inactivity watchdog. Logic lives in `./stream-watchdog.ts` so
+// unit tests can exercise it without dragging in the SessionManager graph.
+import {
+	resolveWatchdogConfigFromEnv,
+	onAgentEvent as streamWatchdogOnAgentEvent,
+	disposeStreamWatchdog,
+} from "./stream-watchdog.js";
+
 /**
  * Returns true only for rpc events that represent genuine new user-visible
  * activity (a message, tool call, or end-of-turn). Lifecycle frames the
@@ -184,6 +192,20 @@ export interface SessionInfo {
 	transientRetryAttempts?: number;
 	/** Count of consecutive agent turns that ended with stopReason:"error". Resets on any non-error message_end or explicit retry. */
 	consecutiveErrorTurns?: number;
+	/** LLM stream-inactivity watchdog state — see STREAM_INACTIVITY_TIMEOUT_MS. */
+	streamWatchdogTimer?: ReturnType<typeof setInterval>;
+	/** Wall time (ms) of last frame seen on the LLM stream. Updated by the watchdog. */
+	lastLlmFrameAt?: number;
+	/** True iff the agent is currently waiting on the LLM stream (not running a tool, not idle).
+	 *  The watchdog only fires when this is true. */
+	awaitingLlmFrame?: boolean;
+	/** Stall retry counter for the current turn. Reset on a non-stalled agent_end
+	 *  (success) or when the stall is surfaced to the user. */
+	streamStallRetries?: number;
+	/** One-shot flag set by the watchdog before aborting for a silent retry. The
+	 *  next `agent_end` consumes this and skips the normal drain/idle-broadcast
+	 *  path so the watchdog can re-dispatch the prompt without the queue racing it. */
+	suppressNextDrainForStallRetry?: boolean;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
 	pendingAutoRetryTimer?: ReturnType<typeof setTimeout>;
 	/** Whether tool calls were executed during the current/last turn */
@@ -1736,6 +1758,16 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		// LLM stream-inactivity watchdog: arm/disarm based on event type. Must run
+		// FIRST so an event mid-tear-down doesn't sneak past while the timer is
+		// already firing. See `./stream-watchdog.ts` for the stall path.
+		streamWatchdogOnAgentEvent(
+			session,
+			event,
+			resolveWatchdogConfigFromEnv(),
+			(id) => this.sessions.has(id),
+		);
+
 		// H3 fix: track the latest in-flight `message_update` so snapshot reads
 		// (`getMessages`) can splice it into the response. Cleared on terminal
 		// lifecycle events below. The agent flushes to `.jsonl` only on
@@ -1851,6 +1883,18 @@ export class SessionManager {
 				session.lastTurnErrored = false;
 				session.lastTurnErrorMessage = undefined;
 				session.consecutiveErrorTurns = 0;
+			}
+
+			// Stream-watchdog silent-retry: if the watchdog set this flag right
+			// before calling rpcClient.abort(), suppress the idle-broadcast +
+			// drain so the queue doesn't race the watchdog's re-prompt. Status
+			// stays "streaming" throughout the retry; `streamingStartedAt` is
+			// left untouched so the UI "streaming for X" counter doesn't flicker.
+			// Consumed exactly once.
+			if (session.suppressNextDrainForStallRetry) {
+				session.suppressNextDrainForStallRetry = false;
+				session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+				return;
 			}
 
 			session.streamingStartedAt = undefined;
@@ -4260,6 +4304,9 @@ export class SessionManager {
 			clearTimeout(session.pendingAutoRetryTimer);
 			session.pendingAutoRetryTimer = undefined;
 		}
+
+		// Clear the LLM stream-inactivity watchdog timer.
+		disposeStreamWatchdog(session);
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
 		// saved before we archive.  Without this, a quick terminate can race
