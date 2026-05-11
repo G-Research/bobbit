@@ -599,3 +599,198 @@ describe("parseAgentWorktreeName — extract role + id from agent worktree dir",
 		assert.equal(parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-coder-notvalid", teamLeadName), null);
 	});
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// Session sidecar tests — `src/server/agent/session-sidecar.ts`.
+//
+// Regression context: pre-sidecar, boot recovery for sessions lost from
+// `sessions.json` had to invent a fresh bobbit session id and roll a
+// fun-name title because the only surviving artifact was the agent's
+// `.jsonl`. The bobbit-owned `.bobbit.json` sidecar carries the original
+// metadata so recoveries become exact instead of best-effort.
+// ──────────────────────────────────────────────────────────────────────────
+
+import {
+	sidecarPathFor,
+	writeSessionSidecar,
+	readSessionSidecar,
+	reconcileRecoveredSessionWithSidecar,
+	buildSessionSidecar,
+	type SessionSidecar,
+} from "../src/server/agent/session-sidecar.ts";
+
+describe("session-sidecar", () => {
+	let tmpDir: string;
+	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-sidecar-"));
+	});
+
+	it("sidecarPathFor strips .jsonl and appends .bobbit.json next to it", () => {
+		const out = sidecarPathFor("/foo/bar/--slug--/abc-123.jsonl");
+		assert.equal(out, path.normalize("/foo/bar/--slug--/abc-123.bobbit.json"));
+	});
+
+	it("sidecarPathFor defensively appends .bobbit.json when input lacks .jsonl", () => {
+		const out = sidecarPathFor("/foo/bar/oddly-named");
+		assert.equal(out, path.normalize("/foo/bar/oddly-named.bobbit.json"));
+	});
+
+	it("writeSessionSidecar writes atomically — no partial file visible mid-write", () => {
+		// We can't truly simulate a crash, but we CAN observe that the target
+		// path is only created via rename: write a sidecar, snapshot the dir,
+		// then write again and confirm no .tmp- files survive.
+		const jsonl = path.join(tmpDir, "abc.jsonl");
+		fs.writeFileSync(jsonl, "");
+		const meta: SessionSidecar = {
+			version: 1,
+			bobbitSessionId: "bob-1",
+			agentSessionId: "agent-1",
+			role: "coder",
+			title: "Coder: Jira",
+			createdAt: 1700000000000,
+		};
+		writeSessionSidecar(jsonl, meta);
+		const entries1 = fs.readdirSync(tmpDir);
+		// Only the .jsonl and the final .bobbit.json — no .tmp- leftover.
+		assert.ok(entries1.includes("abc.jsonl"));
+		assert.ok(entries1.includes("abc.bobbit.json"));
+		assert.ok(!entries1.some((n) => n.includes(".tmp-")));
+		// Re-write with different content; still no tmp leftover.
+		writeSessionSidecar(jsonl, { ...meta, title: "Coder: Jira (updated)" });
+		const entries2 = fs.readdirSync(tmpDir);
+		assert.ok(!entries2.some((n) => n.includes(".tmp-")));
+		const re = readSessionSidecar(jsonl);
+		assert.equal(re?.title, "Coder: Jira (updated)");
+	});
+
+	it("writeSessionSidecar is idempotent — re-writing identical content yields identical content", () => {
+		const jsonl = path.join(tmpDir, "abc.jsonl");
+		fs.writeFileSync(jsonl, "");
+		const meta: SessionSidecar = {
+			version: 1,
+			bobbitSessionId: "bob-2",
+			agentSessionId: "agent-2",
+			role: "coder",
+			title: "T",
+			createdAt: 1,
+		};
+		writeSessionSidecar(jsonl, meta);
+		const first = fs.readFileSync(sidecarPathFor(jsonl), "utf-8");
+		writeSessionSidecar(jsonl, meta);
+		const second = fs.readFileSync(sidecarPathFor(jsonl), "utf-8");
+		assert.equal(first, second);
+	});
+
+	it("readSessionSidecar returns null when the file is absent", () => {
+		const jsonl = path.join(tmpDir, "missing.jsonl");
+		assert.equal(readSessionSidecar(jsonl), null);
+	});
+
+	it("readSessionSidecar returns null when version is not 1 (forward-compat)", () => {
+		const jsonl = path.join(tmpDir, "abc.jsonl");
+		fs.writeFileSync(sidecarPathFor(jsonl), JSON.stringify({
+			version: 2,
+			bobbitSessionId: "x",
+			agentSessionId: "y",
+			role: "coder",
+			title: "T",
+			createdAt: 1,
+		}));
+		assert.equal(readSessionSidecar(jsonl), null);
+	});
+
+	it("readSessionSidecar returns null on JSON parse error", () => {
+		const jsonl = path.join(tmpDir, "abc.jsonl");
+		fs.writeFileSync(sidecarPathFor(jsonl), "{not json");
+		assert.equal(readSessionSidecar(jsonl), null);
+	});
+
+	it("readSessionSidecar returns null when required fields are missing", () => {
+		const jsonl = path.join(tmpDir, "abc.jsonl");
+		fs.writeFileSync(sidecarPathFor(jsonl), JSON.stringify({ version: 1, bobbitSessionId: "x" }));
+		assert.equal(readSessionSidecar(jsonl), null);
+	});
+
+	it("reconcileRecoveredSessionWithSidecar overrides reconstructed fields", () => {
+		const reconstructed = {
+			id: "fresh-uuid-from-heuristic",
+			title: "Team Lead: Calcifer (recovered)",
+			role: "team-lead",
+			teamGoalId: "g-1",
+			createdAt: 999,
+			cwd: "/wt/foo",
+		};
+		const sidecar: SessionSidecar = {
+			version: 1,
+			bobbitSessionId: "original-bob-id",
+			agentSessionId: "agent-xyz",
+			role: "team-lead",
+			teamGoalId: "g-1",
+			teamLeadSessionId: undefined,
+			title: "Team Lead: Jira Springer",
+			createdAt: 100,
+			accessory: "crown",
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4",
+		};
+		const out = reconcileRecoveredSessionWithSidecar(reconstructed, sidecar);
+		assert.equal(out.id, "original-bob-id");
+		assert.equal(out.title, "Team Lead: Jira Springer");
+		assert.equal(out.createdAt, 100);
+		assert.equal(out.accessory, "crown");
+		assert.equal(out.modelProvider, "anthropic");
+		assert.equal(out.modelId, "claude-sonnet-4");
+		// Original record fields preserved when sidecar doesn't override them.
+		assert.equal((out as Record<string, unknown>).cwd, "/wt/foo");
+	});
+
+	it("e2e: write sidecar, simulate .jsonl-only recovery, reconciled record matches sidecar", () => {
+		const jsonl = path.join(tmpDir, "real.jsonl");
+		fs.writeFileSync(jsonl, "");
+		const sidecar = buildSessionSidecar({
+			id: "real-bob-id",
+			role: "coder",
+			title: "Coder: Jira",
+			createdAt: 1700000000000,
+			teamGoalId: "g-7",
+			teamLeadSessionId: "lead-1",
+			accessory: "tools",
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4",
+		}, "agent-7", "lead-1");
+		writeSessionSidecar(jsonl, sidecar);
+		// Simulate heuristic recovery producing a fresh-but-wrong record.
+		const reconstructed = {
+			id: "FRESH-WRONG-UUID",
+			title: "Coder: Random Name (recovered)",
+			role: "coder",
+			teamGoalId: "g-7",
+			teamLeadSessionId: "lead-1",
+			createdAt: 9999999999999,
+			cwd: "/wt/agent",
+		};
+		const read = readSessionSidecar(jsonl);
+		assert.ok(read);
+		const finalRecord = reconcileRecoveredSessionWithSidecar(reconstructed, read!);
+		assert.equal(finalRecord.id, "real-bob-id");
+		assert.equal(finalRecord.title, "Coder: Jira");
+		assert.equal(finalRecord.createdAt, 1700000000000);
+		assert.equal((finalRecord as Record<string, unknown>).accessory, "tools");
+		assert.equal((finalRecord as Record<string, unknown>).modelProvider, "anthropic");
+		assert.equal((finalRecord as Record<string, unknown>).modelId, "claude-sonnet-4");
+	});
+
+	it("buildSessionSidecar fills version, defaults role to 'general', and normalises nullables", () => {
+		const sc = buildSessionSidecar({
+			id: "x",
+			title: "T",
+			createdAt: 1,
+			// no role
+		}, "agent-x");
+		assert.equal(sc.version, 1);
+		assert.equal(sc.role, "general");
+		assert.equal(sc.delegateOf, null);
+		assert.equal(sc.spawnedBySessionId, null);
+		assert.equal(sc.accessory, null);
+	});
+});

@@ -38,6 +38,8 @@ const ROLE_LITERAL_ALLOWLIST = new Set<string>([
 	`// Restore tool activation. Roleless normal sessions still use the general`,
 	// session-setup.ts — role name fallback, not workflow id.
 	`const roleName = plan.roleName || "general";`,
+	// session-sidecar.ts — role name fallback for the sidecar metadata.
+	`role: record.role || "general",`,
 ]);
 
 function listSourceFiles(dir: string, out: string[] = []): string[] {
