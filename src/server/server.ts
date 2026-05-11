@@ -4984,6 +4984,70 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Per-project plugin install lifecycle ─────────────────────────
+	// POST /api/projects/:projectId/plugins/:name/install — install plugin into project
+	// DELETE /api/projects/:projectId/plugins/:name        — uninstall
+	// GET    /api/projects/:projectId/plugins              — list installed
+	const projectPluginInstallMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/plugins\/([^/]+)\/install$/);
+	if (projectPluginInstallMatch && req.method === "POST") {
+		const [, projectId, pluginName] = projectPluginInstallMatch;
+		const project = projectRegistry.get(projectId);
+		if (!project) { json({ error: "Project not found" }, 404); return; }
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project context unavailable" }, 503); return; }
+
+		const { getGlobalPluginLoader } = await import("./plugins/plugin-loader.js");
+		const pl = getGlobalPluginLoader();
+		if (!pl) { json({ error: "Plugin loader not initialised" }, 503); return; }
+		const discovered = pl.discovered.find(d => d.name === pluginName);
+		if (!discovered) { json({ error: "Plugin not found" }, 404); return; }
+
+		const { installPluginIntoProject } = await import("./plugins/project-install.js");
+		const result = installPluginIntoProject(ctx.projectConfigStore, discovered);
+		if (!result.ok) { json({ error: result.error, details: result.details }, 400); return; }
+		json({ installed: true, workflows: result.workflowsInstalled });
+		return;
+	}
+
+	const projectPluginUninstallMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/plugins\/([^/]+)$/);
+	if (projectPluginUninstallMatch && req.method === "DELETE") {
+		const [, projectId, pluginName] = projectPluginUninstallMatch;
+		const project = projectRegistry.get(projectId);
+		if (!project) { json({ error: "Project not found" }, 404); return; }
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project context unavailable" }, 503); return; }
+		const { uninstallPluginFromProject } = await import("./plugins/project-install.js");
+		const result = uninstallPluginFromProject(ctx.projectConfigStore, pluginName);
+		json(result);
+		return;
+	}
+
+	const projectPluginListMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/plugins$/);
+	if (projectPluginListMatch && req.method === "GET") {
+		const [, projectId] = projectPluginListMatch;
+		const project = projectRegistry.get(projectId);
+		if (!project) { json({ error: "Project not found" }, 404); return; }
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project context unavailable" }, 503); return; }
+		const installed = ctx.projectConfigStore.getInstalledPlugins();
+		const wfEntries = ctx.projectConfigStore.getPluginWorkflows();
+		const byPlugin = new Map<string, { id: string; namespacedId: string }[]>();
+		for (const e of wfEntries) {
+			const list = byPlugin.get(e.source) ?? [];
+			list.push({ id: e.id, namespacedId: `${e.source}::${e.id}` });
+			byPlugin.set(e.source, list);
+		}
+		json({
+			plugins: installed.map(p => ({
+				name: p.name,
+				version: p.version,
+				installedAt: p.installedAt,
+				workflows: byPlugin.get(p.name) ?? [],
+			})),
+		});
+		return;
+	}
+
 	// ── Plugin management ────────────────────────────────────────────
 	// GET /api/plugins — list discovered plugins with status (loaded / needs-approval / error / manifest-invalid)
 	if (url.pathname === "/api/plugins" && req.method === "GET") {

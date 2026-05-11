@@ -189,6 +189,24 @@ const MIGRATED_KEYS = new Set([
 	"sandbox_tokens",
 ]);
 
+/** Record of a plugin installed into this project. Stored in project.yaml::plugins. */
+export interface PluginInstallation {
+	name: string;
+	version: string;
+	installedAt: number;
+}
+
+/** A workflow shipped by an installed plugin. Stored separately from user workflows
+ *  so reinstall/upgrade doesn't have to scan-and-patch user-edited workflows: blocks. */
+export interface PluginWorkflowEntry {
+	/** Plugin name that shipped this workflow. */
+	source: string;
+	/** Plugin-side workflow id (no namespace prefix). */
+	id: string;
+	/** Frozen snapshot of the workflow at install time. */
+	snapshot: InlineWorkflowDef;
+}
+
 function isPlainObject(x: unknown): x is Record<string, unknown> {
 	return !!x && typeof x === "object" && !Array.isArray(x);
 }
@@ -263,6 +281,11 @@ export class ProjectConfigStore {
 	/** Structured side-table — components[] and workflows{} from the same yaml file. */
 	private components: Component[] = [];
 	private workflows: Record<string, InlineWorkflowDef> | undefined;
+	/** Plugin installations and their shipped-workflow snapshots — kept separate from
+	 *  the user-owned `workflows:` block so upgrade/uninstall doesn't have to scan and patch
+	 *  hand-edited content. */
+	private installedPlugins: PluginInstallation[] = [];
+	private pluginWorkflows: PluginWorkflowEntry[] = [];
 
 	// ── Native-YAML migrated fields ──
 	private configDirectories: ConfigDirectoryEntry[] = [];
@@ -325,6 +348,31 @@ export class ProjectConfigStore {
 			this.workflows = isPlainObject(raw.workflows)
 				? raw.workflows as Record<string, InlineWorkflowDef>
 				: undefined;
+
+			// Plugin installations + plugin-shipped workflow snapshots.
+			this.installedPlugins = Array.isArray(raw.plugins)
+				? (raw.plugins as unknown[]).flatMap(p => {
+					if (!isPlainObject(p)) return [];
+					if (typeof p.name !== "string" || typeof p.version !== "string") return [];
+					return [{
+						name: p.name,
+						version: p.version,
+						installedAt: typeof p.installedAt === "number" ? p.installedAt : 0,
+					}];
+				})
+				: [];
+			this.pluginWorkflows = Array.isArray(raw.plugin_workflows)
+				? (raw.plugin_workflows as unknown[]).flatMap(e => {
+					if (!isPlainObject(e)) return [];
+					if (typeof e.source !== "string" || typeof e.id !== "string") return [];
+					if (!isPlainObject(e.snapshot)) return [];
+					return [{
+						source: e.source,
+						id: e.id,
+						snapshot: e.snapshot as unknown as InlineWorkflowDef,
+					}];
+				})
+				: [];
 
 			// ── Migrated fields — accept native, legacy JSON-string, or numeric-string ──
 			this.loadMigrated(raw);
@@ -416,6 +464,20 @@ export class ProjectConfigStore {
 			}
 			if (this.workflows && Object.keys(this.workflows).length > 0) {
 				out.workflows = this.workflows;
+			}
+			if (this.installedPlugins.length > 0) {
+				out.plugins = this.installedPlugins.map(p => ({
+					name: p.name,
+					version: p.version,
+					installedAt: p.installedAt,
+				}));
+			}
+			if (this.pluginWorkflows.length > 0) {
+				out.plugin_workflows = this.pluginWorkflows.map(e => ({
+					source: e.source,
+					id: e.id,
+					snapshot: e.snapshot,
+				}));
 			}
 
 			// Native-YAML migrated fields. Only emit when explicitly set / non-default
@@ -671,6 +733,46 @@ export class ProjectConfigStore {
 	/** Replace the workflows{} map. Persists immediately. */
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void {
 		this.workflows = workflows ? structuredClone(workflows) : undefined;
+		this.save();
+	}
+
+	// ── Plugin installations ────────────────────────────────────
+
+	getInstalledPlugins(): PluginInstallation[] {
+		return structuredClone(this.installedPlugins);
+	}
+
+	isPluginInstalled(name: string): boolean {
+		return this.installedPlugins.some(p => p.name === name);
+	}
+
+	getPluginWorkflows(): PluginWorkflowEntry[] {
+		return structuredClone(this.pluginWorkflows);
+	}
+
+	/** Add or replace an install record. Persists immediately. */
+	addInstalledPlugin(p: PluginInstallation): void {
+		this.installedPlugins = this.installedPlugins.filter(x => x.name !== p.name);
+		this.installedPlugins.push({ ...p });
+		this.save();
+	}
+
+	/** Remove an install record and drop any workflows the plugin contributed. */
+	removeInstalledPlugin(name: string): boolean {
+		const before = this.installedPlugins.length;
+		this.installedPlugins = this.installedPlugins.filter(p => p.name !== name);
+		this.pluginWorkflows = this.pluginWorkflows.filter(e => e.source !== name);
+		if (this.installedPlugins.length === before) return false;
+		this.save();
+		return true;
+	}
+
+	/** Replace the plugin_workflows entries for a given plugin source. Persists immediately. */
+	setPluginWorkflows(source: string, entries: Omit<PluginWorkflowEntry, "source">[]): void {
+		this.pluginWorkflows = this.pluginWorkflows.filter(e => e.source !== source);
+		for (const e of entries) {
+			this.pluginWorkflows.push({ source, id: e.id, snapshot: structuredClone(e.snapshot) });
+		}
 		this.save();
 	}
 

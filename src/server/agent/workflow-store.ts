@@ -77,6 +77,10 @@ export interface Workflow {
 	updatedAt: number;
 	/** If true, workflow is hidden from the UI (e.g. test-only workflows) */
 	hidden?: boolean;
+	/** Set when this workflow came from an installed plugin (vs hand-authored in workflows:).
+	 *  The id field is the namespaced id (e.g. "autoresearch::feature"); originalId is the
+	 *  plugin-side id ("feature") preserved for diagnostics. */
+	pluginSource?: { name: string; version: string; originalId: string };
 }
 
 // ── Normalization between the inline yaml shape and the runtime shape ──
@@ -235,12 +239,39 @@ export class InlineWorkflowStore {
 
 	private readLocal(): Map<string, Workflow> {
 		this.cfg.reload();
-		const block = this.cfg.getWorkflows();
 		const out = new Map<string, Workflow>();
-		if (!block) return out;
-		for (const [id, raw] of Object.entries(block)) {
-			const wf = normalizeWorkflow(raw, id);
-			if (wf) out.set(wf.id, wf);
+
+		// User-authored workflows in workflows: block.
+		const block = this.cfg.getWorkflows();
+		if (block) {
+			for (const [id, raw] of Object.entries(block)) {
+				const wf = normalizeWorkflow(raw, id);
+				if (wf) out.set(wf.id, wf);
+			}
+		}
+
+		// Plugin-shipped workflow snapshots — namespaced as "<plugin>::<id>" so a plugin
+		// and a user-defined workflow can't collide on the bare id. The plugin's install
+		// record carries the version, which we project onto each workflow's pluginSource
+		// for diagnostics (UI badges, "Workflow not found: ..." error context).
+		const installed = new Map(this.cfg.getInstalledPlugins().map(p => [p.name, p]));
+		for (const entry of this.cfg.getPluginWorkflows()) {
+			const namespacedId = `${entry.source}::${entry.id}`;
+			const wf = normalizeWorkflow(entry.snapshot, namespacedId);
+			if (!wf) continue;
+			// The snapshot may carry its own `id:` field (the plugin's own bare id).
+			// Overwrite it with the namespaced form so callers see one consistent id.
+			wf.id = namespacedId;
+			wf.pluginSource = {
+				name: entry.source,
+				version: installed.get(entry.source)?.version ?? "unknown",
+				originalId: entry.id,
+			};
+			// User-authored workflows win on bare-id collision (already in `out`); but
+			// since plugin ids are namespaced, they can only collide with each other,
+			// not with user content. First-write wins arbitrarily — install lifecycle
+			// rejects duplicate (source,id) pairs at the API layer.
+			if (!out.has(wf.id)) out.set(wf.id, wf);
 		}
 		return out;
 	}

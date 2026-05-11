@@ -41,6 +41,7 @@ import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
+import { renderSystemPluginsTab, renderProjectPluginsTab } from "./settings-plugins-tab.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
@@ -53,6 +54,7 @@ const SYSTEM_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "general", label: "General" },
 	{ id: "models", label: "Models" },
 	{ id: "directories", label: "Config Directories" },
+	{ id: "plugins", label: "Plugins" },
 	{ id: "palette", label: "Color Palette" },
 	{ id: "account", label: "Account" },
 	{ id: "maintenance", label: "Maintenance" },
@@ -64,6 +66,7 @@ const PROJECT_TABS: { id: SettingsTab; label: string }[] = [
 	{ id: "components", label: "Components" },
 	{ id: "workflows", label: "Workflows" },
 	{ id: "directories", label: "Config Directories" },
+	{ id: "plugins", label: "Plugins" },
 	{ id: "appearance", label: "Appearance" },
 ];
 
@@ -3677,12 +3680,14 @@ export function renderSettingsPage() {
 						${currentTab === "components" ? renderProjectComponentsTab(currentScope) : ""}
 						${currentTab === "workflows" ? renderProjectScopeWorkflowsTab(currentScope) : ""}
 						${currentTab === "directories" ? renderProjectScopeDirectoriesTab(currentScope) : ""}
+						${currentTab === "plugins" ? renderProjectPluginsTab(currentScope) : ""}
 					` : html`
 						${currentTab === "general" ? renderGeneralTab() : ""}
 						${currentTab === "models" ? renderModelsTab() : ""}
 						${currentTab === "shortcuts" ? renderShortcutsTab() : ""}
 						${currentTab === "palette" ? renderPaletteTab() : ""}
 						${currentTab === "directories" ? renderDirectoriesTab() : ""}
+						${currentTab === "plugins" ? renderSystemPluginsTab() : ""}
 						${currentTab === "account" ? renderAccountTab() : ""}
 						${currentTab === "maintenance" ? renderMaintenanceTab() : ""}
 					`}
