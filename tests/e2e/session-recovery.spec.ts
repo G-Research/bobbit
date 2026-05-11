@@ -19,7 +19,7 @@
  * fixture is worker-scoped and not suited for restart cycles.
  */
 import { test as base, expect } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -36,11 +36,22 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
-const E2E_TEMP_ROOT = existsSync("/.dockerenv")
-	? "/tmp"
-	: process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+// Canonicalize via realpathSync so macOS `/var → /private/var` symlink doesn't
+// trip the symlink-root guard on POST /api/projects (the same fix applied to
+// tests/multi-project.test.ts). Cross-platform: on Linux/Windows/Docker the
+// canonical path equals the input, so this is a no-op there.
+function canonicalize(p: string): string {
+	try { mkdirSync(p, { recursive: true }); } catch { /* best-effort */ }
+	try { return realpathSync(p); } catch { return p; }
+}
+
+const E2E_TEMP_ROOT = canonicalize(
+	existsSync("/.dockerenv")
+		? "/tmp"
+		: process.platform === "win32"
+			? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
+			: join(tmpdir(), "bobbit-e2e"),
+);
 
 interface StartedGateway {
 	port: number;
