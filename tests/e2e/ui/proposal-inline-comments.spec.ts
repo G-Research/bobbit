@@ -520,6 +520,68 @@ test.describe("Inline comments on goal proposal panel", () => {
 		).toBeVisible({ timeout: 3_000 });
 	});
 
+	test("BUG: hover chip exposes Edit + Delete; Delete removes the annotation and updates the badge", async ({ page }) => {
+		const panel = await openGoalAssistantProposal(page);
+
+		await seedAnnotationWithHighlight(page, {
+			quote: "test goal",
+			comment: "to be deleted via hover",
+		});
+
+		await expect(
+			panel.locator('[data-testid="proposal-comment-count"]'),
+		).toContainText("1 comment", { timeout: 5_000 });
+
+		// Wait for the annotator-rendered span to have real layout before we
+		// reach into the live component to fire the hover-chip path.
+		await page.waitForFunction(() => {
+			const el = document.querySelector(".r6o-annotation") as HTMLElement | null;
+			if (!el) return false;
+			const r = el.getBoundingClientRect();
+			return r.width > 0 && r.height > 0;
+		}, { timeout: 5_000 });
+
+		// Drive the hover-chip directly via the same code path Recogito would
+		// invoke on real mouseenter. This avoids dispatching a synthetic
+		// hover event whose plumbing into text-annotator is browser-specific.
+		await page.evaluate(() => {
+			const rd: any = document
+				.querySelector("commentable-markdown")
+				?.querySelector("review-document");
+			if (!rd) throw new Error("no <review-document>");
+			const span = rd.querySelector(".r6o-annotation");
+			if (!span) throw new Error("no .r6o-annotation span to hover");
+			const id = span.getAttribute("data-annotation");
+			if (!id) throw new Error(".r6o-annotation missing data-annotation");
+			rd._showHoverChip(id, span);
+		});
+
+		const editBtn = page.locator('[data-testid="annotation-hover-edit"]');
+		const deleteBtn = page.locator('[data-testid="annotation-hover-delete"]');
+		await expect(
+			editBtn,
+			"hover chip must expose an Edit button",
+		).toBeVisible({ timeout: 3_000 });
+		await expect(
+			deleteBtn,
+			"hover chip must expose a Delete button",
+		).toBeVisible({ timeout: 3_000 });
+
+		await deleteBtn.click();
+
+		// Badge must drop back to zero — `annotation-change` must have fired
+		// with the post-removal count. When the count is 0 the badge element
+		// is removed from the DOM, so assert it is no longer present.
+		await expect(
+			panel.locator('[data-testid="proposal-comment-count"]'),
+			"hover-chip delete must update the comment badge",
+		).toHaveCount(0, { timeout: 3_000 });
+		await expect(
+			page.locator(".r6o-annotation"),
+			"hover-chip delete must remove the highlight span",
+		).toHaveCount(0, { timeout: 3_000 });
+	});
+
 	test("annotations are ephemeral across reload", async ({ page }) => {
 		const panel = await openGoalAssistantProposal(page);
 		await injectAnnotation(page);

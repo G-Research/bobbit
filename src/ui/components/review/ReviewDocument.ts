@@ -58,6 +58,7 @@ export class ReviewDocument extends LitElement {
   private _hoverChipHideTimer: number | undefined;
 
   private _annotator: TextAnnotator | null = null;
+  private _annotationTitleObserver: MutationObserver | null = null;
   private _pendingSelection: { quote: string; prefix: string; suffix: string; start: number; end: number; isCode: boolean } | null = null;
   private _contentEl: HTMLDivElement | null = null;
   private _selectionDebounceTimer: number | undefined;
@@ -735,6 +736,10 @@ export class ReviewDocument extends LitElement {
   }
 
   private _destroyAnnotator(): void {
+    if (this._annotationTitleObserver) {
+      try { this._annotationTitleObserver.disconnect(); } catch { /* ignore */ }
+      this._annotationTitleObserver = null;
+    }
     if (this._annotator) {
       try {
         this._annotator.destroy();
