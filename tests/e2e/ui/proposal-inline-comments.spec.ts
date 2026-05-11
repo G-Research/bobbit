@@ -320,13 +320,19 @@ test.describe("Inline comments on goal proposal panel", () => {
 		});
 
 		const highlight = page.locator(".r6o-annotation").first();
-		await expect(highlight).toBeAttached({ timeout: 5_000 });
+		await expect(highlight).toBeVisible({ timeout: 5_000 });
 
 		// User clicks the visible position of the highlighted text. This
 		// dispatches a real mouse click at those screen coords — which is
 		// what a user actually does, vs. dispatchEvent which bypasses any
 		// pointer-event layering the bug would otherwise mask.
-		const box = await highlight.boundingBox();
+		// Poll for a non-null boundingBox — `toBeVisible` can resolve before
+		// the annotator-rendered span has laid out under load.
+		let box: Awaited<ReturnType<typeof highlight.boundingBox>> = null;
+		for (let attempt = 0; attempt < 20 && !box; attempt++) {
+			box = await highlight.boundingBox();
+			if (!box) await page.waitForTimeout(100);
+		}
 		if (!box) throw new Error(".r6o-annotation has no bounding box");
 		await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 
