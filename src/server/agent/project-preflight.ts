@@ -227,28 +227,40 @@ export function runPreflight(rootPath: string, ctx: PreflightContext): Preflight
 
 	// 8. path.nested-in-project
 	{
-		const offenders: Array<{ name: string; rootPath: string; via: "rootPath" | "worktree" }> = [];
+		const gatewayRootResolved = (() => {
+			try { return path.resolve(tryRealpath(ctx.gatewayProjectRoot)); }
+			catch { return path.resolve(ctx.gatewayProjectRoot); }
+		})();
+		const offenders: Array<{ name: string; rootPath: string; via: "rootPath" | "worktree"; gatewayOwned: boolean }> = [];
 		const me = tryRealpath(rootPath);
 		for (const proj of ctx.registeredProjects) {
 			if (proj.hidden) continue;
 			const projRoot = tryRealpath(proj.rootPath);
+			const gatewayOwned = path.resolve(projRoot) === gatewayRootResolved;
 			if (isSameOrInside(projRoot, me) && path.resolve(projRoot) !== path.resolve(me)) {
-				offenders.push({ name: proj.name, rootPath: proj.rootPath, via: "rootPath" });
+				offenders.push({ name: proj.name, rootPath: proj.rootPath, via: "rootPath", gatewayOwned });
 				continue;
 			}
 			const wtRoot = ctx.worktreeRootFor?.({ id: proj.id, rootPath: proj.rootPath }) ?? `${proj.rootPath}-wt`;
 			const wtReal = tryRealpath(wtRoot);
 			if (fs.existsSync(wtReal) && isSameOrInside(wtReal, me)) {
-				offenders.push({ name: proj.name, rootPath: wtRoot, via: "worktree" });
+				offenders.push({ name: proj.name, rootPath: wtRoot, via: "worktree", gatewayOwned });
 			}
 		}
 		if (offenders.length > 0) {
+			// Downgrade to warn when the only container(s) are the gateway-owned
+			// project root. The gateway has to register its own working directory
+			// as a project, and any sibling project the user adds inside the same
+			// repo (e.g. a worktree dev workflow) would otherwise hard-fail here.
+			const allGatewayOwned = offenders.every(o => o.gatewayOwned);
 			checks.push({
 				id: "path.nested-in-project",
-				level: "fail",
-				title: "Nested inside another project",
+				level: allGatewayOwned ? "warn" : "fail",
+				title: allGatewayOwned
+					? "Nested inside the gateway project"
+					: "Nested inside another project",
 				detail: offenders.map(o =>
-					`Inside ${o.via === "worktree" ? "worktree root" : "project"} "${o.name}" at ${o.rootPath}.`,
+					`Inside ${o.via === "worktree" ? "worktree root" : "project"} "${o.name}" at ${o.rootPath}${o.gatewayOwned ? " (gateway-owned)" : ""}.`,
 				).join(" "),
 			});
 		} else {
