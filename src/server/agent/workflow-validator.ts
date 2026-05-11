@@ -215,8 +215,32 @@ export function validateWorkflow(
 				if (typeof step.prompt !== "string" || step.prompt.length === 0) {
 					fail(`type: ${stepType} step requires a non-empty "prompt".`);
 				}
+			} else if (stepType === "external-job") {
+				// external-job steps wait for an external POST to /api/verify/external/:token.
+				// No required fields beyond `name`; `timeout` controls how long we wait.
+				if (typeof step.timeout === "number" && step.timeout <= 0) {
+					fail(`type: external-job step has non-positive timeout.`);
+				}
+			} else if (stepType === "rubric-review") {
+				if (step.reviewer !== "llm" && step.reviewer !== "human") {
+					fail(`type: rubric-review step requires "reviewer" set to "llm" or "human".`);
+				}
+				if (!Array.isArray(step.rubric) || step.rubric.length === 0) {
+					fail(`type: rubric-review step requires a non-empty "rubric" array.`);
+				}
+				if (step.reviewer === "llm" && (typeof step.prompt !== "string" || step.prompt.length === 0)) {
+					fail(`type: rubric-review step with reviewer: llm requires a non-empty "prompt".`);
+				}
+			} else if (stepType === "tool-call") {
+				if (typeof step.tool !== "string" || step.tool.length === 0) {
+					fail(`type: tool-call step requires a non-empty "tool".`);
+				}
 			} else {
-				fail(`unknown step type "${stepType}"; expected one of: command, llm-review, agent-qa.`);
+				// Unknown step type — plugin-registered handlers are resolved at runtime via
+				// the VerifyHandlerRegistry. The validator can't see the plugin registry, so
+				// this is a soft accept: workflow loads, but runtime will fail with a clear
+				// "no handler registered" message if no plugin contributes a handler for this type.
+				// We don't surface a validation error here.
 			}
 		}
 	}

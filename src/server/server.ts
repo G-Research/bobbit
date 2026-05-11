@@ -4959,6 +4959,68 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/verify/rubric/:token — callback for rubric-review/human verify steps.
+	// Body must echo the goalId/gateId/signalId triple and include rubric values.
+	const rubricCallbackMatch = url.pathname.match(/^\/api\/verify\/rubric\/([^/]+)$/);
+	if (rubricCallbackMatch && req.method === "POST") {
+		const token = rubricCallbackMatch[1];
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const { goalId, gateId, signalId, values, notes } = body as Record<string, unknown>;
+		if (typeof goalId !== "string" || typeof gateId !== "string" || typeof signalId !== "string") {
+			json({ error: "Body must include goalId, gateId, signalId" }, 400);
+			return;
+		}
+		if (!values || typeof values !== "object" || Array.isArray(values)) {
+			json({ error: "Body must include a 'values' object" }, 400);
+			return;
+		}
+		const { deliverRubricHumanCallback } = await import("./agent/verify-handlers/rubric-review-handler.js");
+		const outcome = deliverRubricHumanCallback(token, {
+			goalId, gateId, signalId,
+			values: values as Record<string, string | number>,
+			notes: typeof notes === "string" ? notes : undefined,
+		});
+		if (!outcome.ok) {
+			json({ error: outcome.error }, outcome.status);
+			return;
+		}
+		json({ delivered: true });
+		return;
+	}
+
+	// POST /api/verify/external/:token — callback for external-job verify steps.
+	// Body must echo the goalId/gateId/signalId triple the token was issued for.
+	const externalCallbackMatch = url.pathname.match(/^\/api\/verify\/external\/([^/]+)$/);
+	if (externalCallbackMatch && req.method === "POST") {
+		const token = externalCallbackMatch[1];
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const { goalId, gateId, signalId, passed, summary, artifact } = body as Record<string, unknown>;
+		if (typeof goalId !== "string" || typeof gateId !== "string" || typeof signalId !== "string") {
+			json({ error: "Body must include goalId, gateId, signalId" }, 400);
+			return;
+		}
+		if (typeof passed !== "boolean") {
+			json({ error: "Body must include boolean 'passed'" }, 400);
+			return;
+		}
+		const { deliverExternalJobCallback } = await import("./agent/verify-handlers/external-job-handler.js");
+		const outcome = deliverExternalJobCallback(token, {
+			goalId, gateId, signalId, passed,
+			summary: typeof summary === "string" ? summary : undefined,
+			artifact: (artifact && typeof artifact === "object" && !Array.isArray(artifact))
+				? artifact as { content: string; contentType: string; metadata?: Record<string, string> }
+				: undefined,
+		});
+		if (!outcome.ok) {
+			json({ error: outcome.error }, outcome.status);
+			return;
+		}
+		json({ delivered: true });
+		return;
+	}
+
 	// GET /api/goals/:goalId/gates/:gateId/content — gate content
 	const gateContentMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/content$/);
 	if (gateContentMatch && req.method === "GET") {

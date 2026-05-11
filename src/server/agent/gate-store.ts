@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Workflow } from "./workflow-store.js";
+import type { Workflow, BuiltinVerifyStepType } from "./workflow-store.js";
 
 export type GateStatus = "pending" | "passed" | "failed";
 
 export interface GateSignalStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: BuiltinVerifyStepType | (string & {});
 	passed: boolean;
 	skipped?: boolean;
 	output: string;

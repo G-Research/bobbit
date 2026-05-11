@@ -31,6 +31,10 @@ import {
 } from "./verification-logic.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
+import { VerifyHandlerRegistry, unknownTypeFailureResult, type VerifyExecCtx } from "./verify-handlers/registry.js";
+import { externalJobHandler } from "./verify-handlers/external-job-handler.js";
+import { rubricReviewHandler } from "./verify-handlers/rubric-review-handler.js";
+import { toolCallHandler } from "./verify-handlers/tool-call-handler.js";
 
 /**
  * Compute the absolute working directory for a component, given a per-branch
@@ -362,6 +366,7 @@ export class VerificationHarness {
 	private activeVerifications = new Map<string, ActiveVerification>();
 	private readonly _persistPath: string;
 	private projectContextManager: ProjectContextManager | null;
+	public readonly verifyRegistry = new VerifyHandlerRegistry();
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
@@ -899,6 +904,9 @@ export class VerificationHarness {
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
+		this.verifyRegistry.register(externalJobHandler);
+		this.verifyRegistry.register(rubricReviewHandler);
+		this.verifyRegistry.register(toolCallHandler);
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
 		const persisted = this._loadActive();
@@ -1494,7 +1502,7 @@ export class VerificationHarness {
 									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
-						} else {
+						} else if (step.type === "llm-review") {
 							// llm-review — spawn a one-shot reviewer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
@@ -1516,6 +1524,49 @@ export class VerificationHarness {
 									console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
 									await new Promise(r => setTimeout(r, delayMs));
 								}
+							}
+						} else {
+							const handler = this.verifyRegistry.get(step.type);
+							if (handler) {
+								const ctx: VerifyExecCtx = {
+									goalId: signal.goalId,
+									gateId: signal.gateId,
+									signalId: signal.id,
+									signal,
+									gate,
+									cwd,
+									branch: builtinVars["branch"] ?? "",
+									primaryBranch: builtinVars["master"] ?? "",
+									goalSpec,
+									allGateStates,
+									builtinVars,
+									projectVars,
+									agentVars,
+									substituteVars: (template: string) =>
+										this.substituteVars(template, builtinVars, projectVars, agentVars, allGateStates),
+									broadcast: (event: unknown) => this.broadcastFn(signal.goalId, event),
+									persistActive: () => this._persistActive(),
+									isCancelled: () => active.cancelled === true,
+									runLlmReview: async (args) => {
+										const prompt = this.substituteVars(args.prompt, builtinVars, projectVars, agentVars, allGateStates);
+										const reviewSessionId = `${step.type}-${randomUUID().slice(0, 12)}`;
+										const r = await this.runLlmReviewStep(
+											{ name: step.name, prompt, timeout: args.timeout ?? step.timeout, role: args.role ?? step.role },
+											cwd, builtinVars,
+											signal.content, signal.metadata,
+											goalSpec, allGateStates, signal.goalId, reviewSessionId,
+											gate,
+										);
+										return { passed: r.passed, output: r.output, sessionId: r.sessionId };
+									},
+								};
+								const handlerResult = await handler.execute(ctx, step);
+								result = { passed: handlerResult.passed, output: handlerResult.output, sessionId: handlerResult.sessionId };
+								if (handlerResult.artifact) {
+									artifact = handlerResult.artifact;
+								}
+							} else {
+								result = unknownTypeFailureResult(step.type);
 							}
 						}
 

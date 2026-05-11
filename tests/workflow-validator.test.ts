@@ -204,13 +204,48 @@ describe("workflow-validator — negative cases", () => {
 		assert.ok(errs.some(e => /optional: true but has no label/.test(e.message)));
 	});
 
-	it("rejects unknown step type", () => {
+	it("soft-accepts unknown step types so plugin-registered handlers can match at runtime", () => {
 		const wf: ValidatorWorkflow = {
 			id: "x", name: "X",
 			gates: [{ id: "g", name: "G", verify: [{ name: "Q", type: "wat" } as any] }],
 		};
 		const errs = validateWorkflow(wf, components);
-		assert.equal(errs.length, 1);
-		assert.match(errs[0].message, /unknown step type "wat"/);
+		assert.equal(errs.length, 0,
+			"Unknown step types must pass validation — the verify-handler registry resolves them at runtime, " +
+			"failing with a clear 'no handler registered' message if no plugin contributes one.");
+	});
+
+	it("accepts the three new built-in types (external-job / rubric-review / tool-call)", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{
+				id: "g", name: "G",
+				verify: [
+					{ name: "Job", type: "external-job", timeout: 60 } as any,
+					{ name: "Rubric", type: "rubric-review", reviewer: "llm", prompt: "Score it", rubric: [{ id: "a", label: "A" }] } as any,
+					{ name: "Tool", type: "tool-call", tool: "literature_search" } as any,
+				],
+			}],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.equal(errs.length, 0, `expected no errors, got: ${errs.map(e => e.message).join("; ")}`);
+	});
+
+	it("rejects rubric-review without reviewer", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{ id: "g", name: "G", verify: [{ name: "Q", type: "rubric-review", rubric: [{ id: "a", label: "A" }] } as any] }],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(e => /requires "reviewer"/.test(e.message)));
+	});
+
+	it("rejects tool-call without tool", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{ id: "g", name: "G", verify: [{ name: "Q", type: "tool-call" } as any] }],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(e => /requires a non-empty "tool"/.test(e.message)));
 	});
 });

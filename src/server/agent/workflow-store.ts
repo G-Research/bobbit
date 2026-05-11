@@ -17,9 +17,12 @@ import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineV
 
 // ── Public types (kept compatible with the old WorkflowStore shape) ──
 
+/** Built-in verify-step types. Plugin-registered handlers may use any other string. */
+export type BuiltinVerifyStepType = "command" | "llm-review" | "agent-qa" | "external-job" | "rubric-review" | "tool-call";
+
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: BuiltinVerifyStepType | (string & {});
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
@@ -33,6 +36,24 @@ export interface VerifyStep {
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */
 	command?: string;
+	/** type: tool-call — name of the agent tool to invoke. */
+	tool?: string;
+	/** type: tool-call — arguments to pass to the tool (JSON-serialisable). */
+	args?: Record<string, unknown>;
+	/** type: rubric-review — "llm" or "human"; determines whether a session or a form is used. */
+	reviewer?: "llm" | "human";
+	/** type: rubric-review — schema describing rubric items. */
+	rubric?: RubricItem[];
+	/** type: rubric-review — expression evaluated against rubric values to decide pass/fail. */
+	pass_when?: string;
+}
+
+export interface RubricItem {
+	id: string;
+	label: string;
+	scale?: { min: number; max: number };
+	options?: string[];
+	kind?: "text";
 }
 
 export interface WorkflowGate {
@@ -62,9 +83,10 @@ export interface Workflow {
 
 function normalizeStep(raw: unknown): VerifyStep {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+	const rawType = typeof r.type === "string" ? r.type : "command";
 	const step: VerifyStep = {
 		name: typeof r.name === "string" ? r.name : "",
-		type: (r.type === "llm-review" || r.type === "agent-qa") ? r.type : "command",
+		type: rawType,
 	};
 	if (typeof r.run === "string") step.run = r.run;
 	if (typeof r.prompt === "string") step.prompt = r.prompt;
@@ -77,6 +99,30 @@ function normalizeStep(raw: unknown): VerifyStep {
 	if (typeof r.description === "string") step.description = r.description;
 	if (typeof r.component === "string") step.component = r.component;
 	if (typeof r.command === "string") step.command = r.command;
+	if (typeof r.tool === "string") step.tool = r.tool;
+	if (r.args && typeof r.args === "object" && !Array.isArray(r.args)) {
+		step.args = r.args as Record<string, unknown>;
+	}
+	if (r.reviewer === "llm" || r.reviewer === "human") step.reviewer = r.reviewer;
+	if (Array.isArray(r.rubric)) {
+		step.rubric = (r.rubric as unknown[]).map(item => {
+			const it = (item && typeof item === "object") ? item as Record<string, unknown> : {};
+			const ri: RubricItem = {
+				id: typeof it.id === "string" ? it.id : "",
+				label: typeof it.label === "string" ? it.label : "",
+			};
+			if (it.scale && typeof it.scale === "object") {
+				const sc = it.scale as Record<string, unknown>;
+				if (typeof sc.min === "number" && typeof sc.max === "number") {
+					ri.scale = { min: sc.min, max: sc.max };
+				}
+			}
+			if (Array.isArray(it.options)) ri.options = it.options.filter(x => typeof x === "string") as string[];
+			if (it.kind === "text") ri.kind = "text";
+			return ri;
+		});
+	}
+	if (typeof r.pass_when === "string") step.pass_when = r.pass_when;
 	return step;
 }
 
@@ -133,6 +179,11 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.label !== undefined) out.label = s.label;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
+	if (s.tool !== undefined) out.tool = s.tool;
+	if (s.args !== undefined) out.args = s.args;
+	if (s.reviewer !== undefined) out.reviewer = s.reviewer;
+	if (s.rubric !== undefined) out.rubric = s.rubric;
+	if (s.pass_when !== undefined) out.pass_when = s.pass_when;
 	return out;
 }
 
