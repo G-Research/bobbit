@@ -2,7 +2,7 @@
 
 When a user (or another agent) edits a goal's `spec` mid-flight via `PUT /api/goals/:id`, the team-lead session that's currently driving the goal must learn about the edit — otherwise it keeps executing against the stale spec it received in its system prompt at startup.
 
-This doc covers the full notification pipeline: the WS broadcast, the steered prompt to the team-lead, the throttling rule, the UI pill, and the canonical re-read tool. It is the long-form companion to the one-line entries in `AGENTS.md` and the diagnostic in `docs/debugging.md`.
+This doc covers the full notification pipeline: the WS broadcast, the steered prompt to the team-lead, the throttling rule, the UI pill, and the canonical re-read tool. See `docs/debugging.md` for the symptom-driven diagnostic chain.
 
 ## Why a notification at all
 

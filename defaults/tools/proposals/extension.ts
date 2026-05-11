@@ -307,9 +307,7 @@ export default function (pi: ExtensionAPI) {
 		name: "view_goal_spec",
 		label: "View Goal Spec",
 		description:
-			"Read the current `goal.spec` content for a goal (defaults to the agent's current goal via BOBBIT_GOAL_ID). " +
-			"Use after a `goal_spec_changed` notification to learn what the spec now says — the version injected into your " +
-			"system prompt at startup is NOT updated when the user / parent agent edits the spec mid-flight.",
+			"Read the current `goal.spec`. Use after `goal_spec_changed` — the spec injected at startup is not refreshed.",
 		promptSnippet: "View the current goal.spec content (the spec injected at startup may be stale).",
 		parameters: Type.Object({
 			goal_id: Type.Optional(Type.String({ description: "Goal id. Defaults to the current session's goal (BOBBIT_GOAL_ID)." })),
