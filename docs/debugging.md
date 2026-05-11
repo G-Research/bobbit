@@ -886,6 +886,12 @@ The QA extension must emit `[screenshot_file]<path>[/screenshot_file]` markers, 
 
 The `isUserVisibleActivity` filter in `src/server/agent/session-manager.ts` decides which event types bump `lastActivity`. Internal heartbeats / state pushes are excluded. If every restored session reads as "just now", check the filter hasn't been weakened.
 
+## Sidebar shows spurious "now ●" (unread dot) on idle sessions
+
+Symptom: idle sessions in the sidebar repeatedly flip to "now" with an unread dot, roughly every ~15s, even though no agent activity has occurred. The state self-heals within ~5s (next `/api/sessions` poll) but recurs on the next status heartbeat.
+
+Cause: a client-side writer is mutating `lastActivity` in response to `session_status` WS frames. The server is the sole authoritative writer of `lastActivity` - `updateLocalSessionStatus()` in `src/app/api.ts` must update `status` only. See [internals.md - Client must not mutate `lastActivity`](internals.md#client-must-not-mutate-lastactivity). Pinned by `tests/spurious-idle-unread.spec.ts`.
+
 ## Symlinked project root rejected with `code: symlink_root`
 
 `POST /api/projects` returns HTTP 400 `{ error, code: "symlink_root", rootPath, canonical }` when the supplied `rootPath` differs from `realpathSync(rootPath)`. The add-project dialog handles this transparently: it catches `SymlinkRootError` from `src/app/api.ts`, shows a confirm modal (`data-testid="symlink-confirm"`), and re-submits with `body.acceptCanonical: true` on accept. CLI/scripted callers must either pre-resolve the path themselves or include `acceptCanonical: true` in the body. The throw originates in `detectSymlinkRoot()` / `SymlinkProjectRootError` in `src/server/agent/project-registry.ts`. `registerProvisional()` and `registerSystemProject()` auto-accept canonical and never surface this error. See [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling).
