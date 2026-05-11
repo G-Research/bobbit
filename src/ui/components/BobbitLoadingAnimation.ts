@@ -1,6 +1,49 @@
 import { html, TemplateResult } from 'lit';
+import {
+  CANONICAL_PALETTE,
+  resolveBodyPixels,
+  drawPixelsBresenham,
+  BODY_WIDTH,
+  BODY_HEIGHT,
+} from '../bobbit-render.js';
+
+/**
+ * Pre-rendered sprite as a data: URL. Generated once on module load (lazily
+ * memoised, keyed by DPR so zoom changes regenerate). Using an <img> instead
+ * of a <canvas> means the sprite appears on the same paint as the surrounding
+ * scene — no JS-mount-time gap waiting for a ref callback to draw.
+ *
+ * Same pipeline the main sidebar/chat sprite uses (resolveBodyPixels +
+ * drawPixelsBresenham) so pixel boundaries stay crisp at any DPR.
+ */
+const CSS_W = 40; // BODY_WIDTH (10) × scale 4
+const CSS_H = 36; // BODY_HEIGHT (9) × scale 4
+
+let cachedUrl: string | null = null;
+let cachedDpr = 0;
+
+function getLoadingBobbitUrl(): string {
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+  if (cachedUrl && cachedDpr === dpr) return cachedUrl;
+  const devW = Math.round(CSS_W * dpr);
+  const devH = Math.round(CSS_H * dpr);
+  const canvas = document.createElement('canvas');
+  canvas.width = devW;
+  canvas.height = devH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return cachedUrl ?? '';
+  // Gaze 'right' matches the original hand-coded box-shadow eye positions
+  // (pupils at x=4/x=7), so the bobbit keeps its down-right glance.
+  const pixels = resolveBodyPixels(CANONICAL_PALETTE, 'right', false);
+  drawPixelsBresenham(ctx, pixels, devW, devH);
+  cachedUrl = canvas.toDataURL();
+  cachedDpr = dpr;
+  return cachedUrl;
+}
 
 export function bobbitLoadingAnimation(): TemplateResult {
+  const spriteUrl = getLoadingBobbitUrl();
+
   return html`
     <style>
       .bobbit-loading-scene-wrap {
@@ -21,33 +64,29 @@ export function bobbitLoadingAnimation(): TemplateResult {
         width: 340px;
         height: 200px;
       }
+      /* Bobbit anchor — 40×36 wrapper sized to match the sprite's visual box.
+         bottom: 34px places the sprite bottom edge at the same container y
+         it had with the old scale(4) box-shadow technique (anchor.bottom=66
+         + box-shadow y-extent -3..33 with origin center bottom). */
       .bobbit-loading-anchor {
         position: absolute;
-        bottom: 66px;
-        left: 54%;
+        bottom: 34px;
+        left: calc(54% - 1.5px);
+        width: ${CSS_W}px;
+        height: ${CSS_H}px;
         z-index: 10;
         animation: bobbit-loading-bounce 0.75s cubic-bezier(0.45, 0, 0.55, 1) infinite;
       }
+      /* Canvas-based sprite — DPR-accurate, drawn via drawPixelsBresenham
+         (same pipeline as the main bobbit sprite). transform-origin and
+         squash keyframes mirror the old box-shadow version, but with the
+         scale(4) base removed since the canvas is already at native size. */
       .bobbit-loading-pixel {
-        width: 1px;
-        height: 1px;
+        display: block;
+        width: ${CSS_W}px;
+        height: ${CSS_H}px;
         image-rendering: pixelated;
-        transform: scale(4);
         transform-origin: center bottom;
-        box-shadow:
-          3px 0 0 #000, 4px 0 0 #000, 5px 0 0 #000, 6px 0 0 #000, 7px 0 0 #000,
-          2px 1px 0 #000, 3px 1px 0 #8ec63f, 4px 1px 0 #8ec63f, 5px 1px 0 #8ec63f, 6px 1px 0 #b5d98a, 7px 1px 0 #b5d98a, 8px 1px 0 #000,
-          1px 2px 0 #000, 2px 2px 0 #8ec63f, 3px 2px 0 #8ec63f, 4px 2px 0 #8ec63f, 5px 2px 0 #8ec63f, 6px 2px 0 #8ec63f, 7px 2px 0 #b5d98a, 8px 2px 0 #8ec63f, 9px 2px 0 #000,
-          0px 3px 0 #000, 1px 3px 0 #8ec63f, 2px 3px 0 #8ec63f, 3px 3px 0 #8ec63f, 4px 3px 0 #8ec63f, 5px 3px 0 #8ec63f, 6px 3px 0 #8ec63f, 7px 3px 0 #8ec63f, 8px 3px 0 #8ec63f, 9px 3px 0 #000,
-          0px 4px 0 #000, 1px 4px 0 #8ec63f, 2px 4px 0 #8ec63f, 3px 4px 0 #8ec63f,
-          4px 4px 0 #1a3010, 5px 4px 0 #8ec63f, 6px 4px 0 #8ec63f,
-          7px 4px 0 #1a3010, 8px 4px 0 #8ec63f, 9px 4px 0 #000,
-          0px 5px 0 #000, 1px 5px 0 #8ec63f, 2px 5px 0 #8ec63f, 3px 5px 0 #8ec63f,
-          4px 5px 0 #1a3010, 5px 5px 0 #8ec63f, 6px 5px 0 #8ec63f,
-          7px 5px 0 #1a3010, 8px 5px 0 #8ec63f, 9px 5px 0 #000,
-          0px 6px 0 #000, 1px 6px 0 #6b9930, 2px 6px 0 #8ec63f, 3px 6px 0 #8ec63f, 4px 6px 0 #8ec63f, 5px 6px 0 #8ec63f, 6px 6px 0 #8ec63f, 7px 6px 0 #8ec63f, 8px 6px 0 #8ec63f, 9px 6px 0 #000,
-          1px 7px 0 #000, 2px 7px 0 #6b9930, 3px 7px 0 #8ec63f, 4px 7px 0 #8ec63f, 5px 7px 0 #8ec63f, 6px 7px 0 #8ec63f, 7px 7px 0 #8ec63f, 8px 7px 0 #000,
-          2px 8px 0 #000, 3px 8px 0 #000, 4px 8px 0 #000, 5px 8px 0 #000, 6px 8px 0 #000, 7px 8px 0 #000;
         animation: bobbit-loading-squash 0.75s cubic-bezier(0.45, 0, 0.55, 1) infinite;
       }
       .bobbit-loading-shadow {
@@ -154,32 +193,35 @@ export function bobbitLoadingAnimation(): TemplateResult {
         98%  { transform: translateY(1px); }
         100% { transform: translateY(0); }
       }
+      /* Squash — same scaleX/scaleY/rotate values as the original box-shadow
+         version, but the scale(4) base is dropped (the canvas is already at
+         40×36 native size, so scale(4) would distort it to 160×144). */
       @keyframes bobbit-loading-squash {
-        0%   { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
-        2%   { transform: scale(4) scaleX(1.17) scaleY(0.82) rotate(1.2deg); }
-        5%   { transform: scale(4) scaleX(1.19) scaleY(0.80) rotate(1.3deg); }
-        8%   { transform: scale(4) scaleX(1.13) scaleY(0.86) rotate(0.9deg); }
-        12%  { transform: scale(4) scaleX(1.0)  scaleY(1.0)  rotate(0deg); }
-        17%  { transform: scale(4) scaleX(0.92) scaleY(1.10) rotate(-0.6deg); }
-        22%  { transform: scale(4) scaleX(0.88) scaleY(1.14) rotate(-1.0deg); }
-        28%  { transform: scale(4) scaleX(0.85) scaleY(1.17) rotate(-1.2deg); }
-        34%  { transform: scale(4) scaleX(0.84) scaleY(1.18) rotate(-1.1deg); }
-        39%  { transform: scale(4) scaleX(0.88) scaleY(1.14) rotate(-0.7deg); }
-        43%  { transform: scale(4) scaleX(0.92) scaleY(1.10) rotate(-0.4deg); }
-        47%  { transform: scale(4) scaleX(0.94) scaleY(1.06) rotate(-0.1deg); }
-        50%  { transform: scale(4) scaleX(0.95) scaleY(1.05) rotate(0deg); }
-        53%  { transform: scale(4) scaleX(0.94) scaleY(1.06) rotate(0.1deg); }
-        57%  { transform: scale(4) scaleX(0.92) scaleY(1.10) rotate(0.3deg); }
-        62%  { transform: scale(4) scaleX(0.88) scaleY(1.14) rotate(0.6deg); }
-        67%  { transform: scale(4) scaleX(0.85) scaleY(1.17) rotate(0.8deg); }
-        73%  { transform: scale(4) scaleX(0.89) scaleY(1.12) rotate(1.0deg); }
-        79%  { transform: scale(4) scaleX(0.95) scaleY(1.04) rotate(1.1deg); }
-        84%  { transform: scale(4) scaleX(1.01) scaleY(0.97) rotate(1.1deg); }
-        89%  { transform: scale(4) scaleX(1.08) scaleY(0.92) rotate(1.1deg); }
-        93%  { transform: scale(4) scaleX(1.13) scaleY(0.86) rotate(1.05deg); }
-        96%  { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
-        98%  { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
-        100% { transform: scale(4) scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        0%   { transform: scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        2%   { transform: scaleX(1.17) scaleY(0.82) rotate(1.2deg); }
+        5%   { transform: scaleX(1.19) scaleY(0.80) rotate(1.3deg); }
+        8%   { transform: scaleX(1.13) scaleY(0.86) rotate(0.9deg); }
+        12%  { transform: scaleX(1.0)  scaleY(1.0)  rotate(0deg); }
+        17%  { transform: scaleX(0.92) scaleY(1.10) rotate(-0.6deg); }
+        22%  { transform: scaleX(0.88) scaleY(1.14) rotate(-1.0deg); }
+        28%  { transform: scaleX(0.85) scaleY(1.17) rotate(-1.2deg); }
+        34%  { transform: scaleX(0.84) scaleY(1.18) rotate(-1.1deg); }
+        39%  { transform: scaleX(0.88) scaleY(1.14) rotate(-0.7deg); }
+        43%  { transform: scaleX(0.92) scaleY(1.10) rotate(-0.4deg); }
+        47%  { transform: scaleX(0.94) scaleY(1.06) rotate(-0.1deg); }
+        50%  { transform: scaleX(0.95) scaleY(1.05) rotate(0deg); }
+        53%  { transform: scaleX(0.94) scaleY(1.06) rotate(0.1deg); }
+        57%  { transform: scaleX(0.92) scaleY(1.10) rotate(0.3deg); }
+        62%  { transform: scaleX(0.88) scaleY(1.14) rotate(0.6deg); }
+        67%  { transform: scaleX(0.85) scaleY(1.17) rotate(0.8deg); }
+        73%  { transform: scaleX(0.89) scaleY(1.12) rotate(1.0deg); }
+        79%  { transform: scaleX(0.95) scaleY(1.04) rotate(1.1deg); }
+        84%  { transform: scaleX(1.01) scaleY(0.97) rotate(1.1deg); }
+        89%  { transform: scaleX(1.08) scaleY(0.92) rotate(1.1deg); }
+        93%  { transform: scaleX(1.13) scaleY(0.86) rotate(1.05deg); }
+        96%  { transform: scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        98%  { transform: scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
+        100% { transform: scaleX(1.16) scaleY(0.83) rotate(1.05deg); }
       }
       @keyframes bobbit-loading-shadow-anim {
         0%   { box-shadow:
@@ -305,7 +347,15 @@ export function bobbitLoadingAnimation(): TemplateResult {
             <div class="bobbit-loading-sweat-drop"></div>
           </div>
           <div class="bobbit-loading-anchor">
-            <div class="bobbit-loading-pixel"></div>
+            <img
+              class="bobbit-loading-pixel"
+              src="${spriteUrl}"
+              width="${BODY_WIDTH * 4}"
+              height="${BODY_HEIGHT * 4}"
+              alt=""
+              decoding="sync"
+              draggable="false"
+            />
           </div>
           <div class="bobbit-loading-dust">
             <div class="bobbit-loading-dust-px"></div>

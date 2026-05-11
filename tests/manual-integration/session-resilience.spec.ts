@@ -323,16 +323,18 @@ async function createGoalViaBrowser(
 	gw: GW,
 	title: string,
 	spec: string,
-	opts?: { workflowId?: string; sandboxed?: boolean },
+	opts?: { workflowId?: string; sandboxed?: boolean; projectName?: string },
 ): Promise<string> {
 	await page.goto(appUrl(gw));
 	// Wait for sidebar to fully load
 	await page.waitForSelector("button", { timeout: 15_000 });
 
-	// Click "New Goal". Prefer the per-project "+ goal" button (title `New goal in <name>`) —
-	// unambiguous in multi-project installs. Fall back to toolbar "+ New Goal" + picker for
-	// single-project runs where the per-project button may not exist.
-	const perProjectBtn = page.locator("button[title^='New goal in']").first();
+	// Click "New Goal". When `projectName` is supplied, target that project's
+	// per-project "+ goal" button (title `New goal in <name>`); otherwise prefer
+	// the first per-project button. Fall back to toolbar "+ New Goal" + picker.
+	const perProjectBtn = opts?.projectName
+		? page.locator(`button[title="New goal in ${opts.projectName}"]`).first()
+		: page.locator("button[title^='New goal in']").first();
 	if (await perProjectBtn.count() > 0) {
 		await expect(perProjectBtn).toBeVisible({ timeout: 10_000 });
 		await perProjectBtn.click();
@@ -340,12 +342,15 @@ async function createGoalViaBrowser(
 		const toolbarBtn = page.locator("button[title='New goal (Alt+G)']").first();
 		await expect(toolbarBtn).toBeVisible({ timeout: 10_000 });
 		await toolbarBtn.click();
-		// If the project-picker popover opened (multi-project install), pick the first project.
+		// If the project-picker popover opened (multi-project install), pick the
+		// requested project (or the first if none specified).
 		const popover = page.locator("project-picker-popover");
 		if (await popover.count() > 0) {
-			const firstRow = popover.locator(".bobbit-project-picker-row").first();
-			await expect(firstRow).toBeVisible({ timeout: 5_000 });
-			await firstRow.click();
+			const row = opts?.projectName
+				? popover.locator(".bobbit-project-picker-row", { hasText: opts.projectName }).first()
+				: popover.locator(".bobbit-project-picker-row").first();
+			await expect(row).toBeVisible({ timeout: 5_000 });
+			await row.click();
 		}
 	}
 
@@ -490,7 +495,9 @@ async function waitForFile(gw: GW, id: string, ms = 30_000) {
 	while (Date.now() - t0 < ms) {
 		const sf = join(gw.dir, ".bobbit", "state", "sessions.json");
 		if (existsSync(sf)) {
-			const mine = JSON.parse(readFileSync(sf, "utf-8")).find((s: any) => s.id === id);
+			const raw = JSON.parse(readFileSync(sf, "utf-8"));
+			const arr: any[] = Array.isArray(raw) ? raw : (raw?.sessions ?? []);
+			const mine = arr.find((s: any) => s.id === id);
 			if (mine?.agentSessionFile && existsSync(mine.agentSessionFile)) return true;
 		}
 		await new Promise(r => setTimeout(r, 2_000));
@@ -792,25 +799,21 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 			console.log(`  Proj2 session ${label}: message sent`);
 		}
 
-		// 6. Create a goal in the second project via API
+		// 6. Create a goal in the second project via the UI (parity with goals
+		// B and C; was previously API-only). Real users go through the goal
+		// assistant / form, so the test should too — even for the second
+		// project.
 		t0 = performance.now();
-		const goalRes = await api(gw, "/api/goals", {
-			method: "POST",
-			body: JSON.stringify({
-				title: "Proj2 Feature",
-				cwd: proj2Dir,
-				spec: "Add a feature to the second project. Create src/proj2-feature.ts.",
-				workflowId: "feature",
-				projectId: proj2Id,
-				autoStartTeam: true,
-			}),
-		});
-		expect(goalRes.status).toBe(201);
-		const goalBody = await goalRes.json() as any;
-		proj2GoalId = goalBody.id;
 		proj2GoalTitle = "Proj2 Feature";
-		expect(goalBody.projectId).toBe(proj2Id);
-		console.log(`  Proj2 goal created: id=${proj2GoalId} (${Math.round(performance.now() - t0)}ms)`);
+		proj2GoalId = await createGoalViaBrowser(
+			page, gw,
+			proj2GoalTitle,
+			"Add a feature to the second project. Create src/proj2-feature.ts.",
+			{ workflowId: "feature", projectName: "Second Project" },
+		);
+		const createdGoal = await (await api(gw, `/api/goals/${proj2GoalId}`)).json() as any;
+		expect(createdGoal.projectId).toBe(proj2Id);
+		console.log(`  Proj2 goal created via UI: id=${proj2GoalId} (${Math.round(performance.now() - t0)}ms)`);
 
 		// Wait for worktree setup
 		await pollGoalSetup(gw, proj2GoalId, 120_000);
@@ -842,16 +845,17 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		expect(normalize(leadInfo.cwd)).not.toBe(normalize(dir));
 		console.log(`  Proj2 team lead cwd=${leadInfo.cwd} projectId=${leadInfo.projectId}`);
 
-		// 7. Verify sidebar grouping via browser
+		// 7. Verify sidebar grouping via browser — the user sees "Second Project"
+		// AND the proj2 goal title rendered as text in the goal-row.
 		await page.goto(appUrl(gw));
-		await page.waitForSelector('[data-testid="sidebar-expanded"]', { timeout: 15_000 });
-		// Wait for the project header to actually render in the sidebar
-		await page.locator('[data-testid="sidebar-expanded"]').getByText("Second Project").first().waitFor({ timeout: 10_000 });
-
-		// The sidebar should show "Second Project" as a separate project group
-		const sidebarText = await page.locator('[data-testid="sidebar-expanded"]').textContent() || "";
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText("Second Project").first().waitFor({ timeout: 10_000 });
+		await sidebar.getByText(proj2GoalTitle).first().waitFor({ timeout: 10_000 });
+		const sidebarText = (await sidebar.textContent()) || "";
 		expect(sidebarText).toContain("Second Project");
-		console.log(`  Sidebar contains "Second Project" ✓`);
+		expect(sidebarText).toContain(proj2GoalTitle);
+		console.log(`  Sidebar shows "Second Project" + goal "${proj2GoalTitle}" ✓`);
 		await takeScreenshot(page, "multi-project-sidebar.png");
 
 		// 8. Verify API lists sessions and goals with correct projectId

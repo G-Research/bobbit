@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
+import { spliceInFlightMessage } from "../agent/splice-inflight-message.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
@@ -356,13 +357,15 @@ export function handleWebSocketConnection(
 				}
 			})();
 
-			// If there's a pending tool permission request, send it to the new client.
-			// Stamp a fresh seq+ts so the client reducer can order this frame relative
-			// to live events. See docs/design/unified-message-ordering-reducer.md §3.1.
+			// If there's a pending tool permission request, replay it to the new
+			// client. We REUSE the original broadcast's seq/ts (stashed on the
+			// pending-grant record) instead of allocating a fresh seq — a fresh
+			// unicast seq would leave already-attached clients gap-buffering the
+			// next live event forever. Pinned by
+			// tests/perm-frame-late-joiner-seq-gap.test.ts.
 			const pendingPerm = sessionManager.getPendingToolPermission(sessionId);
 			if (pendingPerm) {
-				const { seq, ts } = session.eventBuffer.pushFrame();
-				send(ws, { type: "tool_permission_needed", ...pendingPerm, seq, ts });
+				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
 			return;
 		}
@@ -614,9 +617,12 @@ export function handleWebSocketConnection(
 						// msgsResp.data may be an array or { messages: [...] }
 						let data: any = raw;
 						if (Array.isArray(raw)) {
-							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(raw));
+							// H3: splice in-flight message_update before truncation/sidecar/stamp.
+							const spliced = spliceInFlightMessage(raw, (session as any).latestMessageUpdate);
+							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(spliced));
 						} else if (raw && Array.isArray(raw.messages)) {
-							const truncated = truncateLargeToolContentInMessages(raw.messages);
+							const spliced = spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate);
+							const truncated = truncateLargeToolContentInMessages(spliced);
 							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 							data = merged === raw.messages ? raw : { ...raw, messages: merged };
 						}

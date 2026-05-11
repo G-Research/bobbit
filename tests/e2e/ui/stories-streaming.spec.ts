@@ -22,8 +22,8 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 	});
 
 	test.afterEach(async () => {
@@ -594,8 +594,8 @@ test.describe("CT-06: Focus follows intent", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 	});
 
 	test.afterEach(async () => {

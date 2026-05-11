@@ -20,7 +20,7 @@ export function buildReattemptContext(goal: PersistedGoal, prStatusStore: PrStat
 	if (goal.branch) lines.push(`**Branch:** ${goal.branch}`);
 	const pr = prStatusStore.get(goal.id);
 	if (pr?.url) lines.push(`**PR URL:** ${pr.url}`);
-	lines.push(`**Workflow:** ${goal.workflowId || "general"}`);
+	lines.push(`**Workflow:** ${goal.workflowId || "(none)"}`);
 	lines.push("");
 	lines.push("**Original Spec:**");
 	lines.push(goal.spec || "(no spec)");
@@ -69,14 +69,14 @@ Every goal runs with a workflow that defines the gates to pass, their dependency
 Available workflows:
 {{AVAILABLE_WORKFLOWS}}
 
-Pick the workflow that best fits. When in doubt, use **general**.
+Pick the workflow that best fits. If no workflow obviously fits, pick the first one listed above; the user can change it before accepting.
 
 ## Proposing a goal
 
 When ready, call the \`propose_goal\` tool with these parameters:
 - **title**: Short 2-5 word title (must be under 29 characters)
 - **spec**: Markdown spec content. Include: brief description of what needs to be done, key requirements or acceptance criteria, constraints or edge cases discussed, technical approach notes if relevant
-- **workflow**: Workflow ID (e.g. "general", "feature", "bug-fix")
+- **workflow**: Workflow ID (matching one of the IDs listed above)
 - **options**: (optional) Comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. "QA testing")
 - **cwd**: (optional) Working directory override path, if the user asks to change it
 

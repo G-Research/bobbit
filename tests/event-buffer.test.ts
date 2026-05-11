@@ -232,6 +232,57 @@ test("EventBuffer.pushFrame seqs are monotonic and consumed even with no pushes"
 	assert.equal(buf.lastSeq, 3);
 });
 
+// ── seedNextSeq (restart frame-of-reference preservation) ───────────────────
+
+test("EventBuffer.seedNextSeq advances nextSeq so the next push continues from N+1", () => {
+	const buf = new EventBuffer();
+	buf.seedNextSeq(50);
+	const a = buf.push({ type: "x" });
+	const b = buf.push({ type: "y" });
+	assert.equal(a.seq, 50, "first push after seed lands at the seeded seq");
+	assert.equal(b.seq, 51);
+	assert.equal(buf.lastSeq, 51);
+});
+
+test("EventBuffer.seedNextSeq is monotonic-only (never goes backwards)", () => {
+	const buf = new EventBuffer();
+	buf.push({ type: "x" }); // nextSeq -> 2
+	buf.push({ type: "y" }); // nextSeq -> 3
+	buf.seedNextSeq(2);       // would go backwards — ignored
+	const c = buf.push({ type: "z" });
+	assert.equal(c.seq, 3, "seed below current nextSeq is ignored");
+});
+
+test("EventBuffer.seedNextSeq rejects non-finite / non-positive values", () => {
+	const buf = new EventBuffer();
+	buf.seedNextSeq(Number.NaN);
+	buf.seedNextSeq(Number.POSITIVE_INFINITY);
+	buf.seedNextSeq(0);
+	buf.seedNextSeq(-5);
+	const a = buf.push({ type: "x" });
+	assert.equal(a.seq, 1, "invalid seeds are no-ops");
+});
+
+test("EventBuffer.seedNextSeq + push: client _highestSeq dedup gate keeps applying frames after a server-side restart", () => {
+	// Repro of the regression behind PR #500 + #520: after _restartAgent the
+	// server built a fresh EventBuffer (seq=1) but clients kept their open
+	// WebSocket and `_highestSeq` from the old session, so `seq <= _highestSeq`
+	// silently dropped every new event. Seeding the new buffer with the old
+	// high-water mark + 1 keeps the next event monotonically ahead of the
+	// client's tracker.
+	const oldBuf = new EventBuffer();
+	for (let i = 0; i < 25; i++) oldBuf.push({ i });
+	const clientHighestSeq = oldBuf.lastSeq;
+
+	const newBuf = new EventBuffer();
+	newBuf.seedNextSeq(oldBuf.lastSeq + 1);
+	const firstNewEvent = newBuf.push({ type: "agent_start" });
+	assert.ok(
+		firstNewEvent.seq > clientHighestSeq,
+		`new event seq=${firstNewEvent.seq} must exceed client _highestSeq=${clientHighestSeq}`,
+	);
+});
+
 test("EventBuffer.SNAPSHOT_ORDER_FLOOR is strictly less than every live seq", () => {
 	assert.equal(EventBuffer.SNAPSHOT_ORDER_FLOOR, -1_000_000_000);
 	const buf = new EventBuffer();

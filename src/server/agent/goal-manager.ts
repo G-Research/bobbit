@@ -169,7 +169,8 @@ export class GoalManager {
 		// Snapshot workflow onto goal. Resolution order:
 		//   1. Caller passed `resolvedWorkflow` (from config cascade) — use it.
 		//   2. Caller passed `workflowId` only — read from the inline workflow store.
-		//   3. Neither — fall back to "general".
+		//   3. Neither — fall back to the first workflow in the store
+		//      (insertion order preserves config-cascade priority).
 		// If we can't resolve a workflow at all, throw a clear error so
 		// `POST /api/goals` surfaces a 400 instead of silently creating a
 		// gateless goal. See docs/design/multi-repo-components.md §3.4.
@@ -191,14 +192,18 @@ export class GoalManager {
 			goal.workflowId = workflowId;
 			goal.workflow = JSON.parse(JSON.stringify(wf));
 		} else if (!workflowId && workflowStore) {
-			// Default to "general" workflow when none specified.
-			const defaultWf = workflowStore.get("general");
-			if (defaultWf) {
-				goal.workflowId = "general";
-				goal.workflow = JSON.parse(JSON.stringify(defaultWf));
-			} else if (workflowStore.getAll().length === 0) {
+			// No id supplied — fall back to the first workflow in the store.
+			// Order is insertion order, which preserves config-cascade priority
+			// (project > user > defaults). If the store is empty, surface the
+			// canonical NO_WORKFLOWS_MSG so the UI can show the empty-workflows
+			// banner. Never names a literal workflow id (no "general" magic).
+			const all = workflowStore.getAll();
+			if (all.length === 0) {
 				throw new Error(NO_WORKFLOWS_MSG);
 			}
+			const first = all[0];
+			goal.workflowId = first.id;
+			goal.workflow = JSON.parse(JSON.stringify(first));
 		}
 
 		this.store.put(goal);

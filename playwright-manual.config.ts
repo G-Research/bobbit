@@ -8,6 +8,13 @@
  */
 import { defineConfig } from "@playwright/test";
 
+// Opt-in per-test video capture. Tier-2.5-style — always-off by default,
+// enable with RECORDVIDEO=1 to get a webm per test under test-results/.
+// The Tier 2.5 reporter (`./tests/e2e/report/tier-2-5-reporter.ts`) is not
+// used here — manual specs talk to real agents, not the mock-agent contract
+// the reporter assumes; Playwright's built-in recorder is sufficient.
+const WANT_VIDEO = !!process.env.RECORDVIDEO;
+
 export default defineConfig({
 	timeout: 300_000,     // 5 minutes per test — real LLM calls are slow
 	retries: 0,           // no retries — manual tests should be deterministic
@@ -15,6 +22,8 @@ export default defineConfig({
 	use: {
 		headless: true,
 		screenshot: "off",    // we capture manually
+		video: WANT_VIDEO ? { mode: "on", size: { width: 1280, height: 720 } } : "off",
+		trace: WANT_VIDEO ? "on" : "off",
 	},
 	projects: [
 		{

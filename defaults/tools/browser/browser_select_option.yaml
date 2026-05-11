@@ -1,6 +1,7 @@
 name: browser_select_option
-description: "Select option in a dropdown"
-summary: "Select one or more options in a <select> dropdown by value."
+description: "Select one or more option values in a <select>"
+summary: "Select option in a dropdown"
+params: [selector, values]
 provider:
   type: bobbit-extension
   extension: extension.ts

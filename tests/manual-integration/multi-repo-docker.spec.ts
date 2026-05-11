@@ -282,7 +282,7 @@ test.describe("Multi-repo & components — integration", () => {
 	});
 
 	// 1.  Project registration with a 3-component (2 normal + 1 data-only) set.
-	test("registers a two-repo project + one data-only repo via POST /api/projects", async () => {
+	test("registers a two-repo project + one data-only repo via POST /api/projects", async ({ page }) => {
 		expect(projectId).toBeTruthy();
 
 		const yamlPath = join(rootPath, ".bobbit", "config", "project.yaml");
@@ -299,6 +299,12 @@ test.describe("Multi-repo & components — integration", () => {
 		expect(Array.isArray(cfg.components)).toBe(true);
 		expect(cfg.components).toHaveLength(3);
 		expect(cfg.components.map((c: any) => c.name).sort()).toEqual(["api", "shared", "web"]);
+
+		// UI visibility: the user sees the project in the sidebar.
+		await page.goto(`${gw.base}/?token=${gw.token}`);
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText(`mr-${port}`).first().waitFor({ timeout: 10_000 });
 	});
 
 	// 2.  Inline workflows block persisted via PUT /config.
@@ -385,13 +391,37 @@ test.describe("Multi-repo & components — integration", () => {
 	// 6.  Archive cleanup tears down all per-repo worktrees and (when remote
 	//     pushes are enabled) deletes the matching remote branches. We run
 	//     with BOBBIT_TEST_NO_PUSH=1 so we assert local cleanup only.
-	test("archive cleanup tears down all per-repo worktrees", async ({}, ti) => {
-		ti.setTimeout(60_000);
+	test("archive cleanup tears down all per-repo worktrees", async ({ page }, ti) => {
+		ti.setTimeout(120_000);
 		expect(goalId).toBeTruthy();
 		expect(Object.keys(goalRepoWorktrees)).toHaveLength(3);
 
-		const archiveRes = await api(gw, `/api/goals/${goalId}`, { method: "DELETE" });
-		expect([200, 204]).toContain(archiveRes.status);
+		// UI baseline: project is visible in the sidebar before archive.
+		await page.goto(`${gw.base}/?token=${gw.token}`);
+		const sidebar = page.locator('[data-testid="sidebar-expanded"]');
+		await sidebar.waitFor({ timeout: 15_000 });
+		await sidebar.getByText(`mr-${port}`).first().waitFor({ timeout: 10_000 });
+
+		// Drive the archive through the UI — click Archive on the goal
+		// dashboard and confirm the modal.
+		await page.goto(`${gw.base}/?token=${gw.token}#/goal/${goalId}`);
+		// Use the goal-dashboard nav archive button (`btn-icon` class). The
+		// sidebar has a hidden hover-revealed archive button with the same
+		// title — disambiguate by class.
+		const archiveBtn = page.locator('.nav button[title="Archive goal"]').first();
+		await archiveBtn.waitFor({ timeout: 15_000 });
+		await archiveBtn.click();
+		await page.locator('text=Archive Goal').first().waitFor({ timeout: 5_000 });
+		await page.keyboard.press("Enter");
+
+		const archDeadline = Date.now() + 30_000;
+		let archivedFlag = false;
+		while (Date.now() < archDeadline) {
+			const g = await (await api(gw, `/api/goals/${goalId}`)).json();
+			if (g.archived) { archivedFlag = true; break; }
+			await new Promise(r => setTimeout(r, 250));
+		}
+		expect(archivedFlag, "goal not archived after UI click").toBe(true);
 
 		// Wait for fire-and-forget per-repo cleanup to finish.
 		const deadline = Date.now() + 30_000;

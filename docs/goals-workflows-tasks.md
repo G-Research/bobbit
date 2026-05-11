@@ -20,7 +20,35 @@ Workflows are **project-scoped only** — there is no system-scope or builtin la
 
 When a goal is created with a `workflowId`, the entire workflow is **snapshotted** into `PersistedGoal.workflow`. This frozen copy is immune to later template edits — the goal's requirements are locked at creation time.
 
-Goals without workflows still work fine — workflows are optional.
+Goals without workflows still work fine — workflows are optional **at the data-model layer**. However, the standard goal-creation flow (the +New Goal picker and the goal assistant) requires the linked project to have at least one workflow. See [Default workflow resolution](#default-workflow-resolution) below for the resolution rules and the empty-workflows UX.
+
+#### Default workflow resolution
+
+Goal creation never assumes a workflow named `"general"` exists. The default-workflow rule, applied both server-side (`GoalManager.createGoal`) and UI-side (the goal preview panel and proposal toast), is:
+
+1. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, the request fails with `Workflow not found: <id>`.
+2. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
+3. **No workflows at all** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
+
+No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
+
+#### Goal creation in a zero-workflow project
+
+Projects can legitimately exist with zero workflows (e.g. a freshly registered project whose assistant has not yet run). The goal-creation UX in that state:
+
+- **Goal preview panel** (the +New Goal picker and the goal-assistant accept panel) renders an **empty-workflows banner** with a brief explanation and an **Open Project Assistant** button. The button calls `createProjectAssistantSession(project.rootPath, …)` from `src/app/dialogs.ts`, passing the linked project's id and existing name. The Accept button is disabled while the banner is visible, with a tooltip explaining why.
+- **While workflows are still loading** for the linked project, the panel shows a skeleton placeholder instead of either the dropdown or the banner. This prevents the banner from flickering on initial load before `ensureWorkflowsLoaded(projectId)` resolves.
+- **Goal assistant LLM** receives a stern sentinel from `SessionManager._buildWorkflowList()` when the project has no workflows: an instruction *not* to call `propose_goal` and to surface the empty state to the user. The assistant's normal "pick the first listed workflow" guidance only applies when at least one workflow is present.
+
+The per-project workflow availability is cached client-side (`_workflowCacheByProject` in `src/app/render.ts`) so switching back to a project that has workflows does not refetch unnecessarily. Browser E2E coverage lives in [`tests/e2e/ui/goal-empty-workflows-banner.spec.ts`](../tests/e2e/ui/goal-empty-workflows-banner.spec.ts).
+
+To author workflows for a project, see [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md) and run the project assistant from Settings → Components.
+
+#### `createGoal` failure preserves the assistant
+
+The goal-assistant accept flow (both the goal-preview panel handler and the `propose_goal` proposal-toast handler in `src/app/render.ts`) awaits `POST /api/goals` **before** tearing down any state. Disconnecting the remote agent, clearing the active assistant view, deleting the persisted draft, removing `gateway.sessionId`, and navigating to the goal dashboard all happen only on success.
+
+On failure (any rejection from `createGoal`), the assistant session, chat history, draft, `gatewaySessions` entry, and form state are left intact. The standard `showConnectionError("Failed to create goal", …)` toast surfaces the error message — the user can edit the proposal (e.g. pick a different workflow, fix the title) and click Accept again, or ask the assistant to revise. This avoids the prior failure mode where a 400 response (typically `Workflow not found: …` or `NO_WORKFLOWS_MSG`) would dismiss the assistant and force the user to start over with no context. Re-attempt sessions (with `reattemptGoalId`) go through the same accept handler and benefit from the same guarantee. Browser E2E coverage lives in [`tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts`](../tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts).
 
 **Removed runtime concepts:**
 
@@ -416,7 +444,7 @@ When signaling a gate, the server checks that all upstream dependencies have pas
 Here's the typical flow for a team goal with a workflow:
 
 ```
-1. User creates a goal with workflowId="general"
+1. User creates a goal with workflowId="feature" (or any workflow defined on the project)
    → Server snapshots the workflow into the goal
    → Gate states initialized: design-doc=pending, implementation=pending, ready-to-merge=pending
 

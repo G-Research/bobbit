@@ -19,7 +19,7 @@ Out of scope (file as separate goals — *not designed here*): namespacing, `!`b
 | `src/server/skills/slash-skills.ts` | No structural change; re-export `applySubstitutions`/`buildSlashSkillPrompt` (already exported). |
 | `src/server/ws/handler.ts` | Replace inline regex block (lines 290–322) with call to `resolveSkillExpansions`. Pass structured form to `enqueuePrompt`. |
 | `src/server/agent/session-manager.ts` | `enqueuePrompt` accepts an optional `skillExpansions` array. Persist a sidecar (`<sessionFile>.skill-meta.jsonl`) keyed by user-message text+timestamp. Broadcast `skillExpansions` alongside the echoed user message. |
-| `src/server/agent/system-prompt.ts` | Add `skillsCatalog?: Array<{name; description; argumentHint?}>` to `PromptParts`. Inject "Available Skills" section into `assembleSystemPrompt` and `getPromptSections`, with 4 KB cap and alphabetical truncation. |
+| `src/server/agent/system-prompt.ts` | Add `skillsCatalog?: Array<{name; description; argumentHint?}>` to `PromptParts`. Inject "Available Skills" section into `assembleSystemPrompt` and `getPromptSections`, with a configurable byte cap (default 16 KB) and alphabetical truncation. |
 | `defaults/tools/skills/activate_skill.yaml` *(new)* | Tool definition. |
 | `defaults/tools/skills/extension.ts` *(new)* | Tool handler — calls back via REST to a new `POST /api/sessions/:id/activate-skill` that resolves on the server using the existing `getSlashSkill` + `buildSlashSkillPrompt`. |
 | `src/server/server.ts` | Add `POST /api/sessions/:id/activate-skill` (returns `{ name, args, source, filePath, expanded }` or 404/403). Also exposes `GET /api/sessions/:id/skills-catalog` for tool-extension hot-reload (optional). |
@@ -302,8 +302,9 @@ instructions; act on them as if the user had typed `/<name> <args>`.
 
 ### Token budget
 
-- Cap section at **4 096 chars** (≈1 KB tokens). Each bullet is ≈100–250 chars; gives ~16–40 skills which covers all realistic projects.
-- Construction loop: sort alphabetically by `name`; accumulate bullets while `runningLen + bulletLen < 4096`. When the cap is hit, append `- _… (N more skills omitted, alphabetically truncated; use \`activate_skill\` by name)_` and `console.warn`.
+- Cap section at a **configurable byte budget** (default **16 384 bytes**, user-tunable in `[1 024, 131 072]` via the `skillsCatalogBudget` preference and Settings → General; see [`docs/features.md`](../features.md) under Skills). Each bullet is ≈100–250 chars; the 16 KB default fits ~60–160 skills.
+- Construction loop: sort alphabetically by `name`; accumulate bullets while `runningLen + bulletLen < budget`. When the cap is hit, append `- _… (N more skills omitted, alphabetically truncated; use \`activate_skill\` by name)_` and `console.warn`.
+- Initial implementation shipped with a hardcoded 4 096-byte cap; raised to 16 KB and made configurable in a follow-up. The resolver `resolveSkillsCatalogBudget()` clamps overrides to the supported range and falls back to the default for missing/invalid values.
 
 ### Refresh on session restore
 
@@ -317,7 +318,7 @@ Header (~250 chars)
 N=20 → ~3 250 chars (≈800 tokens)
 ```
 
-Comfortably below the 4 KB cap.
+Comfortably below the 16 KB default cap.
 
 ---
 

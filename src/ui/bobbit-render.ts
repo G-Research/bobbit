@@ -189,8 +189,16 @@ export interface ChatBlobOptions {
 // CANVAS EYE ANIMATION
 // ============================================================================
 
-/** CSS scale factor used by .bobbit-blob__sprite */
-const CSS_SCALE = 4;
+/**
+ * Oversample factor for the canvas backing buffer (per sprite pixel, before DPR).
+ * The canvas displays at CSS 40×36 (BODY_WIDTH/HEIGHT × 4) but draws into a
+ * BODY × HI × dpr buffer. The browser then bilinearly downsamples to screen.
+ * Each sprite pixel becomes a uniformly-coloured HI×HI block, so at rest the
+ * downsample reproduces the source colour exactly — but during rotation /
+ * non-uniform scale the bilinear filter smooths jagged 1–2 device-pixel jitter
+ * that nearest-neighbor (image-rendering: pixelated) would otherwise produce.
+ * This is the same technique renderSidebarBobbitCanvas uses. */
+const CANVAS_HI = 8;
 
 /** Pre-render all unique eye frames for an eye sequence as SpritePixel arrays */
 function buildEyePixelCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<string, SpritePixel[]> {
@@ -211,7 +219,7 @@ function buildEyePixelCache(palette: BobbitPalette, sequence: EyeFrame[]): Map<s
  * distributed uniformly so adjacent columns never differ by more than 1px.
  * This guarantees pixel-perfect eyes at every DPR.
  */
-function drawPixelsBresenham(
+export function drawPixelsBresenham(
 	ctx: CanvasRenderingContext2D,
 	pixels: SpritePixel[],
 	devW: number,
@@ -246,12 +254,12 @@ export function startCanvasEyeAnimation(
 ): () => void {
 	const cache = buildEyePixelCache(palette, sequence);
 
-	// Size canvas backing to exact device pixel count
+	// Oversample: each sprite pixel → (HI × dpr) device pixels in the buffer.
+	// CSS displays at 40×36 (BODY × CSS_SCALE); browser bilinearly downsamples
+	// from buffer → screen, smoothing rotations without softening at-rest pixels.
 	const dpr = window.devicePixelRatio || 1;
-	const cssW = BODY_WIDTH * CSS_SCALE;
-	const cssH = BODY_HEIGHT * CSS_SCALE;
-	const devW = Math.round(cssW * dpr);
-	const devH = Math.round(cssH * dpr);
+	const devW = Math.round(BODY_WIDTH * CANVAS_HI * dpr);
+	const devH = Math.round(BODY_HEIGHT * CANVAS_HI * dpr);
 	canvas.width = devW;
 	canvas.height = devH;
 	// CSS dimensions are handled by the canvas.bobbit-blob__sprite rule (40×36px)
@@ -259,36 +267,36 @@ export function startCanvasEyeAnimation(
 	const ctx = canvas.getContext("2d")!;
 	let rafId = 0;
 	let lastKey = "";
-	let cssAnim: Animation | null = null;
 
-	function findCssAnimation(): Animation | null {
-		try {
-			const anims = canvas.getAnimations();
-			for (const a of anims) {
-				const dur = (a.effect as KeyframeEffect)?.getTiming?.()?.duration;
-				if (dur === cycleDurationMs) return a;
-			}
-		} catch { /* getAnimations not supported */ }
-		return null;
+	// Single source of truth: the canvas already has its own CSS animation
+	// (blob-busy-move-canvas / blob-idle-eyes-canvas) with the right
+	// animation-delay (--bobbit-idle-phase) applied. Reading that animation's
+	// currentTime gives us the *exact same* clock value CSS uses to evaluate
+	// every other animation on the same element — including sibling
+	// accessories (magnifier-depth-idle) that share the same delay.
+	//
+	// This bypasses every clock-arithmetic edge case (mount time, document
+	// timeline epoch, negative-delay semantics): we don't compute the phase,
+	// we observe the same one CSS observes.
+	function readPhasePct(): number {
+		const anims = canvas.getAnimations();
+		// Pick the 10s-cycle animation; its currentTime already accounts for
+		// animation-delay (negative delays make it start positive).
+		let anim: Animation | undefined;
+		for (const a of anims) {
+			const dur = (a.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
+			if (dur === cycleDurationMs) { anim = a; break; }
+		}
+		if (!anim || anim.currentTime == null) return 0;
+		const raw = typeof anim.currentTime === "number"
+			? anim.currentTime
+			: Number((anim.currentTime as CSSNumericValue).to("ms").value);
+		const wrapped = ((raw % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+		return (wrapped / cycleDurationMs) * 100;
 	}
 
 	function tick() {
-		if (!cssAnim) cssAnim = findCssAnimation();
-
-		let pct: number;
-		if (cssAnim && cssAnim.currentTime != null) {
-			const ct = typeof cssAnim.currentTime === "number"
-				? cssAnim.currentTime
-				: (cssAnim.currentTime as CSSNumericValue).to("ms").value;
-			const delay = Number((cssAnim.effect as KeyframeEffect)?.getTiming?.()?.delay ?? 0);
-			const active = ct - delay;
-			pct = active >= 0
-				? ((active % cycleDurationMs) / cycleDurationMs * 100)
-				: 0;
-		} else {
-			pct = (performance.now() % cycleDurationMs) / cycleDurationMs * 100;
-		}
-
+		const pct = readPhasePct();
 		let frame = sequence[0];
 		for (let i = sequence.length - 1; i >= 0; i--) {
 			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }
@@ -334,8 +342,8 @@ export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): Templ
 				const pixels = cache.get("center-false");
 				if (pixels) {
 					const dpr = window.devicePixelRatio || 1;
-					const devW = Math.round(BODY_WIDTH * CSS_SCALE * dpr);
-					const devH = Math.round(BODY_HEIGHT * CSS_SCALE * dpr);
+					const devW = Math.round(BODY_WIDTH * CANVAS_HI * dpr);
+					const devH = Math.round(BODY_HEIGHT * CANVAS_HI * dpr);
 					el.width = devW;
 					el.height = devH;
 					const ctx = el.getContext("2d")!;
@@ -426,8 +434,10 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const naturalSize = 76;
 	const s = size / naturalSize;
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
-	const eyeDelay = -(phaseIndex * 1.3 % 10).toFixed(2);
-	const shimmerDelay = -(phaseIndex * 1.7 % 8).toFixed(2);
+	// Negative animation-delay: each blob starts at a different point in the
+	// 10s cycle, so eyes and accessories are phase-offset across rows.
+	// 1.3s prime-ish step keeps neighbours visibly out of sync.
+	const idlePhaseSec = -(phaseIndex * 1.3 % 10);
 
 	// Eye animation for idle blob
 	let cleanup: (() => void) | null = null;
@@ -444,7 +454,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	return html`
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
 			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
-				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-eye-delay:${eyeDelay}s;--bobbit-shimmer-delay:${shimmerDelay}s;">
+				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-idle-phase:${idlePhaseSec.toFixed(2)}s;">
 					<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>
 					<div class="bobbit-blob__crown"></div>
 					<div class="bobbit-blob__bandana"></div>

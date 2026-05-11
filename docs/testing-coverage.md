@@ -34,10 +34,10 @@ User stories SB-00 through SB-37 (+ SB-00b) are defined in `userstories/sidebar.
 User stories defined in `userstories/sessions.md`, `userstories/resilience.md`, and the session subset of `userstories/projects.md`.
 
 - `tests/e2e/ui/stories-sessions.spec.ts` — S-01 through S-12 (create, switch, draft isolation, delete, rapid switching, worktree, rename, persistence, messaging).
-- `tests/e2e/ui/stories-resilience.spec.ts` — RE-01 through RE-08. Only RE-07 (WebSocket disconnect/reconnect) runs in standard E2E; RE-01–RE-06 and RE-08 exercise real process crash/restart and Docker recovery and are `test.skip()` with "INFRASTRUCTURE: Requires npm run test:manual" annotations — they run under the manual-integration harness instead.
+- `tests/e2e/ui/stories-resilience.spec.ts` — RE-01 through RE-08, all running under standard `npm run test:e2e` via the in-process crash/restart harness (`gateway.crash()` / `gateway.restart()` in `tests/e2e/gateway-harness.ts`, wired into `event.server_crash` / `event.server_restart` in `spec-framework.ts`). RE-05 (Docker sandbox container recovery) auto-skips when Docker isn't reachable via `isDockerAvailable()` from `tests/e2e/test-utils/docker.ts`. See [testing-strategy.md → Writing crash/restart E2E tests](testing-strategy.md#writing-crashrestart-e2e-tests).
 - `tests/e2e/ui/stories-projects.spec.ts` — PR-01/PR-04/PR-09/PR-10 (project organization).
 - All stories registered in `tests/e2e/ui/story-registry.ts`; `tools/spec-check.ts` reports per-contract variation coverage (CT-05 at 75%, CT-16 at 100%).
-- **Framework extensions** in `tests/e2e/ui/spec-framework.ts`: `ProjectHandle` entity handle; `SpecContext.createTestSession(name, opts)` accepting `opts.cwd` (worktree-backed) and `opts.goalId` (goal-scoped); `SpecContext.create_session_via_ui()` and `rename_session()` for sidebar-driven flows; `event.disconnect()` to force a WebSocket close; `event.server_crash()` / `event.server_restart()` which throw "requires manual harness" outside `npm run test:manual`.
+- **Framework extensions** in `tests/e2e/ui/spec-framework.ts`: `ProjectHandle` entity handle; `SpecContext.createTestSession(name, opts)` accepting `opts.cwd` (worktree-backed) and `opts.goalId` (goal-scoped); `SpecContext.create_session_via_ui()` and `rename_session()` for sidebar-driven flows; `event.disconnect()` to force a WebSocket close; `event.server_crash()` / `event.server_restart()` which bounce the in-process gateway via the worker-scoped `gateway` fixture (re-binds the same port, reuses `bobbitDir`).
 
 ## Tail-chat / scroll pin
 

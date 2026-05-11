@@ -1,6 +1,7 @@
 name: propose_goal
-description: "Submit a goal proposal for user review. This is THE canonical (and only) tool for creating a new goal — there is no separate create_goal tool. The user reviews the proposed title, spec, workflow choice, and options, then accepts to spawn a team-lead session that begins working on the goal. To tweak fields of an in-flight draft without re-emitting the whole payload, follow up with edit_proposal(type=\"goal\", ...)."
-summary: "Propose a goal — title, spec (acceptance criteria), workflow choice, and options. Once accepted, Bobbit spawns the goal's worktree + team-lead and begins execution."
+description: "Submit goal proposal with title, spec, workflow"
+summary: "Propose a goal for user review"
+params: [title, spec, cwd?, workflow?, options?]
 provider:
   type: bobbit-extension
   extension: extension.ts

@@ -27,8 +27,8 @@ test.describe("CT-16: Projects organize sessions", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 	});
 
 	test.afterEach(async () => {

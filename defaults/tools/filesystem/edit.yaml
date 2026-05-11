@@ -1,6 +1,7 @@
 name: edit
-description: "Replace exact text in a file"
-summary: "Replace exact text in a file. Use for precise, surgical edits."
+description: "Exact-text replace in a file. First match only."
+summary: "Replace exact text in a file"
+params: [path, oldText, newText]
 provider:
   type: builtin
   tool: edit

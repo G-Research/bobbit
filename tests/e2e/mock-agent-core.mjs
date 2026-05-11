@@ -426,6 +426,12 @@ export class MockAgentCore {
 			const filePath = MockAgentCore.extractFilePath(text);
 			return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
 		}
+		if (lower.includes("ask_user_choices with bad tab labels then retry")) {
+			// Simulates the failure-then-retry path: emits one ask_user_choices
+			// tool_use with questions[1] missing tab_label (rejected with isError:true)
+			// then a second, valid ask_user_choices with the {status:"posted"} stub.
+			return { askUserChoices: "errorThenRetry" };
+		}
 		if (lower.includes("ask_user_choices_multi")) {
 			return { askUserChoices: "multi" };
 		}
@@ -562,7 +568,11 @@ export class MockAgentCore {
 		if (toolAction && toolAction.toolDenied) {
 			await this._handleToolDenied(toolAction.toolDenied);
 		} else if (toolAction && toolAction.askUserChoices) {
-			await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+			if (toolAction.askUserChoices === "errorThenRetry") {
+				await this._handleAskUserChoicesErrorThenRetry();
+			} else {
+				await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+			}
 		} else if (toolAction && toolAction.liveUpdateProposal) {
 			await this._handleLiveUpdateProposal();
 		} else if (toolAction && toolAction.componentConfigProposal) {
@@ -1140,6 +1150,82 @@ export class MockAgentCore {
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Failure-then-retry path for the `ask_user_choices` widget. Emits two
+	 * tool calls back-to-back in the same turn:
+	 *   1. First call has questions[1] missing tab_label → tool_result is
+	 *      flagged isError:true with an `{error:"..."}` body, matching what
+	 *      the real `defaults/tools/ask/extension.ts` validation produces.
+	 *      The renderer must collapse this into a minimal `.ask-error` chip.
+	 *   2. Second call is a valid two-question ask with the normal
+	 *      `{status:"posted"}` stub, rendering the full interactive widget.
+	 *
+	 * After this turn the transcript should contain exactly ONE interactive
+	 * `<ask-user-choices-widget>` (tabs + .ask-submit) preceded by ONE
+	 * `.ask-error` chip. Drives tests/e2e/ui/ask-user-choices-ui.spec.ts's
+	 * error-then-retry case.
+	 */
+	async _handleAskUserChoicesErrorThenRetry() {
+		// ── First call — invalid (questions[1].tab_label missing) ──────────
+		const badToolId = `tool_ask_bad_${Date.now()}`;
+		const badQuestions = [
+			{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
+			// Intentionally missing tab_label — the real extension rejects this.
+			{ question: "Team size?", options: ["small", "medium", "large"] },
+		];
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId: badToolId, input: { questions: badQuestions } });
+		const badAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: badToolId, name: "ask_user_choices", arguments: { questions: badQuestions }, input: { questions: badQuestions } }],
+		};
+		this.conversationMessages.push(badAssistantMsg);
+		this.emit({ type: "message_end", message: badAssistantMsg });
+
+		const errBody = JSON.stringify({
+			error: "ask_user_choices: questions[1].tab_label is required when there are multiple questions.",
+		});
+		this.emit({ type: "tool_execution_update", toolId: badToolId, toolName: "ask_user_choices", status: "complete", output: errBody });
+		this.emit({ type: "tool_execution_end", toolCallId: badToolId, toolName: "ask_user_choices", isError: true });
+		const badToolResultMsg = {
+			role: "toolResult",
+			toolCallId: badToolId,
+			toolName: "ask_user_choices",
+			isError: true,
+			content: [{ type: "text", text: errBody }],
+		};
+		this.conversationMessages.push(badToolResultMsg);
+		this.emit({ type: "message_end", message: badToolResultMsg });
+
+		await this.tick(20);
+
+		// ── Second call — valid, posted stub ────────────────────────────────
+		const goodToolId = `tool_ask_good_${Date.now()}`;
+		const goodQuestions = [
+			{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
+			{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
+		];
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId: goodToolId, input: { questions: goodQuestions } });
+		const goodAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: goodToolId, name: "ask_user_choices", arguments: { questions: goodQuestions }, input: { questions: goodQuestions } }],
+		};
+		this.conversationMessages.push(goodAssistantMsg);
+		this.emit({ type: "message_end", message: goodAssistantMsg });
+
+		const stub = JSON.stringify({ status: "posted", tool_use_id: goodToolId });
+		this.emit({ type: "tool_execution_update", toolId: goodToolId, toolName: "ask_user_choices", status: "complete", output: stub });
+		this.emit({ type: "tool_execution_end", toolCallId: goodToolId, toolName: "ask_user_choices", isError: false });
+		const goodToolResultMsg = {
+			role: "toolResult",
+			toolCallId: goodToolId,
+			toolName: "ask_user_choices",
+			isError: false,
+			content: [{ type: "text", text: stub }],
+		};
+		this.conversationMessages.push(goodToolResultMsg);
+		this.emit({ type: "message_end", message: goodToolResultMsg });
 	}
 
 	/**

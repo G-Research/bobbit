@@ -1,6 +1,7 @@
 name: view_proposal
-description: "Read the current draft of a proposal file for the active session"
-summary: "View the current proposal draft. Returns the file contents (markdown or YAML), or a structured error if no proposal of this type has been emitted yet."
+description: "Return current draft contents or structured error"
+summary: "View the current proposal draft"
+params: [type]
 provider:
   type: bobbit-extension
   extension: extension.ts

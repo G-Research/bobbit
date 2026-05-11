@@ -508,7 +508,7 @@ import { fetchWorkflows, type Workflow } from "./api.js";
 const _workflowCacheByProject = new Map<string, Workflow[]>();
 const _workflowsLoadingByProject = new Set<string>();
 let _cachedWorkflows: Workflow[] = [];
-let _selectedWorkflowId = "general";
+let _selectedWorkflowId = "";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
 let _staffSandboxed = false;
@@ -537,8 +537,27 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 		_workflowCacheByProject.set(projectId, wfs);
 		_workflowsLoadingByProject.delete(projectId);
 		_cachedWorkflows = wfs;
+		// Seed default workflow selection to the first available id when no
+		// explicit choice has been made. The server now requires a real id
+		// (no "general" magic default), so the dropdown must show a valid
+		// option from the moment it renders.
+		if (!_selectedWorkflowId && wfs.length > 0) {
+			_selectedWorkflowId = wfs[0].id;
+		}
+		if (!_proposalWorkflowId && wfs.length > 0) {
+			_proposalWorkflowId = wfs[0].id;
+		}
 		renderApp();
 	});
+}
+
+/** Derive workflow-loading state for the goal form's empty-workflows banner. */
+function workflowStateFor(projectId: string | undefined): "no-project" | "loading" | "empty" | "ready" {
+	if (!projectId) return "no-project";
+	if (_workflowCacheByProject.has(projectId)) {
+		return (_workflowCacheByProject.get(projectId) || []).length === 0 ? "empty" : "ready";
+	}
+	return "loading";
 }
 
 let _sandboxStatusFetching = false;
@@ -726,6 +745,14 @@ interface GoalFormConfig {
 	enabledOptionalSteps: string[];
 	linkedProjectId?: string;
 
+	/** Workflow availability for the linked project. Drives the empty-workflows
+	 *  banner and Accept-disabled state in the form header. */
+	workflowState?: "no-project" | "loading" | "empty" | "ready";
+
+	/** Invoked when the user clicks "Open Project Assistant" in the empty
+	 *  workflows banner. */
+	onOpenProjectAssistant?: () => void;
+
 	// Field change callbacks
 	onTitleChange: (e: Event) => void;
 	onSpecChange: (e: Event) => void;
@@ -763,6 +790,9 @@ interface GoalFormConfig {
 function renderGoalForm(config: GoalFormConfig) {
 	ensureMarkdownBlock();
 	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
+	const wfState = config.workflowState ?? "ready";
+	const noWorkflows = wfState === "empty";
+	const workflowsLoading = wfState === "loading";
 	const worktreePath = linkedProject
 		? worktreePreviewPath(linkedProject.rootPath, config.title)
 		: worktreePreviewPath(config.cwd, config.title);
@@ -795,6 +825,22 @@ function renderGoalForm(config: GoalFormConfig) {
 	return html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
 			${goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
+			${noWorkflows ? html`
+				<div
+					class="rounded-md border p-3 flex flex-col gap-2"
+					style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); background: color-mix(in oklch, var(--warning) 10%, transparent);"
+					data-testid="goal-form-no-workflows-banner"
+				>
+					<div class="text-sm font-medium">This project has no workflows yet</div>
+					<p class="text-xs text-muted-foreground">Goals need a workflow to define gates and verification. Run the project assistant to scaffold workflows for this project.</p>
+					<button
+						class="self-start text-xs px-3 py-1.5 rounded-md border border-border bg-background hover:bg-secondary text-foreground"
+						@click=${config.onOpenProjectAssistant}
+						data-testid="goal-form-open-project-assistant"
+						?disabled=${!config.onOpenProjectAssistant}
+					>Open Project Assistant</button>
+				</div>
+			` : ""}
 			<div class="flex flex-col md:flex-row gap-2.5 md:items-center">
 				<div class="flex items-center gap-2 flex-1 min-w-0">
 					<label class="${lblCls} w-20 md:w-16">Title</label>
@@ -807,7 +853,12 @@ function renderGoalForm(config: GoalFormConfig) {
 						})}
 					</div>
 				</div>
-				${_cachedWorkflows.length > 0 ? html`
+				${workflowsLoading ? html`
+					<div class="flex items-center gap-2 md:shrink-0">
+						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
+						<div class="flex-1 md:flex-none md:w-44 h-9 rounded-md bg-muted/40 animate-pulse" data-testid="goal-form-workflow-skeleton"></div>
+					</div>
+				` : _cachedWorkflows.length > 0 ? html`
 					<div class="flex items-center gap-2 md:shrink-0">
 						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
 						<select
@@ -973,10 +1024,13 @@ function renderGoalForm(config: GoalFormConfig) {
 					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_goalAnnCount})</span>`,
 				}) : ""}
 				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
-				<span data-testid="proposal-primary-submit">${Button({
+				<span
+					data-testid="proposal-primary-submit"
+					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : ""}
+				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
 			</div>
@@ -1030,11 +1084,56 @@ function goalPreviewPanel() {
 				return;
 			}
 		}
+		// Guard: refuse to accept while the linked project has no workflows.
+		// The form's banner handles the affordance; this is the defensive backstop.
+		if (workflowStateFor(state.previewProjectId) === "empty") {
+			showConnectionError(
+				"This project has no workflows yet",
+				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
+			);
+			return;
+		}
+
+		// Snapshot form state up-front so a retry after createGoal() rejection
+		// reads the latest values (the user may have edited the workflow id /
+		// title between attempts).
 		const sessionId = activeSessionId();
 		// Mid-session acceptance must NOT tear down the active session — only
 		// the goal-assistant context owns the disconnect-and-navigate flow.
 		const isAssistantContext = state.assistantType === "goal";
+		const projectId = state.previewProjectId || undefined;
+		const workflowId = _selectedWorkflowId || undefined;
+		const sandboxed = _goalSandboxed;
+		const autoStartTeam = _goalAutoStartTeam;
+		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
+		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
+		const reattemptGoalId = currentSession?.reattemptGoalId;
 
+		// Await the server FIRST. If it rejects, leave the assistant session,
+		// draft, gateway.sessionId, and form state intact so the user can edit
+		// (e.g. change workflow) and try again. See goal spec §1.
+		let goal;
+		try {
+			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
+				spec: state.previewSpec,
+				workflowId,
+				reattemptOf: reattemptGoalId || undefined,
+				sandboxed,
+				projectId,
+				enabledOptionalSteps,
+				autoStartTeam,
+			});
+		} catch (err) {
+			showConnectionError("Failed to create goal", String((err as Error)?.message || err));
+			return;
+		}
+		if (!goal) {
+			// createGoal() returns falsy on certain server errors (the helper
+			// already surfaces a toast). Preserve the assistant either way.
+			return;
+		}
+
+		// --- Success path: now tear down the assistant. ---
 		if (isAssistantContext && state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
@@ -1044,17 +1143,11 @@ function goalPreviewPanel() {
 		if (sessionId) clearProposalAnnotations(sessionId, "goal");
 		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
-		const projectId = state.previewProjectId || undefined;
 		state.previewProjectId = "";
-		const workflowId = _selectedWorkflowId || "general";
-		_selectedWorkflowId = "general";
-		const sandboxed = _goalSandboxed;
+		_selectedWorkflowId = "";
 		_goalSandboxed = false;
-		const autoStartTeam = _goalAutoStartTeam;
 		_goalAutoStartTeam = true;
-		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		_assistantEnabledOptionalSteps = [];
-		// Clean up persisted draft
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1063,25 +1156,11 @@ function goalPreviewPanel() {
 			state.appView = "authenticated";
 		}
 
-		// Detect re-attempt context from the current session
-		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
-		const reattemptGoalId = currentSession?.reattemptGoalId;
-
-		const goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
-			spec: state.previewSpec,
-			workflowId,
-			reattemptOf: reattemptGoalId || undefined,
-			sandboxed,
-			projectId,
-			enabledOptionalSteps,
-			autoStartTeam,
-		});
-
 		// Slice E: drop the on-disk proposal file once accepted.
-		if (sessionId && goal) void deleteProposalFile(sessionId, "goal");
+		if (sessionId) void deleteProposalFile(sessionId, "goal");
 
 		// If this is a re-attempt, archive the old goal and link the new one
-		if (reattemptGoalId && goal) {
+		if (reattemptGoalId) {
 			await gatewayFetch(`/api/goals/${reattemptGoalId}`, { method: "DELETE" });
 			await gatewayFetch(`/api/goals/${goal.id}`, {
 				method: "PUT",
@@ -1091,7 +1170,7 @@ function goalPreviewPanel() {
 
 		// Notify the proposing agent (mid-session only — assistant context
 		// tears down the session below, so notifying there would be moot).
-		if (!isAssistantContext && sessionId && goal) {
+		if (!isAssistantContext && sessionId) {
 			const { notifyProposalDecision } = await import("./api.js");
 			void notifyProposalDecision(sessionId, "goal", "accepted", trimmedTitle);
 		}
@@ -1102,13 +1181,16 @@ function goalPreviewPanel() {
 		}
 		await refreshSessions();
 		if (isAssistantContext) {
-			if (goal) {
-				setHashRoute("goal-dashboard", goal.id, true);
-			} else {
-				setHashRoute("landing");
-			}
+			setHashRoute("goal-dashboard", goal.id, true);
 		}
 		renderApp();
+	};
+
+	const handleOpenProjectAssistant = async () => {
+		const linked = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
+		if (!linked) return;
+		const { createProjectAssistantSession } = await import("./dialogs.js");
+		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
 	};
 
 	return html`
@@ -1123,6 +1205,8 @@ function goalPreviewPanel() {
 				specEditMode: state.previewSpecEditMode,
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
 				linkedProjectId: state.previewProjectId || undefined,
+				workflowState: workflowStateFor(state.previewProjectId || undefined),
+				onOpenProjectAssistant: handleOpenProjectAssistant,
 				onTitleChange: (e: Event) => {
 					state.previewTitle = (e.target as HTMLInputElement).value;
 					state.previewTitleEdited = true;
@@ -2037,6 +2121,37 @@ function projectProposalPanel() {
 	});
 
 	if (!proposal) {
+		const sessId = activeSessionId();
+		const accepted = sessId ? state.projectProposalAcceptedBySessionId[sessId] : false;
+		if (accepted && sessId) {
+			const handleTerminate = async () => {
+				const { confirmAction } = await import("./dialogs.js");
+				const ok = await confirmAction(
+					"Terminate Project Assistant",
+					"End this assistant session and return to the dashboard?",
+					"Terminate",
+					true,
+				);
+				if (!ok) return;
+				const { terminateProjectAssistantSession } = await import("./session-manager.js");
+				await terminateProjectAssistantSession(sessId);
+			};
+			return html`
+				<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-state="accepted">
+					<div class="flex-1 flex items-center justify-center p-5">
+						<div class="flex flex-col items-center gap-3 text-center max-w-sm">
+							<div class="text-base font-medium" data-testid="project-changes-saved-heading">Changes Saved</div>
+							<p class="text-sm text-muted-foreground">Your project configuration has been updated.</p>
+							${Button({
+								variant: "default",
+								onClick: handleTerminate,
+								children: "Terminate Project Assistant",
+							})}
+						</div>
+					</div>
+				</div>
+			`;
+		}
 		return html`
 			<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal">
 				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
@@ -2222,7 +2337,7 @@ function getAssistantPreviewPanel(type: string) {
 let _proposalTitle = "";
 let _proposalCwd = "";
 let _proposalSpec = "";
-let _proposalWorkflowId = "general";
+let _proposalWorkflowId = "";
 let _proposalSpecEditMode = false;
 let _proposalCwdDropdownOpen = false;
 let _proposalCwdHighlightIndex = -1;
@@ -2245,7 +2360,7 @@ function syncProposalFormState(): void {
 	// Preserve project rootPath when proposal doesn't specify cwd
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
-	_proposalWorkflowId = proposal.workflow || "general";
+	_proposalWorkflowId = proposal.workflow || "";
 	_proposalSpecEditMode = false;
 	_proposalEnabledOptionalSteps = proposal.options
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
@@ -2303,32 +2418,60 @@ function goalProposalPanel() {
 				return;
 			}
 		}
+		if (workflowStateFor(state.previewProjectId) === "empty") {
+			showConnectionError(
+				"This project has no workflows yet",
+				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
+			);
+			return;
+		}
+
+		// Snapshot form state so a retry after a server reject re-reads the
+		// latest values (workflow id, sandboxed, etc).
+		const sandboxed = _proposalSandboxed;
+		const autoStartTeam = _proposalAutoStartTeam;
+		const workflowId = _proposalWorkflowId || undefined;
+		const enabledOptionalSteps = _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined;
+		const projectId = state.previewProjectId || undefined;
+
 		_proposalSaving = true;
 		renderApp();
 
+		let goal;
 		try {
-			const sandboxed = _proposalSandboxed;
-			_proposalSandboxed = false;
-			const autoStartTeam = _proposalAutoStartTeam;
-			_proposalAutoStartTeam = true;
-			const goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
-				spec: _proposalSpec,
-				workflowId: _proposalWorkflowId || undefined,
-				sandboxed,
-				projectId: state.previewProjectId || undefined,
-				enabledOptionalSteps: _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined,
-				autoStartTeam,
-			});
+			try {
+				goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
+					spec: _proposalSpec,
+					workflowId,
+					sandboxed,
+					projectId,
+					enabledOptionalSteps,
+					autoStartTeam,
+				});
+			} catch (err) {
+				showConnectionError("Failed to create goal", String((err as Error)?.message || err));
+				return;
+			}
+			if (!goal) return;
+
+			// --- Success: clear the proposal and navigate. ---
 			delete state.activeProposals.goal;
 			_proposalEnabledOptionalSteps = [];
 			_proposalInitializedFrom = null;
-			if (goal) {
-				setHashRoute("goal-dashboard", goal.id, true);
-			}
+			_proposalSandboxed = false;
+			_proposalAutoStartTeam = true;
+			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
 			renderApp();
 		}
+	};
+
+	const handleOpenProjectAssistant = async () => {
+		const linked = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
+		if (!linked) return;
+		const { createProjectAssistantSession } = await import("./dialogs.js");
+		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
 	};
 
 	const handleDismiss = () => {
@@ -2362,6 +2505,8 @@ function goalProposalPanel() {
 		specEditMode: _proposalSpecEditMode,
 		enabledOptionalSteps: _proposalEnabledOptionalSteps,
 		linkedProjectId: state.previewProjectId || undefined,
+		workflowState: workflowStateFor(state.previewProjectId || undefined),
+		onOpenProjectAssistant: handleOpenProjectAssistant,
 		onTitleChange: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
 		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
 		onCwdChange: (v) => { _proposalCwd = v; renderApp(); },
@@ -2726,7 +2871,7 @@ export function doRenderApp(): void {
 					<div class="flex items-center w-full pr-0.5 gap-1" style="min-height:40px;">
 						<div class="shrink-0">${backBtn}</div>
 						<div class="flex-1 min-w-0 flex flex-col justify-center">
-							<span class="mobile-header-title font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}</span>
+							<span class="mobile-header-title font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${activeSession?.sandboxed ? renderSandboxIndicator(activeSession.status) : ""}${(activeSession?.status === "preparing" || activeSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.75em;">preparing…</span>` : ""}</span>
 							${goalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${goalTitle}</span>` : ""}
 						</div>
 						<div class="shrink-0">${editDeleteBtns}</div>
@@ -2739,7 +2884,7 @@ export function doRenderApp(): void {
 			return html`
 				<div class="flex items-center gap-2 px-3 min-w-0 flex-1">
 					<div class="flex flex-col min-w-0 py-1">
-						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}</span>
+						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}${(deskSession?.status === "preparing" || deskSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.85em;">preparing…</span>` : ""}</span>
 						${deskGoalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${deskGoalTitle}</span>` : ""}
 					</div>
 				</div>
@@ -2780,6 +2925,20 @@ export function doRenderApp(): void {
 					title: "Show QR code",
 				})}
 				<theme-toggle></theme-toggle>
+			</div>
+		`;
+	};
+
+	const orphanTranscriptsBanner = () => {
+		const n = state.orphanedTranscriptsCount;
+		if (!n || n <= 0) return "";
+		return html`
+			<div
+				class="shrink-0 flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"
+				data-testid="orphan-transcripts-banner"
+				title="Agent transcripts exist on disk that are not tracked in sessions.json. See gateway logs for paths."
+			>
+				<span>${n} agent transcript${n === 1 ? "" : "s"} on disk are not tracked — see logs</span>
 			</div>
 		`;
 	};
@@ -3264,6 +3423,7 @@ export function doRenderApp(): void {
 
 		if (desktop) {
 			return html`
+				${orphanTranscriptsBanner()}
 				<div class="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
 					<div class="text-muted-foreground empty-state-icon">${icon(Server, "lg")}</div>
 					<p class="text-sm text-muted-foreground">Select a session from the sidebar or create a new one</p>

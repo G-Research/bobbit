@@ -72,12 +72,51 @@ Session lifecycle, reload, and reconnect stories (`userstories/sessions.md`, `us
 | Test file | Stories | What it tests |
 |-----------|---------|---------------|
 | `stories-sessions.spec.ts` | S-01–S-12 | Session create/switch/rename/delete, draft isolation, rapid switching, worktree-backed sessions, persistence, messaging |
-| `stories-resilience.spec.ts` | RE-01–RE-08 | WebSocket disconnect/reconnect (RE-07, runs in standard E2E); server crash/restart, worktree preservation, Docker recovery, rapid restart cycles (RE-01–RE-06, RE-08 — `test.skip()` with "INFRASTRUCTURE: Requires npm run test:manual" annotations) |
+| `stories-resilience.spec.ts` | RE-01–RE-08 | All run in standard E2E via the in-process crash/restart harness (see [Writing crash/restart E2E tests](#writing-crashrestart-e2e-tests)). RE-05 (Docker sandbox container recovery) auto-skips when Docker is unavailable. |
 | `stories-projects.spec.ts` | PR-01, PR-04, PR-09, PR-10 | Projects organize sessions; project switching |
 
-**Why crash/restart stories are skipped in standard E2E.** Real process termination, disk-state recovery, and Docker container lifecycle require the manual-integration harness (`npm run test:manual`), which spawns a real gateway subprocess it can hard-kill and restart on a fresh port. The standard browser E2E harness runs an in-process or long-lived spawned gateway and cannot faithfully simulate a crash—only the manual harness exercises the actual persistence and restore code paths. The stories are still written against the spec-framework API and documented inline so they remain discoverable; they just execute under a different runner.
+All three files register their stories in `tests/e2e/ui/story-registry.ts`, the central registry that `tools/spec-check.ts` walks to report per-contract variation coverage.
 
-All three files register their stories in `tests/e2e/ui/story-registry.ts`, the central registry that `tools/spec-check.ts` walks to report per-contract variation coverage. Current coverage: **CT-05 at 75%** (3/4 variations) and **CT-16 at 100%** (2/2 variations).
+#### Writing crash/restart E2E tests
+
+The worker-scoped `gateway` fixture in `tests/e2e/gateway-harness.ts` exposes two lifecycle hooks for tests that need to assert what survives a server bounce:
+
+- `gateway.crash()` — calls the in-process gateway's `shutdown()`. The browser page's WebSocket fires `close` and the client begins its reconnect loop.
+- `gateway.restart()` — re-invokes `createGateway` against the **same port** with `portExplicit: true`, anchored at the **same `bobbitDir`**. On-disk state (`SessionStore` v2 atomic writes + `.bak.N` rotation, projects, drafts, goals) carries over because the second boot reads what the first wrote. A small `EADDRINUSE` retry loop handles Windows TIME_WAIT races on the listener socket; the call throws if the OS assigns a different port.
+
+**Why same-port re-bind.** The browser page is bound to `http://127.0.0.1:<port>` for the lifetime of the test. The client's WebSocket reconnect logic resumes against the same origin without `page.reload()`, so the test asserts the production reconnect path rather than a navigation.
+
+**Wiring it into a spec.** Pass the `gateway` fixture into the per-test `SpecContext`:
+
+```ts
+test.beforeEach(async ({ page, gateway }) => {
+  s = new SpecContext(page, gateway);
+  // ...
+});
+
+test("RE-02: session survives server restart", async () => {
+  await s.event.server_crash();
+  await s.event.server_restart();
+  // assertions on entities owned by this test
+});
+```
+
+`event.server_crash()` waits up to 5s for the client to observe disconnect (best-effort). `event.server_restart()` waits for `/api/health` to come back and, on a session route, for `connectionStatus === "connected"` — reconnect failure is fatal. The canonical example is `tests/e2e/ui/stories-resilience.spec.ts`.
+
+**Docker-gated variants.** Sandbox-dependent resilience stories (RE-05) skip themselves when Docker isn't reachable using the shared helper:
+
+```ts
+import { isDockerAvailable } from "../test-utils/docker.js";
+
+test("RE-05: sandbox container recovery", async () => {
+  test.skip(!isDockerAvailable(), "Docker not available");
+  // ...
+});
+```
+
+See `tests/e2e/sandbox-recovery-docker.spec.ts` for the same pattern in API-level specs.
+
+**Limitations.** The `gateway` fixture is worker-scoped, so a crash/restart in test N affects every later test on that worker. Tests should assert only on entities they own (sessions/projects/goals they created in this test) and avoid global state assumptions. Playwright groups tests with matching `enableMcp` / `enableWorktreePool` options onto the same worker, so each spec file in practice gets its own gateway lifecycle.
 
 **Framework extensions** added to `tests/e2e/ui/spec-framework.ts` to support these stories:
 
@@ -85,7 +124,7 @@ All three files register their stories in `tests/e2e/ui/story-registry.ts`, the 
 - `SpecContext.createTestSession(name, opts)` — accepts `opts.cwd` to put the session in a real git worktree (needed for worktree assertions) and `opts.goalId` for goal-scoped sessions.
 - `SpecContext.create_session_via_ui()` and `rename_session(name, newTitle)` — sidebar-driven session creation and the double-click-to-rename flow, for UI-first stories.
 - `SpecContext.event.disconnect()` — force-closes the WebSocket so RE-07 can observe reconnect behavior without killing the server.
-- `SpecContext.event.server_crash()` / `server_restart()` — stubs that throw a clear "requires manual harness" error when called under the standard E2E runner, so skipped crash/restart stories fail loudly if someone enables them in the wrong context.
+- `SpecContext.event.server_crash()` / `server_restart()` — bounce the in-process gateway via the worker-scoped `gateway` fixture. Pass `gateway` to the `SpecContext` constructor (`new SpecContext(page, gateway)`) to enable; calls without a fixture throw a clear error. See [Writing crash/restart E2E tests](#writing-crashrestart-e2e-tests).
 
 ## Root Causes of Escaped Bugs
 

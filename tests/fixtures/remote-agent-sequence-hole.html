@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head><title>RemoteAgent seq hole repro</title></head>
+<body>
+<script>
+/**
+ * Focused reproduction for the RemoteAgent event sequencer bug.
+ *
+ * Mirrors the relevant production logic in src/app/remote-agent.ts:
+ * - case "event" advances _highestSeq and buffers out-of-order events.
+ * - case "tool_permission_needed" applies the card with its seq, but does NOT
+ *   advance _highestSeq because it is a top-level WS frame, not type:"event".
+ *
+ * Expected invariant: if any server frame consumes the EventBuffer sequence,
+ * the client sequencer must advance through it. Otherwise the next normal
+ * agent event is buffered forever as a gap.
+ */
+class FakeRemoteAgentSequencer {
+	constructor() {
+		this._highestSeq = 0;
+		this._seqInitialized = false;
+		this._pendingEvents = [];
+		this._pendingEventsMax = 500;
+		this.dispatched = [];
+		this.cards = [];
+		this.sent = [];
+	}
+
+	send(msg) { this.sent.push(msg); }
+
+	handleAgentEvent(event) {
+		this.dispatched.push(`${event.type}:${event.message?.id || event.toolName || ""}`);
+	}
+
+	_drainOrderedEvents() {
+		while (this._pendingEvents.length > 0 && this._pendingEvents[0].seq === this._highestSeq + 1) {
+			const next = this._pendingEvents.shift();
+			this._highestSeq = next.seq;
+			this.handleAgentEvent(next.data);
+		}
+		while (this._pendingEvents.length > 0 && this._pendingEvents[0].seq <= this._highestSeq) {
+			this._pendingEvents.shift();
+		}
+	}
+
+	_advanceTopLevelSeq(seq, frameType) {
+		if (!this._seqInitialized) {
+			this._highestSeq = seq - 1;
+			this._seqInitialized = true;
+		}
+		if (seq <= this._highestSeq) return false;
+		if (seq !== this._highestSeq + 1) {
+			this._pendingEvents = [];
+			this._highestSeq = seq;
+			this.send({ type: "get_messages", reason: `${frameType}_seq_gap` });
+			return true;
+		}
+		this._highestSeq = seq;
+		return true;
+	}
+
+	handleServerMessage(msg) {
+		switch (msg.type) {
+			case "event": {
+				const seq = typeof msg.seq === "number" ? msg.seq : undefined;
+				if (seq === undefined) {
+					this.handleAgentEvent(msg.data);
+					break;
+				}
+				if (!this._seqInitialized) {
+					this._highestSeq = seq - 1;
+					this._seqInitialized = true;
+				}
+				if (seq <= this._highestSeq) break;
+				if (seq !== this._highestSeq + 1) {
+					this._pendingEvents.push({ seq, ts: msg.ts, data: msg.data });
+					this._pendingEvents.sort((a, b) => a.seq - b.seq);
+					if (this._pendingEvents.length > this._pendingEventsMax) {
+						this._pendingEvents = [];
+						this._highestSeq = 0;
+						this.send({ type: "get_messages" });
+					}
+					this._drainOrderedEvents();
+					break;
+				}
+				this._highestSeq = seq;
+				this.handleAgentEvent(msg.data);
+				this._drainOrderedEvents();
+				break;
+			}
+
+			case "tool_permission_needed": {
+				if (typeof msg.seq === "number" && !this._advanceTopLevelSeq(msg.seq, "tool_permission_needed")) {
+					break;
+				}
+				this.cards.push({ toolName: msg.toolName, seq: msg.seq, ts: msg.ts });
+				if (typeof msg.seq === "number") this._drainOrderedEvents();
+				break;
+			}
+		}
+	}
+}
+
+const results = [];
+function t(name, fn) {
+	try { fn(); results.push({ name, passed: true }); }
+	catch (e) { results.push({ name, passed: false, error: String(e && e.message || e) }); }
+}
+function assertEq(actual, expected, label) {
+	const a = JSON.stringify(actual);
+	const e = JSON.stringify(expected);
+	if (a !== e) throw new Error(`${label}: expected ${e}, got ${a}`);
+}
+
+// Control: normal contiguous event frames dispatch immediately.
+t("contiguous event frames dispatch", () => {
+	const a = new FakeRemoteAgentSequencer();
+	a.handleServerMessage({ type: "event", seq: 1, data: { type: "message_end", message: { id: "u1" } } });
+	a.handleServerMessage({ type: "event", seq: 2, data: { type: "message_end", message: { id: "a1" } } });
+	assertEq(a.dispatched, ["message_end:u1", "message_end:a1"], "dispatched events");
+	assertEq(a._highestSeq, 2, "highestSeq");
+	assertEq(a._pendingEvents.length, 0, "pendingEvents length");
+});
+
+// Repro guard: pre-fix, this top-level permission frame consumed seq=2 while
+// leaving _highestSeq at 1. The next real event seq=3 was buffered forever
+// waiting for missing seq=2, so no streamed agent event reached subscribers.
+t("top-level tool_permission_needed seq does not stall subsequent event stream", () => {
+	const a = new FakeRemoteAgentSequencer();
+	a.handleServerMessage({ type: "event", seq: 1, data: { type: "message_end", message: { id: "u1" } } });
+	a.handleServerMessage({ type: "tool_permission_needed", seq: 2, ts: 20, toolName: "Bash" });
+	a.handleServerMessage({ type: "event", seq: 3, data: { type: "message_end", message: { id: "a1" } } });
+
+	// Desired behavior after the fix: seq=2 must advance the sequencer, so seq=3
+	// dispatches immediately and no event remains buffered.
+	assertEq(a.cards, [{ toolName: "Bash", seq: 2, ts: 20 }], "permission card rendered");
+	assertEq(a.dispatched, ["message_end:u1", "message_end:a1"], "event after permission should dispatch");
+	assertEq(a._highestSeq, 3, "highestSeq should include permission and next event");
+	assertEq(a._pendingEvents.length, 0, "pendingEvents should be empty");
+});
+
+window.__TEST_RESULTS = results;
+</script>
+</body>
+</html>

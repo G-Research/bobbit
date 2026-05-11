@@ -16,6 +16,7 @@ import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsCo
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
+import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
@@ -25,7 +26,7 @@ import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { discoverSlashSkills } from "../skills/slash-skills.js";
 import { shouldSkipRemotePush, detectPrimaryBranch } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
@@ -205,6 +206,11 @@ export interface SessionInfo {
 		toolName: string;
 		toolGroup: string;
 		timer: ReturnType<typeof setTimeout>;
+		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
+		 * verbatim to late-joining clients so we never burn a fresh global seq
+		 * on a unicast frame. See tests/perm-frame-late-joiner-seq-gap.test.ts. */
+		seq: number;
+		ts: number;
 	};
 	/** Tools granted via "one-time" mode — revoked on agent_end */
 	oneTimeGrantedTools?: string[];
@@ -250,7 +256,24 @@ export interface SessionInfo {
 	 * neither path is silently dropped.
 	 */
 	inFlightSteerTexts?: string[];
+	/**
+	 * Latest in-flight `message_update` payload. Set on every `message_update`
+	 * event with a non-empty `event.message`; cleared on `message_end`,
+	 * `agent_end`, and `process_exit`. Used to splice the in-flight row into
+	 * `getMessages` snapshot responses so a snapshot taken while an assistant
+	 * message is mid-stream still represents the row — the agent flushes to
+	 * `.jsonl` only on `message_end`, so without this the snapshot drops the
+	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
+	 */
+	latestMessageUpdate?: { id?: string; message: any };
 }
+
+// `spliceInFlightMessage` lives in its own module so unit tests can import
+// it without dragging in the full session-manager module graph (which
+// transitively pulls flexsearch, pi-coding-agent, etc.). Re-exported here
+// for backwards compat with existing call sites.
+export { spliceInFlightMessage } from "./splice-inflight-message.js";
+import { spliceInFlightMessage } from "./splice-inflight-message.js";
 
 /** Helper: extract the text body of a user message (string or block array). */
 function extractUserMessageText(message: any): string {
@@ -396,6 +419,20 @@ function spliceSkillExpansionsIntoEvent(
 	return { ...ev, message: rewrittenMsg };
 }
 
+/** Snapshot of the active pending tool-permission grant, returned to clients
+ * that attach mid-perm so they can replay the SAME seq/ts as the original
+ * broadcast — never allocating a fresh sequence number. Pinned by
+ * tests/perm-frame-late-joiner-seq-gap.test.ts. */
+export interface PendingToolPermissionSnapshot {
+	toolName: string;
+	group: string;
+	roleName: string;
+	roleLabel: string;
+	lastPromptText?: string;
+	seq: number;
+	ts: number;
+}
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -447,6 +484,14 @@ export class SessionManager {
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
+	/**
+	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
+	 * persisted `agentSessionFile` (and are newer than the most recent
+	 * `lastActivity` in the store). Populated by `restoreSessions()` via
+	 * `scanOrphanedTranscripts()`. Surfaced via `GET /api/health` so the
+	 * splash UI can show a one-line banner. Zero means "clean".
+	 */
+	orphanedTranscriptsCount = 0;
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
 	/** @internal Non-PCM test path only. */
@@ -559,18 +604,17 @@ export class SessionManager {
 					}
 
 					if (!worktreeOk) {
-						console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
-						try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
-						broadcastStatus(session, "terminated");
+						const psForGate = this.getSessionStore(session.projectId).get(session.id);
+						if (psForGate && shouldKeepDespiteOrphan(psForGate)) {
+							console.warn(`[orphan-cleanup] WARN: would-archive ${session.id} but worktree+recent-transcript present — leaving live`);
+						} else {
+							console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
+							try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
+							broadcastStatus(session, "terminated");
+						}
 						continue;
 					}
 				}
-
-				// Stop old RPC client gracefully (it's dead, but clean up listeners)
-				try {
-					session.unsubscribe();
-					await session.rpcClient.stop();
-				} catch { /* already dead — ignore */ }
 
 				// Get persisted session data for restore
 				const store = this.getSessionStore(session.projectId);
@@ -580,21 +624,11 @@ export class SessionManager {
 					continue;
 				}
 
-				// Save connected WebSocket clients before removing session
+				// Save connected WebSocket clients in case respawn fails and we need
+				// to re-attach them to the original (now terminated) session.
 				const savedClients = new Set(session.clients);
-
-				// Remove from map so restoreSession can re-add it
-				this.sessions.delete(session.id);
 				try {
-					await this.restoreSession(ps);
-					// Re-attach WebSocket clients to the restored session
-					const restored = this.sessions.get(session.id);
-					if (restored) {
-						for (const ws of savedClients) {
-							if ((ws as any).readyState === 1) restored.clients.add(ws);
-						}
-						broadcastStatus(restored, "idle");
-					}
+					await this._respawnAgentInPlace(session, ps);
 					console.log(`[session-manager] Session ${session.id} recovered successfully`);
 				} catch (err) {
 					console.warn(`[session-manager] Failed to restore session ${session.id} after container recreation:`, err);
@@ -1117,7 +1151,7 @@ export class SessionManager {
 			if (ctx) workflows = ctx.workflowStore.getAll();
 		}
 		if (!workflows || workflows.length === 0) {
-			return 'Use **general** as a safe default.';
+			return '⚠️ This project has no workflows configured. You CANNOT propose a goal yet — the user must run the project assistant first to scaffold workflows. Do not call propose_goal. Instead tell the user "this project has no workflows yet; open the project assistant from Settings → Components (or click the banner in the goal panel) to set them up", and stop.';
 		}
 		return workflows.map(w => {
 			const gateNames = w.gates.map(g => g.name).join(', ');
@@ -1136,7 +1170,7 @@ export class SessionManager {
 	 * If the role has explicit allowedTools, use those.
 	 * Otherwise, compute from the full policy cascade (honouring the allow default).
 	 */
-	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): string[] {
+	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): EffectiveTool[] {
 		if (!role) return [];
 		if (this.toolManager) {
 			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
@@ -1146,13 +1180,15 @@ export class SessionManager {
 
 	private buildToolActivationArgs(
 		sessionId: string,
-		allowedTools: string[] | undefined,
+		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
 	): string[] {
+		const flatNames = allowedTools?.map(e => e.name);
+
 		// MCP proxy extensions
 		const mcpExtPaths = this.mcpManager
-			? writeMcpProxyExtensions(this.mcpManager, allowedTools, role, this.toolManager, this.groupPolicyStore)
+			? writeMcpProxyExtensions(this.mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
@@ -1164,8 +1200,8 @@ export class SessionManager {
 		const roleBaseTools = role && this.toolManager
 			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, this.mcpManager ?? undefined)
 			: [];
-		const roleAllowed = new Set(roleBaseTools.map(t => t.toLowerCase()));
-		const sessionGrants = (allowedTools ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
+		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
+		const sessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
@@ -1197,6 +1233,14 @@ export class SessionManager {
 		// the activator) or when explicitly already populated.
 		if (!parts.skillsCatalog) {
 			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore);
+		}
+		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
+		// into both the assembled prompt and the persisted prompt-sections snapshot.
+		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+			const pref = this.preferencesStore.get("skillsCatalogBudget");
+			if (typeof pref === "number" && Number.isFinite(pref)) {
+				parts.skillsCatalogBudget = pref;
+			}
 		}
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
@@ -1771,6 +1815,21 @@ export class SessionManager {
 	 * - On agent_end, skips drainQueue if the turn ended with an error.
 	 */
 	private handleAgentLifecycle(session: SessionInfo, event: any): void {
+		// H3 fix: track the latest in-flight `message_update` so snapshot reads
+		// (`getMessages`) can splice it into the response. Cleared on terminal
+		// lifecycle events below. The agent flushes to `.jsonl` only on
+		// `message_end`, so without this a snapshot taken mid-stream drops the
+		// row entirely — the H3-D convergent-loss case.
+		if (event.type === "message_update" && event.message) {
+			session.latestMessageUpdate = { id: event.message.id, message: event.message };
+		} else if (
+			event.type === "message_end" ||
+			event.type === "agent_end" ||
+			event.type === "process_exit"
+		) {
+			session.latestMessageUpdate = undefined;
+		}
+
 		// Track tool execution during this turn
 		if (event.type === "tool_execution_start") {
 			session.turnHadToolCalls = true;
@@ -2056,7 +2115,7 @@ export class SessionManager {
 		const role = this.roleManager.getRole(roleName);
 		if (!role) throw new Error(`Role "${roleName}" not found`);
 
-		const effectiveAllowed = this.resolveEffectiveAllowedTools(role);
+		const effectiveAllowed = this.resolveEffectiveAllowedTools(role).map(e => e.name);
 		const effectiveSet = new Set(effectiveAllowed.map(t => t.toLowerCase()));
 
 		const newTools: string[] = [];
@@ -2120,7 +2179,7 @@ export class SessionManager {
 			this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
 			// Re-read role and recompute effective allowed tools
 			const updatedRole = this.roleManager.getRole(role.name);
-			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role);
+			const updatedEffective = this.resolveEffectiveAllowedTools(updatedRole ?? role).map(e => e.name);
 			session.allowedTools = updatedEffective;
 			await this._restartSessionWithUpdatedRole(session);
 
@@ -2154,6 +2213,15 @@ export class SessionManager {
 			session.pendingGrantRequest = undefined;
 		}
 
+		// Stamp seq+ts so client reducer can order this frame relative to live
+		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
+		// IMPORTANT: this is the ONLY frame-allocation callsite in src/server/.
+		// Late-joiners that attach while this perm is pending must REPLAY the
+		// same seq/ts (via getPendingToolPermission) — never allocate a fresh
+		// seq — or already-attached clients will gap-buffer the next live
+		// event. Pinned by tests/perm-frame-late-joiner-seq-gap.test.ts.
+		const { seq, ts } = session.eventBuffer.pushFrame();
+
 		// Create promise that will be resolved by grantToolPermission
 		const promise = new Promise<{ granted: boolean; tools?: string[] }>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -2161,15 +2229,12 @@ export class SessionManager {
 				resolve({ granted: false });
 			}, 5 * 60 * 1000); // 5 minute timeout
 
-			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer };
+			session.pendingGrantRequest = { resolve, reject, toolName, toolGroup, timer, seq, ts };
 		});
 
 		// Broadcast to UI clients
 		const roleName = session.role || "general";
 		const role = this.roleManager?.getRole(roleName);
-		// Stamp seq+ts so client reducer can order this frame relative to live
-		// `event` frames. See docs/design/unified-message-ordering-reducer.md §3.1.
-		const { seq, ts } = session.eventBuffer.pushFrame();
 		broadcast(session.clients, {
 			type: "tool_permission_needed",
 			toolName,
@@ -2207,44 +2272,88 @@ export class SessionManager {
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) return;
 
-		// Save state that must survive the restart
-		const clients = new Set(session.clients);
+		// Save in-memory grant state that restoreSession doesn't persist.
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 
-		// Stop the current agent process
+		const restored = await this._respawnAgentInPlace(session, ps, {
+			mutatePs: p => {
+				// restoreSession normally derives allowedTools from role YAML; session-only
+				// and one-time grants need the augmented list to round-trip.
+				(p as any)._overrideAllowedTools = savedAllowedTools;
+			},
+		});
+
+		if (restored) {
+			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
+		}
+	}
+
+	/**
+	 * Snapshot the per-session monotonic counters that the client keeps in
+	 * lockstep with the server: the streaming-event `seq` (EventBuffer.lastSeq)
+	 * and the canonical `statusVersion`. Used by `restartAgent` /
+	 * `_restartSessionWithUpdatedRole` to seed the freshly-built EventBuffer
+	 * and SessionInfo so the client's `_highestSeq` and `_lastStatusVersion`
+	 * trackers — which never get reset because the WS stays open across the
+	 * respawn — keep applying live frames instead of silently dropping them as
+	 * "duplicates".
+	 *
+	 * The numbers we hand back are the high-water marks. The post-restart code
+	 * primes the new buffer with `seedNextSeq(lastSeq + 1)` and the new
+	 * SessionInfo with `statusVersion: lastVersion`; the very next live frame
+	 * therefore lands at seq = lastSeq + 1 / version = lastVersion + 1, which
+	 * advances both client trackers naturally.
+	 */
+	private _snapshotStreamingFrameOfReference(session: SessionInfo): { lastSeq: number; lastStatusVersion: number } {
+		return {
+			lastSeq: session.eventBuffer.lastSeq,
+			lastStatusVersion: session.statusVersion ?? 0,
+		};
+	}
+
+	/**
+	 * Respawn a session's agent process in-place while WS clients stay attached.
+	 *
+	 * Owns the snapshot/unsubscribe/stop/restore/re-attach/broadcast dance shared
+	 * by `restartAgent`, `_restartSessionWithUpdatedRole`, `recoverSandboxSessions`,
+	 * and the in-memory branch of `ensureSessionAlive`.
+	 *
+	 * The streaming frame-of-reference is snapshotted AFTER `unsubscribe()` so a
+	 * final in-flight `agent_end`-style event cannot race past `lastSeq`. The
+	 * carry-over fields (`_restartFrameOfReference`, `_overrideAllowedTools`)
+	 * are stashed on the persisted-session record for `restoreSession()` to
+	 * consume, then unconditionally cleared in `finally`.
+	 */
+	private async _respawnAgentInPlace(
+		session: SessionInfo,
+		ps: PersistedSession,
+		opts?: { mutatePs?: (ps: PersistedSession) => void; finalStatus?: SessionStatus },
+	): Promise<SessionInfo | undefined> {
+		const savedClients = new Set(session.clients);
+		// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
 		session.unsubscribe();
-		await session.rpcClient.stop();
+		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
-		// Remove from sessions map — restoreSession will re-add it
 		this.sessions.delete(session.id);
-
-		// Temporarily store overridden allowedTools so restoreSession can use them.
-		// restoreSession normally derives allowedTools from the role YAML, but for
-		// session-only and one-time grants the in-memory list includes extra tools.
-		(ps as any)._overrideAllowedTools = savedAllowedTools;
-
-		// Restore the session (re-launches with correct tool activation)
+		(ps as any)._restartFrameOfReference = frameOfRef;
+		opts?.mutatePs?.(ps);
 		try {
 			await this.restoreSession(ps);
 		} finally {
-			// Clean up the temporary override even if restoreSession fails
+			delete (ps as any)._restartFrameOfReference;
 			delete (ps as any)._overrideAllowedTools;
 		}
-
-		// Re-attach the saved clients and carry over grant state
 		const restored = this.sessions.get(session.id);
 		if (restored) {
-			for (const ws of clients) {
-				if ((ws as any).readyState === 1) {
-					restored.clients.add(ws);
-				}
+			for (const ws of savedClients) {
+				if ((ws as any).readyState === 1) restored.clients.add(ws);
 			}
-			// Restore in-memory grant state that restoreSession doesn't know about
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
-			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			broadcastStatus(restored, "idle");
+			broadcastStatus(restored, opts?.finalStatus ?? "idle");
 		}
+		return restored;
 	}
 
 	/**
@@ -2290,36 +2399,16 @@ export class SessionManager {
 			throw zombieErr;
 		}
 
-		// Save state that must survive the restart
-		const clients = new Set(session.clients);
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 
-		// Stop remnant process (may already be dead)
-		session.unsubscribe();
-		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		const restored = await this._respawnAgentInPlace(session, ps, {
+			mutatePs: p => { (p as any)._overrideAllowedTools = savedAllowedTools; },
+		});
 
-		// Remove from sessions map — restoreSession will re-add it
-		this.sessions.delete(sessionId);
-
-		(ps as any)._overrideAllowedTools = savedAllowedTools;
-		try {
-			await this.restoreSession(ps);
-		} finally {
-			delete (ps as any)._overrideAllowedTools;
-		}
-
-		// Re-attach saved clients and carry over grant state
-		const restored = this.sessions.get(sessionId);
 		if (restored) {
-			for (const ws of clients) {
-				if ((ws as any).readyState === 1) {
-					restored.clients.add(ws);
-				}
-			}
 			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
-			broadcastStatus(restored, "idle");
 		} else {
 			throw new Error("Failed to restore session after restart");
 		}
@@ -2464,6 +2553,31 @@ export class SessionManager {
 		// NOTE: Orphaned non-interactive session cleanup is no longer automatic
 		// on startup. Use the Settings → Maintenance UI or
 		// GET/POST /api/maintenance/orphaned-sessions to preview and clean up manually.
+
+		// Scan for orphaned agent-CLI transcripts — surface a banner if the
+		// session-metadata index has diverged from the on-disk JSONLs.
+		try {
+			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+			const tracked = new Set<string>();
+			let mostRecent = 0;
+			const allPersisted = this.projectContextManager
+				? [...this.projectContextManager.getAllSessions()]
+				: (this._testStore?.getAll() ?? []);
+			for (const ps of allPersisted) {
+				if (ps.agentSessionFile) tracked.add(ps.agentSessionFile);
+				if (ps.lastActivity && ps.lastActivity > mostRecent) mostRecent = ps.lastActivity;
+			}
+			// If the store is empty (fresh install), use a 24h floor so we don't
+			// flag every transcript from a previous install.
+			const floor = mostRecent > 0 ? mostRecent : (Date.now() - 24 * 60 * 60 * 1000);
+			const result = scanOrphanedTranscripts(agentSessionsRoot, tracked, floor);
+			this.orphanedTranscriptsCount = result.count;
+			if (result.count > 0) {
+				console.warn(`[session-store] WARN: ${result.count} agent transcript(s) on disk are not tracked in sessions.json`);
+			}
+		} catch (err) {
+			console.warn("[session-manager] orphan-transcript scan failed:", err);
+		}
 	}
 
 	// NOTE: cleanupOrphanedNonInteractiveSessions() was removed — replaced by
@@ -2506,6 +2620,11 @@ export class SessionManager {
 				ps = { ...ps, agentSessionFile: recovered };
 				// Fall through to normal restore below
 			} else {
+				if (shouldKeepDespiteOrphan(ps)) {
+					console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
+					this.addDormantSession(ps);
+					return;
+				}
 				if (ps.worktreePath && ps.branch) {
 					console.warn(
 						`[session-manager] Session ${ps.id} has no agentSessionFile but has worktree ` +
@@ -2522,6 +2641,11 @@ export class SessionManager {
 		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
 		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
+			if (shouldKeepDespiteOrphan(ps)) {
+				console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
+				this.addDormantSession(ps);
+				return;
+			}
 			console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
 			sessionStore.archive(ps.id);
 			return;
@@ -2627,6 +2751,11 @@ export class SessionManager {
 						}
 					}
 					if (!recovered) {
+						if (shouldKeepDespiteOrphan(ps)) {
+							console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
+							this.addDormantSession(ps);
+							return;
+						}
 						console.warn(`[session-manager] Archiving session ${ps.id} — sandbox worktree unrecoverable`);
 						try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* best-effort */ }
 						return; // Skip restoring this session
@@ -2659,8 +2788,11 @@ export class SessionManager {
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType);
-		const effectiveAllowed = overrideAllowedTools ?? this.resolveEffectiveAllowedTools(restoredRole);
+		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
+			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			: this.resolveEffectiveAllowedTools(restoredRole);
 		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
+		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		const toolArgs = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
 		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
 
@@ -2692,7 +2824,7 @@ export class SessionManager {
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
 				goalState: "active",
-				allowedTools: restoredAllowedTools,
+				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -2722,7 +2854,7 @@ export class SessionManager {
 				goalSpec,
 				rolePrompt,
 				roleName,
-				allowedTools: restoredAllowedTools,
+				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -2743,13 +2875,28 @@ export class SessionManager {
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
+		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
+		// stash the previous session's streaming frame-of-reference on `ps` so the
+		// new EventBuffer/SessionInfo continue the monotonic seq + statusVersion
+		// sequence space. Clients keep their WS open across the respawn, so a
+		// fresh seq-1 / version-1 frame would be silently dropped by their dedup
+		// gates. See _snapshotStreamingFrameOfReference().
+		const frameOfRef = (ps as any)._restartFrameOfReference as
+			| { lastSeq: number; lastStatusVersion: number }
+			| undefined;
+		if (frameOfRef && Number.isFinite(frameOfRef.lastSeq) && frameOfRef.lastSeq > 0) {
+			eventBuffer.seedNextSeq(frameOfRef.lastSeq + 1);
+		}
+		const initialStatusVersion = frameOfRef && Number.isFinite(frameOfRef.lastStatusVersion)
+			? frameOfRef.lastStatusVersion
+			: 0;
 
 		const session: SessionInfo = {
 			id: ps.id,
 			title: ps.title,
 			cwd: ps.cwd,
 			status: "starting",
-			statusVersion: 0,
+			statusVersion: initialStatusVersion,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
@@ -2768,7 +2915,7 @@ export class SessionManager {
 			staffId: ps.staffId,
 			accessory: ps.accessory,
 			preview: ps.preview,
-			allowedTools: restoredAllowedTools,
+			allowedTools: restoredAllowedNames,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
@@ -2863,6 +3010,9 @@ export class SessionManager {
 
 	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
+		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
+			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			: undefined;
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
@@ -2951,7 +3101,7 @@ export class SessionManager {
 				rolePrompt: opts?.rolePrompt,
 				roleName: opts?.roleName,
 				workflowContext: opts?.workflowContext,
-				effectiveAllowedTools: opts?.allowedTools,
+				effectiveAllowedTools: optsAllowedTagged,
 				projectId,
 				sandboxBranch: opts?.sandboxBranch,
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
@@ -3006,7 +3156,7 @@ export class SessionManager {
 			roleName: opts?.roleName,
 			workflowContext: opts?.workflowContext,
 			reattemptGoalId: opts?.reattemptGoalId,
-			effectiveAllowedTools: opts?.allowedTools,
+			effectiveAllowedTools: optsAllowedTagged,
 			projectId,
 			sandboxBranch: opts?.sandboxBranch,
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
@@ -3065,7 +3215,9 @@ export class SessionManager {
 
 		// Inherit tool access from parent session
 		const parentSession = this.sessions.get(parentSessionId);
-		const parentAllowedTools = parentSession?.allowedTools;
+		const parentAllowedTools: EffectiveTool[] | undefined = parentSession?.allowedTools
+			? parentSession.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+			: undefined;
 
 		const plan: SessionSetupPlan = {
 			id,
@@ -3203,10 +3355,12 @@ export class SessionManager {
 				const raw: any = msgs.data;
 				let data: any = raw;
 				if (Array.isArray(raw)) {
-					data = truncateLargeToolContentInMessages(raw);
+					const spliced = spliceInFlightMessage(raw, session.latestMessageUpdate);
+					data = truncateLargeToolContentInMessages(spliced);
 				} else if (raw && Array.isArray(raw.messages)) {
-					const truncated = truncateLargeToolContentInMessages(raw.messages);
-					data = truncated === raw.messages ? raw : { ...raw, messages: truncated };
+					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					const truncated = truncateLargeToolContentInMessages(spliced);
+					data = spliced === raw.messages && truncated === raw.messages ? raw : { ...raw, messages: truncated };
 				}
 				broadcast(session.clients, { type: "messages", data });
 			}
@@ -3548,7 +3702,7 @@ export class SessionManager {
 	 * Get the pending tool permission request for a session, if any.
 	 * Used to send the permission card to newly connecting clients.
 	 */
-	getPendingToolPermission(id: string): { toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string } | undefined {
+	getPendingToolPermission(id: string): /* includes replayed seq: number; ts: number */ PendingToolPermissionSnapshot | undefined {
 		const session = this.sessions.get(id);
 		if (!session?.pendingGrantRequest) return undefined;
 		const roleName = session.role || "general";
@@ -3559,6 +3713,8 @@ export class SessionManager {
 			roleName: role?.name ?? roleName,
 			roleLabel: role?.label ?? roleName,
 			lastPromptText: session.lastPromptText,
+			seq: session.pendingGrantRequest.seq,
+			ts: session.pendingGrantRequest.ts,
 		};
 	}
 
@@ -3882,6 +4038,7 @@ export class SessionManager {
 		// Look up the full role (with toolPolicies) from roleManager if available
 		const fullRole = this.roleManager?.getRole(role.name);
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
+		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
@@ -3891,7 +4048,7 @@ export class SessionManager {
 			goalSpec,
 			rolePrompt: role.promptTemplate,
 			roleName: role.name,
-			allowedTools: effectiveAllowed.length > 0 ? effectiveAllowed : undefined,
+			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
 			projectConfigStore: this.projectConfigStore,
 		});
 
@@ -3972,7 +4129,7 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 		session.role = role.name;
 		session.accessory = role.accessory;
-		session.allowedTools = effectiveAllowed;
+		session.allowedTools = effectiveAllowedNames;
 
 		roleStore.update(id, { role: role.name, accessory: role.accessory });
 
@@ -3981,7 +4138,17 @@ export class SessionManager {
 		// Refresh messages and state for connected clients
 		try {
 			const msgs = await rpcClient.getMessages();
-			if (msgs.success) broadcast(session.clients, { type: "messages", data: msgs.data });
+			if (msgs.success) {
+				const raw: any = msgs.data;
+				let data: any = raw;
+				if (Array.isArray(raw)) {
+					data = spliceInFlightMessage(raw, session.latestMessageUpdate);
+				} else if (raw && Array.isArray(raw.messages)) {
+					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					data = spliced === raw.messages ? raw : { ...raw, messages: spliced };
+				}
+				broadcast(session.clients, { type: "messages", data });
+			}
 			const st = await rpcClient.getState();
 			if (st.success) broadcast(session.clients, { type: "state", data: st.data });
 		} catch { /* best-effort */ }
@@ -4035,8 +4202,9 @@ export class SessionManager {
 		if (live && live.status !== "terminated") {
 			const msgsResp = await live.rpcClient.getMessages();
 			if (!msgsResp.success) return null;
-			const messages = msgsResp.data?.messages || msgsResp.data;
-			if (!Array.isArray(messages) || messages.length === 0) return null;
+			const rawMessages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return null;
+			const messages = spliceInFlightMessage(rawMessages, live.latestMessageUpdate);
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (!title) return null;
 			live.title = title;
@@ -4077,8 +4245,9 @@ export class SessionManager {
 			const msgsResp = await session.rpcClient.getMessages();
 			if (!msgsResp.success) return;
 
-			const messages = msgsResp.data?.messages || msgsResp.data;
-			if (!Array.isArray(messages) || messages.length === 0) return;
+			const rawMessages = msgsResp.data?.messages || msgsResp.data;
+			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return;
+			const messages = spliceInFlightMessage(rawMessages, session.latestMessageUpdate);
 
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (title) {
@@ -4105,7 +4274,17 @@ export class SessionManager {
 		if (!persisted) {
 			throw new Error(`Cannot restore session ${sessionId}: no persisted data found`);
 		}
-		await this.restoreSession(persisted);
+		if (existing) {
+			// In-memory SessionInfo present (terminated, possibly with attached WS
+			// clients). Route through the in-place respawn helper so the streaming
+			// frame-of-reference carries over and post-restore frames aren't dropped
+			// by the client's dedup gates.
+			await this._respawnAgentInPlace(existing, persisted);
+		} else {
+			// Cold restore — no in-memory session, no live clients, fresh
+			// `_highestSeq=0` baseline on whoever connects next.
+			await this.restoreSession(persisted);
+		}
 		console.log(`[session-manager] Restored session ${sessionId} via ensureSessionAlive`);
 	}
 
@@ -4708,6 +4887,13 @@ export class SessionManager {
 	async terminateOrphanedSessions(sessionIds: string[]): Promise<number> {
 		let terminated = 0;
 		for (const id of sessionIds) {
+			// Gate: refuse to archive if worktree dir + recent JSONL still present.
+			// Catches the post-crash bulk-archive bug from goal sessions-p-14dc3ec7.
+			const psForGate = this.resolveStoreForId(id)?.get(id);
+			if (psForGate && shouldKeepDespiteOrphan(psForGate)) {
+				console.warn(`[orphan-cleanup] WARN: would-archive ${id} but worktree+recent-transcript present — leaving live`);
+				continue;
+			}
 			try {
 				const didTerminate = await this.terminateSession(id);
 				if (didTerminate) {

@@ -399,6 +399,7 @@ const projectDraft = createDraftManager({
 		activeProjectProposal: state.activeProposals.project ?? undefined,
 		hasReceivedProposal: state.assistantHasProposal,
 		assistantTab: state.assistantTab,
+		accepted: state.projectProposalAcceptedBySessionId[sessionId] ?? false,
 	}),
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
@@ -422,6 +423,11 @@ const projectDraft = createDraftManager({
 		}
 		state.assistantHasProposal = dismissed ? false : (draft.hasReceivedProposal ?? false);
 		state.assistantTab = draft.assistantTab ?? "chat";
+		if (draft.accepted === true) {
+			state.projectProposalAcceptedBySessionId[_sessionId] = true;
+		} else {
+			delete state.projectProposalAcceptedBySessionId[_sessionId];
+		}
 	},
 });
 
@@ -453,6 +459,9 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	// Extract setup status from health response (avoids extra fetch)
 	if (typeof healthData.setupComplete === "boolean") {
 		state.setupComplete = healthData.setupComplete;
+	}
+	if (typeof healthData.orphanedTranscripts === "number") {
+		state.orphanedTranscriptsCount = healthData.orphanedTranscripts;
 	}
 	if (!healthData.localhost && !healthData.aigw) {
 		const hasAuth = await checkOAuthStatus();
@@ -732,6 +741,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	// connectToSession() rehydrates from the persisted draft if the user comes
 	// back to the originating session.
 	if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
+		delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
 		delete state.activeProposals.project;
 		state.assistantHasProposal = false;
 	}
@@ -1030,7 +1040,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				}
 				// Trigger Lit re-render for aborting indicator — isAborting is read
 				// from the session object (same reference), so Lit won't detect the change.
-				if ((status === "aborting" || status === "idle") && state.chatPanel?.agentInterface) {
+				if (
+					(status === "aborting" ||
+						status === "idle" ||
+						status === "preparing" ||
+						status === "starting") &&
+					state.chatPanel?.agentInterface
+				) {
 					state.chatPanel.agentInterface.requestUpdate();
 				}
 			}
@@ -1367,6 +1383,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			};
 			state.activeProposals[type] = slot;
 			state.assistantHasProposal = true;
+			if (type === "project") {
+				delete state.projectProposalAcceptedBySessionId[sessionId];
+			}
 			if (isFirstEmit) {
 				plugin.onFirstEmit(slot, {
 					isAssistant: state.assistantType === type,
@@ -1710,6 +1729,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// project-assistant branch below handles persistence for that session
 			// type only (its session is dedicated to building the proposal).
 			if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
+				delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
 				delete state.activeProposals.project;
 				state.assistantHasProposal = false;
 			}
@@ -1884,7 +1904,13 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({} as any));
+			const err = new Error((data && data.error) || `Session creation failed: ${res.status}`);
+			(err as any).code = data?.code;
+			(err as any).stack = data?.stack || (err as any).stack;
+			throw err;
+		}
 		const { id } = await res.json();
 		// Clear creatingSession before connecting — connectToSession handles its
 		// own loading state via connectingSessionId, and we want the user to see
@@ -1894,7 +1920,9 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		await connectToSession(id, false);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to create session", msg);
+		const code = err && typeof err === "object" ? (err as any).code : undefined;
+		const stack = err instanceof Error ? err.stack : undefined;
+		showConnectionError("Failed to create session", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		state.creatingSessionForGoalId = null;
@@ -1968,6 +1996,7 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	if (state.activeProposals.project?.sessionId === sessionId) {
 		delete state.activeProposals.project;
 	}
+	delete state.projectProposalAcceptedBySessionId[sessionId];
 
 	await refreshSessions();
 }
@@ -2023,6 +2052,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
+					{ code: data?.code, stack: data?.stack },
 				);
 				return;
 			}
@@ -2047,32 +2077,35 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	}
 
 	// Terminate the project assistant session silently (no confirmation dialog)
+	await terminateProjectAssistantSession(propSessionId);
+}
+
+/**
+ * Tear down a project-assistant session: disconnect, DELETE on the server,
+ * remove from local state, clean drafts, navigate to landing. Used by the
+ * provisional accept path (silently) and by the registered-mode "Terminate
+ * Project Assistant" button after Apply Changes.
+ */
+export async function terminateProjectAssistantSession(sessionId: string): Promise<void> {
+	const { gatewayFetch } = await import("./api.js");
 	try {
-		uncacheSession(propSessionId);
-		if (activeSessionId() === propSessionId) {
+		uncacheSession(sessionId);
+		if (activeSessionId() === sessionId) {
 			state.remoteAgent?.disconnect();
 			state.remoteAgent = null;
 		}
 		// DELETE /api/sessions/:id terminates (live) or purges (archived).
-		// There is no POST /terminate endpoint — the previous call silently 404'd,
-		// which is why the assistant session lingered in the sidebar.
-		const termRes = await gatewayFetch(`/api/sessions/${propSessionId}`, { method: "DELETE" });
-		if (!termRes.ok && termRes.status !== 404) {
-			console.warn(`[project-proposal] Terminate returned ${termRes.status}`);
+		const res = await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+		if (!res.ok && res.status !== 404) {
+			console.warn(`[project-proposal] Terminate returned ${res.status}`);
 		}
-		// Optimistically remove the assistant session from local state so the
-		// sidebar updates immediately, before the round-trip refreshSessions()
-		// completes. The server is now the source of truth for the next refresh,
-		// but under heavy parallel load that round-trip can take 5–10 s and the
-		// sidebar shouldn't show 'Project Assistant (setting up)' that whole
-		// time after the user clicked Accept. Idempotent if the session is
-		// already absent.
-		state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== propSessionId);
+		// Optimistically remove the assistant session from local state.
+		state.gatewaySessions = state.gatewaySessions.filter(s => s.id !== sessionId);
 		renderApp();
-		// Clean up drafts and navigate away
-		deleteGoalDraft(propSessionId);
-		deleteRoleDraft(propSessionId);
-		deleteProjectDraft(propSessionId);
+		deleteGoalDraft(sessionId);
+		deleteRoleDraft(sessionId);
+		deleteProjectDraft(sessionId);
+		delete state.projectProposalAcceptedBySessionId[sessionId];
 		await refreshSessions();
 		setHashRoute("landing");
 	} catch (err) {
@@ -2129,6 +2162,7 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
+					{ code: data?.code, stack: data?.stack },
 				);
 				return;
 			}
@@ -2142,9 +2176,11 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	// Invalidate the Settings page's per-project config cache so its tab picks
 	// up the just-applied changes the next time it renders (no hard reload).
 	invalidateProjectScopeConfig(projectId);
+	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
-	deleteProjectDraft(propSessionId);
+	// Persist the accepted flag in the on-disk draft so it survives reload.
+	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.
 	const { deleteProposalFile } = await import("./proposal-helpers.js");
 	void deleteProposalFile(propSessionId, "project");
@@ -2168,6 +2204,9 @@ export function backToSessions(): void {
 	state.selectedSessionId = null;
 	delete state.activeProposals.goal;
 	delete state.activeProposals.role;
+	if (state.activeProposals.project) {
+		delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
+	}
 	delete state.activeProposals.project;
 	void (async () => {
 		try {
@@ -2491,7 +2530,13 @@ export async function startReattempt(goalId: string): Promise<void> {
 				reattemptGoalId: goalId,
 			}),
 		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({} as any));
+			const err = new Error((data && data.error) || `Session creation failed: ${res.status}`);
+			(err as any).code = data?.code;
+			(err as any).stack = data?.stack || (err as any).stack;
+			throw err;
+		}
 		const { id } = await res.json();
 		// Clear creatingSession before connecting — connectToSession handles its
 		// own loading state via connectingSessionId, and we want the user to see
@@ -2500,7 +2545,9 @@ export async function startReattempt(goalId: string): Promise<void> {
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to re-attempt goal", msg);
+		const code = err && typeof err === "object" ? (err as any).code : undefined;
+		const stack = err instanceof Error ? err.stack : undefined;
+		showConnectionError("Failed to re-attempt goal", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();

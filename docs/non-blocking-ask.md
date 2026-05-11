@@ -132,6 +132,28 @@ A single keydown listener on the widget root handles shortcuts. While focus is i
 
 The widget uses ARIA `role="radiogroup"` / `role="radio"` for options and the standard tablist pattern for tabs, with roving `tabindex` so screen readers announce selection state correctly. Mouse/touch behaviour is unchanged.
 
+## Error results render as a minimal chip
+
+The renderer distinguishes three tool-result envelope shapes from the extension and routes each to a different UI:
+
+| Result shape | UI |
+|---|---|
+| `{status:"posted", tool_use_id}` (synchronous stub) | Interactive widget — full tabs, options, Submit. |
+| `{answers:[...]}` (legacy / pre-non-blocking transcripts) | Read-only answered card. |
+| `isError: true` **or** any other completed-but-unknown shape | Minimal destructive-coloured chip (`<div class="ask-error">`), no clickable options. |
+
+The extension sets `isError: true` on its validation failures (currently the two `tab_label` rules — missing/empty, and >24 chars — on multi-question asks). The renderer also treats *any* completed result that is neither the posted stub nor a legacy answers payload as errored, as a defense-in-depth fallback against future failure paths that forget the flag.
+
+Why a chip instead of the full widget: when an ask call fails the agent typically retries with a corrected call, producing a second `tool_use_id`. Rendering the failed call as an interactive widget would leave two clickable question cards in the transcript and the user could not tell which one is live. Collapsing the failed call to a small inline error chip means only the retry is interactive.
+
+Invariants pinned by tests (treat these as the source of truth):
+
+- [`tests/ask-extension-execute.test.ts`](../tests/ask-extension-execute.test.ts) — the extension returns `isError: true` on each validation failure path.
+- [`tests/ask-user-choices-renderer.spec.ts`](../tests/ask-user-choices-renderer.spec.ts) — the renderer routes `isError: true` and unknown-shape completed results to the `ask-error` chip and never to the interactive widget.
+- [`tests/e2e/ui/ask-user-choices-ui.spec.ts`](../tests/e2e/ui/ask-user-choices-ui.spec.ts) — failure-then-retry scenario shows exactly one interactive widget, preceded by the minimal chip for the failed call.
+
+The `tab_label` validation rules themselves are documented in `defaults/tools/ask/ask_user_choices.yaml` (the agent-facing tool contract) and summarised in the [Widget UX → Labels](#labels) section above. This page intentionally does not duplicate them.
+
 ## Rendering note
 
 Envelope user messages are hidden from the **rendered** transcript by `src/ui/components/AgentInterface.ts` (via `isAskResponseEnvelope`). They're still present in the `.jsonl` and still sent to the LLM — the agent sees them on its next turn as part of history. The UI omits them because the answered widget card is the human-readable representation; showing both would be redundant.

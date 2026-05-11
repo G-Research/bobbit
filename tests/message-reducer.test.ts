@@ -14,6 +14,23 @@ import {
 	type OrderedMessage,
 } from "../src/app/message-reducer.ts";
 
+/** Local extractText helper for assertions (mirrors reducer logic). */
+function extractText(message: any): string {
+	if (!message) return "";
+	if (typeof message === "string") return message;
+	if (typeof message.content === "string") return message.content;
+	if (Array.isArray(message.content)) {
+		return message.content
+			.filter((c: any) => c.type === "text")
+			.map((c: any) => c.text || "")
+			.join("\n");
+	}
+	return "";
+}
+
+// (Test for the H3 guard's behaviour with novel-text plain-text live rows is
+// inside the main describe block below.)
+
 function liveMessageEnd(seq: number, message: any): Action {
 	return { type: "live-event", frame: { type: "message_end", message }, seq, ts: 0 };
 }
@@ -444,5 +461,246 @@ describe("message-reducer", () => {
 		const s2 = reduce(s1, { type: "reset" });
 		assert.strictEqual(s2.messages.length, 0);
 		assert.strictEqual(s2.highestSeq, 0);
+	});
+
+	// --- H3: snapshot-live race fix ---
+	// Structural invariant: any client row stamped after the snapshot was
+	// taken (i.e. `_order > snapshotMaxOrder`) MUST survive a snapshot apply.
+	// See the H3 design doc on the goal.
+
+	it("H3: live row at _order=100 survives a snapshot whose max _order is 5 (id mismatch)", () => {
+		// Live row with positive seq stamped after the snapshot's max _order.
+		// Snapshot does NOT contain this id. Without the _order guard, the
+		// live row would be a survivor anyway here — but verify the guard
+		// fires by ensuring the row keeps its live `_order`, not snapshot.
+		const s = applyAll([
+			liveMessageEnd(100, assistantMsg("a-live", "new")),
+			{
+				type: "snapshot",
+				messages: [
+					userMsg("u1", "hi"),
+					assistantMsg("a-old", "older"),
+				],
+			},
+		]);
+		const live = s.messages.find((m) => m.id === "a-live");
+		assert.ok(live, "live row must survive snapshot apply");
+		assert.strictEqual(live!._order, 100, "live _order preserved");
+	});
+
+	it("H3: live row with structurally-distinct content survives when snapshot is missing it (no id-match, no toolCall-match, no text-match)", () => {
+		// Core H3 case: the snapshot does NOT represent this live row at all.
+		// The live row carries a toolCall whose id is absent from the snapshot,
+		// so it can't be deduped by id, toolCallId, or plain-text equality.
+		// The `_order > serverMaxOrder` guard is the only thing keeping it in
+		// the transcript on a snapshot apply that races with the message_end.
+		const liveAssistant: any = {
+			id: "a-live",
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "tc-novel", name: "bash", input: { command: "echo hi" } },
+			],
+			timestamp: 0,
+		};
+		const s = applyAll([
+			liveMessageEnd(100, liveAssistant),
+			{
+				type: "snapshot",
+				messages: [
+					userMsg("u1", "hi"),
+					assistantMsg("a-old", "unrelated"),
+				],
+			},
+		]);
+		const live = s.messages.find((m) => m.id === "a-live");
+		assert.ok(live, "live row must survive when snapshot does not represent it");
+		assert.strictEqual(live!._order, 100);
+		// Snapshot rows still land below the live row.
+		assert.ok(live!._order > 0);
+		const snapAOld = s.messages.find((m) => m.id === "a-old");
+		assert.ok(snapAOld);
+		assert.ok(snapAOld!._order < 0);
+	});
+
+	it("H3: id-less live plain-text row with NEW text survives a snapshot that doesn't represent it", () => {
+		// The core H3 race for plain-text rows: the live row's text is NOT in
+		// the snapshot (snapshot is stale). The H3 `_order > serverMaxOrder`
+		// guard preserves the live row.
+		const idLessAssistant: any = {
+			role: "assistant",
+			content: [{ type: "text", text: "brand new reply" }],
+			timestamp: 0,
+		};
+		const s = applyAll([
+			liveMessageEnd(100, idLessAssistant),
+			{
+				type: "snapshot",
+				messages: [
+					userMsg("u1", "hi"),
+					assistantMsg("a-snap", "older reply"),
+				],
+			},
+		]);
+		const live = s.messages.find((m: any) => extractText(m) === "brand new reply");
+		assert.ok(live, "live row with novel text survives");
+		assert.strictEqual(live!._order, 100);
+	});
+
+	it("H3 multiset: id-less live row matching a single snapshot key collapses to the snapshot's count", () => {
+		// Snapshot has one "hello" assistant row; the live state has one
+		// id-less "hello" live row. Multiset budget = 1, consumed by the
+		// live row. Net: 1 assistant "hello" row (the snapshot's).
+		const idLessAssistant: any = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			timestamp: 0,
+		};
+		const s = applyAll([
+			liveMessageEnd(100, idLessAssistant),
+			{
+				type: "snapshot",
+				messages: [assistantMsg("a-snap", "hello")],
+			},
+		]);
+		const hellos = s.messages.filter(
+			(m: any) => m.role === "assistant" && extractText(m) === "hello",
+		);
+		assert.strictEqual(hellos.length, 1);
+		assert.strictEqual(hellos[0].id, "a-snap");
+	});
+
+	it("H3 multiset: snapshot with N copies of identical text dedups exactly N live rows; surplus live rows survive via the H3 guard", () => {
+		// 3 id-less live rows with text "OK". Snapshot has 2 "OK" rows.
+		// Multiset budget consumes 2 live rows; the 3rd survives via the
+		// H3 guard (`_order > serverMaxOrder`). Net: 2 snapshot + 1 live = 3.
+		const makeOkLive = (): any => ({
+			role: "assistant",
+			content: [{ type: "text", text: "OK" }],
+			timestamp: 0,
+		});
+		const s = applyAll([
+			liveMessageEnd(10, makeOkLive()),
+			liveMessageEnd(20, makeOkLive()),
+			liveMessageEnd(30, makeOkLive()),
+			{
+				type: "snapshot",
+				messages: [
+					assistantMsg("a-snap-1", "OK"),
+					assistantMsg("a-snap-2", "OK"),
+				],
+			},
+		]);
+		const oks = s.messages.filter(
+			(m: any) => m.role === "assistant" && extractText(m) === "OK",
+		);
+		assert.strictEqual(oks.length, 3, "2 snapshot rows + 1 surplus live row");
+		const snapIds = oks.filter((m) => m.id?.startsWith("a-snap-")).map((m) => m.id);
+		assert.strictEqual(snapIds.length, 2, "both snapshot rows present");
+		const liveSurvivors = oks.filter((m) => m._order > 0);
+		assert.strictEqual(liveSurvivors.length, 1, "exactly one live row survives");
+	});
+
+	it("H3 multiset: N live rows with identical text and an empty snapshot all survive (no dedup budget)", () => {
+		// Multiset budget = 0 (no snapshot rows for this text). All live rows
+		// fall through to the H3 guard and survive.
+		const makeOkLive = (): any => ({
+			role: "assistant",
+			content: [{ type: "text", text: "OK" }],
+			timestamp: 0,
+		});
+		const s = applyAll([
+			liveMessageEnd(10, makeOkLive()),
+			liveMessageEnd(20, makeOkLive()),
+			liveMessageEnd(30, makeOkLive()),
+			{
+				type: "snapshot",
+				messages: [userMsg("u1", "hi")],
+			},
+		]);
+		const oks = s.messages.filter(
+			(m: any) => m.role === "assistant" && extractText(m) === "OK",
+		);
+		assert.strictEqual(oks.length, 3);
+		assert.deepStrictEqual(
+			oks.map((m) => m._order),
+			[10, 20, 30],
+		);
+	});
+
+	it("H3: prior-snapshot artifact (id-less, _order<=0) is dropped by a fresh snapshot that doesn't represent it", () => {
+		// Reproduces the (D) two-tab divergence: when the server splices an
+		// in-flight `message_update` into snapshot N, that row lands at a
+		// negative `_order` (`SNAPSHOT_ORDER_FLOOR + i`). If the in-flight
+		// message is then ABANDONED server-side (e.g. mock-agent
+		// `_streamChunkedText` with `omitFinalEnd:true`, or a real LLM that
+		// pivots from partial text to a tool_use without emitting message_end),
+		// snapshot N+1 will NOT contain it. The previous-snapshot row must NOT
+		// survive — otherwise tab1 (which took snapshot N) and tab2 (which
+		// didn't) diverge in row count forever.
+		const idLessPartial: any = {
+			role: "assistant",
+			content: [{ type: "text", text: "PRE-WAIT-CHUNK partial" }],
+			timestamp: 0,
+		};
+		// Snapshot N: contains the in-flight partial (spliced by the server).
+		const s1 = reduce(initialState(), {
+			type: "snapshot",
+			messages: [userMsg("u1", "hello"), idLessPartial],
+		});
+		// Sanity: the partial is in the transcript with negative `_order`.
+		const partialAfterN = s1.messages.find(
+			(m: any) => m.role === "assistant" && extractText(m) === "PRE-WAIT-CHUNK partial",
+		);
+		assert.ok(partialAfterN, "partial spliced into snapshot N");
+		assert.ok(partialAfterN!._order <= 0, "partial _order is in the snapshot range");
+		// Snapshot N+1: server has moved on; the partial is NOT present.
+		const s2 = reduce(s1, {
+			type: "snapshot",
+			messages: [userMsg("u1", "hello")],
+		});
+		const partialAfterNPlus1 = s2.messages.find(
+			(m: any) => m.role === "assistant" && extractText(m) === "PRE-WAIT-CHUNK partial",
+		);
+		assert.strictEqual(
+			partialAfterNPlus1,
+			undefined,
+			"stale prior-snapshot partial must be dropped by snapshot N+1",
+		);
+	});
+
+	it("H3: backwards compat — snapshot row whose id matches a live row at lower _order still drops the live row via id-match", () => {
+		// The new guard fires only when m._order STRICTLY exceeds the snapshot
+		// max. A live row whose seq is below the snapshot floor (impossible in
+		// practice, but constructed here) goes through the existing id-match
+		// path and is dropped — i.e. the snapshot remains authoritative for
+		// any id it contains, in the regime where the live row predates the
+		// snapshot.
+		const tick0 = initialState();
+		// Hand-build a state with a server live row at _order = -999_999_990
+		// (i.e. below the snapshot we'll apply). Easiest: dispatch a snapshot
+		// to seed the row, then apply a fresh snapshot whose max _order is
+		// strictly greater.
+		const s1 = reduce(tick0, {
+			type: "snapshot",
+			messages: [assistantMsg("a1", "old")], // _order = SNAPSHOT_ORDER_FLOOR + 0
+		});
+		assert.strictEqual(s1.messages[0]._order, SNAPSHOT_ORDER_FLOOR);
+		// Second snapshot has the same id at index 1 (so its _order is
+		// SNAPSHOT_ORDER_FLOOR + 1, strictly greater than the existing row's).
+		// The id-match path drops the seeded row; the snapshot version wins.
+		const s2 = reduce(s1, {
+			type: "snapshot",
+			messages: [
+				assistantMsg("a-other", "placeholder"),
+				assistantMsg("a1", "updated"),
+			],
+		});
+		const a1Rows = s2.messages.filter((m) => m.id === "a1");
+		assert.strictEqual(a1Rows.length, 1, "snapshot remains authoritative for id");
+		assert.strictEqual(
+			(a1Rows[0].content as any[])[0].text,
+			"updated",
+			"snapshot version of a1 wins",
+		);
 	});
 });

@@ -1,6 +1,7 @@
 name: propose_project
-description: "Submit a project proposal for user review. This is the ONE tool that defines or updates everything about a project — including its workflows. There is NO separate propose_workflow tool: workflows live inside this proposal under the `workflows:` field, alongside components and the rest of the project config. Works both for new/provisional projects (from the project assistant) and mid-session for the currently registered project — in the mid-session case, the user sees a diff of the proposed fields against the current project.yaml and accepting writes the changes via PUT /api/projects/:id/config without ending the session. To tweak workflow YAML in an in-flight draft without re-emitting the whole payload, follow up with edit_proposal(type=\"project\", ...)."
-summary: "Propose or update a project — including its components AND its workflows. The `workflows:` field carries the project's full workflow set; this is the canonical (and only) tool for defining / replacing / extending workflows."
+description: "Submit project proposal; works for new or mid-session edits"
+summary: "Propose a project with components and workflows"
+params: [name, root_path, build_command?, test_command?, typecheck_command?, test_unit_command?, test_e2e_command?, components?, workflows?, sandbox?, sandbox_tokens?, config_directories?, worktree_root?, worktree_setup_command?, naming_model?, review_model?, session_model?]
 provider:
   type: bobbit-extension
   extension: extension.ts

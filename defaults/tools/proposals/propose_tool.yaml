@@ -1,6 +1,7 @@
 name: propose_tool
-description: "Submit a custom tool definition for user review. This is THE canonical (and only) tool for creating, updating, or removing tools — there is no separate create_tool / update_tool / delete_tool. Custom tools become available to agents (subject to per-role tool policies and group access) once the user accepts the proposal. To tweak the YAML of an in-flight tool draft, follow up with edit_proposal(type=\"tool\", ...)."
-summary: "Propose, update, or remove a custom tool (YAML definition: name, group, description, parameters, provider). Once accepted, the tool is callable by any role that has it allowed."
+description: "Submit tool proposal with tool name, action, content"
+summary: "Propose a custom tool"
+params: [tool, action, content]
 provider:
   type: bobbit-extension
   extension: extension.ts

@@ -1,6 +1,7 @@
 name: propose_staff
-description: "Submit a staff member proposal for user review. Staff are persistent agents with their own worktree that wake up periodically (or on triggers) to do recurring work — e.g. a docs-keeper that runs nightly to update docs, or a security-watcher triggered on PR creation. This is THE canonical (and only) tool for creating or updating staff. To tweak a draft, follow up with edit_proposal(type=\"staff\", ...)."
-summary: "Propose or update a staff member (persistent recurring agent with name, prompt, optional triggers and schedule)."
+description: "Submit staff proposal with name and prompt"
+summary: "Propose a staff member"
+params: [name, prompt, description?, triggers?, cwd?]
 provider:
   type: bobbit-extension
   extension: extension.ts

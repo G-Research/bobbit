@@ -1,6 +1,7 @@
 name: find
-description: "Search for files by glob pattern"
-summary: "Search for files matching a glob pattern. Respects .gitignore."
+description: "Glob search; respects .gitignore"
+summary: "Find files by glob pattern"
+params: [pattern, path?, limit?]
 provider:
   type: builtin
   tool: find

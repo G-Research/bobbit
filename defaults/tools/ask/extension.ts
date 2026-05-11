@@ -26,14 +26,18 @@ export default function (pi: ExtensionAPI) {
 		return { content: [{ type: "text" as const, text: JSON.stringify(data) }], details: undefined };
 	}
 
+	function errorResult(data: unknown) {
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(data) }],
+			isError: true,
+			details: undefined,
+		};
+	}
+
 	pi.registerTool({
 		name: "ask_user_choices",
 		label: "Ask User Choices",
-		description: [
-			"Post 1–5 multiple-choice questions to the user as an inline widget.",
-			"Non-blocking: the tool returns immediately; the user's answers arrive later as a separate user message.",
-			"Calling this tool ends your current turn.",
-		].join(" "),
+		description: "Post 1–5 multiple-choice questions to the user. Non-blocking; ends your turn.",
 		promptSnippet: [
 			"Post multiple-choice questions to the user. The tool returns immediately and ends your turn.",
 			"Answers arrive later as a user message prefixed with `[ask_user_choices_response tool_use_id=<id>]`",
@@ -42,30 +46,30 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			questions: Type.Array(
 				Type.Object({
-					question: Type.String({ minLength: 1, description: "The question prompt" }),
+					question: Type.String({ minLength: 1 }),
 					options: Type.Array(Type.String({ minLength: 1 }), {
 						minItems: 2,
 						maxItems: 8,
-						description: "2–8 answer options",
+						description: "2–8 answer options.",
 					}),
 					tab_label: Type.Optional(Type.String({
 						minLength: 1,
 						maxLength: 24,
-						description: "Short 2–4 word tab label (≤24 chars) summarizing the question. REQUIRED when posting more than one question — used as the tab title so users can jump between questions without reading full prompts.",
+						description: "2–4 word tab label. Required for multi-question asks.",
 					})),
 					multi: Type.Optional(Type.Boolean({
-						description: "If true, user may select multiple options; selected is returned as a string[].",
+						description: "Allow multiple selections; returns string[].",
 					})),
 					min: Type.Optional(Type.Integer({
 						minimum: 1,
-						description: "Minimum selections when multi:true (default 1).",
+						description: "Min selections when multi:true. Default 1.",
 					})),
 					max: Type.Optional(Type.Integer({
 						minimum: 1,
-						description: "Maximum selections when multi:true (default = options.length).",
+						description: "Max selections when multi:true. Default options.length.",
 					})),
-				}, { additionalProperties: true }),
-				{ minItems: 1, maxItems: 5, description: "1–5 multiple-choice questions" },
+				}),
+				{ minItems: 1, maxItems: 5 },
 			),
 		}),
 		async execute(toolUseId, params) {
@@ -78,12 +82,12 @@ export default function (pi: ExtensionAPI) {
 					const q = questions[i];
 					const label = q?.tab_label;
 					if (typeof label !== "string" || label.trim().length === 0) {
-						return ok({
+						return errorResult({
 							error: `ask_user_choices: questions[${i}].tab_label is required for multi-question asks (2–4 words, ≤24 chars).`,
 						});
 					}
 					if (label.length > 24) {
-						return ok({
+						return errorResult({
 							error: `ask_user_choices: questions[${i}].tab_label exceeds 24 chars (got ${label.length}).`,
 						});
 					}

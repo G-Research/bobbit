@@ -78,7 +78,9 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError } from "./agent/project-registry.js";
+import { runPreflight } from "./agent/project-preflight.js";
+import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
@@ -1153,56 +1155,76 @@ export function createGateway(config: GatewayConfig) {
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
-			// Ordering invariant preserved: the sweeper still runs before
-			// `initWorktreePoolForProject`, so the pool's `reclaimOrphaned`
-			// can't race against the sweeper. Requests that arrive during this
-			// window fall through the non-pool session path (the same path used
-			// before the pool ever fills).
+			// Concurrency note: the sweeper and the pool init operate on DISJOINT
+			// branch sets — `worktree-sweeper.ts` explicitly skips pool branches
+			// (`isPoolBranch`), and `WorktreePool.reclaimOrphaned` only inspects
+			// pool branches. So the two phases are run concurrently via
+			// `Promise.all`, and project-level pool init is also parallelised
+			// across projects (each project's pool is independent). This avoids
+			// the previous serial chain that left the pool empty for minutes on
+			// installs with many stale worktrees, forcing every new session
+			// through the cold path (full createWorktree + npm ci).
 			const runBootBackgroundTasks = async (): Promise<void> => {
-				try {
-					const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-					const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
-					const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-					const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-					const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
-					for (const ctx of projectContextManager.all()) {
-						const repoNames = ctx.projectConfigStore.repoNames();
-						sweepProjects.push({
-							id: ctx.project.id,
-							rootPath: ctx.project.rootPath,
-							repos: repoNames.length > 0 ? repoNames : undefined,
-						});
-						for (const g of ctx.goalStore.getAll()) {
-							sweepGoals.push({
-								id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
-								repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
-							});
-						}
-						for (const s of ctx.sessionStore.getAll()) {
-							sweepSessions.push({
-								id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
-								repoWorktrees: s.repoWorktrees,
-							});
-						}
-						for (const st of ctx.staffStore.getAll()) {
-							sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
-						}
-					}
-					const result = await sweepOrphanedWorktrees({
-						projects: sweepProjects,
-						goals: sweepGoals,
-						sessions: sweepSessions,
-						staff: sweepStaff,
-					});
-					if (result.reclaimed || result.cleaned || result.repaired) {
-						console.log(`[sweeper] reclaimed ${result.reclaimed}, cleaned ${result.cleaned}, repaired ${result.repaired}`);
-					}
-				} catch (err) {
-					console.warn("[server] Worktree sweeper failed (non-fatal):", err);
-				}
+				const t0 = Date.now();
 
-				if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
-					for (const ctx of projectContextManager.all()) {
+				const sweeperTask = (async () => {
+					const tStart = Date.now();
+					try {
+						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
+						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+						// Skip hidden contexts (synthetic system project) — it has
+						// no goals/sessions/staff and must never drive worktree work.
+						for (const ctx of projectContextManager.visible()) {
+							const repoNames = ctx.projectConfigStore.repoNames();
+							sweepProjects.push({
+								id: ctx.project.id,
+								rootPath: ctx.project.rootPath,
+								repos: repoNames.length > 0 ? repoNames : undefined,
+							});
+							for (const g of ctx.goalStore.getAll()) {
+								sweepGoals.push({
+									id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+									repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+								});
+							}
+							for (const s of ctx.sessionStore.getAll()) {
+								sweepSessions.push({
+									id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+									repoWorktrees: s.repoWorktrees,
+								});
+							}
+							for (const st of ctx.staffStore.getAll()) {
+								sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+							}
+						}
+						console.log(`[boot] sweeper start (${sweepProjects.length} projects)`);
+						const result = await sweepOrphanedWorktrees({
+							projects: sweepProjects,
+							goals: sweepGoals,
+							sessions: sweepSessions,
+							staff: sweepStaff,
+						});
+						console.log(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
+					} catch (err) {
+						console.warn(`[boot] sweeper failed in ${Date.now() - tStart}ms (non-fatal):`, err);
+					}
+				})();
+
+				const poolInitTask = (async () => {
+					if (process.env.BOBBIT_SKIP_WORKTREE_POOL) return;
+					// Hidden contexts (synthetic system project) must NOT seed a
+					// worktree pool. When bobbit's state dir is nested inside an
+					// unrelated git checkout, `isGitRepo(<state>/system-project)`
+					// walks up to find the host repo and the pool would allocate
+					// `pool/_pool-*` branches there. See
+					// `tests/system-project-pool-leak.test.ts`.
+					const contexts = Array.from(projectContextManager.visible());
+					console.log(`[boot] pool init start (${contexts.length} projects)`);
+					await Promise.all(contexts.map(async (ctx) => {
+						const tStart = Date.now();
 						try {
 							const repoPath = ctx.project.rootPath;
 							const components = ctx.projectConfigStore.getComponents();
@@ -1227,15 +1249,24 @@ export function createGateway(config: GatewayConfig) {
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot);
+								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
+							} else {
+								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							}
-						} catch { /* best-effort */ }
-					}
-				}
+						} catch (err) {
+							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
+						}
+					}));
+				})();
+
+				await Promise.all([sweeperTask, poolInitTask]);
+				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
 			// resolve components / project root for multi-repo goal creation.
-			for (const ctx of projectContextManager.all()) {
+			// Hidden contexts (synthetic system project) have no goals to wire.
+			for (const ctx of projectContextManager.visible()) {
 				const projectId = ctx.project.id;
 				ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(projectId));
 				ctx.goalManager.setComponentsResolver((pid: string) => {
@@ -1476,6 +1507,10 @@ async function handleApiRoute(
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
 	};
+	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
+		const e = err instanceof Error ? err : new Error(String(err));
+		json({ error: e.message, stack: e.stack, ...extra }, status);
+	};
 
 	// ── Cross-project helper functions ─────────────────────────────
 
@@ -1551,7 +1586,14 @@ async function handleApiRoute(
 	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
 		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
-		json({ status: "ok", sessions: sessionManager.listSessions().length, localhost: isLocalhost, aigw: !!getAigwUrl(preferencesStore), setupComplete: isSetupComplete() });
+		json({
+			status: "ok",
+			sessions: sessionManager.listSessions().length,
+			localhost: isLocalhost,
+			aigw: !!getAigwUrl(preferencesStore),
+			setupComplete: isSetupComplete(),
+			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
+		});
 		return;
 	}
 
@@ -1638,7 +1680,7 @@ async function handleApiRoute(
 			fs.writeFileSync(systemPromptPath, newContent);
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -1667,7 +1709,7 @@ async function handleApiRoute(
 			const content = fs.readFileSync(userPath, "utf-8");
 			json({ path: userPath, created, content });
 		} catch (err: any) {
-			json({ error: String(err?.message ?? err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -1764,6 +1806,70 @@ async function handleApiRoute(
 
 	// ── Project Detection & Browse ────────────────────────────────────
 
+	// GET /api/projects/preflight?path=<absolute>
+	// Returns a structured PreflightReport — always 200 when path is
+	// supplied; the failures are *the* response. 400 only for missing /
+	// bad-shape input.
+	if (url.pathname === "/api/projects/preflight" && req.method === "GET") {
+		const rawPath = url.searchParams.get("path");
+		if (!rawPath || typeof rawPath !== "string") {
+			json({ error: "Missing path query parameter" }, 400);
+			return;
+		}
+		try {
+			const report = runPreflight(rawPath, {
+				registeredProjects: projectRegistry.list(),
+				gatewayProjectRoot: getProjectRoot(),
+				worktreeRootFor: (p) => {
+					const ctx = projectContextManager.getOrCreate(p.id);
+					return ctx?.projectConfigStore.get("worktree_root") || undefined;
+				},
+			});
+			json(report);
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/projects/archive-bobbit
+	// Body: { rootPath }. Moves existing project-scoped .bobbit/ content
+	// aside into .bobbit-archive-NNN/ — never touching the
+	// GATEWAY_OWNED_FILES allowlist. Does NOT mutate the registry; the
+	// client re-runs /preflight afterwards.
+	if (url.pathname === "/api/projects/archive-bobbit" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body.rootPath !== "string") {
+			json({ error: "Missing rootPath" }, 400);
+			return;
+		}
+		if (!path.isAbsolute(body.rootPath)) {
+			json({ error: "rootPath must be absolute" }, 400);
+			return;
+		}
+		if (!fs.existsSync(body.rootPath)) {
+			json({ error: "rootPath does not exist" }, 400);
+			return;
+		}
+		// Compute gateway-owned via the same logic as the preflight check.
+		const sameAsGateway = path.resolve(body.rootPath) === path.resolve(getProjectRoot());
+		const hasGwUrl = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "gateway-url"));
+		const hasWatchdog = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "watchdog.json"));
+		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
+		try {
+			const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned });
+			json(result);
+		} catch (err: any) {
+			if (err instanceof ArchiveError) {
+				const status = err.code === "empty-bobbit-dir" || err.code === "no-bobbit-dir" ? 409 : 400;
+				json({ error: err.message, code: err.code }, status);
+				return;
+			}
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// POST /api/projects/detect
 	if (url.pathname === "/api/projects/detect" && req.method === "POST") {
 		const body = await readBody(req);
@@ -1834,7 +1940,7 @@ async function handleApiRoute(
 			const monorepo = scanMonorepo(dirPath);
 			json({ repos, monorepo });
 		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -1868,7 +1974,7 @@ async function handleApiRoute(
 			const monorepo = scanMonorepo(project.rootPath);
 			json({ repos, monorepo, rootPath: project.rootPath });
 		} catch (err: any) {
-			json({ error: err?.message || String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -1993,6 +2099,14 @@ async function handleApiRoute(
 					}, 400);
 					return;
 				}
+				if (regErr instanceof PreflightFailedError) {
+					json({
+						error: regErr.message,
+						code: "preflight_failed",
+						report: regErr.report,
+					}, 400);
+					return;
+				}
 				throw regErr;
 			}
 			// Initialize project context for the new project
@@ -2091,7 +2205,7 @@ async function handleApiRoute(
 			}
 			json(project, 201);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2119,7 +2233,7 @@ async function handleApiRoute(
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2154,7 +2268,7 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2169,7 +2283,7 @@ async function handleApiRoute(
 			const promoted = projectRegistry.promote(projectId, { name });
 			json(promoted);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -2526,7 +2640,7 @@ async function handleApiRoute(
 		if (url.searchParams.get("include") === "archived") {
 			// Collect archived sessions across all project contexts
 			const allArchived: typeof sessions = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				const store = ctx.sessionStore;
 				for (const s of store.getArchived()) {
 					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
@@ -2541,14 +2655,14 @@ async function handleApiRoute(
 
 			// Collect ALL archived sessions for BFS enrichment (not just delegates)
 			const allArchivedForBfs: typeof sessions = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					allArchivedForBfs.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
 				}
 			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIds: string[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const g of ctx.goalStore.getLive()) {
 					if (!g.archived) liveGoalIds.push(g.id);
 				}
@@ -2587,14 +2701,14 @@ async function handleApiRoute(
 			// can render chevrons/nesting without a separate fetch.
 			const liveIdSet = new Set(sessions.map(s => s.id));
 			const allArchivedForBfsNonPaginated: typeof sessions = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					allArchivedForBfsNonPaginated.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
 				}
 			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIdsNonPaginated: string[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const g of ctx.goalStore.getLive()) {
 					if (!g.archived) liveGoalIdsNonPaginated.push(g.id);
 				}
@@ -2683,7 +2797,7 @@ async function handleApiRoute(
 			const result = await sessionManager.requestToolGrant(sessionId, body.toolName, body.toolGroup);
 			json(result);
 		} catch (err: any) {
-			json({ error: err.message }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -2807,7 +2921,7 @@ async function handleApiRoute(
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
-				json({ error: String(err) }, 500);
+				jsonError(500, err);
 			}
 			return;
 		}
@@ -3064,7 +3178,7 @@ async function handleApiRoute(
 			const filterProjectId = url.searchParams.get("projectId") || undefined;
 			// Aggregate archived goals across all project contexts
 			let allArchived: PersistedGoal[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
 			}
@@ -3081,7 +3195,7 @@ async function handleApiRoute(
 			const goalIdsInPage = new Set(page.map((g: any) => g.id));
 			const affiliatedSessions: any[] = [];
 			const seenSessionIds = new Set<string>();
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
 						seenSessionIds.add(s.id);
@@ -3091,7 +3205,7 @@ async function handleApiRoute(
 			}
 			// BFS walk delegate/team chains from affiliated sessions
 			const allArchivedForGoalsBfs: any[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					allArchivedForGoalsBfs.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
 				}
@@ -3162,7 +3276,7 @@ async function handleApiRoute(
 				try {
 					await sandboxManager.ensureForProject(targetProjectId);
 				} catch (err) {
-					json({ error: `Sandbox init failed: ${(err as Error).message || err}` }, 500);
+					jsonError(500, err, { error: `Sandbox init failed: ${(err as Error).message || err}` });
 					return;
 				}
 			}
@@ -3253,7 +3367,7 @@ async function handleApiRoute(
 				}
 			}
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -3794,7 +3908,7 @@ async function handleApiRoute(
 			const models = await getAvailableModels(preferencesStore);
 			json(models);
 		} catch (err: any) {
-			json({ error: `Failed to load models: ${err.message}` }, 500);
+			jsonError(500, err, { error: `Failed to load models: ${err.message}` });
 		}
 		return;
 	}
@@ -3804,7 +3918,7 @@ async function handleApiRoute(
 		try {
 			json(getAvailableImageModels(preferencesStore));
 		} catch (err: any) {
-			json({ error: `Failed to load image models: ${err.message}` }, 500);
+			jsonError(500, err, { error: `Failed to load image models: ${err.message}` });
 		}
 		return;
 	}
@@ -3871,7 +3985,7 @@ async function handleApiRoute(
 				images: result.images,
 			});
 		} catch (err: any) {
-			json({ error: err?.message || "Image generation failed" }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -3903,7 +4017,7 @@ async function handleApiRoute(
 			const models = await discoverModelsForConfig(config);
 			json({ models });
 		} catch (err: any) {
-			json({ error: err?.message || "Discovery failed" }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -4022,7 +4136,7 @@ async function handleApiRoute(
 			broadcastPreferencesChanged();
 			json({ ok: true, models });
 		} catch (err: any) {
-			json({ error: `Failed to configure AI Gateway: ${err.message}` }, 502);
+			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
 		}
 		return;
 	}
@@ -4047,7 +4161,7 @@ async function handleApiRoute(
 			const models = await discoverAigwModels(body.url);
 			json({ ok: true, models });
 		} catch (err: any) {
-			json({ error: err.message }, 502);
+			jsonError(502, err);
 		}
 		return;
 	}
@@ -4065,7 +4179,7 @@ async function handleApiRoute(
 			broadcastPreferencesChanged();
 			json({ models });
 		} catch (err: any) {
-			json({ error: err.message || "Refresh failed" }, 502);
+			jsonError(502, err);
 		}
 		return;
 	}
@@ -4164,7 +4278,7 @@ async function handleApiRoute(
 				json({ ok: false, modelResolved: sendId, latencyMs, error: err?.message || "Request failed" });
 			}
 		} catch (err: any) {
-			json({ ok: false, error: err?.message || "Test failed" }, 500);
+			jsonError(500, err, { ok: false, error: err?.message || "Test failed" });
 		}
 		return;
 	}
@@ -4259,7 +4373,7 @@ async function handleApiRoute(
 				json(role, 201);
 			}
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -4489,7 +4603,7 @@ async function handleApiRoute(
 			});
 			json(task, 201);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -4974,7 +5088,7 @@ async function handleApiRoute(
 
 				json({ ok: true });
 			} catch (err: any) {
-				json({ error: err.message }, 400);
+				jsonError(400, err);
 			}
 			return;
 		}
@@ -5023,7 +5137,7 @@ async function handleApiRoute(
 
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5055,7 +5169,7 @@ async function handleApiRoute(
 
 			json({ ok: true });
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5071,7 +5185,7 @@ async function handleApiRoute(
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5104,9 +5218,9 @@ async function handleApiRoute(
 			json(result, 201);
 		} catch (err) {
 			if (err instanceof GateDependencyError) {
-				json({ error: String(err.message) }, 409);
+				jsonError(409, err);
 			} else {
-				json({ error: String(err) }, 400);
+				jsonError(400, err);
 			}
 		}
 		return;
@@ -5124,7 +5238,7 @@ async function handleApiRoute(
 			const ok = await teamManager.dismissRole(body.sessionId);
 			json({ ok });
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5215,7 +5329,7 @@ async function handleApiRoute(
 				json({ ...result, aggregate: result, repos: { ".": result } });
 			}
 		} catch (err: any) {
-			json({ error: err.stderr?.trim() || err.message || "git status failed" }, 500);
+			jsonError(500, err, { error: err.stderr?.trim() || err.message || "git status failed" });
 		}
 		return;
 	}
@@ -5252,7 +5366,7 @@ async function handleApiRoute(
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5365,7 +5479,7 @@ async function handleApiRoute(
 			await sessionManager.deliverLiveSteer(session.id, body.message);
 			json({ ok: true, dispatched: true });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5395,7 +5509,7 @@ async function handleApiRoute(
 			const afterSession = sessionManager.getSession(body.sessionId);
 			json({ ok: true, status: afterSession?.status || "idle" });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5452,7 +5566,7 @@ async function handleApiRoute(
 			await sessionManager.enqueuePrompt(body.sessionId, message);
 			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -5500,7 +5614,7 @@ async function handleApiRoute(
 			await teamManager.completeTeam(goalId);
 			json({ ok: true });
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5513,7 +5627,7 @@ async function handleApiRoute(
 			await teamManager.teardownTeam(goalId);
 			json({ ok: true });
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -5729,7 +5843,7 @@ async function handleApiRoute(
 				return;
 			}
 			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
-			json({ error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` }, 500);
+			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
 
@@ -5769,7 +5883,7 @@ async function handleApiRoute(
 			);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
-			json({ error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` }, 500);
+			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
 
@@ -5859,7 +5973,7 @@ async function handleApiRoute(
 				const ok = await sessionManager.assignRole(id, role);
 				if (!ok) { json({ error: "Session not found" }, 404); return; }
 			} catch (err) {
-				json({ error: String(err) }, 400);
+				jsonError(400, err);
 				return;
 			}
 		} else if (typeof body.roleId === "string" && body.roleId === "") {
@@ -6196,7 +6310,7 @@ async function handleApiRoute(
 		try {
 			json(oauthStatus(url.searchParams.get("provider") ?? undefined));
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -6225,7 +6339,7 @@ async function handleApiRoute(
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6241,7 +6355,7 @@ async function handleApiRoute(
 			const result = await oauthComplete(body.flowId, body.code);
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6330,7 +6444,7 @@ async function handleApiRoute(
 			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
 		} catch (err: any) {
 			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
-			json({ error: err?.stderr?.trim() || err?.message || "git status failed" }, 500);
+			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
 			return;
 		}
 		if (!result) { json({ error: "Not a git repository" }, 400); return; }
@@ -6374,7 +6488,7 @@ async function handleApiRoute(
 			if (toolContent === undefined) { json({ error: "No content in block" }, 404); return; }
 			json({ content: toolContent });
 		} catch (err) {
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6432,7 +6546,7 @@ async function handleApiRoute(
 				const status = err.code === "transcript_unavailable" ? 404 : 400;
 				json({ error: err.code, detail: err.message }, status);
 			} else {
-				json({ error: "internal_error", detail: String(err) }, 500);
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
 			}
 		}
 		return;
@@ -6453,7 +6567,7 @@ async function handleApiRoute(
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
 			if (err.message === "NO_DIFF") { json({ error: "No diff found" }, 404); return; }
-			json({ error: String(err) }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -6815,7 +6929,7 @@ async function handleApiRoute(
 			ctx.workflowStore.put(workflow);
 			json(workflow, 201);
 		} catch (err: any) {
-			json({ error: err.message }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -7154,7 +7268,7 @@ async function handleApiRoute(
 					try {
 						manifestParsed = JSON.parse(fs.readFileSync(manifestAbs, "utf-8"));
 					} catch (err: any) {
-						json({ error: `Manifest JSON parse error: ${err?.message ?? err}` }, 400);
+						jsonError(400, err, { error: `Manifest JSON parse error: ${err?.message ?? err}` });
 						return;
 					}
 					if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
@@ -7190,10 +7304,10 @@ async function handleApiRoute(
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
-				json({ error: err.message }, err.statusCode);
+				jsonError(err.statusCode, err);
 				return;
 			}
-			json({ error: `preview mount failed: ${err?.message ?? String(err)}` }, 500);
+			jsonError(500, err, { error: `preview mount failed: ${err?.message ?? String(err)}` });
 			return;
 		}
 	}
@@ -7234,10 +7348,10 @@ async function handleApiRoute(
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
-				json({ error: err.message }, err.statusCode);
+				jsonError(err.statusCode, err);
 				return;
 			}
-			json({ error: `preview mount lookup failed: ${err?.message ?? String(err)}` }, 500);
+			jsonError(500, err, { error: `preview mount lookup failed: ${err?.message ?? String(err)}` });
 			return;
 		}
 	}
@@ -7661,7 +7775,7 @@ async function handleApiRoute(
 			json(staff, 201);
 		} catch (err: any) {
 			console.error("[server] Failed to create staff agent:", err);
-			json({ error: err?.message || "Failed to create staff agent" }, 500);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -7716,7 +7830,7 @@ async function handleApiRoute(
 			const sessionId = await staffManager.wake(id, body?.prompt, sessionManager);
 			json({ sessionId }, 201);
 		} catch (err) {
-			json({ error: String(err) }, 400);
+			jsonError(400, err);
 		}
 		return;
 	}
@@ -8118,7 +8232,9 @@ async function handleApiRoute(
 	// GET /api/maintenance/orphaned-worktrees
 	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
 		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
-		for (const ctx of projectContextManager.all()) {
+		// Hidden contexts (synthetic system project) have no worktrees and
+		// resolving their repoPath can leak into an unrelated host repo.
+		for (const ctx of projectContextManager.visible()) {
 			try {
 				const repoPath = ctx.project.rootPath;
 				if (await isGitRepo(repoPath)) {
@@ -8139,7 +8255,7 @@ async function handleApiRoute(
 		let cleaned = 0;
 		if (body?.worktrees && Array.isArray(body.worktrees)) {
 			// Clean specific worktrees — validate each against registered projects and orphan list
-			const validRepoPaths = new Set([...projectContextManager.all()].map(ctx => ctx.project.rootPath));
+			const validRepoPaths = new Set([...projectContextManager.visible()].map(ctx => ctx.project.rootPath));
 			for (const wt of body.worktrees) {
 				if (wt.path && wt.branch && wt.repoPath) {
 					// Validate repoPath is a registered project
@@ -8158,8 +8274,8 @@ async function handleApiRoute(
 				}
 			}
 		} else {
-			// Clean all orphans across all projects
-			for (const ctx of projectContextManager.all()) {
+			// Clean all orphans across all projects (hidden contexts excluded).
+			for (const ctx of projectContextManager.visible()) {
 				try {
 					const repoPath = ctx.project.rootPath;
 					if (await isGitRepo(repoPath)) {
