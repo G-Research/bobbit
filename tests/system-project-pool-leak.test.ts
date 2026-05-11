@@ -108,8 +108,11 @@ async function waitForAny(predicate: () => boolean, timeoutMs: number): Promise<
  * when migrating the boot loop from `pcm.all()` to `pcm.visible()`.
  */
 function iterateProjectsForPoolInit(registry: ProjectRegistry): RegisteredProject[] {
-	return registry.list();
-	// Post-fix: return registry.list().filter(p => !p.hidden);
+	// Post-fix: mirrors the production boot loop's migration from
+	// `projectContextManager.all()` to `projectContextManager.visible()`,
+	// which filters out `hidden: true` projects (the synthetic system
+	// project). The hidden filter is the single principled fix.
+	return registry.list().filter(p => !p.hidden);
 }
 
 describe("hidden system project — worktree pool leak", () => {

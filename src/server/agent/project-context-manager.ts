@@ -85,7 +85,7 @@ export class ProjectContextManager {
   /** All live (non-archived) goals across all projects, sorted by updatedAt desc. */
   getAllLiveGoals(): PersistedGoal[] {
     const goals: PersistedGoal[] = [];
-    for (const ctx of this.contexts.values()) {
+    for (const ctx of this.visible()) {
       goals.push(...ctx.goalStore.getLive());
     }
     return goals.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -94,7 +94,7 @@ export class ProjectContextManager {
   /** All live (non-archived) sessions across all projects. */
   getAllLiveSessions(): PersistedSession[] {
     const sessions: PersistedSession[] = [];
-    for (const ctx of this.contexts.values()) {
+    for (const ctx of this.visible()) {
       sessions.push(...ctx.sessionStore.getLive());
     }
     return sessions;
@@ -103,7 +103,7 @@ export class ProjectContextManager {
   /** All goals (including archived) across all projects. */
   getAllGoals(): PersistedGoal[] {
     const goals: PersistedGoal[] = [];
-    for (const ctx of this.contexts.values()) {
+    for (const ctx of this.visible()) {
       goals.push(...ctx.goalStore.getAll());
     }
     return goals.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -112,7 +112,7 @@ export class ProjectContextManager {
   /** All sessions (including archived) across all projects. */
   getAllSessions(): PersistedSession[] {
     const sessions: PersistedSession[] = [];
-    for (const ctx of this.contexts.values()) {
+    for (const ctx of this.visible()) {
       sessions.push(...ctx.sessionStore.getAll());
     }
     return sessions;
@@ -134,6 +134,9 @@ export class ProjectContextManager {
     const offset = opts.offset ?? 0;
 
     for (const ctx of this.contexts.values()) {
+      // Skip hidden contexts (e.g. synthetic system project) — they
+      // must never surface in user-facing search results.
+      if (ctx.project.hidden) continue;
       // Filter by projectId if specified
       if (opts.projectId && ctx.project.id !== opts.projectId) continue;
 
@@ -308,9 +311,38 @@ export class ProjectContextManager {
     }
   }
 
-  /** Iterate all contexts. */
+  /**
+   * Iterate **every** context the manager owns, including hidden ones
+   * (e.g. the synthetic system project registered for system-scope
+   * tool-assistant sessions).
+   *
+   * Use this for callers that legitimately need every context:
+   * `getContextForSession`, `findStoreForStaff`, MCP discovery, etc.
+   *
+   * If you are iterating to do worktree/pool/UI work where the system
+   * project must be skipped, use {@link visible} instead.
+   */
   all(): IterableIterator<ProjectContext> {
     return this.contexts.values();
+  }
+
+  /**
+   * Iterate only **visible** contexts — i.e. excluding `hidden: true`
+   * projects (the synthetic system project).
+   *
+   * Use this for worktree sweepers, worktree-pool init, goal/task
+   * pool-resolver wiring, maintenance endpoints, and user-facing
+   * listings/aggregations. The hidden system project must never
+   * participate in any of these flows; iterating it caused
+   * `pool/_pool-*` branches to be allocated in unrelated host repos
+   * when the bobbit state dir was nested inside one (see
+   * `tests/system-project-pool-leak.test.ts`).
+   */
+  *visible(): IterableIterator<ProjectContext> {
+    for (const ctx of this.contexts.values()) {
+      if (ctx.project.hidden) continue;
+      yield ctx;
+    }
   }
 
   /** Number of initialized project contexts. */
