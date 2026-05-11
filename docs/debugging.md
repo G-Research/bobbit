@@ -371,6 +371,64 @@ When a sandbox container is killed or removed, sessions auto-recover. Use this c
 - **Key log prefixes**: `[project-sandbox]` for health monitor and container lifecycle, `[session-manager]` for session recovery and worktree repair, `[sandbox-manager]` for event propagation between subsystems.
 - **Testing container recovery**: Kill the container with `docker rm -f <containerId>` and watch server logs. Sessions should transition: `idle` → `terminated` (process_exit) → `idle` (auto-recovery). Run recovery E2E tests: `npx playwright test --config playwright-e2e.config.ts --project=api sandbox-recovery`.
 
+<a id="team-lead-session-disappears"></a>
+
+## Team-lead session disappears / "No agents — Start Team" button throws "Team already active"
+
+Symptom: a team-mode goal that previously had a running team-lead now renders in the sidebar with no agents under it. Clicking *Start Team* fails with `Team already active` (or the equivalent 409 from `POST /api/goals/:id/team/spawn`), so the user is stuck — the UI thinks there is a team but cannot show it.
+
+Cause: the team-store (`team-state.json`) still has an entry for the goal but its `teamLeadSessionId` no longer resolves to any record in `sessions.json`. The DELETE handler footgun or an older crash-window write torn the metadata index without dropping the team entry.
+
+Fix is automatic on next boot. `TeamManager.restoreTeams()` in `src/server/agent/team-manager.ts` runs a four-pass cascade that converges the team-store, the session-store, and the agent CLI's `.jsonl` slug-dirs:
+
+1. Drop team entries for archived/gone goals (pre-existing).
+2. Drop dangling team entries whose `teamLeadSessionId` doesn't resolve (commit a4c6e890). Removes the cause of the `Team already active` jam.
+3. For team-mode goals lacking both a team entry and a live team-lead, reconstruct a session record from the surviving `*.jsonl` transcript in the agent CLI's slug-dir for the goal's worktree path (commits 050228d3, 237b0d00). The reconstructed record gets a fresh UUID, fun-name title with `(recovered)` suffix, and the goal binding restored — see the third entry below for why the id is fresh.
+4. Rename any legacy `Team Lead: <goal-title> (recovered)` titles to the modern fun-name shape (commit 9cd3ffd5).
+
+Diagnostic chain when the fix doesn't appear to work:
+
+- **Restart and read the boot logs.** Pass-2 logs the count of dangling entries dropped; pass-3 logs each reconstructed session id. Absent both lines = `restoreTeams` didn't run or the team-store/session-store paths are wrong.
+- **Check the slug-dir.** Pass-3 only fires when at least one `*.jsonl` survives in the agent CLI's slug-dir for the goal's `worktreePath`. The slug is `slugify(cwd)`; cross-check the actual directory name on disk. If no transcript survives, there is nothing to reconstruct — the goal can be archived manually.
+- **Check the order invariant.** Pass-2 must run before pass-3 (otherwise pass-3 sees a dangler and skips reconstruction); pass-3 must run after pass-1 cleans up archived goals (otherwise pass-3 would try to reconstruct sessions for goals that should have been culled). The order is fixed in `restoreTeams` but worth verifying if the file has been refactored.
+
+See [docs/design/session-recovery-boot-passes.md](design/session-recovery-boot-passes.md) for the full design (companion to [`session-store-crash-safety.md`](design/session-store-crash-safety.md), which covers the prevention side).
+
+<a id="purgeonesession-refuses-to-destroy"></a>
+
+## `purgeOneSession` refuses to destroy session / DELETE `/api/sessions/:id` returns `alreadyArchived`
+
+Symptom: a script or operator deletes a session via `DELETE /api/sessions/:id` and gets `200 { alreadyArchived: true }` instead of destruction; or the server logs `[session-manager] purgeOneSession refused for session <id>: live team-lead, call teardownTeam() first` and the record stays on disk.
+
+This is the refusal guard working as designed. It exists because the previous behaviour — silently destroying any session on DELETE — was the primary path by which team-lead records got torn out from under live team-store entries, producing the dangling-entry symptom in the entry above. Two layers cooperate:
+
+- **`canPurgeTeamLeadSession` in `src/server/agent/team-store-consistency.ts`.** Refuses purge when **all** of: `session.role === "team-lead"`, `session.teamGoalId` is set, `teamStore.get(teamGoalId).teamLeadSessionId === session.id`, and the owning goal is **not** archived. `SessionManager.purgeOneSession` consults this predicate before any destructive work; on refusal it logs the warning above. The correct unstick is to call `teardownTeam(goalId)` first — that drops the team-store entry, which removes the third condition and lets the purge proceed.
+- **DELETE `/api/sessions/:id` idempotency (commit d9a0b7b4).** For an already-archived session, the handler returns `200 { alreadyArchived: true }` rather than re-running purge. This closes the production footgun where re-archiving (easy from the UI, easy from a script) silently wiped the underlying record.
+
+Explicit-opt-in escape hatch: pass `?purge=true` on the DELETE URL to force destruction of an archived record. Live team-leads still hit the `canPurgeTeamLeadSession` refusal even with `?purge=true` — the query parameter only overrides the archived-idempotency check, not the team-lead guard. To force-destroy a live team-lead, tear down the team first.
+
+See [docs/design/session-recovery-boot-passes.md §3](design/session-recovery-boot-passes.md#3-the-refusal-guard--purgeonesession) for the refusal-condition table and rationale.
+
+<a id="recovered-team-lead-has-fresh-uuid"></a>
+
+## Recovered team-lead session has fresh UUID + fun-name title instead of original
+
+Symptom: after a boot recovery, the team-lead under a goal works — transcript is intact, the team-lead can resume — but its session id in the URL and its title are different from before. The title carries a `(recovered)` suffix.
+
+This is expected. Pass-3 of the boot-recovery cascade (`reconstructTeamLeadSessionRecord` in `src/server/agent/team-store-consistency.ts`) synthesises a **fresh** session record from the surviving `*.jsonl`, because the original gateway session UUID is not preserved anywhere on disk:
+
+- The agent CLI's slug-dir is keyed by `slugify(cwd)` (the worktree path), not by session id.
+- The `.jsonl` filename embeds a timestamp but not the gateway's UUID.
+- `sessions.json` is the only source for the UUID, and by the time pass-3 runs the entry is gone — that's the precondition for reconstruction.
+
+The reconstructed record therefore has: a new UUID, a fun-name title with the `(recovered)` suffix (so users can tell), the same transcript file, the same `teamGoalId` / `projectId` binding, and (for archived goals) `archivedAt` stamped from the transcript's mtime. This is best-effort recovery, not exact recovery.
+
+When this becomes a problem: external bookmarks, hard-coded session-id references in scripts, or anything that joins on the old UUID will not find the recovered record. There is no automatic remapping. The transcript content and goal continuity are preserved; only the id and title differ.
+
+A future **session-sidecar** file — written alongside each `.jsonl`, recording the gateway session UUID, role, goal-id, and fun-name at create-time — would let pass-3 do *exact* recovery: same id, same title, same metadata. Sibling subgoal `a71963d9` is investigating this. Until it lands (and until enough sessions have been created under the sidecar regime that older transcripts have one), pass-3 remains best-effort.
+
+See [docs/design/session-recovery-boot-passes.md §4](design/session-recovery-boot-passes.md#4-why-pass-3-cannot-recover-the-original-session-id).
+
 ## Search index
 
 FlexSearch-backed lexical search (pure-JS, BM25-style ranking). Index per project at `<project-root>/.bobbit/state/search.flex/` (`index/*.json` + `meta.json`). No native binaries, no model downloads, no runtime network. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md) for the full design.
