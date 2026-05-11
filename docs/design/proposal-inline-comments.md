@@ -567,6 +567,111 @@ the tool card, the slot rebuilds at `isFirstEmit = true` — annotations
 were already cleared on dismiss (§7), so the panel re-mounts with an empty
 bucket. Consistent.
 
+## 10. Lifecycle (post-MVP — landed on `goal/fix-propos-190338d6`)
+
+The MVP shipped the *create / send / clear* path. A follow-up goal closed
+the edit/delete gaps so an annotation has a complete in-place lifecycle.
+All behaviour is exercised by
+[`tests/e2e/ui/proposal-inline-comments.spec.ts`](../../tests/e2e/ui/proposal-inline-comments.spec.ts)
+(8 tests) — treat that spec as the executable contract; the prose below
+is orientation.
+
+All changes are confined to the three review components:
+[`ReviewDocument.ts`](../../src/ui/components/review/ReviewDocument.ts),
+[`AnnotationPopover.ts`](../../src/ui/components/review/AnnotationPopover.ts),
+[`review-pane.css`](../../src/ui/components/review/review-pane.css).
+Because `proposalBackend` and `reviewBackend` share the same
+`<review-document>`, the review-pane tab UX inherits these affordances
+automatically.
+
+### 10.1 Click-to-edit
+
+Clicking any `.r6o-annotation` span reopens `AnnotationPopover` in edit
+mode with the existing comment pre-filled. The popover is anchored to the
+clicked highlight's bounding rect.
+
+Under the hood, `ReviewDocument` listens for clicks on rendered
+annotation spans (desktop and mobile share the same path — see
+`_onMobileAnnotationTap`, deduped at the DOM level so Recogito's own
+`selectAnnotation` event does not double-fire). On hit, it sets
+`_editingAnnotationId` and `_existingComment` from the matched
+`ReviewAnnotation`, then opens the popover. The textarea value is
+assigned **synchronously** in `AnnotationPopover.updated()` to avoid a
+first-paint race that previously left the field empty.
+
+### 10.2 Overlap-as-edit
+
+A new selection whose `[start, end]` range intersects any existing
+annotation in the same bucket is treated as **edit the overlapped
+annotation**, not "stack a new comment on top". `_handleSelection` looks
+up `this._annotations` for the first overlapping entry, populates
+`_editingAnnotationId` + `_existingComment` from it, suppresses the
+fresh `createAnnotation` highlight, and opens the popover in edit mode.
+
+This is what users expect (one quote → one comment) and avoids the
+visually broken stacked-underline state the MVP allowed.
+
+### 10.3 Hover chip (desktop)
+
+Hovering a highlight on a pointer device surfaces a floating action chip
+anchored above-right of the span. The chip has two buttons:
+
+- `data-testid="annotation-hover-edit"` — same path as click-to-edit.
+- `data-testid="annotation-hover-delete"` — runs `_removeAnnotation(id)`,
+  which goes through `backend.remove` + `annotator.removeAnnotation` and
+  emits `annotation-change` so the `N comments` badge and **Send
+  feedback (N)** button stay in sync.
+
+Dismissal is `mouseleave` on both the highlight and the chip, with a
+short grace period so the user can travel between them. Touch devices
+keep the existing tap → bottom-sheet flow; the chip is an *additional*
+affordance, not a replacement.
+
+### 10.4 Popover delete (edit mode)
+
+When `AnnotationPopover` opens with `existingComment` set, a destructive
+`.review-popover-delete` button is rendered alongside Save/Cancel and
+wired via an optional `onDelete` callback on the `openAnnotationPopover`
+singleton helper. It works identically in `mode: "popover"` (desktop)
+and `mode: "bottom-sheet"` (mobile).
+
+### 10.5 Dynamic primary-action label
+
+The popover's primary button label is derived from `existingComment`:
+
+| State                       | Label  |
+|-----------------------------|--------|
+| `existingComment === ""`    | **Add**  |
+| `existingComment !== ""`    | **Save** |
+
+Single source of truth lives in `AnnotationPopover.render()`; both
+desktop popover and mobile bottom-sheet read from the same expression.
+This replaces the previous "Submit" label, which collided with chat's
+"submit a message" meaning.
+
+### 10.6 Highlight visibility + tooltip
+
+- `.r6o-annotation` was bumped to a stronger fill (still using
+  `var(--primary)`) on top of the existing underline, so highlights are
+  not lost in dense markdown.
+- Every rendered `.r6o-annotation` carries
+  `title="Click to edit · hover for actions"` for accessibility and
+  discoverability. The title is applied via a `MutationObserver`
+  (`_annotationTitleObserver` in `ReviewDocument.ts`) so spans added by
+  Recogito after the initial render — including those produced by
+  `_reanchorAnnotations()` after a markdown rebuild — pick it up
+  without a separate render pass.
+
+### 10.7 What is *not* changed
+
+- `proposalBackend` remains the single source of truth; storage layer is
+  untouched.
+- `annotation-change` still bubbles up, so the badge and **Send
+  feedback (N)** button continue to track count via the existing path.
+- Bulk-clear flows (`proposal_update` toast, full dismiss, Send
+  feedback) are unchanged.
+- Tool / project proposals stay out of scope (no markdown body).
+
 ## File changes summary
 
 **New files:**
