@@ -1234,6 +1234,14 @@ export class SessionManager {
 		if (!parts.skillsCatalog) {
 			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore);
 		}
+		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
+		// into both the assembled prompt and the persisted prompt-sections snapshot.
+		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
+			const pref = this.preferencesStore.get("skillsCatalogBudget");
+			if (typeof pref === "number" && Number.isFinite(pref)) {
+				parts.skillsCatalogBudget = pref;
+			}
+		}
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
 		if (session) session.promptParts = parts;
