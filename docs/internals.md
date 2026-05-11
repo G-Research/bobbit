@@ -334,6 +334,8 @@ When the agent calls `propose_project`, the client populates `state.activePropos
 
 **Directory browsing**: The smart Add Project dialog includes a Browse button backed by `GET /api/browse-directory?path=<base>`. This endpoint returns directory-only listings (skips files, hidden dirs, `node_modules`, and symlinks). Defaults to the server's CWD when no path is provided.
 
+**Pre-flight validation**: Before submit is enabled, the dialog runs a structured pass/warn/fail pre-flight against the candidate `rootPath` via `GET /api/projects/preflight`, and surfaces an inline "start fresh" archive action when an existing `.bobbit/` is detected. `projectRegistry.register()` re-runs the same checks server-side. See [add-project-preflight.md](add-project-preflight.md) for the check catalogue, the `GATEWAY_OWNED_FILES` allowlist that protects the running gateway from being archived, and the REST surface.
+
 ### Per-project config
 
 Each registered project can override system-level settings (from `project.yaml`). This allows different projects to use different build commands, default models, sandbox settings, etc., while inheriting everything they don't explicitly override.
