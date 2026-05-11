@@ -19,6 +19,7 @@ import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
+import { findOrphanTeamEntries } from "./team-store-consistency.js";
 
 const execFile = promisify(execFileCb);
 
@@ -402,6 +403,45 @@ export class TeamManager {
 			}
 			if (droppedOrphans > 0) {
 				console.log(`[team-manager] Cleaned ${droppedOrphans} orphan team entries on boot.`);
+			}
+
+			// Second pass — drop team entries whose `teamLeadSessionId` points at
+			// a session that no longer exists in the owning project's session
+			// store. Cause: `SessionManager.purgeOneSession` removes a session
+			// record (typically the 7-day archive sweep) but historically did
+			// NOT clean up the team-store entry, leaving the team-store with a
+			// dangling pointer. On the next boot, `restoreTeams` populates
+			// `this.teams` with the orphan, and `startTeam(goalId)` then throws
+			// "Team already active" — the goal is permanently stuck. Symptom on
+			// the UI: "No agents — Start Team" button that does nothing on click.
+			// The source-side leak is plugged in `session-manager.ts::
+			// purgeOneSession` (team-lead branch); this boot sweep recovers
+			// existing damaged state and provides defence-in-depth.
+			let droppedDanglingLead = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				const orphans = findOrphanTeamEntries(
+					ctx.teamStore.getAll(),
+					(id) => ctx.sessionStore.get(id) !== undefined,
+				);
+				for (const goalId of orphans) {
+					const tlid = ctx.teamStore.get(goalId)?.teamLeadSessionId ?? "<none>";
+					try {
+						ctx.teamStore.remove(goalId);
+						droppedDanglingLead++;
+						console.warn(
+							`[team-manager] Boot cleanup: dropped team entry for goal "${goalId}" — ` +
+							`team-lead session ${tlid} is missing from sessions.json (likely purged by archive-expiry sweep).`,
+						);
+					} catch (err) {
+						console.error(
+							`[team-manager] Failed to drop dangling-lead team entry for goalId=${goalId}:`,
+							err,
+						);
+					}
+				}
+			}
+			if (droppedDanglingLead > 0) {
+				console.log(`[team-manager] Cleaned ${droppedDanglingLead} team entries with missing team-lead session on boot.`);
 			}
 		}
 

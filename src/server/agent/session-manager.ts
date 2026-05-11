@@ -4569,6 +4569,28 @@ export class SessionManager {
 		// Remove from store
 		this.resolveStoreForId(ps.id)?.purge(ps.id);
 
+		// Source-fix for the dangling-team-lead bug: if the purged session was
+		// the team-lead of a team-mode goal, also drop the corresponding
+		// team-store entry. Without this, the team-store keeps a pointer at
+		// the now-deleted session id; on the next boot `TeamManager.restoreTeams`
+		// surfaces the dangling entry into `this.teams`, and `startTeam(goalId)`
+		// then throws "Team already active" forever — the goal becomes stuck
+		// at "No agents — Start Team" with a non-functional button. A boot-time
+		// sweep in `team-manager.ts::restoreTeams` recovers already-damaged
+		// state; this clears the leak at source so the sweep stays a defensive
+		// belt rather than the only line of defence.
+		if (ps.role === "team-lead" && ps.teamGoalId && ps.projectId && this.projectContextManager) {
+			try {
+				const ctx = this.projectContextManager.getOrCreate(ps.projectId);
+				if (ctx && ctx.teamStore.get(ps.teamGoalId)) {
+					ctx.teamStore.remove(ps.teamGoalId);
+					console.log(`[session-manager] Dropped team-store entry for goal ${ps.teamGoalId} on team-lead purge (session ${ps.id}).`);
+				}
+			} catch (err) {
+				console.error(`[session-manager] Failed to clean team-store entry on team-lead purge for ${ps.id}:`, err);
+			}
+		}
+
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
 		// drop the entry without waiting for a polling tick.
 		for (const listener of this._terminationListeners) {
