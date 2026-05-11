@@ -1022,6 +1022,32 @@ export function createGateway(config: GatewayConfig) {
 			// Wire verification harness before session restore so orphan cleanup can skip resuming sessions
 			sessionManager.setVerificationHarness(verificationHarness);
 
+			// Discover and load plugins so they can register verify-step handlers
+			// before any verification kicks off post-restore. Builtin plugins are
+			// auto-trusted; user / server / project locations need explicit approval.
+			// Loading is best-effort: a failing plugin surfaces via GET /api/plugins
+			// but never blocks gateway startup.
+			if (!process.env.BOBBIT_SKIP_PLUGINS) {
+				try {
+					const { discoverPlugins, PluginLoader } = await import("./plugins/plugin-loader.js");
+					const discovered = discoverPlugins();
+					const pluginLoader = new PluginLoader({ registry: verificationHarness.verifyRegistry });
+					(globalThis as any).__bobbitPluginLoader = pluginLoader;
+					(globalThis as any).__bobbitDiscoveredPlugins = discovered;
+					const loaded = await pluginLoader.loadAll(discovered);
+					for (const p of loaded) {
+						if (p.load.status === "loaded") {
+							const types = p.load.registeredTypes.length > 0 ? ` (${p.load.registeredTypes.join(", ")})` : "";
+							console.log(`[plugin] loaded ${p.name}@${p.manifest.version}${types}`);
+						} else if (p.load.status !== "needs-approval") {
+							console.warn(`[plugin] ${p.name}: ${JSON.stringify(p.load)}`);
+						}
+					}
+				} catch (err) {
+					console.error("[plugin] discovery failed:", (err as Error).message);
+				}
+			}
+
 			// ── Sandbox manager ──
 			// Sandboxes are initialized lazily per-project on first sandbox use
 			// (see SandboxManager.ensureForProject). The bootstrap closure below
