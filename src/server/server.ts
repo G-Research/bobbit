@@ -5810,11 +5810,27 @@ async function handleApiRoute(
 
 		if (req.method === "DELETE") {
 			const purge = url.searchParams.get("purge") === "true";
-			// Check if it's an archived session — purge immediately
+			// Check if it's an archived session.
+			//
+			// Old behaviour (footgun): DELETE on an archived session
+			// IMMEDIATELY purged it — destroying the .jsonl and the session
+			// record without confirmation. That was inconsistent with DELETE
+			// on a live session (which only archives) and combined with the
+			// missing-.jsonl auto-archive path to silently nuke team-lead
+			// sessions whose owning goal was still live (the user's "Audit
+			// subgoals branch" / "Extract generic fixes" data loss).
+			//
+			// New behaviour: DELETE on an archived session is a 200 no-op
+			// (the session is already in the requested state). Callers that
+			// want destruction must pass ?purge=true explicitly — same flag
+			// they'd use to upgrade a terminate into a destroy on a live
+			// session.
 			const archivedSession = sessionManager.getArchivedSession(id);
 			if (archivedSession) {
-				await sessionManager.purgeArchivedSession(id);
-				json({ ok: true });
+				if (purge) {
+					await sessionManager.purgeArchivedSession(id);
+				}
+				json({ ok: true, alreadyArchived: true, purged: purge });
 				return;
 			}
 			const terminated = await sessionManager.terminateSession(id);

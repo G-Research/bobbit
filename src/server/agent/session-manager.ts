@@ -13,6 +13,7 @@ import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
@@ -4516,6 +4517,46 @@ export class SessionManager {
 
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
+		// SAFETY: refuse to destroy a team-lead session that the team-store
+		// still references for a non-archived goal. Symptom this prevents:
+		// the user's "Audit subgoals branch" team-lead vanished because some
+		// caller (most likely the immediate-purge branch of `DELETE /api/
+		// sessions/:id` at server.ts:5816, or the 7-day archive sweep) hit
+		// `purgeOneSession` on a session that the team-store still treated
+		// as the active team-lead. After purge the team-store referenced a
+		// dead session id, the goal got stuck at "Start Team" with a
+		// non-functional button, and the .jsonl was permanently destroyed.
+		//
+		// The right cleanup order is: teardownTeam(goalId) → that removes
+		// the team-store entry and terminates the team-lead session →
+		// purgeOneSession is then safe. Anything that wants to skip the
+		// teardown step is destroying user data.
+		//
+		// Allow the purge when the owning goal is archived: at that point
+		// teardownTeam should already have run (goal-manager.archiveGoal
+		// invokes it), and even if it didn't the team is no longer being
+		// used by the user, so cleaning up is acceptable.
+		if (ps.role === "team-lead" && ps.teamGoalId && ps.projectId && this.projectContextManager) {
+			try {
+				const ctx = this.projectContextManager.getOrCreate(ps.projectId);
+				if (ctx) {
+					const verdict = canPurgeTeamLeadSession(
+						{ role: ps.role, id: ps.id, teamGoalId: ps.teamGoalId },
+						(goalId) => ctx.teamStore.get(goalId)?.teamLeadSessionId ?? undefined,
+						(goalId) => !!ctx.goalStore.get(goalId)?.archived,
+					);
+					if (!verdict.allow) {
+						console.warn(`[session-manager] Refusing to purge session ${ps.id}: ${verdict.reason}`);
+						return;
+					}
+				}
+			} catch (err) {
+				console.error(`[session-manager] Pre-purge safety check failed for ${ps.id}:`, err);
+				// Fall through to purge rather than block indefinitely on a
+				// check error — best-effort, the rest of the cleanup logs.
+			}
+		}
+
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 

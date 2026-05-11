@@ -14,7 +14,11 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { findOrphanTeamEntries, type TeamEntryRef } from "../src/server/agent/team-store-consistency.ts";
+import {
+	findOrphanTeamEntries,
+	canPurgeTeamLeadSession,
+	type TeamEntryRef,
+} from "../src/server/agent/team-store-consistency.ts";
 
 describe("findOrphanTeamEntries", () => {
 	it("returns entries whose teamLeadSessionId is missing from the session store", () => {
@@ -68,5 +72,70 @@ describe("findOrphanTeamEntries", () => {
 
 	it("handles empty input", () => {
 		assert.deepEqual(findOrphanTeamEntries([], () => true), []);
+	});
+});
+
+describe("canPurgeTeamLeadSession — the safety guard that protects active team-leads", () => {
+	// Regression context: the user's "Audit subgoals branch" + "Extract generic
+	// fixes" team-leads were destroyed because `purgeOneSession` ran on them
+	// while the team-store still referenced them as the live team-lead and the
+	// owning goal was NOT archived. The .jsonl + session record were lost
+	// irrecoverably. This guard refuses the purge in that exact shape.
+
+	it("refuses to purge a team-lead session referenced by a NON-archived goal", () => {
+		const ps = { role: "team-lead", id: "sess-1", teamGoalId: "goal-1" };
+		const v = canPurgeTeamLeadSession(ps, () => "sess-1", () => false);
+		assert.equal(v.allow, false);
+		if (!v.allow) assert.match(v.reason, /team-store still references|teardownTeam/);
+	});
+
+	it("ALLOWS purge when the owning goal IS archived (teardownTeam should already have run)", () => {
+		const ps = { role: "team-lead", id: "sess-1", teamGoalId: "goal-1" };
+		const v = canPurgeTeamLeadSession(ps, () => "sess-1", () => true);
+		assert.equal(v.allow, true);
+	});
+
+	it("ALLOWS purge when the team-store points at a DIFFERENT session (this one already torn down)", () => {
+		const ps = { role: "team-lead", id: "sess-stale", teamGoalId: "goal-1" };
+		const v = canPurgeTeamLeadSession(ps, () => "sess-current", () => false);
+		assert.equal(v.allow, true);
+	});
+
+	it("ALLOWS purge when the team-store has no entry for the goal at all", () => {
+		const ps = { role: "team-lead", id: "sess-1", teamGoalId: "goal-1" };
+		const v = canPurgeTeamLeadSession(ps, () => undefined, () => false);
+		assert.equal(v.allow, true);
+	});
+
+	it("ALLOWS purge for non-team-lead sessions (no team-store invariant to protect)", () => {
+		const coder = { role: "coder", id: "sess-1", teamGoalId: "goal-1" };
+		const reviewer = { role: "reviewer", id: "sess-2", teamGoalId: "goal-1" };
+		assert.equal(canPurgeTeamLeadSession(coder, () => "sess-1", () => false).allow, true);
+		assert.equal(canPurgeTeamLeadSession(reviewer, () => "sess-2", () => false).allow, true);
+	});
+
+	it("ALLOWS purge when the session has no teamGoalId (not in a team)", () => {
+		const ps = { role: "team-lead", id: "sess-1" };
+		const v = canPurgeTeamLeadSession(ps, () => "sess-1", () => false);
+		assert.equal(v.allow, true);
+	});
+
+	it("treats null and undefined team-store ref the same — both allow purge", () => {
+		const ps = { role: "team-lead", id: "sess-1", teamGoalId: "goal-1" };
+		assert.equal(canPurgeTeamLeadSession(ps, () => null, () => false).allow, true);
+		assert.equal(canPurgeTeamLeadSession(ps, () => undefined, () => false).allow, true);
+	});
+
+	it("real-world repro: user's two doomed team-leads would have been protected", () => {
+		// Mirrors the actual data inspected on the user's disk: two team-leads
+		// (audit-subgoals = 20dba486, extract-fixes = cab3eb25) of NON-archived
+		// goals, both referenced by team-store entries, both about to be purged
+		// by the immediate-DELETE path. The guard refuses both.
+		const audit = { role: "team-lead", id: "20dba486", teamGoalId: "225e4d3d" };
+		const fixes = { role: "team-lead", id: "cab3eb25", teamGoalId: "eed06d11" };
+		const teamLeadByGoal = (gid: string) => ({ "225e4d3d": "20dba486", "eed06d11": "cab3eb25" })[gid];
+		const archivedByGoal = (_: string) => false;
+		assert.equal(canPurgeTeamLeadSession(audit, teamLeadByGoal, archivedByGoal).allow, false);
+		assert.equal(canPurgeTeamLeadSession(fixes, teamLeadByGoal, archivedByGoal).allow, false);
 	});
 });

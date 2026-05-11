@@ -48,3 +48,49 @@ export function findOrphanTeamEntries(
 	}
 	return orphans;
 }
+
+/**
+ * Decide whether `purgeOneSession` is allowed to destroy a team-lead session.
+ *
+ * Why this guard exists: if the team-store still references this session as
+ * the team-lead AND the owning goal is NOT archived, destroying the session
+ * leaves the team-store dangling (the boot-sweep then drops it on next start,
+ * but the user-visible damage is the same — the `.jsonl` is gone, the
+ * session record is gone, the chat history is irrecoverable). Symptom: the
+ * user's "Audit subgoals branch" and "Extract generic fixes" team-leads
+ * disappeared this way. Callers that want to clean up should run
+ * `teardownTeam(goalId)` first (which removes the team-store entry and
+ * terminates the session), then call purge against the now-archived session
+ * with no team-store reference.
+ *
+ * When the goal IS archived, purge is allowed: at that point teardownTeam
+ * should already have run, and even if it didn't (race / partial failure)
+ * the team is no longer being used, so cleaning up isn't destroying
+ * user-visible work.
+ *
+ * For non-team-lead sessions and sessions without `teamGoalId`, returns
+ * `{ allow: true }` — they have no team-store invariant to protect.
+ */
+export interface TeamLeadPurgeContext {
+	role?: string;
+	id: string;
+	teamGoalId?: string;
+}
+
+export function canPurgeTeamLeadSession(
+	ps: TeamLeadPurgeContext,
+	getTeamLeadSessionIdForGoal: (goalId: string) => string | undefined | null,
+	isGoalArchived: (goalId: string) => boolean,
+): { allow: true } | { allow: false; reason: string } {
+	if (ps.role !== "team-lead") return { allow: true };
+	if (!ps.teamGoalId) return { allow: true };
+	const referencedSessionId = getTeamLeadSessionIdForGoal(ps.teamGoalId);
+	if (referencedSessionId !== ps.id) return { allow: true };
+	if (isGoalArchived(ps.teamGoalId)) return { allow: true };
+	return {
+		allow: false,
+		reason:
+			`team-store still references this session as the team-lead of live goal ${ps.teamGoalId}. ` +
+			`Call teardownTeam(${ps.teamGoalId}) first to break the reference before purging.`,
+	};
+}
