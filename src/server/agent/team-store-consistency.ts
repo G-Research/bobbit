@@ -94,3 +94,111 @@ export function canPurgeTeamLeadSession(
 			`Call teardownTeam(${ps.teamGoalId}) first to break the reference before purging.`,
 	};
 }
+
+// ── Boot-time recovery for orphan team-store entries ──────────────────────────
+//
+// Symptom this addresses: a team-lead's session record can disappear from
+// sessions.json (race / partial save / DELETE-with-immediate-purge) while
+// the .jsonl agent transcript and all surviving prompt files remain on disk.
+// The team-store still points at the dead session id. Naively dropping the
+// team-store entry on boot destroys the user's only link to the surviving
+// data. Instead we attempt to RECOVER by locating the canonical .jsonl in
+// the worktree slug-dir, reconstructing a fresh session record, and
+// preserving the team-store entry.
+
+/** A .jsonl file under the agent sessions root that matches a team-lead worktree. */
+export interface CandidateJsonl {
+	jsonlPath: string;
+	/** Bytes — used as size tiebreaker when two files have equal mtime. */
+	size: number;
+	/** ms-since-epoch — last-write time. */
+	mtime: number;
+	/** Agent's internal session id (from the first line of the .jsonl). */
+	agentSessionId: string;
+	/** ISO timestamp from the first line of the .jsonl. */
+	agentStartedAtIso: string;
+}
+
+/**
+ * Pick the canonical .jsonl from a slug-dir for a recovered team-lead.
+ *
+ * "Canonical" = most-recently-appended-to (the file that was actively
+ * receiving writes when bobbit lost the session record), with size as a
+ * tiebreaker. Empirically picks the right file in both shapes observed in
+ * the field:
+ *   - "Audit subgoals branch" slug-dir: 12 .jsonl files, one is 3.65 MB +
+ *     latest mtime → canonical.
+ *   - "Extract generic fixes" slug-dir: 7 .jsonl files, one is 245 KB
+ *     with the latest mtime even though a 354 KB sibling exists → canonical
+ *     (mtime-first heuristic; size-first would have picked wrong).
+ */
+export function pickCanonicalTeamLeadJsonl(candidates: ReadonlyArray<CandidateJsonl>): CandidateJsonl | null {
+	if (candidates.length === 0) return null;
+	const sorted = [...candidates].sort((a, b) => (b.mtime - a.mtime) || (b.size - a.size));
+	return sorted[0];
+}
+
+/** Minimal shape required to reconstruct a team-lead session record. */
+export interface OrphanTeamRecoveryInput {
+	teamLeadSessionId: string;
+	goal: {
+		id: string;
+		title?: string;
+		projectId?: string;
+		worktreePath?: string;
+		repoPath?: string;
+		branch?: string;
+		sandboxed?: boolean;
+	};
+	chosenJsonl: CandidateJsonl;
+}
+
+/** The persisted-session shape we write back. Stays loose so callers can
+ *  spread it onto their `PersistedSession` type without type-coupling here. */
+export interface ReconstructedTeamLeadRecord {
+	id: string;
+	title: string;
+	cwd: string;
+	projectId?: string;
+	createdAt: number;
+	lastActivity: number;
+	role: "team-lead";
+	teamGoalId: string;
+	worktreePath?: string;
+	repoPath?: string;
+	branch?: string;
+	agentSessionFile: string;
+	sandboxed?: boolean;
+	accessory: "crown";
+	archived: false;
+}
+
+export function reconstructTeamLeadSessionRecord(input: OrphanTeamRecoveryInput): ReconstructedTeamLeadRecord | null {
+	const { goal, chosenJsonl, teamLeadSessionId } = input;
+	if (!goal.worktreePath) return null;
+	const createdAtMs = Date.parse(chosenJsonl.agentStartedAtIso);
+	return {
+		id: teamLeadSessionId,
+		title: `Team Lead: ${goal.title?.trim() || "(recovered)"} (recovered)`,
+		cwd: goal.worktreePath,
+		projectId: goal.projectId,
+		createdAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
+		lastActivity: chosenJsonl.mtime,
+		role: "team-lead",
+		teamGoalId: goal.id,
+		worktreePath: goal.worktreePath,
+		repoPath: goal.repoPath,
+		branch: goal.branch,
+		agentSessionFile: chosenJsonl.jsonlPath,
+		sandboxed: !!goal.sandboxed,
+		accessory: "crown",
+		archived: false,
+	};
+}
+
+/** Derive the agent slug-dir name from a cwd, mirroring pi-coding-agent's
+ *  encoding. Slashes become `-`, wrapped in `--`. Exposed for testability;
+ *  callers join this onto `~/.bobbit/agent/sessions/`. */
+export function slugDirNameForCwd(cwd: string): string {
+	return "--" + cwd.replace(/^\/+/, "").replace(/\//g, "-") + "--";
+}

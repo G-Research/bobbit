@@ -63,7 +63,13 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 	} catch {
 		// File doesn't exist; check that the *unresolved* path is contained
 		// before reporting 404 (prevents leaking which paths exist outside).
-		if (!isContained(resolved, baseReal)) {
+		// Accept containment under either the canonical baseReal OR the
+		// lexical baseDir — on macOS, baseDir often lives under `/var/...`
+		// (symlinked to `/private/var/...`); `path.resolve` keeps the
+		// un-canonical prefix so the missing path lexically sits under
+		// baseDir but `isContained(resolved, baseReal)` rejects it.
+		// path.resolve has already collapsed `..` so the lexical check is safe.
+		if (!isContained(resolved, baseReal) && !isContained(resolved, baseDir)) {
 			return { ok: false, status: 400, error: "Path traversal rejected" };
 		}
 		return { ok: false, status: 404, error: "File not found" };

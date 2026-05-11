@@ -1,5 +1,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
@@ -19,10 +21,62 @@ import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
-import { findOrphanTeamEntries } from "./team-store-consistency.js";
+import {
+	findOrphanTeamEntries,
+	slugDirNameForCwd,
+	pickCanonicalTeamLeadJsonl,
+	reconstructTeamLeadSessionRecord,
+	type CandidateJsonl,
+} from "./team-store-consistency.js";
 
 const execFile = promisify(execFileCb);
 
+/**
+ * Scan the agent sessions slug-dir for a worktree path and return the .jsonl
+ * candidates whose first-line `cwd` matches. Filters out malformed files and
+ * .jsonls that belong to other worktrees that happened to be written into the
+ * same dir (defensive — shouldn't occur, but the filter is cheap).
+ *
+ * Returns an empty array on any I/O error (no slug-dir, no read permission,
+ * etc.) — boot recovery should never throw on a per-goal lookup miss.
+ */
+function scanSlugDirForJsonls(worktreePath: string): CandidateJsonl[] {
+	const dir = path.join(os.homedir(), ".bobbit", "agent", "sessions", slugDirNameForCwd(worktreePath));
+	let names: string[];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	const out: CandidateJsonl[] = [];
+	for (const name of names) {
+		if (!name.endsWith(".jsonl")) continue;
+		const full = path.join(dir, name);
+		let st;
+		try { st = fs.statSync(full); } catch { continue; }
+		// Read just enough to get the first line — the session-start record.
+		let firstLine = "";
+		try {
+			const fd = fs.openSync(full, "r");
+			const buf = Buffer.alloc(2048);
+			const bytes = fs.readSync(fd, buf, 0, 2048, 0);
+			fs.closeSync(fd);
+			const nl = buf.indexOf("\n");
+			firstLine = buf.toString("utf-8", 0, nl >= 0 && nl < bytes ? nl : bytes);
+		} catch { continue; }
+		let parsed;
+		try { parsed = JSON.parse(firstLine); } catch { continue; }
+		if (parsed?.type !== "session" || parsed.cwd !== worktreePath || typeof parsed.id !== "string") continue;
+		out.push({
+			jsonlPath: full,
+			size: st.size,
+			mtime: st.mtime.getTime(),
+			agentSessionId: parsed.id,
+			agentStartedAtIso: typeof parsed.timestamp === "string" ? parsed.timestamp : new Date(st.birthtimeMs || st.mtime).toISOString(),
+		});
+	}
+	return out;
+}
 
 /**
  * Build a markdown list of available roles (excluding team-lead and assistant)
@@ -405,18 +459,34 @@ export class TeamManager {
 				console.log(`[team-manager] Cleaned ${droppedOrphans} orphan team entries on boot.`);
 			}
 
-			// Second pass — drop team entries whose `teamLeadSessionId` points at
-			// a session that no longer exists in the owning project's session
-			// store. Cause: `SessionManager.purgeOneSession` removes a session
-			// record (typically the 7-day archive sweep) but historically did
-			// NOT clean up the team-store entry, leaving the team-store with a
-			// dangling pointer. On the next boot, `restoreTeams` populates
-			// `this.teams` with the orphan, and `startTeam(goalId)` then throws
-			// "Team already active" — the goal is permanently stuck. Symptom on
-			// the UI: "No agents — Start Team" button that does nothing on click.
-			// The source-side leak is plugged in `session-manager.ts::
-			// purgeOneSession` (team-lead branch); this boot sweep recovers
-			// existing damaged state and provides defence-in-depth.
+			// Second pass — handle team entries whose `teamLeadSessionId` points
+			// at a session that no longer exists in the owning project's
+			// session store.
+			//
+			// Cause class: a session record can disappear from sessions.json
+			// (race / partial save / DELETE-with-immediate-purge / past bug)
+			// while the agent's .jsonl transcript and the team-store entry
+			// both survive on disk. Naively dropping the team-store entry
+			// here would destroy the user's only handle on the surviving
+			// transcript and force them to start a new team-lead from scratch.
+			//
+			// Recovery policy:
+			//   1. Try to locate the canonical .jsonl in the team-lead's
+			//      worktree slug-dir (`~/.bobbit/agent/sessions/<slug>/`).
+			//      If found → reconstruct a fresh session record pointing
+			//      at the surviving .jsonl and write it via sessionStore.put().
+			//      Team-store entry is preserved untouched.
+			//   2. If no .jsonl can be found → there is genuinely nothing
+			//      to restore; drop the team-store entry so `Start Team`
+			//      works for the user.
+			//
+			// Source-side leaks that could create these orphans are plugged
+			// in `session-manager.ts::purgeOneSession` (refusal guard for
+			// live team-leads) and `server.ts::DELETE /api/sessions/:id`
+			// (no auto-purge of archived sessions). This boot pass is the
+			// final safety net for existing damaged state and for future
+			// unknown leak sources.
+			let recovered = 0;
 			let droppedDanglingLead = 0;
 			for (const ctx of this.config.projectContextManager.all()) {
 				const orphans = findOrphanTeamEntries(
@@ -424,24 +494,65 @@ export class TeamManager {
 					(id) => ctx.sessionStore.get(id) !== undefined,
 				);
 				for (const goalId of orphans) {
-					const tlid = ctx.teamStore.get(goalId)?.teamLeadSessionId ?? "<none>";
+					const entry = ctx.teamStore.get(goalId);
+					const tlid = entry?.teamLeadSessionId ?? "<none>";
 					try {
-						ctx.teamStore.remove(goalId);
-						droppedDanglingLead++;
-						console.warn(
-							`[team-manager] Boot cleanup: dropped team entry for goal "${goalId}" — ` +
-							`team-lead session ${tlid} is missing from sessions.json (likely purged by archive-expiry sweep).`,
-						);
+						// Step 1 — try recovery from a surviving .jsonl.
+						const goal = ctx.goalStore.get(goalId);
+						let recoveredOk = false;
+						if (goal?.worktreePath && entry?.teamLeadSessionId) {
+							const candidates = scanSlugDirForJsonls(goal.worktreePath);
+							const chosen = pickCanonicalTeamLeadJsonl(candidates);
+							if (chosen) {
+								const reconstructed = reconstructTeamLeadSessionRecord({
+									teamLeadSessionId: entry.teamLeadSessionId,
+									goal: {
+										id: goal.id,
+										title: goal.title,
+										projectId: goal.projectId,
+										worktreePath: goal.worktreePath,
+										repoPath: goal.repoPath,
+										branch: goal.branch,
+										sandboxed: goal.sandboxed,
+									},
+									chosenJsonl: chosen,
+								});
+								if (reconstructed) {
+									ctx.sessionStore.put(reconstructed as Parameters<typeof ctx.sessionStore.put>[0]);
+									recovered++;
+									recoveredOk = true;
+									console.log(
+										`[team-manager] Boot recovery: reconstructed team-lead session ` +
+										`${entry.teamLeadSessionId.slice(0, 8)} for goal "${goal.title}" ` +
+										`(${goalId.slice(0, 8)}) from surviving .jsonl ${chosen.jsonlPath}.`,
+									);
+								}
+							}
+						}
+						// Step 2 — fall back to drop only when recovery
+						// genuinely isn't possible.
+						if (!recoveredOk) {
+							ctx.teamStore.remove(goalId);
+							droppedDanglingLead++;
+							console.warn(
+								`[team-manager] Boot cleanup: dropped team entry for goal "${goalId}" — ` +
+								`team-lead session ${tlid} missing AND no surviving .jsonl found in ` +
+								`worktree slug-dir. The team is no longer recoverable.`,
+							);
+						}
 					} catch (err) {
 						console.error(
-							`[team-manager] Failed to drop dangling-lead team entry for goalId=${goalId}:`,
+							`[team-manager] Boot recovery/cleanup failed for goalId=${goalId}:`,
 							err,
 						);
 					}
 				}
 			}
+			if (recovered > 0) {
+				console.log(`[team-manager] Boot recovery: reconstructed ${recovered} team-lead session record(s) from surviving .jsonl files.`);
+			}
 			if (droppedDanglingLead > 0) {
-				console.log(`[team-manager] Cleaned ${droppedDanglingLead} team entries with missing team-lead session on boot.`);
+				console.log(`[team-manager] Cleaned ${droppedDanglingLead} unrecoverable team entries on boot.`);
 			}
 		}
 

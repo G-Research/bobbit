@@ -17,7 +17,11 @@ import assert from "node:assert/strict";
 import {
 	findOrphanTeamEntries,
 	canPurgeTeamLeadSession,
+	pickCanonicalTeamLeadJsonl,
+	reconstructTeamLeadSessionRecord,
+	slugDirNameForCwd,
 	type TeamEntryRef,
+	type CandidateJsonl,
 } from "../src/server/agent/team-store-consistency.ts";
 
 describe("findOrphanTeamEntries", () => {
@@ -137,5 +141,145 @@ describe("canPurgeTeamLeadSession — the safety guard that protects active team
 		const archivedByGoal = (_: string) => false;
 		assert.equal(canPurgeTeamLeadSession(audit, teamLeadByGoal, archivedByGoal).allow, false);
 		assert.equal(canPurgeTeamLeadSession(fixes, teamLeadByGoal, archivedByGoal).allow, false);
+	});
+});
+
+describe("slugDirNameForCwd — agent sessions slug encoding", () => {
+	it("encodes a normal absolute path", () => {
+		assert.equal(
+			slugDirNameForCwd("/Users/aj/Documents/dev/bobbit-subgoals-wt/goal-audit-subg-225e4d3d"),
+			"--Users-aj-Documents-dev-bobbit-subgoals-wt-goal-audit-subg-225e4d3d--",
+		);
+	});
+
+	it("preserves existing dashes inside path components", () => {
+		assert.equal(slugDirNameForCwd("/a/b-c-d/e"), "--a-b-c-d-e--");
+	});
+
+	it("strips leading slashes before wrapping", () => {
+		assert.equal(slugDirNameForCwd("//foo/bar"), "--foo-bar--");
+	});
+});
+
+describe("pickCanonicalTeamLeadJsonl — mtime-first, size as tiebreaker", () => {
+	it("picks the file with the latest mtime even if a larger sibling exists", () => {
+		// Mirrors the "Extract generic fixes" case on the user's disk: a
+		// short-lived 354 KB sibling jsonl from a failed restart attempt is
+		// LARGER than the team-lead's canonical 245 KB transcript, but the
+		// canonical file has the latest mtime. Size-first would pick wrong.
+		const candidates: CandidateJsonl[] = [
+			{ jsonlPath: "/x/a.jsonl", size: 354_000, mtime: 100, agentSessionId: "a", agentStartedAtIso: "2026-05-08T11:42:56Z" },
+			{ jsonlPath: "/x/b.jsonl", size: 245_000, mtime: 200, agentSessionId: "b", agentStartedAtIso: "2026-05-08T10:54:09Z" },
+		];
+		const chosen = pickCanonicalTeamLeadJsonl(candidates);
+		assert.equal(chosen?.jsonlPath, "/x/b.jsonl");
+	});
+
+	it("falls back to size when mtimes are equal", () => {
+		const candidates: CandidateJsonl[] = [
+			{ jsonlPath: "/x/small.jsonl", size: 1024, mtime: 100, agentSessionId: "s", agentStartedAtIso: "i" },
+			{ jsonlPath: "/x/big.jsonl",   size: 999_999, mtime: 100, agentSessionId: "b", agentStartedAtIso: "i" },
+		];
+		assert.equal(pickCanonicalTeamLeadJsonl(candidates)?.jsonlPath, "/x/big.jsonl");
+	});
+
+	it("returns null on empty input", () => {
+		assert.equal(pickCanonicalTeamLeadJsonl([]), null);
+	});
+
+	it("single candidate is trivially canonical", () => {
+		const only: CandidateJsonl = { jsonlPath: "/x/only.jsonl", size: 1, mtime: 1, agentSessionId: "x", agentStartedAtIso: "i" };
+		assert.equal(pickCanonicalTeamLeadJsonl([only])?.jsonlPath, "/x/only.jsonl");
+	});
+
+	it("real-world repro for 'Audit subgoals branch': 12 candidates, picks the 3.65 MB one with latest mtime", () => {
+		// Numbers taken from the user's actual disk inspection.
+		const candidates: CandidateJsonl[] = [
+			{ jsonlPath: "/x/main.jsonl",  size: 3_651_800, mtime: 1747242000000, agentSessionId: "019dfee7", agentStartedAtIso: "2026-05-06T20:07:47Z" },
+			{ jsonlPath: "/x/short1.jsonl", size: 52_500,   mtime: 1746998000000, agentSessionId: "019dfeef", agentStartedAtIso: "2026-05-06T20:17:05Z" },
+			{ jsonlPath: "/x/short2.jsonl", size: 58_400,   mtime: 1746997000000, agentSessionId: "019dfeef-dd3d", agentStartedAtIso: "2026-05-06T20:17:05Z" },
+		];
+		assert.equal(pickCanonicalTeamLeadJsonl(candidates)?.agentSessionId, "019dfee7");
+	});
+});
+
+describe("reconstructTeamLeadSessionRecord — fields the boot recovery writes back", () => {
+	it("produces a complete PersistedSession-shape record for a recoverable team-lead", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "20dba486-26e8-417d-b6dc-013094da0153",
+			goal: {
+				id: "225e4d3d-c656-43fe-a05c-4d6ab8c252a8",
+				title: "Audit subgoals branch",
+				projectId: "f8c621ad-9af5-4312-b997-72c07968b87a",
+				worktreePath: "/Users/aj/Documents/dev/bobbit-subgoals-wt/goal-audit-subg-225e4d3d",
+				repoPath: "/Users/aj/Documents/dev/bobbit-subgoals",
+				branch: "goal/audit-subg-225e4d3d",
+				sandboxed: false,
+			},
+			chosenJsonl: {
+				jsonlPath: "/Users/aj/.bobbit/agent/sessions/X/Y.jsonl",
+				size: 3_651_800,
+				mtime: 1747242000000,
+				agentSessionId: "019dfee7-578f-7773-8e32-9e1ba838a4ad",
+				agentStartedAtIso: "2026-05-06T20:07:47.343Z",
+			},
+		});
+		assert.ok(r);
+		assert.equal(r!.id, "20dba486-26e8-417d-b6dc-013094da0153");
+		assert.equal(r!.role, "team-lead");
+		assert.equal(r!.teamGoalId, "225e4d3d-c656-43fe-a05c-4d6ab8c252a8");
+		assert.equal(r!.agentSessionFile, "/Users/aj/.bobbit/agent/sessions/X/Y.jsonl");
+		assert.equal(r!.cwd, "/Users/aj/Documents/dev/bobbit-subgoals-wt/goal-audit-subg-225e4d3d");
+		assert.equal(r!.worktreePath, "/Users/aj/Documents/dev/bobbit-subgoals-wt/goal-audit-subg-225e4d3d");
+		assert.equal(r!.repoPath, "/Users/aj/Documents/dev/bobbit-subgoals");
+		assert.equal(r!.branch, "goal/audit-subg-225e4d3d");
+		assert.equal(r!.projectId, "f8c621ad-9af5-4312-b997-72c07968b87a");
+		assert.equal(r!.archived, false);
+		assert.equal(r!.accessory, "crown");
+		assert.match(r!.title, /Audit subgoals branch.*recovered/);
+		// createdAt should equal the .jsonl's first-line timestamp.
+		assert.equal(r!.createdAt, Date.parse("2026-05-06T20:07:47.343Z"));
+		// lastActivity should equal the file's last-write timestamp.
+		assert.equal(r!.lastActivity, 1747242000000);
+	});
+
+	it("returns null when the goal has no worktreePath (can't reconstruct cwd)", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g" },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 1, agentSessionId: "a", agentStartedAtIso: "2026-05-01T00:00:00Z" },
+		});
+		assert.equal(r, null);
+	});
+
+	it("falls back to Date.now() when the .jsonl's first-line timestamp is unparseable", () => {
+		const before = Date.now();
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g", worktreePath: "/some/wt" },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 1, agentSessionId: "a", agentStartedAtIso: "not-a-date" },
+		});
+		const after = Date.now();
+		assert.ok(r);
+		assert.ok(r!.createdAt >= before && r!.createdAt <= after);
+	});
+
+	it("uses '(recovered)' suffix in title (so users can tell it's not the original session)", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g", title: "Audit X", worktreePath: "/wt" },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 1, agentSessionId: "a", agentStartedAtIso: "2026-05-01T00:00:00Z" },
+		});
+		assert.match(r!.title, /\(recovered\)/);
+	});
+
+	it("handles goal with no title (uses '(recovered)' as placeholder)", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g", worktreePath: "/wt" },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 1, agentSessionId: "a", agentStartedAtIso: "2026-05-01T00:00:00Z" },
+		});
+		assert.ok(r);
+		assert.match(r!.title, /Team Lead:.*\(recovered\)/);
 	});
 });
