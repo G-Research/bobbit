@@ -215,10 +215,31 @@ export interface PromptParts {
 	 *  When non-empty, an "Available Skills" section is injected into the system prompt.
 	 *  Skills with `disable-model-invocation: true` should be filtered out by the caller. */
 	skillsCatalog?: SlashSkill[];
+	/** Optional override for the skills-catalog byte budget (clamped to [MIN, MAX]).
+	 *  When undefined, `SKILLS_CATALOG_BUDGET` is used. */
+	skillsCatalogBudget?: number;
 }
 
-/** Max bytes of skills-catalog markdown to embed in the system prompt. */
-export const SKILLS_CATALOG_BUDGET = 4096;
+/** Default max bytes of skills-catalog markdown to embed in the system prompt. */
+export const SKILLS_CATALOG_BUDGET = 16384;
+/** Lower bound for a user-configured skills-catalog byte budget. */
+export const SKILLS_CATALOG_BUDGET_MIN = 1024;
+/** Upper bound for a user-configured skills-catalog byte budget. */
+export const SKILLS_CATALOG_BUDGET_MAX = 131072;
+
+/**
+ * Resolve a possibly-undefined override into the effective skills-catalog budget.
+ * - `undefined`, `NaN`, or non-finite → `SKILLS_CATALOG_BUDGET`.
+ * - Otherwise clamps `Math.floor(override)` to `[MIN, MAX]`.
+ */
+export function resolveSkillsCatalogBudget(override?: number): number {
+	if (override === undefined || override === null) return SKILLS_CATALOG_BUDGET;
+	if (typeof override !== "number" || !Number.isFinite(override)) return SKILLS_CATALOG_BUDGET;
+	const floored = Math.floor(override);
+	if (floored < SKILLS_CATALOG_BUDGET_MIN) return SKILLS_CATALOG_BUDGET_MIN;
+	if (floored > SKILLS_CATALOG_BUDGET_MAX) return SKILLS_CATALOG_BUDGET_MAX;
+	return floored;
+}
 
 /**
  * Build the "Available Skills" section. Skills are listed alphabetically;
@@ -228,8 +249,9 @@ export const SKILLS_CATALOG_BUDGET = 4096;
  * Caller is responsible for filtering out skills with
  * `disable-model-invocation: true` — this function trusts its input.
  */
-export function buildSkillsCatalogSection(skills: SlashSkill[]): string | undefined {
+export function buildSkillsCatalogSection(skills: SlashSkill[], budgetOverride?: number): string | undefined {
 	if (!skills || skills.length === 0) return undefined;
+	const budget = resolveSkillsCatalogBudget(budgetOverride);
 	const sorted = [...skills].sort((a, b) => a.name.localeCompare(b.name));
 
 	const header = "## Available Skills\n\n" +
@@ -245,7 +267,7 @@ export function buildSkillsCatalogSection(skills: SlashSkill[]): string | undefi
 		const desc = (s.description || "").replace(/\s+/g, " ").trim();
 		const hint = s.argumentHint ? ` _args: ${s.argumentHint}_` : "";
 		const line = `- **${s.name}** — ${desc}${hint}`;
-		if (length + line.length + 1 > SKILLS_CATALOG_BUDGET) {
+		if (length + line.length + 1 > budget) {
 			truncated = sorted.length - i;
 			break;
 		}
@@ -254,7 +276,7 @@ export function buildSkillsCatalogSection(skills: SlashSkill[]): string | undefi
 	}
 	if (truncated > 0) {
 		lines.push(`- _… (${truncated} more skill${truncated === 1 ? "" : "s"} omitted, alphabetically truncated)_`);
-		console.warn(`[system-prompt] Skills catalog exceeded ${SKILLS_CATALOG_BUDGET}B budget — truncated ${truncated} skill(s).`);
+		console.warn(`[system-prompt] Skills catalog exceeded ${budget}B budget — truncated ${truncated} skill(s).`);
 	}
 	return header + lines.join("\n");
 }
@@ -355,7 +377,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 
 	// 5.5. Available Skills (autonomous activation catalog)
 	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog);
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
 		if (skillsSection) sections.push(skillsSection);
 	}
 
@@ -469,7 +491,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 
 	// 8.5. Available Skills
 	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog);
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
 		if (skillsSection) {
 			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
 		}
