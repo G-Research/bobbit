@@ -13,7 +13,7 @@ import { resolveRole, listAvailableRoles } from "./resolve-role.js";
 import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
-import { generateTeamName } from "./team-names.js";
+import { generateTeamName, generateTeamNameSync } from "./team-names.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
@@ -23,59 +23,17 @@ import { checkGateDependencies } from "./gate-dependency-check.js";
 import { anyInFlightChild } from "./team-manager-helpers.js";
 import {
 	findOrphanTeamEntries,
-	slugDirNameForCwd,
 	pickCanonicalTeamLeadJsonl,
 	reconstructTeamLeadSessionRecord,
-	type CandidateJsonl,
+	scanSlugDirForJsonlsAt,
 } from "./team-store-consistency.js";
 
 const execFile = promisify(execFileCb);
 
-/**
- * Scan the agent sessions slug-dir for a worktree path and return the .jsonl
- * candidates whose first-line `cwd` matches. Filters out malformed files and
- * .jsonls that belong to other worktrees that happened to be written into the
- * same dir (defensive — shouldn't occur, but the filter is cheap).
- *
- * Returns an empty array on any I/O error (no slug-dir, no read permission,
- * etc.) — boot recovery should never throw on a per-goal lookup miss.
- */
-function scanSlugDirForJsonls(worktreePath: string): CandidateJsonl[] {
-	const dir = path.join(os.homedir(), ".bobbit", "agent", "sessions", slugDirNameForCwd(worktreePath));
-	let names: string[];
-	try {
-		names = fs.readdirSync(dir);
-	} catch {
-		return [];
-	}
-	const out: CandidateJsonl[] = [];
-	for (const name of names) {
-		if (!name.endsWith(".jsonl")) continue;
-		const full = path.join(dir, name);
-		let st;
-		try { st = fs.statSync(full); } catch { continue; }
-		// Read just enough to get the first line — the session-start record.
-		let firstLine = "";
-		try {
-			const fd = fs.openSync(full, "r");
-			const buf = Buffer.alloc(2048);
-			const bytes = fs.readSync(fd, buf, 0, 2048, 0);
-			fs.closeSync(fd);
-			const nl = buf.indexOf("\n");
-			firstLine = buf.toString("utf-8", 0, nl >= 0 && nl < bytes ? nl : bytes);
-		} catch { continue; }
-		let parsed;
-		try { parsed = JSON.parse(firstLine); } catch { continue; }
-		if (parsed?.type !== "session" || parsed.cwd !== worktreePath || typeof parsed.id !== "string") continue;
-		out.push({
-			jsonlPath: full,
-			size: st.size,
-			mtime: st.mtime.getTime(),
-			agentSessionId: parsed.id,
-			agentStartedAtIso: typeof parsed.timestamp === "string" ? parsed.timestamp : new Date(st.birthtimeMs || st.mtime).toISOString(),
-		});
-	}
-	return out;
+/** Production wrapper around the testable `scanSlugDirForJsonlsAt`. */
+function scanSlugDirForJsonls(worktreePath: string) {
+	const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
+	return scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join);
 }
 
 /**
@@ -504,6 +462,7 @@ export class TeamManager {
 							const candidates = scanSlugDirForJsonls(goal.worktreePath);
 							const chosen = pickCanonicalTeamLeadJsonl(candidates);
 							if (chosen) {
+								const funName = generateTeamNameSync();
 								const reconstructed = reconstructTeamLeadSessionRecord({
 									teamLeadSessionId: entry.teamLeadSessionId,
 									goal: {
@@ -514,8 +473,10 @@ export class TeamManager {
 										repoPath: goal.repoPath,
 										branch: goal.branch,
 										sandboxed: goal.sandboxed,
+										archived: goal.archived,
 									},
 									chosenJsonl: chosen,
+									funName,
 								});
 								if (reconstructed) {
 									ctx.sessionStore.put(reconstructed as Parameters<typeof ctx.sessionStore.put>[0]);
@@ -553,6 +514,83 @@ export class TeamManager {
 			}
 			if (droppedDanglingLead > 0) {
 				console.log(`[team-manager] Cleaned ${droppedDanglingLead} unrecoverable team entries on boot.`);
+			}
+
+			// Third pass — fully-orphaned team-mode goals.
+			//
+			// Shape this handles: the parent's team-store entry was lost AND
+			// the session record was lost, but the agent's .jsonl transcripts
+			// still survive in the worktree slug-dir. The user's 18 subgoals
+			// under "Audit subgoals branch" looked exactly like this: every
+			// archived team-mode subgoal had 7-9 surviving .jsonls and zero
+			// pointers into them. The second pass above only catches orphans
+			// the team-store still references; this third pass catches goals
+			// the team-store has forgotten about entirely.
+			//
+			// We don't re-create the team-store entry — these goals are
+			// archived (the team is done), so there's no need for a live
+			// team-store row. We just stamp the team-lead session record
+			// back into sessionStore (archived=true matching the goal). The
+			// sidebar's archived branch then surfaces the team-lead under
+			// the goal again, with the full .jsonl history available via
+			// continue-archived if the user wants to read it.
+			let fullyOrphanRecovered = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const goal of ctx.goalStore.getAll()) {
+					if (!goal.team) continue;
+					if (!goal.worktreePath) continue;
+					// Skip if a team-store entry exists (already handled by the
+					// pass above) — even orphan entries.
+					if (ctx.teamStore.get(goal.id)) continue;
+					// Skip if any session record already references this goal
+					// as its team-lead — recovery isn't needed.
+					const existingLead = ctx.sessionStore.getAll()
+						.find(s => s.teamGoalId === goal.id && s.role === "team-lead");
+					if (existingLead) continue;
+					// Look for surviving .jsonl(s) in the worktree slug-dir.
+					const candidates = scanSlugDirForJsonls(goal.worktreePath);
+					const chosen = pickCanonicalTeamLeadJsonl(candidates);
+					if (!chosen) continue;
+					// Generate a fresh-but-stable bobbit session id. The
+					// original is unknowable (never persisted).
+					const newSessionId = randomUUID();
+					try {
+						const funName = generateTeamNameSync();
+						const reconstructed = reconstructTeamLeadSessionRecord({
+							teamLeadSessionId: newSessionId,
+							goal: {
+								id: goal.id,
+								title: goal.title,
+								projectId: goal.projectId,
+								worktreePath: goal.worktreePath,
+								repoPath: goal.repoPath,
+								branch: goal.branch,
+								sandboxed: goal.sandboxed,
+								archived: goal.archived,
+							},
+							chosenJsonl: chosen,
+							funName,
+						});
+						if (reconstructed) {
+							ctx.sessionStore.put(reconstructed as Parameters<typeof ctx.sessionStore.put>[0]);
+							fullyOrphanRecovered++;
+							console.log(
+								`[team-manager] Boot recovery: reconstructed fully-orphan team-lead ` +
+								`session ${newSessionId.slice(0, 8)} for goal "${goal.title}" ` +
+								`(${goal.id.slice(0, 8)}, archived=${!!goal.archived}) from ` +
+								`surviving .jsonl ${chosen.jsonlPath}.`,
+							);
+						}
+					} catch (err) {
+						console.error(
+							`[team-manager] Fully-orphan recovery failed for goalId=${goal.id}:`,
+							err,
+						);
+					}
+				}
+			}
+			if (fullyOrphanRecovered > 0) {
+				console.log(`[team-manager] Boot recovery: reconstructed ${fullyOrphanRecovered} fully-orphan team-lead session(s).`);
 			}
 		}
 

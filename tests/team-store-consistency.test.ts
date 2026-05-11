@@ -12,17 +12,21 @@
  * a non-functional button.
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
 	findOrphanTeamEntries,
 	canPurgeTeamLeadSession,
 	pickCanonicalTeamLeadJsonl,
 	reconstructTeamLeadSessionRecord,
+	scanSlugDirForJsonlsAt,
 	slugDirNameForCwd,
 	type TeamEntryRef,
 	type CandidateJsonl,
 } from "../src/server/agent/team-store-consistency.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 describe("findOrphanTeamEntries", () => {
 	it("returns entries whose teamLeadSessionId is missing from the session store", () => {
@@ -281,5 +285,181 @@ describe("reconstructTeamLeadSessionRecord — fields the boot recovery writes b
 		});
 		assert.ok(r);
 		assert.match(r!.title, /Team Lead:.*\(recovered\)/);
+	});
+
+	it("uses the injected funName in the title shape, matching bobbit's normal 'Team Lead: <fun-name>' format", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g", title: "Audit X", worktreePath: "/wt" },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 1, agentSessionId: "a", agentStartedAtIso: "2026-05-01T00:00:00Z" },
+			funName: "Jira Springer",
+		});
+		assert.equal(r!.title, "Team Lead: Jira Springer (recovered)");
+	});
+
+	it("marks the record as archived when the underlying goal is archived (so the sidebar shows it under archived sessions)", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g", title: "Sub", worktreePath: "/wt", archived: true },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 1234567890, agentSessionId: "a", agentStartedAtIso: "2026-05-01T00:00:00Z" },
+			funName: "Beans",
+		});
+		assert.equal(r!.archived, true);
+		assert.equal(r!.archivedAt, 1234567890);
+	});
+
+	it("leaves archivedAt undefined when goal is live", () => {
+		const r = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "s",
+			goal: { id: "g", title: "Live", worktreePath: "/wt", archived: false },
+			chosenJsonl: { jsonlPath: "/x.jsonl", size: 1, mtime: 100, agentSessionId: "a", agentStartedAtIso: "2026-05-01T00:00:00Z" },
+		});
+		assert.equal(r!.archived, false);
+		assert.equal(r!.archivedAt, undefined);
+	});
+});
+
+// ── End-to-end recovery flow against a real temp file system ─────────────────
+//
+// This suite proves the chain works for both the user's actual scenarios:
+//
+//   1. Parent team-lead disappeared but team-store entry survived → orphan
+//      recovery (reconstructed via team-store pointer + slug-dir lookup).
+//
+//   2. Subgoal team-lead disappeared AND team-store entry was lost too →
+//      fully-orphan recovery (reconstructed via goal record + slug-dir lookup,
+//      with a fresh session id).
+//
+// Both pass through `scanSlugDirForJsonlsAt` + `pickCanonicalTeamLeadJsonl` +
+// `reconstructTeamLeadSessionRecord`. The boot wiring in `team-manager.ts`
+// calls these in sequence; this test exercises the same sequence against a
+// real fs.
+
+describe("End-to-end recovery against a real slug-dir on disk", () => {
+	let tmpRoot: string;
+	let sessionsDir: string;
+	beforeEach(() => {
+		tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "team-recovery-")));
+		sessionsDir = path.join(tmpRoot, "agent-sessions");
+		fs.mkdirSync(sessionsDir, { recursive: true });
+	});
+
+	/** Helper: lay down a fake .jsonl with a valid session-start first line. */
+	function makeJsonl(opts: { dir: string; name: string; cwd: string; agentId: string; startedAt: string; size?: number; mtimeMs?: number }) {
+		const full = path.join(opts.dir, opts.name);
+		const first = JSON.stringify({ type: "session", version: 3, id: opts.agentId, cwd: opts.cwd, timestamp: opts.startedAt });
+		// Pad to requested size (after first line + newline).
+		const targetSize = opts.size ?? 1024;
+		const tail = "x".repeat(Math.max(0, targetSize - first.length - 1));
+		fs.writeFileSync(full, first + "\n" + tail, "utf-8");
+		if (opts.mtimeMs != null) {
+			const t = opts.mtimeMs / 1000;
+			fs.utimesSync(full, t, t);
+		}
+		return full;
+	}
+
+	it("scans a slug-dir with multiple .jsonls and matches the picker's canonical choice (the user's audit-subgoals shape)", () => {
+		const cwd = "/Users/aj/Documents/dev/bobbit-subgoals-wt/goal-audit-subg-225e4d3d";
+		const slugDir = path.join(sessionsDir, slugDirNameForCwd(cwd));
+		fs.mkdirSync(slugDir, { recursive: true });
+		// The "canonical" file — bigger AND most recent (mirrors the actual
+		// 3.65 MB / latest-mtime file on the user's disk).
+		makeJsonl({ dir: slugDir, name: "2026-05-06T20-07-47-343Z_canonical.jsonl", cwd, agentId: "019dfee7-canonical", startedAt: "2026-05-06T20:07:47.343Z", size: 8192, mtimeMs: 2_000_000_000_000 });
+		// Sibling files from failed restarts — older mtimes, smaller.
+		makeJsonl({ dir: slugDir, name: "2026-05-06T20-17-05-834Z_stale1.jsonl", cwd, agentId: "stale1", startedAt: "2026-05-06T20:17:05Z", size: 512, mtimeMs: 1_999_000_000_000 });
+		makeJsonl({ dir: slugDir, name: "2026-05-06T20-17-05-853Z_stale2.jsonl", cwd, agentId: "stale2", startedAt: "2026-05-06T20:17:05Z", size: 512, mtimeMs: 1_998_000_000_000 });
+
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, cwd, fs, path.join);
+		assert.equal(candidates.length, 3, "all three valid candidates should be returned");
+		const chosen = pickCanonicalTeamLeadJsonl(candidates);
+		assert.ok(chosen);
+		assert.equal(chosen!.agentSessionId, "019dfee7-canonical");
+	});
+
+	it("ignores .jsonls whose first-line cwd doesn't match (defensive — should not happen but the filter is cheap)", () => {
+		const cwd = "/some/wt";
+		const slugDir = path.join(sessionsDir, slugDirNameForCwd(cwd));
+		fs.mkdirSync(slugDir, { recursive: true });
+		makeJsonl({ dir: slugDir, name: "ours.jsonl", cwd, agentId: "ours", startedAt: "2026-05-01T00:00:00Z" });
+		makeJsonl({ dir: slugDir, name: "alien.jsonl", cwd: "/elsewhere", agentId: "alien", startedAt: "2026-05-01T00:00:00Z" });
+
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, cwd, fs, path.join);
+		assert.equal(candidates.length, 1);
+		assert.equal(candidates[0].agentSessionId, "ours");
+	});
+
+	it("returns empty when the slug-dir doesn't exist (recovery is a no-op for goals with no surviving data)", () => {
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, "/never/created", fs, path.join);
+		assert.deepEqual(candidates, []);
+	});
+
+	it("ignores files that aren't .jsonl", () => {
+		const cwd = "/wt";
+		const slugDir = path.join(sessionsDir, slugDirNameForCwd(cwd));
+		fs.mkdirSync(slugDir, { recursive: true });
+		makeJsonl({ dir: slugDir, name: "valid.jsonl", cwd, agentId: "v", startedAt: "2026-05-01T00:00:00Z" });
+		fs.writeFileSync(path.join(slugDir, "notes.txt"), "irrelevant", "utf-8");
+		fs.writeFileSync(path.join(slugDir, "data.json"), "{}", "utf-8");
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, cwd, fs, path.join);
+		assert.equal(candidates.length, 1);
+		assert.equal(candidates[0].agentSessionId, "v");
+	});
+
+	it("end-to-end: parent goal recovery — orphan team-store pointer + surviving .jsonl produces a complete reconstructed record", () => {
+		// Mirrors the user's "Audit subgoals branch" case exactly.
+		const cwd = "/Users/aj/Documents/dev/bobbit-subgoals-wt/goal-audit-subg-225e4d3d";
+		const slugDir = path.join(sessionsDir, slugDirNameForCwd(cwd));
+		fs.mkdirSync(slugDir, { recursive: true });
+		const jsonlPath = makeJsonl({
+			dir: slugDir, name: "main.jsonl", cwd, agentId: "019dfee7-578f-7773-8e32-9e1ba838a4ad",
+			startedAt: "2026-05-06T20:07:47.343Z", size: 3_651_800, mtimeMs: Date.parse("2026-05-09T17:04:37Z"),
+		});
+
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, cwd, fs, path.join);
+		const chosen = pickCanonicalTeamLeadJsonl(candidates);
+		assert.ok(chosen);
+		const record = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "20dba486-26e8-417d-b6dc-013094da0153",
+			goal: {
+				id: "225e4d3d-c656-43fe-a05c-4d6ab8c252a8",
+				title: "Audit subgoals branch",
+				projectId: "f8c621ad",
+				worktreePath: cwd,
+				repoPath: "/Users/aj/Documents/dev/bobbit-subgoals",
+				branch: "goal/audit-subg-225e4d3d",
+				archived: false,
+			},
+			chosenJsonl: chosen!,
+			funName: "Princess Leia",
+		});
+		assert.ok(record);
+		assert.equal(record!.id, "20dba486-26e8-417d-b6dc-013094da0153");
+		assert.equal(record!.agentSessionFile, jsonlPath);
+		assert.equal(record!.title, "Team Lead: Princess Leia (recovered)");
+		assert.equal(record!.role, "team-lead");
+		assert.equal(record!.archived, false);
+	});
+
+	it("end-to-end: archived subgoal recovery — no team-store entry, no session record, surviving .jsonl produces an archived record", () => {
+		// Mirrors the 18 archived subgoals under "Audit subgoals branch".
+		const cwd = "/wt/goal-subgoals-experimental";
+		const slugDir = path.join(sessionsDir, slugDirNameForCwd(cwd));
+		fs.mkdirSync(slugDir, { recursive: true });
+		makeJsonl({ dir: slugDir, name: "main.jsonl", cwd, agentId: "abc", startedAt: "2026-05-03T10:00:00Z", size: 65_536, mtimeMs: Date.parse("2026-05-03T15:30:00Z") });
+
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, cwd, fs, path.join);
+		const chosen = pickCanonicalTeamLeadJsonl(candidates);
+		const record = reconstructTeamLeadSessionRecord({
+			teamLeadSessionId: "freshly-generated-uuid",
+			goal: { id: "subgoal-1", title: "Subgoals experimental toggle", worktreePath: cwd, archived: true },
+			chosenJsonl: chosen!,
+			funName: "Calcifer",
+		});
+		assert.ok(record);
+		assert.equal(record!.archived, true);
+		assert.equal(record!.archivedAt, Date.parse("2026-05-03T15:30:00Z"));
+		assert.equal(record!.title, "Team Lead: Calcifer (recovered)");
+		assert.equal(record!.teamGoalId, "subgoal-1");
 	});
 });

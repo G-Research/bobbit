@@ -139,12 +139,22 @@ function readModelName(sessionId) {
 	return { modelProvider: "anthropic", modelId: raw };
 }
 
+// Tiny fun-name pool. The full server-side pool lives in data/team-names.json
+// but importing it from this Node script is overkill; this subset gives the
+// recovered sessions a bobbit-style title rather than the goal title.
+const FUN_NAMES = [
+	"Ctrl+Z", "The Intern", "Bug Lebowski", "Darth Linter", "Null Pointer",
+	"Greg from QA", "El Debuggador", "Syntax Sinatra", "404 Not Found",
+	"Oops McFixit", "Fizzbuzz", "Glitch", "Spaghetti", "Wombat", "Biscuit",
+	"Turbo Pascal", "Zero Cool", "Crash Override", "Scrambles", "Beans",
+];
+
 function reconstructSession(teamLeadSessionId, goal, recovered) {
 	const { modelProvider, modelId } = readModelName(teamLeadSessionId);
-	// Title: bobbit usually generates "Team Lead: <fun-name>" at start. The
-	// fun name isn't in any surviving file, so we use the goal title as a
-	// recovery placeholder. The user can rename via the UI.
-	const title = `Team Lead: ${goal.title || "(recovered)"} (recovered)`;
+	// Title mirrors bobbit's "Team Lead: <fun-name>" shape, with a "(recovered)"
+	// suffix so the user can tell it apart from the original session.
+	const funName = FUN_NAMES[Math.floor(Math.random() * FUN_NAMES.length)];
+	const title = `Team Lead: ${funName} (recovered)`;
 	return {
 		id: teamLeadSessionId,
 		title,

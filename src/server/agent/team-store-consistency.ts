@@ -149,8 +149,17 @@ export interface OrphanTeamRecoveryInput {
 		repoPath?: string;
 		branch?: string;
 		sandboxed?: boolean;
+		archived?: boolean;
 	};
 	chosenJsonl: CandidateJsonl;
+	/**
+	 * Optional fun-name (e.g. from `generateTeamName()`). When provided, the
+	 * reconstructed title becomes `"Team Lead: <funName> (recovered)"`,
+	 * matching the visual shape bobbit normally uses ("Team Lead: Jira
+	 * Springer", etc.). When omitted, falls back to the goal title or a
+	 * `(recovered)` placeholder.
+	 */
+	funName?: string;
 }
 
 /** The persisted-session shape we write back. Stays loose so callers can
@@ -170,16 +179,26 @@ export interface ReconstructedTeamLeadRecord {
 	agentSessionFile: string;
 	sandboxed?: boolean;
 	accessory: "crown";
-	archived: false;
+	archived: boolean;
+	archivedAt?: number;
 }
 
 export function reconstructTeamLeadSessionRecord(input: OrphanTeamRecoveryInput): ReconstructedTeamLeadRecord | null {
-	const { goal, chosenJsonl, teamLeadSessionId } = input;
+	const { goal, chosenJsonl, teamLeadSessionId, funName } = input;
 	if (!goal.worktreePath) return null;
 	const createdAtMs = Date.parse(chosenJsonl.agentStartedAtIso);
+	const archived = !!goal.archived;
+	// Title shape: bobbit normally uses "Team Lead: <fun-name>" via
+	// generateTeamName(). For recovery we accept an injected funName so the
+	// boot wiring can call generateTeamName() in async context. Falls back
+	// to the goal title only when no funName is provided (e.g. the
+	// stand-alone recovery script that doesn't load the names pool).
+	const nameForTitle = funName?.trim()
+		|| goal.title?.trim()
+		|| "(recovered)";
 	return {
 		id: teamLeadSessionId,
-		title: `Team Lead: ${goal.title?.trim() || "(recovered)"} (recovered)`,
+		title: `Team Lead: ${nameForTitle} (recovered)`,
 		cwd: goal.worktreePath,
 		projectId: goal.projectId,
 		createdAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
@@ -192,7 +211,12 @@ export function reconstructTeamLeadSessionRecord(input: OrphanTeamRecoveryInput)
 		agentSessionFile: chosenJsonl.jsonlPath,
 		sandboxed: !!goal.sandboxed,
 		accessory: "crown",
-		archived: false,
+		archived,
+		// For archived recoveries, stamp `archivedAt` so the sidebar's
+		// archived section sorts them sensibly. We use the .jsonl's last
+		// mtime as the best proxy — that's the moment the session stopped
+		// being actively written to.
+		...(archived ? { archivedAt: chosenJsonl.mtime } : {}),
 	};
 }
 
@@ -201,4 +225,79 @@ export function reconstructTeamLeadSessionRecord(input: OrphanTeamRecoveryInput)
  *  callers join this onto `~/.bobbit/agent/sessions/`. */
 export function slugDirNameForCwd(cwd: string): string {
 	return "--" + cwd.replace(/^\/+/, "").replace(/\//g, "-") + "--";
+}
+
+// ── FS-touching scan, parameterised for testability ──────────────────────────
+//
+// We expose `scanSlugDirForJsonlsAt(sessionsDir, worktreeCwd, fs)` so unit
+// tests can pass a real `node:fs` plus a tmpdir, validating the actual scan
+// behaviour end-to-end without monkey-patching globals. The production wrapper
+// in `team-manager.ts` calls this with `~/.bobbit/agent/sessions/` and the
+// real fs module.
+
+export interface MinimalFs {
+	readdirSync: (path: string) => string[];
+	statSync: (path: string) => { size: number; mtimeMs?: number; mtime: Date; birthtimeMs?: number; isFile?: () => boolean };
+	openSync: (path: string, flags: string) => number;
+	readSync: (fd: number, buf: Uint8Array, offset: number, length: number, position: number) => number;
+	closeSync: (fd: number) => void;
+}
+
+/**
+ * Scan an agent-sessions root directory for .jsonl files belonging to the
+ * given worktree cwd. Returns candidate descriptors compatible with
+ * `pickCanonicalTeamLeadJsonl`. Filters out:
+ *   - non-.jsonl files
+ *   - .jsonls whose first-line `cwd` doesn't match the worktreeCwd
+ *   - malformed first lines / unreadable files
+ *
+ * Returns an empty array on any I/O error (missing dir, no read permission,
+ * etc.) — recovery callers should never throw on a per-goal lookup miss.
+ *
+ * @param sessionsDir Path to `~/.bobbit/agent/sessions` (the agent-sessions
+ *   root). The function appends `slugDirNameForCwd(worktreeCwd)` itself.
+ * @param worktreeCwd The team-lead's cwd (i.e. the goal's worktreePath).
+ * @param fs Subset of `node:fs` — pass `import("node:fs")` directly, or a
+ *   stub in tests.
+ */
+export function scanSlugDirForJsonlsAt(
+	sessionsDir: string,
+	worktreeCwd: string,
+	fs: MinimalFs,
+	join: (...parts: string[]) => string,
+): CandidateJsonl[] {
+	const dir = join(sessionsDir, slugDirNameForCwd(worktreeCwd));
+	let names: string[];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	const out: CandidateJsonl[] = [];
+	for (const name of names) {
+		if (!name.endsWith(".jsonl")) continue;
+		const full = join(dir, name);
+		let st;
+		try { st = fs.statSync(full); } catch { continue; }
+		let firstLine = "";
+		try {
+			const fd = fs.openSync(full, "r");
+			const buf = Buffer.alloc(2048);
+			const bytes = fs.readSync(fd, buf, 0, 2048, 0);
+			fs.closeSync(fd);
+			const nl = buf.indexOf(0x0a); // '\n'
+			firstLine = buf.toString("utf-8", 0, nl >= 0 && nl < bytes ? nl : bytes);
+		} catch { continue; }
+		let parsed: { type?: string; cwd?: string; id?: string; timestamp?: string } | undefined;
+		try { parsed = JSON.parse(firstLine); } catch { continue; }
+		if (!parsed || parsed.type !== "session" || parsed.cwd !== worktreeCwd || typeof parsed.id !== "string") continue;
+		out.push({
+			jsonlPath: full,
+			size: st.size,
+			mtime: st.mtime.getTime(),
+			agentSessionId: parsed.id,
+			agentStartedAtIso: typeof parsed.timestamp === "string" ? parsed.timestamp : st.mtime.toISOString(),
+		});
+	}
+	return out;
 }
