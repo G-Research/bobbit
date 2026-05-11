@@ -116,6 +116,7 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
 - **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
+- **Session disappears from `sessions.json` but `.jsonl` survives.** Boot recovery first looks for a per-session `<basename>.bobbit.json` sidecar alongside the `.jsonl` (`src/server/agent/session-sidecar.ts`) and reconciles the heuristic record with sidecar fields — sidecar wins (exact bobbit session id, title, role, team links, model). If no sidecar exists, falls back to the heuristic reconstruction in `team-store-consistency.ts` (fresh UUID, fun-name title, role parsed from worktree slug). Backfill on boot writes sidecars for legacy sessions so any future loss event becomes exact-recoverable.
 
 ## `system-prompt.md` not customised
 

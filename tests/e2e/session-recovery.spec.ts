@@ -36,22 +36,19 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
-// Canonicalize via realpathSync so macOS `/var → /private/var` symlink doesn't
-// trip the symlink-root guard on POST /api/projects (the same fix applied to
-// tests/multi-project.test.ts). Cross-platform: on Linux/Windows/Docker the
-// canonical path equals the input, so this is a no-op there.
-function canonicalize(p: string): string {
-	try { mkdirSync(p, { recursive: true }); } catch { /* best-effort */ }
-	try { return realpathSync(p); } catch { return p; }
-}
-
-const E2E_TEMP_ROOT = canonicalize(
-	existsSync("/.dockerenv")
-		? "/tmp"
-		: process.platform === "win32"
-			? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-			: join(tmpdir(), "bobbit-e2e"),
-);
+// Resolve the temp root to its canonical path. On macOS `tmpdir()` returns
+// `/var/folders/...` which is a symlink to `/private/var/folders/...`, and the
+// project-registry refuses to register symlinked roots.
+const E2E_TEMP_ROOT_RAW = existsSync("/.dockerenv")
+	? "/tmp"
+	: process.platform === "win32"
+		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
+		: join(tmpdir(), "bobbit-e2e");
+mkdirSync(E2E_TEMP_ROOT_RAW, { recursive: true });
+const E2E_TEMP_ROOT = (() => {
+	try { return realpathSync(E2E_TEMP_ROOT_RAW); }
+	catch { return E2E_TEMP_ROOT_RAW; }
+})();
 
 interface StartedGateway {
 	port: number;

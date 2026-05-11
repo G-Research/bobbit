@@ -14,6 +14,7 @@ import { SearchService } from "../search/search-service.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
+import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
@@ -3670,6 +3671,30 @@ export class SessionManager {
 				}
 
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
+
+				// Write the bobbit sidecar alongside the .jsonl so a future
+				// recovery (when sessions.json loses this entry) can restore the
+				// ORIGINAL bobbit session id, title, role, team links, and model
+				// prefs instead of inventing fresh ones. Fire-and-forget;
+				// atomic write makes repeat invocations safe.
+				try {
+					const ps = this.resolveStoreForSession(session.id).get(session.id);
+					if (ps) {
+						// pi-coding-agent names .jsonl files after the agent session id
+						// (path/<agent-id>.jsonl). Use the basename as a stable id when
+						// the rpc response doesn't expose it directly.
+						const agentSessionId = (stateResp.data?.sessionId as string | undefined)
+							|| path.basename(agentSessionFile).replace(/\.jsonl$/, "");
+						const sidecar = buildSessionSidecar(
+							ps,
+							agentSessionId,
+							undefined,
+						);
+						writeSessionSidecar(agentSessionFile, sidecar);
+					}
+				} catch (err) {
+					console.warn(`[session-manager] Failed to write session sidecar for ${session.id}: ${err}`);
+				}
 				return; // success
 			} catch (err) {
 				if (attempt < maxRetries) {
@@ -4678,6 +4703,17 @@ export class SessionManager {
 			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
 				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
 			});
+			// Delete the bobbit sidecar alongside the .jsonl. Best-effort —
+			// host-side path lookup (sidecars are bobbit-owned, never written
+			// by sandboxed agents). Missing file is fine.
+			try {
+				const sidecarPath = sidecarPathFor(ps.agentSessionFile);
+				if (fs.existsSync(sidecarPath)) {
+					fs.unlinkSync(sidecarPath);
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
+			}
 		}
 
 		// Delete session prompt file
