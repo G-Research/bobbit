@@ -219,6 +219,28 @@ export class ReviewDocument extends LitElement {
       // it lands before any stopPropagation inside the annotator.
       this._boundMobileAnnotationTap = this._onMobileAnnotationTap.bind(this);
       this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap, true);
+
+      // Decorate Recogito-rendered .r6o-annotation spans with a `title`
+      // tooltip so the affordance is discoverable (accessibility hint).
+      // The spans are wrapped lazily as text-annotator decorates text
+      // nodes; observe additions and tag them.
+      const tagSpan = (el: Element): void => {
+        if (el instanceof HTMLElement && !el.hasAttribute("title")) {
+          el.setAttribute("title", "Click to edit \u00b7 hover for actions");
+        }
+      };
+      this._annotationTitleObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          for (const node of Array.from(m.addedNodes)) {
+            if (!(node instanceof HTMLElement)) continue;
+            if (node.classList?.contains("r6o-annotation")) tagSpan(node);
+            node.querySelectorAll?.(".r6o-annotation:not([title])").forEach(tagSpan);
+          }
+        }
+      });
+      this._annotationTitleObserver.observe(container, { childList: true, subtree: true });
+      // Tag any spans that already exist (re-anchored on mount).
+      container.querySelectorAll(".r6o-annotation:not([title])").forEach(tagSpan);
     } catch (e) {
       console.warn("[review-document] Failed to attach text annotator:", e);
     }
