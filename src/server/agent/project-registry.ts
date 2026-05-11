@@ -6,6 +6,8 @@ import {
   DEFAULT_PROJECT_COLOR_LIGHT,
   PALETTE_PRIMARY_COLORS,
 } from "../../shared/palette-colors.js";
+import { getProjectRoot } from "../bobbit-dir.js";
+import { runPreflight, type PreflightReport } from "./project-preflight.js";
 
 export interface RegisteredProject {
   id: string;           // UUID
@@ -54,6 +56,22 @@ export function detectSymlinkRoot(
  * `acceptCanonical`. The REST surface translates this into a structured 400
  * carrying both paths so the UI can prompt the user.
  */
+/**
+ * Thrown when a server-side preflight pass surfaces any `fail` check. The
+ * REST surface translates this into a 400 carrying the full report.
+ */
+export class PreflightFailedError extends Error {
+  readonly code = "preflight_failed";
+  constructor(
+    public readonly rootPath: string,
+    public readonly report: PreflightReport,
+    failingSummary: string,
+  ) {
+    super(`Project preflight failed for ${rootPath}: ${failingSummary}`);
+    this.name = "PreflightFailedError";
+  }
+}
+
 export class SymlinkProjectRootError extends Error {
   readonly code = "symlink_root";
   constructor(public readonly rootPath: string, public readonly canonical: string) {
@@ -192,6 +210,32 @@ export class ProjectRegistry {
     const existing = this.getByPath(rootPath);
     if (existing) {
       throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+    }
+
+    // Defense in depth: re-run preflight server-side. The REST endpoint may
+    // have already shown the report to the user, but we never trust the
+    // client to have actually heeded it. Any `fail` aborts registration.
+    // Callers that legitimately need to bypass (e.g. the synthetic system
+    // project or the project-assistant scaffolding path) call sister
+    // methods (registerSystemProject / registerProvisional) which do not
+    // invoke this guard.
+    try {
+      const report = runPreflight(rootPath, {
+        registeredProjects: this.list(),
+        gatewayProjectRoot: getProjectRoot(),
+      });
+      if (report.hasFail) {
+        const failing = report.checks.filter(c => c.level === "fail")
+          .map(c => `${c.id}: ${c.detail}`)
+          .join("; ");
+        throw new PreflightFailedError(rootPath, report, failing);
+      }
+    } catch (err) {
+      if (err instanceof PreflightFailedError) throw err;
+      // Any other failure inside preflight is non-fatal — log and proceed,
+      // matching the pre-preflight behavior so a broken check can't lock
+      // out all project registration.
+      console.warn(`[project-registry] preflight failed unexpectedly: ${err}`);
     }
 
     // Scaffold .bobbit directories
