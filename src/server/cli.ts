@@ -11,6 +11,9 @@ import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
 import { createGateway } from "./server.js";
+import { loopbackForBind } from "./cli-loopback.js";
+
+export { loopbackForBind };
 
 interface CliArgs {
 	host: string;
@@ -207,11 +210,15 @@ async function main() {
 
 	const proto = args.tls ? "https" : "http";
 	const baseUrl = `${proto}://${args.host}:${actualPort}`;
+	// peerUrl is what same-host agents use to call back into the gateway. For a
+	// wildcard bind (`0.0.0.0` / `::`), normalise to loopback so the connect side
+	// has a real peer address (the wildcard is a listen-only address).
+	const peerUrl = `${proto}://${loopbackForBind(args.host)}:${actualPort}`;
 	const fullUrl = `${baseUrl}/?token=${encodeURIComponent(authToken)}`;
 
 	// Write gateway URL to a discoverable file so Vite proxy and extensions can find it.
 	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
-	fs.writeFileSync(gatewayUrlPath, baseUrl, "utf-8");
+	fs.writeFileSync(gatewayUrlPath, peerUrl, "utf-8");
 
 	const __cliDir = path.dirname(fileURLToPath(import.meta.url));
 	const pkgVersion = JSON.parse(fs.readFileSync(path.resolve(__cliDir, "../../package.json"), "utf-8")).version;
