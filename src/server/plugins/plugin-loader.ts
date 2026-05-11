@@ -245,3 +245,28 @@ function pickActivate(mod: unknown): PluginActivateFn | undefined {
 	if (typeof m.default === "function") return m.default as PluginActivateFn;
 	return undefined;
 }
+
+/** Bootstrap-time accessor for the loader + last discovery list. The gateway
+ *  calls `setGlobalPluginLoader` during start() so REST endpoints can reach
+ *  the loader without threading it through every signature. */
+let _globalLoader: PluginLoader | null = null;
+let _globalDiscovered: DiscoveredPlugin[] = [];
+
+export function setGlobalPluginLoader(loader: PluginLoader | null, discovered: DiscoveredPlugin[] = []): void {
+	_globalLoader = loader;
+	_globalDiscovered = discovered;
+}
+
+export function getGlobalPluginLoader(): { loader: PluginLoader; discovered: DiscoveredPlugin[] } | null {
+	if (!_globalLoader) return null;
+	return { loader: _globalLoader, discovered: _globalDiscovered };
+}
+
+/** Re-run discovery and reconcile the loader's state. Returns the new merged list. */
+export async function refreshPlugins(paths: DiscoveryPaths = defaultDiscoveryPaths()): Promise<LoadedPlugin[]> {
+	const loader = _globalLoader;
+	if (!loader) throw new Error("Plugin loader not initialised");
+	const discovered = discoverPlugins(paths);
+	_globalDiscovered = discovered;
+	return loader.loadAll(discovered);
+}

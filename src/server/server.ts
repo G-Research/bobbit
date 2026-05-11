@@ -1029,11 +1029,10 @@ export function createGateway(config: GatewayConfig) {
 			// but never blocks gateway startup.
 			if (!process.env.BOBBIT_SKIP_PLUGINS) {
 				try {
-					const { discoverPlugins, PluginLoader } = await import("./plugins/plugin-loader.js");
+					const { discoverPlugins, PluginLoader, setGlobalPluginLoader } = await import("./plugins/plugin-loader.js");
 					const discovered = discoverPlugins();
 					const pluginLoader = new PluginLoader({ registry: verificationHarness.verifyRegistry });
-					(globalThis as any).__bobbitPluginLoader = pluginLoader;
-					(globalThis as any).__bobbitDiscoveredPlugins = discovered;
+					setGlobalPluginLoader(pluginLoader, discovered);
 					const loaded = await pluginLoader.loadAll(discovered);
 					for (const p of loaded) {
 						if (p.load.status === "loaded") {
@@ -4982,6 +4981,84 @@ async function handleApiRoute(
 		const cancelCtx = projectContextManager.getContextForGoal(goalId);
 		if (cancelCtx) cancelCtx.gateStore.updateGateStatus(goalId, gateId, "failed");
 		json({ cancelled: true }, 200);
+		return;
+	}
+
+	// ── Plugin management ────────────────────────────────────────────
+	// GET /api/plugins — list discovered plugins with status (loaded / needs-approval / error / manifest-invalid)
+	if (url.pathname === "/api/plugins" && req.method === "GET") {
+		const { getGlobalPluginLoader } = await import("./plugins/plugin-loader.js");
+		const ctx = getGlobalPluginLoader();
+		if (!ctx) { json({ plugins: [] }); return; }
+		const records = ctx.discovered.map(d => {
+			const rec = ctx.loader.getLoaded(d.name);
+			return {
+				name: d.name,
+				version: d.manifest.version,
+				description: d.manifest.description,
+				source: d.source,
+				path: d.path,
+				contributes: d.manifest.contributes ?? null,
+				entryPoints: d.manifest.entryPoints ?? null,
+				verifyStepTypes: d.manifest.verifyStepTypes ?? [],
+				permissions: d.manifest.permissions ?? [],
+				manifestErrors: d.manifestErrors,
+				load: rec?.load ?? { status: "not-loaded" },
+			};
+		});
+		json({ plugins: records });
+		return;
+	}
+
+	// GET / POST / DELETE /api/plugins/:name and POST /api/plugins/:name/trust
+	const pluginTrustMatch = url.pathname.match(/^\/api\/plugins\/([^/]+)\/trust$/);
+	if (pluginTrustMatch) {
+		const name = decodeURIComponent(pluginTrustMatch[1]);
+		const { getGlobalPluginLoader, refreshPlugins } = await import("./plugins/plugin-loader.js");
+		const ctx = getGlobalPluginLoader();
+		if (!ctx) { json({ error: "Plugin loader not initialised" }, 503); return; }
+		const discovered = ctx.discovered.find(d => d.name === name);
+		if (!discovered) { json({ error: "Plugin not found" }, 404); return; }
+
+		if (req.method === "POST") {
+			if (discovered.manifestErrors.length > 0) {
+				json({ error: "Cannot trust a plugin with manifest errors", manifestErrors: discovered.manifestErrors }, 400);
+				return;
+			}
+			ctx.loader.trustPlugin(discovered);
+			// Drop any cached "needs-approval" state and re-attempt the load.
+			await ctx.loader.unload(name);
+			await refreshPlugins();
+			const updated = ctx.loader.getLoaded(name);
+			json({ trusted: true, load: updated?.load ?? { status: "not-loaded" } });
+			return;
+		}
+		if (req.method === "DELETE") {
+			await ctx.loader.revokeTrust(discovered);
+			json({ trusted: false });
+			return;
+		}
+	}
+
+	const pluginDetailMatch = url.pathname.match(/^\/api\/plugins\/([^/]+)$/);
+	if (pluginDetailMatch && req.method === "GET") {
+		const name = decodeURIComponent(pluginDetailMatch[1]);
+		const { getGlobalPluginLoader } = await import("./plugins/plugin-loader.js");
+		const ctx = getGlobalPluginLoader();
+		if (!ctx) { json({ error: "Plugin loader not initialised" }, 503); return; }
+		const discovered = ctx.discovered.find(d => d.name === name);
+		if (!discovered) { json({ error: "Plugin not found" }, 404); return; }
+		const rec = ctx.loader.getLoaded(name);
+		json({
+			name: discovered.name,
+			version: discovered.manifest.version,
+			description: discovered.manifest.description,
+			source: discovered.source,
+			path: discovered.path,
+			manifest: discovered.manifest,
+			manifestErrors: discovered.manifestErrors,
+			load: rec?.load ?? { status: "not-loaded" },
+		});
 		return;
 	}
 
