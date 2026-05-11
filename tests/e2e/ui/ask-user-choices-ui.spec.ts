@@ -198,6 +198,51 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await page2.close();
 	});
 
+	test("error path — failed ask renders minimal chip; retry shows exactly one interactive widget", async ({ page }) => {
+		// The bug: when ask_user_choices validation fails (e.g. missing tab_label
+		// on a multi-question ask) the renderer used to render the FULL interactive
+		// widget for the failed call, so after the agent retried the user saw two
+		// clickable widgets and couldn't tell which was live.
+		//
+		// Fix: extension returns isError:true; renderer's `errored` derivation
+		// also fires defensively when result is complete but neither posted-stub
+		// nor legacy-answers. The failed call collapses to a minimal `.ask-error`
+		// chip; only the retry renders an interactive widget.
+		//
+		// Mock-agent trigger emits both tool_uses back-to-back in the same turn:
+		// see `_handleAskUserChoicesErrorThenRetry` in tests/e2e/mock-agent-core.mjs.
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "please use ask_user_choices with bad tab labels then retry");
+
+		// Wait for the retry's interactive widget to land.
+		const submit = page.locator(".ask-submit");
+		await expect(submit).toHaveCount(1, { timeout: 20_000 });
+
+		// Failed call collapsed into the minimal chip; retry rendered full chrome.
+		const errorChip = page.locator(".ask-error");
+		await expect(errorChip).toHaveCount(1);
+		await expect(errorChip).toBeVisible();
+		await expect(errorChip).toContainText("tab_label");
+
+		// DOM order: error chip precedes the interactive widget.
+		const widget = page.locator("ask-user-choices-widget").filter({ has: page.locator(".ask-submit") }).first();
+		await expect(widget).toBeVisible();
+		const order = await page.evaluate(() => {
+			const chip = document.querySelector(".ask-error");
+			const sub = document.querySelector(".ask-submit");
+			if (!chip || !sub) return null;
+			// DOCUMENT_POSITION_FOLLOWING (4) on `sub` means chip is before sub.
+			return chip.compareDocumentPosition(sub) & 4 ? "chip-before-widget" : "chip-after-widget";
+		});
+		expect(order).toBe("chip-before-widget");
+
+		// There are TWO ask-user-choices-widget elements (one per tool_use), but
+		// only ONE shows interactive chrome — the failed one is collapsed.
+		await expect(page.locator("[role=\"tab\"]")).toHaveCount(2); // two tabs on the live widget
+		await expect(page.locator(".ask-submit")).toHaveCount(1); // exactly one Submit button
+	});
+
 	test("keyboard-only multi-question submission", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
