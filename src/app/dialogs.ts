@@ -25,6 +25,41 @@ import { refreshSessions } from "./api.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
+// ============================================================================
+// PREFLIGHT TYPES — mirror the server's PreflightReport shape from
+// src/server/agent/project-preflight.ts. See docs/design/robust-add-project.md.
+// Kept inline to avoid coupling the UI bundle to a server-only module.
+// ============================================================================
+
+export type PreflightLevel = "pass" | "warn" | "fail";
+
+export interface PreflightCheck {
+	id: string;
+	level: PreflightLevel;
+	title: string;
+	detail: string;
+	remediation?: {
+		kind: "archive-bobbit" | "use-canonical" | "shorter-path" | "free-space" | "external";
+		label: string;
+		payload?: Record<string, unknown>;
+	};
+}
+
+export interface PreflightReport {
+	rootPath: string;
+	canonical: string;
+	checks: PreflightCheck[];
+	hasFail: boolean;
+}
+
+export interface ArchiveResult {
+	archiveDir: string;
+	archivedAt: string;
+	movedPaths: string[];
+	preservedPaths: string[];
+	gatewayOwned: boolean;
+	partial?: { failed: Array<{ path: string; error: string }> };
+}
 
 // ============================================================================
 // CONFIRM / ERROR DIALOGS
@@ -184,6 +219,160 @@ function promptSymlinkConfirm(
 									variant: "default",
 									onClick: confirm,
 									children: html`<span data-testid="confirm-use-canonical">Use canonical path</span>`,
+								})}
+							</div>
+						`,
+					})}
+				`,
+			}),
+			container,
+		);
+	});
+}
+
+/**
+ * Render the preflight panel inside the add-project dialog. Surfaces the
+ * pass/warn/fail checks from `GET /api/projects/preflight` and exposes the
+ * inline archive CTA on the `bobbit.existing` row. Stateless: caller owns
+ * the report + loading flags and re-renders on change.
+ */
+function renderPreflightPanel(opts: {
+	report: PreflightReport | null;
+	loading: boolean;
+	error: string;
+	archiving: boolean;
+	onArchive: () => void;
+}) {
+	if (opts.loading && !opts.report) {
+		return html`
+			<div class="mt-3 border-t border-border pt-3" data-testid="preflight-panel" data-loading="1">
+				<p class="text-xs text-muted-foreground">Running pre-flight checks…</p>
+			</div>
+		`;
+	}
+	if (opts.error && !opts.report) {
+		return html`
+			<div class="mt-3 border-t border-border pt-3" data-testid="preflight-panel" data-error="1">
+				<p class="text-xs text-red-500">Pre-flight error: ${opts.error}</p>
+			</div>
+		`;
+	}
+	if (!opts.report) return "";
+
+	const iconFor = (level: PreflightLevel) => {
+		switch (level) {
+			case "pass":
+				return html`<span class="text-green-600 dark:text-green-400 font-bold" aria-label="pass">✓</span>`;
+			case "warn":
+				return html`<span class="text-amber-600 dark:text-amber-400 font-bold" aria-label="warn">⚠</span>`;
+			case "fail":
+				return html`<span class="text-red-600 dark:text-red-400 font-bold" aria-label="fail">✗</span>`;
+		}
+	};
+
+	return html`
+		<div class="mt-3 border-t border-border pt-3 flex flex-col gap-1.5" data-testid="preflight-panel" data-has-fail=${opts.report.hasFail ? "1" : "0"}>
+			<div class="flex items-center justify-between">
+				<p class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Pre-flight</p>
+				${opts.report.hasFail
+					? html`<span class="text-[10px] text-red-600 dark:text-red-400 font-medium" data-testid="preflight-blocked">Blocked</span>`
+					: html`<span class="text-[10px] text-green-600 dark:text-green-400 font-medium" data-testid="preflight-ok">Ready</span>`}
+			</div>
+			<ul class="flex flex-col gap-1">
+				${opts.report.checks.map(check => html`
+					<li class="flex items-start gap-2 text-xs" data-testid="preflight-check" data-check-id=${check.id} data-check-level=${check.level}>
+						<span class="shrink-0 w-4 text-center mt-0.5">${iconFor(check.level)}</span>
+						<div class="flex-1 min-w-0">
+							<div class="flex items-center gap-2 flex-wrap">
+								<span class="text-foreground font-medium">${check.title}</span>
+								${check.id === "bobbit.existing" && check.level !== "pass"
+									? html`<button
+										class="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 transition-colors disabled:opacity-50"
+										@click=${opts.onArchive}
+										?disabled=${opts.archiving}
+										data-testid="preflight-archive-cta"
+										title="Move existing .bobbit/ to .bobbit-archive-NNN/"
+									>${opts.archiving ? "Archiving…" : (check.remediation?.label || "Archive existing .bobbit/")}</button>`
+									: ""}
+							</div>
+							${check.detail ? html`<p class="text-muted-foreground text-[11px] leading-snug">${check.detail}</p>` : ""}
+						</div>
+					</li>
+				`)}
+			</ul>
+		</div>
+	`;
+}
+
+/**
+ * Confirm-archive modal shown when the user clicks the inline archive CTA on
+ * the `bobbit.existing` preflight row. Lists the target archive directory
+ * and, if the gateway owns this directory, notes that gateway-owned files
+ * are preserved. Resolves with the user's confirmation (true = proceed).
+ */
+function promptArchiveConfirm(opts: {
+	rootPath: string;
+	gatewayOwned: boolean;
+	existingDetail: string;
+}): Promise<boolean> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		const close = (result: boolean) => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		render(
+			Dialog({
+				isOpen: true,
+				onClose: () => close(false),
+				width: "min(520px, 92vw)",
+				height: "auto",
+				backdropClassName: "bg-black/50 backdrop-blur-sm",
+				children: html`
+					${DialogContent({
+						children: html`
+							${DialogHeader({ title: "Archive existing .bobbit/" })}
+							<div class="flex flex-col gap-3 mt-2 text-sm" data-testid="archive-confirm">
+								<p class="text-foreground">
+									Bobbit will move the existing
+									<code class="font-mono text-xs px-1 py-0.5 rounded bg-secondary text-secondary-foreground">.bobbit/</code>
+									contents into a new
+									<code class="font-mono text-xs px-1 py-0.5 rounded bg-secondary text-secondary-foreground">.bobbit-archive-NNN/</code>
+									directory under
+									<code class="font-mono text-xs px-1 py-0.5 rounded bg-secondary text-secondary-foreground" data-testid="archive-rootpath">${opts.rootPath}</code>.
+								</p>
+								${opts.existingDetail ? html`<p class="text-muted-foreground text-xs" data-testid="archive-existing-detail">${opts.existingDetail}</p>` : ""}
+								${opts.gatewayOwned ? html`
+									<div class="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300" data-testid="archive-gateway-owned">
+										This directory contains gateway-owned state (the running server depends on it).
+										Files like <code class="font-mono">state/gateway-url</code>, <code class="font-mono">state/watchdog.json</code>,
+										<code class="font-mono">state/tls/</code>, <code class="font-mono">state/projects.json</code>, and
+										<code class="font-mono">state/sessions.json</code> will be <strong>preserved in place</strong>;
+										everything else will be archived.
+									</div>
+								` : html`
+									<p class="text-muted-foreground text-xs">
+										A <code class="font-mono">MANIFEST.json</code> file inside the archive lists everything that moved
+										so you can manually undo the operation if needed.
+									</p>
+								`}
+							</div>
+						`,
+					})}
+					${DialogFooter({
+						className: "px-6 pb-4",
+						children: html`
+							<div class="flex gap-2 justify-end">
+								${Button({ variant: "ghost", onClick: () => close(false), children: "Cancel" })}
+								${Button({
+									variant: "destructive" as any,
+									onClick: () => close(true),
+									children: html`<span data-testid="confirm-archive-bobbit">Archive and continue</span>`,
+									className: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
 								})}
 							</div>
 						`,
@@ -1300,6 +1489,61 @@ export function showProjectDialog(): void {
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
 	let detectTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Preflight validation state — runs alongside detection. See
+	// docs/design/robust-add-project.md. Surfaces pass/warn/fail checks before
+	// the user can submit; a fail blocks submission. Renders between path input
+	// and footer; gracefully degrades when the server endpoint is missing
+	// (older gateway) by hiding the panel entirely.
+	let preflightReport: PreflightReport | null = null;
+	let preflightLoading = false;
+	let preflightError = "";
+	let preflightToken = 0;
+	let archiving = false;
+	let preflightUnavailable = false;
+
+	const runPreflight = async (dirPath: string) => {
+		const trimmed = dirPath.trim();
+		if (!trimmed) {
+			preflightReport = null;
+			preflightLoading = false;
+			preflightError = "";
+			renderDialog();
+			return;
+		}
+		if (preflightUnavailable) return;
+		const token = ++preflightToken;
+		preflightLoading = true;
+		preflightError = "";
+		renderDialog();
+		try {
+			const res = await gatewayFetch(`/api/projects/preflight?path=${encodeURIComponent(trimmed)}`);
+			if (token !== preflightToken) return; // stale
+			if (res.status === 404) {
+				// Older gateway without preflight — silently skip.
+				preflightUnavailable = true;
+				preflightReport = null;
+				preflightLoading = false;
+				renderDialog();
+				return;
+			}
+			if (!res.ok) {
+				preflightError = `Preflight failed (${res.status})`;
+				preflightReport = null;
+			} else {
+				preflightReport = await res.json() as PreflightReport;
+			}
+		} catch (err) {
+			if (token !== preflightToken) return;
+			preflightError = err instanceof Error ? err.message : String(err);
+			preflightReport = null;
+		} finally {
+			if (token === preflightToken) {
+				preflightLoading = false;
+				renderDialog();
+			}
+		}
+	};
+
 	// Multi-repo scan checklist state — surfaced as an intermediate step when
 	// the chosen path resolves to more than one detected repo. Single-repo
 	// projects skip this step entirely. The selection is informational
@@ -1326,7 +1570,38 @@ export function showProjectDialog(): void {
 
 	const debouncedDetect = (dirPath: string) => {
 		if (detectTimer) clearTimeout(detectTimer);
-		detectTimer = setTimeout(() => runDetection(dirPath), 400);
+		detectTimer = setTimeout(() => {
+			runDetection(dirPath);
+			runPreflight(dirPath);
+		}, 400);
+	};
+
+	const openArchiveConfirm = async () => {
+		if (!preflightReport) return;
+		const rootPath = preflightReport.rootPath;
+		const gatewayOwned = preflightReport.checks.some(c => c.id === "bobbit.gateway-owned" && c.level !== "pass");
+		const existingDetail = preflightReport.checks.find(c => c.id === "bobbit.existing")?.detail || "";
+		const confirmed = await promptArchiveConfirm({ rootPath, gatewayOwned, existingDetail });
+		if (!confirmed) return;
+		archiving = true;
+		renderDialog();
+		try {
+			const res = await gatewayFetch("/api/projects/archive-bobbit", {
+				method: "POST",
+				body: JSON.stringify({ rootPath }),
+			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({} as any));
+				showConnectionError("Failed to archive .bobbit/", data?.error || `Failed: ${res.status}`);
+			}
+		} catch (err) {
+			showConnectionError("Failed to archive .bobbit/", err instanceof Error ? err.message : String(err));
+		} finally {
+			archiving = false;
+			// Re-run preflight + detection to reflect the new on-disk state.
+			runDetection(pathValue);
+			runPreflight(pathValue);
+		}
 	};
 
 	const cleanup = () => {
@@ -1602,6 +1877,13 @@ export function showProjectDialog(): void {
 														: "A new project will be scaffolded in this directory."}
 											</p>
 										` : ""}
+										${pathValue.trim() && !preflightUnavailable ? renderPreflightPanel({
+											report: preflightReport,
+											loading: preflightLoading,
+											error: preflightError,
+											archiving,
+											onArchive: openArchiveConfirm,
+										}) : ""}
 									</div>
 								` : browseContent}
 								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
@@ -1629,8 +1911,8 @@ export function showProjectDialog(): void {
 								${Button({
 									variant: "default",
 									onClick: doContinue,
-									disabled: !pathValue.trim() || loading,
-									children: loading ? "Detecting…" : "Continue",
+									disabled: !pathValue.trim() || loading || archiving || (preflightReport?.hasFail === true),
+									children: loading ? "Detecting…" : (archiving ? "Archiving…" : "Continue"),
 								})}
 							</div>
 						`,

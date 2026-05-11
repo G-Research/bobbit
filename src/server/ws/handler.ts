@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
-import { emitSessionEvent } from "../agent/session-manager.js";
 import { spliceInFlightMessage } from "../agent/splice-inflight-message.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
@@ -358,13 +357,15 @@ export function handleWebSocketConnection(
 				}
 			})();
 
-			// If there's a pending tool permission request, send it to the new client.
-			// Stamp a fresh seq+ts so the client reducer can order this frame relative
-			// to live events. See docs/design/unified-message-ordering-reducer.md §3.1.
+			// If there's a pending tool permission request, replay it to the new
+			// client. We REUSE the original broadcast's seq/ts (stashed on the
+			// pending-grant record) instead of allocating a fresh seq — a fresh
+			// unicast seq would leave already-attached clients gap-buffering the
+			// next live event forever. Pinned by
+			// tests/perm-frame-late-joiner-seq-gap.test.ts.
 			const pendingPerm = sessionManager.getPendingToolPermission(sessionId);
 			if (pendingPerm) {
-				const { seq, ts } = session.eventBuffer.pushFrame();
-				send(ws, { type: "tool_permission_needed", ...pendingPerm, seq, ts });
+				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
 			return;
 		}
@@ -550,7 +551,7 @@ export function handleWebSocketConnection(
 					// Fire-and-forget: don't block the WS message loop.
 					// The async IIFE handles the full lifecycle.
 					session.isCompacting = true;
-					emitSessionEvent(session, { type: "compaction_start" });
+					broadcast(session.clients, { type: "event", data: { type: "compaction_start" } });
 					(async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
@@ -562,13 +563,13 @@ export function handleWebSocketConnection(
 							// the placeholder when processing the refreshed messages.
 							// Include tokensBefore so the UI can show how much was saved.
 							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
-							emitSessionEvent(session, { type: "compaction_end", success: true, tokensBefore });
+							broadcast(session.clients, { type: "event", data: { type: "compaction_end", success: true, tokensBefore } });
 							// Refresh messages and state (updated context tokens)
 							await sessionManager.refreshAfterCompaction(session);
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							session.isCompacting = false;
-							emitSessionEvent(session, { type: "compaction_end", success: false, error: err.message });
+							broadcast(session.clients, { type: "event", data: { type: "compaction_end", success: false, error: err.message } });
 						}
 					})().catch((err) => {
 						console.error(`[ws-handler] Unexpected compact error for session ${sessionId}:`, err);

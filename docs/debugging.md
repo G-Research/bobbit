@@ -127,6 +127,7 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 
 ## Abort, steer & queue
 
+- **History note**: the steer-subsystem rewrite (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`) plus follow-ups (#477 abort-race, #478 listener-ordering, #480 `bash_bg wait` end-of-turn hint) were reverted on `master` during a freeze investigation, then restored on `goal/restore-st-ac566fee` once the freeze was isolated to PR #514 (WS `emitSessionEvent` refactor, intentionally still absent). All entries below describe the restored behaviour. See [docs/design/steer-subsystem-rewrite.md](design/steer-subsystem-rewrite.md) for the full design.
 - **Session status values**: `idle`, `streaming`, `preparing`, `dormant`, `terminated`, and `aborting`. The `aborting` status is broadcast immediately when the user clicks Stop — it covers the up-to-3s grace period before a force-kill. UI shows an "Aborting..." spinner during this state.
 - **Steered message duplicated after Stop?** This was the canonical pre-rewrite bug. After the steer-subsystem rewrite (see [docs/design/steer-subsystem-rewrite.md](design/steer-subsystem-rewrite.md)), `PromptQueue` no longer carries a `dispatched` flag and `SessionManager` no longer has `removeDispatched()` / `resetDispatched()`. Exactly-once at the transcript level is enforced by: (1) `_dispatchSteer()` removes rows from `promptQueue` *before* awaiting `rpcClient.steer()`, so the SDK becomes the sole authority for in-flight text; (2) the per-session shadow ledger `SessionInfo.inFlightSteerTexts` records every dispatched batch and is spliced on the matching `message_end(role:user)` echo (`_consumeSteerEcho`); (3) on abort — both the graceful `agent_end while wasAborting` branch and `forceAbort` *after* `rpcClient.stop()` (the ledger is Bobbit-owned in-process state, so post-kill is fine) — `_reconcileAfterAbort()` drains the ledger and re-enqueues entries at the front of `promptQueue` with `isSteered=true`, so `drainQueue()` redispatches the batch exactly once after the new agent comes up. If a steer is duplicated, look at: ledger entries that weren't spliced on the echo (text-match drift between dispatch and `message_end`), `_reconcileAfterAbort` running twice without clearing the ledger between calls, or a row remaining in `promptQueue` after `_dispatchSteer` already removed it (impossible by construction, but verify `remove(id)` returned true for every ledger push).
 - **Steered messages lost after abort?** Look in this order: (1) was the steer dispatched at all — check the `_dispatchSteer` removed the row from `promptQueue` before awaiting RPC, and `inFlightSteerTexts` has the entry; (2) did `_reconcileAfterAbort` run — it's invoked on `agent_end while wasAborting` *and* in `forceAbort` immediately *after* `rpcClient.stop()` (the ledger is in-process Bobbit state, so it survives the kill either way); (3) did the post-respawn `drainQueue()` pick up the re-enqueued steered batch — it should pop them via `dequeueAllSteered()` and dispatch via `prompt` (idle path), not `steer`. The remaining residual at-least-once race is a hard kill that lands between `rpcClient.steer()` resolving and the SDK's synchronous `_steeringMessages.push` — orders of magnitude smaller than the pre-rewrite always-on at-least-once contract.
@@ -170,6 +171,35 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 
 - Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is now a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
 - `compacting_placeholder` must be filtered and re-added correctly across server refreshes — the reducer drops the synthetic when a snapshot row carries the server-persisted compaction marker (id-match, with `"Context compacted"` text fallback).
+
+## Goal creation fails with `Workflow not found: general`
+
+**Symptom:** Clicking Accept on a goal proposal (from +New Goal or the goal assistant) returns 400 with `Workflow not found: general`, or — for a project whose store is empty — with the `NO_WORKFLOWS_MSG` body.
+
+- `"general"` is no longer a built-in default. Workflows are project-scoped; a project may have any set of ids, or none at all. If a stale code path is still sending `workflowId="general"`, the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts) should have caught it — re-run `npm run test:unit` and look for the failing scan of `src/server/agent/` or `src/app/`.
+- The resolution rule (`GoalManager.createGoal` in `src/server/agent/goal-manager.ts`): explicit `workflowId` → first workflow in `workflowStore.getAll()` (insertion order) → `NO_WORKFLOWS_MSG`. The UI mirrors this — `_selectedWorkflowId` / `_proposalWorkflowId` in `src/app/render.ts` are seeded from the first cached workflow once `fetchWorkflows` resolves, never from a literal id.
+- If the project genuinely has zero workflows, the user must run the project assistant first. The goal preview panel renders an empty-workflows banner in this state (see next entry). If the banner does not render but `createGoal` still fails with `NO_WORKFLOWS_MSG`, the workflow cache for the linked project is stale or the `wfState` derivation is mis-computing — grep `src/app/render.ts` for `_workflowCacheByProject` and the `wfState` switch.
+- Full convention: [docs/goals-workflows-tasks.md — Default workflow resolution](goals-workflows-tasks.md#default-workflow-resolution).
+
+## Goal accept dismisses the assistant before showing the error
+
+**Symptom:** Clicking Accept on a goal-assistant proposal that fails server-side (workflow missing, project not registered, etc.) closes the assistant panel, clears the chat, and lands the user on the landing page with only a toast as feedback. The session, draft, and conversation are gone.
+
+- Fix lives in `src/app/render.ts` in **both** accept handlers (the goal-preview panel handler and the `propose_goal` proposal-toast handler). `createGoal()` must be awaited **before** any destructive teardown — disconnecting the remote agent, clearing the active view, deleting the draft, removing `gateway.sessionId`, and navigating away all live in the success branch only.
+- On failure the standard `showConnectionError("Failed to create goal", …)` toast surfaces the server's error message; the assistant, chat, `gatewaySessions` entry, and form state remain so the user can retry or ask the assistant to revise. Re-attempt sessions (with `reattemptGoalId`) share the same handler and are covered by the same guarantee.
+- Regression test: [`tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts`](../tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts) — stubs a 400 from `POST /api/goals` and asserts the assistant panel, chat, and `gateway.sessionId` survive.
+- Full convention: [docs/goals-workflows-tasks.md — `createGoal` failure preserves the assistant](goals-workflows-tasks.md#creategoal-failure-preserves-the-assistant).
+
+## Goal form has no workflow dropdown / empty-workflows banner missing
+
+**Symptom:** The goal preview panel shows no workflow `<select>` and no empty-workflows banner — either the dropdown is missing on a project that has workflows, or the banner is missing on a project that has none.
+
+- Derivation lives in `src/app/render.ts` — search for `wfState` (computed by the helper near the top of the file) and its `"loading" | "empty" | "ready"` states. While `"loading"`, the panel renders a skeleton to prevent banner flicker; `"empty"` renders the banner + disabled Accept; `"ready"` renders the dropdown.
+- If a project with workflows shows the banner: the per-project workflow cache (`_workflowCacheByProject`) was not populated. Confirm `ensureWorkflowsLoaded(projectId)` is being called when the linked project changes and that the fetch resolved (DevTools → Network → `GET /api/workflows?projectId=…`). The cache is keyed by `projectId`, so switching projects without re-resolving the cache is the usual culprit.
+- If a project with zero workflows shows neither the banner nor the dropdown: `wfState` is stuck in `"loading"`. Check for a fetch error suppressed without clearing the loading flag.
+- The banner's **Open Project Assistant** button calls `createProjectAssistantSession(linked.rootPath, false, { projectId, existingProjectName })` from `src/app/dialogs.ts`. If the button does nothing, verify `linked` resolves to the project record (not just an id).
+- Regression test: [`tests/e2e/ui/goal-empty-workflows-banner.spec.ts`](../tests/e2e/ui/goal-empty-workflows-banner.spec.ts).
+- Full convention: [docs/goals-workflows-tasks.md — Goal creation in a zero-workflow project](goals-workflows-tasks.md#goal-creation-in-a-zero-workflow-project).
 
 ## Goal proposal dismissed but reappears
 
@@ -609,6 +639,16 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - Spilled files live under `<session-cwd>/.bobbit-qa/screenshots/`. The directory is gitignored and deleted on session shutdown. If stale dirs remain after a crash, they are safe to `rm -rf`.
 - Reports referencing screenshots via `<img src="file://...">` are inlined to base64 by the server when the agent submits via `report_html_file` (20 MB cumulative cap, session-cwd-scoped). See [qa-testing.md — Screenshots in QA reports](qa-testing.md#screenshots-in-qa-reports).
 
+## Worktree-pool errors at startup on a fresh install / `pool/_pool-*` branches in an unrelated repo
+
+- **Symptom**: brand-new bobbit install with no user projects registered emits `[worktree-pool]` errors at startup, or `pool/_pool-*` branches and worktrees appear inside an unrelated git repo (e.g. a bobbit source clone, or whichever directory you happened to `cd` into before launching bobbit). Reproduces only when the bobbit state dir is itself nested inside some ancestor git work tree.
+- **Root cause**: at startup the server registers a hidden synthetic project (id `system`, anchored at `<bobbitStateDir>/system-project/`) as a persistence anchor for system-scope tool-assistant sessions. The boot worktree sweeper and pool-init loops used to iterate **every** `ProjectContext` via `ProjectContextManager.all()`, including the hidden one. The pool's `isGitRepo(repoPath)` gate shells out to `git rev-parse --is-inside-work-tree`, which walks **up** the directory tree — so when `<bobbitStateDir>/system-project/` is nested inside any ancestor `.git`, the gate passes and the pool starts allocating `pool/_pool-*` branches and worktrees in the unrelated host repo.
+- **Fix**: `ProjectContextManager.visible()` skips `hidden: true` contexts. Worktree sweeper, pool init, goal-manager pool-resolver wiring, `/api/maintenance/orphaned-worktrees` cleanup, and the `/api/sessions` + `/api/goals` listing aggregations all iterate `visible()` instead of `all()`. Callers that legitimately need the hidden system project (session/goal lookup by id, MCP discovery, system-scope tool authoring resolution) keep using `all()`. Pinned by `tests/system-project-pool-leak.test.ts`.
+- **Diagnostic checks**:
+  1. `git -C <bobbit-state-dir> rev-parse --show-toplevel` — if it prints any path, the state dir is inside a host git repo and the pre-fix bug would trigger.
+  2. `git -C <host-repo> branch --list 'pool/_pool-*'` — leftover branches from before the fix are safe to delete; `git -C <host-repo> worktree list` will also show stray `<host-repo>-wt/pool/_pool-*` entries that can be removed via `git worktree remove`.
+  3. New worktree/pool/sweeper iteration must use `visible()`. If you add a new boot-time iteration over `ProjectContextManager` and reach for `all()` reflexively, you will reintroduce this bug — see [internals.md — Iteration contract: `visible()` vs `all()`](internals.md#synthetic-system-project).
+
 ## Slow first-session preparing window on cold boot
 
 - **Symptom**: the first session created after `npm run dev:harness` (or any fresh server start) sits in `preparing` for tens of seconds to minutes; subsequent sessions in the same server lifetime are fast. Server stdout shows `[worktree-setup] bobbit: ok` only after a long delay; until that line, every new session falls through to the cold-path `createWorktree` + per-component `runComponentSetups()` (e.g. `npm ci`).
@@ -1030,3 +1070,31 @@ Fix path:
 - `src/server/server.ts` handler: convert `catch (err) { json({ error: String(err) }, status); }` to `catch (err) { jsonError(status, err); }`.
 - `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders the message + optional code + collapsible stack disclosure when both halves are wired correctly.
 - The background polling site in `refreshSessions()` is intentionally silent and does NOT surface a modal — failures there are dropped on purpose.
+
+## Agent `fetch failed` against gateway when started with `--host 0.0.0.0`
+
+- **Symptoms**: under `./run --host 0.0.0.0 --port <port> --no-tls`, the
+  console shows `Listening: http://0.0.0.0:<port>` as expected, but every
+  same-host tool extension that calls back into the gateway (the `team_*`
+  tools, the `Children` tools, image generation, MCP discovery — anything
+  routed through `defaults/tools/_shared/gateway.ts::apiCall`) fails with an
+  opaque `fetch failed`. Under `npm run dev:harness` (which binds to
+  `localhost`) the same code path works.
+- **Why**: `0.0.0.0` and `::` are wildcard *listen* addresses. They tell the
+  kernel "accept connections on every interface" but they are not valid
+  *connect* peers — macOS / BSD reject `connect()` to `0.0.0.0`. If the
+  gateway-url file contains `http://0.0.0.0:<port>`, every agent on the same
+  host that reads it and tries to fetch the gateway hits the kernel rejection
+  before any HTTP frame is sent.
+- **Where the fix lives**: `src/server/cli-loopback.ts` exports the pure
+  helper `loopbackForBind(host)`. `0.0.0.0` → `127.0.0.1`, `::` / `[::]` →
+  `[::1]`, every other host (including `localhost`, LAN IPs, and hostnames)
+  is returned unchanged. `src/server/cli.ts` writes a loopback-normalised
+  `peerUrl` to `<stateDir>/gateway-url` while the human-readable
+  `Listening:` log line and the browser auto-open URL keep using the
+  literal `args.host`. The split is intentional: the operator wants to see
+  the bind address they passed; the agent needs a real connect peer.
+- **Quick checks**: `cat .bobbit/state/gateway-url` should never contain
+  `0.0.0.0` or `::`. If it does, the server is on a pre-fix build, or a new
+  CLI codepath is writing the file directly without routing through
+  `loopbackForBind`. Tests: `tests/cli-loopback-for-bind.test.ts`.

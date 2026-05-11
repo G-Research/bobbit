@@ -460,6 +460,9 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	if (typeof healthData.setupComplete === "boolean") {
 		state.setupComplete = healthData.setupComplete;
 	}
+	if (typeof healthData.orphanedTranscripts === "number") {
+		state.orphanedTranscriptsCount = healthData.orphanedTranscripts;
+	}
 	if (!healthData.localhost && !healthData.aigw) {
 		const hasAuth = await checkOAuthStatus();
 		if (!hasAuth) {

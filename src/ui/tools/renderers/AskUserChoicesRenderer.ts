@@ -104,7 +104,6 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 			};
 		}
 
-		const errored = Boolean(result?.isError);
 		const posted = isPostedStub(result);
 		// Preferred path: the tool returned the `{status:"posted"}` stub and the
 		// user has submitted; answers live in a later envelope user message.
@@ -114,6 +113,13 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 		// Legacy path: pre-redesign sessions where the tool_result itself carried answers.
 		const legacy = posted ? null : extractLegacyAnswers(result);
 		const answers: AskAnswer[] | null = fromTranscript ?? legacy;
+		// Defense-in-depth: a completed tool result that is neither the posted stub
+		// nor carries legacy answers must be a failure — even if `isError` was not
+		// set on the result. This guards against tool extensions that forget to set
+		// `isError: true` on validation failures (would otherwise render the full
+		// interactive widget for a dead call).
+		const errored = Boolean(result?.isError)
+			|| (state !== "inprogress" && Boolean(result) && !posted && !legacy);
 
 		// Interactive mode: tool posted, no envelope yet, not errored.
 		//   - If `posted` is false but the tool has produced a non-stub result,

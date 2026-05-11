@@ -174,6 +174,57 @@ test.describe("Settings (full-stack UI)", () => {
 		await expect(finalCheckbox).toBeChecked();
 	});
 
+	test("skills catalog budget: change, persists across reload, reset clears preference", async ({ page }) => {
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+
+		// Navigation
+		await expect(page.getByText("Skills catalog budget")).toBeVisible({ timeout: 10_000 });
+		const input = page.locator("[data-testid='general-skills-catalog-budget']");
+		const resetBtn = page.locator("[data-testid='general-skills-catalog-budget-reset']");
+		await expect(input).toBeVisible({ timeout: 5_000 });
+
+		// Default: 16 KB (server default; no override stored).
+		await expect(input).toHaveValue("16");
+		await expect(resetBtn).toBeDisabled();
+
+		// Happy path: change to 32 KB and wait for the PUT to complete.
+		let responsePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/preferences") && resp.request().method() === "PUT" && resp.status() === 200,
+		);
+		await input.fill("32");
+		await input.blur();
+		await responsePromise;
+		await expect(resetBtn).toBeEnabled();
+
+		// Persistence: reload and confirm 32 KB stuck.
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		const inputAfter = page.locator("[data-testid='general-skills-catalog-budget']");
+		await expect(inputAfter).toBeVisible({ timeout: 10_000 });
+		await expect(inputAfter).toHaveValue("32");
+
+		// Verify GET /api/preferences reflects the override.
+		const prefs1 = await (await apiFetch("/api/preferences")).json();
+		expect(prefs1.skillsCatalogBudget).toBe(32 * 1024);
+
+		// Cleanup/undo: reset returns to default and clears the preference.
+		responsePromise = page.waitForResponse(
+			resp => resp.url().includes("/api/preferences") && resp.request().method() === "PUT" && resp.status() === 200,
+		);
+		const resetBtnAfter = page.locator("[data-testid='general-skills-catalog-budget-reset']");
+		await resetBtnAfter.click();
+		await responsePromise;
+		await expect(inputAfter).toHaveValue("16");
+		await expect(resetBtnAfter).toBeDisabled();
+
+		const prefs2 = await (await apiFetch("/api/preferences")).json();
+		expect(prefs2.skillsCatalogBudget).toBeUndefined();
+	});
+
 	test("per-project settings scope switching", async ({ page }) => {
 		// Create a project via API
 		const resp = await apiFetch("/api/projects", {

@@ -77,6 +77,20 @@ export class EventBuffer {
 		this.nextSeq = 1;
 	}
 
+	/** Reseed the next-seq counter so a freshly constructed buffer continues
+	 *  the previous one's monotonic sequence space. Used by `_restartAgent`-class
+	 *  flows to preserve the client-side `_highestSeq` frame of reference across
+	 *  a server-side process respawn (clients do NOT disconnect during the
+	 *  restart, so their `_highestSeq` keeps the old high-water mark — if the
+	 *  new buffer started back at 1, every fresh event would be silently dropped
+	 *  by the client's `seq <= _highestSeq` dedup gate).
+	 *  See docs/design/restart-preserves-streaming-frame-of-reference.md. */
+	seedNextSeq(seq: number): void {
+		if (!Number.isFinite(seq) || seq < 1) return;
+		if (seq <= this.nextSeq) return; // never go backwards
+		this.nextSeq = seq;
+	}
+
 	get size(): number {
 		return this.buffer.length;
 	}

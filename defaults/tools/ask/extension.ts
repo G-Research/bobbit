@@ -26,6 +26,14 @@ export default function (pi: ExtensionAPI) {
 		return { content: [{ type: "text" as const, text: JSON.stringify(data) }], details: undefined };
 	}
 
+	function errorResult(data: unknown) {
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(data) }],
+			isError: true,
+			details: undefined,
+		};
+	}
+
 	pi.registerTool({
 		name: "ask_user_choices",
 		label: "Ask User Choices",
@@ -60,7 +68,7 @@ export default function (pi: ExtensionAPI) {
 						minimum: 1,
 						description: "Max selections when multi:true. Default options.length.",
 					})),
-				}, { additionalProperties: true }),
+				}),
 				{ minItems: 1, maxItems: 5 },
 			),
 		}),
@@ -74,12 +82,12 @@ export default function (pi: ExtensionAPI) {
 					const q = questions[i];
 					const label = q?.tab_label;
 					if (typeof label !== "string" || label.trim().length === 0) {
-						return ok({
+						return errorResult({
 							error: `ask_user_choices: questions[${i}].tab_label is required for multi-question asks (2–4 words, ≤24 chars).`,
 						});
 					}
 					if (label.length > 24) {
-						return ok({
+						return errorResult({
 							error: `ask_user_choices: questions[${i}].tab_label exceeds 24 chars (got ${label.length}).`,
 						});
 					}

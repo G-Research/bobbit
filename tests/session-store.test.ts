@@ -42,16 +42,24 @@ function freshStore(): InstanceType<typeof SessionStore> {
 
 describe("SessionStore", () => {
 	beforeEach(() => {
-		// Clear the store file for a clean slate
-		if (fs.existsSync(STORE_FILE)) {
-			fs.unlinkSync(STORE_FILE);
-		}
+		// Clear the store file + backups for a clean slate
+		try {
+			for (const f of fs.readdirSync(stateDir)) {
+				if (f === "sessions.json" || f.startsWith("sessions.json.")) {
+					try { fs.unlinkSync(path.join(stateDir, f)); } catch { /* ignore */ }
+				}
+			}
+		} catch { /* ignore */ }
 	});
 
 	afterEach(() => {
-		// Clean up store file
+		// Clean up store file + any rotated backups so each test starts clean.
 		try {
-			if (fs.existsSync(STORE_FILE)) fs.unlinkSync(STORE_FILE);
+			for (const f of fs.readdirSync(stateDir)) {
+				if (f === "sessions.json" || f.startsWith("sessions.json.")) {
+					try { fs.unlinkSync(path.join(stateDir, f)); } catch { /* ignore */ }
+				}
+			}
 		} catch { /* ignore */ }
 	});
 
@@ -395,9 +403,9 @@ describe("SessionStore", () => {
 			// flush forces write
 			store.flush();
 
-			// Verify by reading file directly
+			// Verify by reading file directly (v2 shape: {version, epoch, sessions[]})
 			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
-			assert.equal(raw[0].title, "Debounced");
+			assert.equal(raw.sessions[0].title, "Debounced");
 		});
 
 		it("flush is a no-op when nothing is pending", () => {

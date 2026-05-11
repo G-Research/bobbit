@@ -1,5 +1,5 @@
 /**
- * `process.execPath` invariant invariant — every node-process spawn site under `src/server/`
+ * `process.execPath` invariant — every node-process spawn site under `src/server/`
  * must use `process.execPath`, never the bare string `"node"`.
  *
  * Bare `spawn("node", ...)` fails under sanitised PATH (e.g. when the

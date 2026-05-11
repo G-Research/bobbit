@@ -70,6 +70,14 @@ export interface GatewayInfo {
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
 	 * tail of this buffer into the test artifact directory. */
 	logs: { ring: string[]; capacity: number };
+	/** Shut down the in-process gateway. The browser page's WebSocket will
+	 * fire `close` and the client's reconnect timer will start polling. */
+	crash(): Promise<void>;
+	/** Re-boot the gateway anchored at the same `bobbitDir` AND the same
+	 * port. Updates `info.sessionManager` to point at the new instance.
+	 * Throws if the OS assigns a different port (which would orphan the
+	 * browser page's WebSocket reconnect target). */
+	restart(): Promise<void>;
 }
 
 // Server log ring buffer — module-scoped so the gateway worker fixture and
@@ -235,16 +243,22 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 			wrSync(join(projectConfigDir, "project.yaml"), yamlContent);
 		} catch { /* best-effort */ }
 
-		const gw = createGateway({
+		// Reusable gateway-construction args. Captured once on first boot,
+		// reused verbatim on restart() so the second instance is anchored
+		// at the same on-disk state and behaves identically.
+		const gatewayConfig = {
 			host: "127.0.0.1",
-			port: 0,             // OS-assigned port
-			portExplicit: true,  // Skip auto-increment loop
 			authToken: token,
 			defaultCwd: bobbitDir,
 			forceAuth: true,
 			agentCliPath: MOCK_AGENT,
-			// Browser tests need the UI served from the same origin.
 			staticDir: STATIC_DIR,
+		};
+
+		let gw = createGateway({
+			...gatewayConfig,
+			port: 0,             // OS-assigned port on first boot
+			portExplicit: true,  // Skip auto-increment loop
 		});
 
 		const port = await gw.start();
@@ -278,6 +292,49 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 			bobbitDir,
 			sessionManager: gw.sessionManager,
 			logs: _serverLogs,
+			async crash() {
+				await gw.shutdown();
+			},
+			async restart() {
+				// Re-bind the gateway to the same port. setProjectRoot /
+				// scaffoldBobbitDir / loadOrCreateToken / project register /
+				// workflow seed are all idempotent on-disk state and skipped
+				// on restart — second boot reads what first boot wrote.
+				// Module singletons in dist/server/* are already shared across
+				// boots within the same Playwright worker (same pattern as
+				// session-recovery.spec.ts and steer-gateway-restart.spec.ts).
+				//
+				// Tiny retry loop covers Windows TIME_WAIT races on the listener
+				// socket. SO_REUSEADDR is OS-default for IPv4 on Windows so this
+				// is rare — but observed enough in CI to warrant the guard.
+				let lastErr: unknown;
+				let boundPort = -1;
+				for (let attempt = 0; attempt < 5; attempt++) {
+					const next = createGateway({
+						...gatewayConfig,
+						port,
+						portExplicit: true,
+					});
+					try {
+						boundPort = await next.start();
+						gw = next;
+						break;
+					} catch (err: any) {
+						lastErr = err;
+						if (err?.code !== "EADDRINUSE") throw err;
+						await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+					}
+				}
+				if (boundPort < 0) throw lastErr;
+				if (boundPort !== port) {
+					throw new Error(`gateway restarted on different port: ${boundPort} vs ${port}`);
+				}
+				writeFileSync(
+					join(bobbitDir, "state", "gateway-url"),
+					`http://127.0.0.1:${port}`,
+				);
+				info.sessionManager = gw.sessionManager;
+			},
 		};
 
 		await use(info);

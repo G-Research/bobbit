@@ -267,36 +267,36 @@ export function startCanvasEyeAnimation(
 	const ctx = canvas.getContext("2d")!;
 	let rafId = 0;
 	let lastKey = "";
-	let cssAnim: Animation | null = null;
 
-	function findCssAnimation(): Animation | null {
-		try {
-			const anims = canvas.getAnimations();
-			for (const a of anims) {
-				const dur = (a.effect as KeyframeEffect)?.getTiming?.()?.duration;
-				if (dur === cycleDurationMs) return a;
-			}
-		} catch { /* getAnimations not supported */ }
-		return null;
+	// Single source of truth: the canvas already has its own CSS animation
+	// (blob-busy-move-canvas / blob-idle-eyes-canvas) with the right
+	// animation-delay (--bobbit-idle-phase) applied. Reading that animation's
+	// currentTime gives us the *exact same* clock value CSS uses to evaluate
+	// every other animation on the same element — including sibling
+	// accessories (magnifier-depth-idle) that share the same delay.
+	//
+	// This bypasses every clock-arithmetic edge case (mount time, document
+	// timeline epoch, negative-delay semantics): we don't compute the phase,
+	// we observe the same one CSS observes.
+	function readPhasePct(): number {
+		const anims = canvas.getAnimations();
+		// Pick the 10s-cycle animation; its currentTime already accounts for
+		// animation-delay (negative delays make it start positive).
+		let anim: Animation | undefined;
+		for (const a of anims) {
+			const dur = (a.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
+			if (dur === cycleDurationMs) { anim = a; break; }
+		}
+		if (!anim || anim.currentTime == null) return 0;
+		const raw = typeof anim.currentTime === "number"
+			? anim.currentTime
+			: Number((anim.currentTime as CSSNumericValue).to("ms").value);
+		const wrapped = ((raw % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+		return (wrapped / cycleDurationMs) * 100;
 	}
 
 	function tick() {
-		if (!cssAnim) cssAnim = findCssAnimation();
-
-		let pct: number;
-		if (cssAnim && cssAnim.currentTime != null) {
-			const ct = typeof cssAnim.currentTime === "number"
-				? cssAnim.currentTime
-				: (cssAnim.currentTime as CSSNumericValue).to("ms").value;
-			const delay = Number((cssAnim.effect as KeyframeEffect)?.getTiming?.()?.delay ?? 0);
-			const active = ct - delay;
-			pct = active >= 0
-				? ((active % cycleDurationMs) / cycleDurationMs * 100)
-				: 0;
-		} else {
-			pct = (performance.now() % cycleDurationMs) / cycleDurationMs * 100;
-		}
-
+		const pct = readPhasePct();
 		let frame = sequence[0];
 		for (let i = sequence.length - 1; i >= 0; i--) {
 			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }

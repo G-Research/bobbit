@@ -353,6 +353,9 @@ export const state = {
 	/** Whether the setup wizard has been completed (safe default: true — don't show banner until we know) */
 	setupComplete: true,
 
+	/** Count of agent-CLI transcripts on disk not tracked in sessions.json. >0 shows a splash banner. */
+	orphanedTranscriptsCount: 0,
+
 
 	/** Cached roles for the role picker menu */
 	roles: [] as Array<{ name: string; label: string; accessory: string }>,

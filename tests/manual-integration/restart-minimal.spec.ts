@@ -237,7 +237,8 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 
 	// Read sessions.json snapshot for diagnosis
 	const sfPath = join(dir, ".bobbit", "state", "sessions.json");
-	const before = JSON.parse(readFileSync(sfPath, "utf-8")) as any[];
+	const beforeRaw = JSON.parse(readFileSync(sfPath, "utf-8")) as any;
+	const before: any[] = Array.isArray(beforeRaw) ? beforeRaw : (beforeRaw?.sessions ?? []);
 	console.log(`  [boot] sessions.json has ${before.length} entries`);
 	for (const s of before) {
 		console.log(`         id=${s.id} title="${s.title}" branch=${s.branch} archived=${!!s.archived} agentSessionFile=${s.agentSessionFile ? "yes" : "MISSING"}`);
@@ -282,7 +283,8 @@ test("restart-minimal: plain + worktree session both survive a restart", async (
 	}
 
 	// Read the post-restart sessions.json for diagnosis
-	const after = JSON.parse(readFileSync(sfPath, "utf-8")) as any[];
+	const afterRaw = JSON.parse(readFileSync(sfPath, "utf-8")) as any;
+	const after: any[] = Array.isArray(afterRaw) ? afterRaw : (afterRaw?.sessions ?? []);
 	console.log(`  [restart] sessions.json now has ${after.length} entries (${after.filter(s => s.archived).length} archived)`);
 
 	// UI visibility assertion: a real user verifies sessions survive by

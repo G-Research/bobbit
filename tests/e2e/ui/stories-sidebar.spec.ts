@@ -49,8 +49,8 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await waitForHealth();
 	});
 
-	test.beforeEach(async ({ page }) => {
-		s = new SpecContext(page);
+	test.beforeEach(async ({ page, gateway }) => {
+		s = new SpecContext(page, gateway);
 		await s.open();
 	});
 

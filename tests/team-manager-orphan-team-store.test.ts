@@ -23,6 +23,7 @@ process.env.BOBBIT_DIR = TEST_DIR;
 
 const { TeamStore } = await import("../src/server/agent/team-store.ts");
 const { GoalStore } = await import("../src/server/agent/goal-store.ts");
+const { SessionStore } = await import("../src/server/agent/session-store.ts");
 const { TeamManager } = await import("../src/server/agent/team-manager.ts");
 
 type PersistedTeamEntry = import("../src/server/agent/team-store.ts").PersistedTeamEntry;
@@ -59,7 +60,8 @@ function makeGoal(id: string, overrides: Partial<PersistedGoal> = {}): Persisted
 function buildProjectContext(stateDir: string) {
 	const teamStore = new TeamStore(stateDir);
 	const goalStore = new GoalStore(stateDir);
-	return { teamStore, goalStore };
+	const sessionStore = new SessionStore(stateDir);
+	return { teamStore, goalStore, sessionStore };
 }
 
 function buildPCM(contexts: Array<ReturnType<typeof buildProjectContext>>) {
@@ -127,6 +129,21 @@ describe("orphan team-store cleanup on boot", () => {
 		const ctx = buildProjectContext(STATE_DIR);
 		ctx.goalStore.put(makeGoal("real-goal-1"));
 		ctx.teamStore.put(makeOrphanEntry("real-goal-1"));
+		// The new recovery code also classifies a team entry whose team-lead
+		// session record is missing as an orphan candidate. Seed the matching
+		// session so the entry is recognised as a real, fully-attested team.
+		ctx.sessionStore.put({
+			id: "tl-real-goal-1",
+			role: "team-lead",
+			title: "Team Lead: real-goal-1",
+			cwd: "/tmp",
+			createdAt: Date.now(),
+			goalId: "real-goal-1",
+			teamGoalId: "real-goal-1",
+			teamLeadSessionId: "tl-real-goal-1",
+			colorIndex: 0,
+			accessory: null,
+		} as any);
 
 		const tm = new TeamManager(makeStubSessionManager(), {
 			taskManager: {} as any,
@@ -155,6 +172,21 @@ describe("orphan team-store cleanup on boot", () => {
 		projA.teamStore.put(makeOrphanEntry("real-A"));
 		projA.teamStore.put(makeOrphanEntry("orphan-A"));
 		projB.teamStore.put(makeOrphanEntry("orphan-B"));
+		// Seed the team-lead session record for the "real" goal so the new
+		// missing-team-lead orphan criterion (added by the recovery commits)
+		// doesn't falsely flag it.
+		projA.sessionStore.put({
+			id: "tl-real-A",
+			role: "team-lead",
+			title: "Team Lead: real-A",
+			cwd: "/tmp",
+			createdAt: Date.now(),
+			goalId: "real-A",
+			teamGoalId: "real-A",
+			teamLeadSessionId: "tl-real-A",
+			colorIndex: 0,
+			accessory: null,
+		} as any);
 
 		const tm = new TeamManager(makeStubSessionManager(), {
 			taskManager: {} as any,

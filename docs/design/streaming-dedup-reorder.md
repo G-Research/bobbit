@@ -4,6 +4,8 @@
 **Scope**: Live streaming only (not reload-replay). Agent execution is correct; this is a transport/rendering bug.
 
 > **Related, parallel pattern.** A separate but structurally similar duplication bug affects the gate verification event family (`gate_verification_*`), which fan-outs across all session WSs in a goal team. The fix mirrors this one — server-stamped monotonic `seq`, plus a client-side dedupe funnel (`src/app/verification-event-bus.ts`). See [docs/internals.md — Verification event dedupe](../internals.md#verification-event-dedupe) and [docs/debugging.md — Verification log duplicated Nx](../debugging.md#verification-log-duplicated-nx).
+>
+> **Single-allocation pin for non-`event` frames.** The `tool_permission_needed` frame also carries a `seq`/`ts` from `EventBuffer.pushFrame()`, but unlike live events it must NOT be re-allocated on late-joiner replay — doing so leaves a hole in the live-seq stream of already-attached clients. The on-attach branch in `ws/handler.ts` replays the original `seq`/`ts` stashed on `pendingGrantRequest`. See [`perm-frame-late-joiner-seq-replay.md`](./perm-frame-late-joiner-seq-replay.md).
 
 ---
 

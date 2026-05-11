@@ -489,8 +489,10 @@
  * With accessories the visual area is ~55×45px (overflow:visible extends it).
  * We scale the whole thing with the outer container's transform. */
 .bobbit-blob--inline .bobbit-blob__sprite {
-	/* Offset eye animation phase so multiple inline blobs don't blink in sync */
-	animation-delay: var(--bobbit-eye-delay, 0s) !important;
+	/* Offset eye animation phase so multiple inline blobs don't blink in sync.
+	   --bobbit-idle-phase is the canonical var (set by renderIdleBlobCanvas);
+	   --bobbit-eye-delay kept as a fallback for any caller still using it. */
+	animation-delay: var(--bobbit-idle-phase, var(--bobbit-eye-delay, 0s)) !important;
 }
 
 /* Shadow not needed inline */
@@ -524,7 +526,8 @@
 .bobbit-blob--inline.bobbit-wand .bobbit-blob__wand { display: block !important; }
 .bobbit-blob--inline.bobbit-wizard-hat .bobbit-blob__wizard-hat { display: block !important; }
 
-/* Sync accessory idle animations with the eye-delay stagger */
+/* Sync accessory idle animations with the same phase stagger as the eyes.
+   --bobbit-idle-phase is the canonical var; --bobbit-eye-delay is a fallback. */
 .bobbit-blob--inline.bobbit-bandana .bobbit-blob__bandana,
 .bobbit-blob--inline.bobbit-magnifier .bobbit-blob__magnifier,
 .bobbit-blob--inline.bobbit-palette .bobbit-blob__palette,
@@ -532,7 +535,7 @@
 .bobbit-blob--inline.bobbit-shield .bobbit-blob__shield,
 .bobbit-blob--inline.bobbit-set-square .bobbit-blob__set-square,
 .bobbit-blob--inline.bobbit-flask .bobbit-blob__flask {
-    animation-delay: var(--bobbit-eye-delay, 0s) !important;
+    animation-delay: var(--bobbit-idle-phase, var(--bobbit-eye-delay, 0s)) !important;
 }
 
 /* ============================================================================

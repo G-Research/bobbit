@@ -55,9 +55,11 @@ describe("reviewer kind field — TeamManager wiring", () => {
 	});
 
 	it("resubscribeTeamEvents skips reviewers when attaching the agent_end listener", () => {
-		const idx = tm.indexOf("resubscribeTeamEvents");
-		assert.ok(idx > 0);
-		const window = tm.slice(idx, idx + 6_000);
+		// Anchor on the method definition (not a comment mention elsewhere).
+		const defRe = /(?:^|\n)\s*resubscribeTeamEvents\s*\(/;
+		const m = defRe.exec(tm);
+		assert.ok(m, "resubscribeTeamEvents method definition must exist");
+		const window = tm.slice(m.index, m.index + 6_000);
 		// Skip predicate: kind === "reviewer" || role === "reviewer"
 		assert.match(window, /kind\s*===\s*"reviewer"/);
 		assert.match(window, /role\s*===\s*"reviewer"/);
@@ -70,7 +72,10 @@ describe("reviewer kind field — TeamManager wiring", () => {
 		const m = declRe.exec(tm);
 		assert.ok(m, "private restoreTeams method must be declared");
 		const idx = m.index;
-		const window = tm.slice(idx, idx + 6_000);
+		// 20 KB window because `restoreTeams` is large — the boot-recovery
+		// passes (orphan team-store, fully-orphan recovery, tree-level rename)
+		// push the lazy-migration to ~15 KB from the method start.
+		const window = tm.slice(idx, idx + 20_000);
 		// The migration check.
 		assert.match(window, /a\.kind\s*===\s*"reviewer"\s*\?\s*"reviewer"\s*:\s*"worker"/);
 	});
@@ -81,8 +86,10 @@ describe("reviewer kind field — defensive guard pattern", () => {
 
 	it("the kind === reviewer skip predicate has a `role === reviewer` fallback for pre-kind records", () => {
 		// Both forms must appear together in the resubscribeTeamEvents window.
-		const idx = tm.indexOf("resubscribeTeamEvents");
-		const window = tm.slice(idx, idx + 6_000);
+		const defRe = /(?:^|\n)\s*resubscribeTeamEvents\s*\(/;
+		const m = defRe.exec(tm);
+		assert.ok(m, "resubscribeTeamEvents method definition must exist");
+		const window = tm.slice(m.index, m.index + 6_000);
 		assert.match(
 			window,
 			/kind\s*===\s*"reviewer"\s*\|\|\s*agent\.role\s*===\s*"reviewer"/,

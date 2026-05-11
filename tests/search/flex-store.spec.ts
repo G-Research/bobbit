@@ -228,6 +228,44 @@ test("corrupt index file is tolerated on open", async () => {
 	}
 });
 
+// Regression: a single failed import file (e.g. tag index) used to leave
+// the store with a partial in-memory index and the next debounced flush
+// would silently overwrite the on-disk export with that incomplete state
+// — tag filters would degrade without further warning. Any failure must
+// trigger a full rebuild from `__docs__.json`.
+test("partial import failure rebuilds index from mirror; tag filters survive", async () => {
+	const dir = tmp("flex-partial-");
+	const seed = await FlexSearchStore.open({ dataDir: dir });
+	await seed.upsert([
+		doc({ id: "live-1", project_id: "p1", text: "alpha", archived: false }),
+		doc({ id: "live-2", project_id: "p2", text: "alpha", archived: false }),
+		doc({ id: "dead-1", project_id: "p1", text: "alpha", archived: true }),
+	]);
+	await seed.close();
+
+	// Corrupt one of the per-key export files (tag index is the realistic
+	// failure mode — it's structurally distinct from the doc/reg/map
+	// files). Leaves `__docs__.json` and the others intact.
+	const indexDir = path.join(dir, "index");
+	const tagFile = fs.readdirSync(indexDir).find((f) => /\.tag\.json$/.test(f));
+	expect(tagFile, "expected a *.tag.json export to corrupt").toBeTruthy();
+	fs.writeFileSync(path.join(indexDir, tagFile!), '[["source_id",[["goals",null]]]]');
+
+	const store = await FlexSearchStore.open({ dataDir: dir });
+	try {
+		expect(store.count()).toBe(3);
+		// Tag filtering must still be correct after rebuild.
+		const live = await store.search({ q: "alpha" });
+		expect(live.results.map((r) => r.id).sort()).toEqual(["live-1", "live-2"]);
+		const p1 = await store.search({ q: "alpha", projectId: "p1" });
+		expect(p1.results.map((r) => r.id)).toEqual(["live-1"]);
+		const all = await store.search({ q: "alpha", includeArchived: true });
+		expect(all.results.map((r) => r.id).sort()).toEqual(["dead-1", "live-1", "live-2"]);
+	} finally {
+		await store.close();
+	}
+});
+
 test("tag filter: archived excluded by default, included when requested", async () => {
 	const dir = tmp();
 	const store = await FlexSearchStore.open({ dataDir: dir });

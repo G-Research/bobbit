@@ -27,9 +27,10 @@ describe("boot-respawn for sessionless in-progress goals — source-grep guard",
 	});
 
 	it("is invoked from resubscribeTeamEvents", () => {
-		const startIdx = text.indexOf("resubscribeTeamEvents");
-		assert.ok(startIdx > 0);
-		const window = text.slice(startIdx, startIdx + 8_000);
+		// Find the method definition (not a comment mention).
+		const defIdx = text.search(/(?:^|\n)\s*resubscribeTeamEvents\s*\(/);
+		assert.ok(defIdx > 0, "resubscribeTeamEvents method definition must exist");
+		const window = text.slice(defIdx, defIdx + 8_000);
 		assert.match(window, /_bootRespawnSessionlessGoals\(\)/);
 	});
 

@@ -104,6 +104,13 @@ let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
 let settingsSubgoalsEnabled = false;
+// Skills-catalog byte budget override. `null` means "use server default" (no preference set).
+let settingsSkillsCatalogBudget: number | null = null;
+
+// Bounds mirror server-side `resolveSkillsCatalogBudget` in src/server/agent/system-prompt.ts.
+const SKILLS_CATALOG_BUDGET_DEFAULT_BYTES = 16384;
+const SKILLS_CATALOG_BUDGET_MIN_BYTES = 1024;
+const SKILLS_CATALOG_BUDGET_MAX_BYTES = 131072;
 let customisePromptStatus = "";
 
 // ── Per-project scope config state ──
@@ -1839,6 +1846,8 @@ function loadGeneralSettings() {
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					// Subgoals (Experimental) — default OFF. See docs/nested-goals.md.
 					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
+					const raw = prefs.skillsCatalogBudget;
+					settingsSkillsCatalogBudget = (typeof raw === "number" && Number.isFinite(raw)) ? raw : null;
 					renderApp();
 				}
 			} catch {}
@@ -1874,6 +1883,32 @@ async function customiseSystemPrompt(): Promise<void> {
 		customisePromptStatus = `Error: ${(err as Error).message}`;
 	}
 	renderApp();
+}
+
+async function setSkillsCatalogBudget(rawKB: number): Promise<void> {
+	if (!Number.isFinite(rawKB)) return;
+	let bytes = Math.floor(rawKB * 1024);
+	if (bytes < SKILLS_CATALOG_BUDGET_MIN_BYTES) bytes = SKILLS_CATALOG_BUDGET_MIN_BYTES;
+	if (bytes > SKILLS_CATALOG_BUDGET_MAX_BYTES) bytes = SKILLS_CATALOG_BUDGET_MAX_BYTES;
+	settingsSkillsCatalogBudget = bytes;
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ skillsCatalogBudget: bytes }),
+		});
+	} catch {}
+}
+
+async function resetSkillsCatalogBudget(): Promise<void> {
+	settingsSkillsCatalogBudget = null;
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ skillsCatalogBudget: null }),
+		});
+	} catch {}
 }
 
 async function togglePlayFinishSound(): Promise<void> {
@@ -2010,6 +2045,32 @@ function renderGeneralTab() {
 					the Plan tab DAG, and the Children tab on the goal dashboard.
 					Currently experimental — behaviour may change.
 				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-sm font-medium text-foreground">Skills catalog budget</span>
+				<p class="text-xs text-muted-foreground">
+					Maximum size (KB) of the "Available Skills" catalog injected into every agent system prompt.
+					Larger budgets let agents see more skills before the alphabetical tail is truncated. Range: 1–128 KB.
+				</p>
+				<div class="flex items-center gap-3">
+					<input
+						type="number"
+						min="1"
+						max="128"
+						step="1"
+						data-testid="general-skills-catalog-budget"
+						class="w-24 px-2 py-1 rounded border border-input bg-background text-sm"
+						.value=${String(Math.round((settingsSkillsCatalogBudget ?? SKILLS_CATALOG_BUDGET_DEFAULT_BYTES) / 1024))}
+						@change=${(e: Event) => setSkillsCatalogBudget(Number((e.target as HTMLInputElement).value))}
+					/>
+					<span class="text-xs text-muted-foreground">KB${settingsSkillsCatalogBudget === null ? " (default)" : ""}</span>
+					<button
+						class="text-xs text-muted-foreground hover:text-foreground underline"
+						data-testid="general-skills-catalog-budget-reset"
+						?disabled=${settingsSkillsCatalogBudget === null}
+						@click=${resetSkillsCatalogBudget}
+					>Reset to default</button>
+				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<span class="text-sm font-medium text-foreground">System prompt</span>

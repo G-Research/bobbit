@@ -19,22 +19,23 @@ describe("zombie-reviewer sweep — source-grep guard", () => {
 	const SOURCE = path.resolve(import.meta.dirname, "..", "src", "server", "agent", "team-manager.ts");
 	const text = fs.readFileSync(SOURCE, "utf-8");
 
+	// Locate the method definition (not a mention in a comment elsewhere).
+	function findMethodWindow(): string {
+		const defIdx = text.search(/(?:^|\n)\s*resubscribeTeamEvents\s*\(/);
+		assert.ok(defIdx > 0, "resubscribeTeamEvents method definition must exist");
+		return text.slice(defIdx, defIdx + 6_000);
+	}
+
 	it("resubscribeTeamEvents contains a zombie-reviewer sweep that calls unregisterReviewerSession", () => {
-		// Locate resubscribeTeamEvents and assert it contains the unregister call.
-		const startIdx = text.indexOf("resubscribeTeamEvents");
-		assert.ok(startIdx > 0, "resubscribeTeamEvents method must exist");
-		const window = text.slice(startIdx, startIdx + 6_000);
+		const window = findMethodWindow();
 		assert.match(window, /unregisterReviewerSession\(/, "the sweep must call unregisterReviewerSession");
 	});
 
 	it("the unregisterReviewerSession call is wrapped in try/catch with continue-on-error semantics", () => {
 		// Locate the unregisterReviewerSession call inside resubscribeTeamEvents
 		// directly, then walk backwards to the nearest `try {` and forwards to
-		// the matching `catch`. This avoids false positives from sibling helpers
-		// (e.g. _bootRespawnSessionlessGoals) within the same lexical window.
-		const startIdx = text.indexOf("resubscribeTeamEvents");
-		assert.ok(startIdx > 0);
-		const window = text.slice(startIdx, startIdx + 6_000);
+		// the matching `catch`.
+		const window = findMethodWindow();
 		const callIdx = window.indexOf("this.unregisterReviewerSession(");
 		assert.ok(callIdx > 0, "unregisterReviewerSession call must be inside resubscribeTeamEvents");
 		const before = window.slice(0, callIdx);
@@ -46,8 +47,7 @@ describe("zombie-reviewer sweep — source-grep guard", () => {
 	});
 
 	it("the catch branch logs the error AND does not rethrow (so boot continues)", () => {
-		const startIdx = text.indexOf("resubscribeTeamEvents");
-		const window = text.slice(startIdx, startIdx + 6_000);
+		const window = findMethodWindow();
 		const callIdx = window.indexOf("this.unregisterReviewerSession(");
 		assert.ok(callIdx > 0);
 		const after = window.slice(callIdx);

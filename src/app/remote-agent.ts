@@ -817,6 +817,42 @@ export class RemoteAgent {
 		}
 	}
 
+	/**
+	 * Advance the global server sequence for top-level frames that consume an
+	 * EventBuffer seq but are not wrapped as `{ type: "event" }`.
+	 *
+	 * `tool_permission_needed` is the important case: the server uses
+	 * `eventBuffer.pushFrame()` so later normal agent events have higher seqs.
+	 * If the client renders the permission card without advancing `_highestSeq`,
+	 * the next event is buffered forever as a gap and streaming appears to stop.
+	 */
+	private _advanceTopLevelSeq(seq: number, frameType: string): boolean {
+		if (!this._seqInitialized) {
+			// Same first-frame baseline as the event path: anything before this frame
+			// is represented by the initial snapshot / resume fallback.
+			this._highestSeq = seq - 1;
+			this._seqInitialized = true;
+		}
+		if (seq <= this._highestSeq) {
+			// Duplicate top-level frame; do not apply side effects twice.
+			return false;
+		}
+		if (seq !== this._highestSeq + 1) {
+			// We cannot buffer this top-level side-effect frame behind missing event
+			// frames, so accept it, force a snapshot for the missing range, and let
+			// future events continue from this seq. This mirrors the overflow/gap
+			// fallback strategy in the event path.
+			console.warn(`[RemoteAgent] ${frameType} seq gap (${this._highestSeq} → ${seq}); forcing snapshot refresh`);
+			this._pendingEvents = [];
+			this._inResumeFallback = true;
+			this._highestSeq = seq;
+			this.requestMessages();
+			return true;
+		}
+		this._highestSeq = seq;
+		return true;
+	}
+
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any): void {
@@ -1334,6 +1370,11 @@ export class RemoteAgent {
 
 			case "tool_permission_needed": {
 				const perm = msg as any;
+				const seq = typeof perm.seq === "number" ? perm.seq : undefined;
+				const ts = typeof perm.ts === "number" ? perm.ts : undefined;
+				if (seq !== undefined && !this._advanceTopLevelSeq(seq, "tool_permission_needed")) {
+					break;
+				}
 				// The server has aborted the agent turn. Clean up the streaming
 				// preview — the reducer's permission action handles transcript
 				// insertion. Aborted-turn cleanup (stripping inflight tool error +
@@ -1351,10 +1392,9 @@ export class RemoteAgent {
 					timestamp: Date.now(),
 					id: `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`,
 				};
-				const seq = typeof perm.seq === "number" ? perm.seq : undefined;
-				const ts = typeof perm.ts === "number" ? perm.ts : undefined;
 				this.apply({ type: "permission-needed", card: permCard, seq, ts });
 				this.emit({ type: "render" });
+				if (seq !== undefined) this._drainOrderedEvents();
 				break;
 			}
 
