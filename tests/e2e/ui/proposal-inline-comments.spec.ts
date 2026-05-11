@@ -190,6 +190,327 @@ test.describe("Inline comments on goal proposal panel", () => {
 		);
 	});
 
+	// ------------------------------------------------------------------
+	// Bug-repro tests (see goal: fix-propos-190338d6).
+	//
+	// These EXPECT TO FAIL on current HEAD — they pin the lifecycle UX
+	// regressions called out in the Issue Analysis gate:
+	//   1. Clicking an existing highlight does NOT reopen the popover in
+	//      edit mode with the existing comment prefilled.
+	//   2. Re-selecting text that overlaps an existing annotation stacks a
+	//      new annotation on top instead of editing the existing one.
+	//   3. Primary action label is hard-coded "Submit" — should read "Add"
+	//      for new comments and "Save" when editing.
+	//   4. Popover in edit mode lacks an in-place delete affordance.
+	//
+	// They drive the lifecycle programmatically by reaching into the live
+	// <review-document> internals (`backend`, `_annotator`, `_handleSelection`,
+	// `_annotations`) — same approach as `injectAnnotation` above. Driving
+	// real text-annotator selection across browsers is too flaky for E2E.
+	// ------------------------------------------------------------------
+
+	/**
+	 * Seed an annotation through both the backend AND the underlying
+	 * text-annotator so a real `.r6o-annotation` span appears in the DOM
+	 * and is clickable. Returns the annotation id used.
+	 */
+	async function seedAnnotationWithHighlight(
+		page: Page,
+		opts: { quote: string; comment: string; bucket?: string },
+	): Promise<string> {
+		return page.evaluate(
+			({ quote, comment, bucket }) => {
+				const sid = (window as any).bobbitState?.selectedSessionId as string;
+				if (!sid) throw new Error("no active session id");
+				const cm: any = document.querySelector("commentable-markdown");
+				if (!cm) throw new Error("no <commentable-markdown> in DOM");
+				const rd: any = cm.querySelector("review-document");
+				if (!rd) throw new Error("no <review-document>");
+				const backend = rd.backend;
+				const content: HTMLElement | null = rd.querySelector(
+					".review-document-content",
+				);
+				const fullText = content?.textContent ?? "";
+				const start = fullText.indexOf(quote);
+				if (start < 0) throw new Error(`quote not found in document: ${quote}`);
+				const end = start + quote.length;
+				const id = `e2e-seeded-${Date.now()}-${Math.random()
+					.toString(36)
+					.slice(2, 6)}`;
+				const ann = { id, quote, comment, start, end, prefix: "", suffix: "" };
+				backend.add({ sessionId: sid, bucket }, ann);
+				rd._annotations = backend.get({ sessionId: sid, bucket });
+				// Build a real Range that actually covers the quote in the rendered
+				// DOM — text-annotator's SPANS renderer needs this to wrap the text
+				// nodes. Passing an empty `document.createRange()` produces an
+				// invisible 0-width overlay span the user can never click.
+				const walker = document.createTreeWalker(
+					content!,
+					NodeFilter.SHOW_TEXT,
+				);
+				let node: Node | null = walker.nextNode();
+				let acc = 0;
+				let sn: Text | null = null;
+				let so = 0;
+				let en: Text | null = null;
+				let eo = 0;
+				while (node) {
+					const t = node as Text;
+					const len = t.data.length;
+					if (!sn && acc + len >= start) {
+						sn = t;
+						so = start - acc;
+					}
+					if (acc + len >= end) {
+						en = t;
+						eo = end - acc;
+						break;
+					}
+					acc += len;
+					node = walker.nextNode();
+				}
+				const realRange = document.createRange();
+				if (sn && en) {
+					realRange.setStart(sn, so);
+					realRange.setEnd(en, eo);
+				}
+				try {
+					rd._annotator?.addAnnotation({
+						id,
+						bodies: [
+							{
+								id: `${id}-body`,
+								annotation: id,
+								purpose: "commenting",
+								value: comment,
+							},
+						],
+						target: {
+							annotation: id,
+							selector: [{ quote, start, end, range: realRange }],
+						},
+					});
+				} catch (e) {
+					throw new Error(
+						"annotator.addAnnotation failed: " + (e as Error).message,
+					);
+				}
+				cm.dispatchEvent(
+					new CustomEvent("annotation-change", {
+						detail: { count: backend.count({ sessionId: sid, bucket }) },
+						bubbles: true,
+						composed: true,
+					}),
+				);
+				return id;
+			},
+			{ quote: opts.quote, comment: opts.comment, bucket: opts.bucket ?? "proposal:goal" },
+		);
+	}
+
+	test("BUG: clicking an existing highlight reopens popover prefilled", async ({
+		page,
+	}) => {
+		await openGoalAssistantProposal(page);
+
+		// Seed a real annotation + highlight span.
+		await seedAnnotationWithHighlight(page, {
+			quote: "test goal",
+			comment: "Make this clearer",
+		});
+
+		const highlight = page.locator(".r6o-annotation").first();
+		await expect(highlight).toBeAttached({ timeout: 5_000 });
+
+		// User clicks the visible position of the highlighted text. This
+		// dispatches a real mouse click at those screen coords — which is
+		// what a user actually does, vs. dispatchEvent which bypasses any
+		// pointer-event layering the bug would otherwise mask.
+		const box = await highlight.boundingBox();
+		if (!box) throw new Error(".r6o-annotation has no bounding box");
+		await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+
+		// Popover must open with the existing comment prefilled in the textarea.
+		const popover = page.locator("annotation-popover[open]");
+		await expect(
+			popover,
+			"clicking a highlight must open the annotation popover",
+		).toBeVisible({ timeout: 5_000 });
+		const textareaValue = await popover
+			.locator("textarea")
+			.inputValue();
+		expect(
+			textareaValue,
+			"clicking highlight must prefill textarea with existing comment",
+		).toBe("Make this clearer");
+	});
+
+	test("BUG: re-selecting overlapping text edits the existing annotation, does not stack", async ({
+		page,
+	}) => {
+		const panel = await openGoalAssistantProposal(page);
+
+		// Seed: an annotation on "test goal" with comment "original".
+		await seedAnnotationWithHighlight(page, {
+			quote: "test goal",
+			comment: "original comment",
+		});
+
+		await expect(
+			panel.locator('[data-testid="proposal-comment-count"]'),
+		).toContainText("1 comment", { timeout: 5_000 });
+
+		// Now simulate the user re-selecting OVERLAPPING text ("test")
+		// and hitting the popover. This routes through `_handleSelection`,
+		// which is the same entry point Recogito's `createAnnotation`
+		// event hits on mouseup.
+		await page.evaluate(() => {
+			const rd: any = document
+				.querySelector("commentable-markdown")
+				?.querySelector("review-document");
+			if (!rd) throw new Error("no <review-document>");
+			const content: HTMLElement | null = rd.querySelector(
+				".review-document-content",
+			);
+			const fullText = content?.textContent ?? "";
+			const start = fullText.indexOf("test");
+			if (start < 0) throw new Error("could not find 'test' in document");
+			const end = start + "test".length;
+			// Place a real selection so `_handleSelection` can read a range
+			// rect from window.getSelection() (it reads `sel.getRangeAt(0)`).
+			const walker = document.createTreeWalker(content!, NodeFilter.SHOW_TEXT);
+			let node: Node | null = walker.nextNode();
+			let acc = 0;
+			let startNode: Text | null = null;
+			let startOffset = 0;
+			let endNode: Text | null = null;
+			let endOffset = 0;
+			while (node) {
+				const t = node as Text;
+				const len = t.data.length;
+				if (!startNode && acc + len >= start) {
+					startNode = t;
+					startOffset = start - acc;
+				}
+				if (acc + len >= end) {
+					endNode = t;
+					endOffset = end - acc;
+					break;
+				}
+				acc += len;
+				node = walker.nextNode();
+			}
+			if (startNode && endNode) {
+				const range = document.createRange();
+				range.setStart(startNode, startOffset);
+				range.setEnd(endNode, endOffset);
+				const sel = window.getSelection();
+				sel?.removeAllRanges();
+				sel?.addRange(range);
+			}
+			rd._handleSelection({
+				id: `overlap-${Date.now()}`,
+				target: {
+					selector: [{ quote: "test", start, end }],
+				},
+			});
+		});
+
+		// Popover must open prefilled with the EXISTING comment — the
+		// overlap must be recognised as an edit, not a brand-new annotation.
+		const popover = page.locator("annotation-popover[open]");
+		await expect(popover).toBeVisible({ timeout: 3_000 });
+		const prefilled = await popover.locator("textarea").inputValue();
+		expect(
+			prefilled,
+			"overlapping re-selection must prefill textarea with existing comment",
+		).toBe("original comment");
+
+		// Save through the popover with new text.
+		await popover.locator("textarea").fill("updated comment");
+		await popover.locator(".review-popover-submit").click();
+
+		// Count must NOT have stacked — still exactly 1 annotation.
+		await expect(
+			panel.locator('[data-testid="proposal-comment-count"]'),
+			"overlapping re-selection must NOT add a second annotation",
+		).toContainText("1 comment", { timeout: 3_000 });
+	});
+
+	test("BUG: new-comment popover primary action reads 'Add', edit-mode reads 'Save'", async ({
+		page,
+	}) => {
+		await openGoalAssistantProposal(page);
+
+		// 1. Drive a brand-new selection — popover opens in create mode.
+		await page.evaluate(() => {
+			const rd: any = document
+				.querySelector("commentable-markdown")
+				?.querySelector("review-document");
+			if (!rd) throw new Error("no <review-document>");
+			const content: HTMLElement | null = rd.querySelector(
+				".review-document-content",
+			);
+			const fullText = content?.textContent ?? "";
+			const start = fullText.indexOf("validates");
+			const end = start + "validates".length;
+			rd._handleSelection({
+				id: `new-${Date.now()}`,
+				target: { selector: [{ quote: "validates", start, end }] },
+			});
+		});
+		const popover = page.locator("annotation-popover[open]");
+		await expect(popover).toBeVisible({ timeout: 3_000 });
+		const createLabel = await popover
+			.locator(".review-popover-submit")
+			.textContent();
+		expect(
+			createLabel?.trim(),
+			"new-comment popover primary action should read 'Add'",
+		).toBe("Add");
+
+		// Cancel to close.
+		await popover.locator(".review-popover-cancel").click();
+		await expect(popover).toHaveCount(0, { timeout: 3_000 });
+
+		// 2. Seed + click highlight — popover opens in edit mode.
+		await seedAnnotationWithHighlight(page, {
+			quote: "test goal",
+			comment: "existing",
+		});
+		await page.locator(".r6o-annotation").first().dispatchEvent("click");
+		await expect(popover).toBeVisible({ timeout: 3_000 });
+		const editLabel = await popover
+			.locator(".review-popover-submit")
+			.textContent();
+		expect(
+			editLabel?.trim(),
+			"edit-mode popover primary action should read 'Save'",
+		).toBe("Save");
+	});
+
+	test("BUG: popover in edit mode shows a delete button", async ({ page }) => {
+		await openGoalAssistantProposal(page);
+
+		await seedAnnotationWithHighlight(page, {
+			quote: "test goal",
+			comment: "to be deleted",
+		});
+		await page.locator(".r6o-annotation").first().dispatchEvent("click");
+
+		const popover = page.locator("annotation-popover[open]");
+		await expect(popover).toBeVisible({ timeout: 3_000 });
+
+		// Expect a destructive delete affordance inside the popover when editing.
+		const deleteBtn = popover.locator(
+			'[data-testid="annotation-delete"], .review-popover-delete',
+		);
+		await expect(
+			deleteBtn,
+			"edit-mode popover must expose a delete button",
+		).toBeVisible({ timeout: 3_000 });
+	});
+
 	test("annotations are ephemeral across reload", async ({ page }) => {
 		const panel = await openGoalAssistantProposal(page);
 		await injectAnnotation(page);
