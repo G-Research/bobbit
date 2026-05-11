@@ -1,0 +1,145 @@
+# Autoresearch workflow — Goal == research idea.
+#
+# Stages map onto bobbit gates with the new built-in verify types:
+#   idea            — content gate, no verification (the seed)
+#   literature      — rubric-review (LLM scores coverage / novelty)
+#   plan            — content gate, rubric-review (LLM scores rigor / feasibility)
+#   experiment-run  — external-job (training run or batch experiment callback)
+#   analysis        — content gate, rubric-review (LLM scores soundness)
+#   publication     — manual gate (human sign-off)
+#
+# Content from idea / plan / analysis is injected downstream via
+# inject_downstream:true so each subsequent stage sees the upstream artifacts
+# without explicit input_gate_ids on every team_spawn.
+
+id: research
+name: Autoresearch
+description: Research idea → literature → plan → experiment → analysis → publication.
+gates:
+  - id: idea
+    name: Research idea
+    content: true
+    inject_downstream: true
+    # No verify — the team lead signals after the idea is captured.
+
+  - id: literature
+    name: Literature coverage
+    depends_on: [idea]
+    content: true
+    inject_downstream: true
+    verify:
+      - name: Coverage rubric
+        type: rubric-review
+        reviewer: llm
+        role: reviewer
+        prompt: |
+          You are reviewing a literature survey for a research idea.
+
+          The idea (from the upstream `idea` gate) is in the Upstream Gates
+          section of your system prompt. The survey itself is the content
+          attached to this `literature` gate signal.
+
+          Score the survey against the rubric below. Be conservative: a survey
+          that misses major prior work, fails to cite seminal papers in the
+          area, or mischaracterises an existing approach should fail novelty
+          OR coverage even if it cites many references.
+        rubric:
+          - id: coverage
+            label: Coverage of prior work
+            scale: { min: 1, max: 5 }
+          - id: novelty
+            label: Novelty against cited work
+            scale: { min: 1, max: 5 }
+          - id: rigor
+            label: Citation rigor (are claims grounded)
+            scale: { min: 1, max: 5 }
+        # Coverage >= 3 AND novelty >= 3 AND rigor >= 3 — gate fails if any
+        # rubric item is below 3. Tighter than "all >= 2" so a weak survey
+        # blocks the experiment-run gate.
+        pass_when: "coverage >= 3 AND novelty >= 3 AND rigor >= 3"
+
+  - id: plan
+    name: Experimental plan
+    depends_on: [literature]
+    content: true
+    inject_downstream: true
+    verify:
+      - name: Plan rubric
+        type: rubric-review
+        reviewer: llm
+        role: reviewer
+        prompt: |
+          You are reviewing an experimental plan for a research idea.
+
+          The idea and the prior literature survey are available in the
+          Upstream Gates section of your system prompt. The plan itself is
+          the content attached to this `plan` gate signal.
+
+          Score the plan against the rubric. A plan that lacks clear success
+          criteria, has no plan-of-record for what to do if the primary
+          hypothesis fails, or relies on data/compute the project does not
+          have access to should fail feasibility.
+        rubric:
+          - id: clarity
+            label: Clarity of hypotheses and success criteria
+            scale: { min: 1, max: 5 }
+          - id: feasibility
+            label: Feasibility given available data / compute
+            options: [low, medium, high]
+          - id: rigor
+            label: Methodological rigor (controls, statistics, ablations)
+            scale: { min: 1, max: 5 }
+        pass_when: "clarity >= 3 AND feasibility != 'low' AND rigor >= 3"
+
+  - id: experiment-run
+    name: Experiment / training run
+    depends_on: [plan]
+    # No content gate — the artifact comes back via the external callback.
+    verify:
+      - name: Run completion
+        type: external-job
+        # 7-day budget for long training runs. The external system posts
+        # to /api/verify/external/<token> with passed/summary/artifact once
+        # the run finishes. Token + (goalId,gateId,signalId) triple must
+        # match; tokens are single-use.
+        timeout: 604800
+
+  - id: analysis
+    name: Results analysis
+    depends_on: [experiment-run]
+    content: true
+    inject_downstream: true
+    verify:
+      - name: Analysis rubric
+        type: rubric-review
+        reviewer: llm
+        role: reviewer
+        prompt: |
+          You are reviewing a results analysis for an experiment.
+
+          Idea, literature, plan, and experiment-run summary are all in the
+          Upstream Gates section. The analysis is the content attached to
+          this `analysis` gate signal.
+
+          Score the analysis. A writeup that overclaims (e.g. positive
+          conclusions from cherry-picked metrics), conflates correlation with
+          causation, or fails to acknowledge negative results should fail
+          soundness.
+        rubric:
+          - id: soundness
+            label: Statistical / methodological soundness
+            scale: { min: 1, max: 5 }
+          - id: honesty
+            label: Honesty about limitations / negative results
+            scale: { min: 1, max: 5 }
+          - id: actionability
+            label: Clear next steps or conclusions
+            scale: { min: 1, max: 5 }
+        pass_when: "soundness >= 3 AND honesty >= 3"
+
+  - id: publication
+    name: Publication-ready
+    depends_on: [analysis]
+    # Manual gate — the human researcher decides when the work is shareable
+    # (internal write-up, preprint, paper submission). No automated check.
+    manual: true

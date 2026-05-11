@@ -1,0 +1,20 @@
+name: autoresearch
+version: 0.1.0
+description: |
+  Workflow templates for autoresearch — treating Goals as research ideas that
+  progress through literature review, planning, experimentation, and write-up.
+  Uses the built-in `rubric-review`, `external-job`, and `llm-review` verify
+  step types; no plugin code beyond data.
+
+bobbit:
+  engines: ">=0.9.0"
+
+contributes:
+  workflows:
+    - workflows/autoresearch.yaml
+
+# Declared up-front so the trust prompt (when this isn't auto-trusted) can show
+# the user what coarse capabilities the plugin needs.
+permissions:
+  - external-webhook   # external-job training/experiment callbacks
+  - llm-review         # rubric-review/llm spawns a reviewer sub-agent
