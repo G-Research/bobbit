@@ -1171,7 +1171,9 @@ export function createGateway(config: GatewayConfig) {
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
-						for (const ctx of projectContextManager.all()) {
+						// Skip hidden contexts (synthetic system project) — it has
+						// no goals/sessions/staff and must never drive worktree work.
+						for (const ctx of projectContextManager.visible()) {
 							const repoNames = ctx.projectConfigStore.repoNames();
 							sweepProjects.push({
 								id: ctx.project.id,
@@ -1209,7 +1211,13 @@ export function createGateway(config: GatewayConfig) {
 
 				const poolInitTask = (async () => {
 					if (process.env.BOBBIT_SKIP_WORKTREE_POOL) return;
-					const contexts = Array.from(projectContextManager.all());
+					// Hidden contexts (synthetic system project) must NOT seed a
+					// worktree pool. When bobbit's state dir is nested inside an
+					// unrelated git checkout, `isGitRepo(<state>/system-project)`
+					// walks up to find the host repo and the pool would allocate
+					// `pool/_pool-*` branches there. See
+					// `tests/system-project-pool-leak.test.ts`.
+					const contexts = Array.from(projectContextManager.visible());
 					console.log(`[boot] pool init start (${contexts.length} projects)`);
 					await Promise.all(contexts.map(async (ctx) => {
 						const tStart = Date.now();
@@ -1253,7 +1261,8 @@ export function createGateway(config: GatewayConfig) {
 
 			// Wire goal-manager resolvers so goals claim through the pool first and
 			// resolve components / project root for multi-repo goal creation.
-			for (const ctx of projectContextManager.all()) {
+			// Hidden contexts (synthetic system project) have no goals to wire.
+			for (const ctx of projectContextManager.visible()) {
 				const projectId = ctx.project.id;
 				ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(projectId));
 				ctx.goalManager.setComponentsResolver((pid: string) => {
@@ -2555,7 +2564,7 @@ async function handleApiRoute(
 		if (url.searchParams.get("include") === "archived") {
 			// Collect archived sessions across all project contexts
 			const allArchived: typeof sessions = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				const store = ctx.sessionStore;
 				for (const s of store.getArchived()) {
 					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
@@ -2570,14 +2579,14 @@ async function handleApiRoute(
 
 			// Collect ALL archived sessions for BFS enrichment (not just delegates)
 			const allArchivedForBfs: typeof sessions = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					allArchivedForBfs.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
 				}
 			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIds: string[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const g of ctx.goalStore.getLive()) {
 					if (!g.archived) liveGoalIds.push(g.id);
 				}
@@ -2616,14 +2625,14 @@ async function handleApiRoute(
 			// can render chevrons/nesting without a separate fetch.
 			const liveIdSet = new Set(sessions.map(s => s.id));
 			const allArchivedForBfsNonPaginated: typeof sessions = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					allArchivedForBfsNonPaginated.push({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any);
 				}
 			}
 			// Build live goal IDs for BFS seeding
 			const liveGoalIdsNonPaginated: string[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const g of ctx.goalStore.getLive()) {
 					if (!g.archived) liveGoalIdsNonPaginated.push(g.id);
 				}
@@ -3093,7 +3102,7 @@ async function handleApiRoute(
 			const filterProjectId = url.searchParams.get("projectId") || undefined;
 			// Aggregate archived goals across all project contexts
 			let allArchived: PersistedGoal[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
 			}
@@ -3110,7 +3119,7 @@ async function handleApiRoute(
 			const goalIdsInPage = new Set(page.map((g: any) => g.id));
 			const affiliatedSessions: any[] = [];
 			const seenSessionIds = new Set<string>();
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
 						seenSessionIds.add(s.id);
@@ -3120,7 +3129,7 @@ async function handleApiRoute(
 			}
 			// BFS walk delegate/team chains from affiliated sessions
 			const allArchivedForGoalsBfs: any[] = [];
-			for (const ctx of projectContextManager.all()) {
+			for (const ctx of projectContextManager.visible()) {
 				for (const s of ctx.sessionStore.getArchived()) {
 					allArchivedForGoalsBfs.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
 				}
@@ -8068,7 +8077,9 @@ async function handleApiRoute(
 	// GET /api/maintenance/orphaned-worktrees
 	if (url.pathname === "/api/maintenance/orphaned-worktrees" && req.method === "GET") {
 		const allOrphans: Array<{ path: string; branch: string; repoPath: string }> = [];
-		for (const ctx of projectContextManager.all()) {
+		// Hidden contexts (synthetic system project) have no worktrees and
+		// resolving their repoPath can leak into an unrelated host repo.
+		for (const ctx of projectContextManager.visible()) {
 			try {
 				const repoPath = ctx.project.rootPath;
 				if (await isGitRepo(repoPath)) {
@@ -8089,7 +8100,7 @@ async function handleApiRoute(
 		let cleaned = 0;
 		if (body?.worktrees && Array.isArray(body.worktrees)) {
 			// Clean specific worktrees — validate each against registered projects and orphan list
-			const validRepoPaths = new Set([...projectContextManager.all()].map(ctx => ctx.project.rootPath));
+			const validRepoPaths = new Set([...projectContextManager.visible()].map(ctx => ctx.project.rootPath));
 			for (const wt of body.worktrees) {
 				if (wt.path && wt.branch && wt.repoPath) {
 					// Validate repoPath is a registered project
@@ -8108,8 +8119,8 @@ async function handleApiRoute(
 				}
 			}
 		} else {
-			// Clean all orphans across all projects
-			for (const ctx of projectContextManager.all()) {
+			// Clean all orphans across all projects (hidden contexts excluded).
+			for (const ctx of projectContextManager.visible()) {
 				try {
 					const repoPath = ctx.project.rootPath;
 					if (await isGitRepo(repoPath)) {
