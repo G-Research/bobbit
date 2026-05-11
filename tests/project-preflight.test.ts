@@ -259,6 +259,70 @@ test("path.long warns on Windows for path > 200 chars", { skip: process.platform
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
+function chmodSkipReason(): string | false {
+	if (process.platform === "win32") return "chmod permission bits are no-ops on Windows";
+	// On POSIX, root bypasses permission checks — chmod restrictions become meaningless.
+	if (typeof process.getuid === "function" && process.getuid() === 0) {
+		return "running as root — chmod restrictions are bypassed";
+	}
+	return false;
+}
+
+test(
+	"path.readable fails when directory is unreadable",
+	{ skip: chmodSkipReason() },
+	() => {
+		const tmp = mkTmp();
+		let restored = false;
+		try {
+			const dir = path.join(tmp, "unreadable");
+			fs.mkdirSync(dir);
+			fs.chmodSync(dir, 0o000);
+			try {
+				const report = runPreflight(dir, emptyCtx());
+				assert.equal(find(report, "path.readable").level, "fail");
+				assert.ok(report.hasFail);
+			} finally {
+				fs.chmodSync(dir, 0o700);
+				restored = true;
+			}
+		} finally {
+			// Defensive: if restore failed mid-flight, still try to make cleanup work.
+			if (!restored) {
+				try { fs.chmodSync(path.join(tmp, "unreadable"), 0o700); } catch { /* ignore */ }
+			}
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"path.writable fails when directory is read-only (chmod 0o555)",
+	{ skip: chmodSkipReason() },
+	() => {
+		const tmp = mkTmp();
+		const dir = path.join(tmp, "readonly");
+		let restored = false;
+		try {
+			fs.mkdirSync(dir);
+			fs.chmodSync(dir, 0o555);
+			try {
+				const report = runPreflight(dir, emptyCtx());
+				assert.equal(find(report, "path.writable").level, "fail");
+				assert.ok(report.hasFail);
+			} finally {
+				fs.chmodSync(dir, 0o700);
+				restored = true;
+			}
+		} finally {
+			if (!restored) {
+				try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
+			}
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	},
+);
+
 test("relative path short-circuits downstream checks gracefully", () => {
 	const report = runPreflight("not/absolute", emptyCtx());
 	// hasFail is true
