@@ -1151,7 +1151,7 @@ export class SessionManager {
 			if (ctx) workflows = ctx.workflowStore.getAll();
 		}
 		if (!workflows || workflows.length === 0) {
-			return 'Use **general** as a safe default.';
+			return '⚠️ This project has no workflows configured. You CANNOT propose a goal yet — the user must run the project assistant first to scaffold workflows. Do not call propose_goal. Instead tell the user "this project has no workflows yet; open the project assistant from Settings → Components (or click the banner in the goal panel) to set them up", and stop.';
 		}
 		return workflows.map(w => {
 			const gateNames = w.gates.map(g => g.name).join(', ');
