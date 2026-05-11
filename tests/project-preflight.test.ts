@@ -96,6 +96,52 @@ test("path.nested-in-project fails when inside another registered project", () =
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
+test("path.nested-in-project: downgraded to warn when only container is gateway-owned project", () => {
+	const tmp = mkTmp();
+	try {
+		const parent = path.join(tmp, "gateway-root");
+		const child = path.join(parent, "nested");
+		fs.mkdirSync(child, { recursive: true });
+		const report = runPreflight(child, emptyCtx({
+			gatewayProjectRoot: parent,
+			registeredProjects: [{
+				id: "gw", name: "Gateway", rootPath: parent, hidden: false,
+			} as any],
+		}));
+		const c = find(report, "path.nested-in-project");
+		assert.equal(c.level, "warn");
+		assert.match(c.detail, /gateway-owned/);
+		assert.equal(report.checks.find(c => c.id === "path.nested-in-project")!.level, "warn");
+	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test("path.nested-in-project: still fails when offenders include a non-gateway project", () => {
+	const tmp = mkTmp();
+	try {
+		const gw = path.join(tmp, "gateway-root");
+		const other = path.join(tmp, "other-root");
+		const child = path.join(gw, "other-root", "nested"); // inside both
+		fs.mkdirSync(child, { recursive: true });
+		fs.mkdirSync(other, { recursive: true });
+		// Make 'other' actually contain 'child': put child under other instead.
+		const child2 = path.join(other, "nested");
+		fs.mkdirSync(child2, { recursive: true });
+		// Place the candidate inside BOTH gw and other by nesting other under gw:
+		const otherInGw = path.join(gw, "other");
+		const candidate = path.join(otherInGw, "nested");
+		fs.mkdirSync(candidate, { recursive: true });
+		const report = runPreflight(candidate, emptyCtx({
+			gatewayProjectRoot: gw,
+			registeredProjects: [
+				{ id: "gw", name: "Gateway", rootPath: gw, hidden: false } as any,
+				{ id: "other", name: "Other", rootPath: otherInGw, hidden: false } as any,
+			],
+		}));
+		const c = find(report, "path.nested-in-project");
+		assert.equal(c.level, "fail");
+	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test("path.nested-in-project: exact-same path is NOT 'nested'", () => {
 	const tmp = mkTmp();
 	try {
