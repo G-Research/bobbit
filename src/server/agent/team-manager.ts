@@ -30,6 +30,13 @@ import {
 	scanSlugDirForJsonlsAt,
 	isStaleRecoveredTeamLeadTitle,
 } from "./team-store-consistency.js";
+import {
+	readSessionSidecar,
+	reconcileRecoveredSessionWithSidecar,
+	sidecarPathFor,
+	writeSessionSidecar,
+	buildSessionSidecar,
+} from "./session-sidecar.js";
 
 const execFile = promisify(execFileCb);
 
@@ -482,7 +489,15 @@ export class TeamManager {
 									funName,
 								});
 								if (reconstructed) {
-									ctx.sessionStore.put(reconstructed as Parameters<typeof ctx.sessionStore.put>[0]);
+									// Sidecar wins over heuristic: if a `.bobbit.json`
+									// exists next to the chosen .jsonl, prefer its
+									// exact values (original session id, title, role,
+									// team links, model prefs).
+									const sidecar = readSessionSidecar(chosen.jsonlPath);
+									const finalRecord = sidecar
+										? reconcileRecoveredSessionWithSidecar(reconstructed as unknown as Record<string, unknown>, sidecar)
+										: reconstructed;
+									ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
 									recovered++;
 									recoveredOk = true;
 									console.log(
@@ -575,7 +590,11 @@ export class TeamManager {
 							funName,
 						});
 						if (reconstructed) {
-							ctx.sessionStore.put(reconstructed as Parameters<typeof ctx.sessionStore.put>[0]);
+							const sidecar = readSessionSidecar(chosen.jsonlPath);
+							const finalRecord = sidecar
+								? reconcileRecoveredSessionWithSidecar(reconstructed as unknown as Record<string, unknown>, sidecar)
+								: reconstructed;
+							ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
 							fullyOrphanRecovered++;
 							console.log(
 								`[team-manager] Boot recovery: reconstructed fully-orphan team-lead ` +
@@ -693,7 +712,11 @@ export class TeamManager {
 								agentWorktreePath: agent.agentWorktreePath,
 								chosenJsonl: chosen,
 							});
-							ctx.sessionStore.put(record as Parameters<typeof ctx.sessionStore.put>[0]);
+							const sidecar = readSessionSidecar(chosen.jsonlPath);
+							const finalRecord = sidecar
+								? reconcileRecoveredSessionWithSidecar(record as unknown as Record<string, unknown>, sidecar)
+								: record;
+							ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
 							agentsRecovered++;
 						} catch (err) {
 							console.error(`[team-manager] Agent recovery failed for ${agent.agentWorktreePath}:`, err);
@@ -703,6 +726,49 @@ export class TeamManager {
 			}
 			if (agentsRecovered > 0) {
 				console.log(`[team-manager] Boot recovery: reconstructed ${agentsRecovered} non-team-lead agent session(s) from surviving .jsonl files.`);
+			}
+
+			// Sixth pass — boot-time sidecar backfill.
+			//
+			// Walk every session record and write a sidecar alongside its
+			// .jsonl if one doesn't already exist. This makes legacy
+			// pre-sidecar sessions recoverable-exact going forward: a future
+			// data-loss event will preserve whatever identity is on disk now
+			// rather than invent a fresh UUID + fun-name again.
+			//
+			// Idempotent: the helper is a no-op if the file already exists
+			// with matching content (atomic rename overwrites in-place
+			// either way, so we don't even need to compare).
+			//
+			// We process `(recovered)`-titled sessions first so the freshly
+			// rolled identity from THIS boot's recovery passes gets a sidecar
+			// before any other race could disturb the record again.
+			let sidecarsBackfilled = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				const allSessions = ctx.sessionStore.getAll();
+				const ordered = [
+					...allSessions.filter(s => typeof s.title === "string" && s.title.includes("(recovered)")),
+					...allSessions.filter(s => !(typeof s.title === "string" && s.title.includes("(recovered)"))),
+				];
+				for (const s of ordered) {
+					if (!s.agentSessionFile) continue;
+					try {
+						const sidecarPath = sidecarPathFor(s.agentSessionFile);
+						if (fs.existsSync(sidecarPath)) continue;
+						// Skip if the .jsonl itself is missing — nothing to attach
+						// the sidecar to and the session is non-recoverable anyway.
+						if (!fs.existsSync(s.agentSessionFile)) continue;
+						const agentSessionId = path.basename(s.agentSessionFile).replace(/\.jsonl$/, "");
+						const sidecar = buildSessionSidecar(s, agentSessionId, undefined);
+						writeSessionSidecar(s.agentSessionFile, sidecar);
+						sidecarsBackfilled++;
+					} catch (err) {
+						console.warn(`[team-manager] Sidecar backfill failed for session ${s.id}:`, err);
+					}
+				}
+			}
+			if (sidecarsBackfilled > 0) {
+				console.log(`[team-manager] Boot backfill: wrote ${sidecarsBackfilled} session sidecar(s) for legacy sessions.`);
 			}
 		}
 

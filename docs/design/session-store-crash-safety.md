@@ -281,3 +281,44 @@ If you see the orphaned-transcripts banner:
 - If they correspond to sessions you remember running and `sessions.json`
   is missing them, you have hit the rollback bug — see step 3 above and
   file a report.
+
+## Per-session sidecar for exact recovery
+
+Even with `sessions.json` made crash-safe, an entry can still vanish from
+it via partial-save races, manual disk corruption, or a rollback as
+described above. The pre-existing recovery in `team-store-consistency.ts`
+reconstructs a session record from a surviving `.jsonl` on a best-effort
+basis — it invents a fresh bobbit session id, rolls a fun-name title, and
+parses the role from the worktree slug heuristically.
+
+To make recovery **exact**, every session creation also writes a tiny
+bobbit-owned sidecar JSON file alongside the `.jsonl`:
+
+```
+~/.bobbit/agent/sessions/<slug>/<jsonl-basename>.bobbit.json
+```
+
+Schema (versioned for forward-compat): `{ version: 1, bobbitSessionId,
+agentSessionId, role, teamGoalId?, teamLeadSessionId?, delegateOf?,
+spawnedBySessionId?, title, accessory?, createdAt, modelProvider?,
+modelId? }`. See `src/server/agent/session-sidecar.ts`.
+
+Writes are atomic (`tmp → rename`) and fire-and-forget. The hook lives in
+`SessionManager.persistSessionMetadata` — after `agentSessionFile` is
+known and the session record is in the store, the sidecar is written.
+Re-emission on any change is safe (the rename overwrites in-place).
+
+On boot, `TeamManager.restoreTeams` calls `readSessionSidecar` after
+heuristic reconstruction in both the orphan-team-lead (second pass),
+fully-orphan (third pass), and non-team-lead-agent (fifth pass) recovery
+paths. Sidecar fields win via `reconcileRecoveredSessionWithSidecar`. A
+sixth pass walks every session record and backfills sidecars for
+pre-sidecar sessions (idempotent — re-running is free).
+
+`purgeOneSession` deletes the sidecar alongside the `.jsonl` when purge
+is allowed (archived goal + `?purge=true`). The d9a0b7b4 refusal guard
+for live team-leads stays in place.
+
+This is a future-proofing layer. The destruction surface is already
+closed by the recovery commits; the sidecar makes future recoveries
+exact instead of best-effort.
