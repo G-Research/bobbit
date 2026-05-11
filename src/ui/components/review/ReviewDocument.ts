@@ -217,6 +217,8 @@ export class ReviewDocument extends LitElement {
       // Fallback DOM-level click handler — annotator's clickAnnotation event
       // doesn't fire in every browser/test environment. Capture phase so
       // it lands before any stopPropagation inside the annotator.
+      // To avoid double-firing when both paths run, the handler bails out
+      // if it sees the popover already open in edit mode for this id.
       this._boundMobileAnnotationTap = this._onMobileAnnotationTap.bind(this);
       this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap, true);
 
@@ -356,10 +358,13 @@ export class ReviewDocument extends LitElement {
     this._popoverMode = this._isMobile ? "bottom-sheet" : "popover";
     this._showFloatingBtn = false;
     this._hideHoverChipNow();
-    if (!this._isMobile && anchor) {
+    if (anchor) {
       this._popoverReferenceRect = anchor.getBoundingClientRect();
-    } else if (!this._isMobile) {
-      // Best-effort fallback — anchor at viewport center.
+    } else {
+      // Best-effort fallback — anchor at viewport center. Required on
+      // mobile too: the bottom-sheet path checks `_popoverReferenceRect`
+      // before opening and would otherwise silently no-op on the first
+      // tap of a session.
       this._popoverReferenceRect = new DOMRect(
         window.innerWidth / 2,
         window.innerHeight / 2,
@@ -553,6 +558,13 @@ export class ReviewDocument extends LitElement {
 
     const annotationId = target.getAttribute("data-annotation");
     if (!annotationId) return;
+
+    // De-dupe with the annotator's own `clickAnnotation` event — if the
+    // popover is already open in edit mode for this annotation, ignore
+    // the DOM-level fallback so we don't re-enter the open path.
+    if (this._popoverOpen && this._editingAnnotationId === annotationId) {
+      return;
+    }
 
     this._openAnnotationForEdit(annotationId, target);
   }
