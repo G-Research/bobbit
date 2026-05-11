@@ -145,6 +145,110 @@ test("preserved directory subtree is recorded as a unit, not recursed into", () 
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
+test("EXDEV from fs.renameSync triggers copy+unlink fallback", () => {
+	const tmp = mkTmp();
+	const origRename = fs.renameSync;
+	let triggered = false;
+	try {
+		seedMixedBobbit(tmp);
+		const targetBasename = "some-random-state.json";
+		// Stub: throw EXDEV exactly once for the target file path.
+		(fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = function (src, dst) {
+			if (!triggered && typeof src === "string" && src.endsWith(targetBasename)) {
+				triggered = true;
+				const err = new Error("EXDEV: cross-device link not permitted (stubbed)") as Error & { code?: string };
+				err.code = "EXDEV";
+				throw err;
+			}
+			return origRename.call(fs, src, dst);
+		} as typeof fs.renameSync;
+
+		// gatewayOwned=true so the walker recurses into state/ and hits the file at leaf level.
+		const res = archiveProjectBobbitDir(tmp, { gatewayOwned: true });
+
+		assert.equal(triggered, true, "stubbed renameSync was never called for the target path");
+		// File must have moved: present in archive, absent in original tree.
+		assert.ok(
+			fs.existsSync(path.join(res.archiveDir, "state", targetBasename)),
+			"target file should be present under archive after EXDEV fallback",
+		);
+		assert.ok(
+			!fs.existsSync(path.join(tmp, ".bobbit", "state", targetBasename)),
+			"target file should be removed from original .bobbit/ after fallback",
+		);
+		assert.ok(
+			res.movedPaths.includes("state/" + targetBasename),
+			`movedPaths should include the target: ${JSON.stringify(res.movedPaths)}`,
+		);
+		// No partial failure recorded for this entry.
+		const failedPaths = res.partial?.failed.map(f => f.path) ?? [];
+		assert.ok(
+			!failedPaths.includes("state/" + targetBasename),
+			`EXDEV path should NOT appear in partial.failed: ${JSON.stringify(failedPaths)}`,
+		);
+	} finally {
+		(fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = origRename;
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("partial failure: one unmovable entry is recorded; siblings still archive; no rollback", () => {
+	const tmp = mkTmp();
+	const origRename = fs.renameSync;
+	let triggered = false;
+	try {
+		seedMixedBobbit(tmp);
+		const lockedBasename = "some-random-state.json";
+		// Use EACCES — the implementation falls back on EXDEV/EPERM but propagates other codes.
+		// This is the only way to actually exercise the partial-failure path with a stub.
+		(fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = function (src, dst) {
+			if (!triggered && typeof src === "string" && src.endsWith(lockedBasename)) {
+				triggered = true;
+				const err = new Error("EACCES: locked by another process (stubbed)") as Error & { code?: string };
+				err.code = "EACCES";
+				throw err;
+			}
+			return origRename.call(fs, src, dst);
+		} as typeof fs.renameSync;
+
+		const res = archiveProjectBobbitDir(tmp, { gatewayOwned: true });
+
+		assert.equal(triggered, true, "stubbed renameSync was never called for the locked path");
+
+		// Failure recorded.
+		assert.ok(res.partial, "result.partial should be set when an entry fails");
+		const failed = res.partial!.failed;
+		const lockedEntry = failed.find(f => f.path === "state/" + lockedBasename);
+		assert.ok(lockedEntry, `partial.failed should include locked entry; got ${JSON.stringify(failed)}`);
+		assert.match(lockedEntry!.error, /EACCES/);
+
+		// Sibling archived successfully (config/system-prompt.md).
+		assert.ok(
+			fs.existsSync(path.join(res.archiveDir, "config", "system-prompt.md")),
+			"sibling entries should still be archived despite one failure",
+		);
+		assert.ok(
+			!fs.existsSync(path.join(tmp, ".bobbit", "config", "system-prompt.md")),
+			"sibling source should be removed after successful archive",
+		);
+
+		// No rollback: locked file still on disk in the original tree.
+		assert.ok(
+			fs.existsSync(path.join(tmp, ".bobbit", "state", lockedBasename)),
+			"locked file should remain in the original tree (no rollback)",
+		);
+
+		// MANIFEST.json written regardless of partial failure.
+		const manifestPath = path.join(res.archiveDir, "MANIFEST.json");
+		assert.ok(fs.existsSync(manifestPath), "MANIFEST.json should be written even on partial failure");
+		const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+		assert.ok(manifest.partial?.failed?.length >= 1, "manifest should record partial failures");
+	} finally {
+		(fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = origRename;
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
 test("custom allowlist used when supplied", () => {
 	const tmp = mkTmp();
 	try {
