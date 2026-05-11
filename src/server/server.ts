@@ -76,7 +76,9 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError } from "./agent/project-registry.js";
+import { runPreflight } from "./agent/project-preflight.js";
+import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
@@ -1793,6 +1795,70 @@ async function handleApiRoute(
 
 	// ── Project Detection & Browse ────────────────────────────────────
 
+	// GET /api/projects/preflight?path=<absolute>
+	// Returns a structured PreflightReport — always 200 when path is
+	// supplied; the failures are *the* response. 400 only for missing /
+	// bad-shape input.
+	if (url.pathname === "/api/projects/preflight" && req.method === "GET") {
+		const rawPath = url.searchParams.get("path");
+		if (!rawPath || typeof rawPath !== "string") {
+			json({ error: "Missing path query parameter" }, 400);
+			return;
+		}
+		try {
+			const report = runPreflight(rawPath, {
+				registeredProjects: projectRegistry.list(),
+				gatewayProjectRoot: getProjectRoot(),
+				worktreeRootFor: (p) => {
+					const ctx = projectContextManager.getOrCreate(p.id);
+					return ctx?.projectConfigStore.get("worktree_root") || undefined;
+				},
+			});
+			json(report);
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/projects/archive-bobbit
+	// Body: { rootPath }. Moves existing project-scoped .bobbit/ content
+	// aside into .bobbit-archive-NNN/ — never touching the
+	// GATEWAY_OWNED_FILES allowlist. Does NOT mutate the registry; the
+	// client re-runs /preflight afterwards.
+	if (url.pathname === "/api/projects/archive-bobbit" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body.rootPath !== "string") {
+			json({ error: "Missing rootPath" }, 400);
+			return;
+		}
+		if (!path.isAbsolute(body.rootPath)) {
+			json({ error: "rootPath must be absolute" }, 400);
+			return;
+		}
+		if (!fs.existsSync(body.rootPath)) {
+			json({ error: "rootPath does not exist" }, 400);
+			return;
+		}
+		// Compute gateway-owned via the same logic as the preflight check.
+		const sameAsGateway = path.resolve(body.rootPath) === path.resolve(getProjectRoot());
+		const hasGwUrl = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "gateway-url"));
+		const hasWatchdog = fs.existsSync(path.join(body.rootPath, ".bobbit", "state", "watchdog.json"));
+		const gatewayOwned = sameAsGateway || hasGwUrl || hasWatchdog;
+		try {
+			const result = archiveProjectBobbitDir(body.rootPath, { gatewayOwned });
+			json(result);
+		} catch (err: any) {
+			if (err instanceof ArchiveError) {
+				const status = err.code === "empty-bobbit-dir" || err.code === "no-bobbit-dir" ? 409 : 400;
+				json({ error: err.message, code: err.code }, status);
+				return;
+			}
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// POST /api/projects/detect
 	if (url.pathname === "/api/projects/detect" && req.method === "POST") {
 		const body = await readBody(req);
@@ -2019,6 +2085,14 @@ async function handleApiRoute(
 						code: "symlink_root",
 						rootPath: regErr.rootPath,
 						canonical: regErr.canonical,
+					}, 400);
+					return;
+				}
+				if (regErr instanceof PreflightFailedError) {
+					json({
+						error: regErr.message,
+						code: "preflight_failed",
+						report: regErr.report,
 					}, 400);
 					return;
 				}
