@@ -19,7 +19,7 @@
  * fixture is worker-scoped and not suited for restart cycles.
  */
 import { test as base, expect } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -36,11 +36,19 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
-const E2E_TEMP_ROOT = existsSync("/.dockerenv")
+// Resolve the temp root to its canonical path. On macOS `tmpdir()` returns
+// `/var/folders/...` which is a symlink to `/private/var/folders/...`, and the
+// project-registry refuses to register symlinked roots.
+const E2E_TEMP_ROOT_RAW = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
 		: join(tmpdir(), "bobbit-e2e");
+mkdirSync(E2E_TEMP_ROOT_RAW, { recursive: true });
+const E2E_TEMP_ROOT = (() => {
+	try { return realpathSync(E2E_TEMP_ROOT_RAW); }
+	catch { return E2E_TEMP_ROOT_RAW; }
+})();
 
 interface StartedGateway {
 	port: number;
