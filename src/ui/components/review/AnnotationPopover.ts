@@ -290,11 +290,15 @@ export class AnnotationPopover extends LitElement {
         this.style.top = "";
         this._attachViewportListener();
       }
+      // Set the textarea value synchronously so consumers (and tests) that
+      // read `textarea.value` immediately after `<annotation-popover open>`
+      // appears in the DOM see the prefill. The focus call still uses rAF
+      // so layout has settled before we move the cursor.
+      if (this._textarea && this.existingComment) {
+        this._textarea.value = this.existingComment;
+      }
       requestAnimationFrame(() => {
-        if (this._textarea) {
-          if (this.existingComment) this._textarea.value = this.existingComment;
-          this._textarea.focus();
-        }
+        this._textarea?.focus();
       });
     } else if (this.open && refChanged && this.mode === "popover") {
       this._reposition();
