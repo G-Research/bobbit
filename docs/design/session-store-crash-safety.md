@@ -5,6 +5,12 @@ Status: implemented on `goal/sessions-p-14dc3ec7`. Companion to
 status invariant) — both are about not silently losing session-shaped
 state across a crash.
 
+See also [`session-recovery-boot-passes.md`](./session-recovery-boot-passes.md)
+for the boot-time recovery cascade that reconstructs team-lead session
+records from surviving `*.jsonl` transcripts when the crash-safety
+guards above could not prevent loss (e.g. legacy installs predating
+those guards).
+
 ---
 
 ## 1. The incident
