@@ -19,8 +19,13 @@ import {
 	canPurgeTeamLeadSession,
 	pickCanonicalTeamLeadJsonl,
 	reconstructTeamLeadSessionRecord,
+	reconstructAgentSessionRecord,
 	scanSlugDirForJsonlsAt,
 	slugDirNameForCwd,
+	isStaleRecoveredTeamLeadTitle,
+	prettyRoleName,
+	parseAgentWorktreeName,
+	discoverAgentsForGoal,
 	type TeamEntryRef,
 	type CandidateJsonl,
 } from "../src/server/agent/team-store-consistency.ts";
@@ -461,5 +466,136 @@ describe("End-to-end recovery against a real slug-dir on disk", () => {
 		assert.equal(record!.archivedAt, Date.parse("2026-05-03T15:30:00Z"));
 		assert.equal(record!.title, "Team Lead: Calcifer (recovered)");
 		assert.equal(record!.teamGoalId, "subgoal-1");
+	});
+
+	it("end-to-end: discovers agent slug-dirs for a team-lead goal and recovers each as an attributable agent session", () => {
+		// User's "Subgoals experimental toggle" had this exact agent layout:
+		// 2 coders + 1 docs-writer, all worktree-sibling slug-dirs alongside the
+		// team-lead's slug-dir.
+		const wtParent = "/Users/aj/Documents/dev/bobbit-subgoals-wt";
+		const teamLeadWt = `${wtParent}/goal-subgoals-e-d4554c66`;
+		// Make the team-lead's own slug-dir + .jsonl
+		const tlSlugDir = path.join(sessionsDir, slugDirNameForCwd(teamLeadWt));
+		fs.mkdirSync(tlSlugDir, { recursive: true });
+		makeJsonl({ dir: tlSlugDir, name: "tl.jsonl", cwd: teamLeadWt, agentId: "tl", startedAt: "2026-05-03T10:00:00Z", size: 1024 });
+		// Plus 3 agent worktrees as siblings
+		const agents = [
+			{ name: "goal-goal-subgoals-e-d4554c66-coder-20592a9e", role: "coder", id: "20592a9e" },
+			{ name: "goal-goal-subgoals-e-d4554c66-coder-e1bd868b", role: "coder", id: "e1bd868b" },
+			{ name: "goal-goal-subgoals-e-d4554c66-docs-writer-18af2949", role: "docs-writer", id: "18af2949" },
+		];
+		for (const a of agents) {
+			const cwd = `${wtParent}/${a.name}`;
+			const agentSlug = path.join(sessionsDir, slugDirNameForCwd(cwd));
+			fs.mkdirSync(agentSlug, { recursive: true });
+			makeJsonl({ dir: agentSlug, name: "main.jsonl", cwd, agentId: a.id, startedAt: "2026-05-03T11:00:00Z", size: 16_384, mtimeMs: Date.parse("2026-05-03T12:00:00Z") });
+		}
+
+		const discovered = discoverAgentsForGoal(sessionsDir, teamLeadWt, fs, path.join, path.dirname, path.basename);
+		assert.equal(discovered.length, 3, "should discover all 3 agent worktrees");
+
+		// Verify each: role parsed, agent worktree path resolved, candidate .jsonl present
+		const byRole = new Map<string, typeof discovered[number]>();
+		for (const d of discovered) byRole.set(`${d.role}:${d.agentId}`, d);
+		assert.ok(byRole.has("coder:20592a9e"));
+		assert.ok(byRole.has("coder:e1bd868b"));
+		assert.ok(byRole.has("docs-writer:18af2949"));
+		for (const d of discovered) {
+			assert.equal(d.candidates.length, 1, `agent ${d.role}-${d.agentId} should have 1 jsonl`);
+		}
+
+		// Reconstruct an agent record
+		const d = discovered[0];
+		const record = reconstructAgentSessionRecord({
+			newSessionId: "fresh-uuid",
+			role: d.role,
+			funName: "Beans",
+			teamLeadSessionId: "tl-session-id",
+			goal: { id: "subgoal-1", projectId: "proj", repoPath: "/repo", archived: true },
+			agentWorktreePath: d.agentWorktreePath,
+			chosenJsonl: d.candidates[0],
+		});
+		assert.equal(record.role, "coder");
+		assert.equal(record.teamGoalId, "subgoal-1");
+		assert.equal(record.teamLeadSessionId, "tl-session-id");
+		assert.equal(record.archived, true);
+		assert.match(record.title, /^Coder: Beans \(recovered\)$/);
+	});
+});
+
+describe("isStaleRecoveredTeamLeadTitle — detect old-shape titles for one-shot rename", () => {
+	it("matches 'Team Lead: <goal.title> (recovered)' exactly", () => {
+		assert.equal(isStaleRecoveredTeamLeadTitle("Team Lead: Audit subgoals branch (recovered)", "Audit subgoals branch"), true);
+	});
+
+	it("does NOT match a fun-name title (idempotent on re-runs)", () => {
+		assert.equal(isStaleRecoveredTeamLeadTitle("Team Lead: Calcifer (recovered)", "Audit subgoals branch"), false);
+	});
+
+	it("does NOT match a non-recovered title", () => {
+		assert.equal(isStaleRecoveredTeamLeadTitle("Team Lead: Jira Springer", "Audit subgoals branch"), false);
+	});
+
+	it("safe with missing title or goalTitle", () => {
+		assert.equal(isStaleRecoveredTeamLeadTitle(undefined, "x"), false);
+		assert.equal(isStaleRecoveredTeamLeadTitle("anything", undefined), false);
+		assert.equal(isStaleRecoveredTeamLeadTitle(undefined, undefined), false);
+	});
+
+	it("trims goalTitle for comparison (defensive)", () => {
+		assert.equal(isStaleRecoveredTeamLeadTitle("Team Lead: Audit X (recovered)", "  Audit X  "), true);
+	});
+});
+
+describe("prettyRoleName — title-case role for session title", () => {
+	it("capitalises single-word role", () => {
+		assert.equal(prettyRoleName("coder"), "Coder");
+	});
+
+	it("hyphenated role: title-case each part", () => {
+		assert.equal(prettyRoleName("code-reviewer"), "Code Reviewer");
+		assert.equal(prettyRoleName("docs-writer"), "Docs Writer");
+	});
+
+	it("'qa' segment is uppercased (special-case for QA Tester etc.)", () => {
+		assert.equal(prettyRoleName("qa-tester"), "QA Tester");
+	});
+});
+
+describe("parseAgentWorktreeName — extract role + id from agent worktree dir", () => {
+	const teamLeadName = "goal-audit-subg-225e4d3d";
+
+	it("parses simple coder worktree", () => {
+		const r = parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-coder-ad801c01", teamLeadName);
+		assert.deepEqual(r, { role: "coder", agentId: "ad801c01" });
+	});
+
+	it("parses hyphenated qa-tester role", () => {
+		const r = parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-qa-tester-f381c7bb", teamLeadName);
+		assert.deepEqual(r, { role: "qa-tester", agentId: "f381c7bb" });
+	});
+
+	it("parses hyphenated code-reviewer role", () => {
+		const r = parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-code-reviewer-e6897153", teamLeadName);
+		assert.deepEqual(r, { role: "code-reviewer", agentId: "e6897153" });
+	});
+
+	it("parses docs-writer role", () => {
+		const r = parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-docs-writer-f9209006", teamLeadName);
+		assert.deepEqual(r, { role: "docs-writer", agentId: "f9209006" });
+	});
+
+	it("returns null for the team-lead worktree itself (doesn't match agent shape)", () => {
+		assert.equal(parseAgentWorktreeName("goal-audit-subg-225e4d3d", teamLeadName), null);
+	});
+
+	it("returns null for unrelated sibling dirs", () => {
+		assert.equal(parseAgentWorktreeName("goal-unrelated-12345678", teamLeadName), null);
+		assert.equal(parseAgentWorktreeName("notes.txt", teamLeadName), null);
+	});
+
+	it("requires 8 hex chars at the end (rejects partial / non-hex ids)", () => {
+		assert.equal(parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-coder-12345", teamLeadName), null);
+		assert.equal(parseAgentWorktreeName("goal-goal-audit-subg-225e4d3d-coder-notvalid", teamLeadName), null);
 	});
 });

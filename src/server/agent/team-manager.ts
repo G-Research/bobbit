@@ -25,7 +25,10 @@ import {
 	findOrphanTeamEntries,
 	pickCanonicalTeamLeadJsonl,
 	reconstructTeamLeadSessionRecord,
+	reconstructAgentSessionRecord,
+	discoverAgentsForGoal,
 	scanSlugDirForJsonlsAt,
+	isStaleRecoveredTeamLeadTitle,
 } from "./team-store-consistency.js";
 
 const execFile = promisify(execFileCb);
@@ -591,6 +594,115 @@ export class TeamManager {
 			}
 			if (fullyOrphanRecovered > 0) {
 				console.log(`[team-manager] Boot recovery: reconstructed ${fullyOrphanRecovered} fully-orphan team-lead session(s).`);
+			}
+
+			// Fourth pass — rename stale recovered team-lead titles.
+			//
+			// Earlier recovered sessions used the goal-title in the title
+			// ("Team Lead: Audit subgoals branch (recovered)") which doesn't
+			// match bobbit's normal "Team Lead: Jira Springer" shape. Upgrade
+			// them to use a generated fun-name on first boot after this fix.
+			// Idempotent: the predicate detects the OLD shape only, so after
+			// rename the predicate stays false on subsequent boots.
+			let titlesUpgraded = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const session of ctx.sessionStore.getAll()) {
+					if (session.role !== "team-lead" || !session.teamGoalId) continue;
+					const goal = ctx.goalStore.get(session.teamGoalId);
+					if (!isStaleRecoveredTeamLeadTitle(session.title, goal?.title)) continue;
+					const funName = generateTeamNameSync();
+					const newTitle = `Team Lead: ${funName} (recovered)`;
+					try {
+						ctx.sessionStore.update(session.id, { title: newTitle });
+						titlesUpgraded++;
+						console.log(`[team-manager] Boot recovery: renamed recovered session ${session.id.slice(0, 8)} to "${newTitle}" (was "${session.title}").`);
+					} catch (err) {
+						console.error(`[team-manager] Title upgrade failed for session ${session.id}:`, err);
+					}
+				}
+			}
+			if (titlesUpgraded > 0) {
+				console.log(`[team-manager] Boot recovery: upgraded ${titlesUpgraded} stale recovered title(s) to fun-name shape.`);
+			}
+
+			// Fifth pass — recover non-team-lead agent sessions (coders,
+			// reviewers, qa-testers, etc.) for every team-mode goal whose
+			// team-lead is now reachable.
+			//
+			// Shape: agent worktrees are siblings of the team-lead worktree
+			// (e.g. `goal-audit-subg-225e4d3d/` vs `goal-goal-audit-subg-
+			// 225e4d3d-coder-ad801c01/`). The worktree dirs themselves get
+			// cleaned up after the agent merges back, but the agent's .jsonl
+			// transcripts under `~/.bobbit/agent/sessions/<agent-slug>/` are
+			// preserved. The user's "Audit subgoals branch" had 14+ agent
+			// slug-dirs surviving with zero session records pointing at them.
+			//
+			// For each agent slug-dir discovered, we reconstruct a session
+			// record with role parsed from the worktree name, teamGoalId
+			// pointing at the goal, and teamLeadSessionId pointing at the
+			// recovered team-lead. Archived flag mirrors the goal. The
+			// sidebar's archived branch then nests them under their
+			// team-lead via the existing `teamLeadSessionId === lead.id`
+			// filter in render-helpers.ts.
+			//
+			// Idempotent: each agent worktree path is uniquely keyed; we
+			// skip any agent whose worktreePath already has a session record.
+			const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
+			let agentsRecovered = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const goal of ctx.goalStore.getAll()) {
+					if (!goal.team || !goal.worktreePath) continue;
+					// Find the team-lead session for this goal (recovered or
+					// original). Without one we can't attribute the agents.
+					const teamLead = ctx.sessionStore.getAll()
+						.find(s => s.teamGoalId === goal.id && s.role === "team-lead");
+					if (!teamLead) continue;
+					// Collect existing agent worktreePaths so we skip them.
+					const existingAgentWorktrees = new Set(
+						ctx.sessionStore.getAll()
+							.filter(s => s.teamGoalId === goal.id && s.role !== "team-lead" && s.worktreePath)
+							.map(s => s.worktreePath!),
+					);
+					const discovered = discoverAgentsForGoal(
+						sessionsRoot,
+						goal.worktreePath,
+						fs,
+						path.join,
+						path.dirname,
+						path.basename,
+					);
+					for (const agent of discovered) {
+						if (existingAgentWorktrees.has(agent.agentWorktreePath)) continue;
+						const chosen = pickCanonicalTeamLeadJsonl(agent.candidates);
+						if (!chosen) continue;
+						try {
+							const funName = generateTeamNameSync(agent.role);
+							const newSessionId = randomUUID();
+							const record = reconstructAgentSessionRecord({
+								newSessionId,
+								role: agent.role,
+								funName,
+								teamLeadSessionId: teamLead.id,
+								goal: {
+									id: goal.id,
+									projectId: goal.projectId,
+									repoPath: goal.repoPath,
+									sandboxed: goal.sandboxed,
+									archived: goal.archived,
+								},
+								agentWorktreePath: agent.agentWorktreePath,
+								chosenJsonl: chosen,
+							});
+							ctx.sessionStore.put(record as Parameters<typeof ctx.sessionStore.put>[0]);
+							agentsRecovered++;
+						} catch (err) {
+							console.error(`[team-manager] Agent recovery failed for ${agent.agentWorktreePath}:`, err);
+						}
+					}
+				}
+			}
+			if (agentsRecovered > 0) {
+				console.log(`[team-manager] Boot recovery: reconstructed ${agentsRecovered} non-team-lead agent session(s) from surviving .jsonl files.`);
 			}
 		}
 

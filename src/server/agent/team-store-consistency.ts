@@ -244,6 +244,187 @@ export interface MinimalFs {
 }
 
 /**
+ * Detect whether a session title is a "stale" recovered title that should be
+ * upgraded to the new fun-name shape. Stale = `"Team Lead: <goal.title> (recovered)"`,
+ * i.e. literally embeds the goal title where bobbit's normal shape would
+ * have a generated fun-name like `"Team Lead: Jira Springer"`.
+ *
+ * Returns false for already-upgraded titles ("Team Lead: Calcifer (recovered)")
+ * so a rename pass can be safely re-run on every boot — fully idempotent.
+ */
+export function isStaleRecoveredTeamLeadTitle(title: string | undefined, goalTitle: string | undefined): boolean {
+	if (!title || !goalTitle) return false;
+	const expected = `Team Lead: ${goalTitle.trim()} (recovered)`;
+	return title === expected;
+}
+
+/**
+ * Pretty-print an agent role for use in a session title.
+ * "coder" → "Coder", "qa-tester" → "QA Tester", "code-reviewer" → "Code Reviewer".
+ */
+export function prettyRoleName(role: string): string {
+	return role
+		.split("-")
+		.map(part => part === "qa" ? "QA" : part.charAt(0).toUpperCase() + part.slice(1))
+		.join(" ");
+}
+
+/**
+ * Parse an agent worktree base name to extract role + agent id.
+ *
+ * Agent worktree name shape: `goal-<team-lead-worktree-name>-<role>-<id>`
+ * where <id> is 8 hex chars. Examples (from the user's actual disk):
+ *   - `goal-goal-audit-subg-225e4d3d-coder-ad801c01` → role="coder", id="ad801c01"
+ *   - `goal-goal-audit-subg-225e4d3d-qa-tester-f381c7bb` → role="qa-tester", id="f381c7bb"
+ *   - `goal-goal-audit-subg-225e4d3d-code-reviewer-e6897153` → role="code-reviewer", id="e6897153"
+ *
+ * Returns null if the name doesn't match the agent pattern (e.g. it's the
+ * team-lead worktree itself or an unrelated sibling).
+ */
+export function parseAgentWorktreeName(name: string, teamLeadWorktreeName: string): { role: string; agentId: string } | null {
+	const prefix = `goal-${teamLeadWorktreeName}-`;
+	if (!name.startsWith(prefix)) return null;
+	const remainder = name.slice(prefix.length);
+	// Trailing 8 hex chars = id; everything else is the (possibly hyphenated) role.
+	const m = remainder.match(/^(.+)-([a-f0-9]{8})$/);
+	if (!m) return null;
+	return { role: m[1], agentId: m[2] };
+}
+
+/** Discovered agent worktree from a slug-dir scan. */
+export interface DiscoveredAgent {
+	agentWorktreePath: string;
+	role: string;
+	agentId: string;
+	candidates: CandidateJsonl[];
+}
+
+/**
+ * Find all agent slug-dirs that belong to a given team-lead goal's worktree.
+ *
+ * Agent slug-dirs live alongside the team-lead's slug-dir under the same
+ * `sessionsDir` and have a predictable name prefix derived from the team-lead's
+ * worktree path. We scan by slug-dir NAME (no need to read every .jsonl
+ * first), then resolve the agent cwd back from the slug name.
+ *
+ * Example: team-lead worktree `/wt/goal-audit-subg-225e4d3d` has slug-dir
+ * `--Users-...-wt-goal-audit-subg-225e4d3d--`. Agent slug-dirs start with
+ * `--Users-...-wt-goal-goal-audit-subg-225e4d3d-` and end with `--`.
+ *
+ * Returns at most one entry per slug-dir, with all surviving .jsonl candidates
+ * inside. Empty if the team-lead worktree path is malformed or the agent
+ * sessions root can't be read.
+ */
+export function discoverAgentsForGoal(
+	sessionsDir: string,
+	teamLeadWorktreePath: string,
+	fs: MinimalFs,
+	join: (...parts: string[]) => string,
+	dirname: (p: string) => string,
+	basename: (p: string) => string,
+): DiscoveredAgent[] {
+	const wtName = basename(teamLeadWorktreePath);
+	const wtParent = dirname(teamLeadWorktreePath);
+	// The agent slug-dir name prefix is `slugDirNameForCwd(wtParent + "/goal-" + wtName + "-")`
+	// minus the trailing `--`. Easier to build directly:
+	const innerPrefix = `${wtParent}/goal-${wtName}-`.replace(/^\/+/, "").replace(/\//g, "-");
+	const slugPrefix = "--" + innerPrefix;  // does NOT have closing `--` — the role/id + `--` comes after
+
+	let names: string[];
+	try { names = fs.readdirSync(sessionsDir); } catch { return []; }
+
+	const out: DiscoveredAgent[] = [];
+	for (const name of names) {
+		if (!name.startsWith(slugPrefix) || !name.endsWith("--")) continue;
+		// Strip the prefix and trailing `--` to extract the role-id suffix.
+		const middle = name.slice(slugPrefix.length, -2);
+		// middle is like "coder-ad801c01" or "qa-tester-f381c7bb" or "code-reviewer-e6897153"
+		const m = middle.match(/^(.+)-([a-f0-9]{8})$/);
+		if (!m) continue;
+		const role = m[1];
+		const agentId = m[2];
+		const agentWorktreePath = `${wtParent}/goal-${wtName}-${role}-${agentId}`;
+		// Scan inside the slug-dir for .jsonls matching the agent cwd.
+		const candidates = scanSlugDirForJsonlsAt(sessionsDir, agentWorktreePath, fs, join);
+		if (candidates.length === 0) continue;
+		out.push({ agentWorktreePath, role, agentId, candidates });
+	}
+	return out;
+}
+
+/** Reconstruction input for an agent (worker / reviewer / qa-tester) session. */
+export interface AgentRecoveryInput {
+	/** Freshly-generated bobbit session id (original is unknowable). */
+	newSessionId: string;
+	role: string;
+	funName: string;
+	teamLeadSessionId: string;
+	goal: {
+		id: string;
+		projectId?: string;
+		repoPath?: string;
+		sandboxed?: boolean;
+		archived?: boolean;
+	};
+	agentWorktreePath: string;
+	chosenJsonl: CandidateJsonl;
+}
+
+export interface ReconstructedAgentRecord {
+	id: string;
+	title: string;
+	cwd: string;
+	projectId?: string;
+	createdAt: number;
+	lastActivity: number;
+	role: string;
+	teamGoalId: string;
+	teamLeadSessionId: string;
+	worktreePath: string;
+	repoPath?: string;
+	branch: string;
+	agentSessionFile: string;
+	sandboxed?: boolean;
+	archived: boolean;
+	archivedAt?: number;
+}
+
+/**
+ * Reconstruct a non-team-lead agent (coder, reviewer, qa-tester, …) session
+ * record from a surviving .jsonl. Mirrors `reconstructTeamLeadSessionRecord`
+ * but stamps `role` + `teamLeadSessionId` so the sidebar nests the agent
+ * under the recovered team-lead. Title shape matches bobbit's normal pattern
+ * for non-leads: `"<Role>: <fun-name> (recovered)"`.
+ */
+export function reconstructAgentSessionRecord(input: AgentRecoveryInput): ReconstructedAgentRecord {
+	const startedMs = Date.parse(input.chosenJsonl.agentStartedAtIso);
+	const archived = !!input.goal.archived;
+	// Branch namespace mirrors what bobbit's session-setup.ts uses: the
+	// worktree dir name with a leading `goal/`. We don't strictly need this
+	// for restore (the agent process picks branch via git) but we stamp it
+	// for sidebar consistency.
+	const branch = `goal/${input.agentWorktreePath.split("/").pop()}`;
+	return {
+		id: input.newSessionId,
+		title: `${prettyRoleName(input.role)}: ${input.funName} (recovered)`,
+		cwd: input.agentWorktreePath,
+		projectId: input.goal.projectId,
+		createdAt: Number.isFinite(startedMs) ? startedMs : Date.now(),
+		lastActivity: input.chosenJsonl.mtime,
+		role: input.role,
+		teamGoalId: input.goal.id,
+		teamLeadSessionId: input.teamLeadSessionId,
+		worktreePath: input.agentWorktreePath,
+		repoPath: input.goal.repoPath,
+		branch,
+		agentSessionFile: input.chosenJsonl.jsonlPath,
+		sandboxed: !!input.goal.sandboxed,
+		archived,
+		...(archived ? { archivedAt: input.chosenJsonl.mtime } : {}),
+	};
+}
+
+/**
  * Scan an agent-sessions root directory for .jsonl files belonging to the
  * given worktree cwd. Returns candidate descriptors compatible with
  * `pickCanonicalTeamLeadJsonl`. Filters out:
