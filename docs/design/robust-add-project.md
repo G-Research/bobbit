@@ -219,7 +219,7 @@ Partial archive failure is surfaced explicitly — we do NOT attempt rollback (t
 
 ## UI changes (`src/app/dialogs.ts`)
 
-The add-project dialog gains a `PreflightPanel` between the path input and the Submit button. Debounce 400 ms (matching existing `runDetection`). Layout:
+The add-project dialog gains a `PreflightPanel` between the path input and the Submit button. Preflight is debounced 400 ms when the user is typing (matching existing `runDetection`); other write sites to `pathValue` trigger preflight immediately (see Implementation notes). Layout:
 
 ```
 ┌── Add project ──────────────────────────────────┐
@@ -243,6 +243,18 @@ The add-project dialog gains a `PreflightPanel` between the path input and the S
   - "Will be preserved" list (only non-empty when `bobbit.gateway-owned` is true) with an explanatory note.
 - After archive, the preflight panel re-fetches. `bobbit.existing` should now report `pass`.
 - The existing `SymlinkRootError` confirm modal is kept as-is and triggered by the registration call path. The `path.symlink` preflight row is informational — clicking its remediation can open the confirm modal pre-emptively, but we don't reshape the established acceptCanonical flow.
+
+### Implementation notes: preflight trigger sites
+
+Preflight is **not** a reactive effect on `pathValue`. It is triggered explicitly from every code path that writes `pathValue`. As of this writing there are three such sites in `src/app/dialogs.ts`:
+
+1. **Text input `onInput`** — calls `debouncedDetect(pathValue)`, which fans out to both `runDetection` and `runPreflight` after the 400 ms debounce.
+2. **Directory browser `selectBrowsed()`** — the user has explicitly confirmed a directory pick, so preflight runs immediately (no debounce) alongside `runDetection`.
+3. **Defensive mount-time guard** — if the dialog opens with a prefilled `pathValue`, `runDetection` and `runPreflight` are kicked off on mount behind a `pathValue.trim()` guard.
+
+**Invariant**: any new code path that mutates `pathValue` must also trigger preflight, or the panel will silently stay empty. The original PR shipped with site (2) missing — `selectBrowsed()` set `pathValue` but called only `runDetection`, so users who picked a directory via the in-dialog browser never saw a preflight report. Reframing this as a reactive effect on `pathValue` changes would eliminate the foot-gun but is intentionally out of scope; the surgical fix preserves the explicit-trigger pattern.
+
+The 404 fallback (`preflightUnavailable = true`, silently hide the panel) is preserved for older gateways but logs a single `console.warn("[preflight] endpoint unavailable — hiding panel")` so dev/QA can distinguish "no panel because endpoint is missing" from "no panel because of a trigger-site regression".
 
 ## Server wiring
 
