@@ -251,6 +251,18 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 The helper implementing this is `resolveProjectForRequest` in `src/server/agent/resolve-project.ts`. Callers in new handlers should invoke it at the top of the handler and return the 400 directly when `ok === false`.
 
+#### `POST /api/sessions` — `assistantType` carve-outs
+
+`POST /api/sessions` accepts an optional `assistantType` that changes how project resolution applies. The rule is one sentence: **only project-scope assistants require a resolvable project; server-scope assistants do not.**
+
+| `assistantType` | Scope | Project resolution |
+|---|---|---|
+| _(unset)_, `goal` | project | Standard contract above — `projectId` or matching `cwd` required, else 400. |
+| `project`, `project-scaffolding` | project (new) | The server creates a provisional project registration so the session persists under its own context. |
+| `role`, `tool`, `staff` | server | `projectId` is **optional**. When omitted, the server anchors the session at the synthetic `system` project (see [internals.md — Synthetic system project](internals.md#synthetic-system-project)). When the caller _does_ pass a `projectId` (e.g. the Roles/Tools/Staff pages when scoped to a project), it is honoured normally. |
+
+Why: `role` / `tool` / `staff` assistants edit project-independent config (custom roles, custom tools, staff agents) that lives at server scope. Forcing them through the project-resolution gate would make `npx bobbit` from a non-project directory return 400 just for opening the Roles page's "+ New Role" button. The system-project anchor gives those sessions a valid persistence store without requiring the user to register a real project first.
+
 ### Project Config
 
 Per-project overrides (recommended — scoped to a registered project):

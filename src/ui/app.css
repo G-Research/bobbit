@@ -1225,10 +1225,17 @@ html {
 .bobbit-blob--archived .bobbit-blob__wand,
 .bobbit-blob--archived .bobbit-blob__wizard-hat,
 .bobbit-blob--archived .bobbit-blob__stamp,
-.bobbit-blob--archived .bobbit-blob__clipboard {
+.bobbit-blob--archived .bobbit-blob__clipboard,
+.bobbit-blob--archived .bobbit-blob__zzz,
+.bobbit-blob--archived .bobbit-blob__zzz-letter {
   animation: none !important;
   transition: none !important;
 }
+
+/* Hide the sleeping "zzz" indicator entirely on archived sessions — an
+ * archived chat isn't "sleeping", it's terminated. Also belt-and-braces for
+ * the e2e test that asserts zero running animations on the archived blob. */
+.bobbit-blob--archived .bobbit-blob__zzz { display: none !important; }
 
 /* Shadow follows sprite horizontally during transitions */
 .bobbit-blob--exit .bobbit-blob__shadow {

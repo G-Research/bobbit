@@ -76,7 +76,7 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -3018,6 +3018,11 @@ async function handleApiRoute(
 		// setting up a NEW project — they get a provisional project registration so sessions
 		// persist under their own project context (survives page refresh).
 		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
+		// Role/Tool/Staff assistants edit server-scope config and do not require a
+		// project. When the client supplies a projectId we still attach to it (the
+		// Roles page can be scoped to a project); otherwise we skip project
+		// resolution entirely so `npx bobbit` in a non-project directory works.
+		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool" || assistantType === "staff";
 		let resolvedProjectId = body?.projectId as string | undefined;
 		let provisionalProjectId: string | undefined;
 
@@ -3069,7 +3074,12 @@ async function handleApiRoute(
 		// Project must be resolvable explicitly or from cwd — no silent default fallback.
 		// (Provisional-project handling above may already have set resolvedProjectId;
 		// if so, skip the resolver.)
-		if (!resolvedProjectId) {
+		// Server-scope assistants (role/tool/staff) without an explicit projectId
+		// anchor at the synthetic system project so they have a valid persistence
+		// store without forcing the user to register a real project.
+		if (!resolvedProjectId && isServerScopeAssistant) {
+			resolvedProjectId = SYSTEM_PROJECT_ID;
+		} else if (!resolvedProjectId) {
 			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
 			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
 			resolvedProjectId = resolved.projectId;
