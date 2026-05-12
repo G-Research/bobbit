@@ -581,6 +581,77 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	}
 }
 
+/* Unread/unseen activity indicator — pulsing dot in sidebar rows */
+.unseen-dot {
+	display: inline-block;
+	width: calc(5px * var(--sidebar-font-scale, 1));
+	height: calc(5px * var(--sidebar-font-scale, 1));
+	border-radius: 50%;
+	background: var(--primary);
+	flex-shrink: 0;
+	vertical-align: middle;
+	margin-left: 2px;
+	margin-top: 1px;
+	box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 50%, transparent);
+	animation: unseen-dot-pulse 1.8s ease-in-out infinite;
+	transform-origin: center;
+}
+
+@keyframes unseen-dot-pulse {
+	0%, 100% {
+		transform: scale(1);
+		box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 45%, transparent);
+	}
+	50% {
+		transform: scale(1.3);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 0%, transparent);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.unseen-dot { animation: none; }
+}
+
+/* Bobbit sprite outline pulse — soft primary-color glow on unseen sessions.
+ * Uses blurred drop-shadows for a soft halo (not a hard pixel outline).
+ * The inner sprite keeps its idle saturate(0.4); drop-shadows are applied
+ * by this parent wrapper and draw the shadow at full primary color
+ * regardless of the desaturated inner content. */
+.bobbit-unread-pulse {
+	/* Outline offset & blur scale with the sidebar font scale so the effect
+	 * stays visually proportional when the user resizes the sidebar text. */
+	--bobbit-outline-offset: calc(1px * var(--sidebar-font-scale, 1));
+	--bobbit-outline-blur:   calc(0.9px * var(--sidebar-font-scale, 1));
+	animation: bobbit-unread-pulse 2s ease-in-out infinite;
+	will-change: filter;
+}
+@keyframes bobbit-unread-pulse {
+	0%, 100% {
+		filter:
+			drop-shadow(var(--bobbit-outline-offset) 0 0 color-mix(in oklch, var(--primary) 30%, transparent))
+			drop-shadow(calc(-1 * var(--bobbit-outline-offset)) 0 0 color-mix(in oklch, var(--primary) 30%, transparent))
+			drop-shadow(0 var(--bobbit-outline-offset) 0 color-mix(in oklch, var(--primary) 30%, transparent))
+			drop-shadow(0 calc(-1 * var(--bobbit-outline-offset)) 0 color-mix(in oklch, var(--primary) 30%, transparent));
+	}
+	50% {
+		filter:
+			drop-shadow(var(--bobbit-outline-offset) 0 var(--bobbit-outline-blur) var(--primary))
+			drop-shadow(calc(-1 * var(--bobbit-outline-offset)) 0 var(--bobbit-outline-blur) var(--primary))
+			drop-shadow(0 var(--bobbit-outline-offset) var(--bobbit-outline-blur) var(--primary))
+			drop-shadow(0 calc(-1 * var(--bobbit-outline-offset)) var(--bobbit-outline-blur) var(--primary));
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-unread-pulse {
+		animation: none;
+		filter:
+			drop-shadow(var(--bobbit-outline-offset) 0 0 color-mix(in oklch, var(--primary) 60%, transparent))
+			drop-shadow(calc(-1 * var(--bobbit-outline-offset)) 0 0 color-mix(in oklch, var(--primary) 60%, transparent))
+			drop-shadow(0 var(--bobbit-outline-offset) 0 color-mix(in oklch, var(--primary) 60%, transparent))
+			drop-shadow(0 calc(-1 * var(--bobbit-outline-offset)) 0 color-mix(in oklch, var(--primary) 60%, transparent));
+	}
+}
+
 /* Sidebar active indicator — heartbeat with double ripple */
 .sidebar-active-dot {
 	display: inline-block;
