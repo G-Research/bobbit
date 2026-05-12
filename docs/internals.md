@@ -28,7 +28,7 @@ Key behaviors:
 - **No default project.** Bobbit has no "default" project concept. On startup, the registry loads `projects.json` as-is - whatever is on disk, including zero projects. A fresh install is a valid state: the sidebar shows an Add Project CTA, and the toolbar **+ New Goal** button is disabled with tooltip "Add a project first" until at least one project is registered. Bobbit never implicitly registers a project based on the server CWD. `ProjectRegistry.ensureDefaultProject()` has been removed.
 - `register()` validates `rootPath` is absolute and exists on disk, checks for duplicate paths, and scaffolds `.bobbit/config/` and `.bobbit/state/` in the project directory if needed. `POST /api/projects` supports `upsert: true` - if a project already exists at the same `rootPath`, the existing project is returned (200) instead of a 400 error. This makes project registration idempotent.
 - `remove()` only unregisters - it does not delete files.
-- **Delete protection:** `DELETE /api/projects/:id` returns `400 {"error":"Cannot delete the last remaining project - add another project first"}` when deleting would leave zero projects. There is no hidden carve-out for a "first" or "CWD" project - every project can be removed as long as at least one other project remains. Under `BOBBIT_E2E=1`, `?force=1` bypasses the last-project guard for tests that need to exercise the zero-project UX.
+- **Removal:** `DELETE /api/projects/:id` always succeeds for non-hidden projects — there is no last-project guard, and there is no carve-out for a "first" or "CWD" project. When the last visible project is removed, the UI falls back to the existing zero-project first-run state. The hidden "system" project is unaffected by this flow.
 - The per-project settings page General tab exposes a "Remove Project" button in a Danger Zone section for every registered project. On confirmation, it calls `DELETE /api/projects/:id`, which invokes `remove()` and navigates the user back to system settings.
 - Persistence is atomic (write to `.tmp` then rename).
 
@@ -821,7 +821,7 @@ The per-project "+ goal" button on each project row bypasses the popover - the p
 | `POST` | `/api/projects` | Register a project (body: `name`, `rootPath`, optional `color`) |
 | `GET` | `/api/projects/:id` | Get a single project |
 | `PUT` | `/api/projects/:id` | Update name/color |
-| `DELETE` | `/api/projects/:id` | Unregister (blocked when it would leave zero projects; `?force=1` under `BOBBIT_E2E=1` bypasses) |
+| `DELETE` | `/api/projects/:id` | Unregister (does not delete files on disk); any project may be removed, including the last visible one |
 | `GET` | `/api/projects/:id/config` | Raw project-level config overrides |
 | `GET` | `/api/projects/:id/config/defaults` | Built-in defaults |
 | `PUT` | `/api/projects/:id/config` | Set/clear project config fields |

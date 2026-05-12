@@ -158,7 +158,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
-		// Enable test-only bypass knobs (e.g. DELETE /api/projects/:id?force=1).
+		// Enable test-only bypass knobs used by various server paths.
 		process.env.BOBBIT_E2E = "1";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";

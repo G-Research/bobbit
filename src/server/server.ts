@@ -2240,19 +2240,13 @@ async function handleApiRoute(
 	}
 
 	// DELETE /api/projects/:id
+	//
+	// Any project may be removed, including the last visible one. When zero
+	// non-hidden projects remain the UI falls back to the existing
+	// zero-project first-run state (see GR-09 / splash-no-projects spec).
 	if (projectGetMatch && req.method === "DELETE") {
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
-		// Test-only bypass: BOBBIT_E2E=1 + ?force=1 allows deleting the last
-		// project so GR-09 (zero-project first-run UX) can exercise the empty state.
-		const forceDelete = process.env.BOBBIT_E2E === "1" && url.searchParams.get("force") === "1";
-		// The synthetic "system" project (hidden) doesn't count toward the
-		// "at least one real project" guard.
-		const visibleCount = projectRegistry.list().filter(p => !p.hidden).length;
-		if (project && !project.hidden && visibleCount === 1 && !forceDelete) {
-			json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
-			return;
-		}
 		try {
 			// Drain the project's worktree pool before removing
 			await sessionManager.removeWorktreePool(projectId);

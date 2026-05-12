@@ -81,7 +81,7 @@ test.describe("Add Project — preflight panel", () => {
 		const projects = data.projects || data || [];
 		for (const p of projects) {
 			if (p.name === "default") continue;
-			await apiFetch(`/api/projects/${p.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 

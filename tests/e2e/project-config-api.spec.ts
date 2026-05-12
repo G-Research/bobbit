@@ -37,7 +37,7 @@ async function registerTmpProject(name: string): Promise<{ id: string; cleanup: 
 	return {
 		id: proj.id,
 		cleanup: () => {
-			apiFetch(`/api/projects/${proj.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
 			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		},
 	};
