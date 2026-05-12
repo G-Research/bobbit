@@ -3348,16 +3348,20 @@ async function handleApiRoute(
 			if (inlineWorkflow && typeof inlineWorkflow === "object") {
 				resolvedWorkflow = inlineWorkflow as Workflow;
 				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
-			} else if (workflowId) {
-				// Layer 1: cascade lookup.
-				const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-				resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-				// Layer 1b: cascade miss — fall through to project store directly
-				// (handles transient stale-cascade after archive/create cycles).
-				if (!resolvedWorkflow) {
-					resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+			} else {
+				// Layer 1: cascade lookup (only when workflowId given).
+				if (workflowId) {
+					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+					// Layer 1b: cascade miss — fall through to project store directly
+					// (handles transient stale-cascade after archive/create cycles).
+					if (!resolvedWorkflow) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					}
 				}
-				// Layer 2: still missing AND store is empty → auto-seed defaults.
+				// Layer 2: store is empty → auto-seed defaults (fires for both
+				// explicit-id and no-id cases — the no-id case then falls through
+				// to GoalManager.createGoal's "first workflow in store" fallback).
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
@@ -3366,11 +3370,13 @@ async function handleApiRoute(
 						targetCtx.workflowStore.put(wf as unknown as Workflow);
 					}
 					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					// Re-resolve after seeding.
-					resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					// Re-resolve after seeding (only when an explicit id was given).
+					if (workflowId) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					}
 				}
-				// Layer 3: store non-empty, id genuinely unknown → friendly 400.
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
+				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
+				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
 					const available = targetCtx.workflowStore.getAll().map(w => w.id);
 					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
 						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
