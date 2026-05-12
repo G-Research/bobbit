@@ -3207,6 +3207,50 @@ html {
 	transition: filter 0.4s ease;
 }
 
+/* Floating "zzz" sleeping indicator — visible only when the chat blob is idle.
+ * Three letters of increasing size drift upward and to the right, staggered
+ * so a new "z" emerges every ~1s. The container is positioned above the
+ * sprite head; tweak top/right to align visually. */
+.bobbit-blob__zzz {
+	position: absolute;
+	/* Bobbit sprite head sits roughly at top:8px (sprite margin-top) minus the
+	 * scale-4 expansion above the origin (~24px). Anchor zzz just above and to
+	 * the right of the head so the letters drift up-and-right away from it. */
+	top: -36px;
+	left: -6px;
+	width: 60px;
+	height: 60px;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 0.4s ease 0.15s;
+	font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+	color: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
+	z-index: 1;
+}
+.bobbit-blob--idle .bobbit-blob__zzz { opacity: 1; }
+.bobbit-blob__zzz-letter {
+	position: absolute;
+	bottom: 0;
+	font-weight: 700;
+	opacity: 0;
+	animation: bobbit-blob-zzz 3.6s ease-in-out infinite;
+	will-change: transform, opacity;
+}
+.bobbit-blob__zzz-letter--1 { left:  0px; bottom: 14px; font-size: 11px; animation-delay: 0s; }
+.bobbit-blob__zzz-letter--2 { left: 10px; bottom: 8px; font-size: 15px; animation-delay: 1.2s; }
+.bobbit-blob__zzz-letter--3 { left: 18px; bottom: 8px; font-size: 11px; animation-delay: 2.4s; }
+@keyframes bobbit-blob-zzz {
+	0%   { transform: translate(0, 0) rotate(-14deg);   opacity: 0; }
+	15%  {                                              opacity: 0.85; }
+	60%  { transform: translate(14px, -32px) rotate(0deg); opacity: 0.6; }
+	100% { transform: translate(26px, -56px) rotate(10deg); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-blob__zzz-letter { animation: none; opacity: 0.5; }
+	.bobbit-blob__zzz-letter--2 { transform: translate(8px, -22px); }
+	.bobbit-blob__zzz-letter--3 { transform: translate(18px, -42px); }
+}
+
 /* Idle state — sitting still, offset left, eyes looking around */
 .bobbit-blob--idle .bobbit-blob__sprite {
 	transform: scale(4) translateX(-7px);

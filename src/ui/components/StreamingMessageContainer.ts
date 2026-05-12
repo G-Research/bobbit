@@ -262,6 +262,11 @@ export class StreamingMessageContainer extends LitElement {
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__shadow"></div>
+					<div class="bobbit-blob__zzz" aria-hidden="true">
+						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--1">z</span>
+						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--2">z</span>
+						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--3">z</span>
+					</div>
 				</div>` : nothing}
 				${showTimer
 					? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">
