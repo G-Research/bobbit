@@ -250,7 +250,14 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 		// sending text rather than the agent's pre-turn auto path — but the
 		// auto-compaction case is what we are exercising. Allow either, but
 		// prefer auto.
-		await expect(card.locator("[data-test='trigger']")).toHaveText(/auto|manual/);
+		await expect(card.locator("[data-test='trigger']")).toHaveText(/auto|manual|context limit/);
+		// Overflow-triggered compaction MUST surface as the "context limit" pill
+		// (NOT "manual"), reach the complete state, and carry parsed/non-null
+		// before+reduction values — pin for the four-defects design doc.
+		await expect(card).toHaveAttribute("data-state", "complete");
+		await expect(card.locator("[data-test='trigger']")).toHaveText("context limit");
+		await expect(card.locator("[data-test='tokens-before']")).toContainText(/\d/);
+		await expect(card.locator("[data-test='reduction-pct']")).toContainText(/-\d+(\.\d+)?%/);
 
 		// Post-compact turn succeeds.
 		await pollIdle(gw, sessionId, 240_000);

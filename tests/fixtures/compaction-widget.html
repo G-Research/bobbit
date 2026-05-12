@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>CompactionSummaryRenderer fixture</title>
+<style>
+	:root {
+		--background: #fff;
+		--foreground: #111;
+		--card: #fff;
+		--border: #e4e4e7;
+		--muted: #f4f4f5;
+		--muted-foreground: #71717a;
+		--chart-1: #3b82f6;
+		--warning: #d97706;
+		--destructive: #dc2626;
+	}
+	body { font-family: sans-serif; padding: 8px; color: var(--foreground); background: var(--background); }
+	.italic { font-style: italic; }
+	.font-mono { font-family: ui-monospace, monospace; }
+	.text-muted-foreground { color: var(--muted-foreground); }
+	.text-foreground { color: var(--foreground); }
+	.text-destructive { color: var(--destructive); }
+	.bg-card { background: var(--card); }
+	.bg-muted\/40 { background: color-mix(in oklch, var(--muted) 40%, transparent); }
+	.border-border { border-color: var(--border); }
+	.border { border-width: 1px; border-style: solid; }
+	.rounded { border-radius: 4px; }
+	.rounded-md { border-radius: 6px; }
+	.rounded-full { border-radius: 9999px; }
+	.p-3 { padding: 12px; }
+	.p-2 { padding: 8px; }
+	.px-2 { padding-left: 8px; padding-right: 8px; }
+	.py-0\.5 { padding-top: 2px; padding-bottom: 2px; }
+	.pt-1 { padding-top: 4px; }
+	.mt-1 { margin-top: 4px; }
+	.mt-2 { margin-top: 8px; }
+	.mt-3 { margin-top: 12px; }
+	.ml-1 { margin-left: 4px; }
+	.ml-2 { margin-left: 8px; }
+	.text-xs { font-size: 12px; }
+	.text-sm { font-size: 14px; }
+	.font-medium { font-weight: 500; }
+	.uppercase { text-transform: uppercase; }
+	.tracking-wide { letter-spacing: 0.025em; }
+	.inline-flex { display: inline-flex; }
+	.flex { display: flex; }
+	.flex-wrap { flex-wrap: wrap; }
+	.items-baseline { align-items: baseline; }
+	.items-center { align-items: center; }
+	.justify-between { justify-content: space-between; }
+	.gap-2 { gap: 8px; }
+	.gap-1\.5 { gap: 6px; }
+	.gap-x-4 { column-gap: 16px; }
+	.gap-y-1 { row-gap: 4px; }
+	.space-y-1\.5 > * + * { margin-top: 6px; }
+	.space-y-3 > * + * { margin-top: 12px; }
+	.h-1\.5 { height: 6px; }
+	.h-full { height: 100%; }
+	.w-24 { width: 96px; }
+	.w-32 { width: 128px; }
+	.w-full { width: 100%; }
+	.block { display: block; }
+	.cursor-pointer { cursor: pointer; }
+	.overflow-hidden { overflow: hidden; }
+	.overflow-x-auto { overflow-x: auto; }
+	.max-h-\[2000px\] { max-height: 2000px; }
+	.transition-all { transition: all 0.3s; }
+	.duration-300 { transition-duration: 0.3s; }
+	.text-green-600 { color: #16a34a; }
+	.animate-spin { animation: spin 1s linear infinite; }
+	@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<script src="./compaction-widget-bundle.js"></script>
+</body>
+</html>
