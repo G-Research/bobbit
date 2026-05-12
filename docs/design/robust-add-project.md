@@ -217,6 +217,15 @@ Partial archive failure is surfaced explicitly — we do NOT attempt rollback (t
 - 409 → `{ error }` if `<rootPath>/.bobbit/` doesn't exist or is already empty.
 - Does NOT mutate the registry. Client re-runs `/preflight` after.
 
+### Boundary with `POST /api/projects/detect`
+
+Preflight's `bobbit.existing` check and `POST /api/projects/detect`'s `hasBobbit` field look superficially similar but answer different questions and must stay decoupled:
+
+- `bobbit.existing` (preflight) — "is there `.bobbit/` content to archive?" Surfaces the **Archive existing .bobbit/** CTA. Fires whenever `.bobbit/config/` or `.bobbit/state/` has any content.
+- `hasBobbit` (detect) — "is this an already-configured Bobbit project?" Drives the smart Add Project routing between auto-import and the project assistant. **True iff `<rootPath>/.bobbit/config/project.yaml` exists** — the same on-disk marker used by `ProjectConfigStore.configFile` and by `project-assistant.ts`'s EDIT-vs-NEW-mode discriminator.
+
+The distinction matters after a successful archive: this endpoint re-scaffolds empty `<rootPath>/.bobbit/config/` and `<rootPath>/.bobbit/state/` (see the Algorithm step 5 above), so the directory entry `.bobbit/` always exists post-archive. A directory-entry check would misroute Continue to auto-import an empty project; the `project.yaml` marker correctly reports `hasBobbit: false` and routes to the assistant. The same logic also covers ghost-`.bobbit/` cases (half-extracted archives, manually-created stubs, crashed installs).
+
 ## UI changes (`src/app/dialogs.ts`)
 
 The add-project dialog gains a `PreflightPanel` between the path input and the Submit button. Preflight is debounced 400 ms when the user is typing (matching existing `runDetection`); other write sites to `pathValue` trigger preflight immediately (see Implementation notes). Layout:
