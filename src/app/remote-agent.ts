@@ -1694,6 +1694,13 @@ export class RemoteAgent {
 			document.documentElement.dataset.subgoalsEnabled =
 				prefs.subgoalsEnabled === true ? "true" : "false";
 		}
+		// Apply maxNestingDepth — default 3 when unset/invalid.
+		if ("maxNestingDepth" in prefs) {
+			document.documentElement.dataset.maxNestingDepth =
+				(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
+					? String(prefs.maxNestingDepth)
+					: "3";
+		}
 
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {

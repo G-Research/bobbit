@@ -151,7 +151,10 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		undefined,
 		() => {},
 		{ get: () => null, getAll: () => [] } as any,
-		undefined,
+		// Stub preferencesStore — enable subgoals by default so the
+		// nesting-limit gate in runSubgoalStep does not block fixture-driven
+		// spawn tests. (Production callers carry a real PreferencesStore.)
+		{ get: (k: string) => k === "subgoalsEnabled" ? true : null } as any,
 		undefined,
 		mockTeamManager as any,
 		undefined,

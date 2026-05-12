@@ -104,6 +104,10 @@ let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
 let settingsSubgoalsEnabled = false;
+let settingsMaxNestingDepth: number | null = null;
+const MAX_NESTING_DEPTH_DEFAULT = 3;
+const MAX_NESTING_DEPTH_MIN = 1;
+const MAX_NESTING_DEPTH_MAX = 10;
 // Skills-catalog byte budget override. `null` means "use server default" (no preference set).
 let settingsSkillsCatalogBudget: number | null = null;
 
@@ -1846,6 +1850,8 @@ function loadGeneralSettings() {
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					// Subgoals (Experimental) — default OFF. See docs/nested-goals.md.
 					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
+					const rawDepth = prefs.maxNestingDepth;
+					settingsMaxNestingDepth = (typeof rawDepth === "number" && Number.isFinite(rawDepth)) ? rawDepth : null;
 					const raw = prefs.skillsCatalogBudget;
 					settingsSkillsCatalogBudget = (typeof raw === "number" && Number.isFinite(raw)) ? raw : null;
 					renderApp();
@@ -1922,6 +1928,34 @@ async function togglePlayFinishSound(): Promise<void> {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ playAgentFinishSound: settingsPlayFinishSound }),
+		});
+	} catch {}
+}
+
+async function setMaxNestingDepth(raw: number): Promise<void> {
+	if (!Number.isFinite(raw)) return;
+	let n = Math.floor(raw);
+	if (n < MAX_NESTING_DEPTH_MIN) n = MAX_NESTING_DEPTH_MIN;
+	if (n > MAX_NESTING_DEPTH_MAX) n = MAX_NESTING_DEPTH_MAX;
+	settingsMaxNestingDepth = n;
+	document.documentElement.dataset.maxNestingDepth = String(n);
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ maxNestingDepth: n }),
+		});
+	} catch {}
+}
+
+async function resetMaxNestingDepth(): Promise<void> {
+	settingsMaxNestingDepth = null;
+	document.documentElement.dataset.maxNestingDepth = String(MAX_NESTING_DEPTH_DEFAULT);
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ maxNestingDepth: null }),
 		});
 	} catch {}
 }
@@ -2045,6 +2079,34 @@ function renderGeneralTab() {
 					the Plan tab DAG, and the Children tab on the goal dashboard.
 					Currently experimental — behaviour may change.
 				</p>
+			</div>
+			<div class="flex flex-col gap-1.5 ${settingsSubgoalsEnabled ? '' : 'opacity-50'}">
+				<span class="text-sm font-medium text-foreground">Max subgoal depth</span>
+				<p class="text-xs text-muted-foreground">
+					Maximum nesting depth for subgoal trees. Depth 3 = root → child → grandchild.
+					Setting this higher risks runaway spawning. System setting is the ceiling —
+					per-goal overrides can only tighten, not loosen. Range: ${MAX_NESTING_DEPTH_MIN}–${MAX_NESTING_DEPTH_MAX}.
+				</p>
+				<div class="flex items-center gap-3">
+					<input
+						type="number"
+						min="${MAX_NESTING_DEPTH_MIN}"
+						max="${MAX_NESTING_DEPTH_MAX}"
+						step="1"
+						data-testid="general-max-nesting-depth"
+						class="w-24 px-2 py-1 rounded border border-input bg-background text-sm"
+						.value=${String(settingsMaxNestingDepth ?? MAX_NESTING_DEPTH_DEFAULT)}
+						?disabled=${!settingsSubgoalsEnabled}
+						@change=${(e: Event) => setMaxNestingDepth(Number((e.target as HTMLInputElement).value))}
+					/>
+					<span class="text-xs text-muted-foreground">${settingsMaxNestingDepth === null ? "(default)" : ""}</span>
+					<button
+						class="text-xs text-muted-foreground hover:text-foreground underline"
+						data-testid="general-max-nesting-depth-reset"
+						?disabled=${settingsMaxNestingDepth === null || !settingsSubgoalsEnabled}
+						@click=${resetMaxNestingDepth}
+					>Reset to default</button>
+				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<span class="text-sm font-medium text-foreground">Skills catalog budget</span>

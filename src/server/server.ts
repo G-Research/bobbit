@@ -63,6 +63,10 @@ import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
+import {
+	clampMaxDepth as clampMaxNestingDepth,
+	readSubgoalNestingPrefs,
+} from "./agent/subgoal-nesting-limit.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -3291,6 +3295,23 @@ async function handleApiRoute(
 		try {
 			const sandboxed = body.sandboxed === true;
 			const autoStartTeam = body.autoStartTeam !== false; // default true
+			// Per-goal subgoal-nesting overrides. System prefs are the ceiling.
+			const sysPrefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
+			let bodySubgoalsAllowed: boolean | undefined;
+			if (typeof body.subgoalsAllowed === "boolean") {
+				// System OFF → cannot enable per-goal. Tighten only.
+				bodySubgoalsAllowed = sysPrefs.subgoalsEnabled
+					? body.subgoalsAllowed
+					: false;
+			}
+			let bodyMaxNestingDepth: number | undefined;
+			if (body.maxNestingDepth !== undefined && body.maxNestingDepth !== null) {
+				const n = Number(body.maxNestingDepth);
+				if (Number.isFinite(n)) {
+					// Clamp into the system ceiling.
+					bodyMaxNestingDepth = Math.min(sysPrefs.maxNestingDepth, clampMaxNestingDepth(n));
+				}
+			}
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
@@ -3355,6 +3376,8 @@ async function handleApiRoute(
 				enabledOptionalSteps,
 				projectId: targetProjectId,
 				inlineRoles,
+				...(bodySubgoalsAllowed !== undefined ? { subgoalsAllowed: bodySubgoalsAllowed } : {}),
+				...(bodyMaxNestingDepth !== undefined ? { maxNestingDepth: bodyMaxNestingDepth } : {}),
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -3455,6 +3478,7 @@ async function handleApiRoute(
 		json,
 		jsonError,
 		broadcastToAll,
+		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
 	})) return;
 
 	// The legacy DELETE handler below is extended in-place to support
@@ -3863,6 +3887,11 @@ async function handleApiRoute(
 		for (const [key, value] of Object.entries(body)) {
 			if (value === null || value === undefined) {
 				preferencesStore.remove(key);
+			} else if (key === "maxNestingDepth") {
+				// Clamp to 1..10 — see subgoal-nesting-limit.ts.
+				const n = Number(value);
+				if (!Number.isFinite(n)) { json({ error: "maxNestingDepth must be a finite number" }, 400); return; }
+				preferencesStore.set(key, clampMaxNestingDepth(n));
 			} else {
 				preferencesStore.set(key, value);
 			}
