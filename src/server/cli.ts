@@ -4,8 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir } from "./bobbit-dir.js";
+import { setProjectRoot, bobbitStateDir, migrateFromLegacyPiDir, globalAgentDir } from "./bobbit-dir.js";
 import { scaffoldBobbitDir } from "./scaffold.js";
+import { stageBundledBinaries } from "./binaries.js";
 import { resolveSystemPromptPath } from "./agent/system-prompt.js";
 import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
@@ -151,6 +152,15 @@ async function main() {
 
 	// Scaffold .bobbit/ on first run (creates config, extensions, state dirs)
 	scaffoldBobbitDir(args.cwd);
+
+	// Stage bundled fd/rg binaries into <agentDir>/bin so pi-coding-agent
+	// finds them via its existing getToolPath() lookup. Idempotent; failures
+	// log a single warning but never crash startup. See src/server/binaries.ts.
+	try {
+		await stageBundledBinaries(globalAgentDir());
+	} catch (e) {
+		console.warn(`[binaries] Staging failed: ${(e as Error).message}`);
+	}
 
 	const authToken = loadOrCreateToken(args.newToken);
 
