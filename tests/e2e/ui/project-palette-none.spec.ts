@@ -22,6 +22,11 @@ import { tmpdir } from "node:os";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+import {
+	DEFAULT_PROJECT_COLOR_LIGHT,
+	DEFAULT_PROJECT_COLOR_DARK,
+	PALETTE_PRIMARY_COLORS,
+} from "../../../src/shared/palette-colors.js";
 
 test.describe('Per-project palette "None (use global)" card', () => {
 	let projectId: string | undefined;
@@ -88,6 +93,13 @@ test.describe('Per-project palette "None (use global)" card', () => {
 		await oceanBtn.click();
 		await putResponse;
 
+		// After picking Ocean, the server should have auto-seeded accent colors
+		// from the Ocean palette primaries.
+		const afterOcean = await (await apiFetch(`/api/projects/${projectId}`)).json();
+		expect(afterOcean.palette).toBe("ocean");
+		expect(afterOcean.colorLight).toBe(PALETTE_PRIMARY_COLORS.ocean.light);
+		expect(afterOcean.colorDark).toBe(PALETTE_PRIMARY_COLORS.ocean.dark);
+
 		await expect(
 			oceanBtn.locator("text=Active"),
 			'expected the "Ocean" palette card to show Active after clicking it',
@@ -143,12 +155,40 @@ test.describe('Per-project palette "None (use global)" card', () => {
 			)
 			.toBe(globalPalette);
 
-		// Server should report the project with no palette override.
+		// Server should report the project with no palette override AND
+		// accent colors reset to defaults (since the caller didn't supply
+		// explicit colorLight/colorDark in the PUT).
 		const after = await (await apiFetch(`/api/projects/${projectId}`)).json();
 		expect(
 			after.palette === undefined || after.palette === null || after.palette === "",
 			`expected GET /api/projects/${projectId} to return no palette field after clearing override, got ${JSON.stringify(after.palette)}`,
 		).toBe(true);
+		expect(
+			after.colorLight,
+			"expected colorLight to reset to default after clearing palette",
+		).toBe(DEFAULT_PROJECT_COLOR_LIGHT);
+		expect(
+			after.colorDark,
+			"expected colorDark to reset to default after clearing palette",
+		).toBe(DEFAULT_PROJECT_COLOR_DARK);
+
+		// The visible oklch swatch labels next to the color pickers should
+		// reflect the defaults too.
+		await expect
+			.poll(
+				() =>
+					page.evaluate(() =>
+						Array.from(document.querySelectorAll('input[type="color"]')).map(
+							(el) => (el.nextElementSibling?.textContent || "").trim(),
+						),
+					),
+				{
+					message:
+						"expected the oklch labels next to the color pickers to reflect the default accent colors after clicking None",
+					timeout: 5_000,
+				},
+			)
+			.toEqual([DEFAULT_PROJECT_COLOR_LIGHT, DEFAULT_PROJECT_COLOR_DARK]);
 
 		// --- Step 3: reload — "None" should still be Active and DOM still global.
 		await page.reload();
@@ -178,5 +218,25 @@ test.describe('Per-project palette "None (use global)" card', () => {
 				},
 			)
 			.toBe(globalPalette);
+
+		// Default accent colors should also persist across reload.
+		const afterReload = await (await apiFetch(`/api/projects/${projectId}`)).json();
+		expect(afterReload.colorLight).toBe(DEFAULT_PROJECT_COLOR_LIGHT);
+		expect(afterReload.colorDark).toBe(DEFAULT_PROJECT_COLOR_DARK);
+		await expect
+			.poll(
+				() =>
+					page.evaluate(() =>
+						Array.from(document.querySelectorAll('input[type="color"]')).map(
+							(el) => (el.nextElementSibling?.textContent || "").trim(),
+						),
+					),
+				{
+					message:
+						"expected default accent colors to persist across reload",
+					timeout: 5_000,
+				},
+			)
+			.toEqual([DEFAULT_PROJECT_COLOR_LIGHT, DEFAULT_PROJECT_COLOR_DARK]);
 	});
 });
