@@ -48,7 +48,7 @@ export type Action =
 	| { type: "permission-needed"; card: any; seq?: number; ts?: number }
 	| { type: "permission-resolved"; messageId: string }
 	| { type: "compaction-placeholder"; message: any }
-	| { type: "compaction-result"; message: any; success: boolean }
+	| { type: "compaction-result"; message: any; success: boolean; toolResult?: any }
 	| { type: "system-notification"; message: any }
 	| { type: "error"; message: any }
 	| { type: "deny-permission-filter"; messageId: string }
@@ -78,6 +78,100 @@ function extractText(message: any): string {
 /** Whitespace-collapsed text used for plain-text snapshot dedup. */
 function normaliseText(s: string): string {
 	return s.replace(/\s+/g, " ").trim();
+}
+
+// ---------------------------------------------------------------------------
+// Compaction marker helpers.
+//
+// The synthetic compaction summary can appear in two shapes:
+//   (a) Rich  — assistant message with a single `toolCall` block named
+//                `__compaction_summary` (current emission path), plus a
+//                paired `toolResult` row.
+//   (b) Legacy — assistant plain-text row starting with "Context compacted"
+//                (pre-rich-summary emission, still produced by older
+//                clients / the agent subprocess's own transcript marker).
+//
+// `isSyntheticCompactionMarker` recognises both so the snapshot dedup
+// invariant (case 12 + "snapshot drops trailing synthetic compaction
+// marker" in tests/message-reducer.test.ts) keeps working unchanged via
+// the legacy branch, while the rich-summary path adds new behaviour
+// (case 12b, 12c).
+// ---------------------------------------------------------------------------
+const COMPACTION_TOOL_NAME = "__compaction_summary";
+
+function hasCompactionToolCall(m: any): boolean {
+	if (!m || m.role !== "assistant") return false;
+	const cs = m.content;
+	if (!Array.isArray(cs)) return false;
+	return cs.some((c: any) => c?.type === "toolCall" && c?.name === COMPACTION_TOOL_NAME);
+}
+
+function isCompactionToolResult(m: any): boolean {
+	return m?.role === "toolResult" && (m as any).toolName === COMPACTION_TOOL_NAME;
+}
+
+function isLegacyTextCompaction(m: any): boolean {
+	if (!m || m.role !== "assistant") return false;
+	const t = extractText(m);
+	return typeof t === "string" && t.startsWith("Context compacted");
+}
+
+/**
+ * Parse "Context compacted from Xk tokens." back into a number. Coupled to
+ * pi-coding-agent transcript format — see
+ * `docs/design/compaction-e2e-rich-summary.md` §2.4 / §4 risk 1. Case (12c)
+ * pins this as a regression sentinel.
+ */
+function parseTokensBeforeFromServerMarker(text: string): number | null {
+	const m = /Context compacted from\s+([\d.]+)\s*([kKmM]?)\s*tokens?/.exec(text);
+	if (!m) return null;
+	const n = parseFloat(m[1]);
+	if (!Number.isFinite(n)) return null;
+	const suffix = m[2]?.toLowerCase();
+	if (suffix === "k") return Math.round(n * 1000);
+	if (suffix === "m") return Math.round(n * 1_000_000);
+	return Math.round(n);
+}
+
+/**
+ * Upgrade a server plain-text compaction marker in-place into a rich
+ * synthetic carrying a `__compaction_summary` toolCall. Used by the
+ * snapshot path on reload when no live rich synthetic exists yet.
+ * `tokensAfter` / `reductionPct` stay null; trigger defaults to "manual".
+ */
+function upgradeServerCompactionMarker(serverRow: any): any {
+	const text = extractText(serverRow);
+	const tokensBefore = parseTokensBeforeFromServerMarker(text);
+	const payload = {
+		schemaVersion: 1 as const,
+		trigger: "manual" as const,
+		success: true,
+		timestamp:
+			typeof serverRow?.timestamp === "number"
+				? new Date(serverRow.timestamp).toISOString()
+				: new Date(0).toISOString(),
+		tokensBefore,
+		tokensAfter: null,
+		reductionPct: null,
+	};
+	const id =
+		typeof serverRow?.id === "string" && serverRow.id.length > 0
+			? serverRow.id
+			: `compact_done_${tokensBefore ?? 0}`;
+	const toolCallId = `compaction-summary:${id}`;
+	return {
+		...serverRow,
+		id,
+		role: "assistant",
+		content: [
+			{
+				type: "toolCall",
+				id: toolCallId,
+				name: COMPACTION_TOOL_NAME,
+				arguments: payload,
+			},
+		],
+	};
 }
 
 /**
@@ -199,7 +293,33 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 		case "snapshot": {
 			const tick = state.nextTick;
 			const enriched = action.messages.map(enrichUserMessage);
-			const snapshotRows: OrderedMessage[] = enriched.map((m, i) => {
+			// Two-way compaction dedup:
+			//   (a) State has a rich synthetic (`__compaction_summary` toolCall) —
+			//       drop the server's plain-text marker from this snapshot. Rich
+			//       wins; the synthetic survives untouched. (Case 12b.)
+			//   (b) State has a legacy text-form synthetic compaction marker —
+			//       leave the snapshot alone; the synthetic is dropped below by the
+			//       survivor pass so the server text wins. (Cases 12 and
+			//       "snapshot drops trailing synthetic compaction marker".)
+			//   (c) No synthetic at all (reload path) — upgrade the server's text
+			//       marker in place into a rich synthetic so the renderer fires.
+			//       tokensAfter / reductionPct stay null. (Case 12c.)
+			const hasRichSyntheticCompaction = state.messages.some(
+				(m) => m._origin === "synthetic" && hasCompactionToolCall(m),
+			);
+			const hasLegacySyntheticCompaction = state.messages.some(
+				(m) => m._origin === "synthetic" && isLegacyTextCompaction(m)
+					&& !hasCompactionToolCall(m),
+			);
+			let effectiveRows = enriched;
+			if (hasRichSyntheticCompaction) {
+				effectiveRows = enriched.filter((m: any) => !isLegacyTextCompaction(m));
+			} else if (!hasLegacySyntheticCompaction) {
+				effectiveRows = enriched.map((m: any) =>
+					isLegacyTextCompaction(m) ? upgradeServerCompactionMarker(m) : m,
+				);
+			}
+			const snapshotRows: OrderedMessage[] = effectiveRows.map((m, i) => {
 				const explicit = (m as any)._order;
 				const order = typeof explicit === "number" ? explicit : SNAPSHOT_ORDER_FLOOR + i;
 				return stamp(m, "server", order, tick);
@@ -254,11 +374,9 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			}
 
 
-			const serverHasCompactionMarker = snapshotRows.some((m) => {
-				if (m.role !== "assistant") return false;
-				const t = extractText(m);
-				return typeof t === "string" && t.startsWith("Context compacted");
-			});
+			const serverHasCompactionMarker = snapshotRows.some((m) =>
+				isLegacyTextCompaction(m),
+			);
 			const serverMaxOrder = snapshotRows.reduce(
 				(acc, m) => (m._order > acc ? m._order : acc),
 				Number.NEGATIVE_INFINITY,
@@ -345,10 +463,17 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				}
 				if (m._origin === "synthetic") {
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
-					// Drop synthetic compaction marker when server has its own.
-					if (m.role === "assistant" && serverHasCompactionMarker) {
-						const t = extractText(m);
-						if (typeof t === "string" && t.startsWith("Context compacted")) continue;
+					// Drop legacy text-form synthetic compaction marker when the
+					// server's plain-text marker is present in this snapshot.
+					// The rich-form synthetic survives — the snapshot path above
+					// has already removed the redundant server text row.
+					if (
+						serverHasCompactionMarker
+						&& isLegacyTextCompaction(m)
+						&& !hasCompactionToolCall(m)
+						&& !isCompactionToolResult(m)
+					) {
+						continue;
 					}
 					survivors.push(m);
 					continue;
@@ -458,9 +583,14 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				(m) => m.id !== "compacting_placeholder",
 			);
 			messages.push(stamp(action.message, "synthetic", order, tick));
+			if (action.toolResult) {
+				messages.push(
+					stamp(action.toolResult, "synthetic", order + 0.001, tick + 1),
+				);
+			}
 			return {
 				messages: sortMessages(messages),
-				nextTick: tick + 1,
+				nextTick: tick + (action.toolResult ? 2 : 1),
 				highestSeq: state.highestSeq,
 			};
 		}

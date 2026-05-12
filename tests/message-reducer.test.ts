@@ -277,6 +277,92 @@ describe("message-reducer", () => {
 		assert.strictEqual(s.messages.length, 2);
 	});
 
+	it("(12b) rich synthetic compaction wins over server text marker", () => {
+		const placeholder = {
+			id: "compacting_placeholder",
+			role: "assistant",
+			content: [{ type: "text", text: "Compacting context…" }],
+			timestamp: 0,
+		};
+		const richMsg = {
+			id: "compact_done_2",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_done_2",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1,
+					trigger: "manual",
+					success: true,
+					timestamp: "2026-05-12T00:00:00Z",
+					tokensBefore: 12_000,
+					tokensAfter: 3_000,
+					reductionPct: 75,
+				},
+			}],
+		};
+		const richResult = {
+			role: "toolResult",
+			toolCallId: "compaction-summary:compact_done_2",
+			toolName: "__compaction_summary",
+			isError: false,
+			content: [{ type: "text", text: "ok" }],
+			timestamp: 0,
+		};
+		const serverText = {
+			id: "asst_compact_server_2",
+			role: "assistant",
+			content: [{ type: "text", text: "Context compacted from 12k tokens." }],
+			timestamp: 0,
+		};
+		const s = applyAll([
+			{ type: "compaction-placeholder", message: placeholder },
+			{ type: "compaction-result", message: richMsg, toolResult: richResult, success: true },
+			{ type: "snapshot", messages: [userMsg("u1", "x"), serverText] },
+		]);
+		const idList = s.messages.map((m) => m.id);
+		assert.ok(idList.includes("compact_done_2"), `rich synthetic must survive, got ${idList.join(",")}`);
+		assert.ok(!idList.includes("asst_compact_server_2"), `server text marker must be dropped, got ${idList.join(",")}`);
+		assert.ok(!idList.includes("compacting_placeholder"));
+		// Paired synthetic toolResult is also present.
+		assert.ok(
+			s.messages.some((m) => m.role === "toolResult" && (m as any).toolName === "__compaction_summary"),
+		);
+	});
+
+	it("(12c) snapshot with only server text marker is upgraded to a rich synthetic", () => {
+		const serverText = {
+			id: "asst_compact_server_3",
+			role: "assistant",
+			content: [{ type: "text", text: "Context compacted from 9.4k tokens." }],
+			timestamp: 0,
+		};
+		const s = applyAll([
+			{ type: "snapshot", messages: [userMsg("u1", "x"), serverText] },
+		]);
+		const compaction = s.messages.find((m: any) =>
+			Array.isArray(m.content)
+				&& m.content.some((c: any) => c?.name === "__compaction_summary"),
+		);
+		assert.ok(compaction, "upgrade should produce a rich synthetic");
+		const call = (compaction as any).content[0];
+		assert.equal(call.name, "__compaction_summary");
+		assert.equal(call.arguments.tokensBefore, 9_400);
+		assert.equal(call.arguments.tokensAfter, null);
+		assert.equal(call.arguments.reductionPct, null);
+		// And no plain-text marker survives — it has been replaced in place.
+		assert.ok(
+			!s.messages.some((m: any) => {
+				if (m.role !== "assistant" || !Array.isArray(m.content)) return false;
+				const t = m.content.filter((c: any) => c?.type === "text").map((c: any) => c.text || "").join("");
+				return t.startsWith("Context compacted");
+			}),
+			"server plain-text marker must be replaced in place, not duplicated",
+		);
+	});
+
 	it("RE-07-style — preferences snapshot ordering preserved (stable by tick)", () => {
 		// Three rows with identical timestamps — must preserve insertion order.
 		const m1 = { id: "m1", role: "user", content: "1", timestamp: 100 };
