@@ -644,7 +644,7 @@ export function createGateway(config: GatewayConfig) {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
-	}, projectContextManager);
+	}, projectContextManager, projectRegistry);
 	sessionManager.configCascade = configCascade;
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -2257,13 +2257,16 @@ async function handleApiRoute(
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
-		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
+		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string; parentProjectId?: string | null } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
 		if (typeof body?.rootPath === "string") updates.rootPath = body.rootPath;
 		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
 		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
 		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
+		if (body?.parentProjectId === null || typeof body?.parentProjectId === "string") {
+			updates.parentProjectId = body.parentProjectId;
+		}
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
