@@ -545,7 +545,15 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - Check `sessionManager` and `teamManager` passed to `VerificationHarness`
 - Inspect: `GET /api/goals/:goalId/verifications/active`
 - **Stuck verification?** Cancel manually via `POST /api/goals/:goalId/gates/:gateId/cancel-verification` (returns `{ cancelled: true }` or `{ cancelled: false }` if nothing was running). The goal dashboard also shows a Cancel button when a verification is in "running" state.
-- **Zombie detection**: On re-signal, the server checks `areVerificationSessionsAlive()` before returning 409. If all reviewer sessions are dead, the stale verification is auto-cancelled and the new signal proceeds. Command steps (no `sessionId`) and waiting steps are treated as alive.
+- **Zombie detection**: On re-signal, the server checks `areVerificationSessionsAlive()` before returning 409. Reviewer/agent steps are alive iff `sessionManager.getSession(step.sessionId)` resolves; command steps are alive iff `step.bootEpoch === harness.bootEpoch && isPidAlive(step.pid)` — a persisted `status: "running"` from a previous gateway lifetime never satisfies this and so cannot lock the gate.
+
+## HTTP 409 `Verification already in progress` after gateway restart
+
+- **Symptom**: after a gateway restart that killed an in-flight command-type verification, `POST /api/goals/:id/gates/:gateId/signal` on the same commit returns `409 { error: "Verification already in progress for this commit", existingSignalId: ... }` even though nothing is actually running. Pre-fix the only unstick was pushing an empty commit to change the SHA.
+- **Cause**: `areVerificationSessionsAlive` treated any persisted `status === "running"` command step (no `sessionId`) as proof of liveness. Persisted state survives restart; the spawned `npm run test:e2e` child does not. The in-memory map and the on-disk gate status drifted (gate looked failed, lock looked running).
+- **Fix**: command-step liveness now requires `step.bootEpoch === this.bootEpoch && isPidAlive(step.pid)`; `bootEpoch` is a per-`VerificationHarness`-instance UUID, so post-restart it can never match. `resumeInterruptedVerifications()` also synchronously deletes failed-on-resume entries from `activeVerifications` and rewrites `active-verifications.json` in a `finally`, so the duplicate-detection check has nothing to false-positive on. See [docs/verification-restart.md](verification-restart.md) for the full design.
+- **If it recurs**: grep server stdout for `[api] Rejecting gate_signal as duplicate` — that log line now dumps `signalId` + per-step `{ name, status, pid, bootEpoch, sessionId }` so you can tell at a glance whether a step is genuinely alive (matching bootEpoch + live pid) or a zombie. A zombie with the current `bootEpoch` means we kept the entry across an explicit `cancelStaleVerifications` — investigate that path. A zombie with a stale `bootEpoch` means the resume cleanup didn't run — check for exceptions during boot in `resumeInterruptedVerifications`.
+- **Pinning tests**: `tests/verification-harness-restart.test.ts` (zombie alive-check, pid-reuse safeguard, resume-removes-from-disk-and-memory); `tests/e2e/verification-restart-resignal.spec.ts` (full HTTP round-trip — seed a zombie, resume, re-signal, assert 200).
 
 ## Phased verification
 
