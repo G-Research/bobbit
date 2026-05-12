@@ -23,6 +23,7 @@ import { connectToSession, terminateSession, createAndConnectSession, startReatt
 import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
+import { getActiveNavId } from "./sidebar-nav.js";
 
 // ============================================================================
 // FORMATTING
@@ -360,6 +361,8 @@ export function renderProjectArchivedSection(
 	if (!state.showArchived) return "";
 	if (archivedGoals.length === 0 && standaloneArchivedSessions.length === 0) return "";
 	const expanded = isArchivedSectionExpanded(project.id);
+	const archHeaderNavId = `archived-header:${project.id}`;
+	const archHeaderActive = getActiveNavId() === archHeaderNavId;
 	const isMobile = variant === "mobile";
 	const headerSize = isMobile ? "sm" : "xs";
 	const headerPy = isMobile ? "py-1.5" : "py-0.5";
@@ -369,7 +372,9 @@ export function renderProjectArchivedSection(
 		<div class="border-t border-border/30 my-1 mx-2"></div>
 		<div class="flex flex-col gap-0.5">
 			<button
-				class="relative flex items-center gap-1 pr-1 ${headerPy} w-full text-left ${isMobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} rounded-md transition-colors"
+				data-nav-id=${archHeaderNavId}
+				data-nav-active=${archHeaderActive ? "true" : "false"}
+				class="relative flex items-center gap-1 pr-1 ${headerPy} w-full text-left ${archHeaderActive ? "bg-secondary text-foreground sidebar-session-active" : (isMobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} rounded-md transition-colors"
 				style="padding-left:${HEADER_CHEVRON_W}px;"
 				@click=${() => { setArchivedSectionExpanded(project.id, !expanded); renderApp(); }}
 			>
@@ -423,9 +428,12 @@ export function renderSessionRow(session: GatewaySession) {
 			title="${isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate (Ctrl+Shift+D)"}">${icon(Trash2, "xs")}</button>
 	`;
 
+	const navId = `session:${session.id}`;
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-nav-id=${navId}
+			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
@@ -481,9 +489,12 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
+	const archivedNavId = `session:${session.id}`;
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-nav-id=${archivedNavId}
+			data-nav-active=${active ? "true" : "false"}
 			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px; filter:grayscale(1); opacity:0.75;"
@@ -555,8 +566,11 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	void childCount; // available if needed later
 
+	const tlNavId = `session:${session.id}`;
 	return html`
 		<div
+			data-nav-id=${tlNavId}
+			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
@@ -774,9 +788,13 @@ export function renderGoalGroup(goal: Goal) {
 		`;
 	};
 
+	const goalNavId = `goal:${goal.id}`;
+	const goalNavActive = getActiveNavId() === goalNavId;
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
-			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50"} transition-colors"
+			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${goalNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50")} transition-colors"
+				data-nav-id=${goalNavId}
+				data-nav-active=${goalNavActive ? "true" : "false"}
 				style="padding-left:${HEADER_CHEVRON_W}px;"
 				@click=${toggleExpand}
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
