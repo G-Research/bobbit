@@ -246,57 +246,85 @@ describe("message-reducer", () => {
 		]);
 	});
 
-	it("(12) compaction placeholder + server marker — server wins, no double", () => {
-		const placeholder = {
-			id: "compacting_placeholder",
-			role: "assistant",
-			content: [{ type: "text", text: "Compacting context…" }],
-			timestamp: 0,
-		};
-		const clientResult = {
-			id: "compact_done_1",
-			role: "assistant",
-			content: [{ type: "text", text: "Context compacted from 12k tokens." }],
-			timestamp: 0,
-		};
-		const serverMarker = {
-			id: "asst_compact_server_1",
-			role: "assistant",
-			content: [{ type: "text", text: "Context compacted from 12k tokens." }],
-			timestamp: 0,
-		};
-		const s = applyAll([
-			{ type: "compaction-placeholder", message: placeholder },
-			{ type: "compaction-result", message: clientResult, success: true },
-			{ type: "snapshot", messages: [userMsg("u1", "x"), serverMarker] },
-		]);
-		const idList = s.messages.map((m) => m.id);
-		assert.ok(!idList.includes("compact_done_1"), `synthetic must be dropped, got ${idList.join(",")}`);
-		assert.ok(!idList.includes("compacting_placeholder"));
-		assert.ok(idList.includes("asst_compact_server_1"));
-		assert.strictEqual(s.messages.length, 2);
-	});
-
-	it("(12b) rich synthetic compaction wins over server text marker", () => {
-		const placeholder = {
-			id: "compacting_placeholder",
-			role: "assistant",
-			content: [{ type: "text", text: "Compacting context…" }],
-			timestamp: 0,
-		};
-		const richMsg = {
-			id: "compact_done_2",
+	it("(12) rich in-progress placeholder (stable id compact_active) carries no plaintext", () => {
+		// The placeholder is now a rich in-progress synthetic with stable id
+		// `compact_active` (not the legacy plaintext id `compacting_placeholder`).
+		// The reducer drops both ids defensively; assert no plaintext
+		// "Compacting context…" survives in the messages array.
+		const richInProgress = {
+			id: "compact_active",
 			role: "assistant",
 			timestamp: 0,
 			content: [{
 				type: "toolCall",
-				id: "compaction-summary:compact_done_2",
+				id: "compaction-summary:compact_active",
 				name: "__compaction_summary",
 				arguments: {
 					schemaVersion: 1,
 					trigger: "manual",
+					state: "in-progress",
 					success: true,
 					timestamp: "2026-05-12T00:00:00Z",
+					tokensBefore: null,
+					tokensAfter: null,
+					reductionPct: null,
+				},
+			}],
+		};
+		const s = applyAll([
+			{ type: "compaction-placeholder", message: richInProgress },
+		]);
+		const idList = s.messages.map((m) => m.id);
+		assert.ok(idList.includes("compact_active"), `rich in-progress must be present, got ${idList.join(",")}`);
+		assert.ok(!idList.includes("compacting_placeholder"), "legacy id must not leak in");
+		// No plaintext compaction row.
+		assert.ok(
+			!s.messages.some((m: any) => extractText(m).includes("Compacting context")),
+			"plaintext placeholder must not survive",
+		);
+		// Double-apply is idempotent (reconnect-race).
+		const s2 = reduce(s, { type: "compaction-placeholder", message: richInProgress });
+		const compactRows = s2.messages.filter((m) => m.id === "compact_active");
+		assert.strictEqual(compactRows.length, 1, "reconnect re-emission must collapse");
+	});
+
+	it("(12b) rich synthetic compaction (stable id compact_active) wins over server text marker", () => {
+		// Final rich row uses the STABLE id `compact_active` — the same id the
+		// in-progress placeholder carried. Single DOM identity invariant.
+		const richInProgress = {
+			id: "compact_active",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_active",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1,
+					trigger: "manual",
+					state: "in-progress",
+					success: true,
+					timestamp: "2026-05-12T00:00:00Z",
+					tokensBefore: null,
+					tokensAfter: null,
+					reductionPct: null,
+				},
+			}],
+		};
+		const richMsg = {
+			id: "compact_active",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_active",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1,
+					trigger: "manual",
+					state: "complete",
+					success: true,
+					timestamp: "2026-05-12T00:00:01Z",
 					tokensBefore: 12_000,
 					tokensAfter: 3_000,
 					reductionPct: 75,
@@ -305,7 +333,7 @@ describe("message-reducer", () => {
 		};
 		const richResult = {
 			role: "toolResult",
-			toolCallId: "compaction-summary:compact_done_2",
+			toolCallId: "compaction-summary:compact_active",
 			toolName: "__compaction_summary",
 			isError: false,
 			content: [{ type: "text", text: "ok" }],
@@ -318,18 +346,138 @@ describe("message-reducer", () => {
 			timestamp: 0,
 		};
 		const s = applyAll([
-			{ type: "compaction-placeholder", message: placeholder },
+			{ type: "compaction-placeholder", message: richInProgress },
 			{ type: "compaction-result", message: richMsg, toolResult: richResult, success: true },
 			{ type: "snapshot", messages: [userMsg("u1", "x"), serverText] },
 		]);
 		const idList = s.messages.map((m) => m.id);
-		assert.ok(idList.includes("compact_done_2"), `rich synthetic must survive, got ${idList.join(",")}`);
+		assert.ok(idList.includes("compact_active"), `rich synthetic must survive, got ${idList.join(",")}`);
 		assert.ok(!idList.includes("asst_compact_server_2"), `server text marker must be dropped, got ${idList.join(",")}`);
 		assert.ok(!idList.includes("compacting_placeholder"));
+		// Exactly ONE assistant row with the stable id — single DOM identity.
+		const stableRows = s.messages.filter((m) => m.id === "compact_active");
+		assert.strictEqual(stableRows.length, 1);
 		// Paired synthetic toolResult is also present.
 		assert.ok(
 			s.messages.some((m) => m.role === "toolResult" && (m as any).toolName === "__compaction_summary"),
 		);
+	});
+
+	it("(12d) in-progress synthetic transitions in place on result — single row, single id", () => {
+		const inProgress = {
+			id: "compact_active",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_active",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1,
+					trigger: "overflow",
+					state: "in-progress",
+					success: true,
+					timestamp: "2026-05-12T00:00:00Z",
+					tokensBefore: 200_000,
+					tokensAfter: null,
+					reductionPct: null,
+				},
+			}],
+		};
+		const complete = {
+			id: "compact_active",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_active",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1,
+					trigger: "overflow",
+					state: "complete",
+					success: true,
+					timestamp: "2026-05-12T00:00:01Z",
+					tokensBefore: 202_592,
+					tokensAfter: 180_000,
+					reductionPct: 11.2,
+				},
+			}],
+		};
+		const completeResult = {
+			role: "toolResult",
+			toolCallId: "compaction-summary:compact_active",
+			toolName: "__compaction_summary",
+			isError: false,
+			content: [{ type: "text", text: "ok" }],
+			timestamp: 0,
+		};
+		const s = applyAll([
+			{ type: "compaction-placeholder", message: inProgress },
+			{ type: "compaction-result", message: complete, toolResult: completeResult, success: true },
+		]);
+		const stableRows = s.messages.filter((m) => m.id === "compact_active");
+		assert.strictEqual(stableRows.length, 1, "exactly one assistant row carries the stable id");
+		const payload: any = (stableRows[0].content as any[])[0].arguments;
+		assert.strictEqual(payload.state, "complete", "state transitioned in place");
+		assert.strictEqual(payload.tokensBefore, 202_592);
+		assert.strictEqual(payload.trigger, "overflow");
+		// Paired toolResult on the same toolCallId, exactly one.
+		const tres = s.messages.filter(
+			(m: any) => m.role === "toolResult"
+				&& m.toolCallId === "compaction-summary:compact_active",
+		);
+		assert.strictEqual(tres.length, 1, "exactly one paired toolResult");
+	});
+
+	it("(12e) overflow trigger preserved end-to-end through reducer", () => {
+		// Asserts that an overflow-triggered compaction-result with a parsed
+		// tokensBefore lands as a single rich row carrying trigger="overflow"
+		// and tokensBefore from the canonical Anthropic error string. The
+		// parse itself is unit-tested against parseOverflowTokenCount in
+		// `tests/compaction-types.test.ts` (or inline below).
+		const PARSED = 202_592; // from "prompt is too long: 202592 tokens > 200000 maximum"
+		const inProgress = {
+			id: "compact_active",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_active",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1, trigger: "overflow", state: "in-progress",
+					success: true, timestamp: "2026-05-12T00:00:00Z",
+					tokensBefore: null, tokensAfter: null, reductionPct: null,
+				},
+			}],
+		};
+		const errored = {
+			id: "compact_active",
+			role: "assistant",
+			timestamp: 0,
+			content: [{
+				type: "toolCall",
+				id: "compaction-summary:compact_active",
+				name: "__compaction_summary",
+				arguments: {
+					schemaVersion: 1, trigger: "overflow", state: "error",
+					success: false, timestamp: "2026-05-12T00:00:01Z",
+					tokensBefore: PARSED, tokensAfter: null, reductionPct: null,
+					error: "prompt is too long: 202592 tokens > 200000 maximum",
+				},
+			}],
+		};
+		const s = applyAll([
+			{ type: "compaction-placeholder", message: inProgress },
+			{ type: "compaction-result", message: errored, success: false },
+		]);
+		const row = s.messages.find((m) => m.id === "compact_active");
+		assert.ok(row, "compact_active row exists");
+		const payload: any = (row!.content as any[])[0].arguments;
+		assert.strictEqual(payload.trigger, "overflow");
+		assert.strictEqual(payload.state, "error");
+		assert.strictEqual(payload.tokensBefore, PARSED);
 	});
 
 	it("(12c) snapshot with only server text marker is upgraded to a rich synthetic", () => {
