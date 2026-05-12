@@ -200,6 +200,10 @@ The live llm-review path is not actually affected by the bug (the kickoff prompt
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
 
+#### Command-step restart survival
+
+Command-type steps (`npm run test:e2e`, type-check, etc.) survive a gateway restart via a detached-spawn + atomic exit-file scheme, with a `bootEpoch`-based correctness floor so a step from a previous gateway lifetime can never falsely lock the gate behind HTTP 409 `Verification already in progress`. Full design and the symbol-level map are in [docs/verification-restart.md](verification-restart.md); symptom→fix lookup in [debugging.md — HTTP 409 after gateway restart](debugging.md#http-409-verification-already-in-progress-after-gateway-restart). Pinned by `tests/verification-harness-restart.test.ts` and `tests/e2e/verification-restart-resignal.spec.ts`.
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
