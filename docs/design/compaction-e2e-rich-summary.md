@@ -842,3 +842,132 @@ Edits required:
 
 No changes required in `src/server/` or `defaults/tools/`. No description
 budget impact. No new MCP / agent‑facing tool.
+
+---
+
+## 7. Polish revision (goal: compaction-ceff5514)
+
+Follow‑up to the merged PR #560. Real overflow‑triggered compactions exposed
+four defects in the v1 card; this revision is pure polish + a lifecycle
+upgrade. The payload schema and renderer registration are unchanged in
+shape — the type union widened and one field was added. No revert.
+
+### 7.1 Defects fixed
+
+1. **`tokensBefore` null on overflow.** The Anthropic 400 (`prompt is too
+   long: 202592 tokens > 200000 maximum`) carries the exact count we want
+   to display, but it was being discarded. Fixed via a resolution chain in
+   `src/app/remote-agent.ts` (see §7.3) plus a parser in
+   `src/app/compaction-types.ts::parseOverflowTokenCount`.
+2. **Label and value far apart.** The v1 card stretched each metric label
+   to the row start and its value to the row end, making the eye scan the
+   full card width. The grid in `CompactionSummaryRenderer.ts` was
+   tightened so label + value sit adjacent.
+3. **Overflow rendered as `manual`.** Trigger was hard‑coded from the
+   client event name. A third trigger value was added (see §7.2) and
+   plumbed from the server / agent event source through to the pill.
+4. **In‑progress was plaintext.** A synthetic assistant message containing
+   `"Compacting context…"` was inserted at compaction start. Replaced with
+   a rendered in‑progress card (spinner + indeterminate progress bar) that
+   transitions in place to `complete` or `error` (§7.4).
+
+### 7.2 Payload extensions
+
+`CompactionSummaryPayload` in `src/app/compaction-types.ts` gained:
+
+- `state?: "in-progress" | "complete" | "error"` — drives the renderer
+  branch. Older persisted payloads (pre‑polish snapshots) omit it; the
+  renderer falls back to deriving `complete | error` from `success`.
+- `trigger` union widened from `"manual" | "auto"` to add `"overflow"`.
+  The renderer pill displays `"context limit"` and tints with
+  `color-mix(in oklch, var(--warning) 14%, transparent)` / `var(--warning)`
+  for overflow (`CompactionSummaryRenderer.ts::triggerLabel` and
+  `triggerStyle`). `manual` and `auto` retain their existing styling.
+
+`success` is preserved as the boolean mirror of `state === "complete"` so
+the reload‑path upgrade adapter (case 12c) and any back‑compat snapshot
+readers keep working unchanged.
+
+### 7.3 `tokensBefore` resolution chain
+
+In `remote-agent.ts`'s `compaction_end` / `auto_compaction_end` handler
+the value is resolved in priority order — first non‑null wins:
+
+1. `event.result.tokensBefore` — agent‑emitted (auto / overflow end).
+2. `event.tokensBefore` — server‑emitted on the manual `/compact` path
+   (`src/server/ws/handler.ts`, `compaction_end` broadcast).
+3. `parseOverflowTokenCount(errMsg)` — extracts the leading integer from
+   the error string. Regex pinned to the Anthropic shape
+   `/(\d{4,})\s*tokens\s*>/i`.
+4. `this._lastKnownContextTokens` — last‑seen live context count,
+   maintained as the in‑progress payload is built so it survives even
+   when the server never broadcast a fresh count.
+
+This means `reductionPct` now resolves for overflow as well, where it was
+uniformly `null` before.
+
+### 7.4 Single‑card lifecycle via stable id
+
+UX invariant: one DOM node carries the compaction widget for its entire
+lifecycle (`in-progress → complete | error`). Pinned by two artefacts:
+
+- `COMPACTION_ACTIVE_ID = "compact_active"` exported from
+  `compaction-types.ts`. The in‑progress emission, the success replacement,
+  and the failure replacement all set `message.id` to this value and use
+  `compaction-summary:compact_active` for the inner `toolCall.id`.
+- The reducer's `compaction-result` case filters by
+  `m.id !== COMPACTION_ACTIVE_ID` before appending the new entry, so the
+  in‑progress row is removed and the completion row takes its slot in
+  the message list. Lit then diffs to the same DOM node and only re‑paints
+  the card body.
+
+The plaintext `"Compacting context…"` injection in `remote-agent.ts` is
+gone; the in‑progress emission now goes through
+`buildInProgressCompactionPayload(trigger, tokensBefore)` and routes the
+same `__compaction_summary` synthetic tool as completion.
+
+**Pinning tests** for this invariant:
+
+- `tests/message-reducer.test.ts` case (12d) — in‑progress synthetic
+  transitions in place on result; asserts exactly one row with id
+  `compact_active` survives across the two‑step sequence.
+- `tests/message-reducer.test.ts` case (12) — rich in‑progress placeholder
+  carries no plaintext (no `"Compacting context…"` string anywhere).
+- `tests/message-reducer.test.ts` case (12e) — overflow trigger survives
+  the reducer round‑trip with `tokensBefore` parsed from the error.
+- Browser E2E `tests/e2e/ui/compaction-widget.spec.ts` drives the renderer
+  through `in-progress → complete` and `in-progress → error (overflow)`,
+  asserting single‑card DOM identity, absence of the plaintext string in
+  the transcript at any point, and that the trigger pill text matches the
+  trigger value.
+
+### 7.5 Server‑side `reason` plumbing
+
+The manual `/compact` RPC handler in `src/server/ws/handler.ts` now tags
+both `compaction_start` and `compaction_end` broadcasts with
+`reason: "manual"`. The client (`remote-agent.ts`) maps the inbound
+`reason` to the payload's `trigger` — defaulting to `"manual"` on the
+manual path, `"auto"` on agent‑initiated `auto_compaction_*` events, and
+`"overflow"` when `reason === "overflow"` (or, defensively, when the
+error string matches the overflow shape).
+
+This makes the trigger source authoritative at the boundary it originates
+from, rather than being inferred from the event name. The previous code
+path at `remote-agent.ts` derived `trigger` from `event.type` alone, which
+is why overflow was misclassified as `manual`.
+
+### 7.6 Files touched
+
+| File | Edit |
+|---|---|
+| `src/app/compaction-types.ts` | `state` field; `"overflow"` trigger; `COMPACTION_ACTIVE_ID`; `buildInProgressCompactionPayload`; `parseOverflowTokenCount`. |
+| `src/app/remote-agent.ts` | Drop plaintext placeholder; emit in‑progress synthetic; tokensBefore resolution chain; trigger from `event.reason`. |
+| `src/app/message-reducer.ts` | `compaction-result` filters by stable id; in‑progress fold path. |
+| `src/ui/tools/renderers/CompactionSummaryRenderer.ts` | Three‑state branch (in‑progress / complete / error); tightened label+value layout; `overflow` pill styling via `--warning`. |
+| `src/server/ws/handler.ts` | `reason: "manual"` on `compaction_start` / `compaction_end` broadcasts. |
+| `tests/message-reducer.test.ts` | New cases (12), (12d), (12e); existing (12b), (12c) retained. |
+| `tests/e2e/ui/compaction-widget.spec.ts` | **New** — `file://` fixture driving both lifecycle paths. |
+
+No description‑budget impact (the renderer remains UI‑only synthetic
+per §2.7). No reducer action shape changes beyond the existing
+`compaction-result`.
