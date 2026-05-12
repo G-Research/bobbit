@@ -3290,7 +3290,7 @@ async function handleApiRoute(
 			if (proj) cwd = proj.rootPath;
 		}
 		const spec = body?.spec || "";
-		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
+		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : undefined;
 		if (!title || typeof title !== "string") {
 			json({ error: "Missing title" }, 400);
 			return;
@@ -3349,8 +3349,19 @@ async function handleApiRoute(
 				resolvedWorkflow = inlineWorkflow as Workflow;
 				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
 			} else {
-				const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-				resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+				// Layer 1: cascade lookup (only when workflowId given).
+				if (workflowId) {
+					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+					// Layer 1b: cascade miss — fall through to project store directly
+					// (handles transient stale-cascade after archive/create cycles).
+					if (!resolvedWorkflow) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					}
+				}
+				// Layer 2: store is empty → auto-seed defaults (fires for both
+				// explicit-id and no-id cases — the no-id case then falls through
+				// to GoalManager.createGoal's "first workflow in store" fallback).
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
@@ -3359,10 +3370,26 @@ async function handleApiRoute(
 						targetCtx.workflowStore.put(wf as unknown as Workflow);
 					}
 					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					// Re-resolve after seeding.
-					resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					// Re-resolve after seeding (only when an explicit id was given).
+					if (workflowId) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					}
+				}
+				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
+				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
+					const available = targetCtx.workflowStore.getAll().map(w => w.id);
+					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
+						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
+						code: "WORKFLOW_NOT_FOUND",
+						workflowId,
+						available,
+					});
+					return;
 				}
 			}
+			// If workflowId is undefined here, fall through — GoalManager.createGoal
+			// picks the first workflow in the project's workflowStore.
+
 			// Optional inline-roles snapshot. See resolveRole() for precedence.
 			const inlineRolesBody = (body as { inlineRoles?: unknown }).inlineRoles;
 			let inlineRoles: Record<string, import("./agent/role-store.js").Role> | undefined;

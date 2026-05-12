@@ -63,11 +63,24 @@ Goals without workflows still work fine — workflows are optional **at the data
 
 #### Default workflow resolution
 
-Goal creation never assumes a workflow named `"general"` exists. The default-workflow rule, applied both server-side (`GoalManager.createGoal`) and UI-side (the goal preview panel and proposal toast), is:
+Goal creation never assumes a workflow named `"general"` exists. Two layers cooperate:
 
-1. **Explicit `workflowId` supplied** — used as-is. If the id doesn't resolve in the project's `WorkflowStore`, the request fails with `Workflow not found: <id>`.
-2. **No `workflowId` supplied** — the server falls back to **the first workflow in `workflowStore.getAll()`**. Order is the store's insertion order, which preserves the project-config cascade priority (project > user > defaults). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
-3. **No workflows at all** — `createGoal` throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
+**Server handler (`POST /api/goals` in `src/server/server.ts`)** — responsible for *resolving* the workflow before calling the manager. It runs four steps:
+
+1. **Cascade lookup** — `configCascade.resolveWorkflows(projectId)` is searched for `workflowId`.
+2. **Project-store fallthrough** — if the cascade misses, the handler tries `targetCtx.workflowStore.get(workflowId)` directly. This handles transient cascade-staleness after archive/create cycles where the cached cascade is briefly out of sync with the live store.
+3. **Auto-seed defaults** — if the project's `workflowStore` is empty, the handler seeds default workflows and re-resolves. This fires for both explicit-`workflowId` and no-`workflowId` request bodies so a freshly registered project can immediately accept a goal.
+4. **Friendly 400 on genuine miss** — if an explicit `workflowId` is still unknown after steps 1–3 and the store is non-empty, the handler returns `400 { code: "WORKFLOW_NOT_FOUND", workflowId, available: [<id>, …] }` via `jsonError`. This replaces the prior 500 crash and lets clients render a useful error (e.g. "workflow `foo` not found; available: `design`, `release`").
+
+When `body.workflowId` is absent, the handler passes `undefined` to `GoalManager.createGoal` (the old `"general"` magic default was removed).
+
+**Manager (`GoalManager.createGoal` in `src/server/agent/goal-manager.ts`)** — the downstream consumer. Its own fallback applies when the handler passes `undefined`:
+
+1. **Explicit `workflowId` supplied** — looked up in the project's `WorkflowStore`; failure throws `Workflow not found: <id>` (the handler normally intercepts this case before delegation, but the manager remains defensive for non-HTTP callers).
+2. **No `workflowId` supplied** — falls back to **the first workflow in `workflowStore.getAll()`** (insertion order, preserving project > user > defaults cascade priority). The UI mirrors this: the workflow `<select>` is seeded to the first available id once `fetchWorkflows` resolves.
+3. **No workflows at all** — throws `NO_WORKFLOWS_MSG` ("This project has no workflows configured…"). The UI never reaches submit in this state because the empty-workflows banner disables the Accept button (see below).
+
+Pinning tests: [`tests/api-goals-workflow-not-found.test.ts`](../tests/api-goals-workflow-not-found.test.ts) covers the cascade-miss / store-hit success, the cascade-miss / store-miss `WORKFLOW_NOT_FOUND` response shape, and the no-`workflowId` first-workflow fallback. [`tests/e2e/goal-creation-auto-seed.spec.ts`](../tests/e2e/goal-creation-auto-seed.spec.ts) covers the empty-store auto-seed path end-to-end.
 
 No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
