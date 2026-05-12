@@ -125,6 +125,81 @@ test("areVerificationSessionsAlive returns false for a zombie command step loade
 	);
 });
 
+test("resumeInterruptedVerifications finalizes a step as failed when pid is alive but startTimeMs indicates pid reuse", async () => {
+	// Pin the `pidLooksReused` safeguard inside _resumeCommandStep.
+	//
+	// Setup: persisted command step with this process's own pid (so the OS
+	// pid-existence probe in Case B says "alive"), bootEpoch matching the
+	// running harness (so `areVerificationSessionsAlive` would otherwise
+	// treat it as ours), and a `startTimeMs` so old that `Date.now() -
+	// startTimeMs > timeoutSec * 1000`. The original child cannot still be
+	// running — the step's own timeout would have killed it long ago — so
+	// the live pid must belong to a recycled, unrelated OS process. The
+	// resume path must finalize the step as failed (Case C), NOT enter
+	// Case B and poll until the deadline.
+	const persistPath = path.join(STATE_DIR, "active-verifications.json");
+	try { fs.unlinkSync(persistPath); } catch { /* ignore */ }
+
+	// First, construct a harness so we can read its bootEpoch.
+	const { harness } = makeHarness();
+	const bootEpoch = (harness as unknown as { bootEpoch: string }).bootEpoch;
+
+	const startedAt = Date.now() - 999_999; // ~16.6 min ago
+	const data = {
+		verifications: [
+			{
+				goalId: GOAL_ID,
+				gateId: GATE_ID,
+				signalId: SIGNAL_ID,
+				overallStatus: "running",
+				startedAt,
+				currentPhase: 0,
+				steps: [
+					{
+						name: "Recycled-pid check",
+						type: "command",
+						status: "running",
+						startedAt,
+						// `process.pid` is, by definition, a live OS pid (this test runner).
+						// It cannot be the original verification child — startTimeMs is
+						// older than the 300s step timeout — so it must be a recycled pid.
+						pid: process.pid,
+						startTimeMs: startedAt,
+						bootEpoch,
+						timeoutSec: 300,
+					},
+				],
+			},
+		],
+	};
+	fs.writeFileSync(persistPath, JSON.stringify(data, null, 2));
+
+	// Re-construct so the new disk fixture is loaded into activeVerifications.
+	const { harness: harness2 } = makeHarness();
+	// Use the same bootEpoch as the disk fixture so the resume path treats
+	// the persisted entry as something this process owns.
+	(harness2 as unknown as { bootEpoch: string }).bootEpoch = bootEpoch;
+
+	// Resume must finalize (not block until deadline). Wrap in a deadline
+	// guard so a regression doesn't hang the unit-test runner.
+	const resumePromise = harness2.resumeInterruptedVerifications();
+	const deadlineMs = 10_000;
+	const racer = new Promise<"timeout">(r => setTimeout(() => r("timeout"), deadlineMs));
+	const winner = await Promise.race([resumePromise.then(() => "ok" as const), racer]);
+	assert.notStrictEqual(
+		winner,
+		"timeout",
+		`resumeInterruptedVerifications did not finalize within ${deadlineMs}ms — pidLooksReused safeguard appears to be missing and Case B is polling for a live (recycled) pid until the step deadline.`,
+	);
+
+	// Verification must be cleaned up just like any other failed-on-resume zombie.
+	const remainingIds = harness2.getActiveVerifications().map(v => v.signalId);
+	assert.ok(
+		!remainingIds.includes(SIGNAL_ID),
+		`pid-reuse verification not cleaned up after resume — still present: ${JSON.stringify(remainingIds)}`,
+	);
+});
+
 test("resumeInterruptedVerifications removes failed-on-resume zombie entries from activeVerifications", async () => {
 	seedPersistedZombie();
 	const { harness } = makeHarness();

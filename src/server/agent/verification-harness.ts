@@ -31,7 +31,7 @@ import { detectPrimaryBranch } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
-import { getVerificationShell } from "./shell-util.js";
+import { getVerificationShell, GIT_BASH } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
 import {
@@ -442,6 +442,9 @@ export class VerificationHarness {
 	 * zombie persisted from before restart".
 	 */
 	private readonly bootEpoch: string = randomUUID();
+
+	/** Flag for one-time cmd.exe detached-mode degradation warning. */
+	private static _warnedCmdExeDetached = false;
 
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
@@ -2637,6 +2640,18 @@ export class VerificationHarness {
 
 			// Decide execution mode.
 			let useDetached = !containerId && !!streamCtx;
+
+			// On Windows without Git Bash, the resolved shell is cmd.exe which
+			// cannot execute the bash exit-file wrapper. Silently degrade to
+			// attached mode so the verification still runs, and warn once so
+			// the missing restart-survival capability is visible in the logs.
+			if (useDetached && process.platform === "win32" && !GIT_BASH) {
+				if (!VerificationHarness._warnedCmdExeDetached) {
+					VerificationHarness._warnedCmdExeDetached = true;
+					console.warn("[verification] Git Bash not found on Windows — detached command mode disabled (cmd.exe cannot run the bash exit-file wrapper). Verification command steps will not survive a gateway restart.");
+				}
+				useDetached = false;
+			}
 			let outFile: string | undefined;
 			let errFile: string | undefined;
 			let exitFile: string | undefined;
@@ -2919,7 +2934,7 @@ export class VerificationHarness {
 	 * so the caller can fall through to the legacy "no session id" failure.
 	 */
 	private async _resumeCommandStep(
-		_v: ActiveVerification,
+		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
 	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
 		if (!step.exitFile && !step.pid) return null;
@@ -2986,26 +3001,47 @@ export class VerificationHarness {
 			const timeoutMs = timeoutSec * 1000;
 			const deadline = step.startedAt + timeoutMs;
 			console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
-			while (Date.now() < deadline) {
-				await new Promise(r => setTimeout(r, 500));
+
+			// Tail the surviving child's stdout/stderr files so UI clients see
+			// live output during the resume wait (and so subsequent gate_status
+			// calls show the streamed tail). Mirrors the live-spawn path.
+			let stopTail: (() => void) | undefined;
+			if (step.outFile && step.errFile) {
+				const stepIndex = v.steps.indexOf(step);
+				if (stepIndex >= 0) {
+					stopTail = this._startFileTailers(step.outFile, step.errFile, {
+						goalId: v.goalId,
+						gateId: v.gateId,
+						signalId: v.signalId,
+						stepIndex,
+					});
+				}
+			}
+
+			try {
+				while (Date.now() < deadline) {
+					await new Promise(r => setTimeout(r, 500));
+					if (step.exitFile && fs.existsSync(step.exitFile)) {
+						return finalize(readExitFile());
+					}
+					if (!isPidAlive(step.pid)) break;
+				}
+				// One last check after the loop
 				if (step.exitFile && fs.existsSync(step.exitFile)) {
 					return finalize(readExitFile());
 				}
-				if (!isPidAlive(step.pid)) break;
+				// Timed out or process died without writing the exit file
+				try { if (step.pid) process.kill(step.pid, "SIGKILL"); } catch { /* already dead */ }
+				return {
+					name: step.name,
+					type: step.type,
+					passed: false,
+					output: "Verification command did not produce an exit code (timeout or process died after restart).",
+					duration_ms: Date.now() - step.startedAt,
+				};
+			} finally {
+				if (stopTail) stopTail();
 			}
-			// One last check after the loop
-			if (step.exitFile && fs.existsSync(step.exitFile)) {
-				return finalize(readExitFile());
-			}
-			// Timed out or process died without writing the exit file
-			try { if (step.pid) process.kill(step.pid, "SIGKILL"); } catch { /* already dead */ }
-			return {
-				name: step.name,
-				type: step.type,
-				passed: false,
-				output: "Verification command did not produce an exit code (timeout or process died after restart).",
-				duration_ms: Date.now() - step.startedAt,
-			};
 		}
 
 		// Case C: process gone, no exit file — killed by something between our

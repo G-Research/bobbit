@@ -178,7 +178,7 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 						// so the alive-check must conclude the process is gone.
 						pid: deadPid(),
 						startTimeMs: startedAt,
-						bootEpoch: 1, // different from any plausible runtime bootEpoch
+						bootEpoch: "00000000-0000-0000-0000-000000000000", // different from any plausible runtime bootEpoch
 						timeoutSec: 300,
 					},
 				],
