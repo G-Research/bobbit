@@ -644,7 +644,7 @@ export function createGateway(config: GatewayConfig) {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
-	}, projectContextManager);
+	}, projectContextManager, projectRegistry);
 	sessionManager.configCascade = configCascade;
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -2257,13 +2257,16 @@ async function handleApiRoute(
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
-		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
+		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string; parentProjectId?: string | null } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
 		if (typeof body?.rootPath === "string") updates.rootPath = body.rootPath;
 		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
 		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
 		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
+		if (body?.parentProjectId === null || typeof body?.parentProjectId === "string") {
+			updates.parentProjectId = body.parentProjectId;
+		}
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
@@ -4550,9 +4553,11 @@ async function handleApiRoute(
 			const qProjectId = url.searchParams.get("projectId") || undefined;
 			if (qProjectId) {
 				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const existing = ctx.roleStore.get(name);
-				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
+				if (!ctx) { jsonError(404, "Project not found"); return; }
+				// promote-on-first-edit — fall back to cascade when not yet in project store
+				const resolvedInCascade = configCascade.resolveRoles(qProjectId).find(r => r.item.name === name);
+				if (!resolvedInCascade) { jsonError(404, "Role not found"); return; }
+				const existing = ctx.roleStore.get(name) ?? resolvedInCascade.item;
 				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 				let toolPolicies = existing.toolPolicies;
 				if (body.toolPolicies !== undefined) {

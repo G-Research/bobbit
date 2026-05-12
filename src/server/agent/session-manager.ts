@@ -1291,10 +1291,10 @@ export class SessionManager {
 		let parts: PromptParts;
 
 		if (assistantDef) {
-			const assistantRole = this.roleManager?.getRole("assistant");
+			const assistantTemplate = this.resolveRolePromptTemplate("assistant", session.projectId);
 			let assistantGoalSpec = "";
-			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
+			if (assistantTemplate) {
+				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
@@ -1324,9 +1324,9 @@ export class SessionManager {
 			let rolePrompt: string | undefined;
 			let roleName: string | undefined;
 			if (session.role && this.roleManager) {
-				const role = this.roleManager.getRole(session.role);
-				if (role?.promptTemplate) {
-					rolePrompt = role.promptTemplate;
+				const tmpl = this.resolveRolePromptTemplate(session.role, session.projectId);
+				if (tmpl) {
+					rolePrompt = tmpl;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
@@ -2792,10 +2792,10 @@ export class SessionManager {
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		if (assistantDef) {
 			// Combine assistant role's shared prompt with per-type specialized prompt
-			const assistantRole = this.roleManager?.getRole("assistant");
+			const assistantTemplate = this.resolveRolePromptTemplate("assistant", ps.projectId);
 			let assistantGoalSpec = "";
-			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
+			if (assistantTemplate) {
+				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
@@ -2828,9 +2828,9 @@ export class SessionManager {
 			let rolePrompt: string | undefined;
 			let roleName: string | undefined;
 			if (ps.role && this.roleManager) {
-				const role = this.roleManager.getRole(ps.role);
-				if (role?.promptTemplate) {
-					rolePrompt = role.promptTemplate;
+				const tmpl = this.resolveRolePromptTemplate(ps.role, ps.projectId);
+				if (tmpl) {
+					rolePrompt = tmpl;
 					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
 					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
 					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
@@ -3399,19 +3399,34 @@ export class SessionManager {
 	private resolveRoleModel(session: SessionInfo): string | undefined {
 		if (!session.role || !this.configCascade) return undefined;
 		try {
-			const resolved = this.configCascade.resolveRoles(session.projectId);
-			return resolved.find(r => r.item.name === session.role)?.item.model;
+			return this.configCascade.resolveRoleModel(session.role, session.projectId);
 		} catch {
 			return undefined;
 		}
+	}
+
+	/**
+	 * Resolve the role's `promptTemplate` for assembly. Prefer the
+	 * field-level project→ancestor→server→builtin cascade when a projectId
+	 * is in scope so a project-only override of `model` doesn't erase the
+	 * inherited promptTemplate (and vice versa). Falls back to the role
+	 * manager view for system-scope sessions (no projectId).
+	 */
+	private resolveRolePromptTemplate(roleName: string, projectId: string | undefined): string | undefined {
+		if (projectId && this.configCascade) {
+			try {
+				const t = this.configCascade.resolveRolePromptTemplate(roleName, projectId);
+				if (t) return t;
+			} catch { /* fall through */ }
+		}
+		return this.roleManager?.getRole(roleName)?.promptTemplate;
 	}
 
 	/** Resolve a role-level thinkingLevel override for the session, if any. */
 	private resolveRoleThinkingLevel(session: SessionInfo): string | undefined {
 		if (!session.role || !this.configCascade) return undefined;
 		try {
-			const resolved = this.configCascade.resolveRoles(session.projectId);
-			return resolved.find(r => r.item.name === session.role)?.item.thinkingLevel;
+			return this.configCascade.resolveRoleThinkingLevel(session.role, session.projectId);
 		} catch {
 			return undefined;
 		}
@@ -3430,8 +3445,7 @@ export class SessionManager {
 		// Role override
 		if (role && this.configCascade) {
 			try {
-				const resolved = this.configCascade.resolveRoles(projectId);
-				const m = resolved.find(r => r.item.name === role)?.item.model;
+				const m = this.configCascade.resolveRoleModel(role, projectId);
 				if (m && /^[^/]+\/.+$/.test(m)) return m;
 			} catch { /* fall through */ }
 		}
@@ -3451,8 +3465,7 @@ export class SessionManager {
 		const valid = ["off", "minimal", "low", "medium", "high"];
 		if (role && this.configCascade) {
 			try {
-				const resolved = this.configCascade.resolveRoles(projectId);
-				const t = resolved.find(r => r.item.name === role)?.item.thinkingLevel;
+				const t = this.configCascade.resolveRoleThinkingLevel(role, projectId);
 				if (t && valid.includes(t)) return t;
 			} catch { /* fall through */ }
 		}
@@ -3468,8 +3481,7 @@ export class SessionManager {
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		if (role && this.configCascade) {
 			try {
-				const resolved = this.configCascade.resolveRoles(projectId);
-				const m = resolved.find(r => r.item.name === role)?.item.model;
+				const m = this.configCascade.resolveRoleModel(role, projectId);
 				if (m && /^[^/]+\/.+$/.test(m)) return m;
 			} catch { /* fall through */ }
 		}

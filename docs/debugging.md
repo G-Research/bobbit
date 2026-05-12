@@ -836,6 +836,16 @@ Troubleshooting checklist:
 
 See [docs/internals.md — Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides) and [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) for the full mechanics.
 
+## `PUT /api/roles/:name?projectId=X` returns 404 "Role not found" for a builtin role
+
+Symptom: editing a builtin role (`coder`, `architect`, ...) on the Role Manager page for a project returns `404 { error: "Role not found" }` (older builds: `"Role not found in project"`). The role appears fine in `GET /api/roles?projectId=<id>` and the role-manager listing, but the very first save fails.
+
+Root cause: pre-fix, the PUT handler called `ctx.roleStore.get(name)` directly. `ctx.roleStore` is the project-scoped store, which only contains roles explicitly overridden at project level — builtins live in the cascade (`BuiltinConfigProvider`) and are absent until promoted.
+
+Fix (commit `f618ab09`): the handler now resolves through `configCascade.resolveRoles(projectId)` first and falls back to the cascade item when the project store has no entry. The subsequent `ctx.roleStore.put(updated)` promotes the role to project scope on first edit — same "promote-on-first-edit" shape used by `POST /api/roles/:name/customize`. The same handler's adjacent `"Project not found"` response was migrated to `jsonError()` in the same pass.
+
+Pinning test: `tests/api-roles-update.test.ts` covers (1) builtin promoted on first PUT, (2) follow-up PUT on the now project-scoped record, (3) unknown role still 404.
+
 ## Reviewer session triggers spurious "Agent finished" team-lead nudge after restart
 
 Symptom: the team lead session receives `team_agent_finished` / "Agent ... has finished" steers naming an `llm-review-*` (or QA) sub-session. Reviewer sessions are owned by the verification harness and must never nudge the team lead — every such steer is a bug. The symptom is **restart-specific**: it does not appear during the normal in-process verification run.
