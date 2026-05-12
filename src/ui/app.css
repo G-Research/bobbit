@@ -1286,9 +1286,8 @@ html {
 	margin: 8px 18px 28px 18px;
 	animation:
 		blob-busy-move 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
-		blob-busy-eyes 10s steps(1) infinite,
-		blob-shimmer 8s ease-in-out infinite;
-	animation-delay: 0ms, 0ms, var(--bobbit-shimmer-delay, 0ms);
+		blob-busy-eyes 10s steps(1) infinite;
+	animation-delay: 0ms, 0ms;
 	box-shadow:
 		3px 0px 0 #000,
 		4px 0px 0 #000,
@@ -3279,48 +3278,6 @@ html {
 	93%, 95% { opacity: 1; }
 }
 
-/* Slow sine-wave light ripple across the sprite surface */
-/* Wave overlay removed — blue shimmer handled by blob-shimmer filter */
-
-/* Reptilian shimmer — subtle pearlescent skin shift */
-@keyframes blob-shimmer {
-	0%, 100% {
-		filter: hue-rotate(0deg) brightness(1) saturate(1);
-		opacity: 0.94;
-	}
-	10% {
-		filter: hue-rotate(8deg) brightness(1.04) saturate(1.05);
-		opacity: 0.93;
-	}
-	22% {
-		filter: hue-rotate(25deg) brightness(1.08) saturate(1.15);
-		opacity: 0.9;
-	}
-	32% {
-		filter: hue-rotate(35deg) brightness(1.1) saturate(1.18);
-		opacity: 0.89;
-	}
-	42% {
-		filter: hue-rotate(20deg) brightness(1.06) saturate(1.1);
-		opacity: 0.91;
-	}
-	52% {
-		filter: hue-rotate(3deg) brightness(1.01) saturate(1.02);
-		opacity: 0.94;
-	}
-	65% {
-		filter: hue-rotate(-5deg) brightness(1) saturate(1.05);
-		opacity: 0.93;
-	}
-	78% {
-		filter: hue-rotate(28deg) brightness(1.09) saturate(1.15);
-		opacity: 0.9;
-	}
-	88% {
-		filter: hue-rotate(14deg) brightness(1.05) saturate(1.08);
-		opacity: 0.93;
-	}
-}
 
 /* Optional label text next to the blob */
 .bobbit-blob__label {
@@ -4179,7 +4136,15 @@ canvas.bobbit-blob__sprite {
 	   Computed: element TL at (3, -15), layout box 37×37 to match original. */
 	margin: -15px -6px 16px 3px !important;
 	transform-origin: 20px 32px;
-	transform: none;
+	/* Force the canvas onto its own GPU layer so the compositor's subpixel
+	 * rounding stays consistent across translate+rotate frames — without this,
+	 * the eye pixels visibly jitter during the right-hop phase of the busy
+	 * animation. translateZ(0) plus will-change pins the layer; backface-
+	 * visibility avoids a separate flicker class on some GPUs. Matches what
+	 * the box-shadow .bobbit-blob__sprite already does. */
+	transform: translateZ(0);
+	will-change: transform;
+	backface-visibility: hidden;
 	box-shadow: none !important;
 	/* Canvas is oversampled (BODY × 8 × dpr) and bilinearly downsampled by the
 	   browser. Each sprite pixel is a uniform 8×8 block, so at rest the bilinear
@@ -4191,8 +4156,7 @@ canvas.bobbit-blob__sprite {
 	/* Default (busy) animation — swap to canvas variants */
 	animation:
 		blob-busy-move-canvas 10s cubic-bezier(0.34, 1, 0.64, 1) infinite,
-		none 10s steps(1) infinite,
-		blob-shimmer 8s ease-in-out infinite;
+		none 10s steps(1) infinite;
 }
 
 .bobbit-blob--exit canvas.bobbit-blob__sprite {
