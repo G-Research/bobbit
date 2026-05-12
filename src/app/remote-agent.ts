@@ -109,6 +109,14 @@ export class RemoteAgent {
 	// Compaction tracking — persists across message refreshes.
 	// Exposed on state so the UI can queue messages during compact.
 	private _isCompacting = false;
+	/** True from `compaction_end` (success path) until the next clean
+	 *  assistant turn lands carrying fresh `usage`. Read by the context-bar
+	 *  renderer in `AgentInterface` to display "Updating after compaction…"
+	 *  instead of the stale pre-compaction percentage (the snapshot's
+	 *  last-assistant-usage is still pre-compaction; pi-coding-agent doesn't
+	 *  emit a fresh per-message usage row for the synthetic summary entry).
+	 *  Public so the renderer can read it via `session._usageStaleAfterCompaction`. */
+	_usageStaleAfterCompaction = false;
 	/** Best-effort cache of the most recently seen context-token count; used
 	 *  as the final fallback when resolving `tokensBefore` for a compaction
 	 *  end event. See `docs/design/compaction-e2e-rich-summary.md` §7.3. */
@@ -1919,6 +1927,20 @@ export class RemoteAgent {
 							this._tryAmendPendingCompaction();
 						}
 
+						// Fresh assistant turn with usable usage → clear the
+						// post-compaction stale flag so the context bar resumes showing
+						// real percentages. Guard on usage-presence and non-error
+						// stopReason — a failed retry shouldn't be treated as a fresh
+						// usage signal.
+						if (
+							this._usageStaleAfterCompaction
+							&& msg.usage
+							&& msg.stopReason !== "aborted"
+							&& msg.stopReason !== "error"
+						) {
+							this._usageStaleAfterCompaction = false;
+						}
+
 						// Check for proposals in assistant message
 						this._checkToolProposals(msg);
 						this._checkProposals(msg);
@@ -2031,6 +2053,11 @@ export class RemoteAgent {
 				this._isCompacting = true;
 				this.onCompactionChange?.(true);
 				this._compactionStartedAt = Date.now();
+				// Mark context-bar usage stale until the next clean assistant
+				// turn arrives — the snapshot's last-assistant-usage post-compaction
+				// is still the pre-compaction value, so we'd otherwise show a wrong
+				// percentage on the bar until the next turn happens.
+				this._usageStaleAfterCompaction = true;
 				// Open the overflow-recovery window so a trailing "prompt is too long"
 				// retry error gets folded into the compaction card instead of
 				// surfacing as a standalone red banner.
@@ -2110,6 +2137,12 @@ export class RemoteAgent {
 					error: displaySuccess ? undefined : (errMsg || undefined),
 				};
 				this._compactionStartedAt = null;
+				// On hard compaction failure clear the stale flag immediately — no
+				// post-compaction state is coming, the bar should resume normal
+				// display from the existing transcript usage.
+				if (!displaySuccess) {
+					this._usageStaleAfterCompaction = false;
+				}
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
 				this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
 				// Queue this card for tokens-after amendment on the next clean
