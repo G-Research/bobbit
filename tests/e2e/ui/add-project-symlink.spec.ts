@@ -82,11 +82,13 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Need .bobbit/ to trigger Path A (auto-import → registerProject). Without it,
-		// the path is routed to the project assistant and the symlink check never
-		// runs. Add it on the canonical so it's visible through both views.
+		// Need .bobbit/config/project.yaml to trigger Path A (auto-import → registerProject).
+		// Without it, /api/projects/detect returns hasBobbit=false and doContinue takes
+		// Path B (project assistant), so the symlink check in registerProject never runs.
+		// project.yaml is the source of truth for hasBobbit since commit 54d5b710.
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
 		// Type the symlinked path.
 		await page.locator('input[placeholder="/path/to/project"]').fill(link);
@@ -141,9 +143,11 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Add .bobbit so Path A is taken.
+		// Add .bobbit/config/project.yaml so Path A (auto-import) is taken.
+		// See: hasBobbit requires project.yaml, not just .bobbit/ presence (commit 54d5b710).
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
 		await page.locator('input[placeholder="/path/to/project"]').fill(link);
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();
