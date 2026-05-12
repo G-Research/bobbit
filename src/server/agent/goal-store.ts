@@ -119,6 +119,16 @@ export interface PersistedGoal {
 	 * same name. See server.ts spawn-child handler.
 	 */
 	inlineRoles?: Record<string, import("./role-store.js").Role>;
+
+	// ── Subgoal nesting-limit overrides (per-goal) ───────────────────────
+	// Both optional, lazy-migrated to undefined. System prefs supply
+	// defaults; per-goal values are TIGHTENING overrides only (the system
+	// pref is the ceiling). See subgoal-nesting-limit.ts.
+
+	/** Per-goal subgoals-allowed override. `false` disables even when system ON. */
+	subgoalsAllowed?: boolean;
+	/** Per-goal max nesting depth override (root=1, +1 per hop). Cannot exceed system pref. */
+	maxNestingDepth?: number;
 }
 
 /**

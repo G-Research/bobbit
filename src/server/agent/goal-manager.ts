@@ -152,8 +152,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role> }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -221,6 +221,14 @@ export class GoalManager {
 		// resolveRole() reads this snapshot first.
 		if (inlineRoles && Object.keys(inlineRoles).length > 0) {
 			goal.inlineRoles = structuredClone(inlineRoles);
+		}
+
+		// Per-goal subgoal-nesting overrides. Stored as-is; the policy module
+		// (subgoal-nesting-limit.ts) computes the effective ceiling at
+		// spawn-time so the system pref can never be exceeded.
+		if (subgoalsAllowed !== undefined) goal.subgoalsAllowed = subgoalsAllowed;
+		if (maxNestingDepth !== undefined && Number.isFinite(maxNestingDepth)) {
+			goal.maxNestingDepth = maxNestingDepth;
 		}
 
 		// Stamp nested-goal lineage. Root: rootGoalId===id, mergeTarget==="master".

@@ -27,3 +27,19 @@ export function isSubgoalsEnabled(): boolean {
 export function _setSubgoalsEnabledForTesting(value: boolean | undefined): void {
 	testOverride = value;
 }
+
+let maxNestingDepthOverride: number | undefined;
+
+/** Read the system-scope max-nesting-depth pref. Default 3 when missing/invalid. */
+export function getSystemMaxNestingDepth(): number {
+	if (maxNestingDepthOverride !== undefined) return maxNestingDepthOverride;
+	if (typeof document === "undefined") return 3;
+	const raw = document.documentElement.dataset.maxNestingDepth;
+	const n = raw ? Number(raw) : NaN;
+	if (!Number.isFinite(n) || n < 1) return 3;
+	return Math.floor(n);
+}
+
+export function _setMaxNestingDepthForTesting(value: number | undefined): void {
+	maxNestingDepthOverride = value;
+}
