@@ -144,6 +144,18 @@ test("resumeInterruptedVerifications removes failed-on-resume zombie entries fro
 		`zombie verification not cleaned up after resumeInterruptedVerifications — still present in activeVerifications: ${JSON.stringify(afterIds)}. This is the root cause of the HTTP 409 lock-after-restart bug.`,
 	);
 
+	// Pin the disk-side cleanup too: the persisted active-verifications.json
+	// must not still reference the zombie signal, or a subsequent boot would
+	// reload it and re-trigger the same HTTP 409 lock.
+	const persistPath = path.join(STATE_DIR, "active-verifications.json");
+	if (fs.existsSync(persistPath)) {
+		const raw = fs.readFileSync(persistPath, "utf-8");
+		assert.ok(
+			!raw.includes(SIGNAL_ID),
+			`zombie verification still present on disk in ${persistPath} after resumeInterruptedVerifications — next boot would reload it.`,
+		);
+	}
+
 	// And the duplicate-detection probe must now agree.
 	assert.strictEqual(
 		harness.areVerificationSessionsAlive(SIGNAL_ID),

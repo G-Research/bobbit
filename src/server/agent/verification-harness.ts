@@ -463,13 +463,6 @@ export class VerificationHarness {
 
 	/**
 	 * Check if any verification sessions for a given signalId are still alive.
-	 * Returns true if at least one running step has a live session.
-	 * Returns false (zombie) if no running sessions exist — safe to auto-cancel.
-	 * Also returns true if steps are still in "waiting" state (not yet started),
-	 * to avoid premature cancellation during phase transitions.
-	 */
-	/**
-	 * Check if any verification sessions for a given signalId are still alive.
 	 *
 	 * "Alive" means we have evidence the OS process / agent session is still
 	 * doing useful work — not merely that the persisted `status === "running"`
@@ -2681,7 +2674,24 @@ export class VerificationHarness {
 				cmdToRun = `( ${command}\n); __ec=$?; printf %s "$__ec" > ${sq(exitTmp)} && mv ${sq(exitTmp)} ${sq(exitFile)}; exit $__ec`;
 			}
 
+			// Resolve a synchronously-thrown spawn error the same way we'd
+			// handle child.on("error", ...) — surface the error text and honour
+			// expectFailure semantics. Without this, accessing child.pid below
+			// would throw TypeError and crash the verification pipeline.
+			const handleSpawnError = (err: Error): { passed: boolean; output: string } => {
+				if (expectFailure && errorPattern) {
+					try {
+						const regex = new RegExp(errorPattern, "i");
+						return { passed: regex.test(err.message), output: err.message };
+					} catch {
+						return { passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` };
+					}
+				}
+				return { passed: expectFailure, output: err.message };
+			};
+
 			let child;
+			let spawnError: Error | undefined;
 			try {
 				child = containerId
 					? spawn("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {
@@ -2702,12 +2712,19 @@ export class VerificationHarness {
 							stdio: ["ignore", "pipe", "pipe"],
 							...(process.platform === "win32" ? { windowsHide: true } : {}),
 						});
+			} catch (err) {
+				spawnError = err as Error;
 			} finally {
 				// Once spawn has dup'd the FDs into the child, parent's copies are
 				// no longer needed. Closing them avoids leaks even if we don't
 				// reach the resolve path.
 				if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
 				if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
+			}
+
+			if (spawnError || !child) {
+				resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
+				return;
 			}
 
 			// Stamp the persisted step with everything needed for cross-restart
@@ -2811,16 +2828,7 @@ export class VerificationHarness {
 			child.on("error", (err) => {
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				try { stopTail?.(); } catch { /* ignore */ }
-				if (expectFailure && errorPattern) {
-					try {
-						const regex = new RegExp(errorPattern, 'i');
-						resolve({ passed: regex.test(err.message), output: err.message });
-					} catch {
-						resolve({ passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` });
-					}
-				} else {
-					resolve({ passed: expectFailure, output: err.message });
-				}
+				resolve(handleSpawnError(err));
 			});
 		});
 	}
@@ -2961,9 +2969,21 @@ export class VerificationHarness {
 			return finalize(readExitFile());
 		}
 
+		// Cross-platform PID-reuse safeguard: Node doesn't expose a per-PID OS
+		// start time, so we can't directly tie a live pid back to the same
+		// process we spawned. As a pragmatic floor: if the recorded
+		// startTimeMs is older than the step's own timeout, the original
+		// child must already have exited (timeout would have killed it),
+		// so a live `step.pid` here is almost certainly a reused/recycled
+		// pid belonging to an unrelated process. Skip Case B and fall
+		// through to Case C (finalize as failed).
+		const timeoutSec = step.timeoutSec ?? 300;
+		const pidLooksReused = typeof step.startTimeMs === "number"
+			&& (Date.now() - step.startTimeMs) > timeoutSec * 1000;
+
 		// Case B: child still running on the host.
-		if (typeof step.pid === "number" && isPidAlive(step.pid)) {
-			const timeoutMs = (step.timeoutSec ?? 300) * 1000;
+		if (!pidLooksReused && typeof step.pid === "number" && isPidAlive(step.pid)) {
+			const timeoutMs = timeoutSec * 1000;
 			const deadline = step.startedAt + timeoutMs;
 			console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
 			while (Date.now() < deadline) {
