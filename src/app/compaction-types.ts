@@ -12,7 +12,7 @@
  * (`COMPACTION_ACTIVE_ID = "compact_active"`) across the whole lifecycle
  * (in-progress → complete | error). The reducer filters by that id so the
  * Lit render keeps the same DOM node and only re-paints the body. See
- * §2.1 of `docs/design/compaction-widget-polish.md`.
+ * §2.1 / §7 of `docs/design/compaction-e2e-rich-summary.md`.
  */
 
 /** "manual" → /compact slash; "auto" → threshold-driven; "overflow" → context-limit error. */

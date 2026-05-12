@@ -569,7 +569,7 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// Carries a RICH in-progress synthetic with stable id `compact_active`.
 			// Filter both the legacy plaintext id and the stable id so reconnect
 			// races / double-emission collapse to a single row. See
-			// `docs/design/compaction-widget-polish.md` §2.2.
+			// `docs/design/compaction-e2e-rich-summary.md` §7.4.
 			const tick = state.nextTick;
 			const order = state.highestSeq + 0.5;
 			const messages = state.messages.filter(

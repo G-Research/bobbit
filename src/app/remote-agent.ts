@@ -111,7 +111,7 @@ export class RemoteAgent {
 	private _isCompacting = false;
 	/** Best-effort cache of the most recently seen context-token count; used
 	 *  as the final fallback when resolving `tokensBefore` for a compaction
-	 *  end event. See `docs/design/compaction-widget-polish.md` §2.4. */
+	 *  end event. See `docs/design/compaction-e2e-rich-summary.md` §7.3. */
 	private _lastKnownContextTokens: number | null = null;
 	private _isAborting = false;
 

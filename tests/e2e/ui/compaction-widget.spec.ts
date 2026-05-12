@@ -10,7 +10,7 @@
  *   - layout: tokens-before label is adjacent (≤ 24px) to its value.
  *
  * Pin for the single-DOM-identity invariant — see
- * `docs/design/compaction-widget-polish.md` §5 risk 1.
+ * `docs/design/compaction-e2e-rich-summary.md` §7.4 (single-card lifecycle).
  */
 import { test, expect } from "@playwright/test";
 import { execSync } from "node:child_process";

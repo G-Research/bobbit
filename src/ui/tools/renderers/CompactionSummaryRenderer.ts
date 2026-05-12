@@ -17,7 +17,7 @@ import type {
  * Renders three lifecycle states (in-progress | complete | error) from a
  * single payload shape. Single DOM identity is provided by the reducer
  * (stable id `compact_active`); the renderer just re-paints the body. See
- * `docs/design/compaction-widget-polish.md` §2.3.
+ * `docs/design/compaction-e2e-rich-summary.md` §7 (Polish revision).
  *
  * Stable test hooks:
  *   data-testid="compaction-summary-card"
