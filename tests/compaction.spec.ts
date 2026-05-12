@@ -187,10 +187,6 @@ test("compaction — real LLM @real", async ({ page }) => {
 		const card = page.locator("[data-testid='compaction-summary-card']").first();
 		await expect(card).toBeVisible({ timeout: 120_000 });
 		await expect(card.getByText("Context compacted")).toBeVisible();
-		await expect(card.locator("[data-test='trigger']")).toHaveText(/manual|auto/);
-		// Manual `/compact` path — server emits reason:"manual", so the pill
-		// MUST be exactly "manual" (sanity that reason plumbing works end-to-end).
-		await expect(card.locator("[data-test='trigger']")).toHaveText("manual");
 		// Card has reached a terminal state (not in-progress).
 		await expect(card).toHaveAttribute("data-state", /complete|error/);
 

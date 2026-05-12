@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>CompactionSummaryRenderer — interactive preview</title>
+<link rel="stylesheet" href="./compaction-widget-preview.css" />
+<style>
+	body {
+		font-family: ui-sans-serif, system-ui, sans-serif;
+		padding: 16px;
+		color: var(--foreground);
+		background: var(--background);
+		margin: 0;
+	}
+	.controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin-bottom: 16px;
+		padding: 12px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+	}
+	.controls h3 {
+		width: 100%;
+		margin: 0 0 4px 0;
+		font-size: 13px;
+		color: var(--muted-foreground);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.controls button {
+		padding: 6px 12px;
+		font-size: 13px;
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.controls button:hover { background: color-mix(in oklch, var(--muted) 70%, var(--foreground)); }
+	.controls button.active { background: var(--chart-1); color: white; border-color: var(--chart-1); }
+	.scenario-row { width: 100%; display: flex; gap: 8px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+	<h3>Scenarios</h3>
+	<div class="scenario-row">
+		<button onclick="show('in-progress-manual')">in-progress · manual</button>
+		<button onclick="show('in-progress-auto')">in-progress · auto</button>
+		<button onclick="show('in-progress-overflow')">in-progress · overflow</button>
+		<button onclick="show('complete-big')">complete · 90% reduction</button>
+		<button onclick="show('complete-small')">complete · 11% reduction</button>
+		<button onclick="show('complete-no-after')">complete · awaiting amend (spinner)</button>
+		<button onclick="show('hard-fail')">hard compaction failure (manual)</button>
+	</div>
+</div>
+
+<div id="container"></div>
+
+<script src="./compaction-widget-bundle.js"></script>
+<script>
+// Simulate a compaction that started 8s ago (live ticker) or took 14s (terminal).
+const LIVE_START = () => new Date(Date.now() - 8_000).toISOString();
+const DONE_DURATION = 14_320;
+const DONE_STARTED = () => new Date(Date.now() - DONE_DURATION).toISOString();
+
+const scenarios = {
+	"in-progress-manual": () => window.applyInProgress("manual", 45_000),
+	"in-progress-auto": () => window.applyInProgress("auto", 150_000),
+	"in-progress-overflow": () => window.applyInProgress("overflow", 231_200),
+	"complete-big": () => window.applyComplete({
+		trigger: "auto", tokensBefore: 150_000, tokensAfter: 12_500, reductionPct: 91.7,
+		startedAt: DONE_STARTED(), durationMs: DONE_DURATION,
+	}),
+	"complete-small": () => window.applyComplete({
+		trigger: "manual", tokensBefore: 50_000, tokensAfter: 44_500, reductionPct: 11.0,
+		startedAt: DONE_STARTED(), durationMs: 4_800,
+	}),
+	"complete-no-after": () => window.applyComplete({
+		trigger: "overflow", tokensBefore: 231_200, tokensAfter: null, reductionPct: null,
+		startedAt: DONE_STARTED(), durationMs: DONE_DURATION,
+	}),
+	"hard-fail": () => window.applyError({
+		trigger: "manual", tokensBefore: 50_000, tokensAfter: null, reductionPct: null,
+		error: "Compaction RPC timed out after 120s",
+		startedAt: DONE_STARTED(), durationMs: 120_000,
+	}),
+};
+
+function show(name) {
+	scenarios[name]();
+	document.querySelectorAll(".controls button").forEach(b => b.classList.remove("active"));
+	event.target.classList.add("active");
+}
+
+// Default scenario on load
+window.addEventListener("load", () => {
+	setTimeout(() => {
+		const btn = document.querySelector('button[onclick*="complete-no-after"]');
+		btn?.click();
+	}, 50);
+});
+</script>
+</body>
+</html>
