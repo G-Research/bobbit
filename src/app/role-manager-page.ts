@@ -220,9 +220,16 @@ async function createRoleAssistantSession(): Promise<void> {
 	state.creatingSession = true;
 	renderApp();
 	try {
+		const bodyObj: Record<string, any> = { assistantType: "role" };
+		const projectId = getConfigProjectId();
+		if (projectId) {
+			bodyObj.projectId = projectId;
+			const project = state.projects.find(p => p.id === projectId);
+			if (project) bodyObj.cwd = project.rootPath;
+		}
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ assistantType: "role" }),
+			body: JSON.stringify(bodyObj),
 		});
 		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
 		const { id } = await res.json();
