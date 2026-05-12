@@ -26,7 +26,7 @@ async function registerTmpProject(name: string): Promise<{ id: string; cleanup: 
 	return {
 		id: proj.id,
 		cleanup: () => {
-			apiFetch(`/api/projects/${proj.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
 			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		},
 	};
@@ -194,7 +194,7 @@ test.describe("Component config map (REST API)", () => {
 			expect(web, "component must be persisted on POST").toBeTruthy();
 			expect(web.config, "components[].config must round-trip through POST /api/projects").toEqual(components[0].config);
 		} finally {
-			if (projectId) await apiFetch(`/api/projects/${projectId}?force=1`, { method: "DELETE" }).catch(() => {});
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		}
 	});
