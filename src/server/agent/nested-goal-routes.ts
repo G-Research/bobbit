@@ -29,6 +29,11 @@ import { DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "./plan-mutation-s
 import { validateDependsOn, validatePlanDependsOn } from "./depends-on-validation.js";
 import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
 import { parseAcceptanceCriteria } from "../../shared/parse-acceptance-criteria.js";
+import {
+	checkCanSpawnChild,
+	inheritedChildOverrides,
+	type SubgoalNestingPrefs,
+} from "./subgoal-nesting-limit.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -48,6 +53,8 @@ export interface NestedGoalRouteDeps {
 	 */
 	jsonError(status: number, err: unknown, extra?: Record<string, unknown>): void;
 	broadcastToAll(event: any): void;
+	/** Read the system-scope subgoal nesting prefs (subgoalsEnabled, maxNestingDepth). */
+	getSubgoalNestingPrefs(): SubgoalNestingPrefs;
 }
 
 /**
@@ -110,6 +117,7 @@ export async function tryHandleNestedGoalRoute(
 		json,
 		jsonError,
 		broadcastToAll,
+		getSubgoalNestingPrefs,
 	} = deps;
 
 	const listDescendantsLocal = (goalId: string, opts?: { includeArchived?: boolean }): PersistedGoal[] =>
@@ -238,11 +246,38 @@ export async function tryHandleNestedGoalRoute(
 		if (!ctx) { json({ error: "Project context not found for parent goal" }, 404); return true; }
 		const goalManager = ctx.goalManager;
 
+		// Subgoal nesting-limit gate — single source of truth shared with
+		// `runSubgoalStep`. Idempotency check below runs FIRST so that a
+		// re-call with the same planId on an already-spawned child still
+		// returns the existing id even when the limit would now reject a new
+		// spawn. (See subgoal-nesting-limit.ts.)
+		const nestingPrefs = getSubgoalNestingPrefs();
+
 		// Idempotency: search for an existing child with this (parentId, planId).
 		const siblings = ctx.goalStore.getAll().filter(g => g.parentGoalId === parentId);
 		const existing = siblings.find(g => g.spawnedFromPlanId === planId);
 		if (existing) {
 			json({ id: existing.id, alreadyExists: true });
+			return true;
+		}
+
+		// No existing child — enforce the nesting limit before spawn.
+		const nestingCheck = checkCanSpawnChild(
+			parent,
+			nestingPrefs,
+			(gid) => ctx.goalStore.get(gid),
+		);
+		if (!nestingCheck.ok) {
+			if (nestingCheck.code === "SUBGOALS_DISABLED") {
+				json({ error: "Subgoals are disabled for this goal tree", code: "SUBGOALS_DISABLED" }, 403);
+				return true;
+			}
+			json({
+				error: `Subgoal spawn blocked: nesting depth limit reached (${nestingCheck.currentDepth}/${nestingCheck.maxDepth})`,
+				code: "NESTING_DEPTH_EXCEEDED",
+				currentDepth: nestingCheck.currentDepth,
+				maxDepth: nestingCheck.maxDepth,
+			}, 403);
 			return true;
 		}
 
@@ -310,6 +345,9 @@ export async function tryHandleNestedGoalRoute(
 				};
 			}
 
+			// Propagate the parent's EFFECTIVE nesting limits onto the child so
+			// descendants cannot loosen what an ancestor has tightened.
+			const childOverrides = inheritedChildOverrides(parent, nestingPrefs);
 			const child = await goalManager.createGoal(title, childCwd, {
 				spec,
 				workflowId,
@@ -318,6 +356,8 @@ export async function tryHandleNestedGoalRoute(
 				sandboxed: parent.sandboxed,
 				parentGoalId: parentId,
 				inlineRoles: mergedInlineRoles,
+				subgoalsAllowed: childOverrides.subgoalsAllowed,
+				maxNestingDepth: childOverrides.maxNestingDepth,
 			});
 			// stamp-immediately invariant: stamp spawnedFromPlanId IMMEDIATELY
 			// — no awaits between. Persist suggestedRole + spawnedBySessionId

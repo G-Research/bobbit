@@ -8,7 +8,7 @@ import yaml from "yaml";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { isSubgoalsEnabled } from "./subgoals-flag.js";
+import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
 import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
@@ -527,6 +527,10 @@ let _cachedWorkflows: Workflow[] = [];
 let _selectedWorkflowId = "";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
+/** Per-goal subgoals-allowed override; null = inherit system default at submit time. */
+let _goalSubgoalsAllowed: boolean | null = null;
+/** Per-goal max-nesting-depth override; null = inherit system default at submit time. */
+let _goalMaxNestingDepth: number | null = null;
 let _staffSandboxed = false;
 let _assistantEnabledOptionalSteps: string[] = [];
 
@@ -780,6 +784,13 @@ interface GoalFormConfig {
 	autoStartTeam: boolean;
 	onAutoStartTeamChange: (e: Event) => void;
 
+	// Subgoal nesting controls. Visible only when the system-scope
+	// Subgoals (Experimental) flag is ON — see subgoals-flag.ts.
+	subgoalsAllowed: boolean;
+	maxNestingDepth: number;
+	onSubgoalsAllowedChange: (e: Event) => void;
+	onMaxNestingDepthChange: (e: Event) => void;
+
 	// CWD combobox state
 	cwdDropdownOpen: boolean;
 	cwdHighlightIndex: number;
@@ -976,6 +987,29 @@ function renderGoalForm(config: GoalFormConfig) {
 					<span title="Automatically start the team lead when the worktree is ready"
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 				</label>
+				${isSubgoalsEnabled() ? html`
+					<label class="flex items-center gap-1.5 cursor-pointer" data-testid="goal-form-allow-subgoals-wrap">
+						<input type="checkbox" class="toggle-switch"
+							data-testid="goal-form-allow-subgoals"
+							.checked=${config.subgoalsAllowed}
+							@change=${config.onSubgoalsAllowedChange} />
+						<span class="text-xs text-muted-foreground font-medium">Allow subgoals</span>
+						<span title="Allow this goal tree to spawn nested subgoals. System setting is the ceiling — cannot enable above system."
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
+					${config.subgoalsAllowed ? html`
+						<label class="flex items-center gap-1.5" data-testid="goal-form-max-depth-wrap">
+							<span class="text-xs text-muted-foreground font-medium">Max depth</span>
+							<input type="number" min="1" max="${getSystemMaxNestingDepth()}" step="1"
+								data-testid="goal-form-max-nesting-depth"
+								class="w-14 px-1.5 py-0.5 rounded border border-input bg-background text-xs"
+								.value=${String(config.maxNestingDepth)}
+								@change=${config.onMaxNestingDepthChange} />
+							<span title="Max nesting depth for this goal tree. Cannot exceed the system ceiling (currently ${getSystemMaxNestingDepth()})."
+								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						</label>
+					` : ""}
+				` : ""}
 				${optionalSteps.map(os => {
 					const qaDisabled = os.type === 'agent-qa' && !!config.linkedProjectId && _qaConfigCache.has(config.linkedProjectId) && !_qaConfigCache.get(config.linkedProjectId);
 					return html`
@@ -1185,6 +1219,14 @@ function goalPreviewPanel() {
 		const workflowId = _selectedWorkflowId || undefined;
 		const sandboxed = _goalSandboxed;
 		const autoStartTeam = _goalAutoStartTeam;
+		// Subgoal nesting per-goal overrides — only sent when the system
+		// flag is ON (the server clamps anyway, but no point sending noise).
+		const subgoalsAllowed = isSubgoalsEnabled() && _goalSubgoalsAllowed !== null
+			? _goalSubgoalsAllowed
+			: undefined;
+		const maxNestingDepth = isSubgoalsEnabled() && _goalMaxNestingDepth !== null
+			? _goalMaxNestingDepth
+			: undefined;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
@@ -1226,6 +1268,8 @@ function goalPreviewPanel() {
 				autoStartTeam,
 				workflow: inlineWorkflow,
 				inlineRoles,
+				subgoalsAllowed,
+				maxNestingDepth,
 			});
 		} catch (err) {
 			showConnectionError("Failed to create goal", String((err as Error)?.message || err));
@@ -1251,6 +1295,8 @@ function goalPreviewPanel() {
 		_selectedWorkflowId = "";
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
+		_goalSubgoalsAllowed = null;
+		_goalMaxNestingDepth = null;
 		_assistantEnabledOptionalSteps = [];
 		_assistantInlineWorkflowYaml = "";
 		_assistantInlineWorkflowYamlError = "";
@@ -1361,6 +1407,22 @@ function goalPreviewPanel() {
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
 				autoStartTeam: _goalAutoStartTeam,
 				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
+				subgoalsAllowed: _goalSubgoalsAllowed ?? isSubgoalsEnabled(),
+				maxNestingDepth: _goalMaxNestingDepth ?? getSystemMaxNestingDepth(),
+				onSubgoalsAllowedChange: (e: Event) => {
+					_goalSubgoalsAllowed = (e.target as HTMLInputElement).checked;
+					renderApp();
+				},
+				onMaxNestingDepthChange: (e: Event) => {
+					const raw = Number((e.target as HTMLInputElement).value);
+					const sys = getSystemMaxNestingDepth();
+					if (!Number.isFinite(raw)) return;
+					let n = Math.floor(raw);
+					if (n < 1) n = 1;
+					if (n > sys) n = sys;
+					_goalMaxNestingDepth = n;
+					renderApp();
+				},
 				cwdDropdownOpen: state.cwdDropdownOpen,
 				cwdHighlightIndex: state.cwdHighlightIndex,
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
@@ -2501,6 +2563,8 @@ let _proposalCwdHighlightIndex = -1;
 let _proposalSaving = false;
 let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
+let _proposalSubgoalsAllowed: boolean | null = null;
+let _proposalMaxNestingDepth: number | null = null;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
 /** Inline workflow YAML for the goal proposal panel. */
@@ -2702,6 +2766,12 @@ function goalProposalPanel() {
 		// latest values (workflow id, sandboxed, etc).
 		const sandboxed = _proposalSandboxed;
 		const autoStartTeam = _proposalAutoStartTeam;
+		const subgoalsAllowed = isSubgoalsEnabled() && _proposalSubgoalsAllowed !== null
+			? _proposalSubgoalsAllowed
+			: undefined;
+		const maxNestingDepth = isSubgoalsEnabled() && _proposalMaxNestingDepth !== null
+			? _proposalMaxNestingDepth
+			: undefined;
 		const workflowId = _proposalWorkflowId || undefined;
 		const enabledOptionalSteps = _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined;
 		const projectId = state.previewProjectId || undefined;
@@ -2733,6 +2803,8 @@ function goalProposalPanel() {
 					autoStartTeam,
 					workflow: inlineWorkflow,
 					inlineRoles,
+					subgoalsAllowed,
+					maxNestingDepth,
 				});
 			} catch (err) {
 				showConnectionError("Failed to create goal", String((err as Error)?.message || err));
@@ -2752,6 +2824,8 @@ function goalProposalPanel() {
 			_proposalInitializedFrom = null;
 			_proposalSandboxed = false;
 			_proposalAutoStartTeam = true;
+			_proposalSubgoalsAllowed = null;
+			_proposalMaxNestingDepth = null;
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -2809,6 +2883,22 @@ function goalProposalPanel() {
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
 		autoStartTeam: _proposalAutoStartTeam,
 		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
+		subgoalsAllowed: _proposalSubgoalsAllowed ?? isSubgoalsEnabled(),
+		maxNestingDepth: _proposalMaxNestingDepth ?? getSystemMaxNestingDepth(),
+		onSubgoalsAllowedChange: (e: Event) => {
+			_proposalSubgoalsAllowed = (e.target as HTMLInputElement).checked;
+			renderApp();
+		},
+		onMaxNestingDepthChange: (e: Event) => {
+			const raw = Number((e.target as HTMLInputElement).value);
+			const sys = getSystemMaxNestingDepth();
+			if (!Number.isFinite(raw)) return;
+			let n = Math.floor(raw);
+			if (n < 1) n = 1;
+			if (n > sys) n = sys;
+			_proposalMaxNestingDepth = n;
+			renderApp();
+		},
 		cwdDropdownOpen: _proposalCwdDropdownOpen,
 		cwdHighlightIndex: _proposalCwdHighlightIndex,
 		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },

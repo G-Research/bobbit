@@ -13,6 +13,11 @@ import { detectPrimaryBranch } from "../skills/git.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
+import {
+	readSubgoalNestingPrefs,
+	checkCanSpawnChild,
+	inheritedChildOverrides,
+} from "./subgoal-nesting-limit.js";
 import { adaptReadyToMergeVerify, adaptReadyToMergeForChild } from "./child-ready-to-merge.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
@@ -2972,6 +2977,13 @@ export class VerificationHarness {
 		const teamManager = this.teamManager;
 		const rootGoalId = parent.rootGoalId ?? parent.id;
 
+		// Subgoal nesting-limit gate — mirrors the REST `POST /spawn-child`
+		// path. Single source of truth in subgoal-nesting-limit.ts. We only
+		// run the check on the spawn path; if the child is already resolved
+		// (tier 1/3/5/cached) we skip — idempotent re-runs must not fail a
+		// step that already produced a live child.
+		const _nestingPrefs = readSubgoalNestingPrefs((k) => this.preferencesStore?.get(k));
+
 		// Tag the active step with the planId early so cancellation paths /
 		// restart-resume can correlate without spawn having succeeded yet.
 		if (active.steps[stepIndex]) {
@@ -3046,6 +3058,19 @@ export class VerificationHarness {
 					this._persistActive();
 				}
 			} else {
+				// Enforce nesting limit BEFORE spawning a fresh child. The
+				// outer `finally { sem.release() }` covers the early-return
+				// paths below — do NOT release here.
+				const _check = checkCanSpawnChild(parent, _nestingPrefs, (gid) => ctx.goalStore.get(gid));
+				if (!_check.ok) {
+					if (_check.code === "SUBGOALS_DISABLED") {
+						return { passed: false, output: `Subgoal spawn blocked: subgoals are disabled for this goal tree.` };
+					}
+					return {
+						passed: false,
+						output: `Subgoal spawn blocked: nesting depth limit reached (${_check.currentDepth}/${_check.maxDepth}).`,
+					};
+				}
 				// Spawn a fresh child. stamp-immediately invariant: stamp spawnedFromPlanId
 				// IMMEDIATELY after createGoal — no other awaits or calls in
 				// between. The very next line MUST be the updateGoal call.
@@ -3102,6 +3127,7 @@ export class VerificationHarness {
 					parentGoalId,
 					teamManager,
 				}).value;
+				const _childOverrides = inheritedChildOverrides(parent, _nestingPrefs);
 				const child = await goalManager.createGoal(sg.title, parent.cwd, {
 					spec: sg.spec,
 					workflowId: childWorkflowId,
@@ -3110,6 +3136,8 @@ export class VerificationHarness {
 					sandboxed: parent.sandboxed,
 					parentGoalId,
 					inlineRoles: inheritedInlineRoles,
+					subgoalsAllowed: _childOverrides.subgoalsAllowed,
+					maxNestingDepth: _childOverrides.maxNestingDepth,
 				});
 				await goalManager.updateGoal(child.id, {
 					spawnedFromPlanId: planId,

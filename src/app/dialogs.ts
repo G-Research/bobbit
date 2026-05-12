@@ -1839,11 +1839,14 @@ export function showProjectDialog(): void {
 				onClose: cleanup,
 				width: "min(480px, 92vw)",
 				height: "auto",
+				// Cap modal height so the footer (Continue/Cancel) stays in view
+				// even when the preflight panel renders a long checklist. The
+				// DialogContent below gets `overflow-y-auto` so the body scrolls.
 				className: "max-h-[90vh]",
 				backdropClassName: "bg-black/50 backdrop-blur-sm",
 				children: html`
 					${DialogContent({
-						className: "overflow-y-auto",
+						className: "flex-1 min-h-0 overflow-y-auto",
 						children: html`
 							${DialogHeader({ title: showingScan ? "Detected repos" : (detectionResult?.hasBobbit ? "Register Project" : "Add Project") })}
 							<div class="mt-4 flex flex-col gap-4">

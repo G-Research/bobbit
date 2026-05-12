@@ -409,6 +409,11 @@ async function initApp() {
 					// Apply subgoalsEnabled — default OFF (system-scope feature gate).
 					document.documentElement.dataset.subgoalsEnabled =
 						prefs.subgoalsEnabled === true ? "true" : "false";
+					// Apply maxNestingDepth — default 3 when unset/invalid.
+					document.documentElement.dataset.maxNestingDepth =
+						(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
+							? String(prefs.maxNestingDepth)
+							: "3";
 				}
 			} catch {}
 
@@ -697,6 +702,11 @@ async function initApp() {
 			// Apply subgoalsEnabled — default OFF (system-scope feature gate).
 			document.documentElement.dataset.subgoalsEnabled =
 				prefs.subgoalsEnabled === true ? "true" : "false";
+			// Apply maxNestingDepth — default 3 when unset/invalid.
+			document.documentElement.dataset.maxNestingDepth =
+				(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
+					? String(prefs.maxNestingDepth)
+					: "3";
 			// Reload shortcuts if changed
 			if (prefs.shortcuts) {
 				await loadSavedBindings();
