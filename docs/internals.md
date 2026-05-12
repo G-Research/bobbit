@@ -813,6 +813,10 @@ The per-project "+ goal" button on each project row bypasses the popover - the p
 - **Search**: The `_archivedBySearch` / `_ensureArchivedForSearch` auto-open behaviour is unchanged - a search match inside any archived item still forces `state.showArchived` on globally. When a search query is active, each project's subsection only renders matching items; projects with no matches render no Archived subsection at all.
 - **Collapsed sidebar**: `renderCollapsedSidebar` is unchanged - archived goals continue to render inline with live goals in the icon-only rail.
 
+### Sidebar keyboard navigation
+
+`Ctrl+↑/↓` walk the sidebar in rendered DOM order with auto-open on every step; `Ctrl+→/←` expand/collapse the active group header without moving the cursor. The order is read directly from `[data-nav-id]` elements under `.sidebar-edge`, so search filtering, archived view, and every collapse toggle are honoured automatically — the rendered sidebar is the single source of truth. Implementation lives in `src/app/sidebar-nav.ts`; shortcut ids `prev-session`, `next-session`, `sidebar-expand`, `sidebar-collapse` are registered in `src/app/main.ts`. See [docs/sidebar-keyboard-navigation.md](sidebar-keyboard-navigation.md) for the full contract, the row-kind → destination table, and the rationale behind `state.keyboardNavActiveId`.
+
 ### REST API
 
 | Method | Path | Description |
