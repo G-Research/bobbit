@@ -37,6 +37,7 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { applyProjectPalette } from "./session-manager.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -3091,7 +3092,8 @@ function renderAppearanceTab(projectId: string) {
 			if (res.ok) {
 				const updated = await res.json();
 				const idx = state.projects.findIndex((p: any) => p.id === projectId);
-				if (idx >= 0) state.projects[idx] = { ...state.projects[idx], ...updated };
+				if (idx >= 0) state.projects[idx] = updated;
+				applyProjectPalette(projectId);
 				renderApp();
 			}
 		} catch { /* ignore */ }
@@ -3106,7 +3108,8 @@ function renderAppearanceTab(projectId: string) {
 			if (res.ok) {
 				const updated = await res.json();
 				const idx = state.projects.findIndex((p: any) => p.id === projectId);
-				if (idx >= 0) state.projects[idx] = { ...state.projects[idx], ...updated };
+				if (idx >= 0) state.projects[idx] = updated;
+				applyProjectPalette(projectId);
 				renderApp();
 			}
 		} catch { /* ignore */ }
