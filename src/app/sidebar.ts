@@ -34,6 +34,7 @@ import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, H
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
+import { getActiveNavId } from "./sidebar-nav.js";
 
 // ============================================================================
 // PROJECT EXPANSION STATE
@@ -559,10 +560,14 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 	const staffExpanded = isStaffExpanded(projectId || "");
 	// Always show the Staff section so users can create their first staff agent
 
+	const staffNavId = `staff-header:${projectId || ""}`;
+	const staffNavActive = getActiveNavId() === staffNavId;
 	return html`
 		<div class="border-t border-border/30 my-1 mx-2"></div>
 		<div class="flex flex-col gap-0.5">
-			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
+			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${staffNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} transition-colors"
+				data-nav-id=${staffNavId}
+				data-nav-active=${staffNavActive ? "true" : "false"}
 				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
 				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
 				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}font-size: 1.1667em;">${staffExpanded ? "▾" : "▸"}</span>
@@ -604,9 +609,12 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
 					title="Edit">${icon(Pencil, "xs")}</button>`;
+				const staffSessionNavId = agent.currentSessionId ? `session:${agent.currentSessionId}` : "";
 				return html`
 				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+					data-nav-id=${staffSessionNavId}
+					data-nav-active=${active ? "true" : "false"}
 					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
 					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
@@ -706,8 +714,12 @@ function _handleFullSearchClick(query: string): void {
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = getProjectAccentColor(project);
 	const isProvisional = !!project.provisional;
+	const navId = `project:${project.id}`;
+	const navActive = getActiveNavId() === navId;
 	return html`
-		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+			data-nav-id=${navId}
+			data-nav-active=${navActive ? "true" : "false"}
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
 			<span class="text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
@@ -764,7 +776,10 @@ function renderProjectContent(
 		`)}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
-			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+			${(() => { const ungNavId = `ungrouped-header:${project.id}`; const ungActive = getActiveNavId() === ungNavId; return html`
+			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer ${ungActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+				data-nav-id=${ungNavId}
+				data-nav-active=${ungActive ? "true" : "false"}
 				style="padding-left:${HEADER_CHEVRON_W}px;"
 				@click=${() => { setUngroupedExpanded(project.id, !ungroupedExp); renderApp(); }}>
 				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;">${ungroupedExp ? "▾" : "▸"}</span>
@@ -792,6 +807,7 @@ function renderProjectContent(
 					${sessions.map(renderSessionRow)}
 				</div>
 			` : ""}
+			`; })()}
 		</div>
 		${!isProvisional && staff ? renderStaffSidebarSection(staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(project, archivedGoals, standaloneArchivedSessions) : ""}
