@@ -510,6 +510,20 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
   3. If a project legitimately has more than 30 workspace packages, output is capped at `MAX_CANDIDATES = 30` (alphabetical truncation marker emitted). The assistant still gets a representative slice; the user can add the rest manually.
 - **Architecture**: see `src/server/agent/monorepo-scan.ts` and [docs/internals.md — Project-proposal panel structure](internals.md#project-proposal-panel-structure) (Monorepo subproject scan).
 
+## Add-project: Continue after Archive tries to auto-import / opens stale project instead of assistant
+
+- **Symptom**: user clicks "Archive existing .bobbit/" in the add-project preflight panel, archive succeeds, then clicking Continue auto-imports a (now empty) project instead of opening the project assistant. Same symptom for any "ghost `.bobbit/`" directory (empty, half-extracted archive, crashed install, manually-created stub).
+- **Cause**: `POST /api/projects/detect` decides `hasBobbit` from the on-disk marker `<path>/.bobbit/config/project.yaml`, NOT from the mere presence of a `.bobbit/` directory entry. The archive flow re-scaffolds empty `.bobbit/config/` and `.bobbit/state/` after moving content aside (see `src/server/agent/bobbit-archive.ts`), so `.bobbit/` always exists post-archive but `project.yaml` does not — detection must return `hasBobbit: false` and the UI must fall through to the assistant branch in `src/app/dialogs.ts::doContinue`.
+- **Diagnostic order**:
+  1. `GET /api/projects/detect` for the candidate path — confirm `hasBobbit` matches existence of `<path>/.bobbit/config/project.yaml`. If `hasBobbit: true` with no `project.yaml`, the server check has regressed (see `src/server/server.ts` `/api/projects/detect` handler).
+  2. The preflight `bobbit.existing` row is a separate concern ("is there content to archive?") and must keep firing whenever `.bobbit/` has content — do NOT collapse the two checks. See [add-project-preflight.md](add-project-preflight.md).
+  3. Browser E2E: `tests/e2e/ui/add-project-post-archive.spec.ts` pins the archive → Continue → assistant flow.
+- **Truth table** (`.bobbit/` shape → expected route):
+  - absent → assistant
+  - empty, or only empty `config/` + `state/` (post-archive shape) → assistant
+  - contains `config/project.yaml` → auto-import
+- **Architecture**: see [docs/internals.md — Project assistant](internals.md#project-assistant) for the detection marker rationale and the auto-import vs assistant routing.
+
 ## Legacy JSON-string project.yaml field rejected
 
 - **Symptom**: `PUT /api/projects/:id/config` (or `/api/project-config`) returns 400 in one of two situations:
