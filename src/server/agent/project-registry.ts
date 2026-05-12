@@ -297,6 +297,14 @@ export class ProjectRegistry {
         if (updates.colorDark === undefined) {
           project.colorDark = PALETTE_PRIMARY_COLORS[project.palette].dark;
         }
+      } else if (!project.palette) {
+        // Clearing palette → reset accents to defaults (unless caller supplied explicit overrides)
+        if (updates.colorLight === undefined) {
+          project.colorLight = DEFAULT_PROJECT_COLOR_LIGHT;
+        }
+        if (updates.colorDark === undefined) {
+          project.colorDark = DEFAULT_PROJECT_COLOR_DARK;
+        }
       }
     }
 
