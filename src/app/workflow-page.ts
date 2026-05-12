@@ -1,4 +1,6 @@
-import "./workflow-page.css";
+// CSS for this page (and the project-proposal preview pane that reuses
+// .wf-* classes) is eagerly imported from main.ts so it is available even
+// when this lazy page module has not been loaded yet.
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
