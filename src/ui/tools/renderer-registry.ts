@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
-import { html, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";
 import { AlertTriangle, ChevronsUpDown, ChevronUp, FileQuestion, Loader } from "lucide";
@@ -182,6 +182,7 @@ export function renderHeader(
 	state: ToolHeaderState,
 	toolIcon: any,
 	text: string | TemplateResult,
+	trailing?: TemplateResult | typeof nothing,
 ): TemplateResult {
 	const statusIcon = (iconComponent: any, color: string) =>
 		html`<span class="inline-block ${color}">${icon(iconComponent, "sm")}</span>`;
@@ -189,33 +190,43 @@ export function renderHeader(
 	switch (state) {
 		case "inprogress":
 			return html`
-				<div class="flex items-center justify-between gap-2 text-sm text-muted-foreground">
-					<div class="flex items-center gap-2">
+				<div class="flex items-center gap-2 text-sm text-muted-foreground">
+					<div class="flex items-center gap-2 min-w-0">
 						${statusIcon(toolIcon, "text-foreground")}
 						${text}
 					</div>
+					${trailing ? html`<span class="ml-auto flex items-center">${trailing}</span>` : html`<span class="ml-auto"></span>`}
 					${statusIcon(Loader, "text-foreground animate-spin")}
 				</div>
 			`;
 		case "complete":
 			return html`
 				<div class="flex items-center gap-2 text-sm text-muted-foreground">
-					${statusIcon(toolIcon, "text-green-600 dark:text-green-500")}
-					${text}
+					<div class="flex items-center gap-2 min-w-0">
+						${statusIcon(toolIcon, "text-green-600 dark:text-green-500")}
+						${text}
+					</div>
+					${trailing ? html`<span class="ml-auto flex items-center">${trailing}</span>` : nothing}
 				</div>
 			`;
 		case "error":
 			return html`
 				<div class="flex items-center gap-2 text-sm text-muted-foreground">
-					${statusIcon(toolIcon, "text-destructive")}
-					${text}
+					<div class="flex items-center gap-2 min-w-0">
+						${statusIcon(toolIcon, "text-destructive")}
+						${text}
+					</div>
+					${trailing ? html`<span class="ml-auto flex items-center">${trailing}</span>` : nothing}
 				</div>
 			`;
 		case "warning":
 			return html`
 				<div class="flex items-center gap-2 text-sm text-muted-foreground">
-					${statusIcon(toolIcon, "text-amber-600 dark:text-amber-500")}
-					${text}
+					<div class="flex items-center gap-2 min-w-0">
+						${statusIcon(toolIcon, "text-amber-600 dark:text-amber-500")}
+						${text}
+					</div>
+					${trailing ? html`<span class="ml-auto flex items-center">${trailing}</span>` : nothing}
 				</div>
 			`;
 	}
@@ -232,6 +243,7 @@ export function renderCollapsibleHeader(
 	contentRef: Ref<HTMLElement>,
 	chevronRef: Ref<HTMLElement>,
 	defaultExpanded = false,
+	trailing?: TemplateResult | typeof nothing,
 ): TemplateResult {
 	const statusIcon = (iconComponent: any, color: string) =>
 		html`<span class="inline-block ${color}">${icon(iconComponent, "sm")}</span>`;
@@ -276,13 +288,14 @@ export function renderCollapsibleHeader(
 					: "text-foreground";
 
 	return html`
-		<button @click=${toggleContent} class="flex items-center justify-between gap-2 text-sm text-muted-foreground w-full text-left hover:text-foreground transition-colors cursor-pointer">
-			<div class="flex items-center gap-2">
+		<button @click=${toggleContent} class="flex items-center gap-2 text-sm text-muted-foreground w-full text-left hover:text-foreground transition-colors cursor-pointer">
+			<div class="flex items-center gap-2 min-w-0">
 				${state === "inprogress" ? statusIcon(Loader, "text-foreground animate-spin") : ""}
 				${statusIcon(toolIcon, toolIconColor)}
 				${text}
 			</div>
-			<span class="inline-block text-muted-foreground" ${ref(chevronRef)}>
+			${trailing ? html`<span class="ml-auto flex items-center">${trailing}</span>` : html`<span class="ml-auto"></span>`}
+			<span class="inline-block text-muted-foreground shrink-0" ${ref(chevronRef)}>
 				<span class="chevron-up ${defaultExpanded ? "" : "hidden"}">${icon(ChevronUp, "sm")}</span>
 				<span class="chevrons-up-down ${defaultExpanded ? "hidden" : ""}">${icon(ChevronsUpDown, "sm")}</span>
 			</span>

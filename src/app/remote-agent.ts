@@ -115,6 +115,39 @@ export class RemoteAgent {
 	private _lastKnownContextTokens: number | null = null;
 	private _isAborting = false;
 
+	/** Overflow-recovery tracking. When the upstream agent hits a context-limit
+	 *  error mid-turn it emits `auto_compaction_start { reason: "overflow" }`,
+	 *  compacts, and retries the prompt. If the retry ALSO fails (compaction
+	 *  didn't reclaim enough), the retry surfaces as an assistant `message_end`
+	 *  with `stopReason: "error"` and an Anthropic-style overflow `errorMessage`.
+	 *  Showing that as a standalone red banner is jarring — the user already
+	 *  has a compaction card describing what happened. Instead we attach the
+	 *  real error to the compaction card and suppress the trailing red block.
+	 *  Window opens on `auto_compaction_start { reason: "overflow" }` and stays
+	 *  open until either the next assistant `message_end` lands or 60 s passes. */
+	private _overflowRecoveryDeadline: number | null = null;
+	/** Last overflow-trigger compaction payload — re-dispatched with the real
+	 *  retry error if a failed retry arrives inside the recovery window. */
+	private _lastOverflowPayload: import("./compaction-types.js").CompactionSummaryPayload | null = null;
+
+	/** Payload of the most recent compaction whose `tokensAfter` we haven't
+	 *  amended yet. The server emits `compaction_end` BEFORE the post-compaction
+	 *  state refresh lands, so reading `_state.contextTokens` (or scanning back
+	 *  for the latest assistant usage row) at that instant returns a stale
+	 *  value from an earlier turn — NOT the real post-compaction size. Instead
+	 *  we leave `tokensAfter`/`reductionPct` null on the initial card and amend
+	 *  it when the next successful assistant `message_end` lands carrying
+	 *  authoritative `usage`. Cleared either on amend or on a subsequent failed
+	 *  retry (the overflow-recovery fold path takes precedence). */
+	private _pendingCompactionAmend: import("./compaction-types.js").CompactionSummaryPayload | null = null;
+
+	/** Wall-clock start of the active compaction. Captured on
+	 *  `compaction_start` / `auto_compaction_start` so the terminal payload
+	 *  can carry an authoritative `durationMs` (renderer displays it on the
+	 *  complete/error card; in-progress card uses the same start to power
+	 *  the live <live-timer> ticker). */
+	private _compactionStartedAt: number | null = null;
+
 	// Proposal deferral — when set, incoming messages are stored but
 	// _checkProposals is skipped until runDeferredProposalCheck() is called.
 	// This lets us fire requestMessages() early for fast loading while
@@ -789,6 +822,39 @@ export class RemoteAgent {
 		this.apply({ type: "compaction-placeholder", message });
 	}
 
+	/**
+	 * Try to amend the most recent compaction card with an authoritative
+	 * `tokensAfter` read from the latest clean assistant `usage` in the
+	 * transcript. Fires from both the live `message_end` path and after a
+	 * `messages` snapshot apply (the post-compaction state refresh from the
+	 * server reaches us as a snapshot, not as live events). No-op when no
+	 * amend is pending. Clears the pending state on success so we don't
+	 * thrash.
+	 */
+	private _tryAmendPendingCompaction(): void {
+		const prev = this._pendingCompactionAmend;
+		if (!prev) return;
+		const totalAfter = this._readContextTokens();
+		if (totalAfter == null || !Number.isFinite(totalAfter) || totalAfter <= 0) return;
+		const tb = prev.tokensBefore;
+		const reductionPct =
+			tb && tb > 0 ? Math.round(((tb - totalAfter) / tb) * 1000) / 10 : null;
+		const amended: CompactionSummaryPayload = {
+			...prev,
+			tokensAfter: totalAfter,
+			reductionPct,
+		};
+		const { message: am, toolResult: atr } = buildCompactionSummaryMessages(amended);
+		this.apply({
+			type: "compaction-result",
+			message: am,
+			success: amended.success,
+			toolResult: atr,
+		});
+		this._lastKnownContextTokens = totalAfter;
+		this._pendingCompactionAmend = null;
+	}
+
 	/** Map upstream event `reason` (or legacy event-type) to a trigger. */
 	private _triggerFromEvent(event: any): CompactionTrigger {
 		const reason = event?.reason;
@@ -1092,6 +1158,10 @@ export class RemoteAgent {
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					// Post-compaction refreshAfterCompaction lands here. Amend the
+					// in-flight compaction card with authoritative tokensAfter if
+					// the new transcript carries usable usage.
+					this._tryAmendPendingCompaction();
 					// Successful snapshot apply — cached state is now in sync with
 					// the server, so future visibility ticks can short-circuit
 					// `requestMessages()` until the WS drops again.
@@ -1799,6 +1869,56 @@ export class RemoteAgent {
 				if (event.message) {
 					let msg = event.message;
 					if (msg.role === "assistant") {
+						// Overflow-recovery fold: if the upstream just compacted on
+						// `reason: "overflow"` and the retry ALSO failed with the
+						// canonical "prompt is too long" error, attach the real error
+						// to the existing compaction card and mark this message to
+						// suppress its standalone red error block. Window closes either
+						// way — a single recovery attempt is all upstream gives us.
+						let foldedIntoCompactionCard = false;
+						if (
+							this._overflowRecoveryDeadline !== null
+							&& Date.now() <= this._overflowRecoveryDeadline
+							&& msg.stopReason === "error"
+							&& typeof msg.errorMessage === "string"
+						) {
+							const err: string = msg.errorMessage;
+							const isOverflowErr = /prompt is too long|tokens?\s*>\s*\d/i.test(err);
+							if (isOverflowErr && this._lastOverflowPayload) {
+								const updated = {
+									...this._lastOverflowPayload,
+									state: "error" as const,
+									success: false,
+									error: err,
+								};
+								const { message: cm, toolResult: ctr } =
+									buildCompactionSummaryMessages(updated);
+								this.apply({
+									type: "compaction-result",
+									message: cm,
+									success: false,
+									toolResult: ctr,
+								});
+								msg = { ...msg, _suppressedByOverflowRecovery: true };
+								foldedIntoCompactionCard = true;
+								// Failed retry — don't keep waiting for a clean amend.
+								this._pendingCompactionAmend = null;
+							}
+						}
+						this._overflowRecoveryDeadline = null;
+						this._lastOverflowPayload = null;
+
+						// Tokens-after amendment: the first clean assistant turn after
+						// compaction has authoritative `usage` reflecting the real
+						// post-compaction context size. Re-dispatch the compaction
+						// card with that number filled in (single DOM identity via
+						// stable id). Also fires later from the snapshot path so the
+						// refreshAfterCompaction broadcast can populate the spinner
+						// even when no follow-up turn happens yet.
+						if (!foldedIntoCompactionCard) {
+							this._tryAmendPendingCompaction();
+						}
+
 						// Check for proposals in assistant message
 						this._checkToolProposals(msg);
 						this._checkProposals(msg);
@@ -1910,6 +2030,13 @@ export class RemoteAgent {
 				// Don't set isStreaming — compaction uses its own blob animation
 				this._isCompacting = true;
 				this.onCompactionChange?.(true);
+				this._compactionStartedAt = Date.now();
+				// Open the overflow-recovery window so a trailing "prompt is too long"
+				// retry error gets folded into the compaction card instead of
+				// surfacing as a standalone red banner.
+				if (this._triggerFromEvent(event) === "overflow") {
+					this._overflowRecoveryDeadline = Date.now() + 60_000;
+				}
 				// Add a rich in-progress synthetic so compaction is visible in chat history
 				this._addCompactingPlaceholder(this._triggerFromEvent(event));
 				// Normalize to compaction_start for UI subscribers
@@ -1952,27 +2079,42 @@ export class RemoteAgent {
 				if (tokensBefore == null) {
 					tokensBefore = this._lastKnownContextTokens;
 				}
-				const tokensAfter = this._readContextTokens();
-				if (tokensAfter != null) this._lastKnownContextTokens = tokensAfter;
-				const reductionPct =
-					tokensBefore && tokensAfter && tokensBefore > 0
-						? Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 1000) / 10
-						: null;
+				// tokensAfter is INTENTIONALLY null here. The server emits
+				// `compaction_end` BEFORE broadcasting the post-compaction state
+				// refresh, so reading context tokens now returns a stale value
+				// from an earlier turn (manifests as a misleading "30% reduction"
+				// when real reduction is 90%+). Instead we set null and amend
+				// from the next successful assistant message_end's `usage`.
+				// Overflow-trigger compactions ALWAYS get rendered as complete.
+				// By the time upstream sends `auto_compaction_end { reason: "overflow" }`
+				// the compaction operation itself has already run — even if the
+				// subsequent retry fails. Whether the user's request ultimately
+				// succeeds is a separate concern (surfaced via the normal assistant
+				// `message_end` error path if the retry fails). Conflating the two
+				// led to a card that looked like compaction had failed when it
+				// hadn't.
+				const displaySuccess = trigger === "overflow" ? true : success;
+				const nowMs = Date.now();
+				const startedAtMs = this._compactionStartedAt;
 				const payload: CompactionSummaryPayload = {
 					schemaVersion: 1,
 					trigger,
-					state: success ? "complete" : "error",
-					success,
-					timestamp: new Date().toISOString(),
+					state: displaySuccess ? "complete" : "error",
+					success: displaySuccess,
+					timestamp: new Date(nowMs).toISOString(),
+					startedAt: startedAtMs != null ? new Date(startedAtMs).toISOString() : undefined,
+					durationMs: startedAtMs != null ? Math.max(0, nowMs - startedAtMs) : undefined,
 					tokensBefore,
-					tokensAfter,
-					reductionPct,
-					error: success
-						? undefined
-						: (errMsg || ((event as any).aborted ? "Compaction aborted" : "Unknown error")),
+					tokensAfter: null,
+					reductionPct: null,
+					error: displaySuccess ? undefined : (errMsg || undefined),
 				};
+				this._compactionStartedAt = null;
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
-				this.apply({ type: "compaction-result", message, success, toolResult });
+				this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
+				// Queue this card for tokens-after amendment on the next clean
+				// assistant `message_end` carrying usage.
+				this._pendingCompactionAmend = payload;
 				// Normalize to compaction_end for UI subscribers
 				if (event.type === "auto_compaction_end") {
 					this.emit({ type: "compaction_end", success } as any);

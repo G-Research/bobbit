@@ -246,16 +246,11 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 		// Card renders with trigger="auto".
 		const card = page.locator("[data-testid='compaction-summary-card']").first();
 		await expect(card).toBeVisible({ timeout: 180_000 });
-		// The trigger may be manual if the budget check tripped on the user
-		// sending text rather than the agent's pre-turn auto path — but the
-		// auto-compaction case is what we are exercising. Allow either, but
-		// prefer auto.
-		await expect(card.locator("[data-test='trigger']")).toHaveText(/auto|manual|context limit/);
-		// Overflow-triggered compaction MUST surface as the "context limit" pill
-		// (NOT "manual"), reach the complete state, and carry parsed/non-null
-		// before+reduction values — pin for the four-defects design doc.
+		// Card reaches a terminal state with parsed before-token value. The
+		// trigger pill was removed (added no actionable info), so the trigger
+		// is no longer asserted via DOM — the payload still carries it for
+		// renderer logic.
 		await expect(card).toHaveAttribute("data-state", "complete");
-		await expect(card.locator("[data-test='trigger']")).toHaveText("context limit");
 		await expect(card.locator("[data-test='tokens-before']")).toContainText(/\d/);
 		await expect(card.locator("[data-test='reduction-pct']")).toContainText(/-\d+(\.\d+)?%/);
 

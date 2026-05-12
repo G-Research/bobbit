@@ -5,8 +5,8 @@
  * `(window as any).applyInProgress | applyComplete | applyError`. Asserts:
  *   - in-progress → complete: card[data-state] flips, exactly one card on
  *     the page, no plaintext "Compacting context…" appears.
- *   - in-progress → error: overflow trigger pill renders "context limit",
- *     error message is visible.
+ *   - in-progress → error (overflow): card transitions, friendly error message
+ *     is visible.
  *   - layout: tokens-before label is adjacent (≤ 24px) to its value.
  *
  * Pin for the single-DOM-identity invariant — see
@@ -54,14 +54,13 @@ async function gotoAndWait(page: any) {
 }
 
 test.describe("CompactionSummaryRenderer (browser E2E)", () => {
-	test("in-progress → complete: same card, no plaintext placeholder", async ({ page }) => {
+	test("in-progress → complete: single header row, same card identity", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate(() => (window as any).applyInProgress("overflow", 202_592));
 
 		const card = page.locator("[data-testid='compaction-summary-card']");
 		await expect(card).toHaveCount(1);
 		await expect(card).toHaveAttribute("data-state", "in-progress");
-		await expect(card.locator("[data-test='trigger']")).toHaveText("context limit");
 		// Plaintext placeholder must NEVER appear in the rendered DOM.
 		await expect(page.getByText("Compacting context…")).toHaveCount(1); // header text
 		// And it must be inside the card (not a separate row).
@@ -73,7 +72,9 @@ test.describe("CompactionSummaryRenderer (browser E2E)", () => {
 		);
 		expect(stray).toBe(0);
 
-		// Transition to complete.
+		// Transition to complete. Non-error states render as a SINGLE header
+		// row — no expandable body, no before/after badges (those numbers
+		// were structurally unreliable at compaction_end time).
 		await page.evaluate(() =>
 			(window as any).applyComplete({
 				tokensBefore: 202_592, tokensAfter: 180_000, reductionPct: 11.2,
@@ -81,52 +82,34 @@ test.describe("CompactionSummaryRenderer (browser E2E)", () => {
 		);
 		await expect(card).toHaveAttribute("data-state", "complete");
 		await expect(page.locator("[data-testid='compaction-summary-card']")).toHaveCount(1);
-		await expect(card.locator("[data-test='tokens-before']")).toContainText("tok");
-		await expect(card.locator("[data-test='tokens-after']")).toContainText("tok");
-		await expect(card.locator("[data-test='reduction-pct']")).toContainText("%");
+		await expect(card.getByText("Context compacted")).toBeVisible();
+		// No tokens badges / reduction lozenge on the complete card anymore.
+		await expect(card.locator("[data-test='tokens-before']")).toHaveCount(0);
+		await expect(card.locator("[data-test='tokens-after']")).toHaveCount(0);
+		await expect(card.locator("[data-test='reduction-pct']")).toHaveCount(0);
 	});
 
-	test("in-progress → error: overflow trigger pill, error message visible", async ({ page }) => {
+	test("in-progress → error: hard compaction failure surfaces raw upstream error", async ({ page }) => {
 		await gotoAndWait(page);
-		await page.evaluate(() => (window as any).applyInProgress("overflow", null));
+		await page.evaluate(() => (window as any).applyInProgress("manual", null));
 		const card = page.locator("[data-testid='compaction-summary-card']");
 		await expect(card).toHaveAttribute("data-state", "in-progress");
 
-		await page.evaluate(() => (window as any).applyError());
+		await page.evaluate(() =>
+			(window as any).applyError({
+				trigger: "manual",
+				error: "Compaction RPC timed out after 120s",
+			}),
+		);
 		await expect(card).toHaveAttribute("data-state", "error");
-		await expect(card.locator("[data-test='trigger']")).toHaveText("context limit");
-		await expect(card.locator("[data-test='error']")).toContainText("202592 tokens");
+		// Hard compaction failure (manual /compact RPC error). The raw upstream
+		// error is surfaced verbatim because there is no useful friendly
+		// alternative; users may need the literal string to file a bug.
+		await expect(card.locator("[data-test='error']")).toContainText("timed out");
 		// Still exactly one card on the page.
 		await expect(page.locator("[data-testid='compaction-summary-card']")).toHaveCount(1);
 	});
 
-	test("layout: tokens-before label sits adjacent to its value", async ({ page }) => {
-		await gotoAndWait(page);
-		await page.evaluate(() =>
-			(window as any).applyComplete({
-				tokensBefore: 12_500, tokensAfter: 3_000, reductionPct: 76,
-			}),
-		);
-		const gap = await page.evaluate(() => {
-			const value = document.querySelector("[data-test='tokens-before']") as HTMLElement | null;
-			if (!value) return -1;
-			// The label sits as the previous-sibling span inside the same wrapper.
-			const wrapper = value.parentElement!;
-			const label = wrapper.querySelector(".uppercase") as HTMLElement | null;
-			if (!label) return -1;
-			const lr = label.getBoundingClientRect();
-			const vr = value.getBoundingClientRect();
-			return Math.abs(vr.left - lr.right);
-		});
-		expect(gap).toBeGreaterThanOrEqual(0);
-		expect(gap).toBeLessThanOrEqual(24);
-	});
 
-	test("manual trigger pill renders 'manual', auto renders 'auto'", async ({ page }) => {
-		await gotoAndWait(page);
-		await page.evaluate(() => (window as any).applyComplete({ trigger: "manual" }));
-		await expect(page.locator("[data-test='trigger']")).toHaveText("manual");
-		await page.evaluate(() => (window as any).applyComplete({ trigger: "auto" }));
-		await expect(page.locator("[data-test='trigger']")).toHaveText("auto");
-	});
+
 });

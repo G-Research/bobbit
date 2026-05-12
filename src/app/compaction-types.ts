@@ -44,6 +44,12 @@ export interface CompactionSummaryPayload {
 	reductionPct: number | null;
 	/** Failure detail; only set when state === "error". */
 	error?: string;
+	/** ISO-8601 of when the compaction started. Used by the renderer to power
+	 *  the live-duration ticker (in-progress) and is preserved verbatim into
+	 *  the terminal payload so a snapshot/reload still shows the right total. */
+	startedAt?: string;
+	/** Total compaction duration, ms. Set only on terminal payloads. */
+	durationMs?: number;
 }
 
 export interface CompactionSummaryMessages {
@@ -113,6 +119,7 @@ export function buildInProgressCompactionPayload(
 	trigger: CompactionTrigger,
 	tokensBefore: number | null,
 ): CompactionSummaryPayload {
+	const now = new Date().toISOString();
 	return {
 		schemaVersion: 1,
 		trigger,
@@ -121,7 +128,8 @@ export function buildInProgressCompactionPayload(
 		// renderer drives off `state`, not `success`. Older readers that
 		// still check `success` see this as "not yet failed".
 		success: true,
-		timestamp: new Date().toISOString(),
+		timestamp: now,
+		startedAt: now,
 		tokensBefore,
 		tokensAfter: null,
 		reductionPct: null,
