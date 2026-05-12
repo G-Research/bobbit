@@ -1225,10 +1225,16 @@ html {
 .bobbit-blob--archived .bobbit-blob__wand,
 .bobbit-blob--archived .bobbit-blob__wizard-hat,
 .bobbit-blob--archived .bobbit-blob__stamp,
-.bobbit-blob--archived .bobbit-blob__clipboard {
+.bobbit-blob--archived .bobbit-blob__clipboard,
+.bobbit-blob--archived .bobbit-blob__zzz,
+.bobbit-blob--archived .bobbit-blob__zzz-letter {
   animation: none !important;
   transition: none !important;
 }
+/* Hide the floating zzz indicator entirely on archived blobs — they are
+ * frozen, not idle/sleeping. Suppresses the 3 zzz letter animations that
+ * would otherwise trip tests/e2e/ui/archived-blob.spec.ts. */
+.bobbit-blob--archived .bobbit-blob__zzz { opacity: 0 !important; }
 
 /* Shadow follows sprite horizontally during transitions */
 .bobbit-blob--exit .bobbit-blob__shadow {
