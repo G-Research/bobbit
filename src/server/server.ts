@@ -4550,9 +4550,11 @@ async function handleApiRoute(
 			const qProjectId = url.searchParams.get("projectId") || undefined;
 			if (qProjectId) {
 				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { json({ error: "Project not found" }, 404); return; }
-				const existing = ctx.roleStore.get(name);
-				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
+				if (!ctx) { jsonError(404, "Project not found"); return; }
+				// promote-on-first-edit — fall back to cascade when not yet in project store
+				const resolvedInCascade = configCascade.resolveRoles(qProjectId).find(r => r.item.name === name);
+				if (!resolvedInCascade) { jsonError(404, "Role not found"); return; }
+				const existing = ctx.roleStore.get(name) ?? resolvedInCascade.item;
 				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 				let toolPolicies = existing.toolPolicies;
 				if (body.toolPolicies !== undefined) {
