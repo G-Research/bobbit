@@ -2075,9 +2075,15 @@ export class RemoteAgent {
 
 			// The agent subprocess may send error responses with id:undefined
 			// (upstream bug). These arrive as events rather than RPC responses.
-			// Treat compact-related errors as compaction_end so the UI recovers.
+			// Treat compact-related errors as compaction_end so the UI recovers —
+			// but ONLY while a compaction is actually in flight. Without this guard
+			// a stray failed `response` arriving AFTER a successful compaction
+			// (e.g. an unrelated tool error or the well-known upstream id:undefined
+			// frame) would synthesize a bogus `compaction_end { success: false }`
+			// and overwrite the already-completed card (same stable `compact_active`
+			// id) with a failure state.
 			case "response":
-				if (!event.success && event.error) {
+				if (!event.success && event.error && this._isCompacting) {
 					// Synthesize a compaction_end event so the blob animation ends
 					this.emit({ type: "compaction_end", success: false, error: event.error });
 				}
