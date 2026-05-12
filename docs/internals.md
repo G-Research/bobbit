@@ -1087,6 +1087,14 @@ Everything else returns `false`, including all lifecycle frames, `auto_compactio
 
 Locked by `tests/session-restore-last-activity.test.ts` - source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
 
+### Client must not mutate `lastActivity`
+
+The server is the **sole writer** of `lastActivity`. The client receives it on `GET /api/sessions` (polled ~every 5s) and must treat it as read-only. In particular, `updateLocalSessionStatus()` in `src/app/api.ts` - invoked from the `session_status` WS handler in `src/app/session-manager.ts` - must update `status` only and leave `lastActivity` alone.
+
+Why: `session_status` frames fire on every real transition **and** on the 15s status heartbeat (see [design/unify-session-status.md](design/unify-session-status.md)). If the client bumped `lastActivity` on each frame, `hasUnseenActivity()` would flip true on every heartbeat (because `lastActivity > lastReadAt`) and `terseRelativeTime()` would render "now", giving the sidebar a spurious unread dot on idle sessions roughly every 15 seconds. The next `/api/sessions` poll reconciles within ~5s, but the heartbeat re-triggers the bug indefinitely. The poll-driven 5s lag is invisible at sidebar granularity (`terseRelativeTime` bucket is 60s).
+
+Locked by `tests/spurious-idle-unread.spec.ts`.
+
 ### Key files
 
 | File | Role |
