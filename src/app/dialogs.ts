@@ -1839,9 +1839,11 @@ export function showProjectDialog(): void {
 				onClose: cleanup,
 				width: "min(480px, 92vw)",
 				height: "auto",
+				className: "max-h-[90vh]",
 				backdropClassName: "bg-black/50 backdrop-blur-sm",
 				children: html`
 					${DialogContent({
+						className: "overflow-y-auto",
 						children: html`
 							${DialogHeader({ title: showingScan ? "Detected repos" : (detectionResult?.hasBobbit ? "Register Project" : "Add Project") })}
 							<div class="mt-4 flex flex-col gap-4">

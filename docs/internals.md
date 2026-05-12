@@ -239,7 +239,7 @@ Two modules implement this:
 
 - **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, etc.).
 
-- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveTools()`, and `resolveToolGroupPolicies()` - all accepting an optional `projectId`. `resolveWorkflows()` exists for shape compat but only reads the project layer (see callout above).
+- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, a `ProjectContextManager`, and an optional `ProjectRegistry` (used for the role field-level ancestor walk — see [Field-level role inheritance](#field-level-role-inheritance)). Provides `resolveRoles()`, `resolveTools()`, and `resolveToolGroupPolicies()` - all accepting an optional `projectId`. `resolveWorkflows()` exists for shape compat but only reads the project layer (see callout above).
 
 Each returned item is a `ResolvedItem<T>` with:
 - `item: T` - the config object
@@ -253,6 +253,32 @@ For each cascaded config type (roles, tools, tool-group-policies), items are mer
 Workflows are not cascaded - `resolveWorkflows(projectId)` reads only the project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`.
 
 **System-scope writes** (role customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles because the server stores are independent of `ProjectContextManager`. Workflow mutations have no system-scope path - they always require a `projectId`.
+
+#### Field-level role inheritance
+
+Three role fields — `model`, `thinkingLevel`, and `promptTemplate` — resolve **field-by-field** rather than via the whole-item replacement used by `resolveRoles()`. A project-level role override that sets only `model` no longer wipes out the `thinkingLevel` or `promptTemplate` inherited from a parent project, the server scope, or the builtin. This matters because role YAML files are typically partial: editing one field in the UI should not silently blank the others.
+
+The lookup walks, for each field independently, the first source that supplies a non-empty string:
+
+1. Current project's role store (`<project>/.bobbit/config/roles/<role>.yaml`).
+2. Each ancestor project's role store, walking up `parentProjectId` via `ProjectRegistry.getAncestors(projectId)`. The walk is cycle-guarded (parents are validated at write time, see below) and capped at 32 hops as a defence-in-depth bound.
+3. Server-scope role store (`<server-cwd>/.bobbit/config/roles/`).
+4. Builtin (`defaults/roles/*.yaml`).
+5. For `model` and `thinkingLevel` only: the `default.sessionModel` / equivalent preference fallback applied by `SessionManager` (`promptTemplate` has no preference fallback — if no layer defines one, the role uses no template).
+
+Methods on `ConfigCascade`:
+
+- `resolveRoleModel(roleName, projectId?)`
+- `resolveRoleThinkingLevel(roleName, projectId?)`
+- `resolveRolePromptTemplate(roleName, projectId?)`
+
+`SessionManager` uses these (`resolveRoleModel`, `resolveRoleThinkingLevel`, `resolveRolePromptTemplate`, plus the `resolveInitialModel` / `resolveInitialThinkingLevel` / `resolveInitialReviewModel` helpers) on session spawn, respawn, and system-prompt injection so an agent's effective model, thinking level, and prompt template all pick up the nearest defining ancestor.
+
+`resolveRoles()` itself is unchanged — it still does whole-item replacement and is the right call when callers need the complete shape of a role (e.g. UI listings, role manager). The field-level resolvers are the right call when consuming a single field for runtime use.
+
+**Project ancestor chain.** `RegisteredProject.parentProjectId?: string` (in `project-registry.ts`) is the link. It is set via `PUT /api/projects/:id` (see [REST API — Projects](#rest-api)) and validated at write time: the target must exist, must not be hidden, must not be provisional, must not be the project itself, and the chain must remain acyclic. `ProjectRegistry.getAncestors(projectId)` returns the resolved ancestor chain in order (nearest parent first); it is the only consumer of `parentProjectId` at runtime today.
+
+Workflows, tools, and tool-group policies do **not** participate in field-level inheritance — only the three role fields above do. Workflows remain project-local (see callout), and tools/policies use whole-item replacement via `resolveTools()` / `resolveToolGroupPolicies()`.
 
 #### Workflows are project-scoped only
 
