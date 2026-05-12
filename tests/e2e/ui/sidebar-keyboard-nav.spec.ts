@@ -418,6 +418,200 @@ test.describe("Sidebar keyboard navigation contract (TDD repro)", () => {
 	});
 
 	// -------------------------------------------------------------------
+	// 8. Toggling the archived view adds / removes archived rows from the
+	//    Ctrl+ArrowDown cycle. Required by the goal spec's reproducing-test
+	//    gate (item 5): "Toggling archived view changes the cycle to
+	//    include/exclude archived rows accordingly."
+	// -------------------------------------------------------------------
+	test("toggling See Archived adds/removes archived rows from the Ctrl+ArrowDown cycle", async ({ page }) => {
+		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		const projC = await registerProject(`navkb-charlie-${stamp}`);
+
+		let liveGoalId: string | undefined;
+		let liveSessId: string | undefined;
+		let archGoalId: string | undefined;
+
+		try {
+			// Live goal + one session under Project C.
+			const liveGoal = await createGoal({
+				title: `KBNavCharlieLive-${stamp}`,
+				projectId: projC.id,
+				worktree: false,
+				cwd: nonGitCwd(),
+			});
+			liveGoalId = liveGoal.id;
+			liveSessId = await createSession({ projectId: projC.id, goalId: liveGoalId });
+
+			// A second goal under Project C — archive it so it only appears when
+			// `state.showArchived` is on.
+			const archGoal = await createGoal({
+				title: `KBNavCharlieArch-${stamp}`,
+				projectId: projC.id,
+				worktree: false,
+				cwd: nonGitCwd(),
+			});
+			archGoalId = archGoal.id;
+			await deleteGoal(archGoalId); // soft-delete = archive
+
+			// Force archived view OFF in localStorage before the app boots so we
+			// have a known starting state regardless of what previous tests left
+			// behind.
+			await page.addInitScript(() => {
+				localStorage.setItem("bobbit-show-archived", "false");
+			});
+			await openApp(page);
+			await waitForShortcutsReady(page);
+			await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
+
+			const projCNavId = `project:${projC.id}`;
+			const liveGoalNavId = `goal:${liveGoalId}`;
+			const archHeaderNavId = `archived-header:${projC.id}`;
+			const archGoalNavId = `goal:${archGoalId}`;
+
+			// Project C must have rendered with a nav-id; if not the rest of the
+			// test makes no sense.
+			await expect(
+				page.locator(`[data-nav-id="${projCNavId}"]`),
+				`${MARK}: Project C header must render with data-nav-id="${projCNavId}"`,
+			).toHaveCount(1, { timeout: 10_000 });
+			await expect(
+				page.locator(`[data-nav-id="${liveGoalNavId}"]`),
+				`${MARK}: live goal under Project C must render with data-nav-id`,
+			).toHaveCount(1, { timeout: 10_000 });
+
+			// Sanity: showArchived must really be off after the init script + reload.
+			const showArchivedInitial = await page.evaluate(
+				() => (window as any).bobbitState?.showArchived === true,
+			);
+			expect(
+				showArchivedInitial,
+				`${MARK}: test pre-condition — showArchived must start OFF`,
+			).toBe(false);
+
+			// -- Archived OFF: archived rows must NOT be in the DOM or the cycle. --
+			const offIds = await navIdsInDomOrder(page);
+			expect(
+				offIds.includes(archHeaderNavId),
+				`${MARK}: with archived view OFF, archived-header must not appear in DOM (got [${offIds.join(",")}])`,
+			).toBe(false);
+			expect(
+				offIds.includes(archGoalNavId),
+				`${MARK}: with archived view OFF, archived goal row must not appear in DOM`,
+			).toBe(false);
+
+			await page.evaluate(() => { window.location.hash = "#/"; });
+			const visitedOff = new Set<string>();
+			for (let i = 0; i < offIds.length + 2; i++) {
+				await pressCtrlArrow(page, "ArrowDown");
+				await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+				const id = await activeNavId(page);
+				if (id) visitedOff.add(id);
+			}
+			expect(
+				visitedOff.has(archHeaderNavId),
+				`${MARK}: Ctrl+ArrowDown with archived view OFF must not visit archived-header (visited=[${[...visitedOff].join(",")}])`,
+			).toBe(false);
+			expect(
+				visitedOff.has(archGoalNavId),
+				`${MARK}: Ctrl+ArrowDown with archived view OFF must not visit archived goal (visited=[${[...visitedOff].join(",")}])`,
+			).toBe(false);
+
+			// -- Toggle archived view ON via the visible "See Archived" button. --
+			const seeArchivedBtn = page
+				.locator("button", { hasText: "See Archived" })
+				.locator("visible=true")
+				.first();
+			// Fall back to a simpler visible-button query if the chained locator
+			// returns nothing (Playwright's `visible=true` engine is sometimes
+			// finicky in chained mode).
+			const btn = (await seeArchivedBtn.count())
+				? seeArchivedBtn
+				: page.locator("button:has-text('See Archived')").first();
+			await btn.click();
+
+			// Wait for the toggle to land in client state, then for the archived
+			// goal to be fetched and rendered.
+			await expect
+				.poll(
+					() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+					{ timeout: 5_000 },
+				)
+				.toBe(true);
+			await expect(
+				page.locator(`[data-nav-id="${archHeaderNavId}"]`),
+				`${MARK}: archived-header for Project C must render once See Archived is ON`,
+			).toHaveCount(1, { timeout: 10_000 });
+			await expect(
+				page.locator(`[data-nav-id="${archGoalNavId}"]`),
+				`${MARK}: archived goal under Project C must render once See Archived is ON`,
+			).toHaveCount(1, { timeout: 10_000 });
+
+			const onIds = await navIdsInDomOrder(page);
+			expect(
+				onIds.includes(archHeaderNavId),
+				`${MARK}: with archived view ON, archived-header MUST appear in DOM nav order`,
+			).toBe(true);
+			expect(
+				onIds.includes(archGoalNavId),
+				`${MARK}: with archived view ON, archived goal MUST appear in DOM nav order`,
+			).toBe(true);
+
+			// Walk again and confirm both new rows are reachable from Ctrl+Down.
+			await page.evaluate(() => { window.location.hash = "#/"; });
+			const visitedOn = new Set<string>();
+			for (let i = 0; i < onIds.length + 2; i++) {
+				await pressCtrlArrow(page, "ArrowDown");
+				await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+				const id = await activeNavId(page);
+				if (id) visitedOn.add(id);
+			}
+			expect(
+				visitedOn.has(archHeaderNavId),
+				`${MARK}: Ctrl+ArrowDown with archived view ON must visit archived-header (visited=[${[...visitedOn].join(",")}])`,
+			).toBe(true);
+			expect(
+				visitedOn.has(archGoalNavId),
+				`${MARK}: Ctrl+ArrowDown with archived view ON must visit archived goal (visited=[${[...visitedOn].join(",")}])`,
+			).toBe(true);
+
+			// -- Toggle archived view OFF again — archived rows must leave the cycle. --
+			const btnOff = (await seeArchivedBtn.count())
+				? seeArchivedBtn
+				: page.locator("button:has-text('See Archived')").first();
+			await btnOff.click();
+			await expect
+				.poll(
+					() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+					{ timeout: 5_000 },
+				)
+				.toBe(false);
+			await expect(
+				page.locator(`[data-nav-id="${archHeaderNavId}"]`),
+				`${MARK}: archived-header must disappear after toggling See Archived OFF again`,
+			).toHaveCount(0, { timeout: 10_000 });
+
+			const offIds2 = await navIdsInDomOrder(page);
+			expect(
+				offIds2.includes(archHeaderNavId),
+				`${MARK}: toggling archived view OFF must remove archived-header from cycle`,
+			).toBe(false);
+			expect(
+				offIds2.includes(archGoalNavId),
+				`${MARK}: toggling archived view OFF must remove archived goal from cycle`,
+			).toBe(false);
+		} finally {
+			// Restore archived view default so we don't pollute siblings.
+			await page.evaluate(() => {
+				try { localStorage.setItem("bobbit-show-archived", "false"); } catch {}
+			}).catch(() => {});
+			if (liveSessId) await deleteSession(liveSessId).catch(() => {});
+			if (liveGoalId) await deleteGoal(liveGoalId).catch(() => {});
+			if (archGoalId) await deleteGoal(archGoalId).catch(() => {});
+			await apiFetch(`/api/projects/${projC.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	// -------------------------------------------------------------------
 	// 7. Auto-open: landing on a goal header opens the goal dashboard.
 	// -------------------------------------------------------------------
 	test("Ctrl+ArrowDown landing on a goal header auto-opens the goal dashboard", async ({ page }) => {
