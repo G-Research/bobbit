@@ -1,0 +1,15 @@
+{
+  "name": "@bobbit/binaries-win32-x64",
+  "version": "0.9.0",
+  "description": "Bundled fd and ripgrep binaries for Bobbit (win32-x64).",
+  "license": "MIT",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "bin/",
+    "index.js",
+    "README.md"
+  ]
+}
