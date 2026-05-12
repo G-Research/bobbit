@@ -1151,6 +1151,25 @@ Client-side, the `claude-opus-4-6` placeholder default in `src/app/remote-agent.
 
 ---
 
+## Tool renderer context
+
+Every in-chat tool card is produced by `renderTool()` in `src/ui/tools/index.ts`, which looks up a `ToolRenderer` from `renderer-registry.ts` and calls its `render(params, result, isStreaming, ctx)`. The `ctx` (typed as `ToolRenderContext` in `src/ui/tools/types.ts`) lets renderers call back to the gateway without coupling to the surrounding app state.
+
+| Field | Why it exists |
+|---|---|
+| `toolUseId` | The `tool_use` block id from the assistant message. Used by `AskUserChoicesRenderer` (matching response envelopes), `PreviewRenderer` (locating the snapshot block), etc. |
+| `sessionId` | The gateway session that issued the call. Used for routes scoped to a session (e.g. preview mount, full-content fetches). |
+| `goalId` | The current session's goal id, when bound to a goal. Used by the `Children` tool renderers — specifically `goal_plan_propose`'s in-chat approval flow, which POSTs to `/api/goals/:goalId/mutation/:requestId/decision`. |
+| `getAskResponseAnswers(toolUseId)` | Looks up answers for a posted `ask_user_choices` by scanning the transcript for a matching response envelope. |
+
+### Threading `goalId` through `ToolRenderContext`
+
+`Messages.ts` resolves the renderer's `goalId` from the session record (`rec.goalId` or `rec.teamGoalId`, since a team-lead's session is bound to the goal via `teamGoalId`) and passes it into `renderTool()`. Renderers that need it use `resolveGoalId(ctx)` from `children-renderer-helpers.ts`, which prefers `ctx.goalId` and falls back to `document.documentElement.dataset.currentGoalId` for archived-session transcripts where the session record has already been GC'd. The fallback path keeps the Approve / Reject buttons live when re-opening an archived session whose goal is still active.
+
+The field was added specifically for the nested-goals work — see [Tool renderers](nested-goals.md#tool-renderers). It's optional on `ToolRenderContext`; renderers outside the `Children` group ignore it.
+
+---
+
 ## Tool access policies
 
 All tool access uses a **grant policy** system enforced by a single `tool_call` guard extension. Every tool resolves to one of three policy values:
