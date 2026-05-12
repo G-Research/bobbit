@@ -22,6 +22,7 @@ import {
 	isProposalStreaming,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
+import { errorDetails } from "./error-helpers.js";
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
@@ -1110,7 +1111,8 @@ function goalPreviewPanel() {
 				autoStartTeam,
 			});
 		} catch (err) {
-			showConnectionError("Failed to create goal", String((err as Error)?.message || err));
+			const { message, code, stack } = errorDetails(err);
+			showConnectionError("Failed to create goal", message, { code, stack });
 			return;
 		}
 		if (!goal) {
@@ -2379,7 +2381,8 @@ function goalProposalPanel() {
 					autoStartTeam,
 				});
 			} catch (err) {
-				showConnectionError("Failed to create goal", String((err as Error)?.message || err));
+				const { message, code, stack } = errorDetails(err);
+				showConnectionError("Failed to create goal", message, { code, stack });
 				return;
 			}
 			if (!goal) return;
