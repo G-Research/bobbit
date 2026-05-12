@@ -81,6 +81,9 @@ const TOOLS = {
 				if (arch === "arm64") {
 					return `ripgrep-${version}-aarch64-unknown-linux-gnu.tar.gz`;
 				}
+				// Design: ship glibc for linux-x64. ripgrep doesn't publish a gnu x86_64 asset
+				// in every release — the musl build is statically linked and works on glibc
+				// hosts too, so we use it as the linux-x64 binary. Documented in docs/releasing.md.
 				return `ripgrep-${version}-x86_64-unknown-linux-musl.tar.gz`;
 			} else if (plat === "win32") {
 				const a = arch === "arm64" ? "aarch64" : "x86_64";

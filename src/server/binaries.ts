@@ -213,8 +213,9 @@ export async function stageBundledBinaries(agentDir: string): Promise<StagingRes
 				const current = fs.readlinkSync(target);
 				if (path.resolve(path.dirname(target), current) === path.resolve(res.path)) continue;
 			} else if (lstat.isFile()) {
-				const a = fs.statSync(res.path);
-				if (a.size === lstat.size && a.mtimeMs <= lstat.mtimeMs) continue;
+				// For copies we can't cheaply prove identity (mtime is unreliable across
+				// npm install runs, size collisions are possible). Always re-copy on
+				// startup — the cost is a single file copy per gateway boot.
 			}
 			fs.rmSync(target, { force: true });
 		} catch {

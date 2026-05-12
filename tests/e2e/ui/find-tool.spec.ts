@@ -46,14 +46,6 @@ async function gotoAndWait(page: any) {
 	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
 }
 
-// Build a minimal ToolResultMessage shape that FindRenderer accepts.
-function okResult(output: string) {
-	return { isError: false, content: [{ type: "text", text: output }] };
-}
-function errResult(output: string) {
-	return { isError: true, content: [{ type: "text", text: output }] };
-}
-
 test.describe("FindRenderer (browser E2E)", () => {
 	test("streaming header shows pattern and path before result arrives @smoke", async ({ page }) => {
 		await gotoAndWait(page);
@@ -161,6 +153,3 @@ test.describe("FindRenderer (browser E2E)", () => {
 	});
 });
 
-// silence unused warnings for helpers we kept for readability
-void okResult;
-void errResult;

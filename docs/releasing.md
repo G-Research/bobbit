@@ -10,7 +10,7 @@ Bobbit ships `fd` and `rg` so agents have them locally with zero network
 calls at install or runtime. Binaries live in per-platform optional npm
 sub-packages under the `@bobbit/` scope. See
 [`src/server/binaries.ts`](../src/server/binaries.ts) for the resolver, and
-the design doc (`design-doc.md`) for the rationale.
+the bundled-fd/rg design doc (tracked as the `design-doc` workflow gate on goal `bundled-fd-c0e73adc`) for the rationale.
 
 ### Layout
 
@@ -98,15 +98,16 @@ Currently shipped:
 
 - `darwin-arm64` (Apple Silicon)
 - `darwin-x64` (Intel Mac)
-- `linux-x64` (glibc)
-- `linux-arm64` (glibc)
+- `linux-x64` — fd is glibc; ripgrep uses the statically-linked musl asset (works on glibc and musl hosts).
+- `linux-arm64` (glibc for fd and rg)
 - `win32-x64`
 
 Deferred:
 
 - `win32-arm64` — defer until there is real demand.
-- `linux-x64-musl` — defer; glibc users get the bundled binary, musl
-  users get the PATH fallback.
+- A dedicated `linux-x64-musl` sub-package — not needed today because rg's
+  musl asset is already linked statically; fd glibc fails on pure-musl hosts,
+  which fall through to the PATH probe with a clear warning.
 
 ### Verifying a release locally
 
