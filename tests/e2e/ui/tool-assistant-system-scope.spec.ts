@@ -20,7 +20,7 @@ test.describe("Tools page — New Tool with system scope", () => {
 		// path doesn't depend on any real project being registered.
 		const list = await apiFetch("/api/projects").then(r => r.json()) as Array<{ id: string }>;
 		for (const p of list) {
-			await apiFetch(`/api/projects/${p.id}?force=1`, { method: "DELETE" });
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" });
 		}
 
 		await navigateToHash(page, "#/tools");

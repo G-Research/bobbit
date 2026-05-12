@@ -132,7 +132,7 @@ test.describe("multi-repo flow (UI)", () => {
 			await page.reload();
 			await expect(page.locator('[data-testid="component-card"]')).toHaveCount(3, { timeout: 10_000 });
 		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}
 	});
@@ -167,7 +167,7 @@ test.describe("multi-repo flow (UI)", () => {
 				.inputValue();
 			expect(reloadedValue).toBe("echo edited");
 		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}
 	});
@@ -197,7 +197,7 @@ test.describe("multi-repo flow (UI)", () => {
 			const data = await res.json();
 			expect(data.worktree_root).toBe(customRoot);
 		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}
 	});
@@ -229,7 +229,7 @@ test.describe("multi-repo flow (UI)", () => {
 			const data = await res.json();
 			expect(data.components.map((c: any) => c.name)).toEqual(["api", "web"]);
 		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}
 	});
@@ -298,7 +298,7 @@ test.describe("multi-repo flow (UI)", () => {
 				await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
 			}
 		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}
 	});
@@ -327,7 +327,7 @@ test.describe("multi-repo flow (UI)", () => {
 			// goal-form indicator in the same suite would duplicate that
 			// browser-render concern without adding signal.
 		} finally {
-			await apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}
 	});

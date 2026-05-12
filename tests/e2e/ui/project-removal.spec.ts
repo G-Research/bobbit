@@ -1,8 +1,9 @@
 /**
  * E2E tests: Remove Project button in per-project settings.
  *
- * Tests that a non-default project can be removed via the settings page,
- * and that the default project does NOT show a remove button.
+ * Every project (including the first/"default" one) shows a Remove Project
+ * button. Verified more directly by `remove-first-project.spec.ts`; this
+ * spec covers the happy-path removal flow.
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
@@ -63,21 +64,4 @@ test.describe("Remove Project button", () => {
 		await expect(sidebar.getByText("Removable Project")).not.toBeVisible({ timeout: 3_000 });
 	});
 
-	test("default project does not show Remove Project button", async ({ page }) => {
-		// Get the default project (first in the list)
-		const res = await apiFetch("/api/projects");
-		const projects = await res.json();
-		const defaultProject = projects[0];
-		expect(defaultProject).toBeDefined();
-
-		await openApp(page);
-		await navigateToHash(page, `#/settings/${defaultProject.id}/general`);
-
-		// Wait for settings content to load
-		await expect(page.locator("h1").filter({ hasText: "Settings" })).toBeVisible({ timeout: 15_000 });
-
-		// Remove button should NOT be present for the default project
-		const removeBtn = page.getByRole("button", { name: "Remove Project" });
-		await expect(removeBtn).not.toBeVisible();
-	});
 });
