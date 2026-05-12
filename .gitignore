@@ -72,3 +72,5 @@ tests/fixtures/streaming-message-container-bundle.js
 tests/fixtures/streaming-message-container-bundle.css
 tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
+tests/fixtures/children-tool-renderers-bundle.js
+tests/fixtures/children-tool-renderers-bundle.css
