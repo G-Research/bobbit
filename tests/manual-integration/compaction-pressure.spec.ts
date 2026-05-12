@@ -19,8 +19,9 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import {
 	mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, openSync, writeSync,
-	cpSync,
+	cpSync, copyFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -185,6 +186,31 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
 	writeFileSync(join(dir, ".bobbit", "state", "projects.json"), "[]");
 
+	// The fresh BOBBIT_DIR has no preferences and the fresh BOBBIT_AGENT_DIR
+	// has no auth/settings — so the gateway would never auto-select a default
+	// model (no aigw URL, no default.sessionModel preference). Seed both:
+	//   1. Copy the user's real ~/.bobbit/agent/{auth,settings,models}.json
+	//      into the isolated agentDir so the agent can actually call the LLM.
+	//   2. Write default.sessionModel into the test's preferences.json so
+	//      tryAutoSelectModel() pins a real model on each session.
+	// The test then overlays its own contextWindow override on top of the
+	// copied models.json — leaving the user's real config untouched.
+	const realAgentDir = process.env.BOBBIT_AGENT_DIR_REAL || join(homedir(), ".bobbit", "agent");
+	mkdirSync(agentDir, { recursive: true });
+	for (const f of ["auth.json", "settings.json", "models.json"]) {
+		const src = join(realAgentDir, f);
+		if (existsSync(src)) {
+			try { copyFileSync(src, join(agentDir, f)); } catch {}
+		}
+	}
+	if (!existsSync(join(agentDir, "auth.json"))) {
+		test.skip(true, `No agent auth found at ${realAgentDir}/auth.json — set BOBBIT_AGENT_DIR_REAL or sign in first`);
+	}
+	const defaultSessionModel = process.env.COMPACTION_TEST_MODEL || "anthropic/claude-haiku-4-5";
+	writeFileSync(join(dir, ".bobbit", "state", "preferences.json"), JSON.stringify({
+		"default.sessionModel": defaultSessionModel,
+	}, null, 2));
+
 	let gw = await startGW(dir, agentDir, port, "BOOT");
 	try {
 		// Register project
@@ -199,9 +225,21 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 		const sRes = await api(gw, "/api/sessions", { method: "POST", body: "{}" });
 		expect(sRes.status).toBe(201);
 		const sessionId = (await sRes.json() as any).id;
-		const session = await pollIdle(gw, sessionId);
-		const modelId: string | undefined = session.model?.id || session.model;
-		const providerId: string | undefined = session.model?.provider || session.provider;
+		// Wait for the session to be idle AND for the default model to be
+		// auto-selected and persisted (modelProvider/modelId on the session
+		// store). Default-model resolution happens asynchronously after the
+		// session spawns, so the first idle poll can race ahead of it.
+		let session: any;
+		let modelId: string | undefined;
+		let providerId: string | undefined;
+		const modelDeadline = Date.now() + 60_000;
+		while (Date.now() < modelDeadline) {
+			session = await pollIdle(gw, sessionId);
+			modelId = session.modelId || session.model?.id || session.model;
+			providerId = session.modelProvider || session.model?.provider || session.provider;
+			if (modelId && providerId) break;
+			await new Promise((r) => setTimeout(r, 500));
+		}
 		if (!modelId || !providerId) {
 			throw new Error(`no default model in session: ${JSON.stringify(session)}`);
 		}
@@ -243,16 +281,19 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 		await trigger.fill(filler + "\n\nNow summarise everything.");
 		await trigger.press("Enter");
 
-		// Card renders with trigger="auto".
+		// Card renders and reaches the complete state. After the
+		// `Smooth, single-row compaction card` refactor (commit f772976e) the
+		// renderer collapsed the success body to a single header row — the
+		// before/after token badges and reduction bar were removed because
+		// `tokensAfter` was structurally unreliable at compaction_end. The
+		// only stable DOM hooks on the success path are the card root
+		// (`data-state`) and the verdict pill (`data-verdict`). Hard
+		// compaction failures surface via the assistant error path, not the
+		// card, so a missing verdict is itself a regression.
 		const card = page.locator("[data-testid='compaction-summary-card']").first();
 		await expect(card).toBeVisible({ timeout: 180_000 });
-		// Card reaches a terminal state with parsed before-token value. The
-		// trigger pill was removed (added no actionable info), so the trigger
-		// is no longer asserted via DOM — the payload still carries it for
-		// renderer logic.
 		await expect(card).toHaveAttribute("data-state", "complete");
-		await expect(card.locator("[data-test='tokens-before']")).toContainText(/\d/);
-		await expect(card.locator("[data-test='reduction-pct']")).toContainText(/-\d+(\.\d+)?%/);
+		await expect(card.locator("[data-test='verdict']")).toHaveAttribute("data-verdict", "ok");
 
 		// Post-compact turn succeeds.
 		await pollIdle(gw, sessionId, 240_000);
