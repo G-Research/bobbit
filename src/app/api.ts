@@ -19,6 +19,8 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
+import { errorFromResponse, errorDetails } from "./error-helpers.js";
+export { errorFromResponse, errorDetails };
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -37,27 +39,6 @@ export function resetPrPollThrottle(): void {
 async function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): Promise<void> {
 	const { showConnectionError: show } = await import("./dialogs.js");
 	show(title, message, opts);
-}
-
-/**
- * Build an Error from a non-OK response, preserving the server's structured
- * `{ error, code, stack }` body so callers can forward `code`/`stack` to the
- * connection-error modal. Pair with `errorDetails(err)` in the matching catch.
- */
-async function errorFromResponse(res: Response, fallback: string): Promise<Error> {
-	const data = await res.json().catch(() => ({} as any));
-	const err = new Error((data && data.error) || fallback || `Failed: ${res.status}`);
-	(err as any).code = data?.code;
-	(err as any).stack = data?.stack || (err as any).stack;
-	return err;
-}
-
-/** Extract `{ message, code, stack }` from a caught value for `showConnectionError`. */
-function errorDetails(err: unknown): { message: string; code?: string; stack?: string } {
-	const message = err instanceof Error ? err.message : String(err);
-	const code = err && typeof err === "object" ? (err as any).code : undefined;
-	const stack = err instanceof Error ? err.stack : undefined;
-	return { message, code, stack };
 }
 
 /**
