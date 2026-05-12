@@ -1890,7 +1890,10 @@ async function handleApiRoute(
 				if (stat.isDirectory()) {
 					const entries = fs.readdirSync(dirPath);
 					isEmpty = entries.length === 0;
-					hasBobbit = entries.includes(".bobbit");
+					// Source of truth: a configured project is one with .bobbit/config/project.yaml.
+					// Mere presence of an empty .bobbit/ (e.g. post-archive shape, ghost dirs) must NOT
+					// route the add-project flow to auto-import. See goal: Post-archive → assistant.
+					hasBobbit = fs.existsSync(path.join(dirPath, ".bobbit", "config", "project.yaml"));
 					hasPackageJson = entries.includes("package.json");
 					hasCargoToml = entries.includes("Cargo.toml");
 					hasGoMod = entries.includes("go.mod");
