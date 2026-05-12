@@ -339,12 +339,13 @@ test.describe("Sidebar keyboard navigation contract (TDD repro)", () => {
 
 		const after = await navIdsInDomOrder(page);
 		// Project A's goal + sessions should NOT appear in the new DOM order.
-		const projectAChildren = before.filter(
-			(id) => id !== projectNavId &&
-				before.indexOf(id) > before.indexOf(projectNavId) &&
-				// stop at the next project header
-				!(id.startsWith("project:") && id !== projectNavId),
-		);
+		// Slice from projectA exclusive to the next project header (or end).
+		const projAIdx = before.indexOf(projectNavId);
+		let nextProjIdx = before.length;
+		for (let i = projAIdx + 1; i < before.length; i++) {
+			if (before[i].startsWith("project:")) { nextProjIdx = i; break; }
+		}
+		const projectAChildren = before.slice(projAIdx + 1, nextProjIdx);
 		for (const child of projectAChildren) {
 			expect(
 				after.includes(child),

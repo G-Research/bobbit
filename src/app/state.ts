@@ -221,6 +221,12 @@ export const state = {
 	connectingSessionId: null as string | null,
 	/** The session ID the user has selected (visual highlight). Updated synchronously. */
 	selectedSessionId: null as string | null,
+	/** Keyboard-nav active row override (data-nav-id of the last row touched
+	 *  by Ctrl+↑/↓). Used only when the row's kind has no inherent route
+	 *  mapping (project / staff-header / ungrouped-header / archived-header)
+	 *  or to keep the sticky highlight after navigation. Cleared automatically
+	 *  by the hashchange listener installed in sidebar-nav.ts. */
+	keyboardNavActiveId: null as string | null,
 	/** Monotonically increasing counter. Bumped on every select. Used to detect stale hydrations. */
 	switchGeneration: 0,
 	sessionPollTimer: null as ReturnType<typeof setInterval> | null,
