@@ -217,9 +217,18 @@ Partial archive failure is surfaced explicitly — we do NOT attempt rollback (t
 - 409 → `{ error }` if `<rootPath>/.bobbit/` doesn't exist or is already empty.
 - Does NOT mutate the registry. Client re-runs `/preflight` after.
 
+### Boundary with `POST /api/projects/detect`
+
+Preflight's `bobbit.existing` check and `POST /api/projects/detect`'s `hasBobbit` field look superficially similar but answer different questions and must stay decoupled:
+
+- `bobbit.existing` (preflight) — "is there `.bobbit/` content to archive?" Surfaces the **Archive existing .bobbit/** CTA. Fires whenever `.bobbit/config/` or `.bobbit/state/` has any content.
+- `hasBobbit` (detect) — "is this an already-configured Bobbit project?" Drives the smart Add Project routing between auto-import and the project assistant. **True iff `<rootPath>/.bobbit/config/project.yaml` exists** — the same on-disk marker used by `ProjectConfigStore.configFile` and by `project-assistant.ts`'s EDIT-vs-NEW-mode discriminator.
+
+The distinction matters after a successful archive: this endpoint re-scaffolds empty `<rootPath>/.bobbit/config/` and `<rootPath>/.bobbit/state/` (see the Algorithm step 5 above), so the directory entry `.bobbit/` always exists post-archive. A directory-entry check would misroute Continue to auto-import an empty project; the `project.yaml` marker correctly reports `hasBobbit: false` and routes to the assistant. The same logic also covers ghost-`.bobbit/` cases (half-extracted archives, manually-created stubs, crashed installs).
+
 ## UI changes (`src/app/dialogs.ts`)
 
-The add-project dialog gains a `PreflightPanel` between the path input and the Submit button. Debounce 400 ms (matching existing `runDetection`). Layout:
+The add-project dialog gains a `PreflightPanel` between the path input and the Submit button. Preflight is debounced 400 ms when the user is typing (matching existing `runDetection`); other write sites to `pathValue` trigger preflight immediately (see Implementation notes). Layout:
 
 ```
 ┌── Add project ──────────────────────────────────┐
@@ -243,6 +252,18 @@ The add-project dialog gains a `PreflightPanel` between the path input and the S
   - "Will be preserved" list (only non-empty when `bobbit.gateway-owned` is true) with an explanatory note.
 - After archive, the preflight panel re-fetches. `bobbit.existing` should now report `pass`.
 - The existing `SymlinkRootError` confirm modal is kept as-is and triggered by the registration call path. The `path.symlink` preflight row is informational — clicking its remediation can open the confirm modal pre-emptively, but we don't reshape the established acceptCanonical flow.
+
+### Implementation notes: preflight trigger sites
+
+Preflight is **not** a reactive effect on `pathValue`. It is triggered explicitly from every code path that writes `pathValue`. As of this writing there are three such sites in `src/app/dialogs.ts`:
+
+1. **Text input `onInput`** — calls `debouncedDetect(pathValue)`, which fans out to both `runDetection` and `runPreflight` after the 400 ms debounce.
+2. **Directory browser `selectBrowsed()`** — the user has explicitly confirmed a directory pick, so preflight runs immediately (no debounce) alongside `runDetection`.
+3. **Defensive mount-time guard** — if the dialog opens with a prefilled `pathValue`, `runDetection` and `runPreflight` are kicked off on mount behind a `pathValue.trim()` guard.
+
+**Invariant**: any new code path that mutates `pathValue` must also trigger preflight, or the panel will silently stay empty. The original PR shipped with site (2) missing — `selectBrowsed()` set `pathValue` but called only `runDetection`, so users who picked a directory via the in-dialog browser never saw a preflight report. Reframing this as a reactive effect on `pathValue` changes would eliminate the foot-gun but is intentionally out of scope; the surgical fix preserves the explicit-trigger pattern.
+
+The 404 fallback (`preflightUnavailable = true`, silently hide the panel) is preserved for older gateways but logs a single `console.warn("[preflight] endpoint unavailable — hiding panel")` so dev/QA can distinguish "no panel because endpoint is missing" from "no panel because of a trigger-site regression".
 
 ## Server wiring
 

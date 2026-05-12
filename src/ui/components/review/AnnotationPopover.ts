@@ -44,6 +44,8 @@ export interface OpenPopoverOptions {
   onSubmit: (comment: string) => void;
   /** Called when the user cancels (Esc, swipe-down, click-Cancel). */
   onCancel: () => void;
+  /** Called when the user deletes the existing comment (edit mode only). */
+  onDelete?: () => void;
 }
 
 let _singleton: AnnotationPopover | null = null;
@@ -64,6 +66,7 @@ export function openAnnotationPopover(opts: OpenPopoverOptions): void {
   el.existingComment = opts.existingComment ?? "";
   el.onSubmit = opts.onSubmit;
   el.onCancel = opts.onCancel;
+  el.onDelete = opts.onDelete ?? null;
   el.open = true;
 }
 
@@ -84,6 +87,7 @@ export class AnnotationPopover extends LitElement {
   /** Imperative event sinks set by the singleton helper above. */
   onSubmit: ((comment: string) => void) | null = null;
   onCancel: (() => void) | null = null;
+  onDelete: (() => void) | null = null;
 
   @query("textarea") private _textarea!: HTMLTextAreaElement;
 
@@ -225,6 +229,17 @@ export class AnnotationPopover extends LitElement {
     .review-popover-submit:hover {
       opacity: 0.9;
     }
+    .review-popover-delete {
+      margin-right: auto;
+      background: transparent;
+      color: var(--negative, #dc2626);
+      border-color: color-mix(in oklch, var(--negative, #dc2626) 40%, transparent);
+    }
+    .review-popover-delete:hover {
+      background: color-mix(in oklch, var(--negative, #dc2626) 10%, transparent);
+      color: var(--negative, #dc2626);
+      border-color: var(--negative, #dc2626);
+    }
 
     /* Bottom-sheet variant. */
     .review-popover--sheet {
@@ -275,11 +290,15 @@ export class AnnotationPopover extends LitElement {
         this.style.top = "";
         this._attachViewportListener();
       }
+      // Set the textarea value synchronously so consumers (and tests) that
+      // read `textarea.value` immediately after `<annotation-popover open>`
+      // appears in the DOM see the prefill. The focus call still uses rAF
+      // so layout has settled before we move the cursor.
+      if (this._textarea && this.existingComment) {
+        this._textarea.value = this.existingComment;
+      }
       requestAnimationFrame(() => {
-        if (this._textarea) {
-          if (this.existingComment) this._textarea.value = this.existingComment;
-          this._textarea.focus();
-        }
+        this._textarea?.focus();
       });
     } else if (this.open && refChanged && this.mode === "popover") {
       this._reposition();
@@ -436,12 +455,19 @@ export class AnnotationPopover extends LitElement {
     cb?.();
   }
 
+  private _delete(): void {
+    const cb = this.onDelete;
+    this._reset();
+    cb?.();
+  }
+
   private _reset(): void {
     if (this._textarea) this._textarea.value = "";
     this.existingComment = "";
     this.open = false;
     this.onSubmit = null;
     this.onCancel = null;
+    this.onDelete = null;
     this._copied = false;
   }
 
@@ -492,6 +518,17 @@ export class AnnotationPopover extends LitElement {
       </div>
     `;
 
+    const isEditing = this.existingComment !== "";
+    const primaryLabel = isEditing ? "Save" : "Add";
+    const deleteBtn = isEditing && this.onDelete
+      ? html`<button
+          class="review-popover-delete"
+          data-testid="annotation-delete"
+          title="Delete comment"
+          @click=${this._delete}
+        >Delete</button>`
+      : "";
+
     if (this.mode === "bottom-sheet") {
       return html`
         <div class="review-popover review-popover--sheet" @keydown=${this._onKeyDown}>
@@ -504,8 +541,9 @@ export class AnnotationPopover extends LitElement {
           ${quoteRow}
           <textarea placeholder="Add your comment..." @keydown=${this._onKeyDown}></textarea>
           <div class="review-popover-actions">
+            ${deleteBtn}
             <button class="review-popover-cancel" @click=${this._cancel}>Cancel</button>
-            <button class="review-popover-submit" @click=${this._submit}>Submit</button>
+            <button class="review-popover-submit" @click=${this._submit}>${primaryLabel}</button>
           </div>
         </div>
       `;
@@ -516,8 +554,9 @@ export class AnnotationPopover extends LitElement {
         ${quoteRow}
         <textarea placeholder="Add your comment..." @keydown=${this._onKeyDown}></textarea>
         <div class="review-popover-actions">
+          ${deleteBtn}
           <button class="review-popover-cancel" @click=${this._cancel}>Cancel</button>
-          <button class="review-popover-submit" @click=${this._submit}>Submit</button>
+          <button class="review-popover-submit" @click=${this._submit}>${primaryLabel}</button>
         </div>
       </div>
     `;

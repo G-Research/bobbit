@@ -51,7 +51,14 @@ export class ReviewDocument extends LitElement {
   @state() private _toastMessage = "";
   @state() private _existingComment = "";
 
+  // Hover chip state (desktop affordance over an existing highlight)
+  @state() private _hoverChipId: string | null = null;
+  @state() private _hoverChipX = 0;
+  @state() private _hoverChipY = 0;
+  private _hoverChipHideTimer: number | undefined;
+
   private _annotator: TextAnnotator | null = null;
+  private _annotationTitleObserver: MutationObserver | null = null;
   private _pendingSelection: { quote: string; prefix: string; suffix: string; start: number; end: number; isCode: boolean } | null = null;
   private _contentEl: HTMLDivElement | null = null;
   private _selectionDebounceTimer: number | undefined;
@@ -88,8 +95,12 @@ export class ReviewDocument extends LitElement {
       this._selectionDebounceTimer = undefined;
     }
     if (this._boundMobileAnnotationTap) {
-      this._contentEl?.removeEventListener("click", this._boundMobileAnnotationTap);
+      this._contentEl?.removeEventListener("click", this._boundMobileAnnotationTap, true);
       this._boundMobileAnnotationTap = null;
+    }
+    if (this._hoverChipHideTimer != null) {
+      clearTimeout(this._hoverChipHideTimer);
+      this._hoverChipHideTimer = undefined;
     }
     if (this._toastTimer != null) {
       clearTimeout(this._toastTimer);
@@ -182,9 +193,56 @@ export class ReviewDocument extends LitElement {
         this._handleSelection(annotation);
       });
 
-      // Listen for clicks on existing annotation highlights (edit/delete)
+      // Click an existing highlight → reopen popover in edit mode. The
+      // text-annotator emits its own `clickAnnotation` event with the
+      // annotation object; we route that through `_openAnnotationForEdit`.
+      this._annotator.on("clickAnnotation", (ann: any, originalEvent: PointerEvent) => {
+        const anchor =
+          ((originalEvent?.target as HTMLElement | undefined)?.closest?.(".r6o-annotation") as HTMLElement | null)
+          ?? (this._contentEl?.querySelector(`[data-annotation="${ann.id}"]`) as HTMLElement | null);
+        this._openAnnotationForEdit(ann.id, anchor);
+      });
+
+      // Hover affordance — show a small Edit/Delete chip anchored to the highlight.
+      this._annotator.on("mouseEnterAnnotation", (ann: any) => {
+        const span = this._contentEl?.querySelector(
+          `.r6o-annotation[data-annotation="${ann.id}"]`,
+        ) as HTMLElement | null;
+        if (span) this._showHoverChip(ann.id, span);
+      });
+      this._annotator.on("mouseLeaveAnnotation", () => {
+        this._scheduleHideHoverChip();
+      });
+
+      // Fallback DOM-level click handler — annotator's clickAnnotation event
+      // doesn't fire in every browser/test environment. Capture phase so
+      // it lands before any stopPropagation inside the annotator.
+      // To avoid double-firing when both paths run, the handler bails out
+      // if it sees the popover already open in edit mode for this id.
       this._boundMobileAnnotationTap = this._onMobileAnnotationTap.bind(this);
-      this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap);
+      this._contentEl?.addEventListener("click", this._boundMobileAnnotationTap, true);
+
+      // Decorate Recogito-rendered .r6o-annotation spans with a `title`
+      // tooltip so the affordance is discoverable (accessibility hint).
+      // The spans are wrapped lazily as text-annotator decorates text
+      // nodes; observe additions and tag them.
+      const tagSpan = (el: Element): void => {
+        if (el instanceof HTMLElement && !el.hasAttribute("title")) {
+          el.setAttribute("title", "Click to edit \u00b7 hover for actions");
+        }
+      };
+      this._annotationTitleObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          for (const node of Array.from(m.addedNodes)) {
+            if (!(node instanceof HTMLElement)) continue;
+            if (node.classList?.contains("r6o-annotation")) tagSpan(node);
+            node.querySelectorAll?.(".r6o-annotation:not([title])").forEach(tagSpan);
+          }
+        }
+      });
+      this._annotationTitleObserver.observe(container, { childList: true, subtree: true });
+      // Tag any spans that already exist (re-anchored on mount).
+      container.querySelectorAll(".r6o-annotation:not([title])").forEach(tagSpan);
     } catch (e) {
       console.warn("[review-document] Failed to attach text annotator:", e);
     }
@@ -200,6 +258,52 @@ export class ReviewDocument extends LitElement {
     const quote = selector.quote || "";
     const start = selector.start ?? 0;
     const end = selector.end ?? 0;
+
+    // Remove the auto-created annotation from the annotator regardless of
+    // whether we open in create or edit mode — we'll re-add after submit
+    // (or, in edit mode, we never want a duplicate highlight).
+    try {
+      this._annotator?.removeAnnotation(annotation.id || annotation);
+    } catch {
+      // ignore
+    }
+
+    // Overlap detection — if this new selection overlaps any existing
+    // annotation in the same bucket, treat it as an edit of that
+    // annotation instead of stacking a new comment on top.
+    const overlap = this._annotations.find(
+      (a) =>
+        a.start != null &&
+        a.end != null &&
+        a.start < end &&
+        a.end > start,
+    );
+    if (overlap) {
+      this._pendingSelection = {
+        quote: overlap.quote,
+        prefix: overlap.prefix || "",
+        suffix: overlap.suffix || "",
+        start: overlap.start ?? 0,
+        end: overlap.end ?? 0,
+        isCode: overlap.isCode || false,
+      };
+      this._selectedText = overlap.quote;
+      this._existingComment = overlap.comment || "";
+      this._editingAnnotationId = overlap.id;
+      this._popoverMode = this._isMobile ? "bottom-sheet" : "popover";
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        this._popoverReferenceRect = sel.getRangeAt(0).getBoundingClientRect();
+      } else {
+        const span = this._contentEl?.querySelector(
+          `.r6o-annotation[data-annotation="${overlap.id}"]`,
+        ) as HTMLElement | null;
+        if (span) this._popoverReferenceRect = span.getBoundingClientRect();
+      }
+      window.getSelection()?.removeAllRanges();
+      this._popoverOpen = true;
+      return;
+    }
 
     // Get prefix/suffix from surrounding text
     const fullText = this._contentEl?.textContent || "";
@@ -217,15 +321,11 @@ export class ReviewDocument extends LitElement {
       }
     }
 
-    // Remove the auto-created annotation from the annotator — we'll re-add after comment
-    try {
-      this._annotator?.removeAnnotation(annotation.id || annotation);
-    } catch {
-      // ignore
-    }
-
     this._pendingSelection = { quote, prefix, suffix, start, end, isCode };
     this._selectedText = quote;
+    this._existingComment = "";
+    this._editingAnnotationId = null;
+    this._popoverMode = this._isMobile ? "bottom-sheet" : "popover";
 
     // Anchor popover to the selection rect. Floating UI clamps to the
     // viewport so the popover never overflows the screen.
@@ -233,6 +333,101 @@ export class ReviewDocument extends LitElement {
       this._popoverReferenceRect = sel.getRangeAt(0).getBoundingClientRect();
     }
     this._popoverOpen = true;
+  }
+
+  /**
+   * Open the annotation popover in edit mode for an existing annotation.
+   * Shared by both the desktop click path (`clickAnnotation` event +
+   * fallback DOM listener) and the mobile tap path.
+   */
+  private _openAnnotationForEdit(annotationId: string, anchor: HTMLElement | null): void {
+    const ann = this._annotations.find((a) => a.id === annotationId);
+    if (!ann) return;
+
+    this._pendingSelection = {
+      quote: ann.quote,
+      prefix: ann.prefix || "",
+      suffix: ann.suffix || "",
+      start: ann.start ?? 0,
+      end: ann.end ?? 0,
+      isCode: ann.isCode || false,
+    };
+    this._selectedText = ann.quote;
+    this._existingComment = ann.comment || "";
+    this._editingAnnotationId = ann.id;
+    this._popoverMode = this._isMobile ? "bottom-sheet" : "popover";
+    this._showFloatingBtn = false;
+    this._hideHoverChipNow();
+    if (anchor) {
+      this._popoverReferenceRect = anchor.getBoundingClientRect();
+    } else {
+      // Best-effort fallback — anchor at viewport center. Required on
+      // mobile too: the bottom-sheet path checks `_popoverReferenceRect`
+      // before opening and would otherwise silently no-op on the first
+      // tap of a session.
+      this._popoverReferenceRect = new DOMRect(
+        window.innerWidth / 2,
+        window.innerHeight / 2,
+        0,
+        0,
+      );
+    }
+    this._popoverOpen = true;
+  }
+
+  // --- Hover chip (Edit / Delete affordance over an existing highlight) ---
+
+  private _showHoverChip(annotationId: string, anchor: HTMLElement): void {
+    if (this._hoverChipHideTimer != null) {
+      clearTimeout(this._hoverChipHideTimer);
+      this._hoverChipHideTimer = undefined;
+    }
+    const rect = anchor.getBoundingClientRect();
+    const hostRect = this.getBoundingClientRect();
+    this._hoverChipId = annotationId;
+    // Anchor above-right of the span, in element-relative coords.
+    this._hoverChipX = rect.right - hostRect.left - 60;
+    this._hoverChipY = rect.top - hostRect.top - 28;
+    if (this._hoverChipY < 0) this._hoverChipY = rect.bottom - hostRect.top + 4;
+  }
+
+  private _scheduleHideHoverChip(): void {
+    if (this._hoverChipHideTimer != null) clearTimeout(this._hoverChipHideTimer);
+    this._hoverChipHideTimer = window.setTimeout(() => {
+      this._hoverChipId = null;
+      this._hoverChipHideTimer = undefined;
+    }, 150);
+  }
+
+  private _hideHoverChipNow(): void {
+    if (this._hoverChipHideTimer != null) {
+      clearTimeout(this._hoverChipHideTimer);
+      this._hoverChipHideTimer = undefined;
+    }
+    this._hoverChipId = null;
+  }
+
+  private _onHoverChipEnter(): void {
+    if (this._hoverChipHideTimer != null) {
+      clearTimeout(this._hoverChipHideTimer);
+      this._hoverChipHideTimer = undefined;
+    }
+  }
+
+  private _onHoverChipEdit(): void {
+    const id = this._hoverChipId;
+    if (!id) return;
+    const span = this._contentEl?.querySelector(
+      `.r6o-annotation[data-annotation="${id}"]`,
+    ) as HTMLElement | null;
+    this._openAnnotationForEdit(id, span);
+  }
+
+  private _onHoverChipDelete(): void {
+    const id = this._hoverChipId;
+    if (!id) return;
+    this._hideHoverChipNow();
+    this._removeAnnotation(id);
   }
 
   // --- Mobile selection flow ---
@@ -354,7 +549,7 @@ export class ReviewDocument extends LitElement {
   }
 
   private _onMobileAnnotationTap(e: Event): void {
-    const target = (e.target as HTMLElement).closest(".r6o-annotation");
+    const target = (e.target as HTMLElement).closest(".r6o-annotation") as HTMLElement | null;
     if (!target) {
       // Tapped outside annotation — hide floating button if visible
       if (this._showFloatingBtn) this._showFloatingBtn = false;
@@ -364,28 +559,14 @@ export class ReviewDocument extends LitElement {
     const annotationId = target.getAttribute("data-annotation");
     if (!annotationId) return;
 
-    const ann = this._annotations.find((a) => a.id === annotationId);
-    if (!ann) return;
-
-    this._pendingSelection = {
-      quote: ann.quote,
-      prefix: ann.prefix || "",
-      suffix: ann.suffix || "",
-      start: ann.start ?? 0,
-      end: ann.end ?? 0,
-      isCode: ann.isCode || false,
-    };
-    this._selectedText = ann.quote;
-    this._existingComment = ann.comment || "";
-    this._editingAnnotationId = ann.id;
-    this._popoverMode = this._isMobile ? "bottom-sheet" : "popover";
-    this._popoverOpen = true;
-    this._showFloatingBtn = false;
-
-    // Anchor popover to the highlight rect on desktop; Floating UI handles clamping.
-    if (!this._isMobile) {
-      this._popoverReferenceRect = target.getBoundingClientRect();
+    // De-dupe with the annotator's own `clickAnnotation` event — if the
+    // popover is already open in edit mode for this annotation, ignore
+    // the DOM-level fallback so we don't re-enter the open path.
+    if (this._popoverOpen && this._editingAnnotationId === annotationId) {
+      return;
     }
+
+    this._openAnnotationForEdit(annotationId, target);
   }
 
   private _showToast(message: string): void {
@@ -571,6 +752,7 @@ export class ReviewDocument extends LitElement {
     }
     const rect = this._popoverReferenceRect;
     if (!rect) return;
+    const editingId = this._editingAnnotationId;
     openAnnotationPopover({
       referenceRect: rect,
       selectedText: this._selectedText,
@@ -578,10 +760,20 @@ export class ReviewDocument extends LitElement {
       existingComment: this._existingComment,
       onSubmit: (comment) => this._onAnnotationSubmit({ detail: { comment } } as CustomEvent),
       onCancel: () => this._onAnnotationCancel(),
+      onDelete: editingId
+        ? () => {
+            this._removeAnnotation(editingId);
+            this._onAnnotationCancel();
+          }
+        : undefined,
     });
   }
 
   private _destroyAnnotator(): void {
+    if (this._annotationTitleObserver) {
+      try { this._annotationTitleObserver.disconnect(); } catch { /* ignore */ }
+      this._annotationTitleObserver = null;
+    }
     if (this._annotator) {
       try {
         this._annotator.destroy();
@@ -628,6 +820,27 @@ export class ReviewDocument extends LitElement {
         : ""}
       ${this._toastMessage
         ? html`<div class="review-toast">${this._toastMessage}</div>`
+        : ""}
+      ${this._hoverChipId && !this._isMobile
+        ? html`<div
+            class="review-hover-chip"
+            style="left:${this._hoverChipX}px;top:${this._hoverChipY}px"
+            @mouseenter=${this._onHoverChipEnter}
+            @mouseleave=${this._scheduleHideHoverChip}
+          >
+            <button
+              class="review-hover-chip-btn"
+              data-testid="annotation-hover-edit"
+              title="Edit comment"
+              @click=${this._onHoverChipEdit}
+            >Edit</button>
+            <button
+              class="review-hover-chip-btn review-hover-chip-btn--danger"
+              data-testid="annotation-hover-delete"
+              title="Delete comment"
+              @click=${this._onHoverChipDelete}
+            >Delete</button>
+          </div>`
         : ""}
       <!-- Annotation popover is mounted as a singleton in <body>; see _syncPopover. -->
     `;

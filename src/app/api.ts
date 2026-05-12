@@ -88,7 +88,13 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 export function updateLocalSessionStatus(sessionId: string, status: string): void {
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
-		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status, lastActivity: Date.now() };
+		// NOTE: do NOT touch lastActivity here. The server is the sole writer of
+		// lastActivity (bumped on real activity in src/server/agent/session-setup.ts
+		// and friends, surfaced via /api/sessions polling every ~5s). Clobbering
+		// lastActivity to Date.now() on every session_status frame caused spurious
+		// "now ●" unread indicators in the sidebar on benign heartbeats and
+		// busy→idle transitions. See tests/spurious-idle-unread.spec.ts.
+		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status };
 		renderApp();
 	}
 }

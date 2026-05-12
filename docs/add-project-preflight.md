@@ -23,9 +23,11 @@ with structured `pass | warn | fail` checks the user can read and act on.
 
 ## End-user guide
 
-When you open Add Project and type a path, the dialog runs a pre-flight pass
-(debounced) and renders a list of checks below the input. Each check has one
-of three levels:
+When you open Add Project and supply a path — either by typing it into the
+input or picking one via the directory browser — the dialog runs a pre-flight
+pass and renders a list of checks below the input. Typing is debounced
+(400 ms); picking via the directory browser triggers the check immediately.
+Each check has one of three levels:
 
 | Level | Submit | Meaning |
 |-------|--------|---------|
@@ -55,7 +57,7 @@ reports `pass` when it succeeds.
 | `path.nested-in-project` | fail | Path is inside another registered project's `rootPath`, or inside its worktree root. Downgraded to `warn` when the only container is the gateway's own project — that case is unavoidable in dev. |
 | `path.contains-project` | warn | Path is an ancestor of an existing registered project. Registering the parent would shadow it. |
 | `path.is-worktree` | fail | `<rootPath>/.git` is a file pointing into another repo's `worktrees/` directory — register the primary checkout instead. |
-| `bobbit.existing` | warn | `.bobbit/` already has content. Detail summarises sessions / goals / config files. Carries an inline **Archive existing .bobbit/** action. |
+| `bobbit.existing` | warn | `.bobbit/` already has content. Detail summarises sessions / goals / config files. Carries an inline **Archive existing .bobbit/** action. This check asks "is there content to archive?" — a distinct question from "is this a configured Bobbit project?", which is keyed to `.bobbit/config/project.yaml` and answered by [`POST /api/projects/detect`](internals.md#project-assistant). After a successful archive, `bobbit.existing` becomes `pass` (the empty re-scaffolded `config/`+`state/` shape doesn't trip it) and detection routes Continue to the project assistant, not auto-import. |
 | `bobbit.gateway-owned` | warn | This path is the running gateway's own working directory (matches `getProjectRoot()`, contains `state/gateway-url`, or `state/watchdog.json`). Archive operations will preserve gateway-owned files when this is set. |
 | `git.repo` | pass-only | Informational — whether `.git` is a directory or a file. Never blocking. |
 | `disk.space` | warn | Free space on the volume is below 500 MB. |

@@ -1520,6 +1520,8 @@ export function showProjectDialog(): void {
 			if (token !== preflightToken) return; // stale
 			if (res.status === 404) {
 				// Older gateway without preflight — silently skip.
+				// Guarded by the `if (preflightUnavailable) return` above, so this warns at most once.
+				console.warn("[preflight] endpoint unavailable — hiding panel");
 				preflightUnavailable = true;
 				preflightReport = null;
 				preflightLoading = false;
@@ -1745,6 +1747,7 @@ export function showProjectDialog(): void {
 		browsing = false;
 		renderDialog();
 		runDetection(pathValue);
+		runPreflight(pathValue);
 	};
 
 	const renderDialog = () => {
@@ -1928,6 +1931,7 @@ export function showProjectDialog(): void {
 		});
 	};
 
+	if (pathValue.trim()) { runDetection(pathValue); runPreflight(pathValue); }
 	renderDialog();
 }
 
