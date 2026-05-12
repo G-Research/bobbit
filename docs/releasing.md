@@ -9,8 +9,7 @@ release flow (changelog, version bump, `npm publish`) is conventional.
 Bobbit ships `fd` and `rg` so agents have them locally with zero network
 calls at install or runtime. Binaries live in per-platform optional npm
 sub-packages under the `@bobbit/` scope. See
-[`src/server/binaries.ts`](../src/server/binaries.ts) for the resolver, and
-the bundled-fd/rg design doc (tracked as the `design-doc` workflow gate on goal `bundled-fd-c0e73adc`) for the rationale.
+[`src/server/binaries.ts`](../src/server/binaries.ts) for the resolver.
 
 ### Layout
 
