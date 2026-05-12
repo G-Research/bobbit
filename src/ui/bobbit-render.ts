@@ -52,6 +52,9 @@ export interface SidebarBobbitOptions {
 	isAborting?: boolean;
 	accessory?: AccessoryDef;
 	noDesaturate?: boolean;
+	/** Session has unread/unseen activity. Overrides the sleeping pose with
+	 *  right-gazing open eyes that periodically blink. */
+	unread?: boolean;
 }
 
 // ============================================================================
@@ -515,7 +518,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
  * Animations (bob, shimmer, eye blink) still use CSS on the container.
  */
 export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateResult {
-	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false } = opts;
+	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false, unread = false } = opts;
 	const acc = opts.accessory ?? NO_ACCESSORY;
 	const hasAccessory = acc.id !== "none";
 	const addsHeight = acc.addsHeight;
@@ -526,6 +529,12 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	else p = CANONICAL_PALETTE;
 
 	const isBusy = status === "streaming" || isCompacting;
+	// Idle / not-currently-viewed sessions render with sleeping eyes (closed)
+	// to match the chat blob's sleeping pose. noDesaturate previews (role
+	// manager etc.) keep awake eyes so the bobbit looks alive in selection UI.
+	// When the session has unread activity (`unread`), it wakes up: eyes open,
+	// gaze shifted right toward the session title, periodically blinking.
+	const isSleeping = status === "idle" && !isCompacting && !isSelected && !isAborting && !noDesaturate && !unread;
 
 	// Smooth rendering: draw at HI× into the canvas, display at CSS target size
 	// with image-rendering:auto (bilinear downsampling). No CSS scale() needed.
@@ -536,7 +545,8 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 
 	// Draw body to canvas at HI× scale
 	const eyeColor = isSelected ? p.main : p.eye;
-	const bodyPixels = resolveBodyPixels(p, "center", false, eyeColor);
+	const bodyGaze = unread ? "right" : "center";
+	const bodyPixels = resolveBodyPixels(p, bodyGaze, isSleeping, eyeColor);
 	const bodyCanvas = document.createElement("canvas");
 	bodyCanvas.width = BODY_WIDTH * HI;
 	bodyCanvas.height = BODY_HEIGHT * HI;
@@ -547,6 +557,25 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		bodyCtx.fillRect(x * HI, y * HI, HI, HI);
 	}
 	const bodyUrl = bodyCanvas.toDataURL();
+
+	// Unread state: pre-render a second body image with the eyes blinked
+	// (right gaze, blink=true). The CSS class `bobbit-sidebar-unread-blink`
+	// flips between this and the open-eye body via opacity on a slow cycle
+	// to produce a periodic blink.
+	let blinkUrl = "";
+	if (unread) {
+		const blinkPixels = resolveBodyPixels(p, "right", true, eyeColor);
+		const blinkCanvas = document.createElement("canvas");
+		blinkCanvas.width = BODY_WIDTH * HI;
+		blinkCanvas.height = BODY_HEIGHT * HI;
+		const blinkCtx = blinkCanvas.getContext("2d")!;
+		blinkCtx.imageSmoothingEnabled = false;
+		for (const [x, y, color] of blinkPixels) {
+			blinkCtx.fillStyle = color;
+			blinkCtx.fillRect(x * HI, y * HI, HI, HI);
+		}
+		blinkUrl = blinkCanvas.toDataURL();
+	}
 
 	// Eye overlay at HI× (only when selected)
 	let eyeUrl = "";
@@ -652,6 +681,12 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	// Body layer: high-res canvas img displayed at CSS target size, smooth downsampling
 	const bodyLayer = html`<img src="${bodyUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:0;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:transform;${bodyTransform}">`;
 
+	// Unread blink layer: a copy of the body with eyes blinked, stacked on top
+	// and animated via CSS to flick visible for a brief moment each cycle.
+	const blinkLayer = unread && blinkUrl
+		? html`<img src="${blinkUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" class="bobbit-sidebar-unread-blink" style="position:absolute;left:0;top:${innerTop};width:${cssW}px;height:${cssH}px;will-change:opacity,transform;${bodyTransform}">`
+		: "";
+
 	// Eye layer (only when selected)
 	const eyeLayer = isSelected && eyeUrl
 		? html`<img src="${eyeUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:0;top:${eyeTop};width:${cssW}px;height:${cssH}px;will-change:transform;${eyeAnim}">`
@@ -662,5 +697,5 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		? html`<img src="${accUrl}" style="position:absolute;left:0;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
 		: "";
 
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${eyeLayer}${accessoryLayer}</span>`;
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;
 }

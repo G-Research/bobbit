@@ -629,6 +629,22 @@ details.wf-proposal-workflow .wf-proposal-gates {
 @media (prefers-reduced-motion: reduce) {
 	.bobbit-unread-pulse { animation: none; }
 }
+
+/* Unread sidebar bobbit periodic blink overlay.
+ * Two stacked body images: open-eyed underneath, blinked on top. This class
+ * sits on the blinked image and flicks it visible for ~120ms every ~3s. */
+.bobbit-sidebar-unread-blink {
+	opacity: 0;
+	animation: bobbit-sidebar-unread-blink 3.4s steps(1) infinite;
+}
+@keyframes bobbit-sidebar-unread-blink {
+	0%, 95% { opacity: 0; }
+	96%, 98% { opacity: 1; }
+	99%, 100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-sidebar-unread-blink { animation: none; }
+}
 @media (prefers-reduced-motion: reduce) {
 	.bobbit-unread-pulse::after { animation: none; opacity: 0.7; }
 }
