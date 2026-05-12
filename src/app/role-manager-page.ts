@@ -231,14 +231,18 @@ async function createRoleAssistantSession(): Promise<void> {
 			method: "POST",
 			body: JSON.stringify(bodyObj),
 		});
-		if (!res.ok) throw new Error(`Session creation failed: ${res.status}`);
+		if (!res.ok) {
+			const { errorFromResponse } = await import("./error-helpers.js");
+			throw await errorFromResponse(res, `Session creation failed: ${res.status}`);
+		}
 		const { id } = await res.json();
 		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { assistantType: "role" });
 	} catch (err) {
 		const { showConnectionError } = await import("./dialogs.js");
-		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to create role assistant", msg);
+		const { errorDetails } = await import("./error-helpers.js");
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create role assistant", message, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();

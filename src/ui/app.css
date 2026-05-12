@@ -1231,6 +1231,10 @@ html {
   animation: none !important;
   transition: none !important;
 }
+/* Hide the floating zzz indicator entirely on archived blobs — they are
+ * frozen, not idle/sleeping. Suppresses the 3 zzz letter animations that
+ * would otherwise trip tests/e2e/ui/archived-blob.spec.ts. */
+.bobbit-blob--archived .bobbit-blob__zzz { opacity: 0 !important; }
 
 /* Hide the sleeping "zzz" indicator entirely on archived sessions — an
  * archived chat isn't "sleeping", it's terminated. Also belt-and-braces for

@@ -919,16 +919,18 @@ Should not happen post-fix. `ProjectRegistry.findByCwd()` canonicalises both the
 
 Symptom: triggering an action (e.g. create goal) produces a modal whose body is just "Failed: 400" or "Failed to create goal: 400" — no description, no code, no stack.
 
-Diagnosis: the API wrapper in `src/app/api.ts` (or `src/app/session-manager.ts`) is dropping the structured server error body. The reference pattern is the throw side parsing `await res.json().catch(() => ({}))` and attaching `data.code` and `data.stack` to the thrown `Error`, plus the catch side reading both back off the error object and forwarding them to `showConnectionError(title, msg, { code, stack })` in `src/app/dialogs.ts`. Both halves must be applied together — fixing only one half drops the structured info.
+Diagnosis: a client call site is dropping the structured server error body. Both halves must be applied together — fixing only one half drops the structured info.
 
-Server side: confirm the handler whose response surfaced is using `jsonError(status, err, extra?)` (defined in `src/server/server.ts`) for caught exceptions, not literal `json({ error: String(err) }, ...)` or `json({ error: err.message }, ...)`. Validation responses with literal strings (e.g. `"Missing title"`) intentionally stay as `json({ error: "..." }, ...)` — they have no useful stack.
+Reference pattern, using the shared helpers in `src/app/error-helpers.ts`:
 
-Fix path:
+- Throw side: `if (!res.ok) throw await errorFromResponse(res, "Failed to …");` — parses `{ error, code, stack }` off the JSON body and attaches `code`/`stack` to the `Error`. Falls back to `Failed: <status>` on a non-JSON body.
+- Catch side: `showConnectionError(title, e.message, errorDetails(e));` — extracts `{ message, code?, stack? }` from any caught value (Error, custom subclass with `.code`, or non-Error) without throwing.
 
-- `src/app/api.ts` wrapper: replace `throw new Error(\`Failed: ${res.status}\`)` with the parse-and-attach pattern; update the catch block to read `code`/`stack` off the error and pass them to `showConnectionError`.
-- `src/server/server.ts` handler: convert `catch (err) { json({ error: String(err) }, status); }` to `catch (err) { jsonError(status, err); }`.
-- `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders the message + optional code + collapsible stack disclosure when both halves are wired correctly.
-- The background polling site in `refreshSessions()` is intentionally silent and does NOT surface a modal — failures there are dropped on purpose.
+Server side: confirm the handler whose response surfaced is using `jsonError(status, err, extra?)` (in `src/server/server.ts`) for caught exceptions, not literal `json({ error: String(err) }, ...)` or `json({ error: err.message }, ...)`. Validation responses with literal strings (e.g. `"Missing title"`) intentionally stay as `json({ error: "..." }, ...)` — they have no useful stack.
+
+The `<error-details>` component (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack disclosure when both halves are wired. Background polling sites (e.g. `refreshSessions()`) are intentionally silent and do NOT surface a modal.
+
+Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call site that must forward `{ code, stack }`) and `tests/error-helpers.test.ts` (helper contract). Add new modal call sites to the former; do not add a new `showConnectionError(...)` without forwarding `errorDetails(err)`.
 
 ## Agent `fetch failed` against gateway when started with `--host 0.0.0.0`
 

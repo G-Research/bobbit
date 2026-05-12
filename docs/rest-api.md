@@ -15,7 +15,7 @@ Non-2xx JSON responses follow:
 - `code` — optional machine-readable code (e.g. `"symlink_root"`).
 - Additional fields may be merged via `extra` (e.g. `canonical` for symlink rejection).
 
-Client API wrappers in `src/app/api.ts` parse this body, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })`, which renders via the `<error-details>` component (`src/ui/components/ErrorDetails.ts`).
+Client call sites use the shared helpers `errorFromResponse(res, fallback)` and `errorDetails(err)` from `src/app/error-helpers.ts` to parse this body, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })`, which renders via the `<error-details>` component (`src/ui/components/ErrorDetails.ts`). The set of modal call sites that must forward `{ code, stack }` is pinned by `tests/error-modal-call-sites.test.ts`; the helper contract is pinned by `tests/error-helpers.test.ts`.
 
 ### Health & Info
 

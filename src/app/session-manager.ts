@@ -13,6 +13,7 @@ import {
 	GW_SESSION_KEY,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
+import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
@@ -1861,7 +1862,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					detail: { kind: "session", id: sessionId },
 				}));
 			} else {
-				showConnectionError("Connection Failed", `Could not connect to session: ${msg}`);
+				const { code, stack } = errorDetails(err);
+				showConnectionError(
+					"Connection Failed",
+					`Could not connect to session: ${msg}`,
+					{ code, stack },
+				);
 			}
 		}
 	} finally {
