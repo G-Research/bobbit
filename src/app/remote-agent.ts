@@ -10,6 +10,7 @@ import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSu
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
+import { buildCompactionSummaryMessages, type CompactionSummaryPayload } from "./compaction-types.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -727,6 +728,38 @@ export class RemoteAgent {
 
 	compact(): void {
 		this.send({ type: "compact" });
+	}
+
+	/**
+	 * Best-effort sample of current context-token usage. Walks the transcript
+	 * backwards for the latest assistant message carrying `usage`, mirroring
+	 * the calculation in `AgentInterface.ts::contextHtml`. Returns null when
+	 * no usage row is available.
+	 */
+	private _readContextTokens(): number | null {
+		try {
+			const msgs = this._state?.messages;
+			if (!Array.isArray(msgs)) return null;
+			for (let i = msgs.length - 1; i >= 0; i--) {
+				const m = msgs[i] as any;
+				if (
+					m?.role === "assistant"
+					&& m.usage
+					&& m.stopReason !== "aborted"
+					&& m.stopReason !== "error"
+				) {
+					const u = m.usage;
+					const total = u.totalTokens
+						|| ((u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0));
+					return typeof total === "number" && Number.isFinite(total) && total > 0
+						? total
+						: null;
+				}
+			}
+		} catch {
+			/* swallow — best effort */
+		}
+		return null;
 	}
 
 	/** Add or re-add the "Compacting context…" placeholder to the message list. */
@@ -1876,26 +1909,29 @@ export class RemoteAgent {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
 				const success = event.type === "compaction_end" ? event.success : !event.aborted;
-				const tokensBefore = (event as any).tokensBefore;
-				let resultText = "Context compacted.";
-				if (tokensBefore) {
-					const fmt = tokensBefore < 1000 ? `${tokensBefore}` : tokensBefore < 1_000_000 ? `${(tokensBefore / 1000).toFixed(1)}k` : `${(tokensBefore / 1_000_000).toFixed(1)}M`;
-					resultText = `Context compacted from ${fmt} tokens.`;
-				}
-				const resultMsg = success
-					? {
-						role: "assistant" as const,
-						content: [{ type: "text", text: resultText }],
-						timestamp: Date.now(),
-						id: `compact_done_${Date.now()}`,
-					}
-					: {
-						role: "assistant" as const,
-						content: [{ type: "text", text: `Compaction failed: ${(event as any).error || ((event as any).aborted ? "Compaction aborted" : "Unknown error")}` }],
-						timestamp: Date.now(),
-						id: `compact_err_${Date.now()}`,
-					};
-				this.apply({ type: "compaction-result", message: resultMsg, success });
+				const tokensBefore: number | null = (event as any).tokensBefore ?? null;
+				const tokensAfter = this._readContextTokens();
+				const reductionPct =
+					tokensBefore && tokensAfter && tokensBefore > 0
+						? Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 1000) / 10
+						: null;
+				const trigger: "manual" | "auto" =
+					event.type === "auto_compaction_end" ? "auto" : "manual";
+				const payload: CompactionSummaryPayload = {
+					schemaVersion: 1,
+					trigger,
+					success,
+					timestamp: new Date().toISOString(),
+					tokensBefore,
+					tokensAfter,
+					reductionPct,
+					error: success
+						? undefined
+						: ((event as any).error
+							|| ((event as any).aborted ? "Compaction aborted" : "Unknown error")),
+				};
+				const { message, toolResult } = buildCompactionSummaryMessages(payload);
+				this.apply({ type: "compaction-result", message, success, toolResult });
 				// Normalize to compaction_end for UI subscribers
 				if (event.type === "auto_compaction_end") {
 					this.emit({ type: "compaction_end", success } as any);
@@ -1923,3 +1959,5 @@ function extractText(message: any): string {
 	}
 	return "";
 }
+
+

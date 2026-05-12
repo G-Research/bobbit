@@ -477,6 +477,16 @@ npm run test:manual                 # Headless, API assertions only (~5 min)
 SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 ```
 
+### Real-LLM e2e lane (`npm run test:e2e:real`)
+
+A separate Playwright config — `tests/playwright-e2e.config.ts` — spawns an isolated gateway on port 3097 with `BOBBIT_DIR=.e2e-real-bobbit` for tests that need a real LLM. Currently exercised by `tests/compaction.spec.ts`; the manual-integration counterpart for the same feature is `tests/manual-integration/compaction-pressure.spec.ts`. See [compaction.md](compaction.md) for the feature-level walkthrough.
+
+```bash
+npm run test:e2e:real
+```
+
+This lane is opt-in (needs an API key) and is **not** part of `npm run test:e2e`.
+
 **Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
 
 **What it tests**: Creates 6 session variations on a single gateway, sends messages through the browser, hard-kills the gateway (simulating a crash), restarts on a fresh port, and verifies each session survives:

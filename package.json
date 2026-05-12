@@ -25,6 +25,7 @@
     "test:unit": "npx tsx --import ./tests/helpers/css-stub-loader.mjs --test --test-force-exit tests/*.test.ts && npx playwright test --config tests/playwright.config.ts",
     "test:bundle": "npm run build:ui && npx tsx --test tests/bundle-size.test.ts",
     "test:e2e": "npm run build --silent 2>/dev/null && npx playwright test --config playwright-e2e.config.ts 2>/dev/null",
+    "test:e2e:real": "npm run build && npx playwright test --config tests/playwright-e2e.config.ts",
     "test:e2e:smoke": "npm run build --silent 2>/dev/null && npx playwright test --config playwright-e2e-smoke.config.ts",
     "test:e2e:standard": "npm run build --silent 2>/dev/null && npx playwright test --config playwright-e2e-standard.config.ts",
     "test:manual": "npm run build && npx playwright test --config playwright-manual.config.ts",
