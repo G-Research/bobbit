@@ -4805,6 +4805,16 @@ async function handleApiRoute(
 					await verificationHarness.cancelStaleVerifications(goalId, gateId);
 					// Fall through to create new signal
 				} else {
+					// Surface the step states so a future 409 is diagnosable from
+					// logs alone — see goal "Unstick verification lock on restart".
+					const stepSummary = runningDup.steps.map((s: any) => ({
+						name: s.name,
+						status: s.status,
+						pid: s.pid,
+						bootEpoch: s.bootEpoch,
+						sessionId: s.sessionId,
+					}));
+					console.warn(`[api] Rejecting gate_signal as duplicate: gate=${gateId} signalId=${runningDup.signalId} aliveCheck=true steps=${JSON.stringify(stepSummary)}`);
 					json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
 					return;
 				}
