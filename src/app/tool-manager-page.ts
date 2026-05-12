@@ -141,6 +141,43 @@ const TOOL_MOCK_DATA: Record<string, { params: any; result: any }> = {
 		params: { task_id: "task-002abcd", state: "complete", result_summary: "No issues found" },
 		result: mockResult('{"id":"task-002abcd","title":"Review auth module","type":"code-review","state":"complete"}'),
 	},
+	// Children (nested-goal) tools
+	goal_spawn_child: {
+		params: { title: "Add login", planId: "plan-1", spec: "Implement the login flow." },
+		result: mockResult('{"id":"g-deadbeef-1234"}'),
+	},
+	goal_plan_propose: {
+		params: { steps: [{ phase: "do", title: "Add API", spec: "Wire endpoint" }, { phase: "verify", title: "Add tests", spec: "Pin endpoint" }] },
+		result: mockResult('{"classification":"fix-up","applied":true}'),
+	},
+	goal_plan_status: {
+		params: {},
+		result: mockResult('{"steps":[{"phase":"do","title":"Add API","planId":"plan-1","childGoalId":"g-abc12345","childState":"in-progress"}],"frozen":true,"replanCount":0}'),
+	},
+	goal_merge_child: {
+		params: { childGoalId: "g-abc12345xyz" },
+		result: mockResult('{"ok":true}'),
+	},
+	goal_pause: {
+		params: { goalId: "g-1", cascade: true },
+		result: mockResult('{"count":3}'),
+	},
+	goal_resume: {
+		params: { goalId: "g-1" },
+		result: mockResult('{"count":1}'),
+	},
+	goal_archive_child: {
+		params: { childGoalId: "g-abc12345xyz", mergedManually: true },
+		result: mockResult('{"count":1}'),
+	},
+	goal_decide_mutation: {
+		params: { decision: "approve", requestId: "req-aabbccdd" },
+		result: mockResult('{"applied":true}'),
+	},
+	goal_set_policy: {
+		params: { divergencePolicy: "balanced", maxConcurrentChildren: 3 },
+		result: mockResult('{}'),
+	},
 };
 
 function getMockData(toolName: string): { params: any; result: any } {

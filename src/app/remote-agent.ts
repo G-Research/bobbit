@@ -11,6 +11,33 @@ import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnsw
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
 
+// ───────────────────────────────────────────────────────────────────────
+// Goal-state subscription fanout — additive bridge so renderer-level
+// custom elements (e.g. <children-goal-state-pill>) can subscribe to
+// `goal_state_changed` / `goal_child_spawned` events without coupling to
+// the dashboard or adding a DOM event type. See subgoals design doc.
+// ───────────────────────────────────────────────────────────────────────
+
+export interface GoalStateChangeEvent {
+	goalId?: string;
+	type?: string;
+}
+
+const _goalStateSubscribers = new Set<(evt: GoalStateChangeEvent) => void>();
+
+/** Subscribe to goal_state_changed / goal_child_spawned WS broadcasts.
+ *  Returns an unsubscribe function. Safe to call any number of times. */
+export function subscribeGoalStateChanges(cb: (evt: GoalStateChangeEvent) => void): () => void {
+	_goalStateSubscribers.add(cb);
+	return () => { _goalStateSubscribers.delete(cb); };
+}
+
+function notifyGoalStateSubscribers(evt: GoalStateChangeEvent): void {
+	for (const cb of _goalStateSubscribers) {
+		try { cb(evt); } catch { /* swallow — one bad subscriber must not break the rest */ }
+	}
+}
+
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
  *  a single `this.onProposal?.(type, input, streaming)` dispatch. Until then,
@@ -1221,6 +1248,8 @@ export class RemoteAgent {
 				// Throttling lives inside the dashboard (`schedulePlanRerender`).
 				import("./goal-dashboard.js").then(m => m.notifyGoalEventForDashboard?.()).catch(() => {});
 				import("./api.js").then(m => m.refreshSessions()).catch(() => {});
+				// Fan out to any renderer-level subscribers (e.g. <children-goal-state-pill>).
+				notifyGoalStateSubscribers({ goalId: (msg as any).goalId, type: msg.type });
 				break;
 			}
 

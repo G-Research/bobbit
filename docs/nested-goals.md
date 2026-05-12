@@ -982,6 +982,117 @@ every contributor role declares `never`. The invariant is enforced by
 `tests/role-children-tools-policy.test.ts` and the tool-guard extension
 hard-blocks the call at runtime.
 
+## Tool renderers
+
+Each of the nine `Children` tools has a custom in-chat renderer in
+`src/ui/tools/renderers/Goal*Renderer.ts`, registered eagerly in
+`src/ui/tools/index.ts`. Without these the transcript would dump raw JSON
+responses carrying internal IDs (`planId`, `requestId`, child goal UUIDs)
+that the user has no reason to parse — the team-lead drives the nested-goal
+lifecycle and the user needs scannable cards, not protocol payloads.
+
+**Feature-flag gating.** Every renderer's `render()` first checks
+`isSubgoalsEnabled()` (`src/app/subgoals-flag.js`); when subgoals are off,
+it falls through to `DefaultRenderer` so the JSON payload is still visible
+for debugging. This keeps the renderers invisible to projects that haven't
+opted in and avoids registering an UI surface for a half-shipped feature.
+
+**Shared helpers.** `src/ui/tools/renderers/children-renderer-helpers.ts`
+holds the small primitives every renderer reuses: `stateBadge()`,
+`classificationBadge()`, `goalIdChip()` (truncated 8-char mono chip),
+`policyDescription()`, `concurrencyBar()`, `resolveGoalId()`, plus the
+`getResult()` / `parseParams()` JSON shims. Duplication with
+`TaskToolRenderers` / `TeamToolRenderers` is intentional — those copies are
+not exported and a refactor would entangle three unrelated tool groups.
+
+### Per-tool shapes
+
+| Tool | Visual shape |
+|---|---|
+| `goal_spawn_child` (`GoalSpawnChildRenderer.ts`) | Mini goal-proposal card: title, workflow id (or "default"), `planId` chip, collapsible spec excerpt, live `<children-goal-state-pill>` keyed by the new child goal id. |
+| `goal_plan_propose` (`GoalPlanProposeRenderer.ts`) | **Mirrors `ProposalRenderer.ts`** — header with rev number, steps table (phase / title / collapsible spec), classification badge, criteria-drop red banner, in-chat Approve / Reject buttons (`<children-mutation-approval>`) when `requiresApproval` is set, "Applied ✓" pill when `applied`. Falls back to a spawned-list when the server response carries `fallback: "spawn-children-direct"`. |
+| `goal_plan_status` (`GoalPlanStatusRenderer.ts`) | Compact steps grid; each row carries a live `<children-goal-state-pill>` for the corresponding child goal. |
+| `goal_merge_child` (`GoalMergeChildRenderer.ts`) | Outcome pill: `merged ✓` / `already merged` / `conflict ⚠` / `RTM not passed ✗`. On conflict, an `<expandable-section>` reveals the conflict output. |
+| `goal_pause` / `goal_resume` (`GoalPauseResumeRenderer.ts`) | Single-line card: verb + cascade-affected count from the response. |
+| `goal_archive_child` (`GoalArchiveChildRenderer.ts`) | Single-line: child title + `goalIdChip` + `mergedManually ✓` flag when present. |
+| `goal_decide_mutation` (`GoalDecideMutationRenderer.ts`) | Green "Approved" or red "Rejected" pill + truncated `requestId`. The response carries `{ applied }` only today; an `applied steps diff` block is rendered conditionally if a future server response surfaces one. |
+| `goal_set_policy` (`GoalSetPolicyRenderer.ts`) | Key/value rows: divergence policy (with one-line `policyDescription()`) + `maxConcurrentChildren` rendered as a `concurrencyBar()` (1–8 small blocks). |
+
+Why `goal_plan_propose` mirrors `ProposalRenderer.ts`: a plan-propose call
+IS a goal proposal — it's the parent goal proposing a set of child goals.
+Reusing the proposal shape (header + rev marker + steps table + approval
+buttons + applied-pill) keeps the team-lead's mental model consistent
+between "propose this top-level goal" (user-facing) and "propose this plan
+of child goals" (team-lead-facing). The two flows share the
+`__proposal_rev_v1__` tool-result marker via `proposal-rev-marker.ts`.
+
+### In-chat approval (`<children-mutation-approval>`)
+
+When `goal_plan_propose` returns `requiresApproval: true` under `strict` /
+`balanced` policy (see [Mutation classifier](#mutation-classifier)), the
+renderer mounts `<children-mutation-approval>` (`src/ui/lazy/
+children-mutation-approval.ts`). Approve / Reject buttons POST to
+`/api/goals/:goalId/mutation/:requestId/decision` via `gatewayFetch` — the
+same endpoint the dashboard's mutation-pending card uses (see
+`src/app/custom-messages.ts`). The two surfaces coexist by design: the
+in-chat card is where the team-lead conversation is happening, while the
+dashboard card is the goal-level view; either action satisfies the
+request. A module-level `decisionMemory: Map<requestId, decision>` survives
+the re-mount caused by the outer transcript re-rendering when the WS
+`mutation_decided` broadcast arrives, so the card doesn't snap back to the
+idle state.
+
+The element resolves `goalId` two ways: it accepts a `goal-id` attribute
+(set by the renderer from `ToolRenderContext.goalId`, see
+[Threading `goalId` through `ToolRenderContext`](internals.md#threading-goalid-through-toolrendercontext)),
+and the renderer falls back to `document.documentElement.dataset.currentGoalId`
+via `resolveGoalId()` for archived-session transcripts where the session
+record has been GC'd.
+
+### Live state pill (`<children-goal-state-pill>`)
+
+`<children-goal-state-pill>` (`src/ui/lazy/children-goal-state-pill.ts`) is
+a Lit element that shows a coloured `pending` / `in-progress` / `complete`
+/ `archived` / `failed` pill for a child goal and re-fetches when the goal
+changes. Used by `GoalSpawnChildRenderer` and `GoalPlanStatusRenderer`
+because those cards stay in the transcript indefinitely — the user
+scrolling back through history wants to see the *current* state of each
+child, not a snapshot from when the tool fired.
+
+Updates ride on a small subscription bridge in `src/app/remote-agent.ts`:
+
+```ts
+export function subscribeGoalStateChanges(
+  cb: (evt: { goalId?: string; type?: string }) => void,
+): () => void;
+```
+
+The WS handler in `remote-agent.ts` fans `goal_state_changed` /
+`goal_child_spawned` broadcasts out to every registered subscriber. The
+pill subscribes on `connectedCallback`, filters on `goalId`, and calls
+`gatewayFetch('/api/goals/:id')` to refresh — never touching the
+dashboard's reactive store. The reason for a dedicated bridge rather than
+a DOM `CustomEvent` is decoupling: many transcript cards may want live
+goal state without participating in the dashboard's render cycle, and a
+DOM event would require every host (the transcript host, the goal
+dashboard, archived-session viewers) to wire identical listeners.
+Unsubscribe runs in `disconnectedCallback` so removed cards don't leak.
+
+Lazy-mounting (`import("../../lazy/children-goal-state-pill.js")` on first
+call) keeps the main bundle small — `children-mutation-approval.ts` and
+`children-goal-state-pill.ts` only ship to clients that actually use
+subgoals.
+
+### Tests
+
+- `tests/children-tool-renderers.spec.ts` — unit (file:// fixtures): each
+  renderer's call-only / streaming / result / error / fallback states; the
+  feature-flag fall-through to `DefaultRenderer` when subgoals are off.
+- `tests/e2e/ui/children-tool-renderers.spec.ts` — browser E2E: title +
+  `planId` rendering for `goal_spawn_child`, step rows for
+  `goal_plan_propose`, approval buttons under `requiresApproval`, and the
+  Approve-click POST to the mutation-decision endpoint.
+
 ## Acceptance criteria (verification checklist)
 
 A user must be able to:

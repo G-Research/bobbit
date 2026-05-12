@@ -49,6 +49,12 @@ setRenderApp(doRenderApp);
 // object is already mutable from devtools and contains no secrets).
 (window as any).__bobbitState = state;
 
+// E2E test hook: expose renderTool() and lit-html's render() so browser-based
+// tests can mount renderers directly without going through the session
+// pipeline. Used by tests/e2e/ui/children-tool-renderers.spec.ts.
+import("../ui/tools/index.js").then(m => { (window as any).__bobbitRenderTool = m.renderTool; }).catch(() => {});
+import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
+
 // ============================================================================
 // GATEWAY STARTUP POLLING
 // ============================================================================
