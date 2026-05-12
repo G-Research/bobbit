@@ -241,23 +241,59 @@ test.describe("Mobile review annotation — CSS", () => {
 		expect(parseInt(zIndex)).toBeGreaterThanOrEqual(200);
 	});
 
-	test("r6o-annotation has highlight styles", async ({ page }) => {
+	test("r6o-annotation highlight pipeline (inline style + blend-mode override)", async ({ page }) => {
+		// Since commit b20b1a00, the per-annotation background colour is no
+		// longer set by a stylesheet rule on `.r6o-annotation` — text-annotator
+		// writes it as an INLINE style on each span (see ReviewDocument.ts
+		// `_highlightStyle`). The only CSS-side piece of the fix that survives
+		// in review-pane.css is the `.r6o-span-highlight-layer` blend-mode
+		// override. This test pins both:
+		//   1. inline background-color on `.r6o-annotation` is not clobbered
+		//      by review-pane.css (so the library's inline styles win), and
+		//   2. `.r6o-span-highlight-layer` has mix-blend-mode: normal (the
+		//      library hard-codes `multiply` which on dark themes multiplies
+		//      the tint into near-black — this rule restores intended alpha).
 		await page.goto(TEST_PAGE);
 
-		// Create a mock annotation highlight
 		await page.evaluate(() => {
+			// Simulate what text-annotator does: write an inline background-color
+			// onto the .r6o-annotation span. The previous CSS used `!important`,
+			// which would have overridden this inline value — removing that rule
+			// is precisely what made the per-theme colour reach the DOM.
 			const span = document.createElement("span");
 			span.className = "r6o-annotation";
 			span.textContent = "highlighted";
-			document.getElementById("content")!.appendChild(span);
+			span.style.backgroundColor = "rgba(99, 102, 241, 0.45)";
+
+			// Wrap in the span-highlight-layer the library emits — this is the
+			// element our CSS override targets.
+			const layer = document.createElement("div");
+			layer.className = "r6o-span-highlight-layer";
+			layer.appendChild(span);
+			document.getElementById("content")!.appendChild(layer);
 		});
 
+		// (1) Inline background-color survives review-pane.css.
 		const bg = await page.locator(".r6o-annotation").evaluate(
 			(el: HTMLElement) => getComputedStyle(el).backgroundColor,
 		);
-		// Should have a purple-ish highlight background
 		expect(bg).not.toBe("rgba(0, 0, 0, 0)");
 		expect(bg).not.toBe("transparent");
+		// Should reflect the inline value we set, not anything from CSS.
+		expect(bg).toBe("rgba(99, 102, 241, 0.45)");
+
+		// (2) Cursor affordance on .r6o-annotation is preserved.
+		const cursor = await page.locator(".r6o-annotation").evaluate(
+			(el: HTMLElement) => getComputedStyle(el).cursor,
+		);
+		expect(cursor).toBe("pointer");
+
+		// (3) review-pane.css forces mix-blend-mode: normal on the highlight
+		// layer so the baked alpha renders correctly on dark themes.
+		const blend = await page.locator(".r6o-span-highlight-layer").evaluate(
+			(el: HTMLElement) => getComputedStyle(el).mixBlendMode,
+		);
+		expect(blend).toBe("normal");
 	});
 
 	test("bottom sheet has slide-up animation class applied", async ({ page }) => {

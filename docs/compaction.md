@@ -13,21 +13,31 @@ live in [internals.md](internals.md).
 
 ## Triggers
 
-Compaction has two entrypoints on the client:
+Compaction has three entrypoints on the client, distinguished by the
+upstream event's `reason` field:
 
-- **Manual** — the user types `/compact` in the prompt box. The slash
-  command appends a `compact_cmd_*` user message, starts the blob squash
-  animation, and RPC-calls the server's `compactRpc`. Wired in
-  `src/ui/components/AgentInterface.ts` (`/compact` handler) and
-  `src/server/agent/rpc-bridge.ts` (`compactRpc`).
-- **Auto** — the agent subprocess emits `auto_compaction_start` when its
-  pre-turn budget check decides another turn would blow the context window.
-  Handled in `src/app/remote-agent.ts` alongside the manual path; the client
-  normalises `auto_compaction_*` events into the same `compaction_start` /
-  `compaction_end` shape so downstream code does not have to fork.
+- **Manual** (`reason: "manual"`) — the user types `/compact` in the prompt
+  box. The slash command appends a `compact_cmd_*` user message, starts
+  the blob squash animation, and RPC-calls the server's `compactRpc`.
+  Wired in `src/ui/components/AgentInterface.ts` (`/compact` handler) and
+  `src/server/agent/rpc-bridge.ts` (`compactRpc`). The server's WS
+  handler stamps `reason: "manual"` on both `compaction_start` and
+  `compaction_end` broadcasts so the client distinguishes this path from
+  the auto / overflow paths uniformly.
+- **Auto** (`reason: "threshold"`) — the agent subprocess decides on its
+  own that another turn would blow the context window and emits
+  `compaction_start` with `reason: "threshold"`. Maps to `trigger: "auto"`
+  on the card.
+- **Overflow** (`reason: "overflow"`) — the agent ran a turn anyway and
+  the model returned a context-limit error (e.g. Anthropic's
+  `prompt is too long: N tokens > M maximum`). The agent auto-compacts to
+  recover and emits `reason: "overflow"`. Maps to `trigger: "overflow"` on
+  the card, displayed as the `context limit` pill.
 
-Both paths end with the same `compaction_end` event carrying
-`tokensBefore`, a `success` flag, and (on failure) an `error` string.
+Both paths end with the same `compaction_end` event carrying `reason`,
+an optional `result.tokensBefore`, an `aborted` / `success` flag, and
+(on failure) an `errorMessage` string. The client maps `reason` to the
+payload's `trigger` field in `src/app/remote-agent.ts::_triggerFromEvent`.
 
 ## The rich summary card
 
@@ -69,7 +79,8 @@ emits these stable selectors so e2e tests do not have to match on text:
 | `[data-test="tokens-before"]` | Before-token value. |
 | `[data-test="tokens-after"]` | After-token value (or em-dash). |
 | `[data-test="reduction-pct"]` | Reduction badge (when known). |
-| `[data-test="trigger"]` | Trigger pill — text content is `manual` or `auto`. |
+| `[data-test="trigger"]` | Trigger pill — text content is `manual`, `auto`, or `context limit` (overflow). |
+| `[data-state]` (on card root) | Lifecycle state — `in-progress`, `complete`, or `error`. Same DOM node carries the card across the entire lifecycle (see *Single-card lifecycle* below). |
 | `[data-test="verdict"]` | Tick or cross icon. |
 
 ### Payload shape
@@ -80,7 +91,11 @@ The payload type and envelope builder live in
 ```ts
 interface CompactionSummaryPayload {
   schemaVersion: 1;
-  trigger: "manual" | "auto";
+  trigger: "manual" | "auto" | "overflow";
+  state?: "in-progress" | "complete" | "error";  // drives renderer branch;
+                                                 // older payloads omit it —
+                                                 // renderer falls back to
+                                                 // deriving from `success`
   success: boolean;
   timestamp: string;            // ISO-8601
   tokensBefore: number | null;
@@ -90,6 +105,34 @@ interface CompactionSummaryPayload {
   error?: string;               // failure detail
 }
 ```
+
+### Single-card lifecycle
+
+The card transitions in place across `in-progress → complete | error`
+rather than being torn down and rebuilt. The synthetic assistant message
+uses a fixed id, `COMPACTION_ACTIVE_ID = "compact_active"` (exported from
+`compaction-types.ts`), and the reducer's `compaction-placeholder` and
+`compaction-result` cases both filter out any prior row with that id
+before appending. Lit then diffs to the same DOM node, repainting only
+the card body — there is never a plaintext `"Compacting context…"` row
+in the transcript. Pinned by `tests/message-reducer.test.ts` case 12d
+and `tests/e2e/ui/compaction-widget.spec.ts`.
+
+### Overflow `tokensBefore` resolution
+
+`remote-agent.ts`'s `compaction_end` handler resolves `tokensBefore` in
+priority order — first non-null wins:
+
+1. `event.result.tokensBefore` — agent-emitted on auto / overflow end.
+2. `event.tokensBefore` — server-emitted on the manual `/compact` path.
+3. `parseOverflowTokenCount(event.errorMessage)` — extracts the leading
+   integer from an Anthropic-shaped error via `/(\d{4,})\s*tokens\s*>/i`.
+4. `this._lastKnownContextTokens` — last-seen live count, kept current
+   as the in-progress payload is built.
+
+This means `reductionPct` now resolves for overflow as well, where v1
+left it uniformly `null`. Pinned by `tests/compaction-types.test.ts`
+and reducer case 12e.
 
 `schemaVersion: 1` is reserved for forward compatibility — bump it if a
 future renderer adds fields that older snapshots cannot supply.
@@ -142,9 +185,10 @@ row preserves position and id while attaching whatever structure can be
 recovered from the text.
 
 These invariants are pinned by `tests/message-reducer.test.ts` cases 12,
-12b, and 12c. The text-prefix parser is intentionally coupled to the
-pi-coding-agent transcript format; case 12c's token-value assertion is
-the regression sentinel if that format ever changes.
+12b, 12c, 12d (in-place lifecycle transition), and 12e (overflow trigger
++ tokensBefore propagation). The text-prefix parser is intentionally
+coupled to the pi-coding-agent transcript format; case 12c's token-value
+assertion is the regression sentinel if that format ever changes.
 
 ## Tests
 
@@ -199,11 +243,14 @@ npm run test:manual
 | Concern | File |
 | --- | --- |
 | Payload type + envelope builder + reload-upgrade helpers | `src/app/compaction-types.ts` |
-| Live emission (manual + auto) | `src/app/remote-agent.ts` — `compaction_end` / `auto_compaction_end` |
-| Reducer (placeholder, result, snapshot dedup, reload upgrade) | `src/app/message-reducer.ts` — `compaction-result` and `snapshot` cases |
-| Renderer | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
+| Live emission (manual / auto / overflow) | `src/app/remote-agent.ts` — `compaction_start` / `compaction_end` handlers, `_triggerFromEvent`, `_lastKnownContextTokens` |
+| Server-side manual broadcast | `src/server/ws/handler.ts` — emits `reason: "manual"` on the manual `/compact` path |
+| Reducer (in-progress, result, snapshot dedup, reload upgrade) | `src/app/message-reducer.ts` — `compaction-placeholder`, `compaction-result`, and `snapshot` cases |
+| Renderer (three states + adjacent layout + overflow pill) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
 | Renderer registration | `src/ui/tools/index.ts` — `__compaction_summary` |
-| Reducer unit tests | `tests/message-reducer.test.ts` — cases 12, 12b, 12c |
+| Helper unit tests | `tests/compaction-types.test.ts` — `parseOverflowTokenCount`, in-progress builder, stable id |
+| Reducer unit tests | `tests/message-reducer.test.ts` — cases 12, 12b, 12c, 12d, 12e |
+| Browser E2E (renderer lifecycle, file:// harness) | `tests/e2e/ui/compaction-widget.spec.ts`, `tests/fixtures/compaction-widget.html` |
 | Real-LLM e2e | `tests/compaction.spec.ts`, `tests/playwright-e2e.config.ts` |
 | Manual-integration pressure test | `tests/manual-integration/compaction-pressure.spec.ts` |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |

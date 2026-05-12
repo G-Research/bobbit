@@ -145,6 +145,7 @@ function upgradeServerCompactionMarker(serverRow: any): any {
 	const payload = {
 		schemaVersion: 1 as const,
 		trigger: "manual" as const,
+		state: "complete" as const,
 		success: true,
 		timestamp:
 			typeof serverRow?.timestamp === "number"
@@ -565,9 +566,15 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 		}
 
 		case "compaction-placeholder": {
+			// Carries a RICH in-progress synthetic with stable id `compact_active`.
+			// Filter both the legacy plaintext id and the stable id so reconnect
+			// races / double-emission collapse to a single row. See
+			// `docs/design/compaction-e2e-rich-summary.md` §7.4.
 			const tick = state.nextTick;
 			const order = state.highestSeq + 0.5;
-			const messages = state.messages.filter((m) => m.id !== "compacting_placeholder");
+			const messages = state.messages.filter(
+				(m) => m.id !== "compacting_placeholder" && m.id !== "compact_active",
+			);
 			messages.push(stamp(action.message, "synthetic", order, tick));
 			return {
 				messages: sortMessages(messages),
@@ -577,10 +584,18 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 		}
 
 		case "compaction-result": {
+			// Drop the legacy plaintext placeholder id AND any rich in-progress
+			// row carrying the stable `compact_active` id (the in-place
+			// transition target) AND its paired toolResult. Then push the new
+			// rich row(s) under the same stable id. Single-DOM-identity
+			// invariant pinned by message-reducer.test.ts case 12d.
 			const tick = state.nextTick;
 			const order = state.highestSeq + 0.5;
 			const messages = state.messages.filter(
-				(m) => m.id !== "compacting_placeholder",
+				(m) =>
+					m.id !== "compacting_placeholder"
+					&& m.id !== "compact_active"
+					&& (m as any).toolCallId !== "compaction-summary:compact_active",
 			);
 			messages.push(stamp(action.message, "synthetic", order, tick));
 			if (action.toolResult) {

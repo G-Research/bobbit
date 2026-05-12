@@ -10,7 +10,13 @@ import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSu
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
-import { buildCompactionSummaryMessages, type CompactionSummaryPayload } from "./compaction-types.js";
+import {
+	buildCompactionSummaryMessages,
+	buildInProgressCompactionPayload,
+	parseOverflowTokenCount,
+	type CompactionSummaryPayload,
+	type CompactionTrigger,
+} from "./compaction-types.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -103,6 +109,10 @@ export class RemoteAgent {
 	// Compaction tracking — persists across message refreshes.
 	// Exposed on state so the UI can queue messages during compact.
 	private _isCompacting = false;
+	/** Best-effort cache of the most recently seen context-token count; used
+	 *  as the final fallback when resolving `tokensBefore` for a compaction
+	 *  end event. See `docs/design/compaction-e2e-rich-summary.md` §7.3. */
+	private _lastKnownContextTokens: number | null = null;
 	private _isAborting = false;
 
 	// Proposal deferral — when set, incoming messages are stored but
@@ -751,9 +761,11 @@ export class RemoteAgent {
 					const u = m.usage;
 					const total = u.totalTokens
 						|| ((u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0));
-					return typeof total === "number" && Number.isFinite(total) && total > 0
-						? total
-						: null;
+					if (typeof total === "number" && Number.isFinite(total) && total > 0) {
+						this._lastKnownContextTokens = total;
+						return total;
+					}
+					return null;
 				}
 			}
 		} catch {
@@ -762,17 +774,30 @@ export class RemoteAgent {
 		return null;
 	}
 
-	/** Add or re-add the "Compacting context…" placeholder to the message list. */
-	private _addCompactingPlaceholder(): void {
-		this.apply({
-			type: "compaction-placeholder",
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: "Compacting context…" }],
-				timestamp: Date.now(),
-				id: "compacting_placeholder",
-			},
-		});
+	/**
+	 * Inject a RICH in-progress compaction synthetic into the message list.
+	 * Replaces the legacy plaintext "Compacting context…" row — the renderer
+	 * now drives the in-progress state itself. Used by both the live
+	 * `compaction_start` path and the reconnect-path (~line 1109) when the
+	 * server tells us compaction is still in progress on resume.
+	 */
+	private _addCompactingPlaceholder(trigger: CompactionTrigger = "manual"): void {
+		const tokensBefore = this._readContextTokens() ?? this._lastKnownContextTokens;
+		if (tokensBefore != null) this._lastKnownContextTokens = tokensBefore;
+		const payload = buildInProgressCompactionPayload(trigger, tokensBefore);
+		const { message } = buildCompactionSummaryMessages(payload);
+		this.apply({ type: "compaction-placeholder", message });
+	}
+
+	/** Map upstream event `reason` (or legacy event-type) to a trigger. */
+	private _triggerFromEvent(event: any): CompactionTrigger {
+		const reason = event?.reason;
+		if (reason === "overflow") return "overflow";
+		if (reason === "threshold") return "auto";
+		if (reason === "manual") return "manual";
+		if (event?.type === "auto_compaction_start" || event?.type === "auto_compaction_end")
+			return "auto";
+		return "manual";
 	}
 
 	requestMessages(): void {
@@ -1885,8 +1910,8 @@ export class RemoteAgent {
 				// Don't set isStreaming — compaction uses its own blob animation
 				this._isCompacting = true;
 				this.onCompactionChange?.(true);
-				// Add a placeholder message so compaction is visible in chat history
-				this._addCompactingPlaceholder();
+				// Add a rich in-progress synthetic so compaction is visible in chat history
+				this._addCompactingPlaceholder(this._triggerFromEvent(event));
 				// Normalize to compaction_start for UI subscribers
 				if (event.type === "auto_compaction_start") {
 					this.emit({ type: "compaction_start" } as any);
@@ -1909,17 +1934,34 @@ export class RemoteAgent {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
 				const success = event.type === "compaction_end" ? event.success : !event.aborted;
-				const tokensBefore: number | null = (event as any).tokensBefore ?? null;
+				const trigger = this._triggerFromEvent(event);
+				const errMsg: string | undefined =
+					(event as any).errorMessage || (event as any).error;
+				// tokensBefore resolution chain (see design doc §2.4):
+				//   1. event.result.tokensBefore  — agent-emitted auto/overflow end
+				//   2. event.tokensBefore         — server-emitted manual path
+				//   3. parseOverflowTokenCount(errMsg) when overflow error path
+				//   4. this._lastKnownContextTokens
+				let tokensBefore: number | null =
+					(event as any).result?.tokensBefore
+					?? (event as any).tokensBefore
+					?? null;
+				if (tokensBefore == null && errMsg) {
+					tokensBefore = parseOverflowTokenCount(errMsg);
+				}
+				if (tokensBefore == null) {
+					tokensBefore = this._lastKnownContextTokens;
+				}
 				const tokensAfter = this._readContextTokens();
+				if (tokensAfter != null) this._lastKnownContextTokens = tokensAfter;
 				const reductionPct =
 					tokensBefore && tokensAfter && tokensBefore > 0
 						? Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 1000) / 10
 						: null;
-				const trigger: "manual" | "auto" =
-					event.type === "auto_compaction_end" ? "auto" : "manual";
 				const payload: CompactionSummaryPayload = {
 					schemaVersion: 1,
 					trigger,
+					state: success ? "complete" : "error",
 					success,
 					timestamp: new Date().toISOString(),
 					tokensBefore,
@@ -1927,8 +1969,7 @@ export class RemoteAgent {
 					reductionPct,
 					error: success
 						? undefined
-						: ((event as any).error
-							|| ((event as any).aborted ? "Compaction aborted" : "Unknown error")),
+						: (errMsg || ((event as any).aborted ? "Compaction aborted" : "Unknown error")),
 				};
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
 				this.apply({ type: "compaction-result", message, success, toolResult });
