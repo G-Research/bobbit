@@ -324,6 +324,153 @@ restart. Clients re-emit `mutation_pending` events on WS attach. A
 daily `unref()`'d sweep calls `pruneExpired` so completed/abandoned
 requests don't accumulate indefinitely (R-035 remediation).
 
+## Nesting depth limit & per-goal toggle
+
+Nested subgoals are recursive — a child can spawn grandchildren which
+can spawn great-grandchildren. Without a ceiling, a runaway team-lead
+(or a rogue mutation that re-proposes its own plan as a subgoal) can
+fork-bomb the system: every spawn forks a worktree, a sandbox, and a
+team of agents. The nesting-limit feature is the structural backstop
+that prevents that, independently of the experimental Subgoals toggle.
+
+Two layers control whether (and how deeply) a parent may spawn:
+
+1. **System-scope ceiling** — two prefs in
+   `<stateDir>/preferences.json`:
+   - `subgoalsEnabled` (boolean, default `false`) — the existing
+     experimental toggle.
+   - `maxNestingDepth` (integer, default **3**, clamped to **1..10**)
+     — the new depth ceiling.
+2. **Per-goal override** — two optional fields on `PersistedGoal`:
+   - `subgoalsAllowed?: boolean` — can tighten (force OFF for this
+     tree) but cannot loosen a system-level OFF.
+   - `maxNestingDepth?: number` — can tighten below the system ceiling
+     but **never exceed it**. The server clamps the submitted value to
+     `min(systemMax, clamp(value, 1, 10))` at goal-creation time.
+
+The **system setting is the ceiling**, not just a default. Per-goal
+values can only tighten. This makes the system pref a real safety lever
+— flipping `maxNestingDepth: 2` system-wide retroactively caps every
+live goal tree, regardless of what each goal stored.
+
+### Depth counting convention
+
+Depth is **parent hops from the root, plus one** — root = depth 1.
+
+- Root goal `A` → depth 1; may spawn child `B` ✓
+- Child `B` → depth 2; may spawn grandchild `C` ✓
+- Grandchild `C` → depth 3; blocked from spawning `D` ✗ (would be depth 4)
+
+The walk up the `parentGoalId` chain is bounded (cap 64 hops, cycle
+guard) so a corrupt parent-pointer can never loop infinitely.
+
+### Enforcement
+
+The pre-spawn gate has a single source of truth — the pure helpers in
+`src/server/agent/subgoal-nesting-limit.ts`:
+
+| Function | Purpose |
+|---|---|
+| `readSubgoalNestingPrefs(prefsGet)` | Read system prefs with defaults + clamping. |
+| `nestingDepth(goal, lookup)` | Bounded walk up `parentGoalId` chain. |
+| `effectiveSubgoalsAllowed(goal, prefs)` | System OFF wins; per-goal OFF wins. |
+| `effectiveMaxNestingDepth(goal, prefs)` | `min(system, goal.own)`. |
+| `checkCanSpawnChild(parent, prefs, lookup)` | Structured outcome: `ok` / `SUBGOALS_DISABLED` / `NESTING_DEPTH_EXCEEDED`. |
+| `inheritedChildOverrides(parent, prefs)` | Effective values to stamp on a new child. |
+
+Both spawn paths consume `checkCanSpawnChild` and react identically:
+
+- **`POST /api/goals/:id/spawn-child`** (in
+  `src/server/agent/nested-goal-routes.ts`) — idempotency check runs
+  FIRST (re-calls with the same `planId` on an already-spawned child
+  still succeed even when the limit would now reject a fresh spawn).
+  Then `checkCanSpawnChild` runs against the parent and returns one of:
+  - `403 { error, code: "SUBGOALS_DISABLED" }` — subgoals disabled for
+    this goal tree (system OFF, or parent's `subgoalsAllowed === false`).
+  - `403 { error, code: "NESTING_DEPTH_EXCEEDED", currentDepth, maxDepth }`
+    — spawning would push the child past the effective ceiling.
+- **`runSubgoalStep`** in the verification harness
+  (`src/server/agent/verification-harness.ts`) — runs the SAME check
+  before spawning. On block, the verify-step fails with
+  `passed: false` and a readable `output` (`"Subgoal spawn blocked:
+  nesting depth limit reached (3/3)."` or `"...subgoals are disabled for
+  this goal tree."`). The gate fails cleanly with the explanation in the
+  verification report — no crash, no infinite-retry. The check runs only
+  on the spawn path: if the child is already resolved via tier-1/3/5 or
+  the cached pointer, idempotent re-runs skip the check and continue.
+
+### Inheritance — descendants can't loosen ancestors
+
+When either spawn path creates a child, it stamps the parent's
+**effective** values onto the child via `inheritedChildOverrides`:
+
+```ts
+child.subgoalsAllowed = effectiveSubgoalsAllowed(parent, prefs);
+child.maxNestingDepth = effectiveMaxNestingDepth(parent, prefs);
+```
+
+This means: even if the system pref later widens (e.g.
+`maxNestingDepth: 3` → `5`), every existing descendant of a goal that
+was created under the tighter ceiling stays bounded by its parent's
+stamped value. Loosening at the system level cannot retroactively
+extend an in-flight tree past where its ancestors already capped it.
+A child's own `maxNestingDepth` is always clamped to `min(system,
+parent.effectiveMax)` on creation.
+
+`POST /api/goals` (top-level goal creation) accepts the same fields in
+the body and applies the same clamp: an attempt to set
+`maxNestingDepth: 9` while the system pref is `3` lands as `3` on the
+persisted goal.
+
+### UI surfaces
+
+Both controls render **only when the system Subgoals toggle is ON** —
+they share the same experimental gate.
+
+**Settings → System → General** (below the Subgoals toggle):
+
+- A **Max subgoal depth** stepper with `↓`/`↑` buttons and a reset
+  link (testid `general-max-nesting-depth`). Click `↓` to decrement,
+  `↑` to increment, clamped to `1..10`. Persisted via
+  `PUT /api/preferences { maxNestingDepth: N }`; the server clamps and
+  broadcasts `preferences_changed`. Greyed out when Subgoals is OFF.
+- The client mirrors the value to
+  `document.documentElement.dataset.maxNestingDepth` so the goal
+  creation panel can read it synchronously without an await — same
+  pattern as `subgoalsEnabled` (see
+  [design/subgoals-experimental-toggle.md](design/subgoals-experimental-toggle.md)).
+
+**Goal creation panel** (below the Sandbox / Auto-start toggles):
+
+- An **Allow subgoals** toggle. Default inherits from
+  `isSubgoalsEnabled()`. When the system pref is OFF the toggle is OFF
+  and greyed out — a per-goal flag cannot override a system-level OFF.
+  Flipping it OFF disables subgoals for this specific goal tree.
+- A **Max nesting depth** stepper (testid
+  `goal-form-max-nesting-depth`), visible only when Allow subgoals is
+  ON. Default inherits from `getSystemMaxNestingDepth()`. The tooltip
+  surfaces the current system ceiling. The submit path only sends the
+  override when it differs from the inherited default; otherwise the
+  field is omitted and the server resolves at request time from prefs.
+
+The enforcement is **purely server-side**. The UI controls are UX —
+if a rogue agent bypasses the panel and POSTs a higher `maxNestingDepth`
+directly, the server still clamps to the system ceiling and the
+spawn-time `checkCanSpawnChild` gate still applies. The Subgoals tool
+description (`defaults/tools/children/goal_spawn_child.yaml`) calls out
+the two 403 codes so agents understand why a spawn might be rejected.
+
+### Tests
+
+- `tests/subgoal-nesting-limit.test.ts` — pure helper coverage:
+  clamping, depth walk (including cycle-guard), effective-values, gate
+  outcomes, child inheritance.
+- `tests/e2e/api-goals-spawn-child-nesting.spec.ts` — REST roundtrip:
+  `SUBGOALS_DISABLED` when subgoals are off; `NESTING_DEPTH_EXCEEDED`
+  at depth+1 > max; idempotent re-call accepted past the limit.
+- `tests/e2e/ui/subgoal-nesting-limit.spec.ts` — settings stepper +
+  goal-creation panel controls + persistence across reload.
+
 ## Concurrency
 
 A single `Map<rootGoalId, Semaphore>` lives on the harness instance.
@@ -812,7 +959,7 @@ each event with a 250ms trailing-edge throttle to avoid layout thrash.
 
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
-| POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole?, dependsOn?: string[] }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (depends-on validation, see [Declaring dependencies](#declaring-dependencies)), 400 (parent-cycle / missing field), 404 (parent missing). Stamps `spawnedFromPlanId` AND `dependsOnPlanIds` immediately after createGoal. |
+| POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole?, dependsOn?: string[] }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (depends-on validation, see [Declaring dependencies](#declaring-dependencies)), 400 (parent-cycle / missing field), 403 `SUBGOALS_DISABLED` / 403 `NESTING_DEPTH_EXCEEDED {currentDepth, maxDepth}` (see [Nesting depth limit & per-goal toggle](#nesting-depth-limit--per-goal-toggle)), 404 (parent missing). Stamps `spawnedFromPlanId` AND `dependsOnPlanIds` immediately after createGoal; new children inherit the parent's effective `subgoalsAllowed` / `maxNestingDepth`. |
 | PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
 | POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
