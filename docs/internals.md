@@ -254,6 +254,8 @@ Workflows are not cascaded - `resolveWorkflows(projectId)` reads only the projec
 
 **System-scope writes** (role customize + override endpoints with `scope=server` or no scope) route to the standalone server stores constructed at module top in `src/server/server.ts` (`roleStore`, `toolManager`), which are backed by `<server-cwd>/.bobbit/config/`. They are **never** written into any project's store. Zero-project installs can still customize system-scope roles because the server stores are independent of `ProjectContextManager`. Workflow mutations have no system-scope path - they always require a `projectId`.
 
+**Promote-on-first-edit for project-scoped role writes.** `PUT /api/roles/:name?projectId=<id>` and `POST /api/roles/:name/customize` both resolve the target role through `configCascade.resolveRoles(projectId)` rather than reading the project store directly. When the role exists anywhere in the cascade (builtin / server / ancestor project) but has no project-level record yet, the handler treats the cascade item as the base, applies the requested field updates, and writes the result into the project store — promoting the builtin to project scope on its first edit. Subsequent edits operate on the now-existing project record normally. A 404 is returned only when the role name is absent from the entire cascade. This is the same shape used by per-project tool overrides and is what makes the Role Manager UI "just work" for builtin roles without a separate "create override" step. Pinning test: `tests/api-roles-update.test.ts`.
+
 #### Field-level role inheritance
 
 Three role fields — `model`, `thinkingLevel`, and `promptTemplate` — resolve **field-by-field** rather than via the whole-item replacement used by `resolveRoles()`. A project-level role override that sets only `model` no longer wipes out the `thinkingLevel` or `promptTemplate` inherited from a parent project, the server scope, or the builtin. This matters because role YAML files are typically partial: editing one field in the UI should not silently blank the others.
@@ -1246,7 +1248,7 @@ Disruptive servers (e.g. headed Chromium from `@playwright/mcp`) are opted out a
 
 ### REST API
 
-- `PUT /api/roles/:name` - accepts `toolPolicies` (Record of tool/group name → `allow` | `ask` | `never`)
+- `PUT /api/roles/:name` - accepts `toolPolicies` (Record of tool/group name → `allow` | `ask` | `never`). With `?projectId=<id>`, follows the promote-on-first-edit rule for builtin roles (see above).
 - `PUT /api/tools/:name` - accepts `grantPolicy`
 - `GET /api/tool-group-policies` - all group default policies
 - `PUT /api/tool-group-policies/:group` - set/clear group default (`{ policy: "allow" | "ask" | "never" | null }`)
