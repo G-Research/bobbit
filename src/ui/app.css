@@ -4269,3 +4269,24 @@ canvas.bobbit-blob__sprite {
 	animation: blob-idle-eyes-canvas 10s steps(1) infinite !important;
 	animation-delay: var(--bobbit-idle-phase, 0s) !important;
 }
+
+/* Archived blob — kill ALL animations under the subtree, including the
+ * sleeping zzz indicator and idle eye cycles added after the original
+ * archived rule. Higher specificity than .bobbit-blob--idle selectors so
+ * archived wins regardless of which state classes co-exist. */
+.bobbit-blob.bobbit-blob--archived,
+.bobbit-blob.bobbit-blob--archived *,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__sprite,
+.bobbit-blob.bobbit-blob--archived canvas.bobbit-blob__sprite,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz-letter,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz-letter--1,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz-letter--2,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz-letter--3 {
+	animation: none !important;
+	transition: none !important;
+}
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz,
+.bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz-letter {
+	opacity: 0 !important;
+}
