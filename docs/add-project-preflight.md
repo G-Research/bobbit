@@ -23,9 +23,11 @@ with structured `pass | warn | fail` checks the user can read and act on.
 
 ## End-user guide
 
-When you open Add Project and type a path, the dialog runs a pre-flight pass
-(debounced) and renders a list of checks below the input. Each check has one
-of three levels:
+When you open Add Project and supply a path — either by typing it into the
+input or picking one via the directory browser — the dialog runs a pre-flight
+pass and renders a list of checks below the input. Typing is debounced
+(400 ms); picking via the directory browser triggers the check immediately.
+Each check has one of three levels:
 
 | Level | Submit | Meaning |
 |-------|--------|---------|
