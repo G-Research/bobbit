@@ -1,4 +1,15 @@
 import "./app.css";
+// Eagerly load CSS that is also used by proposal preview panes
+// ([data-panel="project-proposal"], [data-panel="role-proposal"],
+// [data-panel="tool-proposal"]). These stylesheets are otherwise only
+// imported by their lazy *-page.ts modules — opening a proposal pane in a
+// fresh tab without first visiting the corresponding Settings page would
+// render the pane unstyled. Vite chunks CSS and JS independently, so an
+// eager CSS import does NOT pull in the lazy JS chunk.
+// Pinned by tests/e2e/ui/proposal-pane-styles.spec.ts.
+import "./workflow-page.css";
+import "./role-manager.css";
+import "./tool-manager.css";
 import "./storage.js"; // must initialize before anything else
 import { ChatPanel } from "../ui/index.js";
 import {
