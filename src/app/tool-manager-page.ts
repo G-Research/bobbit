@@ -1,4 +1,4 @@
-import "./tool-manager.css";
+// CSS for this page is eagerly imported from main.ts (see comment there).
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
