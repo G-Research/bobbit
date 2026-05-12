@@ -12,7 +12,7 @@ import { ref } from "lit/directives/ref.js";
 import {
 	BODY_GRID, BODY_WIDTH, BODY_HEIGHT,
 	EYE_POSITIONS,
-	BUSY_EYE_SEQUENCE, IDLE_EYE_SEQUENCE,
+	BUSY_EYE_SEQUENCE, IDLE_EYE_SEQUENCE, SLEEP_EYE_SEQUENCE,
 	type PaletteKey, type SpritePixel, type EyeGaze, type EyeFrame, type ShadowPixel,
 	type AccessorySpriteData,
 	ACCESSORIES as SPRITE_ACCESSORIES,
@@ -353,7 +353,10 @@ export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): Templ
 		};
 		return html`<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>`;
 	}
-	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
+	// Chat blob: when idle, switch to the SLEEP eye sequence so the eyes stay
+	// shut. This pairs with the breathing-squish CSS animation to make idle
+	// bobbits read as "asleep" rather than "awake but bored".
+	const sequence = isIdle ? SLEEP_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
 	let cleanup: (() => void) | null = null;
 	const onRef = (el: Element | undefined) => {
 		if (el && el instanceof HTMLCanvasElement) {
