@@ -7,7 +7,7 @@ Status: implemented (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`). Re
 The steer/queue path has **three independent caches** of "what's pending":
 
 1. **Bobbit `promptQueue`** — `src/server/agent/prompt-queue.ts`. Rows carry `isSteered` and `dispatched` flags.
-2. **pi-coding-agent SDK `_steeringMessages`** — text-only mirror. Removed by exact-text match in `_processAgentEvent` on `message_start(role:user)` (see `node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js` ~line 273).
+2. **pi-coding-agent SDK `_steeringMessages`** — text-only mirror. Removed by exact-text match in `_processAgentEvent` on `message_start(role:user)` (see `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` ~line 273).
 3. **pi-agent-core `Agent.steeringQueue`** — a `PendingMessageQueue` polled at turn boundaries (`agent.js` line 51, `getSteeringMessages` callback at line 295).
 
 When these three diverge, the user pays.
@@ -121,7 +121,7 @@ A row's lifetime is now exactly: **queued → dispatched (= removed)**.
 The SDK already exposes the destructive drain we need:
 
 ```js
-// node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js  (~L1015)
+// node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js  (~L1015)
 clearQueue() {
     const steering = [...this._steeringMessages];
     const followUp = [...this._followUpMessages];
@@ -357,7 +357,7 @@ Landed as the four-commit stack on `goal/steer-subs-bd19361f`:
 
 - **`PromptQueue`** (`src/server/agent/prompt-queue.ts`): no `dispatched` field, no `markDispatched` / `removeDispatched` / `resetDispatched`. Adds `enqueueAtFront(text, opts)` for reconciliation paths. Row lifetime is exactly `queued → dispatched (= removed)`.
 - **`SessionManager`** (`src/server/agent/session-manager.ts`): single dispatch site `_dispatchSteer()` removes rows from `promptQueue` *before* awaiting `rpcClient.steer()`. `deliverLiveSteer`, `steerQueued`, and the `tool_execution_end` / `agent_end` boundary handlers all funnel through it. `bgProcessManager.abortAllWaits()` has two call sites: inside `_dispatchSteer` (every dispatch) and inside `steerQueued` for the streaming case (so a parked `bash_bg wait` resolves and a tool boundary actually arrives).
-- **Shadow ledger** (`SessionInfo.inFlightSteerTexts: string[]`): mitigation B from §6.1 — chosen because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` and the agent-side dispatch table lives inside `node_modules/@mariozechner/pi-coding-agent`. Push on `_dispatchSteer` post-RPC; splice on `message_end(role:user)` matching by text in `_consumeSteerEcho`; drain in `_reconcileAfterAbort` (re-enqueue at front of `promptQueue` via `enqueueAtFront`).
+- **Shadow ledger** (`SessionInfo.inFlightSteerTexts: string[]`): mitigation B from §6.1 — chosen because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` and the agent-side dispatch table lives inside `node_modules/@earendil-works/pi-coding-agent`. Push on `_dispatchSteer` post-RPC; splice on `message_end(role:user)` matching by text in `_consumeSteerEcho`; drain in `_reconcileAfterAbort` (re-enqueue at front of `promptQueue` via `enqueueAtFront`).
 - **Reconciliation on abort**: `_reconcileAfterAbort()` runs in two places — `handleAgentLifecycle`'s `agent_end while wasAborting` branch (graceful) and `forceAbort` *before* `rpcClient.stop()` (force-kill). Either way the SDK's pending steers are pulled back into Bobbit's queue and redispatched exactly once after the agent is ready.
 - **Tests**: five P0 specs in place — `tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts` (§1 exactly-once), `tests/e2e/steer-reconnect.spec.ts` (§2 WS reconnect), `tests/e2e/steer-gateway-restart.spec.ts` (§3 gateway restart), `tests/e2e/steer-multitab.spec.ts` (§4 multi-tab convergence), `tests/e2e/ui/queue-ui.spec.ts` PI-10 (§5 sent-indicator removal). Plus `tests/queue-dispatch.spec.ts` and `tests/prompt-queue.spec.ts` rewritten to assert on row-removal + `enqueueAtFront` rather than on the deleted `dispatched` flag.
 - **Mock cleanup**: `tests/e2e/mock-agent-core.mjs` no longer emits `[STEER_RECEIVED] <text>`. Browser tests scrape `<user-message>` elements; API tests read `agent_session.messages`. `grep -r STEER_RECEIVED tests/` returns 0 matches.

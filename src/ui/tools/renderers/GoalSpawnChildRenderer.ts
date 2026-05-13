@@ -2,7 +2,7 @@
  * Renderer for `goal_spawn_child` — spawned-child mini-card with a live
  * goal-state pill.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { GitBranchPlus } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";

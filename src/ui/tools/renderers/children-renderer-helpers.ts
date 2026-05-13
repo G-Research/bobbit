@@ -5,7 +5,7 @@
  * exported). Tiny duplication is preferred to a refactor of the existing
  * renderers' internals.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 
 export function getResult(result: ToolResultMessage | undefined): { text: string; data: any } {

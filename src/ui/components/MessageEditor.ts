@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -11,7 +11,7 @@ import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { gatewayFetch } from "../../app/api.js";
 import "./AttachmentTile.js";
-import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 /** Slash skill metadata from the server */
 interface SlashSkillInfo {

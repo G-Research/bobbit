@@ -6941,6 +6941,7 @@ async function handleApiRoute(
 		const qp2 = url.searchParams;
 		let cursor: number | undefined;
 		let limit: number | undefined;
+		const verbose = qp2.get("verbose") === "1" || qp2.get("verbose") === "true";
 		try {
 			if (qp2.has("cursor")) {
 				const c = Number(qp2.get("cursor"));
@@ -6967,7 +6968,7 @@ async function handleApiRoute(
 		const ctx2: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
 		try {
 			const envelope = await readOrphanedBeforeCompaction(
-				{ compactionId, cursor, limit },
+				{ compactionId, cursor, limit, verbose },
 				{
 					readContent: () => sessionFileRead(ctx2, targetPs.agentSessionFile!, sandboxManager),
 					firstKeptEntryId: entry.firstKeptEntryId,

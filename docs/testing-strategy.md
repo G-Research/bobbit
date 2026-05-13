@@ -518,7 +518,12 @@ This lane is opt-in (needs an API key) and is **not** part of `npm run test:e2e`
 
 ### Agent tool-use canary
 
-`tests/manual-integration/agent-tool-use.spec.ts` is the regression net for upstream `@mariozechner/pi-*` upgrades. A previous pi bump silently broke all agent tool use because nothing in the unit / API / browser layers exercised a real LLM-driven agent actually calling tools end-to-end. The spec spawns a real agent in a sandboxed session and drives five scenarios (builtin bash, MCP-backed edit and find, mid-tool steer/interrupt, tool error) that each assert on a unique sentinel string in the UI transcript or on filesystem state — never on internal session logs — so it stays valid across pi-internal refactors. Run before and after any `@mariozechner/pi-*` version bump; see [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-manual-integration) for the scenario list and rationale.
+The canary for `--tools` allowlist regressions has two layers, both pinning the post-`fdfee7c5` activation contract:
+
+- **Unit contract pin** — `tests/tool-activation-contract.test.ts`. Runs in seconds under `npm run test:unit`; asserts `computeToolActivationArgs()` emits `--no-builtin-tools`, `--no-extensions`, the `_builtins/extension.ts` re-register shim, and the sorted `BOBBIT_BUILTIN_TOOLS` env list, with no stray `--tools` flag.
+- **Manual-integration canary** — `tests/manual-integration/agent-tool-use.spec.ts`. Real agent in a sandboxed session, seven scenarios covering pi builtins (bash, edit, find), the steer/interrupt path, a tool-error path, a Bobbit extension tool (`web_fetch`), and an MCP meta-tool (`mcp_describe`). Tool-card assertions are tool-name-specific (`data-tool-name="<name>"` on the shared wrapper in `src/ui/components/Messages.ts`); substitute tools that produce the same visible side-effect no longer pass.
+
+Run the unit pin on every commit and the integration canary before and after any `@earendil-works/pi-*` version bump. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers) for the full scenario list, rationale, and the recipe for adding a new tool category.
 
 ## Target State
 

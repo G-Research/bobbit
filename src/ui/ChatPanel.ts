@@ -2,7 +2,7 @@ import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "./components/AgentInterface.js";
-import type { Agent, AgentTool } from "@mariozechner/pi-agent-core";
+import type { Agent, AgentTool } from "@earendil-works/pi-agent-core";
 import type { AgentInterface } from "./components/AgentInterface.js";
 import type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider.js";
 import type { ArtifactsPanel } from "./tools/artifacts/index.js";

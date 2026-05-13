@@ -1,4 +1,4 @@
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 import type { AgentMessage, MessageRenderer } from "../ui/index.js";
 import { defaultConvertToLlm, registerMessageRenderer } from "../ui/index.js";
 import { html } from "lit";
@@ -33,7 +33,7 @@ export interface MutationPendingMessage {
 	decided?: "approved" | "rejected";
 }
 
-declare module "@mariozechner/pi-agent-core" {
+declare module "@earendil-works/pi-agent-core" {
 	interface CustomAgentMessages {
 		"system-notification": SystemNotificationMessage;
 		"mutation-pending": MutationPendingMessage;

@@ -642,7 +642,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	const cancelAnim = isCancelling ? "animation:bobbit-cancel-fade 1.2s ease-in-out infinite;" : "";
 	const compactSquish = isCompacting && !isCancelling;
 
-	const compactTopOffset = compactSquish ? 5.4 : 0;
+	const compactTopOffset = compactSquish ? 2 : 0;
 
 	// Body transform: image already at CSS target size, no base scale needed.
 	// Compaction uses -s (smooth) keyframes that omit scale(1.6).

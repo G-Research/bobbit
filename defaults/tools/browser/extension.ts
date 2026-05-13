@@ -10,7 +10,7 @@
  * All tools respect the AbortSignal so they can be cancelled via the abort button.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";

@@ -10,7 +10,7 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 

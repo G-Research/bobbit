@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing, type TemplateResult } from "lit";
 import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";

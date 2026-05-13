@@ -1,7 +1,7 @@
 /**
  * Renderer for `goal_plan_status` — current plan summary + steps grid.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { ListTree } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
