@@ -27,6 +27,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
 - **Tests**: `tests/` (unit), `tests/e2e/` (API), `tests/e2e/ui/` (browser), `tests/manual-integration/` (real agents + Docker).
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
+- **Perf**: client trace primitive `src/app/perf-trace.ts` (opt-in via `localStorage.bobbitPerf=1`), manual harness `tests/manual-integration/perf-sidebar-nav.spec.ts`, cross-commit report under `docs/perf/`. See [docs/perf/README.md](docs/perf/README.md).
 
 ## Before editing anything non-trivial
 
@@ -68,4 +69,4 @@ AGENTS.md is loaded into **every** agent turn. Keep it small and general.
 
 ## Reference docs
 
-[docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md)
+[docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md) · [docs/perf/README.md](docs/perf/README.md)
