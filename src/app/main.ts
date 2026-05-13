@@ -544,17 +544,20 @@ async function initApp() {
 		handler: () => { navigateSidebar("down"); },
 	});
 
+	// Ctrl+→ / Ctrl+←: allowInInput is FALSE so native word-jump wins inside
+	// the prompt editor and other text inputs. The sidebar only captures these
+	// keys when focus is outside any input (e.g. on the sidebar itself).
 	registerShortcut({
 		id: "sidebar-expand", label: "Expand sidebar group", category: "Sessions",
 		defaultBindings: [{ key: "ArrowRight", ctrlOrMeta: true, shift: false, alt: false }],
-		allowInInput: true,
+		allowInInput: false,
 		handler: () => { expandActiveSidebarItem(true); },
 	});
 
 	registerShortcut({
 		id: "sidebar-collapse", label: "Collapse sidebar group", category: "Sessions",
 		defaultBindings: [{ key: "ArrowLeft", ctrlOrMeta: true, shift: false, alt: false }],
-		allowInInput: true,
+		allowInInput: false,
 		handler: () => { expandActiveSidebarItem(false); },
 	});
 
