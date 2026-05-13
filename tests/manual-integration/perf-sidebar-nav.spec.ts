@@ -293,6 +293,8 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	await page.setViewportSize({ width: 1280, height: 800 });
 
 	mkdirSync(OUT_DIR, { recursive: true });
+	const HISTORY_DIR = resolve(PROJECT_ROOT, "docs", "perf", "history");
+	mkdirSync(HISTORY_DIR, { recursive: true });
 	if (WANT_SCREENSHOTS) mkdirSync(join(OUT_DIR, "screens"), { recursive: true });
 
 	// ── Boot gateway in an isolated dir ────────────────────────────
@@ -392,35 +394,46 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	// ── Warm pass: navigate to landing, then click through sessions ──
 	await page.goto(appUrl);
 	await page.waitForLoadState("domcontentloaded");
-	// Wait for any session row to show up in the sidebar before we start clicking.
+	// REST-seeded sessions render under an `ungrouped-header:<projectId>` group
+	// that is collapsed by default. Expand every ungrouped header so the per-
+	// session rows become visible & clickable.
+	try {
+		await page.waitForSelector('[data-nav-id^="ungrouped-header:"]', { timeout: 15_000 });
+	} catch {
+		console.warn("[harness] no ungrouped header in sidebar after 15s");
+	}
+	const ungrouped = await page.locator('[data-nav-id^="ungrouped-header:"]').all();
+	for (const row of ungrouped) {
+		try { await row.click({ force: true }); } catch { /* swallow */ }
+	}
+	// Confirm at least one session row is now visible before we start clicking.
 	try {
 		await page.waitForSelector('[data-nav-id^="session:"]', { timeout: 15_000 });
 	} catch {
-		const html = await page.content();
-		console.warn("[harness] no session rows in sidebar after 15s — first 4k of body:");
-		console.warn(html.slice(0, 4000));
+		const body = await page.content();
+		console.warn("[harness] no session rows in sidebar after expanding ungrouped — first 4k of body:");
+		console.warn(body.slice(0, 4000));
 	}
 
 	for (let lap = 0; lap < 2; lap++) {
 		for (const sid of sessionIds) {
-			// Prefer clicking the sidebar row (mirrors user interaction).
 			const row = page.locator(`[data-nav-id="session:${sid}"]`).first();
 			const rowCount = await row.count();
-			if (rowCount > 0) {
-				await row.click({ force: true });
-			} else {
-				// Fallback: invoke the same code path the click handler uses.
-				await page.evaluate(async (id) => {
-					const mod = await import("/src/app/sidebar-nav.ts");
-					mod.openForNavItem({ kind: "session", id });
-				}, sid).catch(() => {
-					return page.evaluate((id) => { location.hash = `#/session/${id}`; }, sid);
-				});
+			if (rowCount === 0) {
+				console.warn(`[harness] sidebar row for session ${sid} not found — skipping`);
+				continue;
 			}
+			await row.click({ force: true });
 			try {
 				await page.waitForSelector(`#app[data-perf-ready="session"]`, { timeout: 10_000 });
 			} catch { /* keep going */ }
 			await page.waitForTimeout(50);
+			// Clear the sentinel so the *next* nav can re-set it (avoids a stale
+			// `data-perf-ready` immediately satisfying the wait).
+			await page.evaluate(() => {
+				const el = document.getElementById("app");
+				if (el) el.removeAttribute("data-perf-ready");
+			});
 		}
 	}
 	await dumpClientEntries("warm");
@@ -445,24 +458,22 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		await page.goto(appUrl);
 		await page.waitForTimeout(1500);
 		for (let lap = 0; lap < 2; lap++) {
-			// Click the goal sidebar row when available so nav.click + nav.goal.ready fire.
 			const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
 			const rowCount = await row.count();
-			if (rowCount > 0) {
-				await row.click({ force: true });
-			} else {
-				await page.evaluate(async (id) => {
-					const mod = await import("/src/app/sidebar-nav.ts");
-					mod.openForNavItem({ kind: "goal", id });
-				}, goalId).catch(() => {
-					return page.evaluate((id) => { location.hash = `#/goal/${id}`; }, goalId);
-				});
+			if (rowCount === 0) {
+				console.warn(`[harness] sidebar row for goal ${goalId} not found on lap ${lap}`);
+				break;
 			}
+			await row.click({ force: true });
 			try {
 				await page.waitForSelector(`#app[data-perf-ready="goal"]`, { timeout: 10_000 });
 			} catch { /* keep going */ }
 			await page.waitForTimeout(150);
-			await page.evaluate(() => { location.hash = "#/"; });
+			await page.evaluate(() => {
+				const el = document.getElementById("app");
+				if (el) el.removeAttribute("data-perf-ready");
+				location.hash = "#/";
+			});
 			await page.waitForTimeout(150);
 		}
 		// One cold reload
@@ -492,6 +503,37 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	}));
 	console.log(`[harness] wrote ${jsonPath}`);
 	console.log(`[harness] wrote ${htmlPath}`);
+
+	// ── Cross-commit history: write docs/perf/history/<sha>.json ─────
+	try {
+		const rows = summarise(clientEntries);
+		const spans: Record<string, { p50: number; p95: number; p99: number; n: number; mean: number; max: number }> = {};
+		for (const r of rows) spans[r.name] = { p50: r.p50, p95: r.p95, p99: r.p99, n: r.n, mean: r.mean, max: r.max };
+		let commit = "unknown", parentCommit = "unknown", branch = "unknown";
+		try { commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
+		try { parentCommit = execFileSync("git", ["rev-parse", "HEAD~1"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
+		try { branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
+		const short = commit.slice(0, 12);
+		const historyPath = join(HISTORY_DIR, `${short}.json`);
+		writeFileSync(historyPath, JSON.stringify({
+			commit, parentCommit, branch,
+			timestamp: new Date().toISOString(),
+			seededSessions: sessionIds.length,
+			spans,
+		}, null, 2));
+		console.log(`[harness] wrote ${historyPath}`);
+		// Regenerate the cross-commit comparison report.
+		try {
+			execFileSync(process.execPath, [resolve(PROJECT_ROOT, "scripts", "perf-report.mjs")], {
+				cwd: PROJECT_ROOT,
+				stdio: "inherit",
+			});
+		} catch (err) {
+			console.warn(`[harness] perf-report.mjs failed:`, err);
+		}
+	} catch (err) {
+		console.warn("[harness] failed to emit history JSON:", err);
+	}
 
 	// ── Hard-fail if any canonical span has zero samples ───────────
 	const byName = new Map<string, number>();
