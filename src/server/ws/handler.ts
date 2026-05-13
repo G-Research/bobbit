@@ -12,6 +12,7 @@ import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
+import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
 import {
@@ -549,9 +550,26 @@ export function handleWebSocketConnection(
 					});
 					break;
 				}
-				case "set_thinking_level":
-					await session.rpcClient.setThinkingLevel(msg.level);
+				case "set_thinking_level": {
+					// Defence in depth: drop unknown tokens; clamp against the
+					// session's current model so xhigh on a non-supporting model
+					// degrades to high (etc.) at the server boundary.
+					const known = isKnownThinkingLevel(msg.level);
+					if (!known) break;
+					let level: string = known;
+					const persisted = sessionManager.getPersistedSession(session.id);
+					if (persisted?.modelId) {
+						const meta = inferMeta(persisted.modelId);
+						const clamped = clampThinkingLevel(level, {
+							id: persisted.modelId,
+							provider: persisted.modelProvider,
+							reasoning: meta.reasoning,
+						});
+						if (clamped) level = clamped;
+					}
+					await session.rpcClient.setThinkingLevel(level);
 					break;
+				}
 				case "compact": {
 					// Fire-and-forget: don't block the WS message loop.
 					//

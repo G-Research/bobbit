@@ -43,6 +43,7 @@ import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
+import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../shared/thinking-levels.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
 
@@ -1149,7 +1150,7 @@ let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6"
 let prefReviewModel = "";    // same format
 let prefNamingModel = "";    // same format
 let prefImageModel = "";     // same format, defaults to openai/gpt-image-2 when unset
-let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|""
+let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|""
 let prefReviewThinking = "";
 let prefNamingThinking = "";
 let allModels: Array<{ id: string; provider: string; reasoning: boolean }> = [];
@@ -1468,14 +1469,43 @@ export function renderModelRow(
 ) {
 	const modelDisplay = formatModelPref(modelValue, opts?.fallbackLabel);
 
-	// Determine if selected model supports reasoning
-	let thinkingDisabled = false;
+	// Determine the selected model's capabilities. When the model is
+	// unknown (not in allModels yet — registry still loading, or the saved
+	// pref is stale/unavailable) we fall back to the full reasoning-capable
+	// set so the dropdown stays usable; the server clamps defensively.
+	let selectedModel: { id: string; provider: string; reasoning: boolean } | undefined;
 	if (modelValue) {
-		const model = allModels.find(m => `${m.provider}/${m.id}` === modelValue);
-		if (model && !model.reasoning) {
-			thinkingDisabled = true;
+		selectedModel = allModels.find(m => `${m.provider}/${m.id}` === modelValue);
+	}
+	const thinkingDisabled = !!selectedModel && !selectedModel.reasoning;
+	const supportedLevels: ThinkingLevel[] = selectedModel
+		? getSupportedThinkingLevels(selectedModel)
+		: ["off", "minimal", "low", "medium", "high"];
+
+	// Reactive clamp: if the saved thinking value is no longer supported by
+	// the currently-selected model (e.g. user switched away from Opus 4.7
+	// while xhigh was selected), surface the clamped value in the dropdown
+	// AND persist it on the next microtask so the displayed and stored
+	// values match. `allowEmpty: true` keeps the "" (inherit) sentinel
+	// intact when the caller offers a fallbackLabel option.
+	let displayedThinking = thinkingValue;
+	if (selectedModel && thinkingValue && thinkingValue !== "") {
+		const clamped = clampThinkingLevel(thinkingValue, selectedModel, { allowEmpty: true });
+		if (clamped !== undefined && clamped !== thinkingValue) {
+			displayedThinking = clamped;
+			// Defer the persistence callback to avoid mutating during render.
+			queueMicrotask(() => onThinkingChange(clamped));
 		}
 	}
+
+	const thinkingLabels: Record<ThinkingLevel, string> = {
+		off: "Off",
+		minimal: "Minimal",
+		low: "Low",
+		medium: "Medium",
+		high: "High",
+		xhigh: "Extra high",
+	};
 
 	// Availability + Test button state
 	const available = modelIsAvailable(modelValue);
@@ -1553,14 +1583,10 @@ export function renderModelRow(
 						title=${thinkingDisabled ? "Selected model does not support thinking" : "Thinking level"}
 					>
 						${Select({
-							value: thinkingValue || (opts?.fallbackLabel ? "" : thinkingDefault),
+							value: displayedThinking || (opts?.fallbackLabel ? "" : thinkingDefault),
 							options: [
 								...(opts?.fallbackLabel ? [{ value: "", label: opts.fallbackLabel, icon: icon(Brain, "sm") }] : []),
-								{ value: "off", label: "Off", icon: icon(Brain, "sm") },
-								{ value: "minimal", label: "Minimal", icon: icon(Brain, "sm") },
-								{ value: "low", label: "Low", icon: icon(Brain, "sm") },
-								{ value: "medium", label: "Medium", icon: icon(Brain, "sm") },
-								{ value: "high", label: "High", icon: icon(Brain, "sm") },
+								...supportedLevels.map(lvl => ({ value: lvl, label: thinkingLabels[lvl], icon: icon(Brain, "sm") })),
 							] as SelectOption[],
 							onChange: (value: string) => { onThinkingChange(value); },
 							size: "sm",

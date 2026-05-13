@@ -61,7 +61,7 @@ export class MessageEditor extends LitElement {
 	@property() onSend?: (input: string, attachments: Attachment[]) => void;
 	@property() onAbort?: () => void;
 	@property() onModelSelect?: () => void;
-	@property() onThinkingChange?: (level: "off" | "minimal" | "low" | "medium" | "high") => void;
+	@property() onThinkingChange?: (level: ThinkingLevel) => void;
 	@property() onFilesChange?: (files: Attachment[]) => void;
 	@property() onSteer?: (msg: QueuedMessage) => void;
 	@property() onRemoveQueued?: (id: string) => void;

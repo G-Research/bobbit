@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Per-Model Thinking-Level Capability Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  .row { display: flex; gap: 8px; align-items: center; padding: 8px 0; }
+  select { font-size: 13px; background: #27272a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 4px; }
+  code { font-family: monospace; }
+</style>
+</head>
+<body>
+<!--
+  Fixture verifying the UI reactivity contract for the per-model thinking
+  selector. The logic mirrors `src/shared/thinking-levels.ts`; the unit tests
+  in `tests/thinking-levels.test.ts` exhaustively cover the capability matrix
+  against the canonical implementation. This fixture exists to verify the
+  *interaction* behaviour: switching models swaps the option list, and a
+  no-longer-supported current level is clamped to the displayed value.
+-->
+<div class="row">
+  <label>Model:</label>
+  <select id="model-select">
+    <option value="anthropic|claude-opus-4-7-20251101|1">Anthropic Claude Opus 4-7 (reasoning)</option>
+    <option value="anthropic|claude-opus-4-6-20251015|1">Anthropic Claude Opus 4-6 (reasoning)</option>
+    <option value="anthropic|claude-opus-4-5-20250920|1">Anthropic Claude Opus 4-5 (reasoning)</option>
+    <option value="anthropic|claude-sonnet-4-6-20251101|1">Anthropic Claude Sonnet 4-6 (reasoning)</option>
+    <option value="anthropic|claude-haiku-4-5|0">Anthropic Claude Haiku 4-5 (non-reasoning)</option>
+    <option value="openai|gpt-5.2-codex|1">OpenAI gpt-5.2-codex (reasoning)</option>
+    <option value="openai|gpt-5.2|1">OpenAI gpt-5.2 (reasoning)</option>
+    <option value="openai|gpt-5.4|1">OpenAI gpt-5.4 (reasoning)</option>
+    <option value="openai|gpt-5.5|1">OpenAI gpt-5.5 (reasoning)</option>
+    <option value="openai|gpt-5.1-codex-max|1">OpenAI gpt-5.1-codex-max (reasoning)</option>
+    <option value="openai|gpt-5|1">OpenAI gpt-5 (reasoning)</option>
+    <option value="openai|gpt-4o|0">OpenAI gpt-4o (non-reasoning)</option>
+  </select>
+</div>
+<div class="row">
+  <label>Thinking:</label>
+  <select id="thinking-select" data-testid="thinking-select"></select>
+  <span>current: <code id="thinking-current" data-testid="current-level"></code></span>
+</div>
+<div class="row">
+  <span>Supported: <code id="supported-list" data-testid="supported-list"></code></span>
+</div>
+
+<script>
+// Plain-JS mirror of `src/shared/thinking-levels.ts`. Keep in sync — the unit
+// suite (`tests/thinking-levels.test.ts`) pins the canonical TS implementation.
+const THINKING_LEVELS = ["off","minimal","low","medium","high","xhigh"];
+const RANK = { off:0, minimal:1, low:2, medium:3, high:4, xhigh:5 };
+
+function supportsXHigh(m) {
+  const id = m.id || "";
+  const provider = (m.provider || "").toLowerCase();
+  // Provider guard must fail closed on cross-provider id collisions —
+  // mirrors the canonical `providerMatches` helper in src/shared/thinking-levels.ts.
+  const anthropicProviderOk = !provider || provider === "anthropic" || provider === "aigw";
+  if (anthropicProviderOk && /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id)) return true;
+  const openaiProviderOk = !provider || provider === "openai" || provider === "aigw";
+  if (openaiProviderOk && (/^gpt-5\.1-codex-max\b/i.test(id) || /^gpt-5\.(?:2|4|5)(?:\b|[-.])/i.test(id))) return true;
+  return false;
+}
+
+function getSupportedThinkingLevels(m) {
+  if (m.reasoning === false) return ["off"];
+  const base = ["off","minimal","low","medium","high"];
+  return supportsXHigh(m) ? base.concat("xhigh") : base;
+}
+
+function clampThinkingLevel(level, m) {
+  if (level == null || level === "") return "off";
+  const supported = new Set(getSupportedThinkingLevels(m));
+  let token = THINKING_LEVELS.includes(level) ? level : "off";
+  if (supported.has(token)) return token;
+  for (let i = RANK[token] - 1; i >= 0; i--) {
+    const c = THINKING_LEVELS[i];
+    if (supported.has(c)) return c;
+  }
+  return "off";
+}
+
+const LABELS = { off:"Off", minimal:"Minimal", low:"Low", medium:"Medium", high:"High", xhigh:"Extra high" };
+
+let currentModel = parseModel(document.getElementById("model-select").value);
+let currentLevel = "medium";
+let clampCount = 0;
+
+const modelSelect = document.getElementById("model-select");
+const thinkingSelect = document.getElementById("thinking-select");
+const currentSpan = document.getElementById("thinking-current");
+const supportedSpan = document.getElementById("supported-list");
+
+function parseModel(value) {
+  const [provider, id, reasoning] = value.split("|");
+  return { provider, id, reasoning: reasoning === "1" };
+}
+
+function rerender() {
+  const supported = getSupportedThinkingLevels(currentModel);
+  supportedSpan.textContent = supported.join(",");
+  if (!supported.includes(currentLevel)) {
+    const clamped = clampThinkingLevel(currentLevel, currentModel);
+    if (clamped !== currentLevel) {
+      currentLevel = clamped;
+      clampCount++;
+    }
+  }
+  thinkingSelect.innerHTML = "";
+  for (const lvl of supported) {
+    const opt = document.createElement("option");
+    opt.value = lvl;
+    opt.textContent = LABELS[lvl];
+    thinkingSelect.appendChild(opt);
+  }
+  thinkingSelect.value = currentLevel;
+  currentSpan.textContent = currentLevel;
+}
+
+modelSelect.addEventListener("change", (e) => {
+  currentModel = parseModel(e.target.value);
+  rerender();
+});
+thinkingSelect.addEventListener("change", (e) => {
+  currentLevel = e.target.value;
+  currentSpan.textContent = currentLevel;
+});
+
+window.setModelByValue = (value) => {
+  modelSelect.value = value;
+  modelSelect.dispatchEvent(new Event("change"));
+};
+window.setLevel = (lvl) => { currentLevel = lvl; rerender(); };
+window.pickLevel = (lvl) => { thinkingSelect.value = lvl; thinkingSelect.dispatchEvent(new Event("change")); };
+window.getCurrentLevel = () => currentLevel;
+window.getSupported = () => Array.from(thinkingSelect.options).map(o => o.value);
+window.getClampCount = () => clampCount;
+
+rerender();
+window._testReady = true;
+</script>
+</body>
+</html>

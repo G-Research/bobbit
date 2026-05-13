@@ -28,6 +28,13 @@ nul
 .e2e-pi*
 .e2e-bobbit*
 .e2e-fullstack*
+
+# Bundled fd/rg binaries — populated by scripts/build-binaries.mjs at release
+# time, NOT committed. Each sub-package bin/ stays tracked via .gitkeep.
+binaries/binaries-*/bin/fd
+binaries/binaries-*/bin/fd.exe
+binaries/binaries-*/bin/rg
+binaries/binaries-*/bin/rg.exe
 .e2e-real-pi
 .e2e-real-bobbit
 .e2e-ui-pi
@@ -46,6 +53,8 @@ tests/fixtures/markdown-throttle-bundle.js
 tests/fixtures/markdown-throttle-bundle.css
 tests/fixtures/bash-renderer-bundle.js
 tests/fixtures/bash-renderer-bundle.css
+tests/fixtures/find-renderer-bundle.js
+tests/fixtures/find-renderer-bundle.css
 tests/fixtures/compaction-widget-bundle.js
 tests/fixtures/compaction-widget-bundle.css
 tests/fixtures/ask-user-choices-renderer-bundle.js

@@ -104,6 +104,56 @@ test.describe("StreamingMessageContainer.setMessage — sticky _immediateUpdate 
 		expect(result.messageText).toBe("hello-delta");
 	});
 
+	test("defensive clear: when isStreaming flips true → false with a stale _message, the container clears itself", async ({ page }) => {
+		// Reproduces the "duplicate Thinking bubble at the end of an idle
+		// chat" symptom. AgentInterface's `agent_end` / `message_end`
+		// handlers normally call `setMessage(null, true)`, but they can be
+		// bypassed by snapshot replays, status-only transitions, missed
+		// agent_end events, or rAF races. `isStreaming=false` is the
+		// authoritative "agent is idle" signal — the container must self
+		// heal when it sees that flip while still holding a stale message.
+		const result = await page.evaluate(async () => {
+			const host = document.getElementById("host")!;
+			const el: any = document.createElement("streaming-message-container");
+			el.isStreaming = true;
+			host.appendChild(el);
+			// Wait for the element to upgrade and the initial render to commit.
+			await new Promise((r) => requestAnimationFrame(() => r(null)));
+			await el.updateComplete;
+
+			// Simulate a `message_update` mid-stream populating the container.
+			el.setMessage(
+				{
+					role: "assistant",
+					id: "msg-mid-stream",
+					content: [{ type: "thinking", thinking: "hmm let me think" }],
+				},
+				true,
+			);
+			await el.updateComplete;
+			const beforeId = el._message?.id ?? null;
+
+			// Status flips to idle WITHOUT AgentInterface calling
+			// setMessage(null, true). Lit propagates the property change; the
+			// container's `updated()` lifecycle must defensively clear the
+			// stale `_message` on its own.
+			el.isStreaming = false;
+			await el.updateComplete;
+
+			return {
+				beforeId,
+				afterMessage: el._message,
+			};
+		});
+
+		expect(result.beforeId, "setup precondition: container holds the partial").toBe("msg-mid-stream");
+		expect(
+			result.afterMessage,
+			"isStreaming → false must trigger a defensive clear so the duplicate " +
+				"Thinking bubble cannot persist past the end of the turn",
+		).toBeNull();
+	});
+
 	test("a SECOND batched setMessage after the dropped one DOES land (proves only the first delta is lost)", async ({ page }) => {
 		// This second test pins down the bug's signature: it's specifically
 		// the FIRST delta after an immediate-clear that is dropped, because

@@ -43,6 +43,48 @@ export class StreamingMessageContainer extends LitElement {
 	override updated(changed: Map<string, unknown>) {
 		if (this.archived) return; // No animation state transitions when archived
 		if (changed.has("isStreaming")) {
+			// Defensive cleanup: when the agent transitions to NOT streaming and
+			// we still have a stale in-flight `_message` cached, drop it. The
+			// authoritative copy lives in the message-list; leaving the partial
+			// rendered here on top produces the "duplicate Thinking bubble at
+			// the end of an idle chat" bug. AgentInterface's `agent_end` /
+			// `message_end` handlers already call `setMessage(null, true)` on
+			// the happy path, but they can be bypassed by:
+			//   • snapshot replays whose synthetic `message_end` loop predates
+			//     the component being queried.
+			//   • a status-only transition (heartbeat `session_status: idle`)
+			//     after a missed `agent_end`.
+			//   • a turn that ends via `error` / `aborted` before the agent
+			//     emits a final `message_end` for the last `_message` snapshot.
+			//   • a race where `setMessage(msg, false)`'s rAF fires AFTER
+			//     `agent_end`'s `setMessage(null, true)` has cleared everything.
+			// `isStreaming` is the single source of truth for "agent is doing
+			// something" — if it's false, the container has no business
+			// rendering an assistant card. Compaction owns its own visual
+			// state and doesn't set `_message`, so this is safe to run
+			// unconditionally on the transition.
+			if (!this.isStreaming && this._message !== null) {
+				this.setMessage(null, true);
+			}
+			// Compaction-state safety net: when the next turn starts streaming
+			// (i.e. `isStreaming` flips to true) AND we're still in a compaction
+			// animation state, force the compaction exit immediately. The
+			// `endCompacting()` setTimeout SHOULD have already transitioned us
+			// out, but if it was missed (compaction_end not received, race
+			// during session switch, etc.) the sprite would otherwise stay
+			// wedged in 'compacting' until the 10-minute safety timer fires.
+			// Recognise the next turn as authoritative evidence that compaction
+			// is done and clear the visual state.
+			if (
+				this.isStreaming
+				&& (this._blobState === 'compact-shake'
+					|| this._blobState === 'compacting'
+					|| this._blobState === 'compact-pop')
+			) {
+				this._doEndCompacting();
+				// Fall through to the regular isStreaming branches below so the
+				// blob picks up its `active`/`entering` state for the new turn.
+			}
 			// Don't let agent_start/agent_end events override the compaction animation
 			if (this._blobState === 'compact-shake' || this._blobState === 'compacting' || this._blobState === 'compact-pop' || this._compactEntryTimer) {
 				// no-op — compaction owns the blob state until endCompacting() finishes
