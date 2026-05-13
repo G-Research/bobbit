@@ -14,6 +14,7 @@ import {
 // import it without pulling the entire app-shell graph.
 import { gatewayFetch as _rawGatewayFetch } from "./gateway-fetch.js";
 import { measureAsync as _perfMeasureAsync, isEnabled as _perfIsEnabled } from "./perf-trace.js";
+import { isPerfFlagEnabled, PERF_FLAG_LAZY_TOOL_CONTENT } from "./perf-flags.js";
 
 /**
  * Match the request URL/path against the hot endpoints called out in the
@@ -54,6 +55,14 @@ function _perfSpanFor(url: string): { name: string; detail: Record<string, unkno
  * branch falls through to the raw fetch with no allocation.
  */
 export function gatewayFetch(url: string, init?: RequestInit): Promise<Response> {
+	// Phase 2B lazy-tool-content flag: when enabled, rewrite GET
+	// /api/sessions/:id to add `?stripToolContent=1` so the server returns the
+	// transcript with large tool-call content blocks replaced by lazy
+	// placeholders. The rewrite lives inside the central fetch wrapper so
+	// every call site (existence checks, archived fallback, sidebar nav) opts
+	// in uniformly without each call site having to know about the flag.
+	// Idempotent on URLs that already carry the param.
+	url = _maybeLazyToolContent(url, init);
 	if (!_perfIsEnabled()) return _rawGatewayFetch(url, init);
 	const span = _perfSpanFor(url);
 	if (!span) return _rawGatewayFetch(url, init);
@@ -67,6 +76,26 @@ export function gatewayFetch(url: string, init?: RequestInit): Promise<Response>
 		} catch { /* swallow */ }
 		return res;
 	}, span.detail);
+}
+
+/**
+ * Match GET /api/sessions/:id (exact — not /api/sessions/:id/anything-else)
+ * and add `?stripToolContent=1` when the `lazyToolContent` perf flag is on.
+ * Returns the URL unchanged in every other case (cheap when disabled — a
+ * single localStorage read + regex hit on session-detail URLs).
+ */
+function _maybeLazyToolContent(url: string, init?: RequestInit): string {
+	const method = (init?.method || "GET").toUpperCase();
+	if (method !== "GET") return url;
+	if (!isPerfFlagEnabled(PERF_FLAG_LAZY_TOOL_CONTENT)) return url;
+	// Split path + query.
+	const qIdx = url.indexOf("?");
+	const pathRaw = qIdx >= 0 ? url.slice(0, qIdx) : url;
+	const query = qIdx >= 0 ? url.slice(qIdx + 1) : "";
+	const path = pathRaw.startsWith("http") ? pathRaw.replace(/^https?:\/\/[^/]+/, "") : pathRaw;
+	if (!/^\/api\/sessions\/[^/]+$/.test(path)) return url;
+	if (/(^|&)stripToolContent=/.test(query)) return url;
+	return query ? `${url}&stripToolContent=1` : `${url}?stripToolContent=1`;
 }
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";

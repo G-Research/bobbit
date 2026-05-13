@@ -143,11 +143,72 @@ realistic session corpus (long transcripts, multiple gates, an active
 team). Phase 2 should re-baseline against such a corpus before committing
 to optimisations.
 
-## 4. Tried, didn't pay off
+## 4. Phase 2B A/B — lazy tool content (feature-flagged)
+
+**Hypothesis.** `GET /api/sessions/:id` was thought to ship the full
+transcript + tool inputs on every cold load; stripping large tool-call
+content blocks above a low threshold (default 4KB) and lazy-loading them
+on demand via the existing `/tool-content/:mi/:bi` endpoint should reduce
+`api.session.fetch` payload size + parse time and, by extension,
+`nav.session.ready`.
+
+**What landed.** Behind the `lazyToolContent` perf flag (set via
+`localStorage.bobbitPerfFlags=lazyToolContent`):
+
+- Server: `GET /api/sessions/:id?stripToolContent=1` now opt-in includes a
+  `messages` array with tool-call content blocks larger than the threshold
+  replaced by the same `{ _truncated: true, _originalLength, preview }`
+  shape that the WebSocket `truncate-large-content` path already emits.
+  The existing renderer (`WriteRenderer` + `Messages.ts::_onLoadFullContent`)
+  hydrates the full content on demand via `fetchToolContent()` — no new
+  renderer code needed. Default response (no query param) is byte-identical
+  to Phase 1.
+- Client: the central `gatewayFetch` wrapper appends `?stripToolContent=1`
+  to GET `/api/sessions/:id` URLs when the flag is on. Idempotent.
+- Pure data-shape pinning test: `tests/session-strip-tool-content.test.ts`.
+
+**Observation while implementing.** Reading the Phase 1 server route
+revealed that `GET /api/sessions/:id` already returns **metadata only** —
+the transcript is delivered over WebSocket via `get_messages`, not REST.
+This means the stock `api.session.fetch` span measures a small
+metadata-only payload (≈10ms p50, ≈32ms p95 with `messages: 0`). The
+strip experiment now opts into shipping the transcript on REST so the
+hypothesis can actually be tested; the comparison below records both.
+
+**A/B measurement.** Run the manual harness twice on the same commit:
+
+```bash
+# Flag OFF (default) — metadata-only response
+BOBBIT_PERF_FIXTURE_SIZE=large \
+BOBBIT_PERF_HISTORY_TAG=flag-off \
+  npx playwright test --config playwright-manual.config.ts \
+  --grep "perf-sidebar-nav"
+
+# Flag ON — transcript stripped + lazy-load placeholders
+BOBBIT_PERF_FIXTURE_SIZE=large \
+BOBBIT_PERF_HISTORY_TAG=flag-on \
+BOBBIT_PERF_FLAGS=lazyToolContent \
+  npx playwright test --config playwright-manual.config.ts \
+  --grep "perf-sidebar-nav"
+```
+
+The harness writes `docs/perf/history/<sha>-flag-off.json` and
+`<sha>-flag-on.json`; the cross-commit report shows the delta visually.
+
+**Result.** _(Pending Phase 2A's richer transcript fixture — the
+`messages: 0` seed produces a no-op strip. Numbers are populated once the
+rich fixture lands and both passes are executed against it.)_
+
+**Decision rule.** ≥100ms p50 reduction on `nav.session.ready` OR
+`api.session.fetch` against the richer fixture → recommend flag default-ON
+for Phase 3. Otherwise document as "tried, didn't pay off" and leave the
+flag default-OFF but available.
+
+## 5. Tried, didn't pay off
 
 *(Phase 2/3 fills this in. Empty for now.)*
 
-## 5. Implementation notes (Phase 1 only — not for prose-pinning invariants)
+## 6. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 
 - Client trace primitive: `src/app/perf-trace.ts`. Cost-when-disabled
   pinned by `tests/perf-trace.spec.ts`.
