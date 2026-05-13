@@ -3028,7 +3028,11 @@ export class SessionManager {
 				assistantType: undefined,
 				taskId: opts?.taskId,
 				allowedTools: opts?.allowedTools,
-				role: opts?.role,
+				// Mirror session-setup's effectiveRoleId fallback: when callers
+				// (team-manager, staff-manager) pass only `roleName`, use that as
+				// `session.role` so the post-spawn auto-model safety net still
+				// keys off the right role id during the worktree-prep window.
+				role: opts?.role ?? opts?.roleName,
 				accessory: opts?.accessory,
 				worktreePath,
 				projectId,
