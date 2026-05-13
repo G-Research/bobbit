@@ -23,6 +23,7 @@
 
 import { state, renderApp, expandedGoals, saveExpandedGoals, isUngroupedExpanded, setUngroupedExpanded, isStaffExpanded, setStaffSectionExpanded, isArchivedSectionExpanded, setArchivedSectionExpanded } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { mark as perfMark, startSpan as perfStartSpan } from "./perf-trace.js";
 // sidebar.ts also imports from this module — ES modules handle the cycle
 // fine because we only reference these as function bindings at call time.
 import { isProjectExpanded as _isProjectExpanded, toggleProjectExpanded as _toggleProjectExpanded } from "./sidebar.js";
@@ -158,6 +159,30 @@ export function openForNavItem(item: NavItem): void {
 	// Set the override BEFORE mutating the route, so the hashchange listener
 	// always sees a matching hash + override pair and never spuriously clears.
 	state.keyboardNavActiveId = navId;
+
+	// Perf: instrument click → view-ready. The click span closes when the
+	// hash actually changes (routing.ts hashchange listener). The view-ready
+	// span closes on the first doRenderApp committing the destination view
+	// (render.ts). Cheap when perf-trace is disabled — startSpan returns a
+	// shared no-op handle.
+	perfMark("nav.click");
+	(state as any)._navClickSpan = perfStartSpan("nav.click", { kind: item.kind, id: item.id });
+	if (item.kind === "session") {
+		state.pendingNavSpan?.span.end({ aborted: true });
+		state.pendingNavSpan = {
+			span: perfStartSpan("nav.session.ready", { sessionId: item.id }),
+			view: "session",
+			id: item.id,
+		};
+	} else if (item.kind === "goal") {
+		state.pendingNavSpan?.span.end({ aborted: true });
+		state.pendingNavSpan = {
+			span: perfStartSpan("nav.goal.ready", { goalId: item.id }),
+			view: "goal-dashboard",
+			id: item.id,
+		};
+	}
+
 	switch (item.kind) {
 		case "session":
 			// Fire-and-forget. selectSession (sync) sets hash + selectedSessionId;

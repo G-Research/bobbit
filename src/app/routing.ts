@@ -2,6 +2,9 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
+import { isEnabled as _perfIsEnabled } from "./perf-trace.js";
+import { state as _navState } from "./state.js";
+
 export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
 
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
@@ -117,6 +120,15 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 			window.dispatchEvent(new HashChangeEvent("hashchange"));
 		} else {
 			window.location.hash = newHash;
+		}
+	}
+	// Perf: close the `nav.click` span when the route mutation completes.
+	// Cheap when perf is disabled — a property lookup and an if.
+	if (_perfIsEnabled()) {
+		const s = (_navState as any)._navClickSpan;
+		if (s) {
+			(_navState as any)._navClickSpan = null;
+			s.end();
 		}
 	}
 }
