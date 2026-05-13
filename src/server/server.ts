@@ -5376,6 +5376,12 @@ async function handleApiRoute(
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
+			// Translate GoalPausedError to the canonical 409 GOAL_PAUSED shape
+			// used by /team/spawn, /spawn-child, /gates/:id/signal.
+			if (err && typeof err === "object" && (err as { code?: string }).code === "GOAL_PAUSED") {
+				json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
+				return;
+			}
 			jsonError(400, err);
 		}
 		return;
