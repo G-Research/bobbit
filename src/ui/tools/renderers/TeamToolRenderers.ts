@@ -2,7 +2,7 @@
  * Renderers for team_spawn, team_list, team_dismiss, team_complete tools.
  * Compact, human-readable output for team coordination at a glance.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Users, UserPlus, UserMinus, Trophy, Zap, MessageSquare, AlertTriangle } from "lucide";

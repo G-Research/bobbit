@@ -1,7 +1,7 @@
 /**
  * Renderer for `goal_archive_child` — single-line.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { Archive } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";

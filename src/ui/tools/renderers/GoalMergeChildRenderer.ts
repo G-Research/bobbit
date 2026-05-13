@@ -1,7 +1,7 @@
 /**
  * Renderer for `goal_merge_child` — outcome pill + optional conflict block.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { GitMerge } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";

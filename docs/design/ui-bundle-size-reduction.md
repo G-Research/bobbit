@@ -44,7 +44,7 @@ dist/ui/assets/index-DB1RfC0H.js            3,586.09 kB │ gzip: 999.48 kB     
 (!) Some chunks are larger than 500 kB after minification.
 ```
 
-Key finding: only `index-*.js` and `mistral-*.js` exceed 500 kB. The pi-ai providers are already lazy-loaded chunks via dynamic `import()` inside `node_modules/@mariozechner/pi-ai/dist/providers/register-builtins.js`. They are split correctly; they are **not** pulled into `index-*.js`. The big win is `index-*.js` itself.
+Key finding: only `index-*.js` and `mistral-*.js` exceed 500 kB. The pi-ai providers are already lazy-loaded chunks via dynamic `import()` inside `node_modules/@earendil-works/pi-ai/dist/providers/register-builtins.js`. They are split correctly; they are **not** pulled into `index-*.js`. The big win is `index-*.js` itself.
 
 Confirmed: **no static UI imports of `pi-ai/dist/providers/*`** exist in `src/`. Mistral/google-shared are emitted because pi-ai's lazy `import("./mistral.js")` is reachable, not because UI code statically imports them. `mistral.js` is only needed when the user picks a Mistral model — see "Provider tree-shaking audit" below.
 
@@ -206,7 +206,7 @@ Lazy candidates (estimated savings):
 
 The 836 kB mistral chunk and 270 kB google-shared chunk are emitted as their own chunks because pi-ai's `register-builtins.js` uses dynamic `import("./mistral.js")` and `import("./google.js")` (verified). They are **already** off the main bundle. We don't pay their cost on first load.
 
-Confirmed grep — only static UI imports of `@mariozechner/pi-ai` are types and a few small functions:
+Confirmed grep — only static UI imports of `@earendil-works/pi-ai` are types and a few small functions:
 
 ```
 streamSimple             → ui/utils/proxy-utils.ts, ui/components/AgentInterface.ts
@@ -221,7 +221,7 @@ None of these reach `providers/mistral.js` or `providers/google.js` synchronousl
 
 **Action**: no code change required — just add a build assertion that confirms `mistral-*.js` and `google-shared-*.js` are emitted as **separate** chunks (not merged into main). If a future refactor accidentally hoists a static provider import, the assertion fails fast.
 
-The `mistral` chunk is large (836 kB) because pi-ai bundles a Mistral-specific codepath; reducing it is upstream work in `@mariozechner/pi-ai` and **out of scope**. Settings dialog could lazy-load model lists, but it's behind a settings click which is already lazy under item 1.
+The `mistral` chunk is large (836 kB) because pi-ai bundles a Mistral-specific codepath; reducing it is upstream work in `@earendil-works/pi-ai` and **out of scope**. Settings dialog could lazy-load model lists, but it's behind a settings click which is already lazy under item 1.
 
 ### Expected impact
 

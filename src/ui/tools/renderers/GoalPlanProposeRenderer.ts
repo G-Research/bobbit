@@ -8,7 +8,7 @@
  *   - Fallback `spawn-children-direct`: spawned list.
  *   - Otherwise applied: green pill.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { ClipboardList } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";

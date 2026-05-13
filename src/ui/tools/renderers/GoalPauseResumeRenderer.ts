@@ -1,7 +1,7 @@
 /**
  * Renderers for `goal_pause` and `goal_resume` — single-line cards.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { Pause, Play } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";

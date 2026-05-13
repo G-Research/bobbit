@@ -173,7 +173,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals/:id/team` | Get team state for a goal |
-| `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
+| `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session). Returns `400 { code: "SPEC_REQUIRED" }` if `goal.spec` is empty, shorter than 20 chars, or the literal sentinel `"placeholder"` — the team-lead's kickoff prompt embeds the spec, so a missing spec produces a useless agent. Guard is REST-only: internal call sites (`autoStartTeam`, verification-harness subgoal step) bypass it deliberately. See [design/team-lead-spec-injection.md](design/team-lead-spec-injection.md). |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
 | `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`) |
 | `POST` | `/api/goals/:id/team/steer` | Steer a team agent mid-turn (`{ sessionId, message }`) |

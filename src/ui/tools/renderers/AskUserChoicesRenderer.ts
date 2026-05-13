@@ -9,7 +9,7 @@
  * "Answered mode" when found.
  */
 import { icon } from "@mariozechner/mini-lit";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { HelpCircle } from "lucide";
 import { renderHeader, getToolState, type ToolHeaderState } from "../renderer-registry.js";

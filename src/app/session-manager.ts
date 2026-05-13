@@ -971,7 +971,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const savedModel = loadSessionModel(sessionId);
 			if (!savedModel) return null;
 			try {
-				const { getModel } = await import("@mariozechner/pi-ai");
+				const { getModel } = await import("@earendil-works/pi-ai");
 				return getModel(savedModel.provider as any, savedModel.modelId);
 			} catch {
 				return null; // Model no longer available

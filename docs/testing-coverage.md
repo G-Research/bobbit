@@ -49,14 +49,37 @@ User-facing contract: "if I am at the bottom when content arrives, I stay at the
 - **Production invariant** — `agent-interface .overflow-y-auto` ships with inline `overflow-anchor: none` so Chromium and Safari/iOS PWA execute the same JS pin path; CI on Chromium catches what Safari users would otherwise see in production. Contract in [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant).
 - **Lower-tier scroll specs** — unit-level coverage of the scroll lock primitives lives in `tests/agent-interface-scroll.spec.ts` (zero-delta vibration), `tests/agent-interface-scroll-hardening.spec.ts` (echo ring, sub-pixel rounding), `tests/scroll-anchor-shrink.spec.ts`, `tests/collapse-scroll-bugs.spec.ts`, `tests/mobile-scroll-keyboard.spec.ts`, `tests/e2e/ui/jump-to-bottom.spec.ts`.
 
-## Agent tool-use canary (manual integration)
+## Agent tool-use canary (two layers)
 
-- **File**: `tests/manual-integration/agent-tool-use.spec.ts`. Runs under `npm run test:manual` only (real LLM + Docker sandbox).
-- **Why it exists**: an earlier upgrade of the upstream `@mariozechner/pi-*` packages silently broke all agent tool use; no test in the unit / API / browser layers exercised a real LLM-driven agent calling tools end-to-end, so the regression escaped the whole suite. This spec is the canary that fails fast on the next pi bump if the tool-call wiring breaks again.
-- **What it covers**: five scenarios, each in its own fresh sandboxed session — builtin `bash`, the `defaults/tools/filesystem/edit` MCP tool, the `defaults/tools/filesystem/find` MCP tool, mid-tool steer/interrupt (long-running bash, then pivot), and a tool error path (`edit` on a missing file). Together they exercise builtin shell, file-editing, MCP-backed tools, the steer/interrupt path, and tool-error surfacing.
-- **Sentinel-based assertions, not log scraping**: each scenario instructs the agent to emit a unique sentinel — `HELLO_<nonce>`, `DONE`, `COUNT=3`, `PIVOT_ACK`, `EDIT_FAILED:` — and the test asserts the sentinel appears in the rendered transcript (UI DOM) or in the filesystem state of the worktree. Assertions are deliberately on observable user-facing behavior rather than on internal session logs or pi-ai event shapes, so the test stays valid across pi-internal refactors.
-- **Runtime budget**: stays inside the existing `npm run test:manual` ~5-minute budget; scenarios run serially in fresh sessions to keep each one independent and the failure signal narrow.
-- **Gate on pi upgrades**: this spec must be green on the currently pinned pi line **before** any `@mariozechner/pi-*` version bump, and must stay green after. If it regresses after a bump, the bump is the bug — adapt Bobbit to pi's new API rather than relaxing the spec.
+Two complementary tests pin the agent's tool-call wiring after the pi 0.70+ `--tools` semantics drift that motivated commit `fdfee7c5`. Together they catch a future pi upgrade that silently strips Bobbit extension or MCP meta-tools from the agent's allowlist — the original regression class.
+
+### Layer 1 — unit contract pin (`npm run test:unit`)
+
+- **File**: `tests/tool-activation-contract.test.ts`. Runs in seconds; no LLM, no Docker.
+- **What it pins**: the exact `{ args, env }` shape `computeToolActivationArgs()` (in `src/server/agent/tool-activation.ts`) emits for a representative role config — `--no-builtin-tools`, `--no-extensions`, `--extension <…>/defaults/tools/_builtins/extension.ts` for the re-registered file builtins, plus `env.BOBBIT_BUILTIN_TOOLS` as the sorted, comma-joined builtin list. Asserts the broken pre-fix `--tools` flag is **not** present.
+- **Why a unit test**: the integration canary below is the end-to-end proof but takes minutes and needs a real LLM. The contract test makes a flag-semantics regression fail CI in seconds on every commit, so the integration canary only has to catch genuinely new failure modes.
+
+### Layer 2 — manual-integration canary (`npm run test:manual`)
+
+- **File**: `tests/manual-integration/agent-tool-use.spec.ts`. Real LLM + Docker sandbox.
+- **Why it exists**: an earlier upgrade of the upstream `@earendil-works/pi-*` packages silently broke all agent tool use; no test in the unit / API / browser layers exercised a real LLM-driven agent calling tools end-to-end, so the regression escaped the whole suite. This spec is the canary that fails fast on the next pi bump if the tool-call wiring breaks again.
+- **What it covers**: seven scenarios, each in its own fresh sandboxed session — builtin `bash`, the `defaults/tools/filesystem/edit` MCP tool, the `defaults/tools/filesystem/find` MCP tool, mid-tool steer/interrupt (long-running bash, then pivot), a tool error path (`edit` on a missing file), a Bobbit extension tool (`web_fetch` against the gateway's own `/api/health`), and an MCP meta-tool (`mcp_describe` against the playwright MCP server). Together they exercise the three categories that matter for the `--tools` regression class: pi builtins, Bobbit extension tools, and MCP-backed tools.
+- **Tool-name-specific assertions**: every tool-card wrapper in the UI carries `data-tool-name="<name>"` (single attribute on the shared wrapper in `src/ui/components/Messages.ts`). Spec helpers `countToolCardsByName(page, name, ...substrings)` and `assertNoOtherToolCards(page, exceptName, ...substrings)` query by that attribute, so a substitute tool — e.g. the LLM falling back to `write` + `read` when `bash` is stripped — does **not** pass the assertion. The previous substring-only check reported all-green on the broken pi precisely because the substitute cards still contained the prompt's sentinel text.
+- **Sentinel-based positive assertions**: each scenario instructs the agent to emit a unique sentinel (`HELLO_<nonce>`, `DONE`, `COUNT=3`, `PIVOT_ACK`, `EDIT_FAILED:`, `HEALTH_OK_<nonce>`, `MCP_OPS_<nonce>=<n>`) and asserts it appears in the rendered transcript or on disk. Assertions are deliberately on observable user-facing behavior rather than on internal session logs or pi-ai event shapes, so the test stays valid across pi-internal refactors.
+- **Runtime budget**: ~5 min inside the existing `npm run test:manual` envelope; scenarios run serially in fresh sessions to keep each one independent and the failure signal narrow.
+- **Gate on pi upgrades**: this spec must be green on the currently pinned pi line **before** any `@earendil-works/pi-*` version bump, and must stay green after. If it regresses after a bump, the bump is the bug — adapt Bobbit to pi's new API rather than relaxing the spec.
+
+### Adding a new tool category to the canary
+
+When a new tool category appears (e.g. a new MCP meta-tool, a new Bobbit extension family, a new pi builtin) and the existing seven scenarios don't already exercise it, add one representative scenario inside the existing `test.describe.serial("Agent tool use", ...)`:
+
+1. Pick one representative tool from the category — one is enough; the unit contract pins the flag-level shape for the rest.
+2. Prompt the agent to name the tool explicitly and emit a unique sentinel observable in the UI DOM or on disk (no log scraping).
+3. Positive: `countToolCardsByName(page, "<tool>", ...substrings)` ≥ 1, and the sentinel appears in the transcript.
+4. Negative: `assertNoOtherToolCards(page, "<tool>", ...substrings)` — a substitute that produces the same visible side-effect must not pass.
+5. Use a fresh sandboxed session per scenario so failures don't cross-contaminate.
+
+Do **not** add a scenario per individual tool — the unit contract test is the canary's complement and pins the rest of the surface.
 
 ## Sidebar child auto-loading
 
