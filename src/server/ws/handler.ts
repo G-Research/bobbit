@@ -572,11 +572,26 @@ export function handleWebSocketConnection(
 				}
 				case "compact": {
 					// Fire-and-forget: don't block the WS message loop.
-					// The async IIFE handles the full lifecycle.
+					//
+					// pi-coding-agent 0.74.0+ emits its OWN `compaction_start` and
+					// `compaction_end` events from inside the compact() RPC, with
+					// `reason: "manual"` and a full `result` payload. Those are
+					// already broadcast to clients via session-manager's event
+					// listener, and session-manager itself triggers
+					// `refreshAfterCompaction` on the compaction_end branch.
+					//
+					// Re-broadcasting our own wrapper events here would land a
+					// second `compaction_end` AFTER the agent's, transitioning the
+					// card to "complete" twice and (because the agent's lands
+					// before this handler finishes) showing the finished render
+					// during the still-in-flight compaction. So we DO NOT
+					// broadcast wrapper events here — we only need to:
+					//   1. Flip `session.isCompacting` so server-side state matches.
+					//   2. Append the manual sidecar row (session-manager skips
+					//      manual on its own compaction_end branch).
 					const startedAtMs = Date.now();
 					const compactionId = makeCompactionId(startedAtMs);
 					session.isCompacting = true;
-					broadcast(session.clients, { type: "event", data: { type: "compaction_start", reason: "manual" } });
 					(async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
@@ -584,7 +599,6 @@ export function handleWebSocketConnection(
 							console.log(`[ws-handler] Compact RPC resolved for session ${sessionId}`);
 							const endedAtMs = Date.now();
 							session.isCompacting = false;
-							// Include tokensBefore so the UI can show how much was saved.
 							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
 							const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
 							// Persist the sidecar row so the card survives reload.
@@ -600,12 +614,6 @@ export function handleWebSocketConnection(
 								success: true,
 								firstKeptEntryId,
 							});
-							// Send compaction_end BEFORE refreshing messages/state so
-							// the client clears _isCompacting first and won't re-add
-							// the placeholder when processing the refreshed messages.
-							broadcast(session.clients, { type: "event", data: { type: "compaction_end", reason: "manual", success: true, tokensBefore } });
-							// Refresh messages and state (updated context tokens)
-							await sessionManager.refreshAfterCompaction(session);
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							const endedAtMs = Date.now();
@@ -623,7 +631,6 @@ export function handleWebSocketConnection(
 								error: err.message,
 								firstKeptEntryId: null,
 							});
-							broadcast(session.clients, { type: "event", data: { type: "compaction_end", reason: "manual", success: false, error: err.message } });
 						}
 					})().catch((err) => {
 						console.error(`[ws-handler] Unexpected compact error for session ${sessionId}:`, err);

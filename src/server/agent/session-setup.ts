@@ -227,16 +227,22 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	// a redundant initial `model_change` event with its hardcoded default.
 	// Explicit caller-supplied values (verification harness) win; otherwise
 	// resolve from role/preferences when auto-select is enabled.
+	//
+	// `plan.role` and `plan.roleName` are two parallel fields naming the same
+	// role (see SessionSetupPlan). Several callers (team-manager.spawnRole,
+	// startTeam for the team lead, staff-manager) pass only `roleName`. Fall
+	// back to `roleName` so role-keyed model/thinking-level overrides aren't
+	// silently dropped. Collapsing the duality is a separate refactor.
 	if (plan.initialModel && /^[^/]+\/.+$/.test(plan.initialModel)) {
 		plan.bridgeOptions.initialModel = plan.initialModel;
 	} else if (!plan.skipAutoModel) {
-		const pinned = ctx.resolveInitialModel(plan.role, plan.projectId);
+		const pinned = ctx.resolveInitialModel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinned) plan.bridgeOptions.initialModel = pinned;
 	}
 	if (plan.initialThinkingLevel) {
 		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
 	} else if (!plan.skipAutoThinking) {
-		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role, plan.projectId);
+		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
 }
@@ -496,7 +502,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		lastActivity: session.lastActivity,
 		goalId: plan.goalId,
 		assistantType: plan.assistantType,
-		role: plan.role,
+		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
@@ -860,7 +866,10 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		taskId: plan.taskId,
 		delegateOf: plan.delegateOf,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
-		role: plan.role,
+		// Mirror the spawn-time resolver fallback: when callers pass only
+		// `roleName`, surface it as `session.role` so the post-spawn
+		// `tryAutoSelectModel` safety net keys off the right role id.
+		role: plan.role ?? plan.roleName,
 		accessory: plan.accessory,
 		promptQueue: new PromptQueue(),
 		spawnPinnedModel,
